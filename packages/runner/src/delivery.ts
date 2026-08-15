@@ -150,7 +150,9 @@ export const deliverFailedWorkspace = async (
     return null;
   }
   try {
-    await command("git", ["push", "--force-with-lease", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env);
+    // Plain push, never forced: the run branch is unique per (task, run), so a
+    // rejection means something else is there and salvaging must not clobber it.
+    await command("git", ["push", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env);
     return {
       pushStatus: "SUCCEEDED",
       pushRemote: remote,

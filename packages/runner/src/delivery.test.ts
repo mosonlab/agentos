@@ -81,7 +81,7 @@ test("a failed run pushes its commits as WIP and opens no pull request", async (
   assert.equal(result?.pullRequestUrl, undefined);
   assert.deepEqual(calls, [
     "git rev-parse HEAD",
-    "git push --force-with-lease origin HEAD:refs/heads/agentos/task-1/run-2",
+    "git push origin HEAD:refs/heads/agentos/task-1/run-2",
   ]);
 });
 
