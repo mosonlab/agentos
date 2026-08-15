@@ -20,6 +20,11 @@
 | 13 | 收件箱 | Inbox MCP 为协议层；投递通道 v1 = 飞书自建应用 bot（长连接模式收事件，免公网回调），支持双向问答+卡片按钮多选题；PWA + Web Push 排 v2（国内 Web Push 仅 iOS APNs 可达） | Telegram 国内被墙；通道换皮不动 agent 侧 |
 | 14 | 试点验收 | 新建一个玩具仓，跑通「设目标 → 走开 → 收 PR」+ 完整 9 步模板 + 审批门 | Leo 选定 |
 | 15 | 人工挂账 | Leo 亲手在飞书开放平台建自建应用、开机器人能力、拿 app_id/app_secret（开工后给逐步指引） | 涉及账号，agent 不碰 |
+| 16 | 前端（Leo 2026-08-15 二轮审讯定）| ③落地后即派 Opus+high（硬点单独升 xhigh）；v1 建 7 页：Projects/Agents/Tasks(+Runs)/Inbox/Goals/Settings-Secrets/MCP，Costs 仪表盘排 v2；视觉照抄 Danny 深色暖橄榄主题（design-reference/ 为准）；实时性=轮询起步；审批双端（飞书+Web）谁先点谁生效 | 档位提升买不来铺量型任务缺的东西，验收回路才买得来 |
+| 17 | Web 鉴权与远程访问 | v1 不做登录、只绑 localhost；试点跑通后立刻挂 CF Tunnel + Cloudflare Access 实现手机远程（纯部署层，不进代码） | 单机 localhost 加登录是自我折磨；边缘鉴权免代码 |
+| 18 | 权限界面细粒度 | v1 = 绑定级（Repo/Skill/MCP/Secret/文件夹读写删勾选，与后端一一对应）；工具级开关等 v2 Docker 有真强制力再上 | 裸跑下「禁 bash」挡不住，假开关比没有更糟 |
+| 19 | Agent 提示词管线 | writing-for-agents 起草全部 10 个 → 3 承重角色（senior-dev/implementation-plan-executioner/review-coordinator）互盲双写、其余 7 个单轮 codex 交叉评审 → 试点失败案例驱动迭代；签认=批量过目抽查 | 提示词的真正考官是试点运行，上游磨合只保证起点 |
+| 20 | agentrunner 时点 | 裁定#4 保留，执行时点=开始无人值守跑真实仓库之前；v2 Docker 落地后退役 | 过渡方案按过渡成本衡量 |
 
 ## 概念口径（已向 Leo 讲清）
 
