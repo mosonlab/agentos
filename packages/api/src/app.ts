@@ -998,6 +998,48 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     await db.task.delete({ where: { id: id.parse(context.req.param("taskId")) } });
     return context.body(null, 204);
   });
+  app.post("/tasks/:taskId/retry", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const now = new Date();
+    const result = await db.$transaction(async (tx) => {
+      const task = await tx.task.findUnique({
+        where: { id: taskId },
+        include: { runs: { orderBy: { runNumber: "desc" }, take: 1 } },
+      });
+      if (!task) return { error: "Task not found", code: 404 as const };
+      const last = task.runs[0];
+      if (!last) return { error: "Task has no run to retry", code: 409 as const };
+      if (last.status === RunStatus.QUEUED || last.status === RunStatus.CLAIMED || last.status === RunStatus.RUNNING) {
+        return { error: "Task already has an active run", code: 409 as const };
+      }
+      if (last.runNumber >= last.maxRunsPerTask) return { error: "Run budget exhausted", code: 409 as const };
+      const run = await tx.run.create({
+        data: {
+          projectId: last.projectId,
+          taskId,
+          goalId: last.goalId,
+          agentId: last.agentId,
+          repoId: last.repoId,
+          runNumber: last.runNumber + 1,
+          dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
+          runner: last.runner,
+          model: last.model,
+          targetBranch: last.targetBranch,
+          branch: last.branch,
+          promptHash: last.promptHash,
+          maxDurationMin: last.maxDurationMin,
+          stallTimeoutMin: last.stallTimeoutMin,
+          maxRunsPerTask: last.maxRunsPerTask,
+          readyAt: now,
+        },
+      });
+      await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Run ${run.runNumber} queued by operator retry` } });
+      return { run };
+    });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.run, 201);
+  });
   app.get("/tasks/:taskId/activity", async (context) => context.json(await db.taskActivity.findMany({
     where: { taskId: id.parse(context.req.param("taskId")) },
     orderBy: { createdAt: "asc" },
@@ -1126,11 +1168,19 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       },
     });
     if (!body.ok && !previous?.circuitOpen) {
+      // Attach the operator chat so the alert can actually leave the web Inbox;
+      // threadless messages are skipped by the Feishu outbox forever.
+      const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
+      const thread = chatId ? (
+        await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+        ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
+      ) : null;
       await db.inboxMessage.create({
         data: {
           from: "AGENT",
           kind: "TEXT",
           body: `${body.runner.toLowerCase()} runner preflight failed and its circuit is open: ${body.error ?? "unknown error"}`,
+          ...(thread ? { threadId: thread.id } : {}),
         },
       });
     }
