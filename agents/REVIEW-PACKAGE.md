@@ -1,8 +1,19 @@
 # 批量过目呈裁件 — 10 角色提示词（DECISIONS #19 管线产物）
 
-产物清单：`agents/foundational.md`（共享底座）、`agents/roles/` 10 角色、`agents/skills/` 2 技能（plan-mode、review-report）、`agents/README.md`（形态契约：frontmatter 与 schema Agent/Skill 字段一一对应，可被 seed 导入）。互盲对照稿存 `agents/.blind-codex/`。
+产物清单：`agents/foundational.md`（共享底座）、`agents/roles/` 10 角色、`agents/skills/` 2 技能（plan-mode、review-report）、`agents/README.md`（形态契约：frontmatter 与 schema Agent/Skill 字段一一对应，可被 seed 导入）。互盲对照稿的关键原文已摘录进下方分歧节，过程稿目录已删除。
 
 管线执行情况：① writing-for-agents 起草 10 角色 → ② 三承重角色互盲双写（codex exec Sol+high，输入仅 BLUEPRINT 规格原文；产出结构差异明显，无污染信号）→ ③ 其余 7 角色单轮 codex 交叉评审 → ④ 术语与 packages/api 九步实现（templates.ts，已落地）对齐。
+
+## 裁定（Leo，2026-08-15，审讯 8 问全落）
+
+1. IPE 给 inbox 权限；阻塞时先做完不依赖答案的独立步，再报「阻塞步+最小决策」挂起等恢复；可问范围仅限「计划不可执行/自相矛盾」，设计意见不许问。（挂起语义系事实修正：runner 的 inbox 为 WAITING_INBOX 挂起-恢复机制，不存在边等边干。）
+2. 计划评审第四评审员 = 第二次 feasibility pass，coordinator 自行 brief 风险区，不见第一轮报告。
+3. 第 6 步代码评审复用 feasibility/scope-guardian/coherence 三件套打 implementation diff。
+4. seed 的 Plan 步 `approvalGate` 改回 `false`（照 BLUEPRINT §10），修复归 codex 并行写手。
+5. inboxAccess 维持最小名单：default/spec/plan/senior-dev/IPE 有，评审四件套与 librarian 无。
+6. skill 仅 plan-mode 与 review-report 两个，不再拆。
+7. 互盲过程稿 `agents/.blind-codex/` 删除，原文摘录以本件分歧节为准。
+8. seed 读 agents/ 的导入改造压到试点开跑前，暂不动。
 
 ## 术语对齐（第 ④ 步）
 
@@ -34,7 +45,7 @@
 
 - **我稿（原）**：`inboxAccess: false`。计划步不可能执行时：继续做剩余独立步，任务停 review，activity 记明阻塞步。理由：BLUEPRINT 的 IPE 原文无 inbox；停滞由 runner 停滞检测兜底。
 - **盲写稿**：`inboxAccess: true`。「If the plan is internally contradictory, impossible in the granted repository, or requires a human choice, stop at the narrow blocker, preserve completed valid work, and use the Inbox with concrete evidence and the smallest decision needed to continue.」
-- **我的倾向**：采纳授权（true）但合成处置——inbox 报「阻塞步+最小决策」的同时继续做不依赖答案的独立步（与 foundational 的 non-blocking inbox 语义一致）。理由：walk-away 流程里无 inbox 的阻塞=整条链静默卡死到人看板为止；BLUEPRINT §2 也说 inbox 是 stuck 时的唯一打断通道，不限角色。**当前文件已按此倾向落**，若 Leo 裁回 false 改一行即可。
+- **终裁（见上方裁定 1）**：授权 true，处置顺序=先做完不依赖答案的独立步，再 inbox 挂起等恢复（挂起语义按 runner 实际机制修正），可问范围收窄到不可执行类阻塞。理由：walk-away 流程里无 inbox 的阻塞=整条链静默卡死到人看板为止；BLUEPRINT §2 也说 inbox 是 stuck 时的唯一打断通道，不限角色。
 
 ### 分歧 2 — 计划评审的第四评审员来源
 

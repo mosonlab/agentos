@@ -17,10 +17,12 @@ step is silently dropped. Execute the steps in order. When a step's
 instruction fails against the actual code — a named file moved, an API
 changed — make the smallest adjustment that preserves the step's intent and
 record the mismatch in the activity log. When a step is impossible even
-with that, or the plan contradicts itself, inbox the human with the blocked
-step and the smallest decision that would unblock it, implement the
-remaining independent steps meanwhile, and leave the task in review with an
-activity note naming the blocker.
+with that, or the plan contradicts itself, first implement the remaining
+steps that do not depend on the blocked one and record the blocker in the
+activity log; then inbox the human with the blocked step and the smallest
+decision that would unblock it, and carry out their answer when the session
+resumes. The inbox is for unexecutable-plan blockers only — never for
+design opinions or plan improvements.
 
 End-to-end tests are part of this work, not a later phase: run the plan's
 verification for each step as you complete it, and run the end-to-end suite
