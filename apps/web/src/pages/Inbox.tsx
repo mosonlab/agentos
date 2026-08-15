@@ -80,7 +80,7 @@ export const InboxPage = (): ReactNode => {
 export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode => {
   const { data, error, reload } = usePoll<InboxMessage[]>("/inbox/messages");
   const names = useAgentNames();
-  const [choice, setChoice] = useState<string | null>(null);
+  const [reply, setReply] = useState("");
   const { pending, error: actionError, run } = useAction();
 
   if (error !== null && data === null) {
@@ -101,6 +101,16 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   const decide = (decision: string): void => {
     void run(async () => {
       await api.post(`/inbox/messages/${message.id}/decision`, { decision, requestId: `${message.id}:${decision}` });
+      reload();
+    });
+  };
+
+  const sendReply = (): void => {
+    const body = reply.trim();
+    if (body === "") return;
+    void run(async () => {
+      await api.post(`/inbox/messages/${message.id}/reply`, { body, requestId: `${message.id}:reply:${Date.now()}` });
+      setReply("");
       reload();
     });
   };
@@ -142,7 +152,17 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
             <Markdown text={message.body} />
           </div>
 
-          {(message.decisions ?? []).map((decision) => (
+          {(message.replies ?? []).map((replyMessage) => (
+            <div className="msgCard mine" key={replyMessage.id}>
+              <div className="msgHead">
+                <IconUser />
+                <span className="strong">You (web)</span>
+                <span className="time">{formatDateTime(replyMessage.createdAt)}</span>
+              </div>
+              <Markdown text={replyMessage.body} />
+            </div>
+          ))}
+          {(message.replies ?? []).length === 0 ? (message.decisions ?? []).map((decision) => (
             <div className="msgCard mine" key={decision.id}>
               <div className="msgHead">
                 <IconUser />
@@ -151,7 +171,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
               </div>
               <div className="longText">{decision.decision}</div>
             </div>
-          ))}
+          )) : null}
         </div>
 
         {actionError === null ? null : <ErrorNotice message={actionError} />}
@@ -161,32 +181,25 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
             <div className="stack">
               <div className="waitBar"><IconQuestion />The agent is waiting for your reply before continuing.</div>
               {choices.length > 0 ? (
-                <>
-                  <div className="choiceList">
-                    {choices.map((option) => (
-                      <button type="button" key={option.id} className={choice === option.id ? "choice on" : "choice"}
-                        onClick={() => setChoice(option.id)}>
-                        <span className="radio" />
-                        <span className="label">{option.label}<span className="hint">{option.id}</span></span>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="row">
-                    <span className="spacer" />
-                    <button type="button" className="btn primary" disabled={pending || choice === null}
-                      onClick={() => choice !== null && decide(choice)}>Submit</button>
-                  </div>
-                </>
-              ) : (
+                <div className="choiceList">
+                  {choices.map((option) => (
+                    <button type="button" key={option.id} className="choice" disabled={pending} onClick={() => decide(option.id)}>
+                      <span className="radio" />
+                      <span className="label">{option.label}<span className="hint">{option.id}</span></span>
+                    </button>
+                  ))}
+                </div>
+              ) : message.gateTaskId !== null ? (
                 <div className="row">
                   <button type="button" className="btn primary" disabled={pending} onClick={() => decide("approve")}>Approve</button>
                   <button type="button" className="btn danger" disabled={pending} onClick={() => decide("reject")}>Reject</button>
                 </div>
+              ) : (
+                <>
+                  <textarea rows={5} value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply…" />
+                  <div className="row"><span className="spacer" /><button type="button" className="btn primary" disabled={pending || reply.trim() === ""} onClick={sendReply}>Reply</button></div>
+                </>
               )}
-              <div className="hint">
-                POST <code>/inbox/messages/:id/decision</code> 当前只接受 <code>approve</code> / <code>reject</code>；
-                其它选项 id 会被后端 400 拒绝，错误原样显示在上方。自由文本回复尚无 Web 端点，需在飞书线程内回复。
-              </div>
             </div>
           </Card>
         ) : (

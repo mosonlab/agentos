@@ -8,7 +8,7 @@ import { navigate } from "../lib/router";
 import type { Agent, Repo, Task, TaskStatus, TaskTemplate } from "../lib/types";
 import { IconPlus, IconRobot } from "../components/icons";
 import {
-  Card, EmptyState, ErrorNotice, Field, FullPanel, GapNotice, Pill, RowMenu, Segmented, Tabs, Toggle,
+  Card, EmptyState, ErrorNotice, Field, FullPanel, Pill, RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
 
 const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
@@ -179,8 +179,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
         </Card>
       ) : (
         <Card title="From template">
-          {templates.missing ? <GapNotice endpoint="GET /projects/:projectId/task-templates" what="模板列表" /> : null}
-          {(templates.data ?? []).length === 0 && !templates.missing
+          {(templates.data ?? []).length === 0
             ? <EmptyState>No templates in this project yet.</EmptyState>
             : (
               <div className="stack">

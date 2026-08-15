@@ -27,13 +27,7 @@ export const ConnectionsPage = (): ReactNode => {
       </div>
 
       <div className="stack">
-        {connections.missing ? (
-          <div className="notice gap">
-            控制面尚无 <code>GET /projects/:projectId/mcp-connections</code>（MCPConnection / AgentMCPConnection 表已存在，
-            但 API 未暴露）。MCP 列表按空渲染；下方 Repos 用真实端点。
-          </div>
-        ) : null}
-        {connections.error !== null && !connections.missing
+        {connections.error !== null
           ? <ErrorNotice message={`${connections.error.status} ${connections.error.message}`} onRetry={connections.reload} />
           : null}
 
@@ -93,7 +87,7 @@ export const ConnectionsPage = (): ReactNode => {
           <div className="hint">
             绑定表 <code>AgentMCPConnection(agentId, mcpConnectionId)</code> 与 <code>AgentRepoAccess</code>。
             仓库授权可在 Agent 详情 → Capabilities 写入（<code>POST /agents/:agentId/repos/:repoId/access</code>）；
-            MCP 绑定端点尚未提供。
+            MCP 绑定可在 Agent 详情 → Capabilities 中管理。
           </div>
         </Card>
       </div>

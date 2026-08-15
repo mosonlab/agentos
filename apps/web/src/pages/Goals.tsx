@@ -1,14 +1,79 @@
 import { type ReactNode, useState } from "react";
 
+import { api } from "../lib/api";
 import { duration, formatDateTime, money, timeAgo } from "../lib/format";
-import { usePoll } from "../lib/hooks";
+import { useAction, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
-import type { Goal } from "../lib/types";
+import type { Goal, RunnerPreference } from "../lib/types";
 import { IconArrowLeft, IconPlus } from "../components/icons";
 import {
-  Card, EmptyState, ErrorNotice, GoalPill, KeyValue, Markdown, Metric, ShowMore, Tabs,
+  Card, EmptyState, ErrorNotice, Field, FullPanel, GoalPill, KeyValue, Markdown, Metric, ShowMore, Tabs,
 } from "../components/ui";
+
+const NewGoal = ({ projectId, onClose, onCreated }: {
+  projectId: string;
+  onClose: () => void;
+  onCreated: () => void;
+}): ReactNode => {
+  const [form, setForm] = useState({
+    title: "", spec: "", spendCap: "", maxDurationMin: "120", stallTimeoutMin: "10",
+    stuckThreshold: "19", runnerPreference: "AUTO" as RunnerPreference, sharedFolderPath: "",
+  });
+  const [items, setItems] = useState([""]);
+  const { pending, error, run } = useAction();
+
+  const submit = async (): Promise<void> => {
+    const ok = await run(() => api.post<Goal>(`/projects/${projectId}/goals`, {
+      title: form.title,
+      spec: form.spec,
+      spendCap: form.spendCap.trim() === "" ? null : Number(form.spendCap),
+      maxDurationMin: form.maxDurationMin.trim() === "" ? null : Number(form.maxDurationMin),
+      stallTimeoutMin: Number(form.stallTimeoutMin),
+      stuckThreshold: Number(form.stuckThreshold),
+      runnerPreference: form.runnerPreference,
+      sharedFolderPath: form.sharedFolderPath.trim() === "" ? null : form.sharedFolderPath,
+      definitionOfDone: items.map((text) => text.trim()).filter(Boolean).map((text) => ({ text })),
+    }));
+    if (ok) { onCreated(); onClose(); }
+  };
+
+  const valid = form.title.trim() !== "" && items.some((item) => item.trim() !== "")
+    && Number(form.stallTimeoutMin) > 0 && Number(form.stuckThreshold) > 0;
+  return (
+    <FullPanel title="New Goal" onClose={onClose} actions={
+      <button type="button" className="btn primary" disabled={pending || !valid} onClick={() => void submit()}>Create</button>
+    }>
+      {error === null ? null : <ErrorNotice message={error} />}
+      <Card title="Goal">
+        <div className="stack">
+          <Field label="Title"><input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ship the next release" /></Field>
+          <Field label="Spec"><textarea rows={10} value={form.spec} onChange={(event) => setForm({ ...form, spec: event.target.value })} placeholder="Describe the objective, constraints, and context…" /></Field>
+          <div className="fieldRow">
+            <Field label="Spend cap (USD)" hint="Leave empty for no cap."><input type="number" min="0" step="0.01" value={form.spendCap} onChange={(event) => setForm({ ...form, spendCap: event.target.value })} /></Field>
+            <Field label="Wall-clock limit (min)" hint="Leave empty for no limit."><input type="number" min="1" value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: event.target.value })} /></Field>
+          </div>
+          <div className="fieldRow">
+            <Field label="Stall timeout (min)"><input type="number" min="1" value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: event.target.value })} /></Field>
+            <Field label="Stuck threshold"><input type="number" min="1" value={form.stuckThreshold} onChange={(event) => setForm({ ...form, stuckThreshold: event.target.value })} /></Field>
+            <Field label="Runner"><select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>{["AUTO", "CLAUDE", "CODEX", "PI"].map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}</select></Field>
+          </div>
+          <Field label="Shared folder" hint="Optional path available to work on this goal."><input type="text" value={form.sharedFolderPath} onChange={(event) => setForm({ ...form, sharedFolderPath: event.target.value })} placeholder="/path/to/shared/folder" /></Field>
+        </div>
+      </Card>
+      <Card title="Definition of Done" extra={<button type="button" className="btn small" onClick={() => setItems([...items, ""])}><IconPlus />Add item</button>}>
+        <div className="stack">
+          {items.map((item, index) => (
+            <div className="row" key={index}>
+              <input type="text" value={item} onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder={`Criterion ${index + 1}`} />
+              {items.length > 1 ? <button type="button" className="btn small" onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))}>Remove</button> : null}
+            </div>
+          ))}
+        </div>
+      </Card>
+    </FullPanel>
+  );
+};
 
 const dodCounts = (goal: Goal): { done: number; total: number } => {
   const items = goal.definitionOfDone ?? [];
@@ -17,8 +82,9 @@ const dodCounts = (goal: Goal): { done: number; total: number } => {
 
 export const GoalsPage = (): ReactNode => {
   const { projectId, project } = useProjectScope();
-  const { data, loading, error, missing, reload } = usePoll<Goal[]>(projectId === "" ? null : `/projects/${projectId}/goals`, 5_000);
+  const { data, loading, error, reload } = usePoll<Goal[]>(projectId === "" ? null : `/projects/${projectId}/goals`, 5_000);
   const goals = data ?? [];
+  const [creating, setCreating] = useState(false);
 
   if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
 
@@ -30,19 +96,12 @@ export const GoalsPage = (): ReactNode => {
           <div className="subtitle">Long-running objectives in {project?.name ?? "this project"}</div>
         </div>
         <div className="pageActions">
-          {/* Kept visible but disabled: POST /projects/:projectId/goals does not exist yet. */}
-          <button type="button" className="btn primary" disabled title="控制面尚无 goals 端点"><IconPlus />New Goal</button>
+          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Goal</button>
         </div>
       </div>
 
       <div className="stack">
-        {missing ? (
-          <div className="notice gap">
-            控制面尚无 <code>GET /projects/:projectId/goals</code>（Goals 是 DECISIONS #10 的第 ⑤ 阶段，尚未实现）。
-            页面按空列表渲染；端点上线后无需改动前端即可显示。
-          </div>
-        ) : null}
-        {error !== null && !missing ? <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /> : null}
+        {error !== null ? <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /> : null}
 
         {goals.map((goal) => {
           const counts = dodCounts(goal);
@@ -68,25 +127,25 @@ export const GoalsPage = (): ReactNode => {
         })}
 
         {goals.length === 0
-          ? <Card flush><EmptyState>{loading && !missing ? "Loading…" : "No goals yet."}</EmptyState></Card>
+          ? <Card flush><EmptyState>{loading ? "Loading…" : "No goals yet."}</EmptyState></Card>
           : null}
       </div>
+      {creating ? <NewGoal projectId={projectId} onClose={() => setCreating(false)} onCreated={reload} /> : null}
     </div>
   );
 };
 
 export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
-  const { data: goal, error, missing, reload } = usePoll<Goal>(`/goals/${goalId}`, 5_000);
+  const { data: goal, error, reload } = usePoll<Goal>(`/goals/${goalId}`, 5_000);
   const [tab, setTab] = useState<"dod" | "log" | "spec">("dod");
+  const [progress, setProgress] = useState("");
+  const { pending, error: actionError, run } = useAction();
 
-  if (missing) {
-    return (
-      <div className="page">
-        <div className="detailHead"><Link to="/goals" className="backLink"><IconArrowLeft />Back to Goals</Link></div>
-        <div className="notice gap">控制面尚无 <code>GET /goals/:goalId</code>。</div>
-      </div>
-    );
-  }
+  const addProgress = async (): Promise<void> => {
+    const ok = await run(() => api.post(`/goals/${goalId}/progress-log`, { body: progress }));
+    if (ok) { setProgress(""); reload(); }
+  };
+
   if (error !== null && goal === null) {
     return <div className="page"><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></div>;
   }
@@ -147,6 +206,13 @@ export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
 
         {tab === "log" ? (
           <Card title="Progress log" extra={<span className="count">{(goal.progressLog ?? []).length}</span>}>
+            <div className="stack" style={{ marginBottom: 14 }}>
+              {actionError === null ? null : <ErrorNotice message={actionError} />}
+              <Field label="Add progress update">
+                <textarea rows={4} value={progress} onChange={(event) => setProgress(event.target.value)} placeholder="What changed, what remains, and any blockers…" />
+              </Field>
+              <div className="row"><span className="spacer" /><button type="button" className="btn primary" disabled={pending || progress.trim() === ""} onClick={() => void addProgress()}>Add update</button></div>
+            </div>
             {(goal.progressLog ?? []).length === 0
               ? <EmptyState>No entries yet.</EmptyState>
               : (goal.progressLog ?? []).map((entry) => (

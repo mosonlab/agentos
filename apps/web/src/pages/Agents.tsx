@@ -5,10 +5,10 @@ import { formatDate, formatDateTime, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
-import type { Agent, Environment, MCPConnection, RepoPermission, RunnerPreference, Secret, Skill, Repo } from "../lib/types";
+import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import {
-  Card, Check, EmptyState, ErrorNotice, Field, FullPanel, GapNotice, KeyValue, Pill,
+  Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Pill,
   RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
 
@@ -44,9 +44,6 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
         onClick={() => void submit()}>Create</button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
-      {environments.missing
-        ? <GapNotice endpoint="GET /projects/:projectId/environments" what="环境下拉" />
-        : null}
       <Card title="Setup">
         <div className="stack">
           <div className="fieldRow">
@@ -206,19 +203,87 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
   );
 };
 
+const BindingToggle = ({ on, label, add, remove, onDone }: {
+  on: boolean;
+  label: string;
+  add: () => Promise<unknown>;
+  remove: () => Promise<unknown>;
+  onDone: () => void;
+}): ReactNode => {
+  const { pending, error, run } = useAction();
+  const change = (next: boolean): void => {
+    void run(async () => {
+      if (next) await add();
+      else await remove();
+      onDone();
+    });
+  };
+  return <div>{error === null ? null : <ErrorNotice message={error} />}<Toggle on={on} onChange={change} disabled={pending} label={label} /></div>;
+};
+
+const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant: FilesystemGrant; onDone: () => void }): ReactNode => {
+  const { pending, error, run } = useAction();
+  const patch = (key: "canRead" | "canWrite" | "canDelete", value: boolean): void => {
+    void run(async () => {
+      await api.patch(`/agents/${agentId}/filesystem-grants/${grant.id}`, {
+        canRead: grant.canRead, canWrite: grant.canWrite, canDelete: grant.canDelete, [key]: value,
+      });
+      onDone();
+    });
+  };
+  const remove = (): void => {
+    void run(async () => {
+      await api.delete(`/agents/${agentId}/filesystem-grants/${grant.id}`);
+      onDone();
+    });
+  };
+  return (
+    <tr>
+      <td className="name">{grant.folderPath}{error === null ? null : <span className="sub">{error}</span>}</td>
+      <td><Check on={grant.canRead} onChange={(value) => patch("canRead", value)} disabled={pending} label={`Read ${grant.folderPath}`} /></td>
+      <td><Check on={grant.canWrite} onChange={(value) => patch("canWrite", value)} disabled={pending} label={`Write ${grant.folderPath}`} /></td>
+      <td><Check on={grant.canDelete} onChange={(value) => patch("canDelete", value)} disabled={pending} label={`Delete in ${grant.folderPath}`} /></td>
+      <td className="tight"><RowMenu items={[{ label: "Remove", danger: true, onSelect: remove }]} /></td>
+    </tr>
+  );
+};
+
+const NewFilesystemGrant = ({ agentId, onDone }: { agentId: string; onDone: () => void }): ReactNode => {
+  const [folderPath, setFolderPath] = useState("");
+  const [permissions, setPermissions] = useState({ canRead: true, canWrite: false, canDelete: false });
+  const { pending, error, run } = useAction();
+  const submit = async (): Promise<void> => {
+    const ok = await run(() => api.post(`/agents/${agentId}/filesystem-grants`, { folderPath, ...permissions }));
+    if (ok) { setFolderPath(""); setPermissions({ canRead: true, canWrite: false, canDelete: false }); onDone(); }
+  };
+  const any = permissions.canRead || permissions.canWrite || permissions.canDelete;
+  return (
+    <div className="stack" style={{ marginBottom: 14 }}>
+      {error === null ? null : <ErrorNotice message={error} />}
+      <div className="fieldRow">
+        <Field label="Folder path"><input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
+        <Field label="Permissions">
+          <div className="row" style={{ minHeight: 34 }}>
+            {(["canRead", "canWrite", "canDelete"] as const).map((key) => (
+              <span className="row" key={key}><Check on={permissions[key]} onChange={(value) => setPermissions({ ...permissions, [key]: value })} label={key} />{key.slice(3)}</span>
+            ))}
+          </div>
+        </Field>
+        <div className="field"><label>&nbsp;</label><button type="button" className="btn primary" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>Grant access</button></div>
+      </div>
+    </div>
+  );
+};
+
 const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectId: string; onSaved: () => void }): ReactNode => {
   const repos = usePoll<Repo[]>(`/projects/${projectId}/repos`, 10_000);
   const skills = usePoll<Skill[]>(`/projects/${projectId}/skills`, 30_000);
   const connections = usePoll<MCPConnection[]>(`/projects/${projectId}/mcp-connections`, 30_000);
-  const secrets = usePoll<Secret[]>("/secrets", 30_000);
   const grantedRepos = agent.repoAccess ?? null;
 
   return (
     <div className="stack">
       <Card title="Repositories" extra={<span className="count">{(repos.data ?? []).length}</span>}>
-        {grantedRepos === null
-          ? <div className="notice">绑定读回未实现：<code>GET /agents/:agentId</code> 不包含 repoAccess，下面的授权是只写操作。</div>
-          : null}
         {(repos.data ?? []).length === 0
           ? <EmptyState>No repos in this project.</EmptyState>
           : (repos.data ?? []).map((repo) => (
@@ -228,9 +293,8 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
       </Card>
 
       <Card title="Skills" extra={<span className="count">{(skills.data ?? []).length}</span>}>
-        {skills.missing ? <GapNotice endpoint="GET /projects/:projectId/skills" what="skill 挂载" /> : null}
         {(skills.data ?? []).length === 0
-          ? (skills.missing ? null : <EmptyState>No skills defined in this project.</EmptyState>)
+          ? <EmptyState>No skills defined in this project.</EmptyState>
           : (skills.data ?? []).map((skill) => {
             const mounted = (agent.skills ?? []).some((entry) => entry.skillId === skill.id);
             return (
@@ -239,15 +303,16 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
                   <div className="strong">{skill.name}</div>
                   <div className="hint">{skill.kind.toLowerCase()} · {skill.slug}</div>
                 </div>
-                <Toggle on={mounted} label={`Mount ${skill.name}`} />
+                <BindingToggle on={mounted} label={`Mount ${skill.name}`}
+                  add={() => api.post(`/agents/${agent.id}/skills`, { skillId: skill.id })}
+                  remove={() => api.delete(`/agents/${agent.id}/skills/${skill.id}`)} onDone={onSaved} />
               </div>
             );
           })}
       </Card>
 
       <Card title="MCP Connections" extra={<span className="count">{(connections.data ?? []).length}</span>}>
-        {connections.missing ? <GapNotice endpoint="GET /projects/:projectId/mcp-connections" what="MCP 绑定" /> : null}
-        {(connections.data ?? []).map((connection) => {
+        {(connections.data ?? []).length === 0 ? <EmptyState>No MCP connections in this project.</EmptyState> : (connections.data ?? []).map((connection) => {
           const bound = (agent.mcpConnections ?? []).some((entry) => entry.mcpConnectionId === connection.id);
           return (
             <div key={connection.id} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
@@ -255,16 +320,17 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
                 <div className="strong">{connection.name}</div>
                 <div className="hint">{connection.transport}</div>
               </div>
-              <Toggle on={bound} label={`Bind ${connection.name}`} />
+              <BindingToggle on={bound} label={`Bind ${connection.name}`}
+                add={() => api.post(`/agents/${agent.id}/mcp-connections`, { mcpConnectionId: connection.id })}
+                remove={() => api.delete(`/agents/${agent.id}/mcp-connections/${connection.id}`)} onDone={onSaved} />
             </div>
           );
         })}
       </Card>
 
       <Card title="Secrets" extra={<span className="count">{(agent.secretGrants ?? []).length}</span>}>
-        {secrets.missing ? <GapNotice endpoint="GET /secrets" what="secret 授权" /> : null}
         {(agent.secretGrants ?? []).length === 0
-          ? (secrets.missing ? null : <EmptyState>No secrets granted to this agent.</EmptyState>)
+          ? <EmptyState>No secrets granted to this agent.</EmptyState>
           : (agent.secretGrants ?? []).map((grant) => (
             <div key={`${grant.secretId}:${grant.envVar}`} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
               <div style={{ flex: 1 }}><div className="strong">{grant.secret?.name ?? grant.secretId}</div><div className="hint">{grant.envVar}</div></div>
@@ -273,25 +339,18 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
       </Card>
 
       <Card title="Filesystem grants" extra={<span className="count">{(agent.filesystemGrants ?? []).length}</span>}>
-        {(agent.filesystemGrants ?? []).length === 0
-          ? <GapNotice endpoint="GET/POST /agents/:agentId/filesystem-grants" what="文件夹读写删勾选（DECISIONS #18）" />
-          : (
-            <div className="tableWrap">
+        <NewFilesystemGrant agentId={agent.id} onDone={onSaved} />
+        <div className="tableWrap">
               <table className="table">
-                <thead><tr><th>Folder</th><th>Read</th><th>Write</th><th>Delete</th></tr></thead>
+                <thead><tr><th>Folder</th><th>Read</th><th>Write</th><th>Delete</th><th /></tr></thead>
                 <tbody>
                   {(agent.filesystemGrants ?? []).map((grant) => (
-                    <tr key={grant.id}>
-                      <td className="name">{grant.folderPath}</td>
-                      <td><Check on={grant.canRead} label="read" /></td>
-                      <td><Check on={grant.canWrite} label="write" /></td>
-                      <td><Check on={grant.canDelete} label="delete" /></td>
-                    </tr>
+                    <FilesystemGrantRow key={grant.id} agentId={agent.id} grant={grant} onDone={onSaved} />
                   ))}
                 </tbody>
               </table>
+              {(agent.filesystemGrants ?? []).length === 0 ? <EmptyState>No filesystem grants.</EmptyState> : null}
             </div>
-          )}
       </Card>
     </div>
   );
@@ -417,7 +476,6 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
             <div className="hint" style={{ marginBottom: 12 }}>
               Agents this agent may spawn for subtasks. Bindings live in AgentCollaboration.
             </div>
-            <GapNotice endpoint="GET/POST /agents/:agentId/collaborators" what="协作名单读写" />
             <div style={{ marginTop: 12 }}>
               {(siblings ?? []).filter((candidate) => candidate.id !== agent.id).map((candidate) => (
                 <div key={candidate.id} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
@@ -425,7 +483,9 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                     <div className="strong">{candidate.title}</div>
                     <div className="hint">{titleCase(candidate.name)} · {candidate.model}</div>
                   </div>
-                  <Toggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={`Allow ${candidate.name}`} />
+                  <BindingToggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={`Allow ${candidate.name}`}
+                    add={() => api.post(`/agents/${agent.id}/collaborators`, { allowedAgentId: candidate.id })}
+                    remove={() => api.delete(`/agents/${agent.id}/collaborators/${candidate.id}`)} onDone={reload} />
                 </div>
               ))}
             </div>

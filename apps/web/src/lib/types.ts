@@ -299,6 +299,7 @@ export type InboxMessage = {
   createdAt: string;
   answeredAt: string | null;
   decisions?: InboxDecision[];
+  replies?: InboxMessage[];
 };
 
 export type Goal = {

@@ -59,7 +59,7 @@ const SecretForm = ({ secret, onClose, onSaved }: {
 
 export const SecretsPage = (): ReactNode => {
   const { projectId } = useProjectScope();
-  const { data, loading, error, missing, reload } = usePoll<Secret[]>("/secrets", 10_000);
+  const { data, loading, error, reload } = usePoll<Secret[]>("/secrets", 10_000);
   const { data: agents } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 30_000);
   const [editing, setEditing] = useState<Secret | null>(null);
   const [creating, setCreating] = useState(false);
@@ -80,18 +80,12 @@ export const SecretsPage = (): ReactNode => {
           <div className="subtitle">One shared library; runners inject granted values as environment variables (DECISIONS #9)</div>
         </div>
         <div className="pageActions">
-          <button type="button" className="btn primary" disabled={missing} onClick={() => setCreating(true)}><IconPlus />New Secret</button>
+          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Secret</button>
         </div>
       </div>
 
       <div className="stack">
-        {missing ? (
-          <div className="notice gap">
-            控制面尚无 <code>/secrets</code> CRUD 端点（Secret 表与加解密已在 <code>packages/api/src/secrets.ts</code>，
-            但只在 runner 领取任务时内部使用）。本页按空库渲染，端点上线后自动显示。
-          </div>
-        ) : null}
-        {error !== null && !missing ? <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /> : null}
+        {error !== null ? <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /> : null}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
 
         <Card flush>
@@ -131,17 +125,11 @@ export const SecretsPage = (): ReactNode => {
               </tbody>
             </table>
             {secrets.length === 0
-              ? <EmptyState>{loading && !missing ? "Loading…" : "No secrets stored."}</EmptyState>
+              ? <EmptyState>{loading ? "Loading…" : "No secrets stored."}</EmptyState>
               : null}
           </div>
         </Card>
 
-        <Card title="Per-agent grants">
-          <div className="hint">
-            授权关系存在 <code>AgentSecretGrant(agentId, secretId, envVar)</code>；控制面尚无读写端点，
-            上表的 “Granted to” 列在 <code>GET /secrets</code> 带 <code>agentGrants</code> 时自动填充。
-          </div>
-        </Card>
       </div>
 
       {creating ? <SecretForm secret={null} onClose={() => setCreating(false)} onSaved={reload} /> : null}
