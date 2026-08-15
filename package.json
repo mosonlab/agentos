@@ -1,0 +1,27 @@
+{
+  "name": "agentos",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @agentos/db && npm run build -w @agentos/api && npm run build -w @agentos/runner && npm run build -w @agentos/cli && npm run build -w @agentos/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:api": "npm run dev -w @agentos/api",
+    "dev:web": "npm run dev -w @agentos/web",
+    "dev:runner": "npm run dev -w @agentos/runner",
+    "agentos": "npm run start -w @agentos/cli --",
+    "db:generate": "npm run db:generate -w @agentos/db",
+    "db:migrate": "npm run db:migrate -w @agentos/db",
+    "db:validate": "npm run db:validate -w @agentos/db",
+    "postinstall": "npm run db:generate"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
