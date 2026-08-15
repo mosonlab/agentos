@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdir, rm, stat } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { appendFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -82,6 +82,33 @@ export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): 
   const info = await stat(workspace);
   if (!info.isDirectory()) throw new Error("Resumed workspace is not a directory");
   return { path: workspace, branch: claim.run.branch, baseSha: claim.run.baseSha };
+};
+
+/**
+ * Session credentials for the AgentOS MCP server, written per claim because the
+ * session token and fencing token are reissued on every claim.
+ *
+ * They live in a 0600 file rather than only in the child environment because
+ * codex spawns MCP servers with a scrubbed environment. The file is inside the
+ * throwaway workspace, so it dies with it; git is told to ignore it locally so
+ * an agent running `git add -A` cannot commit it.
+ */
+export const writeSessionCredentials = async (
+  config: Pick<RunnerConfig, "apiUrl">,
+  claim: ClaimedTask,
+  workspace: Workspace,
+): Promise<string> => {
+  const directory = join(workspace.path, ".agentos");
+  const path = join(directory, "session.json");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, JSON.stringify({
+    apiUrl: config.apiUrl,
+    runId: claim.run.id,
+    sessionToken: claim.sessionToken,
+    fencingToken: claim.fencingToken,
+  }), { mode: 0o600 });
+  await appendFile(join(workspace.path, ".git", "info", "exclude"), "\n/.agentos/\n").catch(() => undefined);
+  return path;
 };
 
 export const captureWorkspaceResult = async (

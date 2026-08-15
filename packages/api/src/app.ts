@@ -1450,6 +1450,42 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
   app.post("/session/runs/:runId/activity", appendFencedActivity);
 
+  // The agent's own view of its run: what it is working on, what budget is left,
+  // and what the prior chain steps produced. Read-only, session-scoped.
+  app.get("/session/runs/:runId/status", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const principal = context.get("principal");
+    if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
+    const run = await db.run.findUnique({
+      where: { id: runId },
+      include: { task: { include: { stepOutput: true, templateStep: { select: { name: true, outputKind: true } } } } },
+    });
+    if (!run) return context.json({ error: "Run not found" }, 404);
+    return context.json({
+      run: {
+        id: run.id,
+        runNumber: run.runNumber,
+        maxRunsPerTask: run.maxRunsPerTask,
+        status: run.status,
+        startedAt: run.startedAt,
+        maxDurationMin: run.maxDurationMin,
+        stallTimeoutMin: run.stallTimeoutMin,
+        branch: run.branch,
+        targetBranch: run.targetBranch,
+      },
+      task: run.task ? {
+        id: run.task.id,
+        name: run.task.name,
+        status: run.task.status,
+        approvalGate: run.task.approvalGate,
+        chainIndex: run.task.chainIndex,
+        stepName: run.task.templateStep?.name ?? null,
+        outputKind: run.task.templateStep?.outputKind ?? null,
+        outputPersisted: run.task.stepOutput !== null,
+      } : null,
+    });
+  });
+
   app.put("/session/runs/:runId/output", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const principal = context.get("principal");

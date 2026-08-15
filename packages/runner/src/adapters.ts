@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -9,10 +10,24 @@ import { workspaceEnvironment } from "./workspace.js";
 
 export const ADAPTER_VERSION = "2.0.0";
 
+// The seat manual tells the agent to use the AgentOS tools; the manifest has to
+// name them, or the agent has no way to know what it was actually granted.
+const toolManifest = (claim: ClaimedTask): string[] => [
+  "",
+  claim.runner === "PI"
+    ? "AgentOS tools attached to this session (pi extension tools):"
+    : "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+  "- task_activity_log(body): record notable progress in the task activity log. Routine channel; never interrupts a human.",
+  "- task_output(kind, body): persist this step's deliverable as the task output. Later steps and the approval gate read it.",
+  "- task_status(): read the current task and run status, budget, branch, and whether an output exists.",
+  "- inbox_ask(body, choices?): ask the human. Suspends this session until they answer; you resume in place with the reply.",
+];
+
 export const buildPrompt = (claim: ClaimedTask): string => [
   claim.agent.foundationalPrompt,
   "",
   `Role (${claim.agent.name}): ${claim.agent.rolePrompt}`,
+  ...toolManifest(claim),
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
@@ -33,6 +48,23 @@ export const buildChildEnvironment = (
   AGENTOS_SESSION_TOKEN: claim.sessionToken,
   AGENTOS_RUN_ID: claim.run.id,
   AGENTOS_FENCING_TOKEN: claim.fencingToken,
+});
+
+// Resolved from the package root so it works from dist/ (launchd) and src/ (tsx).
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+
+export const mcpServerPath = (): string => process.env.RUNNER_MCP_SERVER_PATH ?? join(packageRoot, "dist", "mcp-server.js");
+export const piExtensionPath = (): string => process.env.RUNNER_PI_EXTENSION_PATH ?? join(packageRoot, "assets", "pi-agentos-extension.ts");
+
+/**
+ * The AgentOS MCP server the agent's CLI session spawns for itself. It carries
+ * no credentials: they reach the server through the inherited child environment,
+ * so nothing secret ends up in a command line other processes can read.
+ */
+const mcpServerArgs = (credentialsPath: string): string[] => [mcpServerPath(), "--credentials", credentialsPath];
+
+export const mcpConfig = (credentialsPath: string): { mcpServers: Record<string, { type: string; command: string; args: string[] }> } => ({
+  mcpServers: { agentos: { type: "stdio", command: process.execPath, args: mcpServerArgs(credentialsPath) } },
 });
 
 export type AdapterEvent = {
@@ -110,6 +142,8 @@ export type RunSpec = {
   workingDirectory: string;
   env: NodeJS.ProcessEnv;
   prompt: string;
+  /** 0600 file the AgentOS MCP server reads its session credentials from. */
+  credentialsPath: string;
 };
 
 export type ResumeSpec = RunSpec & { providerConversationId: string; input: string };
@@ -279,7 +313,16 @@ const modelSpec = (raw: string): { model: string; effort: string | null } => {
   return at > 0 ? { model: raw.slice(0, at), effort: raw.slice(at + 1) } : { model: raw, effort: null };
 };
 
-const argsFor = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
+// Each CLI takes the AgentOS tool surface through a different door: claude has a
+// native MCP config flag, codex takes MCP servers as config overrides, and pi
+// ships no MCP client at all, so it gets the same four tools as an extension.
+const codexMcpArgs = (credentialsPath: string): string[] => [
+  "-c", `mcp_servers.agentos.command=${JSON.stringify(process.execPath)}`,
+  "-c", `mcp_servers.agentos.args=${JSON.stringify(mcpServerArgs(credentialsPath))}`,
+  "-c", "mcp_servers.agentos.startup_timeout_sec=30",
+];
+
+export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
   const input = resume?.input ?? spec.prompt;
   const { model, effort } = modelSpec(spec.claim.run.model);
   if (runner === "CLAUDE") return [
@@ -287,26 +330,31 @@ const argsFor = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string
     // Model must be pinned explicitly; the CLI otherwise inherits the
     // operator's personal default, which is reserved quota.
     "--model", model, "--effort", effort ?? "high",
+    // strict keeps the operator's personal MCP servers out of an agent session:
+    // the manifest is supposed to be the whole tool surface.
+    "--mcp-config", JSON.stringify(mcpConfig(spec.credentialsPath)), "--strict-mcp-config",
     ...(resume ? ["--resume", resume.providerConversationId] : []), input,
   ];
   if (runner === "CODEX") return resume
-    ? ["exec", "resume", "--json", resume.providerConversationId, input]
+    ? ["exec", "resume", ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, input]
     : [
       "exec", "--json", "-m", model,
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      ...codexMcpArgs(spec.credentialsPath),
       "--dangerously-bypass-approvals-and-sandbox", input,
     ];
   return [
     "-p", "--mode", "json", "--session-dir", join(spec.workingDirectory, ".agentos-pi"),
     "--model", model,
     ...(effort ? ["--thinking", effort] : []),
+    "--extension", piExtensionPath(),
     ...(resume ? ["--session", resume.providerConversationId] : []), input,
   ];
 };
 
 const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink, resume?: ResumeSpec): RuntimeHandle => {
   const binary = spec.config.binaries[runner];
-  const args = argsFor(runner, spec, resume);
+  const args = argsForRunner(runner, spec, resume);
   const prefixed = spec.config.runAsPrefix.length > 0;
   const executable = prefixed ? spec.config.runAsPrefix[0]! : binary;
   const fullArgs = prefixed ? [...spec.config.runAsPrefix.slice(1), binary, ...args] : args;
@@ -512,4 +560,10 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   model: spec.claim.run.model,
   promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
   structuredEvents: true,
+  // What the seat manual promises the agent, and how it was actually injected.
+  agentosTools: {
+    transport: spec.claim.runner === "PI" ? "pi-extension" : "mcp-stdio",
+    entrypoint: spec.claim.runner === "PI" ? piExtensionPath() : mcpServerPath(),
+    tools: ["task_activity_log", "task_output", "task_status", "inbox_ask"],
+  },
 });

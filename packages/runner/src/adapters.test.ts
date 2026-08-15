@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { adapterExecutionSucceeded, buildChildEnvironment, buildPrompt, type ExitEvidence } from "./adapters.js";
+import {
+  adapterExecutionSucceeded, argsForRunner, buildChildEnvironment, buildPrompt, mcpConfig, type ExitEvidence,
+} from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
+import type { RunnerConfig } from "./config.js";
 
 const claim: ClaimedTask = {
   task: {
@@ -42,6 +45,41 @@ const claim: ClaimedTask = {
 
 test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
+});
+
+test("the prompt manifest names the AgentOS tools the session actually got", () => {
+  const prompt = buildPrompt(claim);
+  for (const tool of ["task_activity_log", "task_output", "task_status", "inbox_ask"]) assert.match(prompt, new RegExp(tool));
+  // codex/claude see MCP tool names; pi gets the same tools as extension tools.
+  assert.match(prompt, /MCP server 'agentos'/);
+  assert.match(buildPrompt({ ...claim, runner: "PI" }), /pi extension tools/);
+});
+
+test("every CLI is launched with the AgentOS tool surface attached", () => {
+  const spec = {
+    config: { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: [] } as unknown as RunnerConfig,
+    claim, workingDirectory: "/work", env: {}, prompt: "prompt",
+    credentialsPath: "/work/.agentos/session.json",
+  };
+  const claude = argsForRunner("CLAUDE", spec);
+  const config = JSON.parse(claude[claude.indexOf("--mcp-config") + 1]!) as ReturnType<typeof mcpConfig>;
+  assert.deepEqual(config.mcpServers.agentos!.args, [
+    ...[config.mcpServers.agentos!.args[0]!], "--credentials", "/work/.agentos/session.json",
+  ]);
+  // Strict config keeps the operator's personal MCP servers out of agent sessions.
+  assert.ok(claude.includes("--strict-mcp-config"));
+
+  // codex scrubs the environment of MCP servers, so the credentials file is the
+  // only channel that reaches it; the tokens themselves stay out of argv.
+  const codex = argsForRunner("CODEX", spec).join(" ");
+  assert.match(codex, /mcp_servers\.agentos\.command=/);
+  assert.match(codex, /--credentials/);
+  assert.equal(codex.includes(claim.sessionToken), false);
+
+  assert.ok(argsForRunner("PI", spec).includes("--extension"));
+  // Resumed sessions keep the tools; a resume without them silently drops them.
+  const resumed = argsForRunner("CODEX", spec, { ...spec, providerConversationId: "thread-1", input: "again" });
+  assert.match(resumed.join(" "), /mcp_servers\.agentos\.command=/);
 });
 
 test("child environment is an explicit allowlist and excludes host variables", () => {

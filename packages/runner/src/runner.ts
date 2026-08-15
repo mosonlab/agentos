@@ -24,7 +24,10 @@ import {
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { deliverFailedWorkspace, deliverWorkspace } from "./delivery.js";
-import { captureWorkspaceResult, cleanupWorkspace, provisionWorkspace, reuseWorkspace, workspaceEnvironment, type Workspace } from "./workspace.js";
+import {
+  captureWorkspaceResult, cleanupWorkspace, provisionWorkspace, reuseWorkspace, workspaceEnvironment,
+  writeSessionCredentials, type Workspace,
+} from "./workspace.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
   id: tool.id,
@@ -155,7 +158,8 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       return;
     }
 
-    const spec = { config, claim, workingDirectory: workspace.path, env, prompt };
+    const credentialsPath = await writeSessionCredentials(config, claim, workspace);
+    const spec = { config, claim, workingDirectory: workspace.path, env, prompt, credentialsPath };
     handle = claim.resume
       ? await adapter.resume({ ...spec, ...claim.resume }, sink)
       : await adapter.start(spec, sink);
