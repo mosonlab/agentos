@@ -9,6 +9,7 @@ import { IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components
 import {
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, Pill, RunPill, ShowMore, TaskPill, Toggle,
 } from "../components/ui";
+import { retryable } from "./Tasks";
 
 const RunEvents = ({ runId }: { runId: string }): ReactNode => {
   const { data, error, loading } = usePoll<SessionEvent[]>(`/runs/${runId}/events`, 3_000);
@@ -123,6 +124,9 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   const patch = (body: Record<string, unknown>): void => {
     void run(async () => { await api.patch(`/tasks/${taskId}`, body); reload(); });
   };
+  const retry = (): void => {
+    void run(async () => { await api.post(`/tasks/${taskId}/retry`, {}); reload(); });
+  };
   const runs = task.runs;
   const totalCost = runs.reduce((sum, item) => sum + Number(item.session?.costUsd ?? 0), 0);
 
@@ -137,6 +141,9 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <select value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })} style={{ width: 130 }}>
           {STATUSES.map((status) => <option key={status} value={status}>{status.toLowerCase()}</option>)}
         </select>
+        {retryable(task) ? (
+          <button type="button" className="btn" disabled={pending} onClick={retry}><IconRefresh />Retry</button>
+        ) : null}
         <button type="button" className="btn" onClick={reload}><IconRefresh />Refresh</button>
       </div>
 

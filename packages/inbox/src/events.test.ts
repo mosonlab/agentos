@@ -14,6 +14,45 @@ test("event_id is the stable Feishu dedupe identity", () => {
   assert.deepEqual(eventIdentity(envelope), { eventId: "evt-1", eventType: "card.action.trigger" });
 });
 
+test("inbound text nobody is waiting on lands as a visible human message", async () => {
+  let landed: Record<string, unknown> | undefined;
+  const tx = {
+    inboxExternalEvent: { create: async () => ({}), update: async () => ({}) },
+    inboxMessage: {
+      findMany: async () => [],
+      create: async ({ data }: { data: Record<string, unknown> }) => { landed = data; return { id: "inbound-1", ...data }; },
+    },
+    inboxThread: { findFirst: async () => null, create: async () => ({ id: "thread-9" }) },
+  };
+  const db = {
+    $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+  const result = await processFeishuEvent(db, {
+    header: { event_id: "evt-9", event_type: "im.message.receive_v1" },
+    event: { message: { message_id: "om-9", chat_id: "oc-1", content: JSON.stringify({ text: "怎么样了？" }) } },
+  });
+  assert.deepEqual(result, { duplicate: false, resumed: false, unmatched: true, messageId: "inbound-1" });
+  assert.equal(landed?.from, "HUMAN");
+  assert.equal(landed?.body, "怎么样了？");
+  assert.equal(landed?.threadId, "thread-9");
+  // Unmatched text is inert: no session, no gate, nothing to decide.
+  assert.equal(landed?.sessionId, undefined);
+  assert.equal(landed?.status, "CLOSED");
+});
+
+test("a card click that matches nothing still fails loudly instead of being filed", async () => {
+  const tx = {
+    inboxExternalEvent: { create: async () => ({}), update: async () => ({}) },
+    inboxMessage: { findUnique: async () => null, create: async () => { throw new Error("must not file a card click"); } },
+    inboxThread: { findFirst: async () => null, create: async () => ({ id: "thread-9" }) },
+  };
+  const db = {
+    $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    inboxExternalEvent: { create: async () => ({}) },
+  } as unknown as PrismaClient;
+  await assert.rejects(() => processFeishuEvent(db, envelope), /No matching Inbox question/);
+});
+
 test("duplicate external event is acknowledged without a second resume", async () => {
   let transactions = 0;
   const db = {

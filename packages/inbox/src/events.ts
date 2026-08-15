@@ -5,7 +5,7 @@ export type FeishuEnvelope = {
   event?: Record<string, unknown>;
 };
 
-type EventResult = { duplicate: boolean; resumed: boolean; messageId?: string };
+type EventResult = { duplicate: boolean; resumed: boolean; messageId?: string; unmatched?: boolean };
 
 const record = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -54,9 +54,31 @@ export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvel
         : externalReplyId
           ? await tx.inboxMessage.findUnique({ where: { externalMessageId: externalReplyId }, include: { session: { include: { run: true } } } })
           : candidates[0] ?? null;
-      if (!question?.session?.run) throw new Error("No matching Inbox question");
       const choiceId = string(actionValue?.choiceId);
       const answer = choiceId ?? (message ? textContent(message) : null);
+      // Inbound text nobody is waiting on used to vanish into the audit table.
+      // Land it as a plain human message on the chat's thread so the Inbox page
+      // shows it; it stays out of the decision flow (no session, no gate).
+      if (!question?.session?.run && choiceId === null && answer && chatId) {
+        const thread = await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+          ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } });
+        const landed = await tx.inboxMessage.create({ data: {
+          from: InboxSender.HUMAN,
+          kind: "TEXT",
+          body: answer,
+          threadId: thread.id,
+          status: InboxStatus.CLOSED,
+          dedupeKey: `inbound:${eventId}`,
+          externalMessageId: string(message?.message_id),
+          deliveryStatus: "DELIVERED",
+          deliveredAt: now,
+        } });
+        await tx.inboxExternalEvent.update({
+          where: { channel_externalEventId: { channel: "FEISHU", externalEventId: eventId } }, data: { processedAt: now },
+        });
+        return { duplicate: false, resumed: false, unmatched: true, messageId: landed.id };
+      }
+      if (!question?.session?.run) throw new Error("No matching Inbox question");
       if (!answer) throw new Error("Inbox reply is empty");
       const result = await applyInboxDecisionTx(tx, {
         inboxMessageId: question.id,

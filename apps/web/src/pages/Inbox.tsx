@@ -16,7 +16,8 @@ const useAgentNames = (): Map<string, string> => {
 };
 
 const senderName = (message: InboxMessage, names: Map<string, string>): string =>
-  message.agentId === null ? "System" : names.get(message.agentId) ?? "Agent";
+  // Unmatched inbound Feishu text lands here as a HUMAN message with no agent.
+  message.from === "HUMAN" ? "You" : message.agentId === null ? "System" : names.get(message.agentId) ?? "Agent";
 
 export const InboxPage = (): ReactNode => {
   const { data, loading, error, reload } = usePoll<InboxMessage[]>("/inbox/messages");
@@ -51,7 +52,7 @@ export const InboxPage = (): ReactNode => {
             <button type="button" className="inboxItem" key={message.id} onClick={() => navigate(`/inbox/${message.id}`)}>
               <div className="body">
                 <div className="sender">
-                  {message.agentId === null ? <IconUser /> : <IconRobot />}
+                  {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
                   {senderName(message, names)}
                   {message.status === "OPEN" ? <InboxPill status={message.status} /> : null}
                   {message.gateTaskId === null ? null : <Pill tone="violet">Approval gate</Pill>}

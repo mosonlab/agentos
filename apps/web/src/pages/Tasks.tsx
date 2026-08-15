@@ -33,7 +33,19 @@ const runLabel = (task: Task): ReactNode => {
   );
 };
 
-const TaskCard = ({ task, onDelete }: { task: Task; onDelete: (task: Task) => void }): ReactNode => {
+// A retry only lands once the last run is terminal; the API rejects the rest.
+export const retryable = (task: Task): boolean => {
+  const run = task.runs[0];
+  if (!run) return false;
+  if (run.status === "QUEUED" || run.status === "CLAIMED" || run.status === "PROVISIONING" || run.status === "RUNNING") return false;
+  return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
+};
+
+const TaskCard = ({ task, onDelete, onRetry }: {
+  task: Task;
+  onDelete: (task: Task) => void;
+  onRetry: (task: Task) => void;
+}): ReactNode => {
   const run = task.runs[0];
   return (
     <article
@@ -44,7 +56,10 @@ const TaskCard = ({ task, onDelete }: { task: Task; onDelete: (task: Task) => vo
     >
       <div className="row" style={{ alignItems: "flex-start" }}>
         <h3 style={{ flex: 1 }}>{task.name}</h3>
-        <RowMenu items={[{ label: "Delete", danger: true, onSelect: () => onDelete(task) }]} />
+        <RowMenu items={[
+          ...(retryable(task) ? [{ label: "Retry", onSelect: () => onRetry(task) }] : []),
+          { label: "Delete", danger: true, onSelect: () => onDelete(task) },
+        ]} />
       </div>
       <div className="meta">
         <div className="metaRow">
@@ -81,7 +96,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
     name: "", description: "",
     assigneeAgentId: agents[0]?.id ?? "", repoId: repos[0]?.id ?? "", targetBranch: "",
     assigneeType: "AGENT" as "AGENT" | "HUMAN", approvalGate: false,
-    maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3,
+    maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
   });
   const [templateId, setTemplateId] = useState("");
   const [variables, setVariables] = useState<Record<string, string>>({});
@@ -242,6 +257,9 @@ export const TasksPage = (): ReactNode => {
     if (!window.confirm(`Delete task ${task.name}?`)) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
   };
+  const retry = (task: Task): void => {
+    void run(async () => { await api.post(`/tasks/${task.id}/retry`, {}); reload(); });
+  };
 
   if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
 
@@ -279,7 +297,7 @@ export const TasksPage = (): ReactNode => {
                     move(event.dataTransfer.getData("text/plain"), column.status);
                   }}
                 >
-                  {columnTasks.map((task) => <TaskCard key={task.id} task={task} onDelete={remove} />)}
+                  {columnTasks.map((task) => <TaskCard key={task.id} task={task} onDelete={remove} onRetry={retry} />)}
                   {columnTasks.length === 0 ? <div className="columnEmpty">{loading ? "Loading…" : "Drop tasks here"}</div> : null}
                 </div>
               </div>
