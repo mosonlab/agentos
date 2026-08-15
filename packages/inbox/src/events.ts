@@ -75,6 +75,12 @@ export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvel
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return { duplicate: true, resumed: false };
     }
+    // The transaction above rolled back, taking the audit record with it.
+    // Re-persist the raw event so unmatched inbound messages stay inspectable.
+    await db.inboxExternalEvent.create({ data: {
+      channel: "FEISHU", externalEventId: eventId, eventType,
+      payload: envelope as Prisma.InputJsonValue,
+    } }).catch(() => undefined);
     throw error;
   }
 };

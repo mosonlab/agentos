@@ -39,7 +39,7 @@ const command = async (
   });
 });
 
-export const workspaceEnvironment = (config: RunnerConfig): NodeJS.ProcessEnv => ({
+export const workspaceEnvironment = (config: Pick<RunnerConfig, "path" | "home">): NodeJS.ProcessEnv => ({
   PATH: config.path,
   HOME: config.home,
   LANG: "C.UTF-8",

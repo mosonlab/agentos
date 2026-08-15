@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import type { InFlightTool } from "./budget.js";
+import { workspaceEnvironment } from "./workspace.js";
 
 export const ADAPTER_VERSION = "2.0.0";
 
@@ -27,9 +28,7 @@ export const buildChildEnvironment = (
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run">,
 ): NodeJS.ProcessEnv => ({
   ...claim.secrets,
-  PATH: config.path,
-  HOME: config.home,
-  LANG: "C.UTF-8",
+  ...workspaceEnvironment(config),
   AGENTOS_API_URL: config.apiUrl,
   AGENTOS_SESSION_TOKEN: claim.sessionToken,
   AGENTOS_RUN_ID: claim.run.id,
