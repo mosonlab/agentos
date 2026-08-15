@@ -37,6 +37,7 @@ const claim: ClaimedTask = {
   fencingToken: "1:run-1:token",
   sessionToken: "agos_session_secret",
   secrets: { ALLOWED_SECRET: "secret" },
+  priorOutputs: [],
 };
 
 test("buildPrompt combines foundational, role, and task context", () => {

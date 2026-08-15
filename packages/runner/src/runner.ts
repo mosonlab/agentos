@@ -23,6 +23,7 @@ import {
 } from "./api.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
+import { deliverWorkspace } from "./delivery.js";
 import { captureWorkspaceResult, cleanupWorkspace, provisionWorkspace, reuseWorkspace, workspaceEnvironment, type Workspace } from "./workspace.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
@@ -214,22 +215,29 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       await cleanup(config, workspace, false);
       return;
     }
-    const succeeded = adapterExecutionSucceeded(evidence);
-    const classified = succeeded ? null : adapter.classifyError(evidence);
+    const executionSucceeded = adapterExecutionSucceeded(evidence);
+    let delivery: Awaited<ReturnType<typeof deliverWorkspace>> | null = null;
     let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
     try { gitResult = await captureWorkspaceResult(config, workspace); } catch (error: unknown) {
       await appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
     }
+    if (executionSucceeded) delivery = await deliverWorkspace(config, claim, { ...workspace, branch: gitResult.branch });
+    const succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
+    const classified = succeeded ? null : delivery?.failureClass
+      ? { failureClass: delivery.failureClass, retryable: false }
+      : adapter.classifyError(evidence);
     const finishedCleanup = await cleanup(config, workspace, !succeeded && config.failedWorkspaceRetention > 0);
     await completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: evidence.signal,
       terminalEventSeen: evidence.terminalEventSeen,
-      terminalSuccess: evidence.terminalSuccess,
+      terminalSuccess: succeeded && evidence.terminalSuccess,
       terminationReason: budgetReason ?? evidence.terminationReason,
       ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
-      ...(!succeeded ? { failureReason: budgetReason ?? (evidence.stderr.trim() || `CLI exited with code ${evidence.exitCode}`) } : {}),
+      ...(!succeeded ? { failureReason: budgetReason ?? delivery?.pushError ?? (evidence.stderr.trim() || `CLI exited with code ${evidence.exitCode}`) } : {}),
+      output: evidence.stdout.trim().slice(-500_000) || null,
       ...gitResult,
+      ...(delivery ?? { pushStatus: "NOT_REQUESTED" as const }),
       ...finishedCleanup,
     });
   } catch (error: unknown) {

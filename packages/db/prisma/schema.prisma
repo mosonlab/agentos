@@ -424,8 +424,11 @@ model TaskTemplateStep {
   approvalGate            Boolean      @default(false)
   attachmentsFromPrevious Boolean      @default(false)
   spawnPolicy             Json?
+  runner                  RunnerKind?
+  outputKind              String       @default("result")
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
   assigneeAgent           Agent?       @relation(fields: [assigneeAgentId], references: [id], onDelete: SetNull)
+  tasks                   Task[]
 
   @@unique([taskTemplateId, stepIndex])
   @@index([assigneeAgentId])
@@ -437,6 +440,7 @@ model Task {
   assigneeAgentId    String?
   repoId             String?
   templateId         String?
+  templateStepId     String?
   followUpTaskId     String?          @unique
   name               String
   description        String
@@ -463,6 +467,7 @@ model Task {
   assigneeAgent      Agent?           @relation(fields: [assigneeAgentId, projectId], references: [id, projectId], onDelete: Restrict)
   repo               Repo?            @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
   template           TaskTemplate?    @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateStep       TaskTemplateStep? @relation(fields: [templateStepId], references: [id], onDelete: SetNull)
   followUpTask       Task?            @relation("TaskFollowUp", fields: [followUpTaskId], references: [id], onDelete: SetNull)
   previousTask       Task?            @relation("TaskFollowUp")
   attachments        TaskAttachment[]
@@ -470,14 +475,32 @@ model Task {
   sessions           Session[]
   runs               Run[]
   inboxMessages      InboxMessage[]
+  gateMessages       InboxMessage[]   @relation("InboxGateTask")
   inboxThreads       InboxThread[]
+  stepOutput         TaskStepOutput?
 
   @@unique([chainId, chainIndex])
   @@unique([id, projectId])
   @@index([projectId, status])
   @@index([assigneeAgentId])
   @@index([templateId])
+  @@index([templateStepId])
   @@index([repoId])
+}
+
+model TaskStepOutput {
+  id        String   @id @default(cuid())
+  taskId    String   @unique
+  runId     String?
+  kind      String
+  body      String
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  run       Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
 }
 
 model TaskAttachment {
@@ -592,6 +615,11 @@ model Run {
   baseSha               String?
   headSha               String?
   pushStatus            PushStatus     @default(NOT_REQUESTED)
+  pushRemote            String?
+  pushError             String?
+  pullRequestUrl        String?
+  pullRequestNumber     Int?
+  deliveryInstructions  String?
   adapterVersion        String?
   cliVersion            String?
   model                 String
@@ -624,6 +652,7 @@ model Run {
   session               Session?
   events                SessionEvent[]
   inboxDecisions        InboxDecision[]
+  stepOutputs           TaskStepOutput[]
 
   @@unique([taskId, runNumber])
   @@unique([id, projectId])
@@ -722,6 +751,7 @@ model InboxMessage {
   sessionId        String?
   taskId           String?
   goalId           String?
+  gateTaskId       String?
   threadId         String?
   replyToMessageId String?
   kind             InboxKind   @default(TEXT)
@@ -744,6 +774,7 @@ model InboxMessage {
   session          Session?    @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   task             Task?       @relation(fields: [taskId], references: [id], onDelete: SetNull)
   goal             Goal?       @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  gateTask         Task?       @relation("InboxGateTask", fields: [gateTaskId], references: [id], onDelete: SetNull)
   thread           InboxThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
   replyTo          InboxMessage? @relation("InboxReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
   replies          InboxMessage[] @relation("InboxReplies")
@@ -754,6 +785,7 @@ model InboxMessage {
   @@index([sessionId])
   @@index([taskId])
   @@index([goalId])
+  @@index([gateTaskId, status])
   @@index([threadId, status, createdAt])
   @@index([deliveryStatus, nextDeliveryAt])
 }

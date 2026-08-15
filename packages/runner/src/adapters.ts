@@ -15,6 +15,11 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
+  ...(claim.priorOutputs.length > 0 ? [
+    "",
+    "Persisted outputs from prior template steps:",
+    ...claim.priorOutputs.map((output) => `\n## ${output.task.name} (${output.kind})\n${output.body}`),
+  ] : []),
 ].join("\n");
 
 export const buildChildEnvironment = (

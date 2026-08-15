@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.agentos.postgres-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string><string>deploy/backup-postgres.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/TO/agentos</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>DATABASE_URL</key><string>postgresql://agentos:CHANGE_ME@localhost:5432/agentos?schema=public</string>
+    <key>AGENTOS_BACKUP_DIR</key><string>/Users/Shared/agentos-backups</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>15</integer></dict>
+  <key>StandardOutPath</key><string>/tmp/agentos-postgres-backup.log</string>
+  <key>StandardErrorPath</key><string>/tmp/agentos-postgres-backup.err.log</string>
+</dict>
+</plist>

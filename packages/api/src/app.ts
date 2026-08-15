@@ -1,11 +1,14 @@
 import {
   AssigneeType,
+  advanceTemplateTask,
+  applyInboxDecision,
   CleanupStatus,
   FailureClass,
   Prisma,
   type PrismaClient,
   RepoPermission,
   RunStatus,
+  PushStatus,
   RunnerKind,
   RunnerPreference,
   SessionEventSource,
@@ -31,6 +34,7 @@ import {
 import { reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
+import { instantiateTemplate } from "./templates.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -143,6 +147,13 @@ const completionInput = z.object({
   branch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   headSha: z.string().nullable().optional(),
+  output: z.string().max(500_000).nullable().optional(),
+  pushStatus: z.nativeEnum(PushStatus).default(PushStatus.NOT_REQUESTED),
+  pushRemote: z.string().nullable().optional(),
+  pushError: z.string().max(4000).nullable().optional(),
+  pullRequestUrl: z.string().nullable().optional(),
+  pullRequestNumber: z.number().int().positive().nullable().optional(),
+  deliveryInstructions: z.string().max(8000).nullable().optional(),
   cleanupStatus: z.nativeEnum(CleanupStatus),
   cleanupFailureReason: z.string().max(4000).nullable().optional(),
   workspaceRetained: z.boolean().default(false),
@@ -177,6 +188,22 @@ const inboxQuestionInput = z.object({
   choices: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(200) })).max(20).default([]),
   chatId: z.string().min(1).optional(),
   resumableUntil: z.coerce.date().nullable().optional(),
+});
+const instantiateTemplateInput = z.object({
+  repoId: id,
+  variables: z.record(z.string(), z.string().min(1)),
+  name: z.string().trim().min(1).max(200).optional(),
+  description: z.string().max(50_000).optional(),
+});
+const taskOutputInput = z.object({
+  fencingToken: fence.optional(),
+  kind: z.string().trim().min(1).max(80),
+  body: z.string().min(1).max(500_000),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+const inboxDecisionInput = z.object({
+  decision: z.enum(["approve", "reject"]),
+  requestId: z.string().trim().min(1).max(200),
 });
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
@@ -294,6 +321,34 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     }), 201);
   });
 
+  app.get("/projects/:projectId/task-templates", async (context) => context.json(await db.taskTemplate.findMany({
+    where: { projectId: id.parse(context.req.param("projectId")) },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+    orderBy: { createdAt: "asc" },
+  })));
+  app.get("/task-templates/:templateId", async (context) => {
+    const template = await db.taskTemplate.findUnique({
+      where: { id: id.parse(context.req.param("templateId")) },
+      include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+    });
+    return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
+  });
+  app.post("/projects/:projectId/task-templates/:templateId/instantiate", async (context) => {
+    try {
+      return context.json(await instantiateTemplate(
+        db,
+        id.parse(context.req.param("projectId")),
+        id.parse(context.req.param("templateId")),
+        await readJson(context.req.raw, instantiateTemplateInput),
+      ), 201);
+    } catch (error: unknown) {
+      if (error instanceof Error && /(not found|has no|Missing template|Unknown template|must be agent)/i.test(error.message)) {
+        return context.json({ error: error.message }, 400);
+      }
+      throw error;
+    }
+  });
+
   app.get("/tasks", async (context) => {
     const projectId = context.req.query("projectId");
     return context.json(await db.task.findMany({
@@ -360,6 +415,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskPatch);
     const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
+    if (body.status === TaskStatus.DONE && before.templateId && before.approvalGate) {
+      return context.json({ error: "Template approval gates must be decided through Inbox" }, 409);
+    }
     if (body.assigneeAgentId) {
       const agent = await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } });
       if (!agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
@@ -390,6 +448,19 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     where: { taskId: id.parse(context.req.param("taskId")) },
     orderBy: { createdAt: "asc" },
   })));
+  app.get("/tasks/:taskId/output", async (context) => {
+    const output = await db.taskStepOutput.findUnique({ where: { taskId: id.parse(context.req.param("taskId")) } });
+    return output ? context.json(output) : context.json({ error: "Task output not found" }, 404);
+  });
+  app.put("/tasks/:taskId/output", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const body = await readJson(context.req.raw, taskOutputInput);
+    return context.json(await db.taskStepOutput.upsert({
+      where: { taskId },
+      create: { taskId, kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      update: { kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+    }));
+  });
   app.post("/tasks/:taskId/activity", async (context) => {
     const body = await readJson(context.req.raw, activityInput);
     return context.json(await db.taskActivity.create({
@@ -401,6 +472,32 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
       },
     }), 201);
+  });
+
+  app.get("/inbox/messages", async (context) => context.json(await db.inboxMessage.findMany({
+    where: { from: "AGENT" },
+    include: { decisions: true },
+    orderBy: { createdAt: "desc" },
+  })));
+  app.post("/inbox/messages/:messageId/decision", async (context) => {
+    const body = await readJson(context.req.raw, inboxDecisionInput);
+    try {
+      const result = await applyInboxDecision(db, {
+        inboxMessageId: id.parse(context.req.param("messageId")),
+        externalEventId: `web:${body.requestId}`,
+        decision: body.decision,
+        actorOpenId: "web-operator",
+      });
+      return context.json(result, result.duplicate ? 200 : 201);
+    } catch (error: unknown) {
+      if (error instanceof Error && /(No matching|must be approve|no executable)/.test(error.message)) {
+        return context.json({ error: error.message }, 409);
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return context.json({ duplicate: true, resumed: false });
+      }
+      throw error;
+    }
   });
 
   app.post("/runner/preflight", async (context) => {
@@ -543,6 +640,17 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           secrets[envVar] = decryptSecret(secret.encryptedValue, secret.ciphertextVersion);
         }
         const run = await tx.run.findUniqueOrThrow({ where: { id: candidate.id } });
+        const priorOutputsRaw = candidate.task.chainId && candidate.task.chainIndex !== null
+          ? await tx.taskStepOutput.findMany({
+            where: { task: { chainId: candidate.task.chainId, chainIndex: { lt: candidate.task.chainIndex } } },
+            select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
+            orderBy: { task: { chainIndex: "asc" } },
+          })
+          : [];
+        const priorOutputs = priorOutputsRaw.map((output) => ({
+          ...output,
+          body: output.body.length > 10_000 ? output.body.slice(-10_000) : output.body,
+        }));
         return {
           task: candidate.task,
           agent: candidate.agent,
@@ -553,6 +661,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           fencingToken,
           sessionToken: sessionCredential.token,
           secrets,
+          priorOutputs,
           resume: priorResume,
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };
@@ -690,6 +799,24 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
   app.post("/session/runs/:runId/activity", appendFencedActivity);
 
+  app.put("/session/runs/:runId/output", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const principal = context.get("principal");
+    if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
+    const body = await readJson(context.req.raw, taskOutputInput);
+    if (!body.fencingToken) return context.json({ error: "fencingToken is required" }, 400);
+    const run = await db.run.findFirst({
+      where: { id: runId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
+      select: { taskId: true },
+    });
+    if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
+    return context.json(await db.taskStepOutput.upsert({
+      where: { taskId: run.taskId },
+      create: { taskId: run.taskId, runId, kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      update: { runId, kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+    }));
+  });
+
   app.post("/session/runs/:runId/inbox/questions", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const principal = context.get("principal");
@@ -721,7 +848,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const result = await db.$transaction(async (tx) => {
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
-        include: { task: true, session: true },
+        include: { task: { include: { templateStep: true } }, session: true },
       });
       if (!run?.session) return null;
       const succeeded = completionSucceeded({
@@ -756,6 +883,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           branch: body.branch ?? run.branch,
           baseSha: body.baseSha ?? run.baseSha,
           headSha: body.headSha ?? null,
+          pushStatus: body.pushStatus,
+          pushRemote: body.pushRemote ?? null,
+          pushError: body.pushError ?? null,
+          pullRequestUrl: body.pullRequestUrl ?? null,
+          pullRequestNumber: body.pullRequestNumber ?? null,
+          deliveryInstructions: body.deliveryInstructions ?? null,
           workspaceRetained: body.workspaceRetained,
         },
       });
@@ -800,24 +933,47 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       }
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
-        await tx.task.update({
-          where: { id: run.taskId },
-          data: {
-            status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
-            failureReason: succeeded ? null : budgetExhausted
-              ? `Maximum ${run.maxRunsPerTask} runs reached`
-              : body.failureReason ?? "Execution failed",
-          },
-        });
+        if (succeeded && run.task?.templateId) {
+          const existingOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } });
+          if (existingOutput) {
+            await tx.taskStepOutput.update({
+              where: { taskId: run.taskId },
+              data: {
+                runId: run.id,
+                metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
+              },
+            });
+          } else {
+            await tx.taskStepOutput.create({ data: {
+              taskId: run.taskId,
+              runId: run.id,
+              kind: run.task.templateStep?.outputKind ?? "result",
+              body: body.output?.trim() || `Run ${run.runNumber} completed successfully.`,
+              metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
+            } });
+          }
+          await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now);
+        } else {
+          await tx.task.update({
+            where: { id: run.taskId },
+            data: {
+              status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
+              failureReason: succeeded ? null : budgetExhausted
+                ? `Maximum ${run.maxRunsPerTask} runs reached`
+                : body.failureReason ?? "Execution failed",
+            },
+          });
+        }
         await tx.taskActivity.create({
           data: {
             taskId: run.taskId,
             actorType: "runner",
             actorId: body.runnerId,
-            body: succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
+            body: succeeded && run.task?.templateId ? `Run ${run.runNumber} succeeded; template chain advanced`
+              : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
               : retryCreated ? `Run ${run.runNumber} failed; retry queued`
                 : `Run ${run.runNumber} failed; task moved to review`,
-            metadata: jsonValue({ exitCode: body.exitCode, terminalEventSeen: body.terminalEventSeen, failureClass }),
+            metadata: jsonValue({ exitCode: body.exitCode, terminalEventSeen: body.terminalEventSeen, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl }),
           },
         });
         if (budgetExhausted) {

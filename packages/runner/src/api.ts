@@ -57,6 +57,7 @@ export type ClaimedTask = {
   fencingToken: string;
   sessionToken: string;
   secrets: Record<string, string>;
+  priorOutputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number | null } }>;
 };
 
 export type SessionEventPayload = {
@@ -174,6 +175,13 @@ export type Completion = {
   branch?: string | null;
   baseSha?: string | null;
   headSha?: string | null;
+  output?: string | null;
+  pushStatus?: "NOT_REQUESTED" | "PENDING" | "SUCCEEDED" | "FAILED";
+  pushRemote?: string | null;
+  pushError?: string | null;
+  pullRequestUrl?: string | null;
+  pullRequestNumber?: number | null;
+  deliveryInstructions?: string | null;
   cleanupStatus: CleanupStatus;
   cleanupFailureReason?: string | null;
   workspaceRetained: boolean;

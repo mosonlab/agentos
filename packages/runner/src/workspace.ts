@@ -63,8 +63,8 @@ export const provisionWorkspace = async (config: RunnerConfig, claim: ClaimedTas
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
     await command(config, "git", ["clone", "--no-local", "--branch", target, "--single-branch", claim.repo.remoteUrl, workspace], root, env);
     const baseSha = await command(config, "git", ["rev-parse", "HEAD"], workspace, env);
-    const branch = `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
-    await command(config, "git", ["switch", "-c", branch], workspace, env);
+    const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
+    if (branch !== target) await command(config, "git", ["switch", "-c", branch], workspace, env);
     return { path: workspace, branch, baseSha };
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);

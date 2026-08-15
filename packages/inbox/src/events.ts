@@ -1,4 +1,4 @@
-import { InboxDeliveryStatus, InboxSender, InboxStatus, Prisma, RunStatus, SessionExecutionStatus, type PrismaClient } from "@agentos/db";
+import { applyInboxDecisionTx, InboxSender, InboxStatus, Prisma, type PrismaClient } from "@agentos/db";
 
 export type FeishuEnvelope = {
   header?: { event_id?: string; event_type?: string };
@@ -54,62 +54,22 @@ export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvel
         : externalReplyId
           ? await tx.inboxMessage.findUnique({ where: { externalMessageId: externalReplyId }, include: { session: { include: { run: true } } } })
           : candidates[0] ?? null;
-      if (!question?.session?.run || question.session.run.status !== RunStatus.WAITING_INBOX) {
-        throw new Error("No matching waiting Inbox question");
-      }
+      if (!question?.session?.run) throw new Error("No matching Inbox question");
       const choiceId = string(actionValue?.choiceId);
       const answer = choiceId ?? (message ? textContent(message) : null);
       if (!answer) throw new Error("Inbox reply is empty");
-      const claimed = await tx.inboxMessage.updateMany({
-        where: { id: question.id, status: InboxStatus.OPEN },
-        data: {
-          status: InboxStatus.ANSWERED,
-          selectedChoiceId: choiceId,
-          answeredAt: now,
-          ...(action ? { externalActionId: eventId } : {}),
-        },
-      });
-      if (claimed.count !== 1) return { duplicate: true, resumed: false };
-      const reply = await tx.inboxMessage.create({ data: {
-        from: InboxSender.HUMAN,
-        agentId: question.agentId,
-        sessionId: question.sessionId,
-        taskId: question.taskId,
-        goalId: question.goalId,
-        threadId: question.threadId,
-        replyToMessageId: question.id,
-        kind: "TEXT",
-        body: answer,
-        selectedChoiceId: choiceId,
-        status: InboxStatus.CLOSED,
-        dedupeKey: `feishu:event:${eventId}:reply`,
-        externalMessageId: string(message?.message_id),
-        deliveryStatus: InboxDeliveryStatus.DELIVERED,
-        deliveredAt: now,
-      } });
-      await tx.inboxDecision.create({ data: {
+      const result = await applyInboxDecisionTx(tx, {
         inboxMessageId: question.id,
-        runId: question.session.run.id,
         externalEventId: eventId,
         decision: answer,
         actorOpenId: string(record(event.operator)?.open_id) ?? string(record(record(event.sender)?.sender_id)?.open_id),
-      } });
-      const queued = await tx.run.updateMany({
-        where: { id: question.session.run.id, status: RunStatus.WAITING_INBOX },
-        data: { status: RunStatus.QUEUED, readyAt: now, runnerId: null, fencingToken: null, leaseExpiresAt: null },
-      });
-      if (queued.count !== 1) throw new Error("Waiting Run changed while applying Inbox decision");
-      await tx.session.update({ where: { id: question.session.id }, data: {
-        executionStatus: SessionExecutionStatus.REQUESTED,
-        waitingOnMessageId: null,
-        resumeInput: answer,
-        resumeAttempt: { increment: 1 },
-      } });
+        externalMessageId: string(message?.message_id),
+      }, now);
       await tx.inboxExternalEvent.update({
         where: { channel_externalEventId: { channel: "FEISHU", externalEventId: eventId } }, data: { processedAt: now },
       });
-      return { duplicate: false, resumed: true, messageId: reply.id };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      return result;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   } catch (error: unknown) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return { duplicate: true, resumed: false };

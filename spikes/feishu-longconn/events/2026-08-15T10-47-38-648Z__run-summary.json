@@ -1,0 +1,82 @@
+{
+  "runId": "2026-08-15T10-47-38-648Z",
+  "sdkVersion": "1.73.0",
+  "startedAt": "2026-08-15T10:47:38.648Z",
+  "durationMs": 1800000,
+  "connectionEstablished": true,
+  "connectionErrors": [],
+  "textEvents": [
+    {
+      "at": "2026-08-15T10:51:55.318Z",
+      "eventFile": "events/2026-08-15T10-47-38-648Z__unknown__seq-1.json",
+      "messageId": "om_x100b67307637cca0dd8f113a3bcd91b",
+      "text": "ddd"
+    },
+    {
+      "at": "2026-08-15T10:53:36.184Z",
+      "eventFile": "events/2026-08-15T10-47-38-648Z__unknown__seq-3.json",
+      "messageId": "om_x100b67301c3570a4dda36f48ba7de5e",
+      "text": "nihao"
+    }
+  ],
+  "cardActionEvents": [
+    {
+      "at": "2026-08-15T10:52:15.007Z",
+      "eventFile": "events/2026-08-15T10-47-38-648Z__unknown__seq-2.json",
+      "choice": "A"
+    },
+    {
+      "at": "2026-08-15T10:53:39.494Z",
+      "eventFile": "events/2026-08-15T10-47-38-648Z__unknown__seq-4.json",
+      "choice": "B"
+    }
+  ],
+  "echoReplies": [
+    {
+      "at": "2026-08-15T10:51:56.323Z",
+      "ok": true,
+      "messageId": "om_x100b6730020f98a0c447e68babee4be"
+    },
+    {
+      "at": "2026-08-15T10:53:36.766Z",
+      "ok": true,
+      "messageId": "om_x100b67301dc4e0a8de7b01aab8b1577"
+    }
+  ],
+  "cardsSent": [
+    {
+      "at": "2026-08-15T10:51:56.946Z",
+      "ok": true,
+      "messageId": "om_x100b67300204a4a0c1ff869c6e0a3b3",
+      "chatId": "oc_dc5b9c81a2ba0f2164f16463471aec6a"
+    },
+    {
+      "at": "2026-08-15T10:53:37.425Z",
+      "ok": true,
+      "messageId": "om_x100b67301ddd58a0c322a6ff25902c2",
+      "chatId": "oc_dc5b9c81a2ba0f2164f16463471aec6a"
+    }
+  ],
+  "confirmationMessages": [
+    {
+      "at": "2026-08-15T10:52:15.559Z",
+      "ok": true,
+      "messageId": "om_x100b6730033878a8df664e70709a93c",
+      "choice": "A"
+    },
+    {
+      "at": "2026-08-15T10:53:40.244Z",
+      "ok": true,
+      "messageId": "om_x100b67301d8c80a0dde915abb2c1882",
+      "choice": "B"
+    }
+  ],
+  "connectedAt": "2026-08-15T10:47:39.098Z",
+  "exitReason": "timeout",
+  "finishedAt": "2026-08-15T11:17:38.669Z",
+  "finalConnectionStatus": {
+    "state": "idle",
+    "lastConnectTime": 1786790858665,
+    "reconnectAttempts": 0
+  }
+}

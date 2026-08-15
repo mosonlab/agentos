@@ -1,4 +1,4 @@
-import { PrismaClient, RunnerPreference } from "@prisma/client";
+import { AssigneeType, Prisma, PrismaClient, RunnerKind, RunnerPreference } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
@@ -58,7 +58,42 @@ const main = async (): Promise<void> => {
     });
   }
 
-  console.log(`Seeded ${project.name} with ${agents.length} agents.`);
+  const agentByName = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
+  const template = await prisma.taskTemplate.upsert({
+    where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } },
+    update: {
+      description: "Nine-step managed feature workflow with spec, plan, and PR approval gates.",
+      variables: ["branchName"],
+    },
+    create: {
+      projectId: project.id,
+      name: "compound-engineer-workflow",
+      description: "Nine-step managed feature workflow with spec, plan, and PR approval gates.",
+      variables: ["branchName"],
+    },
+  });
+  const steps = [
+    [1, "Write a spec", "spec", AssigneeType.AGENT, RunnerKind.CLAUDE, true, "spec", "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null],
+    [2, "Plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, true, "plan", "Turn the approved spec into a concrete ordered implementation plan.", null],
+    [3, "Plan review", "review-coordinator", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "plan-review", "Coordinate four independent plan reviews and consolidate must-fix and should-fix findings.", { reviewers: ["feasibility", "scope-guardian", "coherence", "feasibility"], mode: "parallel", reconstructedFourthPass: true }],
+    [4, "Revise plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "revised-plan", "Revise the plan using every must-fix plan-review finding.", null],
+    [5, "Implementation", "implementation-plan-executioner", AssigneeType.AGENT, RunnerKind.CODEX, false, "implementation", "Implement the approved plan on {{branchName}} and run end-to-end tests.", null],
+    [6, "Code review", "review-coordinator", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "code-review", "Review the implementation and consolidate must-fix and should-fix findings.", null],
+    [7, "Apply review fixes", "senior-dev", AssigneeType.AGENT, RunnerKind.CODEX, false, "fixed-implementation", "Apply all must-fix review findings and rerun end-to-end tests.", null],
+    [8, "Librarian", "librarian", AssigneeType.AGENT, RunnerKind.PI, false, "documentation", "Update internal documentation to match the delivered code.", null],
+    [9, "Human PR review", null, AssigneeType.HUMAN, null, true, "approval", "Review and merge the pull request for {{branchName}}.", null],
+  ] as const;
+  for (const [stepIndex, name, agentName, assigneeType, runner, approvalGate, outputKind, prompt, spawnPolicy] of steps) {
+    const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
+    if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
+    await prisma.taskTemplateStep.upsert({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex } },
+      update: { name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, attachmentsFromPrevious: stepIndex > 1, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, attachmentsFromPrevious: stepIndex > 1, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+    });
+  }
+
+  console.log(`Seeded ${project.name} with ${agents.length} agents and the nine-step feature template.`);
 };
 
 try {

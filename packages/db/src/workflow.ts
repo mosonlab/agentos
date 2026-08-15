@@ -1,0 +1,247 @@
+import { createHash } from "node:crypto";
+
+import {
+  AssigneeType,
+  InboxDeliveryStatus,
+  InboxSender,
+  InboxStatus,
+  Prisma,
+  RunStatus,
+  RunnerKind,
+  RunnerPreference,
+  SessionExecutionStatus,
+  TaskStatus,
+  type PrismaClient,
+} from "@prisma/client";
+
+type Tx = Prisma.TransactionClient;
+
+const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
+
+const chooseRunner = (preference: RunnerPreference, model: string): RunnerKind => {
+  if (preference === RunnerPreference.CLAUDE) return RunnerKind.CLAUDE;
+  if (preference === RunnerPreference.CODEX) return RunnerKind.CODEX;
+  if (preference === RunnerPreference.PI) return RunnerKind.PI;
+  const normalized = model.toLowerCase();
+  if (normalized.includes("codex")) return RunnerKind.CODEX;
+  if (normalized.includes("deepseek") || normalized.includes("pi")) return RunnerKind.PI;
+  return RunnerKind.CLAUDE;
+};
+
+export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
+  const task = await tx.task.findUniqueOrThrow({
+    where: { id: taskId },
+    include: {
+      assigneeAgent: true,
+      repo: true,
+      templateStep: true,
+      runs: { orderBy: { runNumber: "desc" }, take: 1 },
+    },
+  });
+  if (task.assigneeType !== AssigneeType.AGENT || !task.assigneeAgent || !task.repo) {
+    throw new Error(`Task ${task.id} cannot be queued without an agent and repo`);
+  }
+  const prior = task.runs[0];
+  const runNumber = (prior?.runNumber ?? 0) + 1;
+  const runner = task.templateStep?.runner ?? chooseRunner(task.assigneeAgent.runnerPreference, task.assigneeAgent.model);
+  return tx.run.create({ data: {
+    projectId: task.projectId,
+    taskId: task.id,
+    agentId: task.assigneeAgent.id,
+    repoId: task.repo.id,
+    runNumber,
+    dedupeKey: `task:${task.id}:run:${runNumber}`,
+    runner,
+    model: task.assigneeAgent.model,
+    targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
+    branch: prior?.branch ?? null,
+    promptHash: promptHash([
+      task.assigneeAgent.foundationalPrompt,
+      task.assigneeAgent.rolePrompt,
+      task.name,
+      task.description,
+    ]),
+    maxDurationMin: task.maxDurationMin,
+    stallTimeoutMin: task.stallTimeoutMin,
+    maxRunsPerTask: task.maxSessionsPerTask,
+    readyAt: now,
+  } });
+};
+
+const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, chatId: string | null) => {
+  const [task, run] = await Promise.all([
+    tx.task.findUniqueOrThrow({ where: { id: gateTaskId } }),
+    tx.run.findUniqueOrThrow({ where: { id: sourceRunId }, include: { session: true } }),
+  ]);
+  if (!run.session) throw new Error(`Run ${sourceRunId} has no session for approval gate`);
+  const thread = chatId ? await tx.inboxThread.upsert({
+    where: { channel_externalChatId_sessionId: { channel: "FEISHU", externalChatId: chatId, sessionId: run.session.id } },
+    create: { channel: "FEISHU", externalChatId: chatId, sessionId: run.session.id, taskId: task.id },
+    update: { taskId: task.id },
+  }) : null;
+  const delivery = run.pullRequestUrl
+    ? `\n\nPull request: ${run.pullRequestUrl}`
+    : run.deliveryInstructions ? `\n\n${run.deliveryInstructions}` : "";
+  return tx.inboxMessage.create({ data: {
+    from: InboxSender.AGENT,
+    agentId: run.agentId,
+    sessionId: run.session.id,
+    taskId: task.id,
+    gateTaskId: task.id,
+    threadId: thread?.id ?? null,
+    kind: "MULTIPLE_CHOICE",
+    body: `审批闸门：${task.name}\n\n请确认本步骤产出。批准后继续；打回后重新执行产出步骤。${delivery}`,
+    choices: [{ id: "approve", label: "批准并继续" }, { id: "reject", label: "打回上一步" }],
+    dedupeKey: `gate:task:${task.id}:run:${sourceRunId}`,
+    deliveryStatus: InboxDeliveryStatus.PENDING,
+  } });
+};
+
+/** Marks a completed template task done and activates exactly one successor or gate. */
+export const advanceTemplateTask = async (
+  tx: Tx,
+  taskId: string,
+  sourceRunId: string,
+  chatId: string | null,
+  now = new Date(),
+): Promise<{ gated: boolean; nextTaskId: string | null }> => {
+  const task = await tx.task.findUniqueOrThrow({
+    where: { id: taskId },
+    include: { followUpTask: true },
+  });
+  if (!task.templateId) return { gated: false, nextTaskId: null };
+  if (task.approvalGate) {
+    await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.REVIEW } });
+    await gateQuestion(tx, task.id, sourceRunId, chatId);
+    return { gated: true, nextTaskId: task.followUpTaskId };
+  }
+  await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
+  const next = task.followUpTask;
+  if (!next) return { gated: false, nextTaskId: null };
+  if (next.assigneeType === AssigneeType.HUMAN || next.approvalGate && !next.assigneeAgentId) {
+    await tx.task.update({ where: { id: next.id }, data: { status: TaskStatus.REVIEW } });
+    await gateQuestion(tx, next.id, sourceRunId, chatId);
+    return { gated: true, nextTaskId: next.id };
+  }
+  await enqueueTaskRun(tx, next.id, now);
+  await tx.taskActivity.create({ data: {
+    taskId: next.id,
+    actorType: "control-plane",
+    body: `Template predecessor ${task.name} completed; step queued`,
+  } });
+  return { gated: false, nextTaskId: next.id };
+};
+
+export type InboxDecisionInput = {
+  inboxMessageId: string;
+  externalEventId: string;
+  decision: string;
+  actorOpenId?: string | null;
+  externalMessageId?: string | null;
+};
+
+export type InboxDecisionResult = {
+  duplicate: boolean;
+  resumed: boolean;
+  gateAction?: "approved" | "rejected";
+  messageId?: string;
+};
+
+/** Shared transaction body for Feishu and Web decisions. OPEN is the cross-channel compare-and-set. */
+export const applyInboxDecisionTx = async (
+  tx: Tx,
+  input: InboxDecisionInput,
+  now = new Date(),
+): Promise<InboxDecisionResult> => {
+  const question = await tx.inboxMessage.findUnique({
+    where: { id: input.inboxMessageId },
+    include: {
+      session: { include: { run: true } },
+      gateTask: { include: { previousTask: true } },
+    },
+  });
+  if (!question?.session?.run) throw new Error("No matching Inbox question");
+  const gateDecision = Boolean(question.gateTaskId);
+  if (gateDecision && input.decision !== "approve" && input.decision !== "reject") {
+    throw new Error("Approval gate decision must be approve or reject");
+  }
+  if (!gateDecision && question.session.run.status !== RunStatus.WAITING_INBOX) {
+    throw new Error("No matching waiting Inbox question");
+  }
+  const claimed = await tx.inboxMessage.updateMany({
+    where: { id: question.id, status: InboxStatus.OPEN },
+    data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
+  });
+  if (claimed.count !== 1) return { duplicate: true, resumed: false };
+  const reply = await tx.inboxMessage.create({ data: {
+    from: InboxSender.HUMAN,
+    agentId: question.agentId,
+    sessionId: question.sessionId,
+    taskId: question.taskId,
+    goalId: question.goalId,
+    threadId: question.threadId,
+    replyToMessageId: question.id,
+    kind: "TEXT",
+    body: input.decision,
+    selectedChoiceId: input.decision,
+    status: InboxStatus.CLOSED,
+    dedupeKey: `decision:${input.externalEventId}:reply`,
+    externalMessageId: input.externalMessageId ?? null,
+    deliveryStatus: InboxDeliveryStatus.DELIVERED,
+    deliveredAt: now,
+  } });
+  await tx.inboxDecision.create({ data: {
+    inboxMessageId: question.id,
+    runId: question.session.run.id,
+    externalEventId: input.externalEventId,
+    decision: input.decision,
+    actorOpenId: input.actorOpenId ?? null,
+  } });
+
+  if (gateDecision && question.gateTask) {
+    if (input.decision === "approve") {
+      await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.DONE, failureReason: null } });
+      await tx.taskActivity.create({ data: { taskId: question.gateTask.id, actorType: "operator", body: "Approval gate approved" } });
+      if (question.gateTask.followUpTaskId) {
+        const successor = await tx.task.findUniqueOrThrow({ where: { id: question.gateTask.followUpTaskId } });
+        if (successor.assigneeType === AssigneeType.AGENT) await enqueueTaskRun(tx, successor.id, now);
+      }
+      return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
+    }
+    const redo = question.gateTask.assigneeType === AssigneeType.AGENT
+      ? question.gateTask
+      : question.gateTask.previousTask;
+    if (!redo) throw new Error("Approval gate has no executable previous task to reject to");
+    await tx.task.update({ where: { id: redo.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+    if (redo.id !== question.gateTask.id) {
+      await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.TODO } });
+    }
+    await tx.taskActivity.create({ data: { taskId: redo.id, actorType: "operator", body: "Approval gate rejected; step queued again" } });
+    await enqueueTaskRun(tx, redo.id, now);
+    return { duplicate: false, resumed: false, gateAction: "rejected", messageId: reply.id };
+  }
+
+  const queued = await tx.run.updateMany({
+    where: { id: question.session.run.id, status: RunStatus.WAITING_INBOX },
+    data: { status: RunStatus.QUEUED, readyAt: now, runnerId: null, fencingToken: null, leaseExpiresAt: null },
+  });
+  if (queued.count !== 1) throw new Error("Waiting Run changed while applying Inbox decision");
+  await tx.session.update({ where: { id: question.session.id }, data: {
+    executionStatus: SessionExecutionStatus.REQUESTED,
+    waitingOnMessageId: null,
+    resumeInput: input.decision,
+    resumeAttempt: { increment: 1 },
+  } });
+  return { duplicate: false, resumed: true, messageId: reply.id };
+};
+
+export const applyInboxDecision = async (
+  db: PrismaClient,
+  input: InboxDecisionInput,
+  now = new Date(),
+): Promise<InboxDecisionResult> => db.$transaction(
+  (tx) => applyInboxDecisionTx(tx, input, now),
+  // PostgreSQL re-checks the OPEN predicate after a concurrent row lock is
+  // released, so the loser observes count=0 instead of a serialization error.
+  { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+);
