@@ -2,12 +2,15 @@ import { config as loadEnvironment } from "dotenv";
 
 loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true });
 
-const [{ loadRunnerConfig }, { pollForTask }] = await Promise.all([
+const [{ loadRunnerConfig }, { pollForTask, runStartupPreflight }] = await Promise.all([
   import("./config.js"),
   import("./runner.js"),
 ]);
 
 const config = loadRunnerConfig();
+if (!config.runnerToken) throw new Error("RUNNER_TOKEN is required; operator credentials must never be used by the runner");
+const preflight = await runStartupPreflight(config);
+console.log(`CLI preflight: ${Object.entries(preflight).map(([runner, ok]) => `${runner.toLowerCase()}=${ok ? "ok" : "blocked"}`).join(" ")}`);
 let stopping = false;
 const stop = (signal: string): void => {
   console.log(`Received ${signal}; stopping local runner after the current task`);

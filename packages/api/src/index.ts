@@ -6,10 +6,18 @@ config({
   quiet: true,
 });
 
-const [{ prisma }, { app }] = await Promise.all([
+const [{ prisma }, { app }, { reconcileAtStartup }] = await Promise.all([
   import("@agentos/db"),
   import("./app.js"),
+  import("./reconcile.js"),
 ]);
+
+const reconciliation = await reconcileAtStartup(
+  prisma,
+  process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
+  Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
+);
+console.log(`Startup reconciliation: ${reconciliation.runs} orphan runs, ${reconciliation.workspaces} workspaces cleaned`);
 
 const port = Number.parseInt(process.env.API_PORT ?? "3000", 10);
 const hostname = process.env.API_HOST ?? "0.0.0.0";

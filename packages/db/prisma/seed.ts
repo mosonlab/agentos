@@ -16,7 +16,7 @@ const agents = [
   ["scope-guardian", "Scope Guardian", "claude", RunnerPreference.CLAUDE, "Review a plan for unnecessary scope expansion."],
   ["coherence", "Coherence Reviewer", "claude", RunnerPreference.CLAUDE, "Review a plan for internal coherence and missing links."],
   ["implementation-plan-executioner", "Implementation Plan Executioner", "codex", RunnerPreference.CODEX, "Implement the approved plan faithfully."],
-  ["librarian", "Librarian", "deepseek", RunnerPreference.PI, "Update internal documentation from how the codebase actually works."],
+  ["librarian", "Librarian", "openai-codex/gpt-5.6-luna", RunnerPreference.PI, "Update internal documentation from how the codebase actually works."],
 ] as const;
 
 const main = async (): Promise<void> => {

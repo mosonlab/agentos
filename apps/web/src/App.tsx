@@ -3,7 +3,8 @@ import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react
 type Status = "TODO" | "DOING" | "REVIEW" | "DONE";
 type Project = { id: string; name: string };
 type Agent = { id: string; name: string; title: string; runnerPreference: string };
-type Session = { id: string; status: string; failureReason: string | null };
+type Repo = { id: string; name: string; remoteUrl: string; defaultBranch: string };
+type Run = { id: string; status: string; failureReason: string | null; branch: string | null; headSha: string | null };
 type Task = {
   id: string;
   name: string;
@@ -13,7 +14,8 @@ type Task = {
   status: Status;
   assigneeAgentId: string | null;
   assigneeAgent: Agent | null;
-  sessions: Session[];
+  repo: Repo | null;
+  runs: Run[];
 };
 type Activity = { id: string; actorType: string; body: string; createdAt: string; metadata?: { stream?: string; failed?: boolean } };
 
@@ -40,6 +42,7 @@ export const App = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [repos, setRepos] = useState<Repo[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selected, setSelected] = useState<Task | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
@@ -61,11 +64,13 @@ export const App = () => {
   const loadBoard = useCallback(async () => {
     if (!token || !projectId) return;
     try {
-      const [nextAgents, nextTasks] = await Promise.all([
+      const [nextAgents, nextRepos, nextTasks] = await Promise.all([
         api<Agent[]>(`/projects/${projectId}/agents`, token),
+        api<Repo[]>(`/projects/${projectId}/repos`, token),
         api<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}`, token),
       ]);
       setAgents(nextAgents);
+      setRepos(nextRepos);
       setTasks(nextTasks);
       setSelected((current) => current ? nextTasks.find((task) => task.id === current.id) ?? null : null);
       setError("");
@@ -104,7 +109,8 @@ export const App = () => {
         body: JSON.stringify({
           name: data.get("name"),
           description: data.get("description"),
-          workingDirectory: data.get("workingDirectory"),
+          repoId: data.get("repoId"),
+          targetBranch: data.get("targetBranch") || null,
           assigneeAgentId: data.get("assigneeAgentId"),
         }),
       });
@@ -135,7 +141,7 @@ export const App = () => {
           <div><span className="eyebrow">PHASE 1 · TASKS</span><h1>Task board</h1><p>Assign work, watch agents run, and approve completed tasks.</p></div>
           <div className="headerActions">
             <select aria-label="Project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
-            <button className="primary" disabled={!projectId || agents.length === 0} onClick={() => setShowCreate(true)}>+ New task</button>
+            <button className="primary" disabled={!projectId || agents.length === 0 || repos.length === 0} onClick={() => setShowCreate(true)}>+ New task</button>
           </div>
         </header>
         {error && <div className="error"><span>{error}</span><button onClick={() => saveToken("")}>Change token</button></div>}
@@ -160,9 +166,9 @@ export const App = () => {
         </section>
       </main>
 
-      {showCreate && <div className="modalBackdrop" onMouseDown={() => setShowCreate(false)}><form className="modal" onSubmit={(event) => void createTask(event)} onMouseDown={(event) => event.stopPropagation()}><div className="modalHead"><div><span className="eyebrow">NEW WORK</span><h2>Create task</h2></div><button type="button" className="iconButton" onClick={() => setShowCreate(false)}>×</button></div><label>Title<input name="name" required autoFocus /></label><label>Description<textarea name="description" rows={5} /></label><label>Working directory<input name="workingDirectory" required placeholder="/absolute/path/to/existing/repo" /></label><label>Agent<select name="assigneeAgentId" required defaultValue={agents.find((agent) => agent.name === "default")?.id ?? agents[0]?.id}>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name} · {agent.runnerPreference.toLowerCase()}</option>)}</select></label><div className="modalActions"><button type="button" onClick={() => setShowCreate(false)}>Cancel</button><button className="primary" type="submit">Create task</button></div></form></div>}
+      {showCreate && <div className="modalBackdrop" onMouseDown={() => setShowCreate(false)}><form className="modal" onSubmit={(event) => void createTask(event)} onMouseDown={(event) => event.stopPropagation()}><div className="modalHead"><div><span className="eyebrow">NEW WORK</span><h2>Create task</h2></div><button type="button" className="iconButton" onClick={() => setShowCreate(false)}>×</button></div><label>Title<input name="name" required autoFocus /></label><label>Description<textarea name="description" rows={5} /></label><label>Repository<select name="repoId" required defaultValue={repos[0]?.id}>{repos.map((repo) => <option value={repo.id} key={repo.id}>{repo.name} · {repo.defaultBranch}</option>)}</select></label><label>Target branch<input name="targetBranch" placeholder="Defaults to repo branch" /></label><label>Agent<select name="assigneeAgentId" required defaultValue={agents.find((agent) => agent.name === "default")?.id ?? agents[0]?.id}>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name} · {agent.runnerPreference.toLowerCase()}</option>)}</select></label><div className="modalActions"><button type="button" onClick={() => setShowCreate(false)}>Cancel</button><button className="primary" type="submit">Create task</button></div></form></div>}
 
-      {selected && <aside className="drawer"><div className="drawerHead"><div><span className="eyebrow">TASK DETAIL</span><h2>{selected.name}</h2></div><button className="iconButton" onClick={() => setSelected(null)}>×</button></div><div className="taskMeta"><span className={`pill ${selected.status.toLowerCase()}`}>{selected.status.toLowerCase()}</span><span>{selected.assigneeAgent?.name}</span></div><p className="description">{selected.description || "No description"}</p>{selected.failureReason && <div className="failureBanner">Failed: {selected.failureReason}</div>}<code className="path">{selected.workingDirectory}</code><div className="activityHead"><h3>Activity</h3><span>refreshes every 2s</span></div><div className="activityList">{activity.map((item) => <div className={`activityItem ${item.metadata?.failed ? "failure" : ""}`} key={item.id}><div><b>{item.actorType}</b><time>{new Date(item.createdAt).toLocaleTimeString()}</time></div><pre>{item.body}</pre></div>)}{activity.length === 0 && <div className="empty">No activity yet</div>}</div></aside>}
+      {selected && <aside className="drawer"><div className="drawerHead"><div><span className="eyebrow">TASK DETAIL</span><h2>{selected.name}</h2></div><button className="iconButton" onClick={() => setSelected(null)}>×</button></div><div className="taskMeta"><span className={`pill ${selected.status.toLowerCase()}`}>{selected.status.toLowerCase()}</span><span>{selected.assigneeAgent?.name}</span></div><p className="description">{selected.description || "No description"}</p>{selected.failureReason && <div className="failureBanner">Failed: {selected.failureReason}</div>}<code className="path">{selected.repo?.remoteUrl ?? "No repo"}</code><div className="activityHead"><h3>Activity</h3><span>refreshes every 2s</span></div><div className="activityList">{activity.map((item) => <div className={`activityItem ${item.metadata?.failed ? "failure" : ""}`} key={item.id}><div><b>{item.actorType}</b><time>{new Date(item.createdAt).toLocaleTimeString()}</time></div><pre>{item.body}</pre></div>)}{activity.length === 0 && <div className="empty">No activity yet</div>}</div></aside>}
     </div>
   );
 };

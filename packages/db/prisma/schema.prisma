@@ -86,12 +86,62 @@ enum InboxStatus {
   CLOSED   @map("closed")
 }
 
-enum SessionStatus {
-  STARTING      @map("starting")
+enum RunStatus {
+  QUEUED        @map("queued")
+  CLAIMED       @map("claimed")
+  PROVISIONING  @map("provisioning")
   RUNNING       @map("running")
   WAITING_INBOX @map("waiting-inbox")
-  COMMITTING    @map("committing")
-  DESTROYED     @map("destroyed")
+  SUCCEEDED     @map("succeeded")
+  FAILED        @map("failed")
+  TIMED_OUT     @map("timed-out")
+  CANCELLED     @map("cancelled")
+  LOST          @map("lost")
+}
+
+enum SessionExecutionStatus {
+  REQUESTED     @map("requested")
+  PROVISIONING  @map("provisioning")
+  RUNNING       @map("running")
+  WAITING_INBOX @map("waiting-inbox")
+  SUCCEEDED     @map("succeeded")
+  FAILED        @map("failed")
+  TIMED_OUT     @map("timed-out")
+  CANCELLED     @map("cancelled")
+  LOST          @map("lost")
+}
+
+enum CleanupStatus {
+  PENDING   @map("pending")
+  RUNNING   @map("running")
+  SUCCEEDED @map("succeeded")
+  FAILED    @map("failed")
+  RETAINED  @map("retained")
+}
+
+enum FailureClass {
+  BINARY_NOT_FOUND       @map("binary-not-found")
+  AUTH_REQUIRED          @map("auth-required")
+  RATE_LIMITED           @map("rate-limited")
+  CANCELLED_OR_TIMED_OUT @map("cancelled-or-timed-out")
+  TOOL_FAILED            @map("tool-failed")
+  TRANSIENT_PROVIDER     @map("transient-provider")
+  PROTOCOL_ERROR         @map("protocol-error")
+  TASK_FAILED            @map("task-failed")
+  BUDGET_EXCEEDED        @map("budget-exceeded")
+}
+
+enum SessionEventSource {
+  RUNNER @map("runner")
+  CLAUDE @map("claude")
+  CODEX  @map("codex")
+  PI     @map("pi")
+}
+
+enum PushStatus {
+  NOT_REQUESTED @map("not-requested")
+  PENDING       @map("pending")
+  SUCCEEDED     @map("succeeded")
   FAILED        @map("failed")
 }
 
@@ -117,6 +167,7 @@ model Project {
   triggers           Trigger[]
   automations        Automation[]
   files              FileObject[]
+  runs               Run[]
 }
 
 model Environment {
@@ -132,6 +183,7 @@ model Environment {
   secrets      EnvironmentSecret[]
 
   @@unique([projectId, name])
+  @@unique([id, projectId])
   @@index([projectId])
 }
 
@@ -149,7 +201,7 @@ model Agent {
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   project            Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  environment        Environment          @relation(fields: [environmentId], references: [id], onDelete: Restrict)
+  environment        Environment          @relation(fields: [environmentId, projectId], references: [id, projectId], onDelete: Restrict)
   skills             AgentSkill[]
   mcpConnections     AgentMCPConnection[]
   repoAccess         AgentRepoAccess[]
@@ -160,11 +212,13 @@ model Agent {
   assignedTasks      Task[]
   templateSteps      TaskTemplateStep[]
   sessions           Session[]
+  runs               Run[]
   inboxMessages      InboxMessage[]
   triggers           Trigger[]
   automations        Automation[]
 
   @@unique([projectId, name])
+  @@unique([id, projectId])
   @@index([projectId])
   @@index([environmentId])
 }
@@ -183,14 +237,16 @@ model Skill {
   agents    AgentSkill[]
 
   @@unique([projectId, slug])
+  @@unique([id, projectId])
   @@index([projectId])
 }
 
 model AgentSkill {
-  agentId String
-  skillId String
-  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  skill   Skill  @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  agentId   String
+  skillId   String
+  projectId String
+  agent     Agent  @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Cascade)
+  skill     Skill  @relation(fields: [skillId, projectId], references: [id, projectId], onDelete: Cascade)
 
   @@id([agentId, skillId])
   @@index([skillId])
@@ -211,6 +267,7 @@ model MCPConnection {
   agents             AgentMCPConnection[]
 
   @@unique([projectId, name])
+  @@unique([id, projectId])
   @@index([projectId])
   @@index([credentialSecretId])
 }
@@ -218,8 +275,9 @@ model MCPConnection {
 model AgentMCPConnection {
   agentId         String
   mcpConnectionId String
-  agent           Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  mcpConnection   MCPConnection @relation(fields: [mcpConnectionId], references: [id], onDelete: Cascade)
+  projectId       String
+  agent           Agent         @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Cascade)
+  mcpConnection   MCPConnection @relation(fields: [mcpConnectionId, projectId], references: [id, projectId], onDelete: Cascade)
 
   @@id([agentId, mcpConnectionId])
   @@index([mcpConnectionId])
@@ -238,8 +296,11 @@ model Repo {
   project            Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
   credentialSecret   Secret?           @relation("RepoCredential", fields: [credentialSecretId], references: [id], onDelete: SetNull)
   agentAccess        AgentRepoAccess[]
+  tasks              Task[]
+  runs               Run[]
 
   @@unique([projectId, name])
+  @@unique([id, projectId])
   @@index([projectId])
   @@index([credentialSecretId])
 }
@@ -247,10 +308,11 @@ model Repo {
 model AgentRepoAccess {
   agentId     String
   repoId      String
+  projectId   String
   mountPath   String
   permissions RepoPermission
-  agent       Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  repo        Repo           @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  agent       Agent          @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Cascade)
+  repo        Repo           @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Cascade)
 
   @@id([agentId, repoId])
   @@index([repoId])
@@ -272,26 +334,31 @@ model FilesystemGrant {
 model AgentCollaboration {
   agentId        String
   allowedAgentId String
-  agent          Agent  @relation("AgentCollaborators", fields: [agentId], references: [id], onDelete: Cascade)
-  allowedAgent   Agent  @relation("AllowedCollaborator", fields: [allowedAgentId], references: [id], onDelete: Cascade)
+  projectId      String
+  agent          Agent  @relation("AgentCollaborators", fields: [agentId, projectId], references: [id, projectId], onDelete: Cascade)
+  allowedAgent   Agent  @relation("AllowedCollaborator", fields: [allowedAgentId, projectId], references: [id, projectId], onDelete: Cascade)
 
   @@id([agentId, allowedAgentId])
   @@index([allowedAgentId])
 }
 
 model Secret {
-  id              String              @id @default(cuid())
-  name            String              @unique
-  encryptedValue  String
-  purpose         SecretPurpose
-  description     String?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  mcpCredentials  MCPConnection[]     @relation("McpCredential")
-  repoCredentials Repo[]              @relation("RepoCredential")
-  webhookTriggers Trigger[]           @relation("WebhookCredential")
-  agentGrants     AgentSecretGrant[]
-  environments    EnvironmentSecret[]
+  id                String              @id @default(cuid())
+  name              String              @unique
+  encryptedValue    String
+  purpose           SecretPurpose
+  description       String?
+  ciphertextVersion Int                 @default(1)
+  keyId             String              @default("v1")
+  rotatedAt         DateTime?
+  disabledAt        DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  mcpCredentials    MCPConnection[]     @relation("McpCredential")
+  repoCredentials   Repo[]              @relation("RepoCredential")
+  webhookTriggers   Trigger[]           @relation("WebhookCredential")
+  agentGrants       AgentSecretGrant[]
+  environments      EnvironmentSecret[]
 }
 
 model AgentSecretGrant {
@@ -302,6 +369,7 @@ model AgentSecretGrant {
   secret   Secret @relation(fields: [secretId], references: [id], onDelete: Cascade)
 
   @@id([agentId, secretId, envVar])
+  @@unique([agentId, envVar])
   @@index([secretId])
 }
 
@@ -313,6 +381,7 @@ model EnvironmentSecret {
   secret        Secret      @relation(fields: [secretId], references: [id], onDelete: Cascade)
 
   @@id([environmentId, secretId, envVar])
+  @@unique([environmentId, envVar])
   @@index([secretId])
 }
 
@@ -355,11 +424,13 @@ model Task {
   id                 String           @id @default(cuid())
   projectId          String
   assigneeAgentId    String?
+  repoId             String?
   templateId         String?
   followUpTaskId     String?          @unique
   name               String
   description        String
   workingDirectory   String?
+  targetBranch       String?
   failureReason      String?
   status             TaskStatus       @default(TODO)
   assigneeType       AssigneeType     @default(AGENT)
@@ -374,22 +445,27 @@ model Task {
   stallTimeoutMin    Int              @default(10)
   maxSessionsPerTask Int              @default(3)
   spendCap           Decimal?         @db.Decimal(12, 2)
+  spendCapApplicable Boolean          @default(false)
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
   project            Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  assigneeAgent      Agent?           @relation(fields: [assigneeAgentId], references: [id], onDelete: SetNull)
+  assigneeAgent      Agent?           @relation(fields: [assigneeAgentId, projectId], references: [id, projectId], onDelete: Restrict)
+  repo               Repo?            @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
   template           TaskTemplate?    @relation(fields: [templateId], references: [id], onDelete: SetNull)
   followUpTask       Task?            @relation("TaskFollowUp", fields: [followUpTaskId], references: [id], onDelete: SetNull)
   previousTask       Task?            @relation("TaskFollowUp")
   attachments        TaskAttachment[]
   activity           TaskActivity[]
   sessions           Session[]
+  runs               Run[]
   inboxMessages      InboxMessage[]
 
   @@unique([chainId, chainIndex])
+  @@unique([id, projectId])
   @@index([projectId, status])
   @@index([assigneeAgentId])
   @@index([templateId])
+  @@index([repoId])
 }
 
 model TaskAttachment {
@@ -438,8 +514,10 @@ model Goal {
   definitionOfDone   GoalDefinitionItem[]
   progressLog        GoalProgressEntry[]
   sessions           Session[]
+  runs               Run[]
   inboxMessages      InboxMessage[]
 
+  @@unique([id, projectId])
   @@index([projectId, status])
 }
 
@@ -470,37 +548,155 @@ model GoalProgressEntry {
   @@index([sessionId])
 }
 
-model Session {
-  id              String              @id @default(cuid())
-  agentId         String
-  taskId          String?
-  goalId          String?
-  runner          RunnerKind
-  status          SessionStatus       @default(STARTING)
-  runtimeHandle   String?
-  runnerId        String?
-  leaseExpiresAt  DateTime?
-  heartbeatAt     DateTime?
-  toolCallLog     Json[]
-  maxDurationMin  Int                 @default(120)
-  stallTimeoutMin Int                 @default(10)
-  startedAt       DateTime            @default(now())
-  lastToolCallAt  DateTime?
-  endedAt         DateTime?
-  costUsd         Decimal?            @db.Decimal(12, 4)
-  commitShas      String[]
-  failureReason   String?
-  agent           Agent               @relation(fields: [agentId], references: [id], onDelete: Restrict)
-  task            Task?               @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  goal            Goal?               @relation(fields: [goalId], references: [id], onDelete: SetNull)
-  inboxMessages   InboxMessage[]
-  progressEntries GoalProgressEntry[]
+model Run {
+  id                    String         @id @default(cuid())
+  projectId             String
+  taskId                String?
+  goalId                String?
+  agentId               String
+  repoId                String?
+  blockedByRunId        String?
+  runNumber             Int
+  dedupeKey             String         @unique
+  status                RunStatus      @default(QUEUED)
+  readyAt               DateTime       @default(now())
+  runner                RunnerKind
+  runnerId              String?
+  leaseGeneration       Int            @default(0)
+  fencingToken          String?        @unique
+  leaseExpiresAt        DateTime?
+  heartbeatAt           DateTime?
+  lastProcessAliveAt    DateTime?
+  lastProgressEventAt   DateTime?
+  inFlightTool          Json?
+  sessionTokenHash      String?        @unique
+  sessionTokenExpiresAt DateTime?
+  sessionTokenRevokedAt DateTime?
+  workspacePath         String?
+  workspaceRetained     Boolean        @default(false)
+  targetBranch          String?
+  branch                String?
+  baseSha               String?
+  headSha               String?
+  pushStatus            PushStatus     @default(NOT_REQUESTED)
+  adapterVersion        String?
+  cliVersion            String?
+  model                 String
+  authMode              String?
+  manifest              Json?
+  promptHash            String
+  maxDurationMin        Int            @default(120)
+  stallTimeoutMin       Int            @default(10)
+  maxRunsPerTask        Int            @default(3)
+  spendCap              Decimal?       @db.Decimal(12, 2)
+  spendCapApplicable    Boolean        @default(false)
+  failureClass          FailureClass?
+  failureReason         String?
+  retryable             Boolean?
+  retryAt               DateTime?
+  terminationReason     String?
+  queuedAt              DateTime       @default(now())
+  claimedAt             DateTime?
+  startedAt             DateTime?
+  endedAt               DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  project               Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task                  Task?          @relation(fields: [taskId, projectId], references: [id, projectId], onDelete: Restrict)
+  goal                  Goal?          @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
+  agent                 Agent          @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Restrict)
+  repo                  Repo?          @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
+  blockedBy             Run?           @relation("RunDependency", fields: [blockedByRunId], references: [id], onDelete: SetNull)
+  dependents            Run[]          @relation("RunDependency")
+  session               Session?
+  events                SessionEvent[]
 
-  @@index([status, startedAt])
+  @@unique([taskId, runNumber])
+  @@unique([id, projectId])
+  @@index([status, readyAt])
   @@index([status, leaseExpiresAt])
+  @@index([projectId])
+  @@index([agentId])
+  @@index([repoId])
+  @@index([blockedByRunId])
+}
+
+model Session {
+  id                     String                 @id @default(cuid())
+  runId                  String                 @unique
+  projectId              String
+  agentId                String
+  taskId                 String?
+  goalId                 String?
+  runner                 RunnerKind
+  executionStatus        SessionExecutionStatus @default(REQUESTED)
+  cleanupStatus          CleanupStatus          @default(PENDING)
+  runtimeHandle          String?
+  providerConversationId String?
+  waitingOnMessageId     String?
+  resumableUntil         DateTime?
+  resumeAttempt          Int                    @default(0)
+  maxDurationMin         Int                    @default(120)
+  stallTimeoutMin        Int                    @default(10)
+  requestedAt            DateTime               @default(now())
+  provisionedAt          DateTime?
+  startedAt              DateTime?
+  endedAt                DateTime?
+  cleanupStartedAt       DateTime?
+  cleanupEndedAt         DateTime?
+  exitCode               Int?
+  signal                 String?
+  terminationReason      String?
+  costUsd                Decimal?               @db.Decimal(12, 4)
+  failureReason          String?
+  cleanupFailureReason   String?
+  run                    Run                    @relation(fields: [runId, projectId], references: [id, projectId], onDelete: Cascade)
+  agent                  Agent                  @relation(fields: [agentId, projectId], references: [id, projectId], onDelete: Restrict)
+  task                   Task?                  @relation(fields: [taskId, projectId], references: [id, projectId], onDelete: Restrict)
+  goal                   Goal?                  @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
+  events                 SessionEvent[]
+  inboxMessages          InboxMessage[]
+  progressEntries        GoalProgressEntry[]
+
+  @@unique([runId, projectId])
+  @@index([executionStatus, requestedAt])
+  @@index([cleanupStatus, requestedAt])
   @@index([agentId])
   @@index([taskId])
   @@index([goalId])
+}
+
+model SessionEvent {
+  id              String             @id @default(cuid())
+  sessionId       String
+  runId           String
+  seq             Int
+  at              DateTime           @default(now())
+  source          SessionEventSource
+  type            String
+  providerEventId String?
+  toolCallId      String?
+  payload         Json
+  session         Session            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  run             Run                @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, seq])
+  @@index([runId, at])
+  @@index([sessionId, at])
+}
+
+model RunnerBackendState {
+  runner                  RunnerKind @id
+  cliVersion              String?
+  authMode                String?
+  capabilities            Json?
+  lastPreflightAt         DateTime?
+  lastPreflightOk         Boolean    @default(false)
+  consecutiveAuthFailures Int        @default(0)
+  circuitOpen             Boolean    @default(false)
+  circuitReason           String?
+  circuitOpenedAt         DateTime?
+  updatedAt               DateTime   @updatedAt
 }
 
 model InboxMessage {

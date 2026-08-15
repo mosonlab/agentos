@@ -1,19 +1,78 @@
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
+export type FailureClass =
+  | "BINARY_NOT_FOUND"
+  | "AUTH_REQUIRED"
+  | "RATE_LIMITED"
+  | "CANCELLED_OR_TIMED_OUT"
+  | "TOOL_FAILED"
+  | "TRANSIENT_PROVIDER"
+  | "PROTOCOL_ERROR"
+  | "TASK_FAILED"
+  | "BUDGET_EXCEEDED";
+
+export type CleanupStatus = "SUCCEEDED" | "FAILED" | "RETAINED";
+
 export type ClaimedTask = {
-  task: { id: string; name: string; description: string; workingDirectory: string | null };
-  agent: { id: string; name: string; foundationalPrompt: string; rolePrompt: string };
+  task: {
+    id: string;
+    name: string;
+    description: string;
+    repoId: string;
+    targetBranch: string | null;
+    maxDurationMin: number;
+    stallTimeoutMin: number;
+    maxSessionsPerTask: number;
+  };
+  agent: {
+    id: string;
+    name: string;
+    model: string;
+    foundationalPrompt: string;
+    rolePrompt: string;
+  };
+  repo: {
+    id: string;
+    remoteUrl: string;
+    defaultBranch: string;
+    mountPath: string;
+  };
+  run: {
+    id: string;
+    runNumber: number;
+    maxDurationMin: number;
+    stallTimeoutMin: number;
+    maxRunsPerTask: number;
+    model: string;
+    targetBranch: string | null;
+    promptHash: string;
+  };
   session: { id: string };
   runner: RunnerKind;
+  fencingToken: string;
+  sessionToken: string;
+  secrets: Record<string, string>;
+};
+
+export type SessionEventPayload = {
+  seq: number;
+  at?: string;
+  source: "RUNNER" | "CLAUDE" | "CODEX" | "PI";
+  type: string;
+  providerEventId?: string | null;
+  toolCallId?: string | null;
+  payload: Record<string, unknown>;
 };
 
 const request = async (config: RunnerConfig, path: string, init: RequestInit): Promise<Response> => {
   const response = await fetch(`${config.apiUrl}${path}`, {
     ...init,
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json", ...init.headers },
+    headers: { Authorization: `Bearer ${config.runnerToken}`, "Content-Type": "application/json", ...init.headers },
   });
   if (!response.ok && response.status !== 204) {
-    throw new Error(`AgentOS API ${response.status}: ${await response.text()}`);
+    const error = new Error(`AgentOS API ${response.status}: ${await response.text()}`);
+    Object.assign(error, { status: response.status });
+    throw error;
   }
   return response;
 };
@@ -26,34 +85,106 @@ export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | nul
   return response.status === 204 ? null : await response.json() as ClaimedTask;
 };
 
-export const heartbeat = async (config: RunnerConfig, sessionId: string): Promise<void> => {
-  await request(config, `/runner/sessions/${sessionId}/heartbeat`, {
+export const startRun = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  snapshot: Record<string, unknown>,
+): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/start`, {
     method: "POST",
-    body: JSON.stringify({ runnerId: config.runnerId, leaseSeconds: config.leaseSeconds }),
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      ...snapshot,
+    }),
+  });
+};
+
+export const heartbeat = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  state: { processAlive: boolean; lastProgressEventAt: Date | null; inFlightTool: Record<string, unknown> | null },
+): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/heartbeat`, {
+    method: "POST",
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      leaseSeconds: config.leaseSeconds,
+      processAlive: state.processAlive,
+      lastProgressEventAt: state.lastProgressEventAt?.toISOString() ?? null,
+      inFlightTool: state.inFlightTool,
+    }),
+  });
+};
+
+export const appendEvents = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  events: SessionEventPayload[],
+  providerConversationId?: string | null,
+): Promise<void> => {
+  if (events.length === 0) return;
+  await request(config, `/runner/runs/${claim.run.id}/events`, {
+    method: "POST",
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      providerConversationId: providerConversationId ?? null,
+      events,
+    }),
   });
 };
 
 export const appendActivity = async (
   config: RunnerConfig,
-  taskId: string,
+  claim: ClaimedTask,
   body: string,
-  stream: "stdout" | "stderr",
+  metadata: Record<string, unknown> = {},
 ): Promise<void> => {
-  if (body.length === 0) return;
-  await request(config, `/tasks/${taskId}/activity`, {
+  if (!body) return;
+  await request(config, `/runner/runs/${claim.run.id}/activity`, {
     method: "POST",
-    body: JSON.stringify({ actorType: "runner", actorId: config.runnerId, body, metadata: { stream } }),
+    body: JSON.stringify({
+      fencingToken: claim.fencingToken,
+      actorId: config.runnerId,
+      body,
+      metadata,
+    }),
   });
 };
 
-export const completeSession = async (
-  config: RunnerConfig,
-  sessionId: string,
-  exitCode: number,
-  failureReason?: string,
-): Promise<void> => {
-  await request(config, `/runner/sessions/${sessionId}/complete`, {
+export type Completion = {
+  exitCode: number | null;
+  signal?: string | null;
+  terminalEventSeen: boolean;
+  terminalSuccess: boolean;
+  terminationReason?: string | null;
+  failureClass?: FailureClass;
+  failureReason?: string;
+  retryable?: boolean;
+  branch?: string | null;
+  baseSha?: string | null;
+  headSha?: string | null;
+  cleanupStatus: CleanupStatus;
+  cleanupFailureReason?: string | null;
+  workspaceRetained: boolean;
+};
+
+export const completeRun = async (config: RunnerConfig, claim: ClaimedTask, completion: Completion): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/complete`, {
     method: "POST",
-    body: JSON.stringify({ runnerId: config.runnerId, exitCode, ...(failureReason ? { failureReason } : {}) }),
+    body: JSON.stringify({ runnerId: config.runnerId, fencingToken: claim.fencingToken, ...completion }),
+  });
+};
+
+export const reportPreflight = async (
+  config: RunnerConfig,
+  runner: RunnerKind,
+  result: { ok: boolean; cliVersion?: string | null; authMode?: string | null; capabilities: Record<string, unknown>; error?: string | null },
+): Promise<void> => {
+  await request(config, "/runner/preflight", {
+    method: "POST",
+    body: JSON.stringify({ runner, ...result }),
   });
 };
