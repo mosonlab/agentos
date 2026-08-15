@@ -74,7 +74,7 @@ const loadAgentSources = async () => {
       rolePrompt: document.body,
     });
   }
-  if (roles.length !== 10) throw new Error(`agents/ contract requires 10 roles; found ${roles.length}`);
+  if (roles.length !== 11) throw new Error(`agents/ contract requires 11 roles; found ${roles.length}`);
 
   const skillDirectory = `${agentsRoot}skills`;
   const skillFiles = (await readdir(skillDirectory)).filter((name) => name.endsWith(".md")).sort();
@@ -195,7 +195,7 @@ const main = async (): Promise<void> => {
     [1, "Write a spec", "spec", AssigneeType.AGENT, RunnerKind.CLAUDE, true, "spec", "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null],
     [2, "Plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "plan", "Turn the approved spec into a concrete ordered implementation plan.", null],
     [3, "Plan review", "review-coordinator", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "plan-review", "Coordinate four independent plan reviews and consolidate must-fix and should-fix findings.", { reviewers: ["feasibility", "scope-guardian", "coherence", "feasibility"], mode: "parallel", reconstructedFourthPass: true }],
-    [4, "Revise plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "revised-plan", "Revise the plan using every must-fix plan-review finding.", null],
+    [4, "Revise plan", "plan-reviser", AssigneeType.AGENT, RunnerKind.CODEX, false, "revised-plan", "Revise the plan using every must-fix plan-review finding.", null],
     [5, "Implementation", "implementation-plan-executioner", AssigneeType.AGENT, RunnerKind.CODEX, false, "implementation", "Implement the approved plan on {{branchName}} and run end-to-end tests.", null],
     [6, "Code review", "review-coordinator", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "code-review", "Review the implementation and consolidate must-fix and should-fix findings.", null],
     [7, "Apply review fixes", "senior-dev", AssigneeType.AGENT, RunnerKind.CODEX, false, "fixed-implementation", "Apply all must-fix review findings and rerun end-to-end tests.", null],
