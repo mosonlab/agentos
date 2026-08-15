@@ -44,6 +44,8 @@ export const workspaceEnvironment = (config: RunnerConfig): NodeJS.ProcessEnv =>
   HOME: config.home,
   LANG: "C.UTF-8",
   GIT_TERMINAL_PROMPT: "0",
+  // macOS Keychain lookups (claude CLI auth) fail without the login identity.
+  ...(process.env.USER ? { USER: process.env.USER, LOGNAME: process.env.LOGNAME ?? process.env.USER } : {}),
 });
 
 export const provisionWorkspace = async (config: RunnerConfig, claim: ClaimedTask): Promise<Workspace> => {
