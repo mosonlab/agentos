@@ -3,12 +3,13 @@ import test from "node:test";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { deliverWorkspace, type CommandExecutor } from "./delivery.js";
+import { deliverFailedWorkspace, deliverWorkspace, pullRequestTitle, type CommandExecutor } from "./delivery.js";
 
 const config = { runAsPrefix: [], path: "/fake/bin", home: "/fake/home" } as unknown as RunnerConfig;
 const claim = {
   task: { id: "task-1", name: "Feature" },
   repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
+  run: { runNumber: 2 },
 } as ClaimedTask;
 const workspace = { path: "/fake/work", branch: "feature/test", baseSha: "base" };
 
@@ -34,4 +35,58 @@ test("delivery records a pushed branch without invoking gh for a non-GitHub remo
   assert.equal(result.pushStatus, "SUCCEEDED");
   assert.match(result.deliveryInstructions ?? "", /not hosted on GitHub/);
   assert.equal(calls.length, 1);
+});
+
+test("a chain step reuses the open pull request on its shared head branch", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake);
+  assert.equal(result.pullRequestNumber, 7);
+  assert.equal(calls.some((call) => call.startsWith("gh pr create")), false);
+});
+
+test("delivery opens one pull request titled after the chain, not the step", async () => {
+  const calls: string[] = [];
+  let created = false;
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "create") { created = true; return ""; }
+    if (executable === "gh" && args[1] === "list") {
+      return created ? JSON.stringify([{ url: "https://github.com/acme/app/pull/8", number: 8 }]) : "[]";
+    }
+    return "";
+  };
+  const chained = {
+    ...claim,
+    task: { ...claim.task, name: "lines subcommand: Write spec", templateStep: { name: "Write spec" } },
+  } as ClaimedTask;
+  const result = await deliverWorkspace(config, chained, workspace, fake);
+  assert.equal(result.pullRequestNumber, 8);
+  assert.equal(pullRequestTitle(chained.task), "lines subcommand");
+  assert.ok(calls.some((call) => call.includes("--title lines subcommand")));
+});
+
+test("a failed run pushes its commits as WIP and opens no pull request", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return executable === "git" && args[0] === "rev-parse" ? "head-sha" : "";
+  };
+  const result = await deliverFailedWorkspace(config, claim, workspace, fake);
+  assert.equal(result?.pushStatus, "SUCCEEDED");
+  assert.equal(result?.pullRequestUrl, undefined);
+  assert.deepEqual(calls, [
+    "git rev-parse HEAD",
+    "git push --force-with-lease origin HEAD:refs/heads/agentos/task-1/run-2",
+  ]);
+});
+
+test("a failed run with no new commit is not pushed at all", async () => {
+  const fake: CommandExecutor = async (executable, args) =>
+    executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
+  assert.equal(await deliverFailedWorkspace(config, claim, workspace, fake), null);
 });

@@ -23,6 +23,7 @@ export type ClaimedTask = {
     maxDurationMin: number;
     stallTimeoutMin: number;
     maxSessionsPerTask: number;
+    templateStep?: { name: string } | null;
   };
   agent: {
     id: string;
@@ -172,6 +173,8 @@ export type Completion = {
   failureClass?: FailureClass;
   failureReason?: string;
   retryable?: boolean;
+  /** The environment failed, not the agent: the attempt must not spend budget. */
+  externalFailure?: boolean;
   branch?: string | null;
   baseSha?: string | null;
   headSha?: string | null;

@@ -45,6 +45,12 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const runner = task.templateStep?.runner ?? chooseRunner(task.assigneeAgent.runnerPreference, task.assigneeAgent.model);
+  // Template steps after the first one inherit the chain's shared feature branch
+  // so every step pushes to the same head and the chain lands in one PR; without
+  // this the workspace falls back to a per-run branch and each step opens its own.
+  const chainBranch = task.templateId && task.targetBranch && task.targetBranch !== task.repo.defaultBranch
+    ? task.targetBranch
+    : null;
   return tx.run.create({ data: {
     projectId: task.projectId,
     taskId: task.id,
@@ -55,7 +61,7 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     runner,
     model: task.assigneeAgent.model,
     targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
-    branch: prior?.branch ?? null,
+    branch: prior?.branch ?? chainBranch,
     promptHash: promptHash([
       task.assigneeAgent.foundationalPrompt,
       task.assigneeAgent.rolePrompt,
@@ -67,6 +73,17 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     maxRunsPerTask: task.maxSessionsPerTask,
     readyAt: now,
   } });
+};
+
+const GATE_OUTPUT_PREVIEW = 1_000;
+
+const outputPreview = async (tx: Tx, taskId: string | null): Promise<string> => {
+  if (!taskId) return "";
+  const output = await tx.taskStepOutput.findUnique({ where: { taskId }, select: { kind: true, body: true } });
+  if (!output) return "";
+  const body = output.body.trim();
+  const shown = body.length > GATE_OUTPUT_PREVIEW ? `${body.slice(0, GATE_OUTPUT_PREVIEW)}\n…（已截断，完整产物见 Tasks 页）` : body;
+  return `\n\n产物（${output.kind}）：\n${shown}`;
 };
 
 const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, chatId: string | null) => {
@@ -83,6 +100,9 @@ const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, cha
   const delivery = run.pullRequestUrl
     ? `\n\nPull request: ${run.pullRequestUrl}`
     : run.deliveryInstructions ? `\n\n${run.deliveryInstructions}` : "";
+  // The approver decides from the card; the produced artifact rides along so
+  // they do not have to open the Tasks page for the common case.
+  const preview = await outputPreview(tx, run.taskId);
   return tx.inboxMessage.create({ data: {
     from: InboxSender.AGENT,
     agentId: run.agentId,
@@ -91,7 +111,7 @@ const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, cha
     gateTaskId: task.id,
     threadId: thread?.id ?? null,
     kind: "MULTIPLE_CHOICE",
-    body: `审批闸门：${task.name}\n\n请确认本步骤产出。批准后继续；打回后重新执行产出步骤。${delivery}`,
+    body: `审批闸门：${task.name}\n\n请确认本步骤产出。批准后继续；打回后重新执行产出步骤。${delivery}${preview}`,
     choices: [{ id: "approve", label: "批准并继续" }, { id: "reject", label: "打回上一步" }],
     dedupeKey: `gate:task:${task.id}:run:${sourceRunId}`,
     deliveryStatus: InboxDeliveryStatus.PENDING,

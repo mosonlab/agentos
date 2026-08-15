@@ -62,6 +62,15 @@ const manual = (branch: string, remote: string, reason: string): DeliveryResult 
   deliveryInstructions: `${reason} Branch '${branch}' was pushed. Open a pull request manually against the repository default branch.`,
 });
 
+// A chain step is named "<chain>: <step>"; the PR is the chain's, not the step's.
+export const pullRequestTitle = (task: ClaimedTask["task"]): string => {
+  const step = task.templateStep?.name;
+  const suffix = step ? `: ${step}` : null;
+  return suffix && task.name.endsWith(suffix) && task.name.length > suffix.length
+    ? task.name.slice(0, -suffix.length)
+    : task.name;
+};
+
 export const deliverWorkspace = async (
   config: RunnerConfig,
   claim: ClaimedTask,
@@ -83,25 +92,30 @@ export const deliverWorkspace = async (
   } catch {
     return manual(workspace.branch, remote, "The gh CLI is unavailable.");
   }
-  const view = async (): Promise<{ url: string; number: number }> => {
-    const raw = await command("gh", ["pr", "view", workspace.branch, "--repo", repo, "--json", "url,number"], workspace.path, env);
-    return JSON.parse(raw) as { url: string; number: number };
+  // Only an *open* PR on this head may be reused: a merged or closed one would
+  // silently swallow the push. One open PR per head branch is a GitHub invariant,
+  // so a chain sharing a branch keeps exactly one human-facing PR.
+  const openPullRequest = async (): Promise<{ url: string; number: number } | null> => {
+    const raw = await command("gh", [
+      "pr", "list", "--repo", repo, "--head", workspace.branch, "--state", "open", "--limit", "1", "--json", "url,number",
+    ], workspace.path, env);
+    const parsed = JSON.parse(raw || "[]") as Array<{ url: string; number: number }>;
+    return parsed[0] ?? null;
   };
   try {
-    try {
-      const existing = await view();
-      return { pushStatus: "SUCCEEDED", pushRemote: remote, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
-    } catch {
-      await command("gh", [
-        "pr", "create", "--repo", repo,
-        "--base", claim.repo.defaultBranch,
-        "--head", workspace.branch,
-        "--title", claim.task.name,
-        "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
-      ], workspace.path, env);
-      const created = await view();
-      return { pushStatus: "SUCCEEDED", pushRemote: remote, pullRequestUrl: created.url, pullRequestNumber: created.number };
-    }
+    const existing = await openPullRequest();
+    if (existing) return { pushStatus: "SUCCEEDED", pushRemote: remote, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
+    await command("gh", [
+      "pr", "create", "--repo", repo,
+      "--base", claim.repo.defaultBranch,
+      "--head", workspace.branch,
+      "--title", pullRequestTitle(claim.task),
+      "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
+    ], workspace.path, env);
+    const created = await openPullRequest();
+    return created
+      ? { pushStatus: "SUCCEEDED", pushRemote: remote, pullRequestUrl: created.url, pullRequestNumber: created.number }
+      : { pushStatus: "SUCCEEDED", pushRemote: remote };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -111,6 +125,40 @@ export const deliverWorkspace = async (
       deliveryInstructions: `Branch '${workspace.branch}' was pushed, but PR creation failed. Run gh pr create manually.`,
       failureClass: failureClassFor(message),
     };
+  }
+};
+
+/**
+ * Salvage for a failed run: if the agent committed anything, push its run branch
+ * as WIP so the work survives workspace cleanup. Never opens a PR, and never
+ * reports a failureClass — the run already has one from the CLI evidence.
+ */
+export const deliverFailedWorkspace = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  workspace: Workspace,
+  command: CommandExecutor = executeCommand(config),
+): Promise<DeliveryResult | null> => {
+  const env = workspaceEnvironment(config);
+  const remote = claim.repo.remoteUrl;
+  // A run branch that never diverged from its base has nothing worth salvaging.
+  const branch = `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
+  try {
+    const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env);
+    if (head === workspace.baseSha) return null;
+  } catch {
+    return null;
+  }
+  try {
+    await command("git", ["push", "--force-with-lease", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env);
+    return {
+      pushStatus: "SUCCEEDED",
+      pushRemote: remote,
+      deliveryInstructions: `Run failed; its commits were pushed to '${branch}' as work in progress. No pull request was opened.`,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { pushStatus: "FAILED", pushRemote: remote, pushError: `WIP salvage push failed: ${message}` };
   }
 };
 
