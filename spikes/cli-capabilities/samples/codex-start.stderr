@@ -1,0 +1,3 @@
+WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)

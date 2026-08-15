@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "env",
+    "CODEX_HOME=/private/tmp/agentos-cli-capabilities-20260815/codex",
+    "codex",
+    "login",
+    "status"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/codex",
+  "started_at_epoch": 1786787996.765994,
+  "duration_seconds": 0.157,
+  "timeout_seconds": 30.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "pi",
+    "--version"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos",
+  "started_at_epoch": 1786787899.786332,
+  "duration_seconds": 0.717,
+  "timeout_seconds": 20.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

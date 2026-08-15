@@ -1,0 +1,10 @@
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "forcedLoginMethod": "claudeai",
+  "email": "<redacted-email>",
+  "orgId": "<redacted-org-id>",
+  "orgName": "<redacted-org-name>",
+  "subscriptionType": "max"
+}

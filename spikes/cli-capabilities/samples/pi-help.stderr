@@ -1,0 +1,1 @@
+Warning: (startup session lookup, global settings) EPERM: operation not permitted, mkdir '/Users/leohe/.pi/agent/settings.json.lock'

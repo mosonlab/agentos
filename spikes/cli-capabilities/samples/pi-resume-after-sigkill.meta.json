@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "env",
+    "PI_CODING_AGENT_DIR=/private/tmp/agentos-cli-capabilities-20260815/pi",
+    "pi",
+    "-p",
+    "--mode",
+    "json",
+    "--no-tools",
+    "--session-dir",
+    "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi/sessions-openai-codex",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--session",
+    "01a004e3-1599-76e1-a512-3bb92ecf3def",
+    "\u4e0d\u8981\u7ee7\u7eed sleep\uff0c\u53ea\u8f93\u51fa resumed\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi",
+  "started_at_epoch": 1786788471.677697,
+  "duration_seconds": 8.437,
+  "timeout_seconds": 120.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a004e2-7b91-7fd2-9fb5-09a8fc93c52a"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"开始执行。"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'sleep 60'","aggregated_output":"","exit_code":null,"status":"in_progress"}}

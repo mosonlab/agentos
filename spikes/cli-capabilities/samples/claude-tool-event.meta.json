@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "claude",
+    "-p",
+    "--dangerously-skip-permissions",
+    "--safe-mode",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--tools=Bash",
+    "\u4f7f\u7528 Bash \u5de5\u5177\u6267\u884c printf 3\uff0c\u7136\u540e\u53ea\u8f93\u51fa\u547d\u4ee4\u7ed3\u679c\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/claude",
+  "started_at_epoch": 1786788134.240673,
+  "duration_seconds": 11.327,
+  "timeout_seconds": 120.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

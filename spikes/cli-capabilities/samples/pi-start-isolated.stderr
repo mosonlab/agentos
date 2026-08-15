@@ -1,0 +1,21 @@
+npm error code EPERM
+npm error syscall open
+npm error path /Users/leohe/.npm/_cacache/tmp/***
+npm error errno EPERM
+npm error
+npm error Your cache folder contains root-owned files, due to a bug in previous versions of npm which has since been addressed.
+npm error
+npm error To permanently fix this problem, please run:
+npm error   sudo chown -R 501:20 "/Users/leohe/.npm"
+npm error Log files were not written due to an error writing to the directory: /Users/leohe/.npm/_logs
+npm error You can rerun the command with `--loglevel=verbose` to see the logs in your terminal
+file:///Users/leohe/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js:2151
+                    reject(new Error(`${command} ${args.join(" ")} failed with code ${code}`));
+                           ^
+
+Error: npm install pi-web-access --prefix /private/tmp/agentos-cli-capabilities-20260815/pi/npm --legacy-peer-deps failed with code 1
+    at ChildProcess.<anonymous> (file:///Users/leohe/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/package-manager.js:2151:28)
+    at ChildProcess.emit (node:events:509:20)
+    at ChildProcess._handle.onexit (node:internal/child_process:294:12)
+
+Node.js v26.5.0

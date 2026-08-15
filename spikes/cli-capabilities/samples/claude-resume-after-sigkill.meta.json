@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "claude",
+    "-p",
+    "--dangerously-skip-permissions",
+    "--safe-mode",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--tools=",
+    "--resume",
+    "c51c82c7-2282-40c5-8872-32eaa2493135",
+    "\u4e0d\u8981\u7ee7\u7eed sleep\uff0c\u53ea\u8f93\u51fa resumed\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/claude",
+  "started_at_epoch": 1786788426.8285928,
+  "duration_seconds": 3.607,
+  "timeout_seconds": 120.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 1
+}

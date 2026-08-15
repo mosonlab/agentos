@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "env",
+    "CLAUDE_CONFIG_DIR=/private/tmp/agentos-cli-capabilities-20260815/claude",
+    "claude",
+    "auth",
+    "status"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos",
+  "started_at_epoch": 1786788262.570774,
+  "duration_seconds": 0.685,
+  "timeout_seconds": 30.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 1
+}

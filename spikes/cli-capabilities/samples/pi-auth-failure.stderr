@@ -1,0 +1,5 @@
+No API key found for openai-codex.
+
+Use /login to log into a provider via OAuth or API key. See:
+  /Users/leohe/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/docs/providers.md
+  /Users/leohe/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/docs/models.md

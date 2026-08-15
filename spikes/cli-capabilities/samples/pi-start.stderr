@@ -1,0 +1,8 @@
+Warning: (startup session lookup, global settings) EPERM: operation not permitted, mkdir '/Users/leohe/.pi/agent/settings.json.lock'
+Warning: (runtime creation, global settings) EPERM: operation not permitted, mkdir '/Users/leohe/.pi/agent/settings.json.lock'
+Warning: (runtime creation, global settings) EPERM: operation not permitted, mkdir '/Users/leohe/.pi/agent/settings.json.lock'
+No API key found for the selected model.
+
+Use /login to log into a provider via OAuth or API key. See:
+  /Users/leohe/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/docs/providers.md
+  /Users/leohe/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/docs/models.md

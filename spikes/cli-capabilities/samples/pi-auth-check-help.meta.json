@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "pi",
+    "auth",
+    "check",
+    "--help"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi",
+  "started_at_epoch": 1786787923.076525,
+  "duration_seconds": 0.638,
+  "timeout_seconds": 20.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

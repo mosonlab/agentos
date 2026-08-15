@@ -1,0 +1,1 @@
+Error: Unknown auth command "status". Use "pi auth print-api-key", "pi auth print-bearer-token", or "pi auth check".

@@ -1,0 +1,8 @@
+provider      model                context  max-out  thinking  images
+openai-codex  gpt-5.3-codex-spark  128K     128K     yes       no    
+openai-codex  gpt-5.4              272K     128K     yes       yes   
+openai-codex  gpt-5.4-mini         272K     128K     yes       yes   
+openai-codex  gpt-5.5              272K     128K     yes       yes   
+openai-codex  gpt-5.6-luna         272K     128K     yes       yes   
+openai-codex  gpt-5.6-sol          272K     128K     yes       yes   
+openai-codex  gpt-5.6-terra        272K     128K     yes       yes   

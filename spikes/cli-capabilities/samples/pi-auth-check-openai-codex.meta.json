@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "env",
+    "PI_CODING_AGENT_DIR=/private/tmp/agentos-cli-capabilities-20260815/pi",
+    "pi",
+    "auth",
+    "check",
+    "--provider",
+    "openai-codex"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos",
+  "started_at_epoch": 1786788071.480449,
+  "duration_seconds": 1.175,
+  "timeout_seconds": 30.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

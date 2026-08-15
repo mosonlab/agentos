@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "env",
+    "PI_CODING_AGENT_DIR=/private/tmp/agentos-cli-capabilities-20260815/pi",
+    "pi",
+    "auth",
+    "check",
+    "--provider",
+    "deepseek"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi",
+  "started_at_epoch": 1786788016.230227,
+  "duration_seconds": 1.201,
+  "timeout_seconds": 30.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

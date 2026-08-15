@@ -1,0 +1,21 @@
+{
+  "runId": "2026-08-15T10-00-45-561Z",
+  "sdkVersion": "1.73.0",
+  "startedAt": "2026-08-15T10:00:45.561Z",
+  "durationMs": 300000,
+  "connectionEstablished": true,
+  "connectionErrors": [],
+  "textEvents": [],
+  "cardActionEvents": [],
+  "echoReplies": [],
+  "cardsSent": [],
+  "confirmationMessages": [],
+  "connectedAt": "2026-08-15T10:00:46.195Z",
+  "exitReason": "timeout",
+  "finishedAt": "2026-08-15T10:05:45.640Z",
+  "finalConnectionStatus": {
+    "state": "idle",
+    "lastConnectTime": 1786788045589,
+    "reconnectAttempts": 0
+  }
+}

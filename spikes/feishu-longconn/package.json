@@ -1,0 +1,17 @@
+{
+  "name": "feishu-longconn",
+  "version": "1.0.0",
+  "description": "",
+  "main": "spike.js",
+  "scripts": {
+    "start": "node spike.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.73.0",
+    "dotenv": "^17.4.2"
+  }
+}

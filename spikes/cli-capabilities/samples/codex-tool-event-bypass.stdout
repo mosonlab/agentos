@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a004e1-3e58-7771-81b8-61b629c49628"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":""}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'printf 3'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'printf 3'","aggregated_output":"3","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"3"}}
+{"type":"turn.completed","usage":{"input_tokens":26991,"cached_input_tokens":22016,"cache_write_input_tokens":0,"output_tokens":82,"reasoning_output_tokens":0}}

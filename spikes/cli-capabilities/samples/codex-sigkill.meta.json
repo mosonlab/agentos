@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "env",
+    "CODEX_HOME=/private/tmp/agentos-cli-capabilities-20260815/codex",
+    "codex",
+    "exec",
+    "--skip-git-repo-check",
+    "--ignore-rules",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--json",
+    "\u4f7f\u7528 shell \u6267\u884c sleep 60\uff0c\u547d\u4ee4\u7ed3\u675f\u540e\u53ea\u8f93\u51fa done\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/codex",
+  "started_at_epoch": 1786788366.683887,
+  "duration_seconds": 20.011,
+  "timeout_seconds": 20.0,
+  "timed_out": true,
+  "timeout_signal": "SIGKILL",
+  "returncode": -9
+}

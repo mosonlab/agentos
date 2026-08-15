@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a004df-7caa-77e1-ba78-8a8169b01220"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"我会按要求执行该命令。"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"sandbox-exec: sandbox_apply: Operation not permitted"}}
+{"type":"turn.completed","usage":{"input_tokens":40764,"cached_input_tokens":35072,"cache_write_input_tokens":0,"output_tokens":253,"reasoning_output_tokens":77}}

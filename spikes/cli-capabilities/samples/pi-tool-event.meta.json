@@ -1,0 +1,30 @@
+{
+  "argv": [
+    "env",
+    "PI_CODING_AGENT_DIR=/private/tmp/agentos-cli-capabilities-20260815/pi",
+    "pi",
+    "-p",
+    "--mode",
+    "json",
+    "--tools",
+    "bash",
+    "--session-dir",
+    "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi/sessions-openai-codex",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--model",
+    "openai-codex/gpt-5.6-luna",
+    "--thinking",
+    "minimal",
+    "\u4f7f\u7528 bash \u5de5\u5177\u6267\u884c printf 3\uff0c\u7136\u540e\u53ea\u8f93\u51fa\u547d\u4ee4\u7ed3\u679c\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi",
+  "started_at_epoch": 1786788180.6369228,
+  "duration_seconds": 10.994,
+  "timeout_seconds": 120.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

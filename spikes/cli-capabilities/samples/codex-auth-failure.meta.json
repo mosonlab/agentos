@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "env",
+    "CODEX_HOME=/private/tmp/agentos-cli-capabilities-20260815/codex-empty",
+    "codex",
+    "exec",
+    "--skip-git-repo-check",
+    "--json",
+    "\u53ea\u8f93\u51fa 2\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos",
+  "started_at_epoch": 1786788505.854014,
+  "duration_seconds": 30.032,
+  "timeout_seconds": 30.0,
+  "timed_out": true,
+  "timeout_signal": "SIGTERM",
+  "returncode": 0
+}

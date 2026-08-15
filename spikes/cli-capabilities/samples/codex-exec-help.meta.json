@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "codex",
+    "exec",
+    "--help"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos",
+  "started_at_epoch": 1786788263.473276,
+  "duration_seconds": 0.069,
+  "timeout_seconds": 30.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

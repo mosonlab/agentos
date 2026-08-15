@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "env",
+    "PI_CODING_AGENT_DIR=/private/tmp/agentos-cli-capabilities-20260815/pi-empty",
+    "pi",
+    "-p",
+    "--mode",
+    "json",
+    "--no-tools",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--model",
+    "openai-codex/gpt-5.6-luna",
+    "\u53ea\u8f93\u51fa 2\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos",
+  "started_at_epoch": 1786788535.970197,
+  "duration_seconds": 1.235,
+  "timeout_seconds": 30.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 1
+}

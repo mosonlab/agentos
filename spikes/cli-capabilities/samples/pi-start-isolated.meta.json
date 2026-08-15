@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "env",
+    "PI_CODING_AGENT_DIR=/private/tmp/agentos-cli-capabilities-20260815/pi",
+    "pi",
+    "-p",
+    "--mode",
+    "json",
+    "--no-tools",
+    "--session-dir",
+    "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi/sessions-isolated",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--provider",
+    "deepseek",
+    "\u53ea\u8f93\u51fa 1+1 \u7684\u7ed3\u679c\uff0c\u4e0d\u8981\u89e3\u91ca\u3002"
+  ],
+  "cwd": "/Users/leohe/Documents/claude_projects/agentos/spikes/cli-capabilities/tmp-work/pi",
+  "started_at_epoch": 1786788017.4862258,
+  "duration_seconds": 2.03,
+  "timeout_seconds": 120.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 1
+}
