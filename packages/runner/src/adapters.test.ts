@@ -64,6 +64,7 @@ test("exit code zero without a provider terminal event is failure", () => {
     exitCode: 0,
     signal: null,
     terminalEventSeen: false,
+    finalOutput: null,
     terminalSuccess: false,
     terminationReason: null,
     stdout: "",

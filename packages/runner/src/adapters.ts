@@ -51,6 +51,7 @@ export type ExitEvidence = {
   terminalEventSeen: boolean;
   terminalSuccess: boolean;
   terminationReason: string | null;
+  finalOutput: string | null;
   stdout: string;
   stderr: string;
 };
@@ -82,6 +83,7 @@ export type RuntimeHandle = {
   terminationReason: string | null;
   sawError: boolean;
   piTurnCompleted: boolean;
+  finalOutput: string | null;
   stdout: string;
   stderr: string;
   exit: Promise<ExitEvidence>;
@@ -171,6 +173,7 @@ const parseClaude = (handle: RuntimeHandle, event: Record<string, unknown>, sink
     handle.terminalEventSeen = true;
     handle.terminalSuccess = event.is_error === false && event.terminal_reason === "completed";
     if (!handle.terminalSuccess) handle.sawError = true;
+    handle.finalOutput = stringField(event, "result") ?? handle.finalOutput;
     emit(handle, sink, "FINAL_OUTPUT", event);
   } else {
     emit(handle, sink, "PROVIDER_STATUS", event);
@@ -195,7 +198,10 @@ const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink:
     if (stringField(item, "type") === "command_execution") {
       handle.inFlightTool = null;
       emit(handle, sink, "TOOL_COMPLETED", item ?? {}, stringField(item, "id"));
-    } else emit(handle, sink, "MODEL_DELTA", event);
+    } else {
+      if (item && stringField(item, "type") === "agent_message") handle.finalOutput = stringField(item, "text") ?? handle.finalOutput;
+      emit(handle, sink, "MODEL_DELTA", event);
+    }
     if (item?.status === "failed" || item?.error) handle.sawError = true;
   } else if (type === "error") {
     handle.sawError = true;
@@ -226,6 +232,14 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
     emit(handle, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
   } else if (type === "turn_end" || type === "message_end") {
     handle.piTurnCompleted = true;
+    const message = asRecord(event.message);
+    if (message && stringField(message, "role") === "assistant" && Array.isArray(message.content)) {
+      const text = message.content
+        .map((part) => stringField(asRecord(part) ?? {}, "text"))
+        .filter((part): part is string => part !== null)
+        .join("\n");
+      if (text) handle.finalOutput = text;
+    }
     emit(handle, sink, "MODEL_COMPLETED", event);
   } else if (type === "agent_end") {
     if (event.willRetry === true) handle.sawError = true;
@@ -300,6 +314,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     terminationReason: null,
     sawError: false,
     piTurnCompleted: false,
+    finalOutput: null,
     stdout: "",
     stderr: "",
     exit: Promise.resolve({} as ExitEvidence),
@@ -330,6 +345,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
         terminalEventSeen: handle.terminalEventSeen,
         terminalSuccess: handle.terminalSuccess,
         terminationReason: handle.terminationReason,
+        finalOutput: handle.finalOutput,
         stdout: handle.stdout,
         stderr: handle.stderr,
       });
