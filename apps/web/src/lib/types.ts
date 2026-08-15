@@ -1,0 +1,342 @@
+/** Wire shapes as serialised by the control plane (packages/db/prisma/schema.prisma).
+ *  Decimal columns arrive as strings, DateTime as ISO strings. */
+
+export type TaskStatus = "TODO" | "DOING" | "REVIEW" | "DONE";
+export type AssigneeType = "AGENT" | "HUMAN";
+export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
+export type RunnerPreference = RunnerKind | "AUTO" | "INHERIT";
+export type RunStatus =
+  | "QUEUED" | "CLAIMED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
+  | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
+export type SessionExecutionStatus =
+  | "REQUESTED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
+  | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
+export type FailureClass =
+  | "BINARY_NOT_FOUND" | "AUTH_REQUIRED" | "RATE_LIMITED" | "CANCELLED_OR_TIMED_OUT"
+  | "TOOL_FAILED" | "TRANSIENT_PROVIDER" | "PROTOCOL_ERROR" | "TASK_FAILED" | "BUDGET_EXCEEDED";
+export type InboxStatus = "OPEN" | "ANSWERED" | "CLOSED";
+export type InboxKind = "TEXT" | "MULTIPLE_CHOICE";
+export type InboxDeliveryStatus = "PENDING" | "SENDING" | "DELIVERED" | "FAILED";
+export type GoalStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "STOPPED_SPEND" | "STOPPED_TIME" | "STOPPED_STUCK";
+export type SecretPurpose = "MCP" | "REPO" | "ENV" | "WEBHOOK";
+export type RepoPermission = "GIT_READ" | "GIT_WRITE";
+
+export type Project = {
+  id: string;
+  name: string;
+  slug: string;
+  yamlDocument: string;
+  maxDurationMin: number;
+  stallTimeoutMin: number;
+  maxSessionsPerTask: number;
+  spendCap: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Agent = {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  name: string;
+  title: string;
+  model: string;
+  foundationalPrompt: string;
+  rolePrompt: string;
+  runnerPreference: RunnerPreference;
+  inboxAccess: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** Present only when the control plane starts including binding tables. */
+  skills?: Array<{ skillId: string; skill?: Skill }>;
+  mcpConnections?: Array<{ mcpConnectionId: string; mcpConnection?: MCPConnection }>;
+  repoAccess?: AgentRepoAccess[];
+  secretGrants?: Array<{ secretId: string; envVar: string; secret?: Secret }>;
+  filesystemGrants?: FilesystemGrant[];
+  collaborators?: Array<{ allowedAgentId: string }>;
+};
+
+export type AgentRepoAccess = {
+  agentId: string;
+  repoId: string;
+  projectId: string;
+  mountPath: string;
+  permissions: RepoPermission;
+};
+
+export type FilesystemGrant = {
+  id: string;
+  agentId: string;
+  folderPath: string;
+  canRead: boolean;
+  canWrite: boolean;
+  canDelete: boolean;
+};
+
+export type Skill = {
+  id: string;
+  projectId: string;
+  name: string;
+  slug: string;
+  kind: "PROMPT" | "FILE";
+  body: string | null;
+  filePath: string | null;
+  updatedAt: string;
+};
+
+export type MCPConnection = {
+  id: string;
+  projectId: string;
+  credentialSecretId: string | null;
+  name: string;
+  transport: string;
+  config: unknown;
+  allowedOperations: string[];
+  createdAt: string;
+  updatedAt: string;
+  agents?: Array<{ agentId: string }>;
+};
+
+export type Environment = {
+  id: string;
+  projectId: string;
+  name: string;
+  networking: "OPEN" | "LIMITED";
+  allowedHosts: string[];
+};
+
+export type Repo = {
+  id: string;
+  projectId: string;
+  credentialSecretId: string | null;
+  name: string;
+  remoteUrl: string;
+  mountPath: string;
+  defaultBranch: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Secret = {
+  id: string;
+  name: string;
+  purpose: SecretPurpose;
+  description: string | null;
+  ciphertextVersion: number;
+  keyId: string;
+  rotatedAt: string | null;
+  disabledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  agentGrants?: Array<{ agentId: string; envVar: string; agent?: { id: string; name: string } }>;
+};
+
+export type Session = {
+  id: string;
+  runId: string;
+  agentId: string;
+  runner: RunnerKind;
+  executionStatus: SessionExecutionStatus;
+  cleanupStatus: string;
+  providerConversationId: string | null;
+  waitingOnMessageId: string | null;
+  resumeAttempt: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  exitCode: number | null;
+  costUsd: string | null;
+  failureReason: string | null;
+};
+
+export type Run = {
+  id: string;
+  projectId: string;
+  taskId: string | null;
+  goalId: string | null;
+  agentId: string;
+  repoId: string | null;
+  runNumber: number;
+  status: RunStatus;
+  runner: RunnerKind;
+  runnerId: string | null;
+  model: string;
+  leaseGeneration: number;
+  workspacePath: string | null;
+  workspaceRetained: boolean;
+  targetBranch: string | null;
+  branch: string | null;
+  baseSha: string | null;
+  headSha: string | null;
+  pushStatus: string;
+  pullRequestUrl: string | null;
+  maxDurationMin: number;
+  stallTimeoutMin: number;
+  maxRunsPerTask: number;
+  failureClass: FailureClass | null;
+  failureReason: string | null;
+  retryable: boolean | null;
+  retryAt: string | null;
+  terminationReason: string | null;
+  queuedAt: string;
+  claimedAt: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  session?: Session | null;
+};
+
+export type SessionEvent = {
+  id: string;
+  sessionId: string;
+  runId: string;
+  seq: number;
+  at: string;
+  source: string;
+  type: string;
+  toolCallId: string | null;
+  payload: unknown;
+};
+
+export type Task = {
+  id: string;
+  projectId: string;
+  assigneeAgentId: string | null;
+  repoId: string | null;
+  templateId: string | null;
+  templateStepId: string | null;
+  followUpTaskId: string | null;
+  name: string;
+  description: string;
+  workingDirectory: string | null;
+  targetBranch: string | null;
+  failureReason: string | null;
+  status: TaskStatus;
+  assigneeType: AssigneeType;
+  approvalGate: boolean;
+  scheduleKind: "NOW" | "AT" | "CRON";
+  maxDurationMin: number;
+  stallTimeoutMin: number;
+  maxSessionsPerTask: number;
+  createdAt: string;
+  updatedAt: string;
+  assigneeAgent: Agent | null;
+  repo: Repo | null;
+  runs: Run[];
+};
+
+export type TaskActivity = {
+  id: string;
+  taskId: string;
+  actorType: string;
+  actorId: string | null;
+  body: string;
+  metadata: unknown;
+  createdAt: string;
+};
+
+export type TaskStepOutput = {
+  id: string;
+  taskId: string;
+  runId: string | null;
+  kind: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskTemplateStep = {
+  id: string;
+  stepIndex: number;
+  name: string;
+  assigneeType: AssigneeType;
+  prompt: string;
+  approvalGate: boolean;
+  outputKind: string;
+  runner: RunnerKind | null;
+  assigneeAgentId: string | null;
+  assigneeAgent: Agent | null;
+};
+
+export type TaskTemplate = {
+  id: string;
+  projectId: string;
+  name: string;
+  description: string;
+  variables: string[];
+  steps: TaskTemplateStep[];
+};
+
+export type InboxChoice = { id: string; label: string };
+
+export type InboxDecision = {
+  id: string;
+  inboxMessageId: string;
+  runId: string;
+  externalEventId: string;
+  decision: string;
+  actorOpenId: string | null;
+  createdAt: string;
+};
+
+export type InboxMessage = {
+  id: string;
+  from: "AGENT" | "HUMAN";
+  agentId: string | null;
+  sessionId: string | null;
+  taskId: string | null;
+  goalId: string | null;
+  gateTaskId: string | null;
+  threadId: string | null;
+  replyToMessageId: string | null;
+  kind: InboxKind;
+  body: string;
+  choices: InboxChoice[] | null;
+  selectedChoiceId: string | null;
+  status: InboxStatus;
+  channel: string;
+  deliveryStatus: InboxDeliveryStatus;
+  deliveryAttempts: number;
+  lastDeliveryError: string | null;
+  createdAt: string;
+  answeredAt: string | null;
+  decisions?: InboxDecision[];
+};
+
+export type Goal = {
+  id: string;
+  projectId: string;
+  title: string;
+  spec: string;
+  dodApproved: boolean;
+  status: GoalStatus;
+  spendCap: string | null;
+  spendUsd: string;
+  maxDurationMin: number | null;
+  stallTimeoutMin: number;
+  stuckThreshold: number;
+  runnerPreference: RunnerPreference;
+  sharedFolderPath: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  definitionOfDone?: GoalDefinitionItem[];
+  progressLog?: GoalProgressEntry[];
+};
+
+export type GoalDefinitionItem = {
+  id: string;
+  goalId: string;
+  itemIndex: number;
+  text: string;
+  done: boolean;
+};
+
+export type GoalProgressEntry = {
+  id: string;
+  goalId: string;
+  sessionId: string | null;
+  body: string;
+  createdAt: string;
+};
+
+export type Health = { status: string; database: string; checkedAt: string };

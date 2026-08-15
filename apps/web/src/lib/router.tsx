@@ -1,0 +1,57 @@
+import { type MouseEvent, type ReactNode, useCallback, useEffect, useState } from "react";
+
+/** Hash routing keeps the app a static bundle: no dev-server rewrite rules and
+ *  `vite preview` behaves exactly like `vite dev`. */
+
+export const currentPath = (): string => {
+  const raw = window.location.hash.replace(/^#/, "");
+  return raw.length === 0 ? "/" : raw;
+};
+
+export const navigate = (path: string): void => {
+  if (currentPath() === path) return;
+  window.location.hash = path;
+  window.scrollTo({ top: 0 });
+};
+
+export const useRoute = (): string => {
+  const [path, setPath] = useState(currentPath);
+  useEffect(() => {
+    const handler = (): void => setPath(currentPath());
+    window.addEventListener("hashchange", handler);
+    return () => window.removeEventListener("hashchange", handler);
+  }, []);
+  return path;
+};
+
+/** Matches `/tasks/:taskId` style patterns; returns captured params or null. */
+export const matchRoute = (pattern: string, path: string): Record<string, string> | null => {
+  const patternParts = pattern.split("/").filter(Boolean);
+  const pathParts = path.split("/").filter(Boolean);
+  if (patternParts.length !== pathParts.length) return null;
+  const params: Record<string, string> = {};
+  for (let index = 0; index < patternParts.length; index += 1) {
+    const expected = patternParts[index] ?? "";
+    const actual = pathParts[index] ?? "";
+    if (expected.startsWith(":")) params[expected.slice(1)] = decodeURIComponent(actual);
+    else if (expected !== actual) return null;
+  }
+  return params;
+};
+
+export const Link = ({ to, className, children, title }: {
+  to: string;
+  className?: string;
+  children: ReactNode;
+  title?: string;
+}): ReactNode => {
+  const onClick = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    navigate(to);
+  }, [to]);
+  return (
+    <a href={`#${to}`} className={className} onClick={onClick} {...(title === undefined ? {} : { title })}>
+      {children}
+    </a>
+  );
+};
