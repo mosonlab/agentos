@@ -61,7 +61,12 @@ In separate terminals:
 ```sh
 npm run dev:web
 npm run dev:runner
+npm run dev:inbox
 ```
+
+The Inbox service reads `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, and the optional
+`FEISHU_DEFAULT_CHAT_ID` from the repository-root `.env`. Keep it resident:
+Feishu long connections do not replay events missed during an offline window.
 
 Create at least one Repo via `POST /projects/:projectId/repos`, then grant the
 selected Agent access with `POST /agents/:agentId/repos/:repoId/access` before

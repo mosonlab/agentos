@@ -80,6 +80,7 @@ test("fencing rejects an expired generation token", async () => {
     const database = {
       run: {
         updateMany: async ({ where }: { where: { fencingToken: string } }) => ({ count: where.fencingToken === currentToken ? 1 : 0 }),
+        findFirst: async () => null,
       },
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/runner/runs/run-1/heartbeat", {

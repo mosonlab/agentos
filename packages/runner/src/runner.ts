@@ -23,7 +23,7 @@ import {
 } from "./api.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { captureWorkspaceResult, cleanupWorkspace, provisionWorkspace, workspaceEnvironment, type Workspace } from "./workspace.js";
+import { captureWorkspaceResult, cleanupWorkspace, provisionWorkspace, reuseWorkspace, workspaceEnvironment, type Workspace } from "./workspace.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
   id: tool.id,
@@ -66,8 +66,9 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
   let heartbeatTimer: NodeJS.Timeout | undefined;
   let heartbeatBusy = false;
   let fencingRejected = false;
+  let waitingInbox = false;
   let budgetReason: string | null = null;
-  let seq = 0;
+  let seq = claim.nextEventSeq;
   let pendingEvents: SessionEventPayload[] = [];
   let eventWrites = Promise.resolve();
   const sink = (event: AdapterEvent): void => {
@@ -117,11 +118,14 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
           lastProgressAt: provisionStartedAt.toISOString(),
         },
       }).catch((error: unknown) => {
-        if ((error as { status?: number }).status === 409) fencingRejected = true;
+        if ((error as { status?: number; code?: string }).status === 409) {
+          waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
+          fencingRejected = true;
+        }
         else console.error("Provisioning heartbeat failed", error);
       });
     }, config.heartbeatIntervalMs);
-    workspace = await provisionWorkspace(config, claim);
+    workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     const env = buildChildEnvironment(config, claim);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
@@ -149,7 +153,9 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     }
 
     const spec = { config, claim, workingDirectory: workspace.path, env, prompt };
-    handle = await adapter.start(spec, sink);
+    handle = claim.resume
+      ? await adapter.resume({ ...spec, ...claim.resume }, sink)
+      : await adapter.start(spec, sink);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     await startRun(config, claim, {
       adapterVersion: ADAPTER_VERSION,
@@ -191,9 +197,10 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
           inFlightTool: serializeTool(snapshot.inFlightTool),
         });
       })().catch(async (error: unknown) => {
-        if ((error as { status?: number }).status === 409 && handle) {
+        if ((error as { status?: number; code?: string }).status === 409 && handle) {
+          waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
           fencingRejected = true;
-          await adapter.kill(handle, "fencing token rejected").catch(() => undefined);
+          await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
         } else console.error("Run heartbeat failed", error);
       }).finally(() => { heartbeatBusy = false; });
     }, config.heartbeatIntervalMs);
@@ -203,6 +210,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     await flushEvents();
     await eventWrites;
     if (fencingRejected) {
+      if (waitingInbox) return;
       await cleanup(config, workspace, false);
       return;
     }
@@ -226,9 +234,16 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     });
   } catch (error: unknown) {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if ((error as { status?: number; code?: string }).status === 409 && (error as { code?: string }).code === "WAITING_INBOX") {
+      waitingInbox = true;
+      fencingRejected = true;
+      if (handle) await adapter.kill(handle, "waiting for Inbox reply").catch(() => undefined);
+      return;
+    }
     const message = errorMessage(error);
     if (handle) await adapter.kill(handle, "runner exception").catch(() => undefined);
     if (fencingRejected) {
+      if (waitingInbox) return;
       if (workspace) await cleanup(config, workspace, false);
       return;
     }

@@ -46,8 +46,13 @@ export type ClaimedTask = {
     model: string;
     targetBranch: string | null;
     promptHash: string;
+    workspacePath: string | null;
+    branch: string | null;
+    baseSha: string | null;
   };
   session: { id: string };
+  resume: { providerConversationId: string; input: string } | null;
+  nextEventSeq: number;
   runner: RunnerKind;
   fencingToken: string;
   sessionToken: string;
@@ -70,8 +75,11 @@ const request = async (config: RunnerConfig, path: string, init: RequestInit): P
     headers: { Authorization: `Bearer ${config.runnerToken}`, "Content-Type": "application/json", ...init.headers },
   });
   if (!response.ok && response.status !== 204) {
-    const error = new Error(`AgentOS API ${response.status}: ${await response.text()}`);
-    Object.assign(error, { status: response.status });
+    const responseBody = await response.text();
+    let code: string | undefined;
+    try { code = (JSON.parse(responseBody) as { code?: string }).code; } catch { /* non-JSON error */ }
+    const error = new Error(`AgentOS API ${response.status}: ${responseBody}`);
+    Object.assign(error, { status: response.status, code });
     throw error;
   }
   return response;

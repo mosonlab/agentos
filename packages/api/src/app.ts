@@ -30,6 +30,7 @@ import {
 } from "./execution.js";
 import { reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret } from "./secrets.js";
+import { suspendForInbox } from "./inbox.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -168,6 +169,14 @@ const preflightInput = z.object({
   authMode: z.string().nullable().optional(),
   capabilities: z.record(z.string(), z.unknown()),
   error: z.string().nullable().optional(),
+});
+const inboxQuestionInput = z.object({
+  fencingToken: fence,
+  requestId: z.string().min(1).max(200),
+  body: z.string().min(1).max(8000),
+  choices: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(200) })).max(20).default([]),
+  chatId: z.string().min(1).optional(),
+  resumableUntil: z.coerce.date().nullable().optional(),
 });
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
@@ -449,6 +458,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         include: {
           task: true,
           repo: true,
+          session: true,
           agent: {
             include: {
               secretGrants: { include: { secret: true } },
@@ -486,8 +496,20 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           },
         });
         if (won.count !== 1) continue;
-        const session = await tx.session.create({
+        const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
+          providerConversationId: candidate.session.providerConversationId,
+          input: candidate.session.resumeInput,
+        } : null;
+        const session = candidate.session ? await tx.session.update({
+          where: { id: candidate.session.id },
           data: {
+            executionStatus: SessionExecutionStatus.PROVISIONING,
+            cleanupStatus: CleanupStatus.PENDING,
+            requestedAt: now,
+            endedAt: null,
+            failureReason: null,
+          },
+        }) : await tx.session.create({ data: {
             runId: candidate.id,
             projectId: candidate.projectId,
             agentId: candidate.agentId,
@@ -497,8 +519,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             executionStatus: SessionExecutionStatus.PROVISIONING,
             maxDurationMin: candidate.maxDurationMin,
             stallTimeoutMin: candidate.stallTimeoutMin,
-          },
-        });
+          } });
+        const latestEvent = await tx.sessionEvent.aggregate({ where: { sessionId: session.id }, _max: { seq: true } });
         await tx.task.update({ where: { id: candidate.task.id }, data: { status: TaskStatus.DOING, failureReason: null } });
         await tx.taskActivity.create({
           data: {
@@ -531,6 +553,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           fencingToken,
           sessionToken: sessionCredential.token,
           secrets,
+          resume: priorResume,
+          nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };
       }
       return null;
@@ -568,6 +592,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       data: {
         executionStatus: SessionExecutionStatus.RUNNING,
         runtimeHandle: body.runtimeHandle ?? null,
+        resumeInput: null,
         provisionedAt: now,
         startedAt: now,
       },
@@ -597,7 +622,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         ...(body.inFlightTool !== undefined ? { inFlightTool: body.inFlightTool ? jsonValue(body.inFlightTool) : Prisma.JsonNull } : {}),
       },
     });
-    return updated.count === 1 ? context.json({ ok: true }) : context.json({ error: "Stale fencing token" }, 409);
+    if (updated.count === 1) return context.json({ ok: true });
+    const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
+    return waiting
+      ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+      : context.json({ error: "Stale fencing token" }, 409);
   });
 
   app.post("/runner/runs/:runId/events", async (context) => {
@@ -607,7 +636,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
       include: { session: true },
     });
-    if (!run?.session) return context.json({ error: "Stale fencing token" }, 409);
+    if (!run?.session) {
+      const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
+      return waiting
+        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+        : context.json({ error: "Stale fencing token" }, 409);
+    }
     await db.sessionEvent.createMany({
       data: body.events.map((event) => ({
         sessionId: run.session!.id,
@@ -655,6 +689,30 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
   app.post("/session/runs/:runId/activity", appendFencedActivity);
+
+  app.post("/session/runs/:runId/inbox/questions", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const principal = context.get("principal");
+    if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
+    const body = await readJson(context.req.raw, inboxQuestionInput);
+    const chatId = body.chatId ?? process.env.FEISHU_DEFAULT_CHAT_ID;
+    if (!chatId) return context.json({ error: "chatId or FEISHU_DEFAULT_CHAT_ID is required" }, 400);
+    try {
+      const question = await suspendForInbox(db, {
+        runId,
+        chatId,
+        fencingToken: body.fencingToken,
+        requestId: body.requestId,
+        body: body.body,
+        choices: body.choices,
+        ...(body.resumableUntil !== undefined ? { resumableUntil: body.resumableUntil } : {}),
+      });
+      return context.json(question, 201);
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.startsWith("Run is not resumable")) return context.json({ error: error.message }, 409);
+      throw error;
+    }
+  });
 
   app.post("/runner/runs/:runId/complete", async (context) => {
     const runId = id.parse(context.req.param("runId"));
@@ -805,7 +863,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       }
       return { taskId: run.taskId, succeeded, retryCreated, failureClass };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    if (!result) return context.json({ error: "Stale fencing token" }, 409);
+    if (!result) {
+      const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
+      return waiting
+        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+        : context.json({ error: "Stale fencing token" }, 409);
+    }
     await reconcileWorkspaces(
       db,
       process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",

@@ -86,6 +86,17 @@ enum InboxStatus {
   CLOSED   @map("closed")
 }
 
+enum InboxChannel {
+  FEISHU @map("feishu")
+}
+
+enum InboxDeliveryStatus {
+  PENDING   @map("pending")
+  SENDING   @map("sending")
+  DELIVERED @map("delivered")
+  FAILED    @map("failed")
+}
+
 enum RunStatus {
   QUEUED        @map("queued")
   CLAIMED       @map("claimed")
@@ -459,6 +470,7 @@ model Task {
   sessions           Session[]
   runs               Run[]
   inboxMessages      InboxMessage[]
+  inboxThreads       InboxThread[]
 
   @@unique([chainId, chainIndex])
   @@unique([id, projectId])
@@ -516,6 +528,7 @@ model Goal {
   sessions           Session[]
   runs               Run[]
   inboxMessages      InboxMessage[]
+  inboxThreads       InboxThread[]
 
   @@unique([id, projectId])
   @@index([projectId, status])
@@ -610,6 +623,7 @@ model Run {
   dependents            Run[]          @relation("RunDependency")
   session               Session?
   events                SessionEvent[]
+  inboxDecisions        InboxDecision[]
 
   @@unique([taskId, runNumber])
   @@unique([id, projectId])
@@ -636,6 +650,7 @@ model Session {
   waitingOnMessageId     String?
   resumableUntil         DateTime?
   resumeAttempt          Int                    @default(0)
+  resumeInput            String?
   maxDurationMin         Int                    @default(120)
   stallTimeoutMin        Int                    @default(10)
   requestedAt            DateTime               @default(now())
@@ -656,6 +671,7 @@ model Session {
   goal                   Goal?                  @relation(fields: [goalId, projectId], references: [id, projectId], onDelete: Restrict)
   events                 SessionEvent[]
   inboxMessages          InboxMessage[]
+  inboxThreads           InboxThread[]
   progressEntries        GoalProgressEntry[]
 
   @@unique([runId, projectId])
@@ -706,23 +722,101 @@ model InboxMessage {
   sessionId        String?
   taskId           String?
   goalId           String?
+  threadId         String?
+  replyToMessageId String?
   kind             InboxKind   @default(TEXT)
   body             String
   choices          Json?
   selectedChoiceId String?
   status           InboxStatus @default(OPEN)
+  channel          InboxChannel @default(FEISHU)
+  dedupeKey        String?      @unique
+  externalMessageId String?     @unique
+  externalActionId String?      @unique
+  deliveryStatus   InboxDeliveryStatus @default(PENDING)
+  deliveryAttempts Int         @default(0)
+  nextDeliveryAt   DateTime    @default(now())
+  deliveredAt      DateTime?
+  lastDeliveryError String?
   createdAt        DateTime    @default(now())
   answeredAt       DateTime?
   agent            Agent?      @relation(fields: [agentId], references: [id], onDelete: SetNull)
   session          Session?    @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   task             Task?       @relation(fields: [taskId], references: [id], onDelete: SetNull)
   goal             Goal?       @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  thread           InboxThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
+  replyTo          InboxMessage? @relation("InboxReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies          InboxMessage[] @relation("InboxReplies")
+  decisions        InboxDecision[]
 
   @@index([status, createdAt])
   @@index([agentId])
   @@index([sessionId])
   @@index([taskId])
   @@index([goalId])
+  @@index([threadId, status, createdAt])
+  @@index([deliveryStatus, nextDeliveryAt])
+}
+
+model InboxThread {
+  id             String       @id @default(cuid())
+  channel        InboxChannel @default(FEISHU)
+  externalChatId String
+  sessionId      String?
+  taskId         String?
+  goalId         String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  session        Session?     @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  task           Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  goal           Goal?        @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  messages       InboxMessage[]
+
+  @@unique([channel, externalChatId, sessionId])
+  @@index([externalChatId])
+  @@index([sessionId])
+}
+
+model InboxExternalEvent {
+  id              String       @id @default(cuid())
+  channel         InboxChannel @default(FEISHU)
+  externalEventId String
+  eventType       String
+  payload         Json
+  receivedAt      DateTime     @default(now())
+  processedAt     DateTime?
+  processingError String?
+
+  @@unique([channel, externalEventId])
+  @@index([processedAt, receivedAt])
+}
+
+model InboxDecision {
+  id             String   @id @default(cuid())
+  inboxMessageId String
+  runId          String
+  externalEventId String  @unique
+  decision       String
+  actorOpenId    String?
+  createdAt      DateTime @default(now())
+  inboxMessage   InboxMessage @relation(fields: [inboxMessageId], references: [id], onDelete: Cascade)
+  run            Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([inboxMessageId])
+  @@index([runId])
+}
+
+model InboxConnectionWindow {
+  id            String   @id @default(cuid())
+  instanceId    String
+  startedAt     DateTime @default(now())
+  connectedAt   DateTime?
+  disconnectedAt DateTime?
+  reconnectCount Int     @default(0)
+  closeReason   String?
+
+  @@index([instanceId, startedAt])
+  @@index([disconnectedAt])
 }
 
 model Trigger {

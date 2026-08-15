@@ -72,6 +72,16 @@ export const provisionWorkspace = async (config: RunnerConfig, claim: ClaimedTas
   }
 };
 
+export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): Promise<Workspace> => {
+  if (!claim.run.workspacePath || !claim.run.branch || !claim.run.baseSha) throw new Error("Resumed Run is missing workspace metadata");
+  const root = resolve(config.workspaceRoot);
+  const workspace = resolve(claim.run.workspacePath);
+  if (!inside(root, workspace)) throw new Error("Resumed workspace escaped the controlled root");
+  const info = await stat(workspace);
+  if (!info.isDirectory()) throw new Error("Resumed workspace is not a directory");
+  return { path: workspace, branch: claim.run.branch, baseSha: claim.run.baseSha };
+};
+
 export const captureWorkspaceResult = async (
   config: RunnerConfig,
   workspace: Workspace,
