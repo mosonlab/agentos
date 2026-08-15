@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/*.test.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },
@@ -13,7 +14,8 @@
     "@agentos/db": "0.0.0",
     "@hono/node-server": "^1.19.6",
     "dotenv": "^17.2.3",
-    "hono": "^4.10.6"
+    "hono": "^4.10.6",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

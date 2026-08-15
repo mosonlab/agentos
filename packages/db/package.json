@@ -16,13 +16,18 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
-    "db:validate": "dotenv -e ../../.env -- prisma validate"
+    "db:validate": "dotenv -e ../../.env -- prisma validate",
+    "db:seed": "dotenv -e ../../.env -- prisma db seed"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "6.19.0"
   },
   "devDependencies": {
     "dotenv-cli": "^11.0.0",
-    "prisma": "6.19.0"
+    "prisma": "6.19.0",
+    "tsx": "^4.20.6"
   }
 }
