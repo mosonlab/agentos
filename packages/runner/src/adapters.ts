@@ -202,7 +202,9 @@ const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink:
       if (item && stringField(item, "type") === "agent_message") handle.finalOutput = stringField(item, "text") ?? handle.finalOutput;
       emit(handle, sink, "MODEL_DELTA", event);
     }
-    if (item?.status === "failed" || item?.error) handle.sawError = true;
+    // A nonzero shell command inside the session (status "failed") is normal
+    // agent behavior, not a run failure; only item-level errors count.
+    if (item?.error) handle.sawError = true;
   } else if (type === "error") {
     handle.sawError = true;
     emit(handle, sink, "ADAPTER_ERROR", event);
@@ -228,7 +230,7 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
     emit(handle, sink, "TOOL_PROGRESS", event, stringField(event, "toolCallId"));
   } else if (type === "tool_execution_end") {
     handle.inFlightTool = null;
-    if (event.isError === true) handle.sawError = true;
+    // Tool errors mid-session are recoverable; the terminal events decide.
     emit(handle, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
   } else if (type === "turn_end" || type === "message_end") {
     handle.piTurnCompleted = true;
