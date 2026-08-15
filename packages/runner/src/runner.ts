@@ -23,7 +23,7 @@ import {
 } from "./api.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { deliverWorkspace } from "./delivery.js";
+import { deliverFailedWorkspace, deliverWorkspace } from "./delivery.js";
 import { captureWorkspaceResult, cleanupWorkspace, provisionWorkspace, reuseWorkspace, workspaceEnvironment, type Workspace } from "./workspace.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
@@ -146,6 +146,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
         failureClass: classified.failureClass,
         failureReason: preflight.error ?? "Preflight failed",
         retryable: classified.retryable,
+        externalFailure: true,
         branch: workspace.branch,
         baseSha: workspace.baseSha,
         headSha: workspace.baseSha,
@@ -223,6 +224,19 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       await appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
     }
     if (executionSucceeded) delivery = await deliverWorkspace(config, claim, { ...workspace, branch: gitResult.branch });
+    else {
+      // The workspace is about to be destroyed; salvage whatever the agent committed.
+      const salvage = await deliverFailedWorkspace(config, claim, { ...workspace, branch: gitResult.branch })
+        .catch((error: unknown) => {
+          void appendActivity(config, claim, `WIP salvage push failed: ${errorMessage(error)}`, { stream: "runner" }).catch(() => undefined);
+          return null;
+        });
+      if (salvage) {
+        delivery = salvage;
+        await appendActivity(config, claim, salvage.deliveryInstructions ?? salvage.pushError ?? "WIP salvage attempted", { stream: "runner" })
+          .catch(() => undefined);
+      }
+    }
     const succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
     const classified = succeeded ? null : delivery?.failureClass
       ? { failureClass: delivery.failureClass, retryable: false }
@@ -235,7 +249,8 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       terminalSuccess: succeeded && evidence.terminalSuccess,
       terminationReason: budgetReason ?? evidence.terminationReason,
       ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
-      ...(!succeeded ? { failureReason: budgetReason ?? delivery?.pushError ?? (evidence.stderr.trim() || `CLI exited with code ${evidence.exitCode}`) } : {}),
+      // A salvage push failure must not mask why the run itself failed.
+      ...(!succeeded ? { failureReason: budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? (evidence.stderr.trim() || `CLI exited with code ${evidence.exitCode}`) } : {}),
       output: (evidence.finalOutput ?? evidence.stdout).trim().slice(-500_000) || null,
       ...gitResult,
       ...(delivery ?? { pushStatus: "NOT_REQUESTED" as const }),
@@ -269,6 +284,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       failureClass: classified.failureClass,
       failureReason: message,
       retryable: classified.retryable,
+      externalFailure: true,
       ...(workspace ? { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha } : {}),
       ...finishedCleanup,
     });

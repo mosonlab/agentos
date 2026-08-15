@@ -15,12 +15,13 @@ import { makeDedupeKey } from "./execution.js";
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
 
 export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()): Promise<number> => {
-  const orphans = await db.run.findMany({
+  const candidates = await db.run.findMany({
     where: {
       status: { in: [...activeStatuses] },
       OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
     },
     select: {
+      heartbeatAt: true,
       id: true,
       projectId: true,
       taskId: true,
@@ -37,9 +38,17 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       maxRunsPerTask: true,
     },
   });
+  // An api restart outlives a lease (60s) but not a heartbeat cycle. A run whose
+  // runner is still checking in is alive — it renews its own lease on the next
+  // heartbeat — so only silence beyond the stall timeout counts as death.
+  const orphans = candidates.filter((run) => !(
+    run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
+  ));
   if (orphans.length === 0) return 0;
   await db.$transaction(async (tx) => {
     for (const run of orphans) {
+      // Losing a lease is an external failure: it buys an attempt, never spends one.
+      const budgetCeiling = run.maxRunsPerTask + 1;
       const lost = await tx.run.updateMany({
         where: { id: run.id, status: { in: [...activeStatuses] } },
         data: {
@@ -49,6 +58,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           sessionTokenRevokedAt: now,
           failureClass: FailureClass.TRANSIENT_PROVIDER,
           retryable: true,
+          maxRunsPerTask: budgetCeiling,
           failureReason: "Run orphaned or lease expired during startup reconciliation",
         },
       });
@@ -63,7 +73,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
         },
       });
       if (!run.taskId) continue;
-      if (run.runNumber < run.maxRunsPerTask) {
+      if (run.runNumber < budgetCeiling) {
         await tx.run.create({
           data: {
             projectId: run.projectId,
@@ -79,7 +89,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
             promptHash: run.promptHash,
             maxDurationMin: run.maxDurationMin,
             stallTimeoutMin: run.stallTimeoutMin,
-            maxRunsPerTask: run.maxRunsPerTask,
+            maxRunsPerTask: budgetCeiling,
           },
         });
         await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
@@ -89,7 +99,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       } else {
         await tx.task.update({
           where: { id: run.taskId },
-          data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${run.maxRunsPerTask} runs reached after lease loss` },
+          data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
         });
         await tx.inboxMessage.create({
           data: {

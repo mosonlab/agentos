@@ -43,6 +43,26 @@ const retryableFailureClasses: readonly FailureClass[] = [
 
 export const failureIsRetryable = (failureClass: FailureClass): boolean => retryableFailureClasses.includes(failureClass);
 
+// Failures caused by the environment rather than the agent's own work: the CLI
+// never got to decide anything, so the attempt must not eat the task's budget.
+// The task's ceiling is raised by one instead of the run number being reused,
+// which would collide with the (taskId, runNumber) dedupe key.
+export const externalFailure = (evidence: {
+  succeeded: boolean;
+  signal?: string | null;
+  reported?: boolean;
+  failureClass?: FailureClass | null;
+}): boolean => {
+  if (evidence.succeeded) return false;
+  // A signal the runner did not ask for (budget kills carry a terminationReason
+  // and are reported as CANCELLED_OR_TIMED_OUT) means the process was shot from
+  // outside the session.
+  if (evidence.signal && evidence.failureClass !== FailureClass.CANCELLED_OR_TIMED_OUT) return true;
+  if (evidence.failureClass === FailureClass.BINARY_NOT_FOUND) return true;
+  if (evidence.failureClass === FailureClass.AUTH_REQUIRED) return true;
+  return evidence.reported === true;
+};
+
 export const retryDelayMs = (runNumber: number, failureClass: FailureClass): number => {
   const base = failureClass === FailureClass.RATE_LIMITED ? 60_000 : 30_000;
   return Math.min(base * (2 ** Math.max(0, runNumber - 1)), 15 * 60_000);

@@ -27,6 +27,7 @@ import { z } from "zod";
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
 import {
   completionSucceeded,
+  externalFailure,
   failureIsRetryable,
   hashPrompt,
   jsonValue,
@@ -186,7 +187,7 @@ const taskInput = z.object({
   approvalGate: taskFields.approvalGate.default(false),
   maxDurationMin: taskFields.maxDurationMin.default(120),
   stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
-  maxSessionsPerTask: taskFields.maxSessionsPerTask.default(3),
+  maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
 });
 const taskPatch = z.object(taskFields).partial().extend({ status: z.nativeEnum(TaskStatus).optional() })
   .refine((value) => Object.keys(value).length > 0);
@@ -232,6 +233,7 @@ const completionInput = z.object({
   failureClass: z.nativeEnum(FailureClass).optional(),
   failureReason: z.string().max(4000).optional(),
   retryable: z.boolean().optional(),
+  externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   headSha: z.string().nullable().optional(),
@@ -1200,7 +1202,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           OR: [{ blockedByRunId: null }, { blockedBy: { status: RunStatus.SUCCEEDED } }],
         },
         include: {
-          task: true,
+          // templateStep travels with the claim so delivery can title the PR
+          // after the chain rather than the step it happens to be running.
+          task: { include: { templateStep: { select: { name: true } } } },
           repo: true,
           session: true,
           agent: {
@@ -1510,6 +1514,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         : body.failureClass ?? (body.exitCode === 0 ? FailureClass.PROTOCOL_ERROR : FailureClass.TASK_FAILED);
       const retryable = failureClass ? (body.retryable ?? failureIsRetryable(failureClass)) : false;
       const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
+      // An external failure buys the task one more attempt rather than spending one.
+      const external = externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
+      const budgetCeiling = run.maxRunsPerTask + (external ? 1 : 0);
       const terminalStatus = succeeded
         ? RunStatus.SUCCEEDED
         : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
@@ -1537,6 +1544,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           pullRequestNumber: body.pullRequestNumber ?? null,
           deliveryInstructions: body.deliveryInstructions ?? null,
           workspaceRetained: body.workspaceRetained,
+          maxRunsPerTask: budgetCeiling,
         },
       });
       if (closed.count !== 1) return null;
@@ -1556,7 +1564,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         },
       });
       let retryCreated = false;
-      if (!succeeded && retryable && run.task && run.runNumber < run.maxRunsPerTask) {
+      if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
         await tx.run.create({
           data: {
             projectId: run.projectId,
@@ -1572,7 +1580,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             promptHash: run.promptHash,
             maxDurationMin: run.maxDurationMin,
             stallTimeoutMin: run.stallTimeoutMin,
-            maxRunsPerTask: run.maxRunsPerTask,
+            maxRunsPerTask: budgetCeiling,
             readyAt: retryAt ?? now,
           },
         });
@@ -1606,7 +1614,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             data: {
               status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
               failureReason: succeeded ? null : budgetExhausted
-                ? `Maximum ${run.maxRunsPerTask} runs reached`
+                ? `Maximum ${budgetCeiling} runs reached`
                 : body.failureReason ?? "Execution failed",
             },
           });
@@ -1630,7 +1638,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
               sessionId: run.session.id,
               taskId: run.taskId,
               kind: "TEXT",
-              body: `Run budget exhausted after ${run.maxRunsPerTask} attempts; operator action required.`,
+              body: `Run budget exhausted after ${budgetCeiling} attempts; operator action required.`,
             },
           });
         }

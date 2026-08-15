@@ -458,7 +458,7 @@ model Task {
   timezone           String?
   maxDurationMin     Int              @default(120)
   stallTimeoutMin    Int              @default(10)
-  maxSessionsPerTask Int              @default(3)
+  maxSessionsPerTask Int              @default(5)
   spendCap           Decimal?         @db.Decimal(12, 2)
   spendCapApplicable Boolean          @default(false)
   createdAt          DateTime         @default(now())
@@ -628,7 +628,7 @@ model Run {
   promptHash            String
   maxDurationMin        Int            @default(120)
   stallTimeoutMin       Int            @default(10)
-  maxRunsPerTask        Int            @default(3)
+  maxRunsPerTask        Int            @default(5)
   spendCap              Decimal?       @db.Decimal(12, 2)
   spendCapApplicable    Boolean        @default(false)
   failureClass          FailureClass?
