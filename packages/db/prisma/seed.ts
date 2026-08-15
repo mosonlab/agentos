@@ -74,7 +74,7 @@ const main = async (): Promise<void> => {
   });
   const steps = [
     [1, "Write a spec", "spec", AssigneeType.AGENT, RunnerKind.CLAUDE, true, "spec", "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null],
-    [2, "Plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, true, "plan", "Turn the approved spec into a concrete ordered implementation plan.", null],
+    [2, "Plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "plan", "Turn the approved spec into a concrete ordered implementation plan.", null],
     [3, "Plan review", "review-coordinator", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "plan-review", "Coordinate four independent plan reviews and consolidate must-fix and should-fix findings.", { reviewers: ["feasibility", "scope-guardian", "coherence", "feasibility"], mode: "parallel", reconstructedFourthPass: true }],
     [4, "Revise plan", "plan", AssigneeType.AGENT, RunnerKind.CLAUDE, false, "revised-plan", "Revise the plan using every must-fix plan-review finding.", null],
     [5, "Implementation", "implementation-plan-executioner", AssigneeType.AGENT, RunnerKind.CODEX, false, "implementation", "Implement the approved plan on {{branchName}} and run end-to-end tests.", null],
