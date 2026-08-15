@@ -62,6 +62,7 @@ export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvel
         inboxMessageId: question.id,
         externalEventId: eventId,
         decision: answer,
+        allowFreeText: choiceId === null,
         actorOpenId: string(record(event.operator)?.open_id) ?? string(record(record(event.sender)?.sender_id)?.open_id),
         externalMessageId: string(message?.message_id),
       }, now);

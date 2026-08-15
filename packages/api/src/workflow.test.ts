@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { advanceTemplateTask, applyInboxDecisionTx, AssigneeType, RunStatus, RunnerPreference } from "@agentos/db";
+import { advanceTemplateTask, applyInboxDecisionTx, AssigneeType, InboxKind, RunStatus, RunnerPreference } from "@agentos/db";
 
 test("a template approval gate persists an outbox card and leaves the task in review", async () => {
   const updates: unknown[] = [];
@@ -71,4 +71,34 @@ test("rejecting a gate transactionally returns the producing step to the queue",
   assert.equal(lookup, 1);
   assert.equal(queued[0]!.runNumber, 2);
   assert.equal(queued[0]!.branch, "feature/x");
+});
+
+test("a multiple-choice Inbox decision accepts an option id and persists the human reply", async () => {
+  let reply: Record<string, unknown> | undefined;
+  let resumeInput: unknown;
+  const tx = {
+    inboxMessage: {
+      findUnique: async () => ({
+        id: "question-1", kind: InboxKind.MULTIPLE_CHOICE,
+        choices: [{ id: "ship", label: "Ship it" }, { id: "wait", label: "Wait" }],
+        gateTaskId: null, agentId: "agent-1", sessionId: "session-1", taskId: "task-1", goalId: null, threadId: "thread-1",
+        session: { id: "session-1", run: { id: "run-1", status: RunStatus.WAITING_INBOX } }, gateTask: null,
+      }),
+      updateMany: async () => ({ count: 1 }),
+      create: async ({ data }: { data: Record<string, unknown> }) => { reply = data; return { id: "reply-1" }; },
+    },
+    inboxDecision: { create: async () => ({}) },
+    run: { updateMany: async () => ({ count: 1 }) },
+    session: { update: async ({ data }: { data: { resumeInput: unknown } }) => { resumeInput = data.resumeInput; return {}; } },
+  } as any;
+  const result = await applyInboxDecisionTx(tx, {
+    inboxMessageId: "question-1", externalEventId: "web:ship", decision: "ship", actorOpenId: "web-operator",
+  });
+  assert.equal(result.resumed, true);
+  assert.equal(reply?.from, "HUMAN");
+  assert.equal(reply?.selectedChoiceId, "ship");
+  assert.equal(resumeInput, "ship");
+  await assert.rejects(() => applyInboxDecisionTx(tx, {
+    inboxMessageId: "question-1", externalEventId: "web:unknown", decision: "unknown",
+  }), /must match an Inbox choice id/);
 });

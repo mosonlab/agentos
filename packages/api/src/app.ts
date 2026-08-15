@@ -4,6 +4,8 @@ import {
   applyInboxDecision,
   CleanupStatus,
   FailureClass,
+  GoalStatus,
+  NetworkingMode,
   Prisma,
   type PrismaClient,
   RepoPermission,
@@ -11,6 +13,8 @@ import {
   PushStatus,
   RunnerKind,
   RunnerPreference,
+  SecretPurpose,
+  SkillKind,
   SessionEventSource,
   SessionExecutionStatus,
   TaskStatus,
@@ -32,7 +36,7 @@ import {
   runnerFor,
 } from "./execution.js";
 import { reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
-import { decryptSecret } from "./secrets.js";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
 
@@ -73,6 +77,90 @@ const repoInput = z.object({
 const repoAccessInput = z.object({
   permissions: z.nativeEnum(RepoPermission).default(RepoPermission.GIT_WRITE),
   mountPath: z.string().trim().min(1).default("repo"),
+});
+const repoPatch = repoInput.partial().refine((value) => Object.keys(value).length > 0);
+const environmentFields = {
+  name: z.string().trim().min(1).max(120),
+  networking: z.nativeEnum(NetworkingMode),
+  allowedHosts: z.array(z.string().trim().min(1).max(253)).max(500),
+};
+const environmentInput = z.object({
+  name: environmentFields.name,
+  networking: environmentFields.networking.default(NetworkingMode.LIMITED),
+  allowedHosts: environmentFields.allowedHosts.default([]),
+});
+const environmentPatch = z.object(environmentFields).partial().refine((value) => Object.keys(value).length > 0);
+const secretFields = {
+  name: z.string().trim().min(1).max(120),
+  purpose: z.nativeEnum(SecretPurpose),
+  description: z.string().trim().max(1000).nullable(),
+};
+const secretInput = z.object({ ...secretFields, description: secretFields.description.default(null), value: z.string().min(1).max(100_000) });
+const secretPatch = z.object(secretFields).partial().extend({ value: z.string().min(1).max(100_000).optional() })
+  .refine((value) => Object.keys(value).length > 0);
+const secretGrantInput = z.object({ secretId: id, envVar: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) });
+const skillBindingInput = z.object({ skillId: id });
+const mcpBindingInput = z.object({ mcpConnectionId: id });
+const skillInput = z.object({
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  kind: z.nativeEnum(SkillKind),
+  body: z.string().nullable().default(null),
+  filePath: z.string().trim().min(1).nullable().default(null),
+}).superRefine((value, context) => {
+  if (value.kind === SkillKind.PROMPT && value.body === null) context.addIssue({ code: "custom", message: "Prompt skills require body" });
+  if (value.kind === SkillKind.FILE && value.filePath === null) context.addIssue({ code: "custom", message: "File skills require filePath" });
+});
+const mcpConnectionInput = z.object({
+  name: z.string().trim().min(1).max(120),
+  transport: z.string().trim().min(1).max(80),
+  config: z.record(z.string(), z.unknown()).default({}),
+  allowedOperations: z.array(z.string().trim().min(1).max(200)).max(500).default([]),
+  credentialSecretId: id.nullable().default(null),
+});
+const filesystemGrantFields = z.object({
+  folderPath: z.string().trim().min(1).max(4096),
+  canRead: z.boolean().default(false),
+  canWrite: z.boolean().default(false),
+  canDelete: z.boolean().default(false),
+});
+const filesystemGrantInput = filesystemGrantFields.refine(
+  (value) => value.canRead || value.canWrite || value.canDelete,
+  "At least one filesystem permission is required",
+);
+const filesystemGrantPatch = filesystemGrantFields.partial().refine((value) => Object.keys(value).length > 0);
+const collaboratorInput = z.object({ allowedAgentId: id });
+const goalFields = {
+  title: z.string().trim().min(1).max(200),
+  spec: z.string().max(500_000),
+  spendCap: z.number().nonnegative().nullable(),
+  maxDurationMin: z.number().int().positive().nullable(),
+  stallTimeoutMin: z.number().int().positive().max(24 * 60),
+  maxSessionsPerTask: z.number().int().positive().max(100),
+  stuckThreshold: z.number().int().positive().max(10_000),
+  runnerPreference: z.nativeEnum(RunnerPreference),
+  sharedFolderPath: z.string().trim().min(1).max(4096).nullable(),
+};
+const definitionItemText = z.object({ text: z.string().trim().min(1).max(10_000) });
+const goalInput = z.object({
+  ...goalFields,
+  spec: goalFields.spec.default(""),
+  spendCap: goalFields.spendCap.default(null),
+  maxDurationMin: goalFields.maxDurationMin.default(120),
+  stallTimeoutMin: goalFields.stallTimeoutMin.default(10),
+  maxSessionsPerTask: goalFields.maxSessionsPerTask.default(3),
+  stuckThreshold: goalFields.stuckThreshold.default(19),
+  runnerPreference: goalFields.runnerPreference.default(RunnerPreference.AUTO),
+  sharedFolderPath: goalFields.sharedFolderPath.default(null),
+  definitionOfDone: z.array(definitionItemText).max(500).default([]),
+});
+const goalPatch = z.object(goalFields).partial().refine((value) => Object.keys(value).length > 0);
+const definitionItemPatch = z.object({ text: definitionItemText.shape.text.optional(), done: z.boolean().optional() })
+  .refine((value) => Object.keys(value).length > 0);
+const progressInput = z.object({
+  body: z.string().trim().min(1).max(100_000),
+  sessionId: id.nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const taskFields = {
   name: z.string().trim().min(1).max(200),
@@ -202,7 +290,11 @@ const taskOutputInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const inboxDecisionInput = z.object({
-  decision: z.enum(["approve", "reject"]),
+  decision: z.string().trim().min(1).max(8000),
+  requestId: z.string().trim().min(1).max(200),
+});
+const inboxReplyInput = z.object({
+  body: z.string().trim().min(1).max(8000),
   requestId: z.string().trim().min(1).max(200),
 });
 
@@ -217,6 +309,24 @@ const isPublic = (path: string, method: string): boolean =>
   path === "/" || path === "/health" || method === "OPTIONS";
 
 const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
+
+const secretPublicSelect = {
+  id: true,
+  name: true,
+  purpose: true,
+  description: true,
+  ciphertextVersion: true,
+  keyId: true,
+  rotatedAt: true,
+  disabledAt: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.SecretSelect;
+
+const goalInclude = {
+  definitionOfDone: { orderBy: { itemIndex: "asc" as const } },
+  progressLog: { orderBy: { createdAt: "asc" as const } },
+};
 
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
@@ -261,6 +371,76 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     return context.body(null, 204);
   });
 
+  app.get("/projects/:projectId/environments", async (context) => context.json(await db.environment.findMany({
+    where: { projectId: id.parse(context.req.param("projectId")) },
+    orderBy: { createdAt: "asc" },
+  })));
+  app.post("/projects/:projectId/environments", async (context) => context.json(await db.environment.create({
+    data: { projectId: id.parse(context.req.param("projectId")), ...await readJson(context.req.raw, environmentInput) },
+  }), 201));
+  app.get("/environments/:environmentId", async (context) => {
+    const environment = await db.environment.findUnique({
+      where: { id: id.parse(context.req.param("environmentId")) },
+      include: { secrets: { include: { secret: { select: secretPublicSelect } } } },
+    });
+    return environment ? context.json(environment) : context.json({ error: "Environment not found" }, 404);
+  });
+  app.patch("/environments/:environmentId", async (context) => context.json(await db.environment.update({
+    where: { id: id.parse(context.req.param("environmentId")) },
+    data: withoutUndefined(await readJson(context.req.raw, environmentPatch)),
+  })));
+  app.delete("/environments/:environmentId", async (context) => {
+    await db.environment.delete({ where: { id: id.parse(context.req.param("environmentId")) } });
+    return context.body(null, 204);
+  });
+
+  app.get("/secrets", async (context) => context.json(await db.secret.findMany({
+    select: {
+      ...secretPublicSelect,
+      agentGrants: { include: { agent: { select: { id: true, name: true, title: true, projectId: true } } } },
+    },
+    orderBy: { createdAt: "asc" },
+  })));
+  app.post("/secrets", async (context) => {
+    const body = await readJson(context.req.raw, secretInput);
+    const secret = await db.secret.create({
+      data: {
+        name: body.name,
+        purpose: body.purpose,
+        description: body.description,
+        encryptedValue: encryptSecret(body.value),
+      },
+      select: secretPublicSelect,
+    });
+    return context.json(secret, 201);
+  });
+  app.get("/secrets/:secretId", async (context) => {
+    const secret = await db.secret.findUnique({
+      where: { id: id.parse(context.req.param("secretId")) },
+      select: {
+        ...secretPublicSelect,
+        agentGrants: { include: { agent: { select: { id: true, name: true, title: true, projectId: true } } } },
+      },
+    });
+    return secret ? context.json(secret) : context.json({ error: "Secret not found" }, 404);
+  });
+  app.patch("/secrets/:secretId", async (context) => {
+    const body = await readJson(context.req.raw, secretPatch);
+    const { value, ...fields } = body;
+    return context.json(await db.secret.update({
+      where: { id: id.parse(context.req.param("secretId")) },
+      data: {
+        ...withoutUndefined(fields),
+        ...(value === undefined ? {} : { encryptedValue: encryptSecret(value), rotatedAt: new Date() }),
+      },
+      select: secretPublicSelect,
+    }));
+  });
+  app.delete("/secrets/:secretId", async (context) => {
+    await db.secret.delete({ where: { id: id.parse(context.req.param("secretId")) } });
+    return context.body(null, 204);
+  });
+
   app.get("/projects/:projectId/agents", async (context) => context.json(await db.agent.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
@@ -273,7 +453,18 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     return context.json(await db.agent.create({ data: { ...body, projectId } }), 201);
   });
   app.get("/agents/:agentId", async (context) => {
-    const agent = await db.agent.findUnique({ where: { id: id.parse(context.req.param("agentId")) } });
+    const agent = await db.agent.findUnique({
+      where: { id: id.parse(context.req.param("agentId")) },
+      include: {
+        environment: true,
+        skills: { include: { skill: true } },
+        mcpConnections: { include: { mcpConnection: true } },
+        repoAccess: { include: { repo: true } },
+        secretGrants: { include: { secret: { select: secretPublicSelect } } },
+        filesystemGrants: true,
+        collaborators: { include: { allowedAgent: true } },
+      },
+    });
     return agent ? context.json(agent) : context.json({ error: "Agent not found" }, 404);
   });
   app.patch("/agents/:agentId", async (context) => {
@@ -291,6 +482,191 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     return context.body(null, 204);
   });
 
+  app.get("/agents/:agentId/secret-grants", async (context) => context.json(await db.agentSecretGrant.findMany({
+    where: { agentId: id.parse(context.req.param("agentId")) },
+    include: { secret: { select: secretPublicSelect } },
+    orderBy: { envVar: "asc" },
+  })));
+  app.post("/agents/:agentId/secret-grants", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const body = await readJson(context.req.raw, secretGrantInput);
+    if (["OPERATOR_TOKEN", "RUNNER_TOKEN", "AGENTOS_API_TOKEN", "AGENTOS_SESSION_TOKEN", "AGENTOS_FENCING_TOKEN"].includes(body.envVar)) {
+      return context.json({ error: `Secret grant may not override reserved principal variable ${body.envVar}` }, 400);
+    }
+    const [agent, secret] = await Promise.all([
+      db.agent.findUnique({ where: { id: agentId }, select: { id: true } }),
+      db.secret.findFirst({ where: { id: body.secretId, disabledAt: null }, select: { id: true } }),
+    ]);
+    if (!agent || !secret) return context.json({ error: "Agent or available Secret not found" }, 404);
+    return context.json(await db.agentSecretGrant.upsert({
+      where: { agentId_envVar: { agentId, envVar: body.envVar } },
+      create: { agentId, ...body },
+      update: { secretId: body.secretId },
+    }), 201);
+  });
+  app.delete("/agents/:agentId/secret-grants/:secretId/:envVar", async (context) => {
+    await db.agentSecretGrant.delete({ where: { agentId_secretId_envVar: {
+      agentId: id.parse(context.req.param("agentId")),
+      secretId: id.parse(context.req.param("secretId")),
+      envVar: z.string().min(1).parse(context.req.param("envVar")),
+    } } });
+    return context.body(null, 204);
+  });
+
+  app.get("/agents/:agentId/filesystem-grants", async (context) => context.json(await db.filesystemGrant.findMany({
+    where: { agentId: id.parse(context.req.param("agentId")) }, orderBy: { folderPath: "asc" },
+  })));
+  app.post("/agents/:agentId/filesystem-grants", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const body = await readJson(context.req.raw, filesystemGrantInput);
+    return context.json(await db.filesystemGrant.upsert({
+      where: { agentId_folderPath: { agentId, folderPath: body.folderPath } },
+      create: { agentId, ...body },
+      update: body,
+    }), 201);
+  });
+  app.patch("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const grantId = id.parse(context.req.param("grantId"));
+    const existing = await db.filesystemGrant.findFirst({ where: { id: grantId, agentId } });
+    if (!existing) return context.json({ error: "Filesystem grant not found" }, 404);
+    return context.json(await db.filesystemGrant.update({
+      where: { id: grantId },
+      data: withoutUndefined(await readJson(context.req.raw, filesystemGrantPatch)) as Prisma.FilesystemGrantUncheckedUpdateInput,
+    }));
+  });
+  app.delete("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
+    const deleted = await db.filesystemGrant.deleteMany({ where: {
+      id: id.parse(context.req.param("grantId")), agentId: id.parse(context.req.param("agentId")),
+    } });
+    return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Filesystem grant not found" }, 404);
+  });
+
+  app.get("/agents/:agentId/collaborators", async (context) => context.json(await db.agentCollaboration.findMany({
+    where: { agentId: id.parse(context.req.param("agentId")) }, include: { allowedAgent: true },
+  })));
+  app.post("/agents/:agentId/collaborators", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const { allowedAgentId } = await readJson(context.req.raw, collaboratorInput);
+    if (agentId === allowedAgentId) return context.json({ error: "An agent cannot collaborate with itself" }, 400);
+    const agents = await db.agent.findMany({ where: { id: { in: [agentId, allowedAgentId] } }, select: { id: true, projectId: true } });
+    if (agents.length !== 2) return context.json({ error: "Agent or collaborator not found" }, 404);
+    if (agents[0]!.projectId !== agents[1]!.projectId) return context.json({ error: "Collaborators belong to different projects" }, 400);
+    return context.json(await db.agentCollaboration.upsert({
+      where: { agentId_allowedAgentId: { agentId, allowedAgentId } },
+      create: { agentId, allowedAgentId, projectId: agents[0]!.projectId }, update: {},
+    }), 201);
+  });
+  app.delete("/agents/:agentId/collaborators/:allowedAgentId", async (context) => {
+    const deleted = await db.agentCollaboration.deleteMany({ where: {
+      agentId: id.parse(context.req.param("agentId")), allowedAgentId: id.parse(context.req.param("allowedAgentId")),
+    } });
+    return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Collaboration binding not found" }, 404);
+  });
+
+  app.get("/projects/:projectId/skills", async (context) => context.json(await db.skill.findMany({
+    where: { projectId: id.parse(context.req.param("projectId")) },
+    include: { agents: true },
+    orderBy: { createdAt: "asc" },
+  })));
+  app.post("/projects/:projectId/skills", async (context) => {
+    const body = await readJson(context.req.raw, skillInput);
+    return context.json(await db.skill.create({
+      data: { projectId: id.parse(context.req.param("projectId")), ...body },
+    }), 201);
+  });
+  app.get("/agents/:agentId/skills", async (context) => context.json(await db.agentSkill.findMany({
+    where: { agentId: id.parse(context.req.param("agentId")) }, include: { skill: true },
+  })));
+  app.post("/agents/:agentId/skills", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const { skillId } = await readJson(context.req.raw, skillBindingInput);
+    const [agent, skill] = await Promise.all([
+      db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
+      db.skill.findUnique({ where: { id: skillId }, select: { projectId: true } }),
+    ]);
+    if (!agent || !skill) return context.json({ error: "Agent or Skill not found" }, 404);
+    if (agent.projectId !== skill.projectId) return context.json({ error: "Agent and Skill belong to different projects" }, 400);
+    return context.json(await db.agentSkill.upsert({
+      where: { agentId_skillId: { agentId, skillId } },
+      create: { agentId, skillId, projectId: agent.projectId }, update: {},
+    }), 201);
+  });
+  app.post("/agents/:agentId/skills/:skillId", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const skillId = id.parse(context.req.param("skillId"));
+    const [agent, skill] = await Promise.all([
+      db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
+      db.skill.findUnique({ where: { id: skillId }, select: { projectId: true } }),
+    ]);
+    if (!agent || !skill) return context.json({ error: "Agent or Skill not found" }, 404);
+    if (agent.projectId !== skill.projectId) return context.json({ error: "Agent and Skill belong to different projects" }, 400);
+    return context.json(await db.agentSkill.upsert({
+      where: { agentId_skillId: { agentId, skillId } },
+      create: { agentId, skillId, projectId: agent.projectId }, update: {},
+    }), 201);
+  });
+  app.delete("/agents/:agentId/skills/:skillId", async (context) => {
+    const deleted = await db.agentSkill.deleteMany({ where: {
+      agentId: id.parse(context.req.param("agentId")), skillId: id.parse(context.req.param("skillId")),
+    } });
+    return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Skill binding not found" }, 404);
+  });
+
+  app.get("/projects/:projectId/mcp-connections", async (context) => context.json(await db.mCPConnection.findMany({
+    where: { projectId: id.parse(context.req.param("projectId")) },
+    include: { agents: true },
+    orderBy: { createdAt: "asc" },
+  })));
+  app.post("/projects/:projectId/mcp-connections", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const body = await readJson(context.req.raw, mcpConnectionInput);
+    if (body.credentialSecretId) {
+      const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
+      if (!secret) return context.json({ error: "MCP credential secret is unavailable" }, 400);
+    }
+    return context.json(await db.mCPConnection.create({
+      data: { ...body, config: jsonValue(body.config), projectId },
+    }), 201);
+  });
+  app.get("/agents/:agentId/mcp-connections", async (context) => context.json(await db.agentMCPConnection.findMany({
+    where: { agentId: id.parse(context.req.param("agentId")) }, include: { mcpConnection: true },
+  })));
+  app.post("/agents/:agentId/mcp-connections", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const { mcpConnectionId } = await readJson(context.req.raw, mcpBindingInput);
+    const [agent, connection] = await Promise.all([
+      db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
+      db.mCPConnection.findUnique({ where: { id: mcpConnectionId }, select: { projectId: true } }),
+    ]);
+    if (!agent || !connection) return context.json({ error: "Agent or MCP connection not found" }, 404);
+    if (agent.projectId !== connection.projectId) return context.json({ error: "Agent and MCP connection belong to different projects" }, 400);
+    return context.json(await db.agentMCPConnection.upsert({
+      where: { agentId_mcpConnectionId: { agentId, mcpConnectionId } },
+      create: { agentId, mcpConnectionId, projectId: agent.projectId }, update: {},
+    }), 201);
+  });
+  app.post("/agents/:agentId/mcp-connections/:connectionId", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const connectionId = id.parse(context.req.param("connectionId"));
+    const [agent, connection] = await Promise.all([
+      db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
+      db.mCPConnection.findUnique({ where: { id: connectionId }, select: { projectId: true } }),
+    ]);
+    if (!agent || !connection) return context.json({ error: "Agent or MCP connection not found" }, 404);
+    if (agent.projectId !== connection.projectId) return context.json({ error: "Agent and MCP connection belong to different projects" }, 400);
+    return context.json(await db.agentMCPConnection.upsert({
+      where: { agentId_mcpConnectionId: { agentId, mcpConnectionId: connectionId } },
+      create: { agentId, mcpConnectionId: connectionId, projectId: agent.projectId }, update: {},
+    }), 201);
+  });
+  app.delete("/agents/:agentId/mcp-connections/:connectionId", async (context) => {
+    const deleted = await db.agentMCPConnection.deleteMany({ where: {
+      agentId: id.parse(context.req.param("agentId")), mcpConnectionId: id.parse(context.req.param("connectionId")),
+    } });
+    return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "MCP binding not found" }, 404);
+  });
+
   app.get("/projects/:projectId/repos", async (context) => context.json(await db.repo.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
@@ -303,6 +679,20 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
     }
     return context.json(await db.repo.create({ data: { ...body, projectId } }), 201);
+  });
+  app.patch("/repos/:repoId", async (context) => {
+    const body = await readJson(context.req.raw, repoPatch);
+    if (body.credentialSecretId) {
+      const secret = await db.secret.findFirst({ where: { id: body.credentialSecretId, disabledAt: null } });
+      if (!secret) return context.json({ error: "Repo credential secret is unavailable" }, 400);
+    }
+    return context.json(await db.repo.update({
+      where: { id: id.parse(context.req.param("repoId")) }, data: withoutUndefined(body),
+    }));
+  });
+  app.delete("/repos/:repoId", async (context) => {
+    await db.repo.delete({ where: { id: id.parse(context.req.param("repoId")) } });
+    return context.body(null, 204);
   });
   app.post("/agents/:agentId/repos/:repoId/access", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -319,6 +709,170 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       create: { agentId, repoId, projectId: agent.projectId, ...body },
       update: body,
     }), 201);
+  });
+  app.delete("/agents/:agentId/repos/:repoId/access", async (context) => {
+    const deleted = await db.agentRepoAccess.deleteMany({ where: {
+      agentId: id.parse(context.req.param("agentId")), repoId: id.parse(context.req.param("repoId")),
+    } });
+    return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Repo access not found" }, 404);
+  });
+
+  app.get("/projects/:projectId/goals", async (context) => context.json(await db.goal.findMany({
+    where: { projectId: id.parse(context.req.param("projectId")) },
+    include: goalInclude,
+    orderBy: { createdAt: "asc" },
+  })));
+  app.post("/projects/:projectId/goals", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const body = await readJson(context.req.raw, goalInput);
+    const { definitionOfDone, ...fields } = body;
+    return context.json(await db.goal.create({
+      data: {
+        ...fields,
+        projectId,
+        definitionOfDone: {
+          create: definitionOfDone.map((item, itemIndex) => ({ itemIndex, text: item.text })),
+        },
+      },
+      include: goalInclude,
+    }), 201);
+  });
+  app.get("/goals/:goalId", async (context) => {
+    const goal = await db.goal.findUnique({
+      where: { id: id.parse(context.req.param("goalId")) }, include: goalInclude,
+    });
+    return goal ? context.json(goal) : context.json({ error: "Goal not found" }, 404);
+  });
+  app.patch("/goals/:goalId", async (context) => context.json(await db.goal.update({
+    where: { id: id.parse(context.req.param("goalId")) },
+    data: withoutUndefined(await readJson(context.req.raw, goalPatch)) as Prisma.GoalUncheckedUpdateInput,
+    include: goalInclude,
+  })));
+  app.delete("/goals/:goalId", async (context) => {
+    await db.goal.delete({ where: { id: id.parse(context.req.param("goalId")) } });
+    return context.body(null, 204);
+  });
+
+  const approveGoalDod = async (context: Context<AppEnvironment, string>) => {
+    const goalId = id.parse(context.req.param("goalId"));
+    const projectId = context.req.param("projectId");
+    const goal = await db.goal.findFirst({
+      where: { id: goalId, ...(projectId ? { projectId: id.parse(projectId) } : {}) },
+      include: { definitionOfDone: true },
+    });
+    if (!goal) return context.json({ error: "Goal not found" }, 404);
+    if (goal.definitionOfDone.length === 0) return context.json({ error: "Definition of Done must contain at least one item" }, 409);
+    const completed = goal.definitionOfDone.every((item) => item.done);
+    const now = new Date();
+    return context.json(await db.goal.update({
+      where: { id: goalId },
+      data: {
+        dodApproved: true,
+        status: completed ? GoalStatus.COMPLETED : GoalStatus.ACTIVE,
+        startedAt: goal.startedAt ?? now,
+        endedAt: completed ? now : null,
+      },
+      include: goalInclude,
+    }));
+  };
+  app.post("/goals/:goalId/approve-dod", approveGoalDod);
+  app.post("/projects/:projectId/goals/:goalId/approve-dod", approveGoalDod);
+
+  const pauseGoal = async (context: Context<AppEnvironment, string>) => {
+    const goalId = id.parse(context.req.param("goalId"));
+    const projectId = context.req.param("projectId");
+    const updated = await db.goal.updateMany({
+      where: { id: goalId, ...(projectId ? { projectId: id.parse(projectId) } : {}), status: GoalStatus.ACTIVE },
+      data: { status: GoalStatus.PAUSED },
+    });
+    if (updated.count !== 1) return context.json({ error: "Only an active Goal can be paused" }, 409);
+    return context.json(await db.goal.findUniqueOrThrow({ where: { id: goalId }, include: goalInclude }));
+  };
+  app.post("/goals/:goalId/pause", pauseGoal);
+  app.post("/projects/:projectId/goals/:goalId/pause", pauseGoal);
+
+  app.get("/goals/:goalId/definition-of-done", async (context) => context.json(await db.goalDefinitionItem.findMany({
+    where: { goalId: id.parse(context.req.param("goalId")) }, orderBy: { itemIndex: "asc" },
+  })));
+  app.post("/goals/:goalId/definition-of-done", async (context) => {
+    const goalId = id.parse(context.req.param("goalId"));
+    const body = await readJson(context.req.raw, definitionItemText);
+    const result = await db.$transaction(async (tx) => {
+      const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
+      const last = await tx.goalDefinitionItem.findFirst({ where: { goalId }, orderBy: { itemIndex: "desc" } });
+      const item = await tx.goalDefinitionItem.create({ data: { goalId, itemIndex: (last?.itemIndex ?? -1) + 1, text: body.text } });
+      if (goal.dodApproved && goal.status === GoalStatus.COMPLETED) {
+        await tx.goal.update({ where: { id: goalId }, data: { status: GoalStatus.ACTIVE, endedAt: null } });
+      }
+      return item;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return context.json(result, 201);
+  });
+  app.patch("/goals/:goalId/definition-of-done/:itemId", async (context) => {
+    const goalId = id.parse(context.req.param("goalId"));
+    const itemId = id.parse(context.req.param("itemId"));
+    const body = await readJson(context.req.raw, definitionItemPatch);
+    const result = await db.$transaction(async (tx) => {
+      const existing = await tx.goalDefinitionItem.findFirst({ where: { id: itemId, goalId } });
+      if (!existing) return null;
+      const item = await tx.goalDefinitionItem.update({ where: { id: itemId }, data: withoutUndefined(body) });
+      const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
+      if (goal.dodApproved) {
+        const items = await tx.goalDefinitionItem.findMany({ where: { goalId }, select: { done: true } });
+        const met = items.length > 0 && items.every((candidate) => candidate.done);
+        const wasMet = goal.status === GoalStatus.COMPLETED;
+        if (met !== wasMet) {
+          const now = new Date();
+          await tx.goal.update({
+            where: { id: goalId },
+            data: met
+              ? { status: GoalStatus.COMPLETED, endedAt: now, startedAt: goal.startedAt ?? now }
+              : { status: GoalStatus.ACTIVE, endedAt: null, startedAt: goal.startedAt ?? now },
+          });
+        }
+      }
+      return item;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return result ? context.json(result) : context.json({ error: "Definition of Done item not found" }, 404);
+  });
+  app.delete("/goals/:goalId/definition-of-done/:itemId", async (context) => {
+    const goalId = id.parse(context.req.param("goalId"));
+    const itemId = id.parse(context.req.param("itemId"));
+    const deleted = await db.$transaction(async (tx) => {
+      const result = await tx.goalDefinitionItem.deleteMany({ where: { id: itemId, goalId } });
+      if (result.count !== 1) return false;
+      const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
+      if (goal.dodApproved) {
+        const items = await tx.goalDefinitionItem.findMany({ where: { goalId }, select: { done: true } });
+        const met = items.length > 0 && items.every((candidate) => candidate.done);
+        await tx.goal.update({
+          where: { id: goalId },
+          data: met
+            ? { status: GoalStatus.COMPLETED, endedAt: goal.endedAt ?? new Date() }
+            : { status: GoalStatus.ACTIVE, endedAt: null },
+        });
+      }
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return deleted ? context.body(null, 204) : context.json({ error: "Definition of Done item not found" }, 404);
+  });
+
+  app.get("/goals/:goalId/progress-log", async (context) => context.json(await db.goalProgressEntry.findMany({
+    where: { goalId: id.parse(context.req.param("goalId")) }, orderBy: { createdAt: "asc" },
+  })));
+  app.post("/goals/:goalId/progress-log", async (context) => {
+    const goalId = id.parse(context.req.param("goalId"));
+    const body = await readJson(context.req.raw, progressInput);
+    if (body.sessionId) {
+      const session = await db.session.findFirst({ where: { id: body.sessionId, goalId }, select: { id: true } });
+      if (!session) return context.json({ error: "Session does not belong to this Goal" }, 400);
+    }
+    return context.json(await db.goalProgressEntry.create({ data: {
+      goalId,
+      sessionId: body.sessionId ?? null,
+      body: body.body,
+      ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+    } }), 201);
   });
 
   app.get("/projects/:projectId/task-templates", async (context) => context.json(await db.taskTemplate.findMany({
@@ -474,11 +1028,33 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     }), 201);
   });
 
-  app.get("/inbox/messages", async (context) => context.json(await db.inboxMessage.findMany({
-    where: { from: "AGENT" },
-    include: { decisions: true },
+  app.get("/inbox/messages", async (context) => {
+    const projectId = context.req.query("projectId");
+    return context.json(await db.inboxMessage.findMany({
+    where: {
+      replyToMessageId: null,
+      ...(projectId ? { OR: [
+        { agent: { projectId } },
+        { task: { projectId } },
+        { goal: { projectId } },
+        { session: { projectId } },
+      ] } : {}),
+    },
+    include: { decisions: true, replies: { orderBy: { createdAt: "asc" } } },
     orderBy: { createdAt: "desc" },
-  })));
+    }));
+  });
+  app.get("/inbox/messages/:messageId", async (context) => {
+    const message = await db.inboxMessage.findUnique({
+      where: { id: id.parse(context.req.param("messageId")) },
+      include: {
+        decisions: true,
+        replies: { orderBy: { createdAt: "asc" } },
+        replyTo: true,
+      },
+    });
+    return message ? context.json(message) : context.json({ error: "Inbox message not found" }, 404);
+  });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const body = await readJson(context.req.raw, inboxDecisionInput);
     try {
@@ -490,7 +1066,28 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (error instanceof Error && /(No matching|must be approve|no executable)/.test(error.message)) {
+      if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
+        return context.json({ error: error.message }, 409);
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return context.json({ duplicate: true, resumed: false });
+      }
+      throw error;
+    }
+  });
+  app.post("/inbox/messages/:messageId/reply", async (context) => {
+    const body = await readJson(context.req.raw, inboxReplyInput);
+    try {
+      const result = await applyInboxDecision(db, {
+        inboxMessageId: id.parse(context.req.param("messageId")),
+        externalEventId: `web:${body.requestId}`,
+        decision: body.body,
+        actorOpenId: "web-operator",
+        allowFreeText: true,
+      });
+      return context.json(result, result.duplicate ? 200 : 201);
+    } catch (error: unknown) {
+      if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   AssigneeType,
   InboxDeliveryStatus,
+  InboxKind,
   InboxSender,
   InboxStatus,
   Prisma,
@@ -138,6 +139,7 @@ export type InboxDecisionInput = {
   decision: string;
   actorOpenId?: string | null;
   externalMessageId?: string | null;
+  allowFreeText?: boolean;
 };
 
 export type InboxDecisionResult = {
@@ -164,6 +166,13 @@ export const applyInboxDecisionTx = async (
   const gateDecision = Boolean(question.gateTaskId);
   if (gateDecision && input.decision !== "approve" && input.decision !== "reject") {
     throw new Error("Approval gate decision must be approve or reject");
+  }
+  if (!gateDecision && question.kind === InboxKind.MULTIPLE_CHOICE && !input.allowFreeText) {
+    const choices = Array.isArray(question.choices) ? question.choices : [];
+    const matchesChoice = choices.some((choice) => (
+      typeof choice === "object" && choice !== null && "id" in choice && choice.id === input.decision
+    ));
+    if (!matchesChoice) throw new Error("Decision must match an Inbox choice id");
   }
   if (!gateDecision && question.session.run.status !== RunStatus.WAITING_INBOX) {
     throw new Error("No matching waiting Inbox question");
