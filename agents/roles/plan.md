@@ -1,7 +1,7 @@
 ---
 name: plan
 title: Planner
-model: claude
+model: claude-opus-5:high
 runner: claude
 inboxAccess: true
 skills: [plan-mode]

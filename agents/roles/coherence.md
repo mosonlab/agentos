@@ -1,7 +1,7 @@
 ---
 name: coherence
 title: Coherence Reviewer
-model: claude
+model: claude-opus-5:high
 runner: claude
 inboxAccess: false
 skills: [review-report]

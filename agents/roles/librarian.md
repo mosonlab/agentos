@@ -1,7 +1,7 @@
 ---
 name: librarian
 title: Librarian
-model: openai-codex/gpt-5.6-luna
+model: openai-codex/gpt-5.6-luna:high
 runner: pi
 inboxAccess: false
 skills: []

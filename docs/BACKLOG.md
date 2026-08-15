@@ -8,6 +8,7 @@
 - [ ] **入站自由文本的兜底 UX**：用户主动发给 bot 的消息若匹配不到等待中的提问会被丢弃（现已落库 InboxExternalEvent 可审计，但 Inbox 页不可见）。考虑落成 from=HUMAN 的未挂靠消息展示。
 - [ ] **api 重启对在跑 run 的折损**：启动对账会把租约过期的 run 判 lost 并消耗 run 预算。孤儿抢端口是本次根因（已清），但「api 短暂重启不应折损预算」值得加缓冲（如启动后宽限一个心跳周期再对账）。
 - [ ] **闸门消息的产物预览**：闸门卡片只有一句话+PR 链接，产物正文要去 Tasks 页翻；可在卡片/Inbox 详情内嵌 TaskStepOutput 摘要。
+- [ ] **agent 会话内 AgentOS MCP 未接上**：spec/plan/plan-review 三步的 agent 都报告会话里没有 AgentOS MCP（activity log / task output / status）与 Inbox MCP 工具，全靠 git push + runner 的 finalOutput 捕获兜底交付。manifest 声称的工具面与实际注入不符，需核 runner 的 MCP 注入链路。
 
 ## 已修（本轮，无需再做）
 

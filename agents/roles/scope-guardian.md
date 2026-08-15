@@ -1,7 +1,7 @@
 ---
 name: scope-guardian
 title: Scope Guardian
-model: claude
+model: claude-opus-5:high
 runner: claude
 inboxAccess: false
 skills: [review-report]

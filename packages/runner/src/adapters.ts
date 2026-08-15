@@ -271,18 +271,33 @@ const processLine = (handle: RuntimeHandle, line: string, sink: SessionEventSink
   else parsePi(handle, event, sink);
 };
 
+// Run.model carries an optional reasoning-effort suffix: "<model>[:<effort>]".
+const modelSpec = (raw: string): { model: string; effort: string | null } => {
+  const at = raw.lastIndexOf(":");
+  return at > 0 ? { model: raw.slice(0, at), effort: raw.slice(at + 1) } : { model: raw, effort: null };
+};
+
 const argsFor = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
   const input = resume?.input ?? spec.prompt;
+  const { model, effort } = modelSpec(spec.claim.run.model);
   if (runner === "CLAUDE") return [
     "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
+    // Model must be pinned explicitly; the CLI otherwise inherits the
+    // operator's personal default, which is reserved quota.
+    "--model", model, "--effort", effort ?? "high",
     ...(resume ? ["--resume", resume.providerConversationId] : []), input,
   ];
   if (runner === "CODEX") return resume
     ? ["exec", "resume", "--json", resume.providerConversationId, input]
-    : ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox", input];
+    : [
+      "exec", "--json", "-m", model,
+      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      "--dangerously-bypass-approvals-and-sandbox", input,
+    ];
   return [
     "-p", "--mode", "json", "--session-dir", join(spec.workingDirectory, ".agentos-pi"),
-    "--model", spec.claim.run.model,
+    "--model", model,
+    ...(effort ? ["--thinking", effort] : []),
     ...(resume ? ["--session", resume.providerConversationId] : []), input,
   ];
 };

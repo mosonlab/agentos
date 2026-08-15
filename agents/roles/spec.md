@@ -1,7 +1,7 @@
 ---
 name: spec
 title: Specification Writer
-model: claude
+model: claude-opus-5:high
 runner: claude
 inboxAccess: true
 skills: []

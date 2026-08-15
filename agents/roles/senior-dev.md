@@ -1,7 +1,7 @@
 ---
 name: senior-dev
 title: Senior Developer
-model: codex
+model: gpt-5.6-luna:high
 runner: codex
 inboxAccess: true
 skills: []
