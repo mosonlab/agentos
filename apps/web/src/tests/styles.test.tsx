@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { Markdown } from "../components/ui";
 
 const sourcePath = fileURLToPath(new URL("../styles.css", import.meta.url));
 const source = readFileSync(sourcePath, "utf8");
@@ -35,10 +38,46 @@ const selectorIndex = (selector: string): number => {
   return index;
 };
 
-test("legacy selectors stay unlayered while Tailwind utilities stay layered", () => {
-  for (const selector of [".row{", ".page{", ".projectMark{", "select{"]) {
-    assert.deepEqual(layersAt(built, selectorIndex(selector)), [], selector);
+/** Every innermost `{...}` block in the built sheet, with the byte offset of its
+ *  opening brace so `layersAt` can say which layers enclose it. The inner body
+ *  pattern excludes braces, so an at-rule header is never captured as a
+ *  selector — the walker descends into `@media`/`@supports`/`@layer` and yields
+ *  the rules inside them. */
+const rules = (): Array<{ selector: string; body: string; brace: number }> => {
+  const found: Array<{ selector: string; body: string; brace: number }> = [];
+  for (const match of built.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selector = (match[1] ?? "").trim();
+    found.push({ selector, body: match[2] ?? "", brace: match.index + (match[1] ?? "").length });
   }
+  return found;
+};
+
+/** A declaration block that sets anything other than a custom property. This is
+ *  the carve-out that lets `.dark { --background: … }` stay unlayered without an
+ *  allowlist of class names: it declares tokens, not appearance. */
+const declaresAppearance = (body: string): boolean =>
+  body.split(";").some((declaration) => {
+    const property = declaration.slice(0, declaration.indexOf(":")).trim();
+    return property.length > 0 && !property.startsWith("--");
+  });
+
+const CLASS_TOKEN = /(?:^|[\s,>+~()])\.[A-Za-z_-]/;
+
+test("no unlayered class rule styles the app", () => {
+  const walked = rules();
+  const unlayered = walked.filter((rule) => layersAt(built, rule.brace).length === 0);
+
+  // Guards against a parser change quietly making the assertion vacuous: the
+  // sheet does still contain unlayered rules (`:root`, `.dark`, `@property`).
+  assert.ok(unlayered.length > 0, "walker found no unlayered rules at all");
+
+  const offenders = unlayered
+    .filter((rule) => !rule.selector.startsWith("@"))
+    .filter((rule) => CLASS_TOKEN.test(rule.selector))
+    .filter((rule) => declaresAppearance(rule.body))
+    .map((rule) => `${rule.selector}{${rule.body.slice(0, 60)}}`);
+  assert.deepEqual(offenders, []);
+
   assert.deepEqual(layersAt(built, selectorIndex(".flex{")), ["utilities"]);
 });
 
@@ -46,10 +85,16 @@ test("Markdown list markers override Tailwind preflight", () => {
   const preflight = built.search(/(?:ol,ul,menu|menu,ol,ul)\{list-style:none/);
   assert.notEqual(preflight, -1, "missing Tailwind list reset");
   assert.deepEqual(layersAt(built, preflight), ["base"]);
-  const unordered = selectorIndex(".md ul{list-style:outside}");
-  const ordered = selectorIndex(".md ol{list-style:decimal}");
-  assert.deepEqual(layersAt(built, unordered), []);
-  assert.deepEqual(layersAt(built, ordered), []);
+
+  // The reset is beaten by utilities now, not by an unlayered `.md ul` rule.
+  assert.deepEqual(layersAt(built, selectorIndex(".list-disc{")), ["utilities"]);
+  assert.deepEqual(layersAt(built, selectorIndex(".list-decimal{")), ["utilities"]);
+
+  // …and the renderer still puts those utilities on the list elements, which is
+  // the half a CSS-only assertion cannot see.
+  const markup = renderToStaticMarkup(<Markdown text={"- a\n\n1. b"} />);
+  assert.match(markup, /<ul[^>]*\blist-disc\b/);
+  assert.match(markup, /<ol[^>]*\blist-decimal\b/);
 });
 
 const lightBlock = /:root\s*\{([^}]+)\}/.exec(source)?.[1] ?? "";
