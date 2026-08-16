@@ -1,8 +1,12 @@
 # SPEC — Batch 0: Frontend base migration to Tailwind v4 + shadcn/ui
 
-Status: draft for review · Author: spec agent · Date: 2026-08-15
+Status: draft for review, rev 2 · Author: spec agent · Date: 2026-08-16
 Authoritative sources: `docs/reference/danny-agentos-video/decisions.md` §3, `docs/BACKLOG-V2.md` Batch 0.
 This is a requirements + acceptance-criteria document. It contains no implementation plan.
+Rev 2 addresses the feasibility review on PR #1 (findings MF-1…MF-6): corrected the Secrets
+flows, hardened the storage contract, made the localStorage gate key-specific, added a
+deterministic acceptance fixture (§8.1), a reproducible dark-parity baseline procedure
+(§8.2), and a page-by-page behavior matrix (§8.5).
 
 ## 1. Problem and audience
 
@@ -34,6 +38,15 @@ In scope:
 5. Shrink `styles.css` to a legacy layer that only contains rules still referenced after
    migration, with every color expressed through theme tokens (no hardcoded surface/text
    hex values outside token definitions).
+6. Harden browser-storage access: theme persistence and the existing
+   `useLocalStorage` hook (`src/lib/hooks.ts`, used by project selection) go through a
+   failure-tolerant storage helper — guarded read/write/remove with an in-memory
+   session fallback when `localStorage` throws (private mode, disabled storage). This is
+   the single deliberate behavior delta of the batch: where the app would previously
+   crash on startup with storage unavailable, it now degrades to session-only state
+   (assumption A8).
+7. A deterministic acceptance fixture (dev-only seed extension in `packages/db`, §8.1) so
+   the acceptance walk in §8 is executable and reproducible (assumption A9).
 
 Non-goals (explicitly out of scope):
 
@@ -49,8 +62,12 @@ Non-goals (explicitly out of scope):
 - No i18n work (Batch 1), no Settings page (Batch 1 — see A3 for where the toggle lives
   meanwhile), no new open-source components (`@uiw/react-md-editor`, SVAR File Manager,
   SurveyJS arrive with their own batches).
-- No package-manager change (see A1) and no changes outside `apps/web` other than the
-  lockfile.
+- No package-manager change (see A1). No runtime changes outside `apps/web`; the only
+  files touched elsewhere are the root lockfile and the dev-only acceptance fixture in
+  `packages/db` (§8.1, assumption A9). No API endpoints, schema, or migrations change.
+- No secret-reveal capability. Secret values are write-only in both the UI and the API
+  (`secretPublicSelect` never returns plaintext); this batch preserves that, it does not
+  add disclosure flows.
 
 ## 3. Intended behavior — concrete scenarios
 
@@ -67,9 +84,11 @@ Non-goals (explicitly out of scope):
    is open switches the app's theme without a reload.
 5. **No flash.** Reloading in forced-light on a dark OS (and vice versa) does not flash the
    wrong theme before first paint.
-6. **Behavior untouched.** Creating a task, dragging a card between kanban columns,
-   answering an inbox message, toggling an agent field, opening the New Task overlay, and
-   deep-linking any route all work exactly as before.
+6. **Behavior untouched.** Every mutation and interaction in the §8.5 matrix — task
+   create/drag/retry/delete, inbox answer and reply, agent CRUD and grant toggles, goal
+   create and progress log, secret create/rotate/delete, project create/YAML edit,
+   overlays/modals/menus, deep links — works exactly as before, issuing the same API
+   calls with the same results.
 7. **Unstyled-state guard.** A shadcn component that ships default styling (e.g. Dialog
    overlay, Select popover) appears in the app's palette, not shadcn's stock zinc palette —
    i.e. the theme tokens are actually wired, not defaulted.
@@ -179,7 +198,9 @@ Checklist (all boxes are requirements; shared chrome first since every page depe
       cards on tokens; polling and actions unchanged.
 - [ ] **`Agents.tsx`** (+ detail) — full. Tables, field editors, code blocks, back links.
 - [ ] **`Goals.tsx`** (+ detail) — full. Goal cards, metrics, progress bars, message flow.
-- [ ] **`Secrets.tsx`** — full. Table + pills + create/reveal flows.
+- [ ] **`Secrets.tsx`** — full. Table + pills + the existing create, edit/rotate
+      (value field optional on edit), and delete flows. There is no reveal flow —
+      values stay write-only (see §2 non-goals).
 - [ ] **`Connections.tsx`** — minimal (rewritten in the Connections batch).
 - [ ] **`Inbox.tsx`** (+ thread) — minimal (rewritten in Batch 3 questionnaire work).
       Choice/radio answering flow must still work in both themes.
@@ -192,8 +213,13 @@ Checklist (all boxes are requirements; shared chrome first since every page depe
 
 ## 6. Edge cases and failure behavior
 
-- **localStorage unavailable/corrupt** (private mode, weird value in `agentos.theme`):
-  treat as "system"; never crash; toggle still works for the session.
+- **localStorage unavailable/corrupt.** A corrupt/unknown value in `agentos.theme` is
+  treated as "system". When storage itself throws, the guarded storage helper (§2 item 6)
+  returns fallbacks and buffers writes in memory: the theme toggle works for the session,
+  and — because `useLocalStorage` (project selection, `agentos.projectId`) is routed
+  through the same helper — the app still starts. "Never crash" is a whole-app contract,
+  not a theme-module-only one; without the §2 item 6 hardening it would be unsatisfiable,
+  since `src/lib/hooks.ts` currently calls `localStorage` unguarded during first render.
 - **No `prefers-color-scheme` support / no-JS first paint**: fall back to dark (today's
   only theme) rather than an unstyled or white flash.
 - **Overlay/Dialog semantics**: the New Task full-screen overlay must keep its
@@ -224,19 +250,66 @@ Build gates (must pass in CI/locally before review):
 - `npm ls react react-dom vite` shows the same major versions as before (React 19, Vite 7);
   no router or state-management package appears in any `package.json`.
 
-## 8. Acceptance criteria — dark/light checks
+## 8. Acceptance criteria — fixture, dark/light checks, behavior matrix
 
-Reviewer walks all 8 pages (+ Agent/Goal/Project/Task detail and Inbox thread routes, and
-the New Task overlay + one modal + one dropdown menu) in each theme:
+### 8.1 Acceptance fixture (deterministic, required)
 
-Dark:
+The current seed (`packages/db/prisma/seed.ts`) creates a project, environment, agents,
+skills, and a task template — but no task, goal, secret, connection, or Inbox message, so
+the walk below cannot be executed from "seed as usual". This batch therefore ships a
+dev-only acceptance fixture (a seed extension or separate script in `packages/db`, run
+on demand — never in production paths) that creates, with stable, documented names/slugs:
 
-- [ ] Side-by-side with pre-migration screenshots, pages are visually equivalent: same
+- One task per status column (`TODO`/`DOING`/`REVIEW`/`DONE`), at least one carrying a
+  run history and activity-log entries so `TaskDetail` shows its event log, stat pills,
+  run table, and comment thread.
+- One goal with a progress-log entry (populates goal card, metrics, progress bar).
+- One secret (populates the Secrets table; plaintext value fixed, e.g. `fixture`).
+- One MCP connection (populates the read-only Connections list).
+- One OPEN Inbox `MULTIPLE_CHOICE` message with ≥2 choices, attached to a synthetic
+  session + run whose status is `WAITING_INBOX` — `applyInboxDecisionTx` gates answering
+  purely on that DB state (`packages/db/src/workflow.ts`), so answering from the UI works
+  with no live runner. One answered TEXT thread for the thread route.
+- Whatever detail-route targets the above imply (agent, project, task, goal detail).
+
+The fixture is idempotent (re-running resets to the same state) so "reset and re-walk"
+is cheap. The acceptance checks below assume this fixture is loaded; no other data setup
+is required or permitted (reproducibility depends on it).
+
+### 8.2 Dark-parity baseline (reproducible procedure)
+
+There are no pre-migration screenshots in the repo, so the baseline is *generated*, not
+retrieved:
+
+1. **Base commit**: the merge-base of the PR branch with `master`, recorded by hash in
+   the PR description.
+2. At that commit: `npm install`, run API + web dev servers, load the §8.1 fixture
+   (the fixture commit may be cherry-picked or its records created via the documented
+   script — same records either way), OS/theme dark.
+3. Viewport fixed at **1440×900**, default zoom. Capture full-page screenshots of every
+   route in §8.3's route list, named by route. Store the set as a PR-attached artifact
+   (zip on the PR or a shared folder linked from the PR — not committed; `frames/`
+   precedent keeps screenshots out of git).
+4. Repeat the identical capture on the PR head commit; compare side-by-side.
+
+Because both capture sets are pinned to (commit, fixture, viewport, theme), two reviewers
+produce the same comparison inputs and can reach the same verdict.
+
+### 8.3 Dark checks
+
+Route list to walk (also the §8.2 capture list): `/inbox`, one Inbox thread, `/tasks`,
+one `/tasks/:id`, `/goals`, one goal detail, `/agents`, one agent detail, `/projects`,
+one project detail, `/connections`, `/secrets`, plus the New Task overlay, one modal,
+and one dropdown menu open.
+
+- [ ] Side-by-side with the §8.2 baseline set, pages are visually equivalent: same
       palette (token values are byte-identical hexes), layout, and type. Tolerance:
       sub-pixel spacing/border-radius differences from component swaps; no color changes.
 - [ ] No stock-shadcn zinc/blue leaking into any component (scenario 7 in §3).
 
-Light:
+### 8.4 Light and switching checks
+
+Light (same route list):
 
 - [ ] Every surface, text level, border, pill, notice, code block, event log, kanban
       column, and scrollbar renders in light values — zero dark islands.
@@ -250,30 +323,73 @@ Switching:
 - [ ] Scenarios 1–5 of §3 pass exactly as written (system default, manual override,
       persistence across reload/tabs, live OS tracking, no first-paint flash).
 
-Behavior:
+### 8.5 Behavior matrix (every mutation, every replaced control)
 
-- [ ] Scenario 6 of §3: task create/drag, inbox answer, agent edit, overlay/modal/menu
-      open-close, deep links — all unchanged. No API or route diffs.
+Each row must pass on the PR head with the §8.1 fixture: the action issues the listed
+API call (observable in devtools/network) and produces the listed UI result, identical
+to pre-migration. Rows marked *(minimal)* are on minimal-tier pages — they must pass
+even though the page code is largely untouched.
+
+| Page | Interaction (control replaced) | Expected API call | Expected result |
+|---|---|---|---|
+| Shell | Project switcher select (menu) | — (localStorage `agentos.projectId`) | Scope switches; persists across reload |
+| Shell | Nav click / unread badge | — | Route changes; badge count matches open Inbox |
+| Shell | Theme toggle (new) | — (localStorage `agentos.theme`) | §3 scenarios 3–5 |
+| Tasks | Create task (Dialog/overlay + Input/Select/Textarea) | `POST /projects/:id/tasks` | Card appears in TODO |
+| Tasks | Instantiate template (template picker) | `POST /projects/:id/task-templates/:id/instantiate` | Chain tasks appear |
+| Tasks | Drag card between columns | `PATCH /tasks/:id` `{status}` | Card moves; column highlight during drag |
+| Tasks | Card menu: retry (DropdownMenu) | `POST /tasks/:id/retry` | Run re-queued |
+| Tasks | Card menu: delete | `DELETE /tasks/:id` | Card gone |
+| TaskDetail | Comment (Textarea + Button) | `POST /tasks/:id/activity` | Entry appears in log |
+| TaskDetail | Menu: status change | `PATCH /tasks/:id` | Pill/status update, poll refresh |
+| TaskDetail | Retry button | `POST /tasks/:id/retry` | New run row |
+| Agents | Create agent (form) | `POST /projects/:id/agents` | Row appears |
+| Agents | Menu: delete agent | `DELETE /agents/:id` | Row gone |
+| Agents (detail) | Edit fields incl. toggles (Switch) + save | `PATCH /agents/:id` | Values persist after reload |
+| Agents (detail) | Repo access toggle + mount path | `POST /agents/:id/repos/:id/access` | Grant reflected |
+| Agents (detail) | Filesystem grant add / edit perms (Checkbox) / remove | `POST` / `PATCH` / `DELETE /agents/:id/filesystem-grants…` | List updates |
+| Agents (detail) | Skill attach/detach | `POST` / `DELETE /agents/:id/skills…` | Chip list updates |
+| Agents (detail) | MCP connection attach/detach | `POST` / `DELETE /agents/:id/mcp-connections…` | List updates |
+| Agents (detail) | Collaborator add/remove | `POST` / `DELETE /agents/:id/collaborators…` | List updates |
+| Goals | Create goal (form) | `POST /projects/:id/goals` | Goal card appears |
+| Goals (detail) | Add progress-log entry | `POST /goals/:id/progress-log` | Entry appears; tabs (Tabs) switch content |
+| Secrets | Create (modal form) | `POST /secrets` | Row appears; value never displayed |
+| Secrets | Edit/rotate (value field blank = keep) | `PATCH /secrets/:id` (with/without `value`) | Fields update; `rotatedAt` set only when value sent |
+| Secrets | Delete | `DELETE /secrets/:id` | Row gone |
+| Projects *(minimal)* | Create project | `POST /projects` | Row appears |
+| Projects *(minimal)* | Edit YAML + save | `PATCH /projects/:id` `{yamlDocument}` | Persists |
+| Projects *(minimal)* | Delete project | `DELETE /projects/:id` | Row gone |
+| Inbox *(minimal)* | Answer choice (radio) | `POST /inbox/messages/:id/decision` | Message flips to ANSWERED; run leaves WAITING_INBOX |
+| Inbox *(minimal)* | Free-text reply | `POST /inbox/messages/:id/reply` | Reply appears in thread |
+| Connections *(minimal)* | List renders (read-only; no mutations exist) | `GET` only | Rows render in both themes |
+
+- [ ] Every row passes; no API or route diffs anywhere in the walk.
 
 ## 9. Rollback note
 
-The entire batch is one PR touching only `apps/web` (plus the root lockfile). Rollback is
-`git revert` of the merge commit: no database migration, no API change, no cross-workspace
-dependency, and no data written anywhere except the `agentos.theme` localStorage key, which
-pre-migration code simply ignores. After revert, `npm install && npm run build` restores
+The entire batch is one PR touching `apps/web`, the root lockfile, and the dev-only
+acceptance fixture in `packages/db` (no schema, no migration). Rollback is `git revert`
+of the merge commit: no database migration, no API change, no cross-workspace runtime
+dependency, and no data written anywhere except the `agentos.theme` localStorage key
+(ignored by pre-migration code) and fixture rows in the dev database (removable by
+re-seeding). After revert, `npm install && npm run build` restores
 the previous frontend byte-for-byte. There is no partial-rollback mode — reverting a single
 page is not supported, by design (the token base is all-or-nothing).
 
 ## 10. How a reviewer verifies
 
 1. Check out the PR branch, `npm install`, run the §7 gates.
-2. `npm run dev:api` + `npm run dev:web`, seed state as usual.
-3. Walk §8's checklists in dark, then light, then exercise the switching scenarios
-   (OS appearance flip + toggle + reload + second tab).
+2. `npm run dev:api` + `npm run dev:web`, load the §8.1 acceptance fixture.
+3. Generate/obtain the §8.2 baseline set; walk §8.3 (dark), §8.4 (light + switching),
+   then the §8.5 behavior matrix.
 4. Grep-level spot checks: no `react-router`/`zustand`/`redux`/`jotai` in any
-   `package.json`; `styles.css` has no hardcoded hex outside token blocks; `localStorage`
-   is touched only by the theme module.
-5. Confirm Connections/Inbox/Projects diffs are minimal (token/base fallout only).
+   `package.json`; `styles.css` has no hardcoded hex outside token blocks; the key
+   `agentos.theme` is referenced only by the theme module, and every `localStorage`
+   access in `apps/web/src` (theme *and* the pre-existing `agentos.projectId` path)
+   goes through the guarded storage helper of §2 item 6 — no bare
+   `window.localStorage` calls outside that helper.
+5. Confirm Connections/Inbox/Projects diffs are minimal (token/base fallout only), and
+   that the only changes outside `apps/web` are the lockfile and the §8.1 fixture.
 
 ## 11. Assumptions (need Leo's eyes)
 
@@ -300,3 +416,17 @@ page is not supported, by design (the token base is all-or-nothing).
   a one-token change.
 - **A7 — Icons.** `icons.tsx` hand-rolled SVGs may be kept as-is; lucide swap is allowed
   only if visually indistinguishable at current sizes. Not a requirement of this batch.
+- **A8 — Storage hardening is in scope.** The existing `useLocalStorage` hook crashes the
+  app at startup when storage is unavailable (unguarded `getItem` in a `useState`
+  initializer, hit via `ProjectProvider`). Assumed: routing it through the new guarded
+  storage helper is an authorized in-scope hardening — the one deliberate behavior delta
+  (crash → session-only degradation). Alternative if rejected: scope "never crash" to the
+  theme module only and accept the pre-existing startup crash as-is.
+- **A9 — Fixture lives in `packages/db`.** A deterministic acceptance walk needs records
+  the current seed doesn't create (§8.1). Assumed: a dev-only fixture script/seed
+  extension in `packages/db` is an authorized carve-out from "no changes outside
+  `apps/web`" — it is test tooling, not runtime code, and adds no schema or migration.
+- **A10 — Baselines are PR artifacts, not committed.** Screenshot sets from §8.2 attach
+  to the PR (zip/linked folder) rather than entering git, following the `frames/`
+  gitignore precedent. The procedure (commit hash + fixture + 1440×900 + theme) makes
+  them regenerable, so losing the artifact is recoverable.
