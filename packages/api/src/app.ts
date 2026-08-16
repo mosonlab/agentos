@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  activateChainSuccessor,
   advanceTemplateTask,
   applyInboxDecision,
   CleanupStatus,
@@ -18,6 +19,7 @@ import {
   SessionEventSource,
   SessionExecutionStatus,
   TaskStatus,
+  gateQuestion,
   prisma,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
@@ -188,6 +190,12 @@ const taskInput = z.object({
   maxDurationMin: taskFields.maxDurationMin.default(120),
   stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
   maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
+  chainId: z.string().trim().min(1).max(100).optional(),
+  chainIndex: z.number().int().min(0).optional(),
+}).superRefine((value, context) => {
+  if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
+    context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
+  }
 });
 const taskPatch = z.object(taskFields).partial().extend({ status: z.nativeEnum(TaskStatus).optional() })
   .refine((value) => Object.keys(value).length > 0);
@@ -934,7 +942,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
     const task = await db.$transaction(async (tx) => {
-      const created = await tx.task.create({ data: { ...body, projectId } });
+      const created = await tx.task.create({
+        data: { ...withoutUndefined(body), projectId } as Prisma.TaskUncheckedCreateInput,
+      });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
       if (agent && repo && body.assigneeType === AssigneeType.AGENT) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
@@ -990,8 +1000,21 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
-    const task = await db.task.update({ where: { id: taskId }, data: withoutUndefined(body) as Prisma.TaskUncheckedUpdateInput });
-    if (body.status && body.status !== before.status) {
+    const advances = body.status === TaskStatus.DONE && (before.chainId || before.followUpTaskId);
+    const task = advances ? await db.$transaction(async (tx) => {
+      const updated = await tx.task.update({ where: { id: taskId }, data: withoutUndefined(body) as Prisma.TaskUncheckedUpdateInput });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
+      if (!before.templateId && before.approvalGate) {
+        await tx.inboxMessage.updateMany({
+          where: { gateTaskId: before.id, status: "OPEN" },
+          data: { status: "CLOSED" },
+        });
+      }
+      await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
+      return updated;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted })
+      : await db.task.update({ where: { id: taskId }, data: withoutUndefined(body) as Prisma.TaskUncheckedUpdateInput });
+    if (!advances && body.status && body.status !== before.status) {
       await db.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
     }
     return context.json(task);
@@ -1644,6 +1667,19 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             } });
           }
           await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now);
+        } else if (succeeded && run.task?.chainId) {
+          if (run.task.approvalGate) {
+            await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.REVIEW, failureReason: null } });
+            await gateQuestion(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null);
+          } else {
+            const completed = await tx.task.update({
+              where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: null },
+            });
+            await activateChainSuccessor(tx, completed, {
+              sourceRunId: run.id,
+              chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
+            }, now);
+          }
         } else {
           await tx.task.update({
             where: { id: run.taskId },
@@ -1660,7 +1696,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             taskId: run.taskId,
             actorType: "runner",
             actorId: body.runnerId,
-            body: succeeded && run.task?.templateId ? `Run ${run.runNumber} succeeded; template chain advanced`
+            body: succeeded && (run.task?.templateId || run.task?.chainId) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
               : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
               : retryCreated ? `Run ${run.runNumber} failed; retry queued`
                 : `Run ${run.runNumber} failed; task moved to review`,
@@ -1709,7 +1745,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         });
       }
       return { taskId: run.taskId, succeeded, retryCreated, failureClass };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if (!result) {
       const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
       return waiting

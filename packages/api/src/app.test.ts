@@ -75,6 +75,66 @@ test("task status patch does not apply create defaults to other fields", async (
   });
 });
 
+test("task create requires chainId and chainIndex together", async () => {
+  await withTokens(async () => {
+    const response = await createApp({} as PrismaClient).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Broken chain", chainId: "chain-1" }),
+    });
+    assert.equal(response.status, 400);
+  });
+});
+
+test("operator DONE on a chain task closes its open gate and queues the CAS-claimed successor", async () => {
+  await withTokens(async () => {
+    let closed = false;
+    const successor = {
+      id: "task-2", projectId: "project-1", name: "Next", description: "next", chainId: "chain-1", chainIndex: 1,
+      updatedAt: new Date(), assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", templateId: null,
+      targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
+      assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
+      repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null,
+    };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, followUpTaskId: null, assigneeAgentId: "agent-1", repoId: "repo-1" };
+    const tx = {
+      task: {
+        update: async () => ({ ...before, status: "DONE" }),
+        findFirst: async () => successor,
+        updateMany: async () => ({ count: 1 }),
+        findUniqueOrThrow: async () => successor,
+      },
+      inboxMessage: { updateMany: async () => { closed = true; return { count: 1 }; } },
+      taskActivity: { create: async () => ({}) },
+      run: { create: async () => ({ id: "run-1" }) },
+    };
+    const database = {
+      task: { findUniqueOrThrow: async () => before },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(closed, true);
+  });
+});
+
+test("template approval gate still rejects operator DONE", async () => {
+  await withTokens(async () => {
+    const database = { task: { findUniqueOrThrow: async () => ({ templateId: "template-1", approvalGate: true }) } } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    assert.equal(response.status, 409);
+  });
+});
+
 test("fencing rejects an expired generation token", async () => {
   await withTokens(async () => {
     const currentToken = "2:run-1:current";
