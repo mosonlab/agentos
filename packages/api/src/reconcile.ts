@@ -1,9 +1,10 @@
-import { readdir, rm, stat } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
 import {
   CleanupStatus,
   FailureClass,
+  InboxStatus,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
@@ -13,66 +14,117 @@ import {
 import { makeDedupeKey } from "./execution.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
+const terminalStatuses = [RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.CANCELLED, RunStatus.LOST] as const;
+const archivedNoticePageSize = 100;
+export const archivedNoticeSweepIntervalMs = 60_000;
 
 export const noteArchivedQueuedRuns = async (
   db: PrismaClient,
   options: { agentId?: string } = {},
 ): Promise<number> => {
-  const stalled = await db.run.findMany({
-    where: {
-      status: RunStatus.QUEUED,
-      taskId: { not: null },
-      agent: { archivedAt: { not: null } },
-      ...(options.agentId ? { agentId: options.agentId } : {}),
-    },
-    select: {
-      id: true,
-      taskId: true,
-      runNumber: true,
-      agent: { select: { name: true, archivedAt: true } },
-    },
-  });
-  const rows = stalled.flatMap((run) => run.taskId && run.agent.archivedAt ? [{
-    id: `archived-skip:${run.id}:${run.agent.archivedAt.toISOString()}`,
-    taskId: run.taskId,
-    actorType: "control-plane",
-    body: `Assignee ${run.agent.name} is archived; run ${run.runNumber} stays queued and is not claimed until the agent is unarchived`,
-  }] : []);
-  if (rows.length === 0) return 0;
-  return (await db.taskActivity.createMany({ data: rows, skipDuplicates: true })).count;
+  let cursor: string | undefined;
+  let inserted = 0;
+  do {
+    const stalled = await db.run.findMany({
+      where: {
+        status: RunStatus.QUEUED,
+        taskId: { not: null },
+        agent: { archivedAt: { not: null } },
+        ...(options.agentId ? { agentId: options.agentId } : {}),
+      },
+      select: {
+        id: true,
+        taskId: true,
+        runNumber: true,
+        agent: { select: { name: true, archivedAt: true } },
+      },
+      orderBy: { id: "asc" },
+      take: archivedNoticePageSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    const rows = stalled.flatMap((run) => run.taskId && run.agent.archivedAt ? [{
+      id: `archived-skip:${run.id}:${run.agent.archivedAt.toISOString()}`,
+      taskId: run.taskId,
+      actorType: "control-plane",
+      body: `Assignee ${run.agent.name} is archived; run ${run.runNumber} stays queued and is not claimed until the agent is unarchived`,
+    }] : []);
+    if (rows.length > 0) {
+      inserted += (await db.taskActivity.createMany({ data: rows, skipDuplicates: true })).count;
+    }
+    if (stalled.length < archivedNoticePageSize) break;
+    cursor = stalled.at(-1)?.id;
+  } while (cursor);
+  return inserted;
+};
+
+export const createArchivedRunNoticeScheduler = (
+  db: PrismaClient,
+  intervalMs = archivedNoticeSweepIntervalMs,
+): ((now?: Date) => Promise<number>) => {
+  let nextSweepAt = Number.NEGATIVE_INFINITY;
+  let inFlight: Promise<number> | null = null;
+  return async (now = new Date()) => {
+    if (inFlight) return inFlight;
+    if (now.getTime() < nextSweepAt) return 0;
+    nextSweepAt = now.getTime() + intervalMs;
+    inFlight = noteArchivedQueuedRuns(db);
+    try {
+      return await inFlight;
+    } finally {
+      inFlight = null;
+    }
+  };
+};
+
+export const removeWorkspaceDirectory = async (path: string): Promise<void> => {
+  // force makes a concurrent runner cleanup between readdir and rm a harmless no-op.
+  await rm(path, { recursive: true, force: true });
 };
 
 export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()): Promise<number> => {
-  const candidates = await db.run.findMany({
-    where: {
-      status: { in: [...activeStatuses] },
-      OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
-    },
-    select: {
-      heartbeatAt: true,
-      id: true,
-      projectId: true,
-      taskId: true,
-      goalId: true,
-      agentId: true,
-      repoId: true,
-      runNumber: true,
-      runner: true,
-      model: true,
-      targetBranch: true,
-      promptHash: true,
-      maxDurationMin: true,
-      stallTimeoutMin: true,
-      maxRunsPerTask: true,
-    },
-  });
+  const [candidates, expiredInboxRuns] = await Promise.all([
+    db.run.findMany({
+      where: {
+        status: { in: [...activeStatuses] },
+        OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
+      },
+      select: {
+        heartbeatAt: true,
+        id: true,
+        projectId: true,
+        taskId: true,
+        goalId: true,
+        agentId: true,
+        repoId: true,
+        runNumber: true,
+        runner: true,
+        model: true,
+        targetBranch: true,
+        promptHash: true,
+        maxDurationMin: true,
+        stallTimeoutMin: true,
+        maxRunsPerTask: true,
+      },
+    }),
+    db.run.findMany({
+      where: {
+        status: RunStatus.WAITING_INBOX,
+        session: { is: { resumableUntil: { lt: now } } },
+      },
+      select: {
+        id: true,
+        taskId: true,
+        session: { select: { id: true, waitingOnMessageId: true } },
+      },
+    }),
+  ]);
   // An api restart outlives a lease (60s) but not a heartbeat cycle. A run whose
   // runner is still checking in is alive — it renews its own lease on the next
   // heartbeat — so only silence beyond the stall timeout counts as death.
   const orphans = candidates.filter((run) => !(
     run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
   ));
-  if (orphans.length === 0) return 0;
+  if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
   await db.$transaction(async (tx) => {
     for (const run of orphans) {
       // Losing a lease is an external failure: it buys an attempt, never spends one.
@@ -139,8 +191,48 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
         });
       }
     }
+    for (const run of expiredInboxRuns) {
+      const expired = await tx.run.updateMany({
+        where: { id: run.id, status: RunStatus.WAITING_INBOX },
+        data: {
+          status: RunStatus.TIMED_OUT,
+          endedAt: now,
+          retryable: false,
+          failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
+          failureReason: "Inbox response window expired",
+        },
+      });
+      if (expired.count !== 1) continue;
+      if (run.session) {
+        await tx.session.updateMany({
+          where: { id: run.session.id, executionStatus: SessionExecutionStatus.WAITING_INBOX },
+          data: {
+            executionStatus: SessionExecutionStatus.TIMED_OUT,
+            cleanupStatus: CleanupStatus.RETAINED,
+            endedAt: now,
+            cleanupEndedAt: now,
+            failureReason: "Inbox response window expired",
+          },
+        });
+      }
+      if (run.session?.waitingOnMessageId) {
+        await tx.inboxMessage.updateMany({
+          where: { id: run.session.waitingOnMessageId, status: InboxStatus.OPEN },
+          data: { status: InboxStatus.CLOSED },
+        });
+      }
+      if (run.taskId) {
+        await tx.task.update({
+          where: { id: run.taskId },
+          data: { status: TaskStatus.REVIEW, failureReason: "Inbox response window expired" },
+        });
+        await tx.taskActivity.create({
+          data: { taskId: run.taskId, actorType: "control-plane", body: "Inbox response window expired; run moved to review" },
+        });
+      }
+    }
   });
-  return orphans.length;
+  return orphans.length + expiredInboxRuns.length;
 };
 
 const insideRoot = (root: string, candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
@@ -177,9 +269,20 @@ export const reconcileWorkspaces = async (
   });
   const byPath = new Map(runs.flatMap((run) => run.workspacePath ? [[resolve(run.workspacePath), run] as const] : []));
   const byId = new Map(runs.map((run) => [run.id, run] as const));
+  const directoryNameSet = new Set(directoryNames);
+  const directoryPaths = new Set(directoryNames.map((name) => resolve(root, name)));
   const retained = runs
-    .filter((run) => run.workspaceRetained && run.workspacePath && run.endedAt != null)
-    .sort((a, b) => (b.endedAt?.getTime() ?? 0) - (a.endedAt?.getTime() ?? 0));
+    .filter((run) => (
+      run.workspaceRetained
+      && terminalStatuses.includes(run.status as typeof terminalStatuses[number])
+      && (directoryNameSet.has(run.id) || Boolean(run.workspacePath && directoryPaths.has(resolve(run.workspacePath))))
+    ))
+    .sort((a, b) => {
+      if (a.endedAt === null && b.endedAt === null) return a.id.localeCompare(b.id);
+      if (a.endedAt === null) return -1;
+      if (b.endedAt === null) return 1;
+      return b.endedAt.getTime() - a.endedAt.getTime();
+    });
   const allowedRetained = new Set(retained.slice(0, Math.max(0, failedRetentionCount)).map(({ id }) => id));
   let removed = 0;
   for (const entry of entries) {
@@ -192,8 +295,7 @@ export const reconcileWorkspaces = async (
     const active = matchingRuns.some((run) => workspaceKeepStatuses.includes(run.status as typeof workspaceKeepStatuses[number]));
     const keepFailed = matchingRuns.some((run) => run.workspaceRetained && allowedRetained.has(run.id));
     if (active || keepFailed) continue;
-    await stat(path);
-    await rm(path, { recursive: true, force: true });
+    await removeWorkspaceDirectory(path);
     const run = pathRun ?? idRun;
     if (run) {
       await db.run.update({ where: { id: run.id }, data: { workspaceRetained: false } });
@@ -214,5 +316,8 @@ export const reconcileAtStartup = async (
 ): Promise<{ runs: number; workspaces: number; archivedNotices: number }> => ({
   runs: await reconcileDatabaseRuns(db),
   workspaces: await reconcileWorkspaces(db, workspaceRoot, failedRetentionCount),
-  archivedNotices: await noteArchivedQueuedRuns(db),
+  archivedNotices: await noteArchivedQueuedRuns(db).catch((error: unknown) => {
+    console.error("Archived-run startup notice failed", error);
+    return 0;
+  }),
 });

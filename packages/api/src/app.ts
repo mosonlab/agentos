@@ -38,7 +38,7 @@ import {
   retryDelayMs,
   runnerFor,
 } from "./execution.js";
-import { noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
+import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
@@ -334,6 +334,7 @@ const goalInclude = {
 
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
+  const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
 
   app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token"] }));
   app.use("*", async (context, next) => {
@@ -1064,7 +1065,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           taskId,
           goalId: last.goalId,
           agentId: task.assigneeAgent.id,
-          repoId: last.repoId,
+          repoId: task.repoId,
           runNumber: last.runNumber + 1,
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
           runner: derived.runner,
@@ -1238,7 +1239,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const body = await readJson(context.req.raw, claimInput);
     const now = new Date();
     await reconcileDatabaseRuns(db, now);
-    await noteArchivedQueuedRuns(db).catch((error: unknown) => console.error("Archived-run notice failed", error));
+    await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
       const candidates = await tx.run.findMany({
         where: {

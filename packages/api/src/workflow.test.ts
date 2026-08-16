@@ -29,8 +29,12 @@ test("runnerFor preserves explicit preferences and every inherited model heurist
     [RunnerPreference.INHERIT, "openai-codex/gpt", RunnerKind.CODEX],
     [RunnerPreference.INHERIT, "deepseek-r1", RunnerKind.PI],
     [RunnerPreference.INHERIT, "agent-pi-v2", RunnerKind.PI],
+    [RunnerPreference.AUTO, "agent/pi-v2", RunnerKind.PI],
     [RunnerPreference.INHERIT, "OpenAI-CoDeX/GPT", RunnerKind.CODEX],
     [RunnerPreference.INHERIT, "claude-opus-5", RunnerKind.CLAUDE],
+    [RunnerPreference.INHERIT, "anthropic/claude-opus-5", RunnerKind.CLAUDE],
+    [RunnerPreference.AUTO, "openrouter/anthropic/claude-opus-5", RunnerKind.CLAUDE],
+    [RunnerPreference.AUTO, "apiary/model", RunnerKind.CLAUDE],
   ];
   for (const [preference, model, expected] of cases) {
     assert.equal(runnerFor(preference, model), expected, `${preference} / ${model}`);
@@ -248,7 +252,7 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
   );
   assert.ok(error instanceof ArchivedAssigneeError);
   assert.equal(isArchivedAssigneeError(error), true);
-  assert.equal(isArchivedAssigneeError({ name: "ArchivedAssigneeError" }), true);
+  assert.equal(isArchivedAssigneeError({ name: "ArchivedAssigneeError" }), false);
 });
 
 test("chain advancement parks an archived successor without throwing or enqueueing", async () => {

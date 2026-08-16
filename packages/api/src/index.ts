@@ -17,7 +17,7 @@ const reconciliation = await reconcileAtStartup(
   process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
   Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
 );
-console.log(`Startup reconciliation: ${reconciliation.runs} orphan runs, ${reconciliation.workspaces} workspaces cleaned, ${reconciliation.archivedNotices} archived-run notices`);
+console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.workspaces} workspaces cleaned, ${reconciliation.archivedNotices} archived-run notices`);
 
 const port = Number.parseInt(process.env.API_PORT ?? "3000", 10);
 const hostname = process.env.API_HOST ?? "0.0.0.0";

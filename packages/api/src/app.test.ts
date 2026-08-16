@@ -120,8 +120,11 @@ test("only environment failures are external, so agent failures still spend budg
   assert.equal(externalFailure({ succeeded: false, failureClass: "TASK_FAILED" }), false);
 });
 
-test("an external failure raises the run ceiling instead of spending an attempt", async () => {
-  await withTokens(async () => {
+test("an archived assignee's automatic retry is queued, audited, and does not spend an external-failure attempt", async () => {
+  const previousRoot = process.env.RUNNER_WORKSPACE_ROOT;
+  process.env.RUNNER_WORKSPACE_ROOT = `/tmp/agentos-missing-${Date.now()}`;
+  try {
+    await withTokens(async () => {
     let closed: Record<string, unknown> | undefined;
     let retry: Record<string, unknown> | undefined;
     const run = {
@@ -174,7 +177,11 @@ test("an external failure raises the run ceiling instead of spending an attempt"
     } as unknown as PrismaClient;
     assert.equal(await noteArchivedQueuedRuns(auditDb), 1);
     assert.match(String(notices[0]?.body), /Archived Retry Agent.*run 4/);
-  });
+    });
+  } finally {
+    if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
+    else process.env.RUNNER_WORKSPACE_ROOT = previousRoot;
+  }
 });
 
 test("startup reconciliation spares a run whose runner is still heartbeating", async () => {
@@ -188,7 +195,9 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
   const lost: string[] = [];
   const database = {
     run: {
-      findMany: async () => candidates,
+      findMany: async ({ where }: { where: { status: RunStatus | { in: RunStatus[] } } }) => (
+        typeof where.status === "object" ? candidates : []
+      ),
       updateMany: async ({ where }: { where: { id: string } }) => { lost.push(where.id); return { count: 1 }; },
       create: async () => ({}),
     },
@@ -226,7 +235,7 @@ const retryRequest = async (
     taskId: "task-1",
     goalId: "goal-1",
     agentId: "old-agent",
-    repoId: "repo-1",
+    repoId: "repo-previous",
     runNumber: 1,
     status: "FAILED",
     runner: RunnerKind.CLAUDE,
@@ -245,6 +254,7 @@ const retryRequest = async (
           id: "task-1",
           name: "Retry me",
           description: "Use current config",
+          repoId: "repo-current",
           assigneeAgent,
           templateStep,
           runs: [last],
@@ -278,6 +288,7 @@ test("operator retry re-derives runner, model, promptHash and current agent id",
     });
     assert.equal(response.status, 201);
     assert.equal(created?.agentId, "current-agent");
+    assert.equal(created?.repoId, "repo-current");
     assert.equal(created?.runner, RunnerKind.PI);
     assert.equal(created?.model, "deepseek-current");
     assert.notEqual(created?.promptHash, last.promptHash);
@@ -299,6 +310,7 @@ test("operator retry with unchanged agent preserves the previously derived confi
     assert.equal(response.status, 201);
     assert.deepEqual({
       agentId: created?.agentId,
+      repoId: created?.repoId,
       runner: created?.runner,
       model: created?.model,
       branch: created?.branch,
@@ -309,6 +321,7 @@ test("operator retry with unchanged agent preserves the previously derived confi
       promptHash: created?.promptHash,
     }, {
       agentId: "old-agent",
+      repoId: "repo-current",
       runner: RunnerKind.CLAUDE,
       model: "old-model",
       branch: "feature/retry",
@@ -591,6 +604,33 @@ test("claim query filters archived agents before take so active work cannot star
     assert.equal(response.status, 200);
     assert.deepEqual(claimWhere?.agent, { archivedAt: null });
     assert.equal(claimedId, "active");
+  });
+});
+
+test("claim polling throttles the archived-run audit sweep per API process", async () => {
+  await withTokens(async () => {
+    let auditQueries = 0;
+    const database = {
+      run: {
+        findMany: async ({ where }: { where: { status: RunStatus | { in: RunStatus[] } } }) => {
+          if (where.status === RunStatus.QUEUED) auditQueries += 1;
+          return [];
+        },
+      },
+      taskActivity: { createMany: async () => ({ count: 0 }) },
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        run: { findMany: async () => [] },
+      }),
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const request = () => app.request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: "runner-1", leaseSeconds: 60 }),
+    });
+    assert.equal((await request()).status, 204);
+    assert.equal((await request()).status, 204);
+    assert.equal(auditQueries, 1);
   });
 });
 

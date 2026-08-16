@@ -25,7 +25,7 @@ export const runnerFor = (preference: RunnerPreference, model: string): RunnerKi
   if (preference === RunnerPreference.PI) return RunnerKind.PI;
   const normalized = model.toLowerCase();
   if (normalized.includes("codex")) return RunnerKind.CODEX;
-  if (normalized.includes("deepseek") || normalized.includes("pi")) return RunnerKind.PI;
+  if (normalized.includes("deepseek") || normalized.split(/[\/:_-]+/u).includes("pi")) return RunnerKind.PI;
   return RunnerKind.CLAUDE;
 };
 
@@ -57,7 +57,7 @@ export class ArchivedAssigneeError extends Error {
 }
 
 export const isArchivedAssigneeError = (error: unknown): error is ArchivedAssigneeError =>
-  typeof error === "object" && error !== null && "name" in error && error.name === "ArchivedAssigneeError";
+  error instanceof Error && error.name === "ArchivedAssigneeError";
 
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
   const task = await tx.task.findUniqueOrThrow({
