@@ -464,7 +464,15 @@ export const Modal = ({ title, onClose, children, footer }: {
 }): ReactNode => (
   <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
     <DialogContent className="max-h-[86vh] w-[min(560px,100%)] max-w-none gap-0 overflow-y-auto rounded-[12px] border-border bg-card p-[22px] font-mono text-card-foreground shadow-[0_30px_90px_var(--modal-shadow)] sm:rounded-[12px]">
-      <DialogHeader><DialogTitle className={CARD_TITLE}>{title}</DialogTitle></DialogHeader>
+      {/* `font-bold leading-none` restores two properties W13 handed to the
+          utilities. `h1,h2,h3,h4 { font-weight: 700 }` was unlayered, so it beat
+          DialogTitle's `font-semibold`; in `@layer base` it loses, and the title
+          drops to 600. And tailwind-merge treats a font-size utility as
+          conflicting with `leading-*` — Tailwind v3 sized text set both — so
+          CARD_TITLE's `text-[13.5px]` deletes the primitive's `leading-none`
+          and the title grows from 13.5px to 20.25px. Measured on the New
+          Project and New Secret dialogs. */}
+      <DialogHeader><DialogTitle className={cn(CARD_TITLE, "font-bold leading-none")}>{title}</DialogTitle></DialogHeader>
       <div className={STACK}>{children}</div>
       {footer === undefined ? null : <DialogFooter className={cn(ROW, "mt-[18px] justify-end")}>{footer}</DialogFooter>}
     </DialogContent>
