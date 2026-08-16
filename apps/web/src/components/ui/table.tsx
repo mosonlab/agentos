@@ -37,7 +37,13 @@ const TableBody = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <tbody
     ref={ref}
-    className={cn("[&_tr:last-child]:border-0 [&_tr:last-child>td]:border-b-0", className)}
+    className={cn(
+      // `.table tbody tr:hover` was tbody-scoped, so the hover belongs here and
+      // not on TableRow — TableHeader renders a TableRow too, and header rows
+      // never took the row-hover background.
+      "[&_tr:last-child]:border-0 [&_tr:last-child>td]:border-b-0 [&_tr]:hover:bg-[color:var(--row-hover)]",
+      className
+    )}
     {...props}
   />
 ))
@@ -65,7 +71,7 @@ const TableRow = React.forwardRef<
   <tr
     ref={ref}
     className={cn(
-      "transition-colors hover:bg-[color:var(--row-hover)] data-[state=selected]:bg-muted",
+      "transition-colors data-[state=selected]:bg-muted",
       className
     )}
     {...props}
