@@ -28,6 +28,7 @@ import {
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
+import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
@@ -42,12 +43,16 @@ import {
   retryDelayMs,
   runnerFor,
 } from "./execution.js";
-import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
+import { createArchivedRunNoticeScheduler, defaultWorkspaceRoot, noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
 import { validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables } from "./hooks.js";
+import { filesRootGrantKey, getFileStore } from "./files/config.js";
+import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
+import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
+import { DirectoryNotEmptyError, InvalidPathError, IsADirectoryError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -128,7 +133,13 @@ const mcpConnectionInput = z.object({
   credentialSecretId: id.nullable().default(null),
 });
 const filesystemGrantFields = z.object({
-  folderPath: z.string().trim().min(1).max(4096),
+  // "" is the sentinel for "the whole Files Root" (schema.prisma), so validation has to run
+  // on the pre-trim value: a trailing `.trim()` before `.refine()` turns " " into "" and
+  // hands a typo the entire root. Trimming still happens, but only for a real path.
+  folderPath: z.string().max(4096).refine(
+    (value) => (value.trim() === "" ? value === "" : isCanonicalRelPath(value.trim())),
+    'folderPath must be "" (the whole Files Root) or a normalized Files-Root-relative POSIX path',
+  ).transform((value) => value.trim()),
   canRead: z.boolean().default(false),
   canWrite: z.boolean().default(false),
   canDelete: z.boolean().default(false),
@@ -334,6 +345,69 @@ const inboxReplyInput = z.object({
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
 
+const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
+class PayloadTooLargeError extends Error {}
+
+const readBoundedBody = async (request: Request, limit: number): Promise<Buffer> => {
+  const length = request.headers.get("Content-Length");
+  if (length !== null && Number(length) > limit) throw new PayloadTooLargeError();
+  const reader = request.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel("File upload exceeds limit");
+        throw new PayloadTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+};
+
+const fileErrorResponse = (context: Context, error: unknown): Response | undefined => {
+  if (error instanceof PayloadTooLargeError) return context.json({ error: "File exceeds 25 MB upload limit" }, 413);
+  if (error instanceof SymlinkError || error instanceof NotADirectoryError || error instanceof InvalidPathError) {
+    return context.json({ error: error.message }, 400);
+  }
+  if (error instanceof NotFoundError) return context.json({ error: error.message }, 404);
+  // 409, not 400: the request is well formed and the conflict is in the state of the
+  // target, so the client may retry it once that state changes.
+  if (error instanceof DirectoryNotEmptyError || error instanceof IsADirectoryError) {
+    return context.json({ error: error.message }, 409);
+  }
+  return undefined;
+};
+
+const deleteRecursively = async (store: FileStore, path: string): Promise<void> => {
+  const stat = await store.stat(path);
+  if (!stat) throw new NotFoundError(`Path not found: ${path}`);
+  if (stat.kind === "dir") {
+    // entries(), not list(): list() hides symlinks, so they survived the walk, the final
+    // rmdir failed ENOTEMPTY, and the tree was left half-destroyed and undeletable.
+    for (const child of await store.entries(path)) {
+      if (child.kind === "dir") await deleteRecursively(store, child.path);
+      else await store.delete(child.path);
+    }
+  }
+  await store.delete(path);
+};
+
+const SESSION_READ_LIMIT = 5 * 1024 * 1024;
+const SESSION_BASE64_BODY_LIMIT = 34 * 1024 * 1024;
+const sessionWriteInput = z.object({
+  path: z.string(),
+  content: z.string(),
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+});
+
 const withoutUndefined = (value: object): Record<string, unknown> => Object.fromEntries(
   Object.entries(value).filter(([, item]) => item !== undefined),
 );
@@ -425,6 +499,75 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
         return context.json({ error: "Webhook instantiation is busy; retry later" }, 503);
       }
+      throw error;
+    }
+  });
+
+  app.get("/files", async (context) => {
+    try {
+      return context.json(await (await getFileStore()).list(context.req.query("dir") ?? ""));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.get("/files/content", async (context) => {
+    const path = context.req.query("path") ?? "";
+    try {
+      const content = await (await getFileStore()).read(path);
+      return context.body(new Uint8Array(content), 200, {
+        "Content-Type": getMimeType(path) ?? "application/octet-stream",
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.split("/").at(-1) ?? "file")}`,
+      });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.put("/files/content", async (context) => {
+    try {
+      const content = await readBoundedBody(context.req.raw, FILE_WRITE_LIMIT);
+      return context.json(await (await getFileStore()).write(context.req.query("path") ?? "", content));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.post("/files/mkdir", async (context) => {
+    try {
+      const { path } = await readJson(context.req.raw, z.object({ path: z.string() }));
+      await (await getFileStore()).mkdir(path);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.post("/files/move", async (context) => {
+    try {
+      const { from, to } = await readJson(context.req.raw, z.object({ from: z.string(), to: z.string() }));
+      await (await getFileStore()).move(from, to);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.delete("/files", async (context) => {
+    try {
+      const store = await getFileStore();
+      const path = context.req.query("path") ?? "";
+      if (context.req.query("recursive") === "true") await deleteRecursively(store, path);
+      else await store.delete(path);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
       throw error;
     }
   });
@@ -617,9 +760,37 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.get("/agents/:agentId/filesystem-grants", async (context) => context.json(await db.filesystemGrant.findMany({
     where: { agentId: id.parse(context.req.param("agentId")) }, orderBy: { folderPath: "asc" },
   })));
+  /**
+   * Two spellings of one physical folder must not become two grants. On a case- and
+   * normalization-insensitive volume `protected` and `Protected` are the same directory,
+   * so a read-only grant on one plus a writable grant on the other is read-write on that
+   * directory -- and the console renders the two rows identically, so nobody sees it.
+   */
+  const aliasingGrant = async (agentId: string, folderPath: string, exclude?: string): Promise<string | null> => {
+    const key = await filesRootGrantKey(normalizeRelPath(folderPath));
+    if (key === null) return null;
+    const existing = await db.filesystemGrant.findMany({ where: { agentId } });
+    for (const grant of existing) {
+      if (grant.folderPath === folderPath || grant.id === exclude) continue;
+      let other: string | null;
+      try {
+        other = await filesRootGrantKey(normalizeRelPath(grant.folderPath));
+      } catch {
+        continue;
+      }
+      if (other !== null && other === key) return grant.folderPath;
+    }
+    return null;
+  };
+  const aliasConflict = (context: Context, folderPath: string, existing: string): Response => context.json({
+    error: `folderPath "${folderPath}" resolves to the same folder as the existing grant "${existing}"; edit that grant instead`,
+  }, 409);
+
   app.post("/agents/:agentId/filesystem-grants", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const body = await readJson(context.req.raw, filesystemGrantInput);
+    const aliased = await aliasingGrant(agentId, body.folderPath);
+    if (aliased !== null) return aliasConflict(context, body.folderPath, aliased);
     return context.json(await db.filesystemGrant.upsert({
       where: { agentId_folderPath: { agentId, folderPath: body.folderPath } },
       create: { agentId, ...body },
@@ -631,9 +802,14 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const grantId = id.parse(context.req.param("grantId"));
     const existing = await db.filesystemGrant.findFirst({ where: { id: grantId, agentId } });
     if (!existing) return context.json({ error: "Filesystem grant not found" }, 404);
+    const patch = await readJson(context.req.raw, filesystemGrantPatch);
+    if (patch.folderPath !== undefined) {
+      const aliased = await aliasingGrant(agentId, patch.folderPath, grantId);
+      if (aliased !== null) return aliasConflict(context, patch.folderPath, aliased);
+    }
     return context.json(await db.filesystemGrant.update({
       where: { id: grantId },
-      data: withoutUndefined(await readJson(context.req.raw, filesystemGrantPatch)) as Prisma.FilesystemGrantUncheckedUpdateInput,
+      data: withoutUndefined(patch) as Prisma.FilesystemGrantUncheckedUpdateInput,
     }));
   });
   app.delete("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
@@ -1717,6 +1893,90 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     }
   });
 
+  const sessionFileAccess = async (runId: string, operation: FileOperation, path: string): Promise<Response | null> => {
+    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+    if (!run) return new Response(JSON.stringify({ error: "Run not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+    const grants = await db.filesystemGrant.findMany({ where: { agentId: run.agentId } }) as GrantLike[];
+    const store = await getFileStore();
+    const admission = await grantAdmits(grants, operation, path, (value) => store.grantKey(value));
+    return admission.admitted
+      ? null
+      : new Response(JSON.stringify({ error: `Filesystem grant missing ${admission.missing}` }), { status: 403, headers: { "Content-Type": "application/json" } });
+  };
+
+  app.get("/session/runs/:runId/files", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const path = context.req.query("dir") ?? "";
+    try {
+      const denied = await sessionFileAccess(runId, "list", path);
+      if (denied) return denied;
+      return context.json(await (await getFileStore()).list(path));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
+  app.get("/session/runs/:runId/files/content", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const path = context.req.query("path") ?? "";
+    try {
+      const denied = await sessionFileAccess(runId, "read", path);
+      if (denied) return denied;
+      const store = await getFileStore();
+      const file = await store.stat(path);
+      if (!file) throw new NotFoundError(`Path not found: ${path}`);
+      if (file.size > SESSION_READ_LIMIT) return context.json({ error: "File is too large for a tool result (5 MB limit)" }, 413);
+      const bytes = await store.read(path);
+      try {
+        return context.json({ content: new TextDecoder("utf-8", { fatal: true }).decode(bytes), encoding: "utf8", stat: file });
+      } catch {
+        return context.json({ content: bytes.toString("base64"), encoding: "base64", stat: file });
+      }
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
+  app.put("/session/runs/:runId/files/content", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    try {
+      // Bounded read, not a Content-Length pre-check: a chunked body declares no length,
+      // so trusting the header let an agent materialize an unbounded body before the
+      // decoded-size check below ever ran. Same treatment as the operator upload route.
+      const body = sessionWriteInput.parse(JSON.parse(
+        (await readBoundedBody(context.req.raw, SESSION_BASE64_BODY_LIMIT)).toString(),
+      ));
+      const denied = await sessionFileAccess(runId, "write", body.path);
+      if (denied) return denied;
+      const bytes = Buffer.from(body.content, body.encoding === "base64" ? "base64" : "utf8");
+      if (bytes.byteLength > FILE_WRITE_LIMIT) return context.json({ error: "File exceeds 25 MB decoded write limit" }, 413);
+      return context.json(await (await getFileStore()).write(body.path, bytes));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
+  app.delete("/session/runs/:runId/files", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const path = context.req.query("path") ?? "";
+    try {
+      const denied = await sessionFileAccess(runId, "delete", path);
+      if (denied) return denied;
+      await (await getFileStore()).delete(path);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
   app.post("/runner/runs/:runId/complete", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, completionInput);
@@ -1930,7 +2190,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     }
     await reconcileWorkspaces(
       db,
-      process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
+      process.env.RUNNER_WORKSPACE_ROOT ?? defaultWorkspaceRoot(),
       Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     ).catch((error: unknown) => console.error("Post-run workspace reconciliation failed", error));
     return context.json(result);

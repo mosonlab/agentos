@@ -36,6 +36,38 @@ test("API routes reject requests without a principal token", async () => {
   });
 });
 
+test("filesystem grant CRUD accepts root/canonical paths and rejects non-canonical paths", async () => {
+  await withTokens(async () => {
+    const saved: string[] = [];
+    const database = {
+      filesystemGrant: {
+        upsert: async ({ create }: { create: { folderPath: string } }) => { saved.push(create.folderPath); return create; },
+        findFirst: async () => ({ id: "grant-1", agentId: "agent-1" }),
+        findMany: async () => saved.map((folderPath, index) => ({ id: `grant-${index}`, folderPath })),
+        update: async ({ data }: { data: { folderPath?: string } }) => { if (data.folderPath !== undefined) saved.push(data.folderPath); return data; },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const request = (folderPath: string) => app.request("/agents/agent-1/filesystem-grants", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ folderPath, canRead: true }),
+    });
+    assert.equal((await request("")).status, 201);
+    for (const path of ["/abs", "a/../b", "a/"]) assert.equal((await request(path)).status, 400, path);
+    assert.equal((await request("  _global  ")).status, 201);
+    // Whitespace-only must not trim down to the whole-Files-Root sentinel.
+    for (const blank of [" ", "   ", "\t\n "]) assert.equal((await request(blank)).status, 400, JSON.stringify(blank));
+    const patchResponse = await app.request("/agents/agent-1/filesystem-grants/grant-1", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ folderPath: "patched", canWrite: true }),
+    });
+    assert.equal(patchResponse.status, 200);
+    assert.deepEqual(saved, ["", "_global", "patched"]);
+  });
+});
+
 test("runner principal cannot cross into operator routes", async () => {
   await withTokens(async () => {
     const response = await createApp({} as PrismaClient).request("/projects", {

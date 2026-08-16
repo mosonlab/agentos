@@ -6,16 +6,24 @@ config({
   quiet: true,
 });
 
-const [{ prisma }, { app }, { reconcileAtStartup }, { startScheduler }] = await Promise.all([
+const [{ prisma }, { app }, { defaultWorkspaceRoot, reconcileAtStartup }, { startScheduler }, files] = await Promise.all([
   import("@agentos/db"),
   import("./app.js"),
   import("./reconcile.js"),
   import("./scheduler.js"),
+  import("./files/config.js"),
 ]);
+
+const filesRoot = files.resolveFilesRoot();
+const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? defaultWorkspaceRoot();
+
+await files.warnIfICloudPath(filesRoot);
+await files.assertFilesRootIsolated(filesRoot, workspaceRoot);
+files.warnIfRunnerSharesPrincipal(filesRoot);
 
 const reconciliation = await reconcileAtStartup(
   prisma,
-  process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
+  workspaceRoot,
   Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
 );
 console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.workspaces} workspaces cleaned, ${reconciliation.archivedNotices} archived-run notices`);

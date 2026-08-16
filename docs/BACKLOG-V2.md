@@ -94,6 +94,23 @@
 - [ ] 权限诚实化（2026-08-16 Leo 裁，替代做强制）：filesystem grants / Environment networking 等未执行项在 UI 标注 "not enforced"；文档给出两个真隔离方案——受限 macOS 用户运行 runner（推荐）与 `RUNNER_RUN_AS_PREFIX` 套 Docker；不做应用层沙箱
 - [ ] License：MIT；发布前定内部中文文档去留
 
+## Files / 平台缺陷（Files 批次评审产出，2026-08-16）
+
+- [ ] **`classifyError` 把任何含 ENOENT 的输出判成 `BINARY_NOT_FOUND`**（`packages/runner/src/adapters.ts:494-499`）。
+      它 grep 的是整个 stdout/stderr，所以任何正常做文件系统操作的 agent 都可能被误判为「CLI 没装」，
+      且 `retryable: false`、`operatorAction` 把人引向「装 CLI / 修 RUNNER_PATH」，真实故障被完全掩盖。
+      实战代价：Files 批次的第 ⑥ 步评审因此连挂五次，报告全丢。
+      修法：限制到 spawn 失败 / exit 127 / 结构化 preflight 证据。
+      **本批次刻意未改**——属于平台全局行为、与 Files 无关，改它会影响另外三条在飞的链。
+- [ ] **`LocalFileStore` 的 post-walk 目录替换（TOCTOU）需要 fd-relative 遍历才能真正关闭。**
+      纯 Node 没有 `openat`；关闭它需要一个 native helper（或 `node:fs` 提供 fd-relative 原语）。
+      缺口是真的、可复现的：`AGENTOS_RACE_PROBE=1 node --import tsx --test src/files/local.test.ts`
+      （探针 24，毫秒级命中）。当前的替代品是启动期检查靠山是否存在
+      （`assertFilesRootIsolated` / `warnIfRunnerSharesPrincipal`），不是修复。
+- [ ] **`FilesystemGrant` 的 whole-root 哨兵值 `""` 应改成显式的 `wholeRoot: boolean`。**
+      本次退档为 pre-trim 校验（空白输入不再静默变成整根授权），因为改 schema 需要同步动 `apps/web`
+      并加大与批次 2 的三方 schema 合并难度。哨兵值本身仍然是「一个笔误 = 全部权限」的形状。
+
 ## 远期
 
 - [ ] YAML Phase 2（diff/pull/push）、Phase 3（task/goal 创建）

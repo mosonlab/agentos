@@ -1,4 +1,5 @@
-import { hostname } from "node:os";
+import { hostname, homedir } from "node:os";
+import { join } from "node:path";
 
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 
@@ -31,7 +32,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
     path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
-    workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
+    workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     toolDeadlineMs: Number.parseInt(process.env.RUNNER_TOOL_DEADLINE_MS ?? "600000", 10),
     runAsPrefix: splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? ""),
