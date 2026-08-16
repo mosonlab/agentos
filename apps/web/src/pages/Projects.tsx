@@ -46,10 +46,17 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Field label="Name">
-        <Input type="text" className="shadow-none" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
+        {/* `h-auto` for the same reason the pair carries `shadow-none`: this form
+            rendered raw `<input>` elements before the batch, so it got the retired
+            sheet's `padding: 9px 11px` with no `h-9` to compete with it and stood at
+            38.75px. The primitive is 29.25px. `placeholder:text-foreground/50` is the
+            same story for colour: a raw element took Tailwind preflight's
+            `currentColor` at 50%, where the primitive pins `text-muted-foreground`.
+            Only these two call sites converted from a raw element. */}
+        <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
       </Field>
       <Field label="Slug" hint="Lower-case, dash separated. Used by the CLI and YAML sync.">
-        <Input type="text" className="shadow-none" value={effectiveSlug} onChange={(event) => setSlug(slugify(event.target.value))} placeholder="mmo-game" />
+        <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={effectiveSlug} onChange={(event) => setSlug(slugify(event.target.value))} placeholder="mmo-game" />
       </Field>
     </Modal>
   );
