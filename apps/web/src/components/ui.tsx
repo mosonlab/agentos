@@ -75,8 +75,30 @@ export const TABLE_TIGHT = "w-[1%] whitespace-nowrap";
 
 /** The sidebar entry is one shape hosted on three different elements, so it is a
  *  string rather than a component; `.active` is applied at the call site. */
-export const NAV_ITEM = "flex items-center gap-[11px] rounded-lg px-[10px] py-[8px] text-[13px] text-muted-foreground hover:bg-accent hover:text-secondary-foreground [&_svg]:flex-none [&_svg]:opacity-85";
-export const NAV_ITEM_ACTIVE = "bg-accent text-foreground";
+export const NAV_ITEM = "flex items-center gap-[11px] rounded-lg px-[10px] py-[8px] text-[13px] text-muted-foreground hover:bg-secondary hover:text-secondary-foreground [&_svg]:flex-none [&_svg]:opacity-85";
+/** The hover pair is restated, not redundant: `.navItem.active` sits *after*
+ *  `.navItem:hover` in the retired stylesheet and ties on specificity, so an
+ *  active item keeps its own background and colour while hovered. Utilities
+ *  have no such source-order guarantee — `hover:` beats the unprefixed form —
+ *  so the active state has to win the hover explicitly. */
+export const NAV_ITEM_ACTIVE = "bg-accent text-foreground hover:bg-accent hover:text-foreground";
+export const NAV_COUNT = "ml-auto";
+export const BADGE_COUNT = "inline-grid h-[18px] min-w-[20px] place-items-center rounded-full bg-destructive px-[6px] text-[11px] font-bold text-[color:var(--badge-foreground)]";
+
+/* The three narrow-viewport rules come from the retired stylesheet's single
+ * `@media (max-width: 900px)` block, which collapsed the sidebar into a wrapping
+ * row across the top and hid its footer. `flex-flow: wrap` is a shorthand, so it
+ * also reset `flex-direction` to `row` — hence `flex-row` alongside `flex-wrap`. */
+export const SHELL = "grid min-h-screen grid-cols-[214px_minmax(0,1fr)] [@media(max-width:900px)]:grid-cols-[1fr]";
+export const SIDEBAR = "sticky top-0 flex h-screen flex-col gap-[2px] overflow-y-auto border-r border-[color:var(--border-soft)] bg-sidebar px-[10px] pt-[10px] pb-[12px] [@media(max-width:900px)]:static [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:flex-row [@media(max-width:900px)]:flex-wrap";
+export const SIDEBAR_FOOT = "mt-auto grid gap-[2px] pt-[10px] [@media(max-width:900px)]:hidden";
+export const PROJECT_SWITCHER = "flex w-full items-center gap-[9px] rounded-lg border border-transparent bg-transparent p-[8px] mb-[10px] text-left hover:bg-secondary";
+export const PROJECT_MARK = "grid flex-none place-items-center size-[26px] rounded-[7px] bg-primary text-[12px] font-bold text-primary-foreground";
+export const PROJECT_NAME = "min-w-0 flex-1 overflow-hidden text-[13px] text-ellipsis whitespace-nowrap";
+export const CHEVRON = "flex-none text-[color:var(--faint)]";
+export const RUNNER_ROW = "flex items-center gap-[10px] px-[10px] py-[8px] text-[12.5px] text-secondary-foreground whitespace-nowrap";
+export const RUNNER_STATE = "ml-auto text-[11.5px] text-[color:var(--faint)]";
+export const CONTENT = "min-w-0 bg-popover";
 
 export const Page = ({ className, children }: { className?: string; children: ReactNode }): ReactNode => (
   <div className={cn(PAGE, className)}>{children}</div>
@@ -292,7 +314,7 @@ export const Check = ({ on, onChange, disabled, label }: {
 export const EmptyState = ({ children }: { children: ReactNode }): ReactNode =>
   <div className="px-[10px] py-[40px] text-center text-[12.5px] text-[color:var(--faint)]">{children}</div>;
 
-const NOTICE = "flex gap-[10px] rounded-lg border border-border bg-card px-[14px] py-[11px] text-[12px] leading-[1.6] text-muted-foreground [&_code]:text-inherit [&_code]:opacity-90";
+export const NOTICE = "flex gap-[10px] rounded-lg border border-border bg-card px-[14px] py-[11px] text-[12px] leading-[1.6] text-muted-foreground [&_code]:text-inherit [&_code]:opacity-90";
 const NOTICE_GAP = "border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] text-[color:var(--status-amber-fg)]";
 const NOTICE_ERROR = "border-[color:var(--destructive-line)] bg-[color:var(--destructive-bg)] text-[color:var(--destructive-fg)]";
 
@@ -306,7 +328,7 @@ export const GapNotice = ({ endpoint, what }: { endpoint: string; what: string }
   </div>
 );
 
-export const ErrorNotice = ({ message, onRetry }: { message: string; onRetry?: () => void }): ReactNode => (
+export const ErrorNotice = ({ message, onRetry }: { message: ReactNode; onRetry?: () => void }): ReactNode => (
   <div className={cn(NOTICE, NOTICE_ERROR)}>
     <span>{message}</span>
     {onRetry ? (

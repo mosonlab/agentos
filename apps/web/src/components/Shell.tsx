@@ -7,6 +7,11 @@ import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
 import type { Health, InboxMessage } from "../lib/types";
 import { useTheme, type ThemeMode } from "../lib/theme";
+import { cn } from "../lib/utils";
+import {
+  BADGE_COUNT, CHEVRON, CONTENT, COUNT, DOT, DOT_TONE, NAV_COUNT, NAV_ITEM, NAV_ITEM_ACTIVE,
+  PROJECT_MARK, PROJECT_NAME, PROJECT_SWITCHER, RUNNER_ROW, RUNNER_STATE, SHELL, SIDEBAR, SIDEBAR_FOOT,
+} from "./ui";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
   IconActivity, IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
@@ -28,20 +33,20 @@ const ProjectSwitcher = (): ReactNode => {
   const [open, setOpen] = useState(false);
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild><button type="button" className="projectSwitcher">
-        <span className="projectMark">{project ? initial(project.name) : "·"}</span>
-        <span className="projectName">{project?.name ?? (projects.length === 0 ? "No project" : "Select project")}</span>
-        <span className="chevron"><IconChevron open={open} /></span>
+      <DropdownMenuTrigger asChild><button type="button" className={PROJECT_SWITCHER}>
+        <span className={PROJECT_MARK}>{project ? initial(project.name) : "·"}</span>
+        <span className={PROJECT_NAME}>{project?.name ?? (projects.length === 0 ? "No project" : "Select project")}</span>
+        <span className={CHEVRON}><IconChevron open={open} /></span>
       </button></DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-[194px] border-sidebar-border bg-popover font-mono text-popover-foreground">
           {projects.map((candidate) => (
             <DropdownMenuItem key={candidate.id} className={candidate.id === project?.id ? "text-primary focus:bg-accent" : "focus:bg-accent"}
               onSelect={() => select(candidate.id)}>
-              <span className="projectMark" style={{ width: 18, height: 18, fontSize: 10 }}>{initial(candidate.name)}</span>
+              <span className={cn(PROJECT_MARK, "size-[18px] text-[10px]")}>{initial(candidate.name)}</span>
               {candidate.name}
             </DropdownMenuItem>
           ))}
-          {projects.length === 0 ? <span className="faint small block px-2 py-1.5">No projects yet</span> : null}
+          {projects.length === 0 ? <span className="block px-2 py-1.5 text-[11.5px] text-[color:var(--faint)]">No projects yet</span> : null}
           <DropdownMenuItem className="focus:bg-accent" onSelect={() => navigate("/projects")}>Manage projects…</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -62,31 +67,33 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
     item.match.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className={SHELL}>
+      <aside className={SIDEBAR}>
         <ProjectSwitcher />
         <nav className="grid gap-0.5">
           {NAV.map((item) => (
-            <Link key={item.to} to={item.to} className={active(item) ? "navItem active" : "navItem"}>
+            <Link key={item.to} to={item.to} className={cn(NAV_ITEM, active(item) && NAV_ITEM_ACTIVE)}>
               {item.icon}
               {item.label}
-              {item.to === "/inbox" && openCount > 0 ? <span className="count"><span className="badge">{openCount}</span></span> : null}
+              {item.to === "/inbox" && openCount > 0
+                ? <span className={cn(COUNT, NAV_COUNT)}><span className={BADGE_COUNT}>{openCount}</span></span>
+                : null}
             </Link>
           ))}
         </nav>
-        <div className="sidebarFoot">
-          <div className="runnerRow">
-            <span className={health?.status === "ok" ? "dot on" : health ? "dot off" : "dot"} />
+        <div className={SIDEBAR_FOOT}>
+          <div className={RUNNER_ROW}>
+            <span className={cn(DOT, health?.status === "ok" ? DOT_TONE.on : health ? DOT_TONE.off : undefined)} />
             Control plane
-            <span className="state">{health ? (health.status === "ok" ? "online" : "degraded") : "offline"}</span>
+            <span className={RUNNER_STATE}>{health ? (health.status === "ok" ? "online" : "degraded") : "offline"}</span>
           </div>
-          <Link to="/secrets" className="navItem"><IconActivity />Settings</Link>
-          <button type="button" className="navItem w-full border-0 bg-transparent text-left" aria-label={`Theme: ${mode}. Switch to ${nextMode[mode]}.`} onClick={() => setMode(nextMode[mode])}>
+          <Link to="/secrets" className={NAV_ITEM}><IconActivity />Settings</Link>
+          <button type="button" className={cn(NAV_ITEM, "w-full border-0 bg-transparent text-left")} aria-label={`Theme: ${mode}. Switch to ${nextMode[mode]}.`} onClick={() => setMode(nextMode[mode])}>
             <ThemeIcon size={15} strokeWidth={1.7} aria-hidden="true" />Theme: {mode}
           </button>
         </div>
       </aside>
-      <main className="content">{children}</main>
+      <main className={CONTENT}>{children}</main>
     </div>
   );
 };
