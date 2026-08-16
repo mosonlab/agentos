@@ -1,6 +1,7 @@
 # PLAN — Batch 0: Frontend base migration to Tailwind v4 + shadcn/ui
 
-Status: rev 1, for review · Author: plan agent · Date: 2026-08-16
+Status: rev 2, post-review revision · Author: plan agent · Date: 2026-08-16
+Review addressed: plan review (FAIL — 4 must-fix, 4 should-fix); see §6 revision record.
 Spec: `docs/specs/batch-0-frontend-base.md` rev 2 (commit 3be0eaa, PR #1).
 Sources honored: `docs/reference/danny-agentos-video/decisions.md` §3, `docs/BACKLOG-V2.md` Batch 0.
 This is an implementation plan only. No code changes ship with it.
@@ -11,7 +12,9 @@ Land the base bottom-up in strict dependency order, keeping the app green after 
 commit: (1) toolchain, (2) theme tokens with the dark palette copied verbatim and the old
 `--ink-*`-style variable names kept alive as aliases, (3) the guarded storage helper,
 (4) theme switching (inline pre-paint script + provider + sidebar toggle), (5) the
-acceptance fixture in `packages/db`, (6) the dark baseline capture at the merge-base,
+acceptance fixture in `packages/db` (including the dev repo, agent grants, and valid
+secret ciphertext the behavior matrix depends on), (6) the dark baseline capture at the
+merge-base,
 (7) shared chrome (`ui.tsx` → shadcn-backed primitives behind unchanged props, then
 `Shell.tsx`, `icons.tsx`), (8) the five full-tier pages one commit each, (9) minimal-tier
 verification pass, (10) legacy-CSS sweep that deletes the now-dead aliases, (11) the full
@@ -22,16 +25,16 @@ re-expressed on theme tokens in step 2, all 8 pages render correctly in both the
 that commit on ("mixed-base period does not ship", spec §6), and page migration becomes a
 pure markup refactor with zero visual risk budget.
 
-Recommended execution: **one serial pass for steps 1–7 and 9–11** (they share
-`styles.css`, `ui.tsx`, and config files), with **two safe parallel carve-outs**: the
-fixture (step 5, touches only `packages/db`) can run as a parallel sub-task any time, and
-the five full-tier pages (step 8) can split into two parallel lanes after step 7 lands,
-under a "no `styles.css` / no `components/` edits inside page lanes" rule. Details in §3.
+Execution is **one serial pass, steps 1–11 in order, single implementer** (rev 2: the
+previously suggested parallel lanes are withdrawn — current runner concurrency is low, so
+lanes buy no wall-clock and only add conflict surface). Commit boundaries are fixed:
+14 commits, listed per step in §2 and recapped in §3.
 
 ## 1. Ambiguities flagged (not decided silently)
 
-The spec leaves these open; the plan proposes a default for each but the review/Leo can
-override before implementation:
+The spec left these open; the plan proposed a default for each. **Rev 2: the review and
+Leo both accepted all six defaults (AMB-4 subject to the MF-4/SF-4 corrections now folded
+into step 5). They are settled — implementation must not reopen them.**
 
 - **AMB-1 — native `<select>` vs Radix Select.** Spec §5 lists "inputs/select/textarea →
   shadcn form controls", but §3.6 requires interactions to behave *exactly* as before.
@@ -66,8 +69,9 @@ override before implementation:
 ## 2. Numbered steps
 
 Conventions for every step: "Files" is exhaustive for intended edits; "Commit" is the
-suggested boundary (one PR, ~13 commits total, each leaving `npm run typecheck && npm run
-build` green); "Unlocks" names the spec acceptance items the step makes passable.
+fixed boundary (one PR, **14 commits total**, each leaving `npm run typecheck && npm run
+build` green); "Unlocks" names the spec acceptance items the step makes passable. Steps
+run serially in order; commits 1–14 map to steps as recapped in §3.
 
 ### Step 1 — Tailwind v4 + shadcn toolchain
 
@@ -75,10 +79,14 @@ build` green); "Unlocks" names the spec acceptance items the step makes passable
   `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react` (Radix primitives
   arrive per-component in step 7). No React/ReactDOM/Vite version changes.
 - `apps/web/vite.config.ts`: register `tailwindcss()` plugin; add `resolve.alias`
-  `@` → `./src`. Proxy/auth block untouched.
+  `@` → **absolute** `src` path — Vite does not resolve relative alias replacements, so
+  reuse the file's existing ESM-safe pattern (`vite.config.ts:6`):
+  `const sourceRoot = fileURLToPath(new URL("./src", import.meta.url))` and alias
+  `{ "@": sourceRoot }`. Proxy/auth block untouched. (MF-1)
 - `apps/web/tsconfig.app.json`: add `baseUrl`/`paths` for `@/*`.
-- `apps/web/components.json`: shadcn config (style "default", CSS variables mode, css
-  `src/styles.css`, alias `@/components`, `@/lib/utils`).
+- `apps/web/components.json`: shadcn config (style `new-york` — the `default` style is
+  deprecated in current shadcn (SF-3); CSS variables mode, css `src/styles.css`, alias
+  `@/components`, `@/lib/utils`).
 - `apps/web/src/lib/utils.ts`: `cn()`.
 - `apps/web/src/styles.css`: prepend `@import "tailwindcss";` only — no token work yet.
 - **Files:** `apps/web/package.json`, `package-lock.json`, `apps/web/vite.config.ts`,
@@ -93,8 +101,11 @@ build` green); "Unlocks" names the spec acceptance items the step makes passable
 
 ### Step 2 — Theme tokens: dark verbatim, light derived, legacy aliases
 
-- Rewrite `apps/web/src/styles.css` head into: Tailwind import → `@theme inline` block
-  wiring shadcn token names to CSS vars → `:root { …light values… }` +
+- Rewrite `apps/web/src/styles.css` head into: Tailwind import →
+  `@custom-variant dark (&:where(.dark, .dark *));` — required so Tailwind v4's `dark:`
+  variant keys off the `.dark` class instead of `prefers-color-scheme`; without it every
+  generated shadcn `dark:` utility follows the OS and manual override breaks (MF-2) →
+  `@theme inline` block wiring shadcn token names to CSS vars → `:root { …light values… }` +
   `.dark { …dark values… }` per the spec §4.2 table (dark hexes byte-copied from today's
   file; custom tokens `--border-soft`, `--faint`, `--primary-hover`, `--primary-soft`,
   `--destructive-fg/bg/line`, `--status-{green,amber,violet}-fg/bg/line`, `--link`,
@@ -109,13 +120,17 @@ build` green); "Unlocks" names the spec acceptance items the step makes passable
   then resolves through tokens in both themes without touching the 400 lines of legacy
   rules yet. Also tokenize the file's stray one-off hexes now (scrollbar `#3a3421`, hover
   `#3f381f`, code-bg `#15130c` → token-derived values in both themes).
-- Temporarily add `class="dark"` to `<html>` in `apps/web/index.html` (removed in step 4
-  when real switching lands) so this commit ships dark-only, exactly as today.
+- Add `class="dark"` to `<html>` in `apps/web/index.html`. **This static class is
+  permanent, not temporary**: it is the no-JS/no-`matchMedia` dark fallback required by
+  spec §6 (MF-3). Step 4's bootstrap script *removes* it when it affirmatively resolves
+  light; it never has to add it. This commit therefore ships dark-only, exactly as today.
 - **Files:** `apps/web/src/styles.css`, `apps/web/index.html`.
 - **Commit 2:** `feat(web): shadcn theme tokens — dark verbatim, light derived, legacy vars aliased`.
 - **Verification:** build green; dark app visually identical (spot-check /tasks,
   /inbox, a modal); toggling `.dark` off in devtools shows a complete light render with
-  zero dark islands on all 8 pages — this is the early §8.4 smoke test.
+  zero dark islands on all 8 pages — this is the early §8.4 smoke test. Confirm the
+  custom variant took: with OS set to light and `.dark` present on `<html>`, a `dark:`
+  utility must apply (proves `dark:` is class-driven, not media-driven — MF-2).
 - **Unlocks:** §6 "mixed-base period does not ship"; precondition for every §8.3/§8.4
   check; minimal-tier pages (§5) are effectively *done* after this step, pending step 9
   verification.
@@ -140,19 +155,27 @@ build` green); "Unlocks" names the spec acceptance items the step makes passable
 
 ### Step 4 — Theme switching: pre-paint script, provider, sidebar toggle
 
-- `apps/web/index.html`: remove step 2's hardcoded `class="dark"`; add a small inline
-  `<script>` before the module script: read `agentos.theme` inside try/catch (bare
-  `localStorage` here is fine and necessary — it runs before any module loads; document
-  the exemption in the helper and the PR for the §10.4 grep), validate against
-  `"light"|"dark"` (anything else = system), fall back to `prefers-color-scheme`, and on
-  *any* failure default to dark (spec §6 no-JS/no-matchMedia rule); set `.dark` on
-  `<html>`. Also make `<meta name="theme-color">` theme-aware (two tags with `media`
-  attributes) — the current hardcoded `#0d1117` is a leftover wart.
+- `apps/web/index.html` (MF-3 — dark-first bootstrap): the static `class="dark"` from
+  step 2 **stays on `<html>`**, making dark the resolved theme whenever JavaScript never
+  runs (spec §6 no-JS rule). Add a small inline `<script>` **in `<head>`, placed after the
+  static class is already in effect and before any stylesheet `<link>`/module script**, so
+  it executes before first paint — no flash in either direction. The script only ever
+  *removes* the class, and only when it affirmatively resolves light: read `agentos.theme`
+  inside try/catch (bare `localStorage` here is fine and necessary — it runs before any
+  module loads; document the exemption in the helper and the PR for the §10.4 grep),
+  validate against `"light"|"dark"` (anything else = system). Resolution: stored `dark` →
+  keep the class; stored `light` → remove it; system → consult
+  `window.matchMedia("(prefers-color-scheme: light)")` behind a
+  `typeof window.matchMedia === "function"` guard and its own try/catch, removing the
+  class only on an explicit light match; `matchMedia` missing or throwing, or any other
+  failure → do nothing, i.e. stay dark (spec §6 no-matchMedia rule).
 - New `apps/web/src/lib/theme.tsx`: `ThemeProvider` + `useTheme()` — state
   `"system" | "light" | "dark"`, persisted via `storage.set/remove` on `agentos.theme`
-  (remove = system, spec §4.3); keeps `<html>.dark` in sync; subscribes to
-  `matchMedia("(prefers-color-scheme: dark)").change` while in system mode; listens to
-  `window.storage` events so new-tab/other-tab changes apply live.
+  (remove = system, spec §4.3); keeps `<html>.dark` in sync; while in system mode
+  subscribes to `matchMedia("(prefers-color-scheme: dark)").change` **behind the same
+  `typeof window.matchMedia === "function"` guard, treating an unavailable `matchMedia`
+  as permanently dark** (MF-3); listens to `window.storage` events so new-tab/other-tab
+  changes apply live.
 - `apps/web/src/main.tsx`: mount `ThemeProvider`.
 - `apps/web/src/components/Shell.tsx`: add the toggle to `sidebarFoot` (AMB-3): one
   button cycling system → light → dark, showing the active mode (lucide
@@ -162,31 +185,62 @@ build` green); "Unlocks" names the spec acceptance items the step makes passable
   `apps/web/src/main.tsx`, `apps/web/src/components/Shell.tsx`.
 - **Commit 4:** `feat(web): theme switching — system default, manual override, no-flash boot`.
 - **Verification:** walk spec §3 scenarios 1–5 manually now (OS dark/light × no key /
-  forced key; reload for flash; second tab; OS live-switch via system settings). Build
-  green.
+  forced key; reload for flash; second tab; OS live-switch via system settings). Plus the
+  MF-3 fallbacks: devtools "disable JavaScript" + reload → dark render; override
+  `window.matchMedia` to `undefined` in a devtools snippet → app stays dark and does not
+  throw. The existing `<meta name="theme-color">` is left byte-identical (SF-1: out of
+  Batch 0 scope). Build green.
 - **Unlocks:** §3 scenarios 1–5; §8.4 "Switching" block; §8.5 Shell theme-toggle row;
   BACKLOG Batch 0 item 3.
 
-### Step 5 — Acceptance fixture (parallel-safe; only step touching `packages/db`)
+### Step 5 — Acceptance fixture (only step touching `packages/db`)
 
 - New `packages/db/prisma/acceptance-fixture.ts` + npm script `db:fixture` in
   `packages/db/package.json` (AMB-4). Idempotent: keyed on stable slugs
-  (`fixture-task-todo`, `fixture-goal`, …), delete-then-recreate so re-running resets.
+  (`fixture-task-todo`, `fixture-repo`, `fixture-goal`, …), delete-then-recreate so
+  re-running resets.
+- **Repo + grants first (MF-4)** — without these the §8.5 matrix cannot run, because
+  template instantiation and blank agent-task creation both hard-require a repo and a
+  per-agent `AgentRepoAccess` grant (`packages/api/src/templates.ts:23-44`,
+  `packages/api/src/app.ts:920-935`, and the required repo select in
+  `apps/web/src/pages/Tasks.tsx:123-129`):
+  - 1 deterministic dev `Repo` on the seeded project: name `fixture-repo`, stable
+    `remoteUrl`/`mountPath` values (no clone ever happens during the UI walk, so a
+    dummy-but-well-formed local remote is fine), `defaultBranch` `main`, no credential
+    secret.
+  - `AgentRepoAccess` grants on that repo for **every seeded agent** (the nine-step
+    template names them all as step assignees, and the grant check covers every template
+    agent), with a fixed `mountPath` and `permissions` value. This also gives the §8.5
+    Agents repo-access matrix row a real target repo to display.
+  - Fixture tasks reference `fixture-repo` so task-detail rows render with repo context.
 - Creates, against the seeded project (spec §8.1): 4 tasks, one per status, the DOING one
-  with a run, run events, and activity-log entries; 1 goal + progress-log entry; 1 secret
-  (value `fixture`); 1 MCP connection; 1 OPEN `MULTIPLE_CHOICE` inbox message (≥2
+  with a run, run events, and activity-log entries; 1 goal + progress-log entry; 1 secret;
+  1 MCP connection; 1 OPEN `MULTIPLE_CHOICE` inbox message (≥2
   choices) attached to a synthetic session + run in `WAITING_INBOX` so
   `applyInboxDecisionTx` accepts the answer with no live runner; 1 answered TEXT thread.
   Exact model/relation names come from `packages/db/prisma/schema.prisma` at
   implementation time; the constraint that matters is the `WAITING_INBOX` gate in
   `packages/db/src/workflow.ts`.
+- **Fixture secret is valid ciphertext (SF-4):** `Secret.encryptedValue` is decrypted
+  with AES-256-GCM at use time (`packages/api/src/secrets.ts:11-15`), so a literal
+  placeholder would poison later decryption. The fixture script encrypts the plaintext
+  `fixture` itself with `node:crypto`, reproducing the v1 wire format
+  (`"v1:" + iv + ":" + authTag + ":" + ciphertext`, all base64, 12-byte IV) against the
+  key in `AGENTOS_SECRET_ENCRYPTION_KEY`, and fails fast with a clear message when the
+  env var is missing/malformed. The ~10-line encrypt helper is duplicated inside the
+  fixture script — `packages/db` must not import from `packages/api` (no new dependency
+  edge); a comment cross-references `packages/api/src/secrets.ts` as the format owner.
 - Document invocation + reset in a header comment and one line in the PR description.
 - **Files:** `packages/db/prisma/acceptance-fixture.ts` (new),
   `packages/db/package.json`.
 - **Commit 5:** `feat(db): dev-only acceptance fixture for the Batch 0 walk`.
 - **Verification:** run seed → fixture → fixture again (idempotent); open every §8.3
   route against it; answer the inbox choice from the UI and see ANSWERED +
-  run leaving WAITING_INBOX.
+  run leaving WAITING_INBOX; instantiate the seeded template from the New Task panel
+  selecting `fixture-repo` (proves repo + grants satisfy the backend checks — MF-4);
+  one-off scratch check that `decryptSecret` from `packages/api/src/secrets.ts` round-trips
+  the stored `encryptedValue` back to `fixture` (SF-4; check is run manually, not
+  committed).
 - **Unlocks:** §8.1 entirely; makes §8.2 capture and §8.5 execution possible; A9.
 
 ### Step 6 — Dark-parity baseline capture (procedure execution, no repo files)
@@ -209,7 +263,8 @@ build` green); "Unlocks" names the spec acceptance items the step makes passable
 
 ### Step 7 — Shared chrome: `ui.tsx`, `Shell.tsx`, `icons.tsx`
 
-Everything in §5 depends on this; it stays serial and lands as three commits.
+Everything in §5 depends on this; it lands as exactly two commits (7c is folded into 7b
+by definition — SF-2).
 
 - **7a — install shadcn components + migrate `ui.tsx` (full).** `npx shadcn add` for the
   A5 set actually consumed: `button`, `card`, `badge`, `tabs`, `dialog`,
@@ -228,32 +283,36 @@ Everything in §5 depends on this; it stays serial and lands as three commits.
   `AgentChip` restyle on tokens (no shadcn counterpart). AMB-6: `GapNotice` copy
   untouched.
   **Files:** `apps/web/src/components/ui/*` (new), `apps/web/src/components/ui.tsx`,
-  `apps/web/package.json` + lockfile (Radix deps), possibly `apps/web/src/styles.css`
-  (retiring rules `ui.tsx` no longer needs — allowed here; forbidden inside step 8 lanes).
+  `apps/web/package.json` + lockfile (Radix deps), `apps/web/src/styles.css`
+  (retiring rules `ui.tsx` no longer needs — allowed here; forbidden inside step 8
+  page commits; a no-op on `styles.css` is fine if nothing retires).
   **Commit 6:** `feat(web): shadcn components installed; ui.tsx primitives re-backed, props unchanged`.
-- **7b — `Shell.tsx` (full).** Sidebar onto `--sidebar*` tokens via Tailwind utilities;
-  project switcher menu → DropdownMenu (or restyled custom — it must keep
-  `agentos.projectId` semantics either way); nav active/hover states on `--accent`;
-  unread badge preserved; runner row restyled; theme toggle from step 4 restyled if
-  needed. Keep the ≤900px collapse behavior.
-  **Files:** `apps/web/src/components/Shell.tsx`, maybe `apps/web/src/styles.css`.
+- **7b — `Shell.tsx` (full) + `icons.tsx` decision.** Sidebar onto `--sidebar*` tokens
+  via Tailwind utilities; project switcher menu → DropdownMenu (or restyled custom — it
+  must keep `agentos.projectId` semantics either way); nav active/hover states on
+  `--accent`; unread badge preserved; runner row restyled; theme toggle from step 4
+  restyled if needed. Keep the ≤900px collapse behavior. `icons.tsx`: keep hand-rolled
+  SVGs as-is (spec A7 default) — only swap icon-for-icon to lucide if indistinguishable
+  at current sizes, never mixed styles on one screen; the expected outcome is zero edits,
+  and any swap that does happen lands inside this commit.
+  **Files:** `apps/web/src/components/Shell.tsx`, `apps/web/src/styles.css` (same
+  retiring-rules allowance as 7a), `apps/web/src/components/icons.tsx` (expected
+  untouched).
   **Commit 7:** `feat(web): shell chrome migrated`.
-- **7c — `icons.tsx`.** Keep hand-rolled SVGs as-is (spec A7 default). Only swap
-  icon-for-icon to lucide if indistinguishable at current sizes; never mixed styles on
-  one screen. Likely a no-op commit folded into 7b.
 - **Verification (whole step):** build green; walk all 8 pages in both themes — every
   primitive renders in-palette (§3.7); open Dialog/DropdownMenu and confirm palette +
   click-outside; §8.5 Shell rows (project switcher persistence, nav/badge) pass.
 - **Unlocks:** §5 shared-chrome checkboxes; §3.7; §8.5 Shell rows; precondition for
   step 8.
 
-### Step 8 — Full-tier pages (parallelizable, two lanes)
+### Step 8 — Full-tier pages (serial, one commit per page, in the order below)
 
 Ground rules for every page commit: markup moves to Tailwind utilities + step 7
 components where 1:1 (per AMB-1 resolution for selects); bespoke patterns (kanban board,
 event log, metric grid, kv grid, code blocks) become custom classes/utilities on tokens;
-**no edits to `styles.css`, `components/`, or `lib/` inside page commits** — needed
-shared changes go through a rebase point between lanes or wait for step 10. Zero API,
+**no edits to `styles.css`, `components/`, or `lib/` inside page commits** — a needed
+shared change is made as its own preceding commit amending the owning step's area, or
+waits for step 10. Zero API,
 route, or copy changes; verification for each page = its §8.5 rows in dark, plus a light
 render pass.
 
@@ -269,7 +328,6 @@ render pass.
 - **8e — `Secrets.tsx`**: table + pills + create/edit-rotate (blank value = keep)/delete
   modals; values stay write-only. **Commit 12.** Unlocks §8.5 Secrets rows (3).
 - **Files:** exactly one page file per commit.
-- Lane split (if parallelized): lane A = 8a+8b (Tasks domain), lane B = 8c+8d+8e.
 
 ### Step 9 — Minimal tier + `App.tsx` sweep
 
@@ -278,8 +336,10 @@ render pass.
   adjusting the *legacy CSS layer*, not the page files. Walk their §8.5 rows (project
   CRUD/YAML, inbox choice-answer + reply, connections list).
 - `apps/web/src/App.tsx`: connection banners and any inline styles onto tokens.
-- **Files:** `apps/web/src/App.tsx`, possibly `apps/web/src/styles.css`; ideally not the
-  three page files.
+- **Files:** `apps/web/src/App.tsx`, `apps/web/src/styles.css` (legacy-layer fixes only;
+  a no-op is fine). The three minimal-tier page files are **not** edited in this step —
+  if a residue genuinely cannot be fixed from the legacy CSS layer, that is a
+  stop-and-flag, not a silent page edit (spec A4).
 - **Commit 13:** `feat(web): App banners on tokens; minimal-tier verified`.
 - **Verification:** three pages + banners in both themes; §8.5 *(minimal)* rows pass;
   reviewer check §10.5 (minimal diffs) holds by construction.
@@ -326,23 +386,29 @@ Execution procedure for the whole §8 battery (this is where the §8.5 matrix ru
 - **Commit:** fixes only, plus the PR-description checklist/artifacts.
 - **Unlocks:** closes §7, §8.3, §8.4, §8.5, §10.
 
-## 3. Parallelization recommendation
+## 3. Execution order and commit map (serial, single implementer)
 
-Safe split, in order of value:
+Rev 2 withdraws the rev 1 parallel-lane recommendation: platform runner concurrency is
+currently low, so lanes buy no wall-clock and only add conflict surface. Execution is
+**strictly serial, steps 1 → 11 in numbered order**, one implementer, one PR. Total code
+volume is ~3,000 lines of TSX + 459 lines of CSS.
 
-1. **Fixture lane (step 5)** — fully independent (`packages/db` only). Can start
-   immediately, in parallel with steps 1–4. Zero file overlap.
-2. **Page lanes (steps 8a–8e)** — after step 7 merges, lane A (Tasks, TaskDetail) and
-   lane B (Agents, Goals, Secrets) touch disjoint single files under the "no shared-file
-   edits" rule above; conflicts are structurally impossible. Worth doing: these five
-   commits are the bulk of the mechanical work (~1,470 lines of page code).
-3. Everything else stays **serial**: steps 1–4 form a strict dependency chain on
-   `styles.css`/config; step 7 rewires the module every page imports; steps 9–11 are
-   whole-app passes that need all lanes merged.
+Fixed commit map (14 commits):
 
-If sub-agents are unavailable or Leo prefers simplicity, a single serial pass is entirely
-reasonable — total code volume is ~3,000 lines of TSX + 459 lines of CSS; the parallel
-split saves wall-clock, not risk.
+| Commit | Step | Summary |
+|---|---|---|
+| 1 | 1 | Tailwind v4 toolchain + shadcn scaffolding |
+| 2 | 2 | Theme tokens, dark verbatim, aliases, static `class="dark"` |
+| 3 | 3 | Guarded storage helper |
+| 4 | 4 | Theme switching (bootstrap, provider, toggle) |
+| 5 | 5 | Acceptance fixture (repo + grants + records + real ciphertext) |
+| — | 6 | Baseline capture — artifact only, no commit |
+| 6 | 7a | shadcn components + `ui.tsx` |
+| 7 | 7b | `Shell.tsx` (+ `icons.tsx` decision, expected no-op) |
+| 8–12 | 8a–8e | One page each: Tasks, TaskDetail, Agents, Goals, Secrets |
+| 13 | 9 | App banners on tokens; minimal-tier verified |
+| 14 | 10 | Legacy CSS sweep |
+| — | 11 | Acceptance run — fixes only, each amending the owning step's area |
 
 ## 4. Coverage map (spec requirement → plan step)
 
@@ -365,10 +431,56 @@ split saves wall-clock, not risk.
 | §8.4 light + switching | 2 (smoke), 11.3–11.4 |
 | §9 rollback (single PR, revert-clean) | plan-wide: one PR, no schema/API changes anywhere |
 | §10 reviewer procedure | artifacts + checklists produced in 6, 11 |
-| A1–A10 | A1→§7 usage throughout; A2→2; A3→4/AMB-3; A4→9; A5→7a; A6→2; A7→7c; A8→3; A9→5; A10→6 |
+| A1–A10 | A1→§7 usage throughout; A2→2; A3→4/AMB-3; A4→9; A5→7a; A6→2; A7→7b; A8→3; A9→5; A10→6 |
 
 ## 5. Review-loop note
 
-A review pass follows this plan; rev 2 will address its findings must-fix/should-fix
-individually. The six AMB items in §1 are the places where a reviewer ruling changes the
-plan's shape; everything else should only need local edits.
+The review pass completed (verdict FAIL — 4 must-fix, 4 should-fix) and this rev 2
+addresses every finding; see §6. All six AMB defaults were upheld by the review and by
+Leo, so they are closed.
+
+## 6. 修订记录 (rev 2 revision record)
+
+Must-fix — all four implemented in the plan:
+
+- **MF-1 (Vite alias must be absolute).** Step 1 now specifies `@` →
+  `fileURLToPath(new URL("./src", import.meta.url))`, reusing the existing ESM-safe
+  pattern already in `apps/web/vite.config.ts:6`.
+- **MF-2 (class-driven dark variant).** Step 2's CSS head now begins with
+  `@custom-variant dark (&:where(.dark, .dark *));` immediately after the Tailwind
+  import, with a step 2 verification that `dark:` utilities key off the class, not the
+  OS.
+- **MF-3 (no-JS/no-matchMedia dark fallback).** Steps 2 and 4 reworked: the static
+  `class="dark"` on `<html>` is now permanent (no-JS resolves dark); the inline bootstrap
+  runs in `<head>` before any stylesheet/module and only *removes* the class when it
+  affirmatively resolves light; both the bootstrap and `theme.tsx` guard
+  `window.matchMedia` and stay dark when it is unavailable. Step 4 verification adds
+  JS-disabled and matchMedia-removed checks.
+- **MF-4 (fixture repo + grants).** Step 5 now creates a deterministic `fixture-repo`
+  Repo on the seeded project plus `AgentRepoAccess` grants for every seeded agent, and
+  points fixture tasks at it; verification includes instantiating the seeded template
+  through the UI. This makes template instantiation, blank agent-task creation, and the
+  §8.5 Agents repo-access row executable.
+
+Should-fix — all four adopted:
+
+- **SF-1 (theme-color out of scope).** Adopted → the two media-qualified
+  `<meta name="theme-color">` tags are dropped from step 4; the existing tag stays
+  byte-identical (noted for Batch 1 alongside the theme system, where it can follow the
+  manual override correctly).
+- **SF-2 (commit/file boundaries inconsistent).** Adopted → commit count fixed at 14 with
+  an explicit commit map in §3; 7c folded into 7b by definition; every
+  "possibly/maybe/ideally" in the step 7a/7b/9 file lists replaced with definite
+  boundaries (explicit no-op allowances instead of hedges).
+- **SF-3 (deprecated `default` style).** Adopted → `components.json` now specifies
+  `new-york`.
+- **SF-4 (fixture secret must be valid ciphertext).** Adopted → step 5 requires real
+  AES-256-GCM ciphertext in the v1 wire format against `AGENTOS_SECRET_ENCRYPTION_KEY`,
+  produced by a small `node:crypto` helper duplicated inside the fixture script so
+  `packages/db` gains no dependency on `packages/api`; round-trip decryption added to
+  step 5 verification.
+
+Consequential edits forced by the fixes (nothing else changed): §0 approach summary and
+§3 rewritten for serial single-lane execution with the fixed commit map (task directive +
+SF-2); step 5 title lost its "parallel-safe" framing; step 8 heading became "serial";
+§1 preamble marks all six AMB defaults as settled; coverage-map A7 pointer 7c → 7b.
