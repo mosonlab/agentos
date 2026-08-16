@@ -1,6 +1,12 @@
 import { type ReactNode, useState } from "react";
 
-import { useDismiss } from "../lib/hooks";
+import { Badge } from "./ui/badge";
+import { Card as ShadCard } from "./ui/card";
+import { Checkbox } from "./ui/checkbox";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
+import { Switch } from "./ui/switch";
+import { Tabs as TabsRoot, TabsList, TabsTrigger } from "./ui/tabs";
 import { titleCase } from "../lib/format";
 import type { Agent, GoalStatus, InboxStatus, RunStatus, TaskStatus } from "../lib/types";
 import { IconChevron, IconDots, IconRobot, IconUser } from "./icons";
@@ -8,7 +14,7 @@ import { IconChevron, IconDots, IconRobot, IconUser } from "./icons";
 export type PillTone = "green" | "amber" | "violet" | "red" | "grey" | "accent";
 
 export const Pill = ({ tone, children }: { tone: PillTone; children: ReactNode }): ReactNode => (
-  <span className={`pill ${tone}`}>{children}</span>
+  <Badge variant="outline" className={`pill ${tone}`}>{children}</Badge>
 );
 
 /** Status semantics follow ui-notes §0: green = succeeded, amber = a human or a
@@ -49,7 +55,7 @@ export const Card = ({ title, extra, children, flush }: {
   children: ReactNode;
   flush?: boolean;
 }): ReactNode => (
-  <section className={flush ? "card flush" : "card"}>
+  <ShadCard className={flush ? "card flush" : "card"}>
     {title !== undefined && (
       <div className="cardTitle">
         {title}
@@ -58,7 +64,7 @@ export const Card = ({ title, extra, children, flush }: {
       </div>
     )}
     {children}
-  </section>
+  </ShadCard>
 );
 
 export const KeyValue = ({ items, columns }: {
@@ -85,13 +91,15 @@ export const Segmented = <T extends string>({ options, value, onChange, accent }
   onChange: (value: T) => void;
   accent?: boolean;
 }): ReactNode => (
-  <div className={accent ? "segmented accent" : "segmented"}>
+  <TabsRoot value={value} onValueChange={(next) => onChange(next as T)} className={accent ? "segmented accent" : "segmented"}>
+    <TabsList>
     {options.map((option) => (
-      <button key={option.value} type="button" className={option.value === value ? "on" : ""} onClick={() => onChange(option.value)}>
+      <TabsTrigger key={option.value} value={option.value} className={option.value === value ? "on" : ""}>
         {option.label}
-      </button>
+      </TabsTrigger>
     ))}
-  </div>
+    </TabsList>
+  </TabsRoot>
 );
 
 export const Tabs = <T extends string>({ options, value, onChange }: {
@@ -99,13 +107,15 @@ export const Tabs = <T extends string>({ options, value, onChange }: {
   value: T;
   onChange: (value: T) => void;
 }): ReactNode => (
-  <div className="tabs">
+  <TabsRoot value={value} onValueChange={(next) => onChange(next as T)} className="tabs">
+    <TabsList>
     {options.map((option) => (
-      <button key={option.value} type="button" className={option.value === value ? "on" : ""} onClick={() => onChange(option.value)}>
+      <TabsTrigger key={option.value} value={option.value} className={option.value === value ? "on" : ""}>
         {option.label}
-      </button>
+      </TabsTrigger>
     ))}
-  </div>
+    </TabsList>
+  </TabsRoot>
 );
 
 export const Toggle = ({ on, onChange, disabled, label }: {
@@ -114,14 +124,12 @@ export const Toggle = ({ on, onChange, disabled, label }: {
   disabled?: boolean;
   label: string;
 }): ReactNode => (
-  <button
-    type="button"
-    role="switch"
-    aria-checked={on}
+  <Switch
+    checked={on}
     aria-label={label}
-    className={on ? "toggle on" : "toggle"}
+    className={`${on ? "toggle on" : "toggle"} [&>span]:hidden`}
     disabled={disabled === true || onChange === undefined}
-    onClick={() => onChange?.(!on)}
+    {...(onChange === undefined ? {} : { onCheckedChange: onChange })}
   />
 );
 
@@ -131,17 +139,13 @@ export const Check = ({ on, onChange, disabled, label }: {
   disabled?: boolean;
   label: string;
 }): ReactNode => (
-  <button
-    type="button"
-    role="checkbox"
-    aria-checked={on}
+  <Checkbox
+    checked={on}
     aria-label={label}
     className={on ? "check on" : "check"}
     disabled={disabled === true || onChange === undefined}
-    onClick={() => onChange?.(!on)}
-  >
-    {on ? <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M3 8.4 6.4 11.6 13 4.8" /></svg> : null}
-  </button>
+    onCheckedChange={(checked) => onChange?.(checked === true)}
+  />
 );
 
 export const EmptyState = ({ children }: { children: ReactNode }): ReactNode => <div className="empty">{children}</div>;
@@ -179,22 +183,19 @@ export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }):
 };
 
 export const RowMenu = ({ items }: { items: Array<{ label: string; danger?: boolean; onSelect: () => void }> }): ReactNode => {
-  const [open, setOpen] = useState(false);
-  useDismiss(() => setOpen(false), open);
   return (
-    <span className="menuWrap" onClick={(event) => event.stopPropagation()}>
-      <button type="button" className="iconBtn" aria-label="More actions" onClick={() => setOpen(!open)}><IconDots /></button>
-      {open ? (
-        <span className="menu">
-          {items.map((item) => (
-            <button key={item.label} type="button" className={item.danger === true ? "danger" : ""}
-              onClick={() => { setOpen(false); item.onSelect(); }}>
-              {item.label}
-            </button>
-          ))}
-        </span>
-      ) : null}
-    </span>
+    <DropdownMenu>
+      <span className="menuWrap" onClick={(event) => event.stopPropagation()}>
+        <DropdownMenuTrigger asChild><button type="button" className="iconBtn" aria-label="More actions"><IconDots /></button></DropdownMenuTrigger>
+      </span>
+      <DropdownMenuContent align="end" className="min-w-32 border-border bg-popover font-mono text-popover-foreground">
+        {items.map((item) => (
+          <DropdownMenuItem key={item.label} className={item.danger === true ? "text-destructive focus:bg-destructive/10 focus:text-destructive" : "focus:bg-accent focus:text-accent-foreground"} onSelect={item.onSelect}>
+            {item.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 };
 
@@ -251,13 +252,13 @@ export const Modal = ({ title, onClose, children, footer }: {
   children: ReactNode;
   footer?: ReactNode;
 }): ReactNode => (
-  <div className="modalScrim" onMouseDown={onClose}>
-    <div className="modal" onMouseDown={(event) => event.stopPropagation()}>
-      <div className="cardTitle">{title}<span className="spacer" /><button type="button" className="iconBtn" onClick={onClose} aria-label="Close">✕</button></div>
+  <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DialogContent className="modal border-border bg-card font-mono text-card-foreground">
+      <DialogHeader><DialogTitle className="cardTitle">{title}</DialogTitle></DialogHeader>
       <div className="stack">{children}</div>
-      {footer === undefined ? null : <div className="row" style={{ justifyContent: "flex-end", marginTop: 18 }}>{footer}</div>}
-    </div>
-  </div>
+      {footer === undefined ? null : <DialogFooter className="row mt-[18px] justify-end">{footer}</DialogFooter>}
+    </DialogContent>
+  </Dialog>
 );
 
 /** Full-bleed layer over the content area, matching `new-task-modal-blank-t0600.jpg`. */
