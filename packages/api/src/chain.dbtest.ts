@@ -275,3 +275,79 @@ test("operator DONE closes the gate card and a later approval is a duplicate no-
   }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   assert.equal(result.duplicate, true);
 });
+
+// A parked successor used to hang: the CAS matches TODO/DOING/REVIEW, so a
+// BACKLOG or archived row makes updateMany match zero rows while the re-read
+// returns the same row forever — inside the caller's transaction.
+//
+// The boundary these tests rely on is Prisma's interactive-transaction timeout,
+// not Promise.race: losing a race does not cancel a database operation, but an
+// expired transaction is closed server-side and the loop dies at its own next
+// statement with P2028. The node:test timeout is a second ceiling and the
+// disposable client's $disconnect releases the row locks on the failing path.
+const activateOnParkedSuccessor = async (predecessor: Parameters<typeof activateChainSuccessor>[1]) => {
+  const hangDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  try {
+    return await hangDb.$transaction(
+      (tx) => activateChainSuccessor(tx, predecessor, {}, new Date()),
+      { maxWait: 2_000, timeout: 5_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
+  } finally {
+    await hangDb.$disconnect();
+  }
+};
+
+const latestActivity = async (taskId: string): Promise<string> => (
+  await db.taskActivity.findFirstOrThrow({ where: { taskId }, orderBy: { createdAt: "desc" } })
+).body;
+
+test("a BACKLOG successor is parked, not spun on", { timeout: 20_000 }, async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: successor.id }, data: { status: "BACKLOG" } });
+  await activateOnParkedSuccessor(predecessor);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "BACKLOG");
+  assert.match(await latestActivity(successor.id), /parked in Backlog/);
+});
+
+test("an archived successor is parked, not spun on", { timeout: 20_000 }, async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: successor.id }, data: { archivedAt: new Date() } });
+  await activateOnParkedSuccessor(predecessor);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.match(await latestActivity(successor.id), /is archived and was not queued/);
+});
+
+test("a successor parked between the read and the claim is caught by the re-read guard", { timeout: 20_000 }, async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  const parkDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const hangDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let parked = false;
+  try {
+    await hangDb.$transaction(async (tx) => {
+      // Park the successor on the first CAS attempt, so the claim loses on
+      // updatedAt, the loop re-reads, and only the re-read guard can stop it.
+      const task = new Proxy(tx.task, { get(target, property, receiver) {
+        if (property !== "updateMany") return Reflect.get(target, property, receiver);
+        return async (args: Parameters<typeof tx.task.updateMany>[0]) => {
+          if (!parked) {
+            parked = true;
+            await parkDb.task.update({ where: { id: successor.id }, data: { status: "BACKLOG" } });
+          }
+          return tx.task.updateMany(args);
+        };
+      } });
+      const instrumentedTx = new Proxy(tx, { get(target, property, receiver) {
+        return property === "task" ? task : Reflect.get(target, property, receiver);
+      } });
+      return activateChainSuccessor(instrumentedTx as any, predecessor, {}, new Date());
+    }, { maxWait: 2_000, timeout: 5_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  } finally {
+    await parkDb.$disconnect();
+    await hangDb.$disconnect();
+  }
+  assert.equal(parked, true);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "BACKLOG");
+  assert.match(await latestActivity(successor.id), /parked in Backlog/);
+});

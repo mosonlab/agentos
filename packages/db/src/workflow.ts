@@ -178,6 +178,21 @@ const isUniqueConflict = (error: unknown): boolean => (
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
 );
 
+/**
+ * Why this successor must not be claimed, or null if it may be.
+ *
+ * The CAS below only matches TODO/DOING/REVIEW. A successor outside that set
+ * and not DONE — archived, or parked in BACKLOG — makes `updateMany` match zero
+ * rows forever while the re-read keeps returning the same row, so the loop spins
+ * inside the caller's transaction and run completion never returns. Returning
+ * early is what makes Backlog a place a chain step can sit.
+ */
+const parkedReason = (successor: { status: TaskStatus; archivedAt: Date | null }): string | null => {
+  if (successor.archivedAt !== null) return "successor is archived and was not queued";
+  if (successor.status === TaskStatus.BACKLOG) return "successor is parked in Backlog — use Start now";
+  return null;
+};
+
 /** Activates at most one chain/follow-up successor using the observed updatedAt as a CAS token. */
 export const activateChainSuccessor = async (
   tx: Tx,
@@ -228,6 +243,16 @@ export const activateChainSuccessor = async (
     return { nextTaskId: successor.id, gated: false };
   }
 
+  const parked = parkedReason(successor);
+  if (parked) {
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor ${task.name} completed; ${parked}`,
+    } });
+    return { nextTaskId: successor.id, gated: false };
+  }
+
   // A lost updatedAt CAS can mean either another advancer won or an unrelated
   // operator edit landed between the read and claim. Re-read and retry the
   // latter instead of silently stalling the chain. The status predicate is a
@@ -254,6 +279,19 @@ export const activateChainSuccessor = async (
         taskId: current.id,
         actorType: "control-plane",
         body: "Predecessor completed; successor already active",
+      } });
+      return { nextTaskId: current.id, gated: false };
+    }
+    // The same guard as above, because the operator can park the successor
+    // *between* the read and the claim. Without this branch the loop re-enters
+    // with a parked row, the CAS keeps matching zero rows, and it spins forever
+    // inside the caller's transaction.
+    const parkedNow = parkedReason(current);
+    if (parkedNow) {
+      await tx.taskActivity.create({ data: {
+        taskId: current.id,
+        actorType: "control-plane",
+        body: `Predecessor ${task.name} completed; ${parkedNow}`,
       } });
       return { nextTaskId: current.id, gated: false };
     }
