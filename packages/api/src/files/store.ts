@@ -28,4 +28,11 @@ export class SymlinkError extends InvalidPathError {}
 /** A regular file whose inode is also reachable from outside the Files Root. */
 export class HardLinkError extends InvalidPathError {}
 export class NotFoundError extends Error {}
+/**
+ * State conflicts, not path-validity problems, so deliberately outside the
+ * InvalidPathError family: a caller catching that family must not treat "the directory
+ * has contents" or "that is a directory" as "your path was malformed".
+ */
+export class DirectoryNotEmptyError extends Error {}
+export class IsADirectoryError extends Error {}
 export class NotADirectoryError extends InvalidPathError {}

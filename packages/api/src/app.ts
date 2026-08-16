@@ -44,7 +44,7 @@ import { instantiateTemplate } from "./templates.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
 import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
 import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
-import { InvalidPathError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
+import { DirectoryNotEmptyError, InvalidPathError, IsADirectoryError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -347,6 +347,11 @@ const fileErrorResponse = (context: Context, error: unknown): Response | undefin
     return context.json({ error: error.message }, 400);
   }
   if (error instanceof NotFoundError) return context.json({ error: error.message }, 404);
+  // 409, not 400: the request is well formed and the conflict is in the state of the
+  // target, so the client may retry it once that state changes.
+  if (error instanceof DirectoryNotEmptyError || error instanceof IsADirectoryError) {
+    return context.json({ error: error.message }, 409);
+  }
   return undefined;
 };
 

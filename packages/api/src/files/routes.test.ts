@@ -46,10 +46,20 @@ test("operator /files routes use a real filesystem", async (suite) => {
     assert.equal((await app.request("/files?path=archive%2Fhello.txt", { method: "DELETE", headers: auth })).status, 200);
   });
 
+  await suite.test("directory state conflicts are 409, not 400 or 500", async () => {
+    await app.request("/files/content?path=state%2Fa.txt", { method: "PUT", headers: auth, body: "a" });
+    // A non-empty directory and "that is a directory" are conflicts with the state of the
+    // target, not malformed requests: 400 would tell the client not to retry as-is.
+    assert.equal((await app.request("/files?path=state", { method: "DELETE", headers: auth })).status, 409);
+    assert.equal((await app.request("/files/content?path=state", { headers: auth })).status, 409);
+    assert.equal((await app.request("/files/content?path=state", { method: "PUT", headers: auth, body: "x" })).status, 409);
+    assert.equal((await app.request("/files?path=state&recursive=true", { method: "DELETE", headers: auth })).status, 200);
+  });
+
   await suite.test("recursive delete removes populated trees while plain delete errors", async () => {
     await app.request("/files/content?path=tree%2Fa%2Fb.txt", { method: "PUT", headers: auth, body: "b" });
     const plain = await app.request("/files?path=tree", { method: "DELETE", headers: auth });
-    assert.equal(plain.status >= 400, true);
+    assert.equal(plain.status, 409);
     const recursive = await app.request("/files?path=tree&recursive=true", { method: "DELETE", headers: auth });
     assert.equal(recursive.status, 200);
     await assert.rejects(stat(join(root, "tree")), { code: "ENOENT" });

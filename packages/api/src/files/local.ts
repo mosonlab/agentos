@@ -33,8 +33,10 @@ import { join, resolve, sep } from "node:path";
 import { filesystemKey, realpathNative } from "./alias.js";
 import { normalizeRelPath } from "./paths.js";
 import {
+  DirectoryNotEmptyError,
   HardLinkError,
   InvalidPathError,
+  IsADirectoryError,
   NotADirectoryError,
   NotFoundError,
   SymlinkError,
@@ -51,7 +53,8 @@ const mapPathError = (error: unknown, path: string): never => {
   if (codeOf(error) === "ELOOP") throw new SymlinkError(`Symlink refused: ${path}`);
   if (codeOf(error) === "ENOENT") throw new NotFoundError(`Path not found: ${path}`);
   if (codeOf(error) === "ENOTDIR") throw new NotADirectoryError(`Not a directory: ${path}`);
-  if (codeOf(error) === "ENOTEMPTY") throw new InvalidPathError(`Directory is not empty: ${path}`);
+  if (codeOf(error) === "ENOTEMPTY") throw new DirectoryNotEmptyError(`Directory is not empty: ${path}`);
+  if (codeOf(error) === "EISDIR") throw new IsADirectoryError(`Path is a directory: ${path}`);
   throw error;
 };
 
