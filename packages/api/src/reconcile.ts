@@ -130,13 +130,27 @@ export const reconcileWorkspaces = async (
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
     throw error;
   }
+  const workspaceKeepStatuses = [
+    RunStatus.CLAIMED,
+    RunStatus.PROVISIONING,
+    RunStatus.RUNNING,
+    RunStatus.WAITING_INBOX,
+    RunStatus.QUEUED,
+  ] as const;
+  const directoryNames = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
   const runs = await db.run.findMany({
-    where: { workspacePath: { not: null } },
+    where: {
+      OR: [
+        { workspacePath: { not: null } },
+        { id: { in: directoryNames } },
+      ],
+    },
     select: { id: true, workspacePath: true, status: true, workspaceRetained: true, endedAt: true },
   });
   const byPath = new Map(runs.flatMap((run) => run.workspacePath ? [[resolve(run.workspacePath), run] as const] : []));
+  const byId = new Map(runs.map((run) => [run.id, run] as const));
   const retained = runs
-    .filter((run) => run.workspaceRetained && run.workspacePath)
+    .filter((run) => run.workspaceRetained && run.workspacePath && run.endedAt != null)
     .sort((a, b) => (b.endedAt?.getTime() ?? 0) - (a.endedAt?.getTime() ?? 0));
   const allowedRetained = new Set(retained.slice(0, Math.max(0, failedRetentionCount)).map(({ id }) => id));
   let removed = 0;
@@ -144,12 +158,15 @@ export const reconcileWorkspaces = async (
     if (!entry.isDirectory()) continue;
     const path = resolve(root, entry.name);
     if (!insideRoot(root, path)) continue;
-    const run = byPath.get(path);
-    const active = run && activeStatuses.includes(run.status as typeof activeStatuses[number]);
-    const keepFailed = run?.workspaceRetained && allowedRetained.has(run.id);
+    const pathRun = byPath.get(path);
+    const idRun = byId.get(entry.name);
+    const matchingRuns = [pathRun, idRun].filter((run): run is NonNullable<typeof run> => run != null);
+    const active = matchingRuns.some((run) => workspaceKeepStatuses.includes(run.status as typeof workspaceKeepStatuses[number]));
+    const keepFailed = matchingRuns.some((run) => run.workspaceRetained && allowedRetained.has(run.id));
     if (active || keepFailed) continue;
     await stat(path);
     await rm(path, { recursive: true, force: true });
+    const run = pathRun ?? idRun;
     if (run) {
       await db.run.update({ where: { id: run.id }, data: { workspaceRetained: false } });
       await db.session.updateMany({

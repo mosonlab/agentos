@@ -59,7 +59,8 @@ tests use a real `mkdtemp` directory plus a mock `db`.
 
 ## Step 1 — Item 1: workspace GC keeps suspended and resume-pending runs
 
-**Files:** `packages/api/src/reconcile.ts`; new `packages/api/src/reconcile.test.ts`.
+**Files:** `packages/api/src/reconcile.ts`; new `packages/api/src/reconcile.test.ts`;
+this plan's revision record.
 **Commit:** `fix(api): workspace GC keeps WAITING_INBOX and resume-pending QUEUED workspaces`
 
 Changes in `reconcileWorkspaces` (`reconcile.ts:120-163`) only; `activeStatuses`
@@ -81,6 +82,17 @@ scenario.
    sort and `slice(0, failedRetentionCount)` (`reconcile.ts:141`). A
    WAITING_INBOX run (`endedAt = null`) no longer competes for — or is evicted
    by — the quota.
+3. The 2026-08-16 05:38 incident exposed a third form of the same Item 1 bug:
+   while the runner clones into `resolve(workspaceRoot, run.id)`, `workspacePath`
+   is still null until `/start` writes it (`app.ts:1344` at the plan baseline).
+   The old workspace query (`reconcile.ts:134`) therefore omitted the run, and
+   the path-only orphan decision (`reconcile.ts:147-152`) deleted the live clone.
+   Read directory names before querying and widen the query to include run ids
+   matching those names as well as rows with a non-null `workspacePath`; keep a
+   directory when either its resolved path or its name-as-run-id identifies a
+   run in the five workspace keep statuses. This protects CLAIMED and
+   PROVISIONING clone directories before their path is persisted, without a
+   column or migration.
 
 **Tests** (new `reconcile.test.ts`, `node:test`; real temp dir via
 `fs.mkdtemp`, mock `db` with `run.findMany`/`run.update`/`session.updateMany`):
@@ -92,6 +104,8 @@ scenario.
 - Run in SUCCEEDED/FAILED past quota → removed; `workspaceRetained` reset and
   session cleanup marked, as today (AC 4).
 - Directory with no matching run row → still removed (edge case preserved).
+- Directory named for a CLAIMED or PROVISIONING run whose `workspacePath` is
+  null → survives (the 2026-08-16 clone-window regression).
 - `reconcileDatabaseRuns` query shape: capture the `where.status.in` list from
   the mock and assert it is exactly `[CLAIMED, PROVISIONING, RUNNING]` (AC 5's
   no-regression guard); the existing heartbeat test at `app.test.ts:165-193`
@@ -854,3 +868,13 @@ claim, and visibility design as one reviewable commit — this renumbered UI to
 Step 7 and verification to Step 8 — and a new Ambiguity 7 was added to declare
 that a chain successor blocked by an archived agent parks in `REVIEW` rather
 than getting a new task status (a consequence of MF-2's no-rollback contract).
+
+### Implementation-time addendum — clone window GC incident
+
+At 2026-08-16 05:38, reconciliation triggered by one completed run removed a
+different run's in-progress clone before `/start` had persisted its
+`workspacePath`. Step 1 now also matches workspace directory names to run ids
+and retains CLAIMED/PROVISIONING (as well as the other keep statuses) even when
+`workspacePath` is null. The baseline sites were rechecked at
+`app.ts:1344` and `reconcile.ts:134,147-152`; this is the same spec Item 1
+defect and adds no migration.
