@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { FailureClass, RunnerKind, RunnerPreference, type Prisma } from "@agentos/db";
+import { FailureClass, type Prisma } from "@agentos/db";
+
+export { runnerFor } from "@agentos/db";
 
 export type ExitEvidence = {
   exitCode: number | null;
@@ -16,16 +18,6 @@ export const completionSucceeded = (evidence: ExitEvidence): boolean =>
   && !evidence.terminationReason
   && evidence.terminalEventSeen
   && evidence.terminalSuccess;
-
-export const runnerFor = (preference: RunnerPreference, model: string): RunnerKind => {
-  if (preference === RunnerPreference.CLAUDE) return RunnerKind.CLAUDE;
-  if (preference === RunnerPreference.CODEX) return RunnerKind.CODEX;
-  if (preference === RunnerPreference.PI) return RunnerKind.PI;
-  const normalized = model.toLowerCase();
-  if (normalized.includes("codex")) return RunnerKind.CODEX;
-  if (normalized.includes("deepseek") || normalized.includes("pi")) return RunnerKind.PI;
-  return RunnerKind.CLAUDE;
-};
 
 export const makeDedupeKey = (taskId: string, runNumber: number): string => `task:${taskId}:run:${runNumber}`;
 

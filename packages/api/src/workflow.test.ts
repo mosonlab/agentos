@@ -1,7 +1,101 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { advanceTemplateTask, applyInboxDecisionTx, AssigneeType, enqueueTaskRun, InboxKind, RunStatus, RunnerPreference } from "@agentos/db";
+import {
+  advanceTemplateTask,
+  applyInboxDecisionTx,
+  AssigneeType,
+  deriveRunConfig,
+  enqueueTaskRun,
+  InboxKind,
+  RunStatus,
+  runnerFor,
+  RunnerKind,
+  RunnerPreference,
+  type PrismaClient,
+} from "@agentos/db";
+
+import { createApp } from "./app.js";
+
+test("runnerFor preserves explicit preferences and every inherited model heuristic", () => {
+  const cases: [RunnerPreference, string, RunnerKind][] = [
+    [RunnerPreference.CLAUDE, "openai-codex", RunnerKind.CLAUDE],
+    [RunnerPreference.CODEX, "deepseek-r1", RunnerKind.CODEX],
+    [RunnerPreference.PI, "claude-opus-5", RunnerKind.PI],
+    [RunnerPreference.INHERIT, "openai-codex/gpt", RunnerKind.CODEX],
+    [RunnerPreference.INHERIT, "deepseek-r1", RunnerKind.PI],
+    [RunnerPreference.INHERIT, "agent-pi-v2", RunnerKind.PI],
+    [RunnerPreference.INHERIT, "OpenAI-CoDeX/GPT", RunnerKind.CODEX],
+    [RunnerPreference.INHERIT, "claude-opus-5", RunnerKind.CLAUDE],
+  ];
+  for (const [preference, model, expected] of cases) {
+    assert.equal(runnerFor(preference, model), expected, `${preference} / ${model}`);
+  }
+});
+
+test("deriveRunConfig preserves model, template override, and exact prompt hash", () => {
+  const agent = {
+    runnerPreference: RunnerPreference.PI,
+    model: "current-model",
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  };
+  const task = { name: "Task name", description: "Task description" };
+  assert.deepEqual(deriveRunConfig(agent, { runner: RunnerKind.CODEX }, task), {
+    runner: RunnerKind.CODEX,
+    model: "current-model",
+    promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
+  });
+});
+
+test("task creation keeps its runner, model, and promptHash output while derivation is shared", async () => {
+  const previousToken = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-workflow-test";
+  try {
+    let runData: Record<string, unknown> | undefined;
+    const agent = {
+      id: "agent-1",
+      model: "OpenAI-CoDeX/GPT",
+      runnerPreference: RunnerPreference.INHERIT,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    };
+    const database = {
+      agent: { findFirst: async () => agent },
+      repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
+      agentRepoAccess: { findFirst: async () => ({ id: "grant-1" }) },
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
+        taskActivity: { create: async () => ({ id: "activity-1" }) },
+        run: { create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; } },
+      }),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-workflow-test", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Task name",
+        description: "Task description",
+        repoId: "repo-1",
+        assigneeAgentId: "agent-1",
+      }),
+    });
+    assert.equal(response.status, 201);
+    assert.deepEqual({
+      runner: runData?.runner,
+      model: runData?.model,
+      promptHash: runData?.promptHash,
+    }, {
+      runner: RunnerKind.CODEX,
+      model: agent.model,
+      promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
+    });
+  } finally {
+    if (previousToken === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = previousToken;
+  }
+});
 
 test("a later chain step runs on the chain's shared branch so the chain lands in one PR", async () => {
   const queued: Record<string, unknown>[] = [];

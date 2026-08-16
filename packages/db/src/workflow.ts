@@ -19,7 +19,7 @@ type Tx = Prisma.TransactionClient;
 
 const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
 
-const chooseRunner = (preference: RunnerPreference, model: string): RunnerKind => {
+export const runnerFor = (preference: RunnerPreference, model: string): RunnerKind => {
   if (preference === RunnerPreference.CLAUDE) return RunnerKind.CLAUDE;
   if (preference === RunnerPreference.CODEX) return RunnerKind.CODEX;
   if (preference === RunnerPreference.PI) return RunnerKind.PI;
@@ -28,6 +28,26 @@ const chooseRunner = (preference: RunnerPreference, model: string): RunnerKind =
   if (normalized.includes("deepseek") || normalized.includes("pi")) return RunnerKind.PI;
   return RunnerKind.CLAUDE;
 };
+
+export const deriveRunConfig = (
+  agent: {
+    runnerPreference: RunnerPreference;
+    model: string;
+    foundationalPrompt: string;
+    rolePrompt: string;
+  },
+  templateStep: { runner: RunnerKind | null } | null,
+  task: { name: string; description: string },
+): { runner: RunnerKind; model: string; promptHash: string } => ({
+  runner: templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model),
+  model: agent.model,
+  promptHash: promptHash([
+    agent.foundationalPrompt,
+    agent.rolePrompt,
+    task.name,
+    task.description,
+  ]),
+});
 
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
   const task = await tx.task.findUniqueOrThrow({
@@ -44,7 +64,7 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   }
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
-  const runner = task.templateStep?.runner ?? chooseRunner(task.assigneeAgent.runnerPreference, task.assigneeAgent.model);
+  const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
   // Template steps after the first one inherit the chain's shared feature branch
   // so every step pushes to the same head and the chain lands in one PR; without
   // this the workspace falls back to a per-run branch and each step opens its own.
@@ -58,16 +78,11 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     repoId: task.repo.id,
     runNumber,
     dedupeKey: `task:${task.id}:run:${runNumber}`,
-    runner,
-    model: task.assigneeAgent.model,
+    runner: derived.runner,
+    model: derived.model,
     targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
     branch: prior?.branch ?? chainBranch,
-    promptHash: promptHash([
-      task.assigneeAgent.foundationalPrompt,
-      task.assigneeAgent.rolePrompt,
-      task.name,
-      task.description,
-    ]),
+    promptHash: derived.promptHash,
     maxDurationMin: task.maxDurationMin,
     stallTimeoutMin: task.stallTimeoutMin,
     maxRunsPerTask: task.maxSessionsPerTask,
