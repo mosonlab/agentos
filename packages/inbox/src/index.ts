@@ -94,10 +94,10 @@ const supervisor = new ConnectionSupervisor((callbacks: SocketCallbacks) => {
 const socket = supervisor.start();
 void deliverPending(prisma, sender).catch((error: unknown) => console.error("Initial Inbox outbox poll failed", error));
 
-const shutdown = async (signal: string): Promise<void> => {
+const shutdown = async (): Promise<void> => {
   clearInterval(deliveryTimer);
   supervisor.stop(socket);
   await prisma.$disconnect();
 };
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown());
+process.once("SIGTERM", () => void shutdown());
