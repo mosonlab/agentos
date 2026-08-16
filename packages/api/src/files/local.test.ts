@@ -1,0 +1,193 @@
+import assert from "node:assert/strict";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+import test from "node:test";
+
+import { createLocalFileStore } from "./local.js";
+import { InvalidPathError, NotFoundError, SymlinkError } from "./store.js";
+
+const withRoot = async (run: (root: string, outside: string) => Promise<void>): Promise<void> => {
+  const base = await mkdtemp(join(tmpdir(), "agentos-files-"));
+  const root = join(base, "root");
+  const outside = join(base, "outside");
+  await Promise.all([mkdir(root), mkdir(outside)]);
+  try {
+    await run(root, outside);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+};
+
+test("probe 1: plain and symlinked roots both support ordinary IO", async () => withRoot(async (root) => {
+  const plain = await createLocalFileStore(root);
+  await plain.write("plain.txt", Buffer.from("plain"));
+  assert.equal((await plain.read("plain.txt")).toString(), "plain");
+  const link = `${root}-link`;
+  await symlink(root, link, "dir");
+  const linked = await createLocalFileStore(link);
+  await linked.write("linked.txt", Buffer.from("linked"));
+  assert.equal((await linked.read("linked.txt")).toString(), "linked");
+  assert.deepEqual((await linked.list("")).map(({ path }) => path).sort(), ["linked.txt", "plain.txt"]);
+}));
+
+test("probe 2: read refuses a final symlink to an outside file", async () => withRoot(async (root, outside) => {
+  const secret = join(outside, "secret.txt");
+  await writeFile(secret, "SECRET");
+  await symlink(secret, join(root, "leak.txt"));
+  const store = await createLocalFileStore(root);
+  await assert.rejects(store.read("leak.txt"), SymlinkError);
+}));
+
+test("probe 3: write refuses a final symlink and preserves the outside file", async () => withRoot(async (root, outside) => {
+  const secret = join(outside, "secret.txt");
+  await writeFile(secret, "SECRET");
+  await symlink(secret, join(root, "leak.txt"));
+  const store = await createLocalFileStore(root);
+  await assert.rejects(store.write("leak.txt", Buffer.from("PWN")), SymlinkError);
+  assert.equal(await readFile(secret, "utf8"), "SECRET");
+}));
+
+test("probe 4: list omits directory symlinks and never exposes outside entries", async () => withRoot(async (root, outside) => {
+  await writeFile(join(outside, "SECRET"), "secret");
+  await writeFile(join(root, "visible.txt"), "ok");
+  await symlink(outside, join(root, "escape"), "dir");
+  const listed = await (await createLocalFileStore(root)).list("");
+  assert.deepEqual(listed.map(({ path }) => path), ["visible.txt"]);
+  assert.equal(listed.some(({ path }) => path.includes("SECRET")), false);
+}));
+
+test("probe 5: stat refuses a symlink instead of following its metadata", async () => withRoot(async (root, outside) => {
+  const target = join(outside, "large.txt");
+  await writeFile(target, "outside metadata");
+  await symlink(target, join(root, "link.txt"));
+  await assert.rejects((await createLocalFileStore(root)).stat("link.txt"), SymlinkError);
+}));
+
+test("probe 6: every operation refuses an intermediate directory symlink", async () => withRoot(async (root, outside) => {
+  await writeFile(join(outside, "file.txt"), "SECRET");
+  await symlink(outside, join(root, "link"), "dir");
+  const store = await createLocalFileStore(root);
+  await store.write("safe.txt", Buffer.from("safe"));
+  const attempts = [
+    () => store.read("link/file.txt"),
+    () => store.write("link/new.txt", Buffer.from("bad")),
+    () => store.list("link/sub"),
+    () => store.stat("link/file.txt"),
+    () => store.delete("link/file.txt"),
+    () => store.move("link/file.txt", "moved.txt"),
+    () => store.move("safe.txt", "link/moved.txt"),
+  ];
+  for (const attempt of attempts) await assert.rejects(attempt(), SymlinkError);
+}));
+
+test("probe 7: a multi-hop inside-to-inside-to-outside symlink is refused", async () => withRoot(async (root, outside) => {
+  await mkdir(join(root, "a"));
+  await writeFile(join(outside, "secret.txt"), "SECRET");
+  await symlink("../../outside", join(root, "a", "b"), "dir");
+  await assert.rejects((await createLocalFileStore(root)).read("a/b/secret.txt"), SymlinkError);
+}));
+
+test("probe 8: deleting a symlink removes only the link", async () => withRoot(async (root, outside) => {
+  const target = join(outside, "keep.txt");
+  await writeFile(target, "KEEP");
+  await symlink(target, join(root, "link.txt"));
+  await (await createLocalFileStore(root)).delete("link.txt");
+  assert.equal(await readFile(target, "utf8"), "KEEP");
+  await assert.rejects(lstat(join(root, "link.txt")), { code: "ENOENT" });
+}));
+
+test("probe 9: a deterministic final-component swap is caught by read open", async () => withRoot(async (root, outside) => {
+  const store = await createLocalFileStore(root);
+  await store.write("x.txt", Buffer.from("inside"));
+  assert.equal((await store.stat("x.txt"))?.kind, "file");
+  const secret = join(outside, "secret.txt");
+  await writeFile(secret, "SECRET");
+  await rm(join(root, "x.txt"));
+  await symlink(secret, join(root, "x.txt"));
+  await assert.rejects(store.read("x.txt"), SymlinkError);
+}));
+
+test("probe 10: pre-planted intermediate symlink is refused; post-walk swaps require OS isolation", async () => withRoot(async (root, outside) => {
+  // A post-walk intermediate swap cannot be closed in pure Node; deployment isolation covers it.
+  await symlink(outside, join(root, "planted"), "dir");
+  await assert.rejects((await createLocalFileStore(root)).read("planted/x"), SymlinkError);
+}));
+
+test("probe 11: write lazily creates mode-0750 parents but refuses a symlink parent", async () => withRoot(async (root, outside) => {
+  const store = await createLocalFileStore(root);
+  await store.write("x/y/z.txt", Buffer.from("ok"));
+  assert.equal((await lstat(join(root, "x"))).mode & 0o777, 0o750);
+  assert.equal((await lstat(join(root, "x", "y"))).mode & 0o777, 0o750);
+  await symlink(outside, join(root, "bad"), "dir");
+  await assert.rejects(store.write("bad/z.txt", Buffer.from("bad")), SymlinkError);
+}));
+
+test("probe 12: Windows drive, UNC, backslash, and traversal shapes are invalid", async () => withRoot(async (root) => {
+  const store = await createLocalFileStore(root);
+  for (const path of ["C:\\evil", "\\\\server\\share\\x", "a\\b", "..\\..\\x"]) {
+    await assert.rejects(store.read(path), InvalidPathError);
+  }
+}));
+
+test("probe 13: NUL is rejected before any filesystem syscall", async () => withRoot(async (root) => {
+  await assert.rejects((await createLocalFileStore(root)).read("a\0b"), InvalidPathError);
+}));
+
+test("probe 14: encoded traversal text is literal and once-decoded traversal is rejected", async () => withRoot(async (root, outside) => {
+  const store = await createLocalFileStore(root);
+  await store.write("%2e%2e%2f", Buffer.from("literal one"));
+  await store.write("%2E%2E", Buffer.from("literal two"));
+  await assert.rejects(store.write("../escape", Buffer.from("bad")), InvalidPathError);
+  assert.equal(await readFile(join(root, "%2e%2e%2f"), "utf8"), "literal one");
+  assert.deepEqual(await readdir(outside), []);
+}));
+
+test("probe 15: traversal, absolute paths, and outside-directory links touch no sentinel", async () => withRoot(async (root, outside) => {
+  const sentinel = join(outside, "outside.txt");
+  await writeFile(sentinel, "SAFE");
+  const store = await createLocalFileStore(root);
+  await assert.rejects(store.read("../outside.txt"), InvalidPathError);
+  await assert.rejects(store.write("../outside.txt", Buffer.from("bad")), InvalidPathError);
+  await assert.rejects(store.read("/etc/passwd"), InvalidPathError);
+  await symlink(outside, join(root, "ssh"), "dir");
+  await assert.rejects(store.read("ssh/outside.txt"), SymlinkError);
+  assert.equal(await readFile(sentinel, "utf8"), "SAFE");
+}));
+
+test("probe 16: paths beginning with the root string cannot escape", async () => withRoot(async (root) => {
+  const store = await createLocalFileStore(root);
+  await assert.rejects(store.read(`${root}-evil/x`), InvalidPathError);
+  await assert.rejects(store.read(`../${basename(root)}-evil/x`), InvalidPathError);
+}));
+
+test("probe 17: all seven FileStore methods round-trip within the root", async () => withRoot(async (root) => {
+  const store = await createLocalFileStore(root);
+  const written = await store.write("a/b.txt", Buffer.from("hello"));
+  assert.equal(written.path, "a/b.txt");
+  assert.equal((await store.list("a")).at(0)?.path, "a/b.txt");
+  assert.equal((await store.stat("a/b.txt"))?.kind, "file");
+  assert.equal((await store.stat("a"))?.kind, "dir");
+  assert.equal(await store.stat("missing"), null);
+  await store.mkdir("empty");
+  await store.move("a/b.txt", "moved/c.txt");
+  assert.equal((await store.read("moved/c.txt")).toString(), "hello");
+  await store.delete("moved/c.txt");
+  await store.delete("moved");
+  await store.write("nonempty/file", Buffer.from("x"));
+  await assert.rejects(store.delete("nonempty"));
+  await store.delete("empty");
+}));
+
+test("probe 18: missing directory lists as NotFound while a virgin root lists empty", async () => withRoot(async (root) => {
+  const store = await createLocalFileStore(root);
+  assert.deepEqual(await store.list(""), []);
+  await assert.rejects(store.list("missing"), NotFoundError);
+}));
+
+test("probe 19: traversal normalizing inside is accepted and traversal escaping is rejected", async () => withRoot(async (root) => {
+  const store = await createLocalFileStore(root);
+  await store.write("a/../b.txt", Buffer.from("inside"));
+  assert.equal(await readFile(join(root, "b.txt"), "utf8"), "inside");
+  await assert.rejects(store.write("a/../../b.txt", Buffer.from("outside")), InvalidPathError);
+}));
