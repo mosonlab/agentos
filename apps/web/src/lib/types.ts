@@ -135,18 +135,42 @@ export type Secret = {
 export type Session = {
   id: string;
   runId: string;
+  projectId: string;
   agentId: string;
+  taskId: string | null;
+  goalId: string | null;
   runner: RunnerKind;
   executionStatus: SessionExecutionStatus;
   cleanupStatus: string;
   providerConversationId: string | null;
   waitingOnMessageId: string | null;
   resumeAttempt: number;
+  requestedAt: string;
   startedAt: string | null;
   endedAt: string | null;
+  terminationReason: string | null;
   exitCode: number | null;
   costUsd: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+  totalTokens: number | null;
   failureReason: string | null;
+  /** Relations GET /sessions and GET /sessions/:id include; absent on the
+   *  session rows nested inside a Run. `run.repo` is a nullable relation, and
+   *  its remoteUrl is what makes the Branch field a link. */
+  agent?: { id: string; title: string } | null;
+  task?: { id: string; name: string } | null;
+  goal?: { id: string; title: string } | null;
+  run?: {
+    id: string;
+    runNumber: number;
+    model: string;
+    branch: string | null;
+    pullRequestUrl: string | null;
+    workspacePath: string | null;
+    repo?: { id: string; name: string; remoteUrl: string } | null;
+  } | null;
 };
 
 export type Run = {

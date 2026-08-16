@@ -11,12 +11,15 @@ import { GoalDetailPage, GoalsPage } from "./pages/Goals";
 import { InboxPage, InboxThreadPage } from "./pages/Inbox";
 import { ProjectDetailPage, ProjectsPage } from "./pages/Projects";
 import { SecretsPage } from "./pages/Secrets";
+import { SessionDetailPage, SessionsPage } from "./pages/Sessions";
 import { TasksPage } from "./pages/Tasks";
 import { TaskDetailPage } from "./pages/TaskDetail";
 
 const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) => ReactNode }> = [
   { pattern: "/tasks", render: () => <TasksPage /> },
   { pattern: "/tasks/:taskId", render: (params) => <TaskDetailPage taskId={params.taskId ?? ""} /> },
+  { pattern: "/sessions", render: () => <SessionsPage /> },
+  { pattern: "/sessions/:sessionId", render: (params) => <SessionDetailPage sessionId={params.sessionId ?? ""} /> },
   { pattern: "/agents", render: () => <AgentsPage /> },
   { pattern: "/agents/:agentId", render: (params) => <AgentDetailPage agentId={params.agentId ?? ""} /> },
   { pattern: "/inbox", render: () => <InboxPage /> },
