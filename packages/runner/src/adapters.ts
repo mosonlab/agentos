@@ -21,6 +21,16 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   "- task_output(kind, body): persist this step's deliverable as the task output. Later steps and the approval gate read it.",
   "- task_status(): read the current task and run status, budget, branch, and whether an output exists.",
   "- inbox_ask(body, choices?): ask the human. Suspends this session until they answer; you resume in place with the reply.",
+  "- files_list(dir): list one Files Root directory non-recursively. Empty dir means the root.",
+  "- files_read(path): read one file; binary content comes back with encoding base64.",
+  "- files_write(path, content, encoding?): write one file, creating parent directories as needed.",
+  "- files_delete(path): delete one file or empty directory.",
+  // The four files_* tools are advertised to every session and authorized server-side per
+  // request: without a matching FilesystemGrant they return 403. They are named here
+  // anyway, and unconditionally, because the manifest is the only place a session learns
+  // what exists -- discovering a capability by having a tool call fail is worse than
+  // seeing a tool that may be denied. See docs/specs/batch-files-paths.md.
+  "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
 ];
 
 export const buildPrompt = (claim: ClaimedTask): string => [

@@ -6,7 +6,12 @@ import { InvalidPathError } from "./store.js";
 export const normalizeRelPath = (input: string): string => {
   if (input.length > 4096) throw new InvalidPathError("Path exceeds 4096 characters");
   if (input.includes("\0")) throw new InvalidPathError("Path contains NUL");
-  if (input.includes("\\")) throw new InvalidPathError("Path must use POSIX separators");
+  // A backslash is an ordinary character in a POSIX filename, and FILES_ROOT defaults to
+  // a human-managed folder where such names occur. Rejecting it made list() hand out
+  // paths every other store method then refused: the file was listed and then unreadable,
+  // unstattable and undeletable through the API. Containment does not rest on this --
+  // resolveContained walks segments and asserts the resolved target is inside the root --
+  // and the drive-letter guard below still covers the Windows shapes.
   if (/^[A-Za-z]:/u.test(input)) throw new InvalidPathError("Windows drive paths are not allowed");
   if (input.startsWith("/")) throw new InvalidPathError("Absolute paths are not allowed");
 

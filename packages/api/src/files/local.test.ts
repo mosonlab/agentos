@@ -165,11 +165,18 @@ test("probe 11: write lazily creates mode-0750 parents but refuses a symlink par
   await assert.rejects(store.write("bad/z.txt", Buffer.from("bad")), SymlinkError);
 }));
 
-test("probe 12: Windows drive, UNC, backslash, and traversal shapes are invalid", async () => withRoot(async (root) => {
+test("probe 12: Windows drive shapes are invalid and a backslash name round-trips", async () => withRoot(async (root) => {
   const store = await createLocalFileStore(root);
-  for (const path of ["C:\\evil", "\\\\server\\share\\x", "a\\b", "..\\..\\x"]) {
-    await assert.rejects(store.read(path), InvalidPathError);
-  }
+  for (const path of ["C:\\evil", "C:evil"]) await assert.rejects(store.read(path), InvalidPathError);
+  // A backslash is a legal POSIX filename character. It is contained like any other
+  // single segment, and every store method must agree about it -- list() used to return
+  // names that read/stat/delete then refused.
+  await store.write("report\\draft.txt", Buffer.from("draft"));
+  assert.deepEqual((await store.list("")).map(({ path }) => path), ["report\\draft.txt"]);
+  assert.equal((await store.read("report\\draft.txt")).toString(), "draft");
+  assert.equal((await store.stat("report\\draft.txt"))?.kind, "file");
+  await store.delete("report\\draft.txt");
+  assert.deepEqual(await store.list(""), []);
 }));
 
 test("probe 13: NUL is rejected before any filesystem syscall", async () => withRoot(async (root) => {

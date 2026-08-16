@@ -49,7 +49,13 @@ test("buildPrompt combines foundational, role, and task context", () => {
 
 test("the prompt manifest names the AgentOS tools the session actually got", () => {
   const prompt = buildPrompt(claim);
-  for (const tool of ["task_activity_log", "task_output", "task_status", "inbox_ask"]) assert.match(prompt, new RegExp(tool));
+  // All eight, not the original four: tools/list advertises eight, and a session that is
+  // told about four cannot know what it was actually granted.
+  for (const tool of [
+    "task_activity_log", "task_output", "task_status", "inbox_ask",
+    "files_list", "files_read", "files_write", "files_delete",
+  ]) assert.match(prompt, new RegExp(tool));
+  assert.match(prompt, /without a grant they return 403/);
   // codex/claude see MCP tool names; pi gets the same tools as extension tools.
   assert.match(prompt, /MCP server 'agentos'/);
   assert.match(buildPrompt({ ...claim, runner: "PI" }), /pi extension tools/);
