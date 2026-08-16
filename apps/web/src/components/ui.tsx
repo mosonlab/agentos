@@ -328,9 +328,16 @@ export const GapNotice = ({ endpoint, what }: { endpoint: string; what: string }
   </div>
 );
 
+/** `NOTICE` is a flex row, so the wrapper decides the layout: each element child
+ *  and each contiguous text run of a bare fragment is its own flex item with a
+ *  10px gap, where a single `<span>` is one item and reflows as a paragraph.
+ *  The baseline took `message: string` in a `<span>`; this batch widened it to
+ *  `ReactNode` so App.tsx's rich banner could route through it, and that banner
+ *  laid out 9 flex items unwrapped at 3f712b5. Both shapes are preserved by
+ *  wrapping only what was a string. */
 export const ErrorNotice = ({ message, onRetry }: { message: ReactNode; onRetry?: () => void }): ReactNode => (
   <div className={cn(NOTICE, NOTICE_ERROR)}>
-    <span>{message}</span>
+    {typeof message === "string" ? <span>{message}</span> : message}
     {onRetry ? (
       <>
         <span className="flex-1" />
