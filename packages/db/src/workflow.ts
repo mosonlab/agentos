@@ -49,6 +49,16 @@ export const deriveRunConfig = (
   ]),
 });
 
+export class ArchivedAssigneeError extends Error {
+  constructor(readonly taskId: string, readonly taskName: string, readonly agentName: string) {
+    super(`Task ${taskName} assignee ${agentName} is archived; unarchive the agent to queue this step`);
+    this.name = "ArchivedAssigneeError";
+  }
+}
+
+export const isArchivedAssigneeError = (error: unknown): error is ArchivedAssigneeError =>
+  typeof error === "object" && error !== null && "name" in error && error.name === "ArchivedAssigneeError";
+
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
@@ -61,6 +71,9 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   });
   if (task.assigneeType !== AssigneeType.AGENT || !task.assigneeAgent || !task.repo) {
     throw new Error(`Task ${task.id} cannot be queued without an agent and repo`);
+  }
+  if (task.assigneeAgent.archivedAt) {
+    throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
   }
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
@@ -143,7 +156,7 @@ export const advanceTemplateTask = async (
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
-    include: { followUpTask: true },
+    include: { followUpTask: { include: { assigneeAgent: true } } },
   });
   if (!task.templateId) return { gated: false, nextTaskId: null };
   if (task.approvalGate) {
@@ -158,6 +171,23 @@ export const advanceTemplateTask = async (
     await tx.task.update({ where: { id: next.id }, data: { status: TaskStatus.REVIEW } });
     await gateQuestion(tx, next.id, sourceRunId, chatId);
     return { gated: true, nextTaskId: next.id };
+  }
+  if (next.assigneeAgent?.archivedAt) {
+    await tx.task.update({
+      where: { id: next.id },
+      data: {
+        status: TaskStatus.REVIEW,
+        failureReason: `Assignee ${next.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
+      },
+    });
+    await tx.taskActivity.create({
+      data: {
+        taskId: next.id,
+        actorType: "control-plane",
+        body: `Predecessor ${task.name} completed but assignee ${next.assigneeAgent.name} is archived; step not queued`,
+      },
+    });
+    return { gated: false, nextTaskId: next.id };
   }
   await enqueueTaskRun(tx, next.id, now);
   await tx.taskActivity.create({ data: {

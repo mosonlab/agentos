@@ -14,6 +14,34 @@ import { makeDedupeKey } from "./execution.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
 
+export const noteArchivedQueuedRuns = async (
+  db: PrismaClient,
+  options: { agentId?: string } = {},
+): Promise<number> => {
+  const stalled = await db.run.findMany({
+    where: {
+      status: RunStatus.QUEUED,
+      taskId: { not: null },
+      agent: { archivedAt: { not: null } },
+      ...(options.agentId ? { agentId: options.agentId } : {}),
+    },
+    select: {
+      id: true,
+      taskId: true,
+      runNumber: true,
+      agent: { select: { name: true, archivedAt: true } },
+    },
+  });
+  const rows = stalled.flatMap((run) => run.taskId && run.agent.archivedAt ? [{
+    id: `archived-skip:${run.id}:${run.agent.archivedAt.toISOString()}`,
+    taskId: run.taskId,
+    actorType: "control-plane",
+    body: `Assignee ${run.agent.name} is archived; run ${run.runNumber} stays queued and is not claimed until the agent is unarchived`,
+  }] : []);
+  if (rows.length === 0) return 0;
+  return (await db.taskActivity.createMany({ data: rows, skipDuplicates: true })).count;
+};
+
 export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()): Promise<number> => {
   const candidates = await db.run.findMany({
     where: {
@@ -183,7 +211,8 @@ export const reconcileAtStartup = async (
   db: PrismaClient,
   workspaceRoot: string,
   failedRetentionCount: number,
-): Promise<{ runs: number; workspaces: number }> => ({
+): Promise<{ runs: number; workspaces: number; archivedNotices: number }> => ({
   runs: await reconcileDatabaseRuns(db),
   workspaces: await reconcileWorkspaces(db, workspaceRoot, failedRetentionCount),
+  archivedNotices: await noteArchivedQueuedRuns(db),
 });

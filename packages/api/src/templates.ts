@@ -36,6 +36,7 @@ export const instantiateTemplate = async (
   if (unknown.length > 0) throw new Error(`Unknown template variables: ${unknown.join(", ")}`);
   for (const step of template.steps) {
     if (step.assigneeType === AssigneeType.AGENT && !step.assigneeAgent) throw new Error(`Template step ${step.name} has no agent`);
+    if (step.assigneeAgent?.archivedAt) throw new Error(`Template step ${step.name} agent ${step.assigneeAgent.name} is archived`);
     if (step.assigneeAgent) {
       const access = await db.agentRepoAccess.findFirst({
         where: { agentId: step.assigneeAgent.id, repoId: repo.id, projectId },

@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { prisma } from "@agentos/db";
+import { isArchivedAssigneeError, prisma } from "@agentos/db";
 import { config as loadEnvironment } from "dotenv";
 
 import { deliverPending, type FeishuMessageClient } from "./delivery.js";
@@ -40,8 +40,13 @@ dispatcher.register({
   },
   "card.action.trigger": async (data: unknown) => {
     const event = data as Record<string, unknown>;
-    const result = await processFeishuEvent(prisma, envelopeFor(event));
-    return { toast: { type: "success", content: result.duplicate ? "该决策已处理" : "决策已收到，任务将继续" } };
+    try {
+      const result = await processFeishuEvent(prisma, envelopeFor(event));
+      return { toast: { type: "success", content: result.duplicate ? "该决策已处理" : "决策已收到，任务将继续" } };
+    } catch (error: unknown) {
+      if (isArchivedAssigneeError(error)) return { toast: { type: "error", content: error.message } };
+      throw error;
+    }
   },
 });
 

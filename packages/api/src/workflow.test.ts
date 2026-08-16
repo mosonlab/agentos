@@ -5,10 +5,12 @@ import test from "node:test";
 import {
   advanceTemplateTask,
   applyInboxDecisionTx,
+  ArchivedAssigneeError,
   AssigneeType,
   deriveRunConfig,
   enqueueTaskRun,
   InboxKind,
+  isArchivedAssigneeError,
   RunStatus,
   runnerFor,
   RunnerKind,
@@ -17,6 +19,7 @@ import {
 } from "@agentos/db";
 
 import { createApp } from "./app.js";
+import { noteArchivedQueuedRuns } from "./reconcile.js";
 
 test("runnerFor preserves explicit preferences and every inherited model heuristic", () => {
   const cases: [RunnerPreference, string, RunnerKind][] = [
@@ -220,4 +223,99 @@ test("a multiple-choice Inbox decision accepts an option id and persists the hum
   await assert.rejects(() => applyInboxDecisionTx(tx, {
     inboxMessageId: "question-1", externalEventId: "web:unknown", decision: "unknown",
   }), /must match an Inbox choice id/);
+});
+
+test("enqueueTaskRun rejects archived agents with a name-recognisable typed error", async () => {
+  const tx = {
+    task: {
+      findUniqueOrThrow: async () => ({
+        id: "task-archived", projectId: "project-1", name: "Archived work", description: "work",
+        assigneeType: AssigneeType.AGENT, templateId: null, targetBranch: "main",
+        maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3, runs: [],
+        assigneeAgent: {
+          id: "agent-1", name: "Ada", archivedAt: new Date(), model: "claude",
+          runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r",
+        },
+        repo: { id: "repo-1", defaultBranch: "main" },
+        templateStep: null,
+      }),
+    },
+    run: { create: async () => { throw new Error("must not create run"); } },
+  } as any;
+  const error = await enqueueTaskRun(tx, "task-archived").then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+  assert.ok(error instanceof ArchivedAssigneeError);
+  assert.equal(isArchivedAssigneeError(error), true);
+  assert.equal(isArchivedAssigneeError({ name: "ArchivedAssigneeError" }), true);
+});
+
+test("chain advancement parks an archived successor without throwing or enqueueing", async () => {
+  const updates: Array<Record<string, unknown>> = [];
+  const activities: Array<Record<string, unknown>> = [];
+  let creates = 0;
+  const next = {
+    id: "task-2", assigneeType: AssigneeType.AGENT, assigneeAgentId: "agent-2", approvalGate: false,
+    assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
+  };
+  const tx = {
+    task: {
+      findUniqueOrThrow: async () => ({
+        id: "task-1", name: "Completed predecessor", templateId: "template-1", approvalGate: false,
+        followUpTaskId: next.id, followUpTask: next,
+      }),
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        updates.push({ id: where.id, ...data });
+        return {};
+      },
+    },
+    run: { create: async () => { creates += 1; return {}; } },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+    },
+  } as any;
+  assert.deepEqual(await advanceTemplateTask(tx, "task-1", "run-1", null), {
+    gated: false,
+    nextTaskId: "task-2",
+  });
+  assert.equal(creates, 0);
+  assert.equal(updates[1]?.status, "REVIEW");
+  assert.match(String(updates[1]?.failureReason), /Archived Successor/);
+  assert.match(String(activities[0]?.body), /Archived Successor.*not queued/);
+});
+
+test("an Inbox-resumed queued run for an archived agent is surfaced by the sweep", async () => {
+  let status: RunStatus = RunStatus.WAITING_INBOX;
+  const archivedAt = new Date("2026-08-16T06:00:00.000Z");
+  const tx = {
+    inboxMessage: {
+      findUnique: async () => ({
+        id: "question-1", kind: InboxKind.TEXT, gateTaskId: null, agentId: "agent-1",
+        sessionId: "session-1", taskId: "task-1", goalId: null, threadId: "thread-1",
+        session: { id: "session-1", run: { id: "run-1", status } }, gateTask: null,
+      }),
+      updateMany: async () => ({ count: 1 }),
+      create: async () => ({ id: "reply-1" }),
+    },
+    inboxDecision: { create: async () => ({}) },
+    run: { updateMany: async () => { status = RunStatus.QUEUED; return { count: 1 }; } },
+    session: { update: async () => ({}) },
+  } as any;
+  await applyInboxDecisionTx(tx, {
+    inboxMessageId: "question-1", externalEventId: "web:resume", decision: "continue",
+  });
+  const notices: Record<string, unknown>[] = [];
+  const db = {
+    run: {
+      findMany: async () => status === RunStatus.QUEUED
+        ? [{ id: "run-1", taskId: "task-1", runNumber: 1, agent: { name: "Archived", archivedAt } }]
+        : [],
+    },
+    taskActivity: {
+      createMany: async ({ data }: { data: Record<string, unknown>[] }) => { notices.push(...data); return { count: data.length }; },
+    },
+  } as unknown as PrismaClient;
+  assert.equal(await noteArchivedQueuedRuns(db), 1);
+  assert.match(String(notices[0]?.body), /Archived.*run 1/);
 });
