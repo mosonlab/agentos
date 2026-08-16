@@ -71,6 +71,7 @@ const quarantineTask = async (db: PrismaClient, task: Task, reason: unknown): Pr
     actorType: "scheduler",
     body: `Schedule quarantined: ${reason instanceof Error ? reason.message : String(reason)}`,
   } });
+  console.warn("Scheduler quarantined task", { taskId: task.id, reason: reason instanceof Error ? reason.message : String(reason) });
   return true;
 }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 
@@ -80,13 +81,18 @@ const fireLabel = (now: Date, timezone: string | null): string => new Intl.DateT
   ...(timezone ? { timeZone: timezone } : {}),
 }).format(now);
 
-export const fireCronTask = async (db: PrismaClient, task: Task, now: Date): Promise<boolean> => {
+export const fireCronTask = async (
+  db: PrismaClient,
+  task: Task,
+  now: Date,
+  onQuarantined: () => void = () => {},
+): Promise<boolean> => {
   let nextRunAt: Date;
   try {
     if (!task.cron) throw new Error("CRON task is missing cron");
     nextRunAt = computeNextOccurrence(task.cron, task.timezone, now);
   } catch (error: unknown) {
-    await quarantineTask(db, task, error);
+    if (await quarantineTask(db, task, error)) onQuarantined();
     return false;
   }
 
@@ -161,23 +167,34 @@ export const schedulerTick = async (db: PrismaClient, now = new Date()): Promise
   let quarantined = 0;
   for (const task of cronTasks) {
     try {
-      if (await fireCronTask(db, task, now)) cronFired += 1;
+      if (await fireCronTask(db, task, now, () => { quarantined += 1; })) cronFired += 1;
     } catch (error: unknown) {
-      if (await quarantineTask(db, task, error)) quarantined += 1;
+      console.error("Scheduled CRON task fire failed", { taskId: task.id, error });
     }
   }
   for (const task of atTasks) {
     try {
       if (await fireAtTask(db, task, now)) atFired += 1;
     } catch (error: unknown) {
-      if (await quarantineTask(db, task, error)) quarantined += 1;
+      console.error("Scheduled AT task fire failed", { taskId: task.id, error });
     }
   }
   return { cronFired, atFired, quarantined };
 };
 
+export const schedulerPollIntervalMs = (raw = process.env.SCHEDULER_POLL_INTERVAL_MS): number => {
+  const fallback = 30_000;
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(parsed) || parsed < 0) {
+    console.warn(`Invalid SCHEDULER_POLL_INTERVAL_MS=${JSON.stringify(raw)}; using ${fallback}ms`);
+    return fallback;
+  }
+  return parsed;
+};
+
 export const startScheduler = (db: PrismaClient): ReturnType<typeof setInterval> | null => {
-  const intervalMs = Number.parseInt(process.env.SCHEDULER_POLL_INTERVAL_MS ?? "30000", 10);
+  const intervalMs = schedulerPollIntervalMs();
   if (intervalMs === 0) return null;
   let busy = false;
   return setInterval(() => {

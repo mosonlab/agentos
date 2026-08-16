@@ -21,6 +21,7 @@
     "agentos": "npm run start -w @agentos/cli --",
     "db:generate": "npm run db:generate -w @agentos/db",
     "db:migrate": "npm run db:migrate -w @agentos/db",
+    "db:drift-check": "npm run db:drift-check -w @agentos/db",
     "db:seed": "npm run db:seed -w @agentos/db",
     "db:validate": "npm run db:validate -w @agentos/db",
     "postinstall": "npm run db:generate"

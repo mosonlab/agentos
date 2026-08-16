@@ -127,6 +127,8 @@ type ChainTask = {
   followUpTaskId: string | null;
 };
 
+type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true } }>;
+
 const activeSuccessorStatuses: RunStatus[] = [
   RunStatus.QUEUED,
   RunStatus.CLAIMED,
@@ -146,7 +148,7 @@ export const activateChainSuccessor = async (
   options: { sourceRunId?: string | null; chatId?: string | null } = {},
   now = new Date(),
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
-  let successor = null;
+  let successor: ChainSuccessor | null = null;
   if (task.chainId && task.chainIndex !== null) {
     successor = await tx.task.findFirst({
       where: { projectId: task.projectId, chainId: task.chainId, chainIndex: { gt: task.chainIndex } },
@@ -189,11 +191,37 @@ export const activateChainSuccessor = async (
     return { nextTaskId: successor.id, gated: false };
   }
 
-  const claimed = await tx.task.updateMany({
-    where: { id: successor.id, updatedAt: successor.updatedAt },
-    data: { status: TaskStatus.TODO },
-  });
-  if (claimed.count === 0) return { nextTaskId: successor.id, gated: false };
+  // A lost updatedAt CAS can mean either another advancer won or an unrelated
+  // operator edit landed between the read and claim. Re-read and retry the
+  // latter instead of silently stalling the chain. The status predicate is a
+  // second idempotency boundary: a completed successor is never resurrected.
+  for (;;) {
+    const claimed = await tx.task.updateMany({
+      where: {
+        id: successor.id,
+        updatedAt: successor.updatedAt,
+        status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
+      },
+      data: { status: TaskStatus.TODO },
+    });
+    if (claimed.count === 1) break;
+    const current: ChainSuccessor | null = await tx.task.findUnique({
+      where: { id: successor.id },
+      include: { runs: { orderBy: { runNumber: "desc" }, take: 1 } },
+    });
+    if (!current || current.status === TaskStatus.DONE) {
+      return { nextTaskId: current?.id ?? null, gated: false };
+    }
+    if (current.runs.some((run) => activeSuccessorStatuses.includes(run.status))) {
+      await tx.taskActivity.create({ data: {
+        taskId: current.id,
+        actorType: "control-plane",
+        body: "Predecessor completed; successor already active",
+      } });
+      return { nextTaskId: current.id, gated: false };
+    }
+    successor = current;
+  }
 
   if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {
     if (options.sourceRunId) {
@@ -238,17 +266,28 @@ export const advanceTemplateTask = async (
   sourceRunId: string,
   chatId: string | null,
   now = new Date(),
+  expectedStatus?: TaskStatus,
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
   });
   if (!task.templateId) return { gated: false, nextTaskId: null };
   if (task.approvalGate) {
-    await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.REVIEW } });
+    if (expectedStatus) {
+      const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.REVIEW } });
+      if (claimed.count !== 1) return { gated: false, nextTaskId: null };
+    } else {
+      await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.REVIEW } });
+    }
     await gateQuestion(tx, task.id, sourceRunId, chatId);
     return { gated: true, nextTaskId: task.followUpTaskId };
   }
-  await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
+  if (expectedStatus) {
+    const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.DONE, failureReason: null } });
+    if (claimed.count !== 1) return { gated: false, nextTaskId: null };
+  } else {
+    await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
+  }
   return activateChainSuccessor(tx, task, { sourceRunId, chatId }, now);
 };
 
@@ -337,9 +376,22 @@ export const applyInboxDecisionTx = async (
       }, now);
       return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
     }
-    const redo = question.gateTask.assigneeType === AssigneeType.AGENT
+    let redo = question.gateTask.assigneeType === AssigneeType.AGENT
       ? question.gateTask
       : question.gateTask.previousTask;
+    if (!redo && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
+      redo = await tx.task.findFirst({
+        where: {
+          projectId: question.gateTask.projectId,
+          chainId: question.gateTask.chainId,
+          chainIndex: { lt: question.gateTask.chainIndex },
+          assigneeType: AssigneeType.AGENT,
+          assigneeAgentId: { not: null },
+          repoId: { not: null },
+        },
+        orderBy: { chainIndex: "desc" },
+      });
+    }
     if (!redo) throw new Error("Approval gate has no executable previous task to reject to");
     await tx.task.update({ where: { id: redo.id }, data: { status: TaskStatus.TODO, failureReason: null } });
     if (redo.id !== question.gateTask.id) {

@@ -37,7 +37,7 @@ const seedWebhook = async () => {
   await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id, assigneeAgentId: agent.id, stepIndex: 0, name: "Implement", assigneeType: "AGENT", prompt: "Handle {{ticket}}",
   } });
-  return { template };
+  return { project, template };
 };
 
 const fire = (templateId: string, payload: unknown) => createApp(db).request(`/hooks/templates/${templateId}`, {
@@ -75,4 +75,37 @@ test("two webhook fires create two independent chains", async () => {
   const ids = [(await first.json() as any).chainId, (await second.json() as any).chainId];
   assert.notEqual(ids[0], ids[1]);
   assert.equal(await db.task.count(), 2);
+});
+
+test("empty-string webhook scalars instantiate successfully", async () => {
+  const { template } = await seedWebhook();
+  const response = await fire(template.id, { issue: { title: "" } });
+  assert.equal(response.status, 201);
+  assert.equal(await db.task.count(), 1);
+  assert.equal(await db.run.count(), 1);
+});
+
+test("concurrent webhook fires retry serialization conflicts and create independent chains", async () => {
+  const { template } = await seedWebhook();
+  const responses = await Promise.all(Array.from({ length: 6 }, (_, index) => fire(template.id, { issue: { title: `Burst ${index}` } })));
+  assert.deepEqual(responses.map((response) => response.status), [201, 201, 201, 201, 201, 201]);
+  const chainIds = await Promise.all(responses.map(async (response) => (await response.json() as { chainId: string }).chainId));
+  assert.equal(new Set(chainIds).size, 6);
+  assert.equal(await db.task.count(), 6);
+  assert.equal(await db.run.count(), 6);
+});
+
+test("template GET responses never include the Secret relation or ciphertext", async () => {
+  const { project } = await seedWebhook();
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-hook-token";
+  try {
+    const response = await createApp(db).request(`/projects/${project.id}/task-templates`, { headers: { Authorization: "Bearer operator-hook-token" } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<Record<string, unknown>>;
+    assert.equal(Object.prototype.hasOwnProperty.call(body[0], "webhookSecret"), false);
+    assert.doesNotMatch(JSON.stringify(body), /encryptedValue|ciphertextVersion/);
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = prior;
+  }
 });

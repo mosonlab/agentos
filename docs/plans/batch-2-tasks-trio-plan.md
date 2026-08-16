@@ -123,19 +123,18 @@ infrastructure every later WI's concurrency ACs depend on (must-fix 3).
 
 **Tests / verification**
 
-- Exact drift check (AC-D1), runnable from `packages/db` with docker-compose
-  Postgres up — `--shadow-database-url` is mandatory with `--from-migrations`,
-  pointed at a throwaway schema in the same instance:
+- Exact drift check (AC-D1), runnable after migrations with `DATABASE_URL`
+  pointing at the same migrated schema used by the datamodel:
 
   ```
-  npx prisma migrate diff \
-    --from-migrations prisma/migrations \
-    --to-schema-datamodel prisma/schema.prisma \
-    --shadow-database-url "postgresql://agentos:agentos@localhost:5432/agentos?schema=prisma_shadow" \
-    --exit-code
+  DATABASE_URL="postgresql://agentos:agentos@localhost:5432/agentos?schema=agentos_test" \
+    npm run db:drift-check
   ```
 
-  Exit 0 = no drift. Additionally `npm run db:validate`.
+  This uses Prisma 6.19's working `--from-url` path and binds `DATABASE_URL`
+  to the same namespace, avoiding the false whole-schema remove/add diff from
+  `--from-migrations` with a differently named shadow schema. Exit 0 = no
+  drift. Additionally `npm run db:validate`.
 - `npm run test:db -w @agentos/api` — runs `migration.dbtest.ts`
   (migration applies to an empty schema; dead tables gone; FK behavior).
 - `grep -rn "inboxConnectionWindow\|\bTrigger\b\|\bAutomation\b"` over

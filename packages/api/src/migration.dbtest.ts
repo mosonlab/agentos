@@ -3,7 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import type { PrismaClient } from "@agentos/db";
 
-import { resetTestDb, setupTestDb } from "./testdb.js";
+import { resetTestDb, setupTestDb, testDatabaseSchema } from "./testdb.js";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -13,14 +13,14 @@ after(async () => { await db.$disconnect(); });
 test("batch 2 migration removes dead tables and installs columns, FKs, and poll index", async () => {
   const dead = await db.$queryRaw<Array<{ table_name: string }>>`
     SELECT table_name FROM information_schema.tables
-    WHERE table_schema = 'agentos_test'
+    WHERE table_schema = ${testDatabaseSchema}
       AND table_name IN ('Trigger', 'Automation', 'InboxConnectionWindow')
   `;
   assert.deepEqual(dead, []);
 
   const columns = await db.$queryRaw<Array<{ column_name: string }>>`
     SELECT column_name FROM information_schema.columns
-    WHERE table_schema = 'agentos_test' AND table_name = 'TaskTemplate'
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'TaskTemplate'
       AND column_name IN ('webhookSecretId', 'webhookRepoId', 'webhookPayloadMapping')
     ORDER BY column_name
   `;
@@ -28,13 +28,13 @@ test("batch 2 migration removes dead tables and installs columns, FKs, and poll 
 
   const constraints = await db.$queryRaw<Array<{ constraint_name: string }>>`
     SELECT constraint_name FROM information_schema.table_constraints
-    WHERE table_schema = 'agentos_test' AND table_name = 'TaskTemplate'
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'TaskTemplate'
       AND constraint_name IN ('TaskTemplate_webhookSecretId_fkey', 'TaskTemplate_webhookRepoId_fkey')
     ORDER BY constraint_name
   `;
   assert.equal(constraints.length, 2);
   const indexes = await db.$queryRaw<Array<{ indexname: string }>>`
-    SELECT indexname FROM pg_indexes WHERE schemaname = 'agentos_test'
+    SELECT indexname FROM pg_indexes WHERE schemaname = ${testDatabaseSchema}
       AND indexname = 'Task_scheduleKind_status_runAt_idx'
   `;
   assert.equal(indexes.length, 1);

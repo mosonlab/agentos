@@ -280,7 +280,7 @@ test("an external failure raises the run ceiling instead of spending an attempt"
         create: async ({ data }: { data: Record<string, unknown> }) => { retry = data; return { id: "run-4", ...data }; },
       },
       session: { update: async () => ({}) },
-      task: { update: async () => ({}) },
+      task: { updateMany: async () => ({ count: 1 }) },
       taskActivity: { create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async () => ({}) },

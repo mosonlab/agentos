@@ -26,7 +26,7 @@ export const resolvePayloadVariables = (
   const mapping = template.webhookPayloadMapping && typeof template.webhookPayloadMapping === "object" && !Array.isArray(template.webhookPayloadMapping)
     ? template.webhookPayloadMapping as { map?: Record<string, unknown>; defaults?: Record<string, unknown> }
     : {};
-  const variables: Record<string, string> = {};
+  const variables = Object.create(null) as Record<string, string>;
   const unresolved: string[] = [];
   for (const name of template.variables) {
     const path = typeof mapping.map?.[name] === "string" ? mapping.map[name] : undefined;

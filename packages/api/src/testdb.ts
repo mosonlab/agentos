@@ -6,12 +6,19 @@ import { PrismaClient } from "@agentos/db";
 export const testDatabaseUrl = process.env.TEST_DATABASE_URL
   ?? "postgresql://agentos:agentos@localhost:5432/agentos?schema=agentos_test";
 
+const parsedTestDatabaseUrl = new URL(testDatabaseUrl);
+export const testDatabaseSchema = parsedTestDatabaseUrl.searchParams.get("schema") ?? "public";
+
+if (testDatabaseSchema === "public") {
+  throw new Error("TEST_DATABASE_URL must name a dedicated non-public schema because the DB harness resets it");
+}
+
 let migrationsApplied = false;
 
 export const setupTestDb = (): PrismaClient => {
   if (!migrationsApplied) {
     const schema = fileURLToPath(new URL("../../db/prisma/schema.prisma", import.meta.url));
-    execSync(`npx prisma migrate deploy --schema ${JSON.stringify(schema)}`, {
+    execSync(`npx prisma migrate reset --force --skip-seed --schema ${JSON.stringify(schema)}`, {
       cwd: fileURLToPath(new URL("../../db", import.meta.url)),
       env: { ...process.env, DATABASE_URL: testDatabaseUrl },
       stdio: "inherit",

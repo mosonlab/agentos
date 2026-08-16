@@ -3,6 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { PrismaClient } from "@agentos/db";
 
+import { createApp } from "./app.js";
 import { fireAtTask, fireCronTask, schedulerTick } from "./scheduler.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
@@ -77,9 +78,66 @@ test("AT task queues once under sequential and concurrent ticks", async () => {
     projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "At", description: "work",
     scheduleKind: "AT", runAt: new Date(now.getTime() - 60_000),
   } });
-  await Promise.all([fireAtTask(db, task, now), fireAtTask(db, task, now)]);
-  await schedulerTick(db, now);
+  const otherDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let arrived = 0;
+  let release!: () => void;
+  const bothRead = new Promise<void>((resolve) => { release = resolve; });
+  const instrument = (client: PrismaClient): PrismaClient => new Proxy(client, {
+    get(target, property, receiver) {
+      if (property !== "$transaction") {
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+        const taskDelegate = new Proxy(tx.task, {
+          get(taskTarget, taskProperty, taskReceiver) {
+            if (taskProperty !== "findUniqueOrThrow") return Reflect.get(taskTarget, taskProperty, taskReceiver);
+            return async (args: Parameters<typeof tx.task.findUniqueOrThrow>[0]) => {
+              const result = await tx.task.findUniqueOrThrow(args);
+              arrived += 1;
+              if (arrived === 2) release();
+              await bothRead;
+              return result;
+            };
+          },
+        });
+        const instrumentedTx = new Proxy(tx, {
+          get(txTarget, txProperty, txReceiver) {
+            return txProperty === "task" ? taskDelegate : Reflect.get(txTarget, txProperty, txReceiver);
+          },
+        });
+        return operation(instrumentedTx);
+      }, options as any);
+    },
+  }) as PrismaClient;
+  try {
+    const results = await Promise.all([fireAtTask(instrument(db), task, now), fireAtTask(instrument(otherDb), task, now)]);
+    assert.deepEqual(results.sort(), [false, true]);
+  } finally {
+    await otherDb.$disconnect();
+  }
+  assert.deepEqual(await schedulerTick(db, now), { cronFired: 0, atFired: 0, quarantined: 0 });
   assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
+});
+
+test("a task with stored invalid cron can still be disabled without repairing cron", async () => {
+  const { project } = await seedExecutor();
+  const task = await db.task.create({ data: {
+    projectId: project.id, name: "Broken schedule", description: "retire me", assigneeType: "HUMAN",
+    scheduleKind: "CRON", cron: "bad cron", runAt: new Date(),
+  } });
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-scheduler-token";
+  try {
+    const response = await createApp(db).request(`/tasks/${task.id}`, {
+      method: "PATCH", headers: { Authorization: "Bearer operator-scheduler-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = prior;
+  }
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status, "DONE");
 });
 
 test("a concurrent cron repair survives stale quarantine and receives no failure activity", async () => {

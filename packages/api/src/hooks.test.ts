@@ -15,12 +15,23 @@ test("payload mapping resolves dot paths, stringifies scalars, and falls back to
       defaults: { fallback: "default" },
     },
   } as any;
-  assert.deepEqual(resolvePayloadVariables(template, { issue: { title: "Fix", attempt: 3, enabled: false, object: { bad: true } } }), {
-    variables: { ticket: "Fix", attempt: "3", enabled: "false", fallback: "default" },
-  });
+  const resolved = resolvePayloadVariables(template, { issue: { title: "Fix", attempt: 3, enabled: false, object: { bad: true } } });
+  assert.ok("variables" in resolved);
+  assert.deepEqual({ ...resolved.variables }, { ticket: "Fix", attempt: "3", enabled: "false", fallback: "default" });
   assert.deepEqual(resolvePayloadVariables({ ...template, webhookPayloadMapping: { map: { ticket: "missing" } } }, {}), {
     unresolved: ["ticket", "attempt", "enabled", "fallback"],
   });
+});
+
+test("payload mapping preserves empty strings and magic variable names as own properties", () => {
+  const empty = resolvePayloadVariables({ variables: ["ticket"], webhookPayloadMapping: { map: { ticket: "issue.title" } } } as any, { issue: { title: "" } });
+  assert.ok("variables" in empty);
+  assert.equal(empty.variables.ticket, "");
+  const magic = resolvePayloadVariables({ variables: ["__proto__"], webhookPayloadMapping: { map: JSON.parse('{"__proto__":"value"}') } } as any, { value: "safe" });
+  assert.ok("variables" in magic);
+  assert.equal(Object.getPrototypeOf(magic.variables), null);
+  assert.equal(Object.prototype.hasOwnProperty.call(magic.variables, "__proto__"), true);
+  assert.equal(magic.variables.__proto__, "safe");
 });
 
 test("all webhook authentication failures return byte-identical 401 responses", async () => {

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { AssigneeType, ScheduleKind } from "@agentos/db";
 
-import { computeNextOccurrence, schedulerTick, startScheduler, validateSchedule } from "./scheduler.js";
+import { computeNextOccurrence, schedulerPollIntervalMs, schedulerTick, startScheduler, validateSchedule } from "./scheduler.js";
 
 test("computeNextOccurrence handles minute math and an IANA timezone", () => {
   assert.equal(computeNextOccurrence("*/2 * * * *", "UTC", new Date("2026-08-15T12:01:30Z")).toISOString(), "2026-08-15T12:02:00.000Z");
@@ -41,9 +41,26 @@ test("stored garbage cron is quarantined with the full observed tuple and one ac
       taskActivity: { create: async () => { activities += 1; return {}; } },
     }),
   } as any;
-  assert.deepEqual(await schedulerTick(database, new Date()), { cronFired: 0, atFired: 0, quarantined: 0 });
+  assert.deepEqual(await schedulerTick(database, new Date()), { cronFired: 0, atFired: 0, quarantined: 1 });
   assert.deepEqual(where, { id: task.id, scheduleKind: task.scheduleKind, status: task.status, cron: task.cron, timezone: task.timezone, runAt: task.runAt });
   assert.equal(activities, 1);
+});
+
+test("transient fire failures remain due and are not quarantined", async () => {
+  const task = { id: "task-transient", scheduleKind: "CRON", status: "TODO", cron: "*/5 * * * *", timezone: "UTC", runAt: new Date(Date.now() - 60_000), projectId: "project-1" } as any;
+  let transactions = 0;
+  const database = {
+    task: { findMany: async ({ where }: { where: { scheduleKind: string } }) => where.scheduleKind === "CRON" ? [task] : [] },
+    $transaction: async () => { transactions += 1; throw new Error("temporary database failure"); },
+  } as any;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    assert.deepEqual(await schedulerTick(database, new Date()), { cronFired: 0, atFired: 0, quarantined: 0 });
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(transactions, 1);
 });
 
 test("scheduler rollback lever creates no interval", () => {
@@ -53,5 +70,14 @@ test("scheduler rollback lever creates no interval", () => {
     assert.equal(startScheduler({} as any), null);
   } finally {
     if (previous === undefined) delete process.env.SCHEDULER_POLL_INTERVAL_MS; else process.env.SCHEDULER_POLL_INTERVAL_MS = previous;
+  }
+});
+
+test("scheduler interval accepts only exact non-negative safe integers", () => {
+  assert.equal(schedulerPollIntervalMs(undefined), 30_000);
+  assert.equal(schedulerPollIntervalMs("0"), 0);
+  assert.equal(schedulerPollIntervalMs("30000"), 30_000);
+  for (const invalid of ["", "-1", "garbage", "0oops", "1.5", "9007199254740992"]) {
+    assert.equal(schedulerPollIntervalMs(invalid), 30_000);
   }
 });

@@ -305,6 +305,13 @@ disappears.
   does today (template chains with a run context). Operator-PATCH advance has
   no run/session to hang a gate card on, so no Inbox message is sent there.
   **[Assumption A9]**
+
+  **Amendment (superseded by approved plan §8-1):** with a successful source
+  run, template and non-template human successors now behave alike: the
+  successor moves to `REVIEW` and receives an Inbox gate card. Rejecting that
+  card re-queues the nearest executable predecessor in the same chain.
+  Operator-PATCH advance still has no source run/session, so that path leaves
+  a human successor `TODO` with activity and sends no card.
 - **Idempotency:** advancing must not enqueue a second run if the successor
   already has an active or queued run (re-entrant PATCHes, gate decision
   races). The existing `applyInboxDecisionTx` OPEN compare-and-set already
@@ -496,3 +503,7 @@ On a dev instance with runner attached:
   operator paces the schedule.
 - **A9 — Operator-PATCH advance sends no gate card** for human successors
   (no run/session context); they're left `TODO` with an activity entry.
+  **Amendment (approved plan §8-1):** A9 applies only to the operator-PATCH
+  path. A successful source run gates template and non-template human
+  successors uniformly (`REVIEW` + Inbox card), with chain-predecessor lookup
+  providing a valid reject/re-run target.
