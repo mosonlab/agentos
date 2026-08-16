@@ -1,7 +1,14 @@
 export type FileStat = { path: string; kind: "file" | "dir"; size: number; modifiedAt: Date };
+export type DirEntry = { path: string; kind: "file" | "dir" | "symlink" };
 
 export interface FileStore {
   list(dir: string): Promise<FileStat[]>;
+  /**
+   * Every child of `dir`, including the symlinks `list` hides. Recursive delete needs the
+   * hidden ones: enumerating with `list` empties a directory of everything it can see and
+   * then fails on rmdir, destroying real files and leaving the tree undeletable.
+   */
+  entries(dir: string): Promise<DirEntry[]>;
   stat(path: string): Promise<FileStat | null>;
   read(path: string): Promise<Buffer>;
   write(path: string, data: Buffer): Promise<FileStat>;

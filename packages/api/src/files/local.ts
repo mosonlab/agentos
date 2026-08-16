@@ -176,6 +176,22 @@ export const createLocalFileStore = async (logicalRoot: string): Promise<FileSto
       }
     },
 
+    async entries(dir) {
+      const resolved = await resolvePath(dir, "existing");
+      try {
+        await inspectDirectory(resolved.target);
+        const found = await readdir(resolved.target, { withFileTypes: true });
+        return await Promise.all(found.map(async (entry) => {
+          const info = await lstat(join(resolved.target, entry.name));
+          const rel = resolved.normalized === "" ? entry.name : `${resolved.normalized}/${entry.name}`;
+          if (info.isSymbolicLink()) return { path: rel, kind: "symlink" as const };
+          return { path: rel, kind: info.isDirectory() ? ("dir" as const) : ("file" as const) };
+        }));
+      } catch (error: unknown) {
+        return mapPathError(error, dir);
+      }
+    },
+
     async delete(path) {
       const resolved = await resolvePath(path, "existing");
       requireNonRoot(resolved);

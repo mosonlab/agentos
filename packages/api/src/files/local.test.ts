@@ -195,6 +195,24 @@ test("probe 19: traversal normalizing inside is accepted and traversal escaping 
   await assert.rejects(store.write("a/../../b.txt", Buffer.from("outside")), InvalidPathError);
 }));
 
+test("probe 22: entries() exposes the symlinks list() hides, without following them", async () => withRoot(async (root, outside) => {
+  await writeFile(join(outside, "secret.txt"), "SECRET");
+  const store = await createLocalFileStore(root);
+  await store.write("tree/real.txt", Buffer.from("real"));
+  await symlink(join(outside, "secret.txt"), join(root, "tree", "link"));
+  await symlink(outside, join(root, "tree", "dirlink"), "dir");
+  assert.deepEqual((await store.list("tree")).map(({ path }) => path), ["tree/real.txt"]);
+  assert.deepEqual((await store.entries("tree")).sort((a, b) => a.path.localeCompare(b.path)), [
+    { path: "tree/dirlink", kind: "symlink" },
+    { path: "tree/link", kind: "symlink" },
+    { path: "tree/real.txt", kind: "file" },
+  ]);
+  for (const entry of await store.entries("tree")) await store.delete(entry.path);
+  await store.delete("tree");
+  assert.equal(await readFile(join(outside, "secret.txt"), "utf8"), "SECRET");
+  assert.deepEqual(await readdir(outside), ["secret.txt"]);
+}));
+
 test("probe 20: the containment assertion itself rejects every escaping resolved target", () => {
   // Deleting the assertion, or weakening it to a bare startsWith(canonicalRoot), turns
   // this red. No other test in the repository fails on either mutation.

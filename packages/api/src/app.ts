@@ -354,7 +354,12 @@ const deleteRecursively = async (store: FileStore, path: string): Promise<void> 
   const stat = await store.stat(path);
   if (!stat) throw new NotFoundError(`Path not found: ${path}`);
   if (stat.kind === "dir") {
-    for (const child of await store.list(path)) await deleteRecursively(store, child.path);
+    // entries(), not list(): list() hides symlinks, so they survived the walk, the final
+    // rmdir failed ENOTEMPTY, and the tree was left half-destroyed and undeletable.
+    for (const child of await store.entries(path)) {
+      if (child.kind === "dir") await deleteRecursively(store, child.path);
+      else await store.delete(child.path);
+    }
   }
   await store.delete(path);
 };

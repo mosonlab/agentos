@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -53,6 +53,16 @@ test("operator /files routes use a real filesystem", async (suite) => {
     const recursive = await app.request("/files?path=tree&recursive=true", { method: "DELETE", headers: auth });
     assert.equal(recursive.status, 200);
     await assert.rejects(stat(join(root, "tree")), { code: "ENOENT" });
+  });
+
+  await suite.test("recursive delete removes a tree whose children include symlinks", async () => {
+    await app.request("/files/content?path=linked%2Freal.txt", { method: "PUT", headers: auth, body: "real" });
+    await symlink("/etc/hosts", join(root, "linked", "link"));
+    await symlink("/etc", join(root, "linked", "dirlink"));
+    const recursive = await app.request("/files?path=linked&recursive=true", { method: "DELETE", headers: auth });
+    assert.equal(recursive.status, 200);
+    await assert.rejects(stat(join(root, "linked")), { code: "ENOENT" });
+    assert.equal((await stat("/etc/hosts")).isFile(), true);
   });
 
   await suite.test("Content-Length over 25 MB returns 413 before storing the body", async () => {
