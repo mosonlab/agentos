@@ -6,6 +6,8 @@ import { apiBase } from "./lib/api";
 import { ProjectProvider, useProjectScope } from "./lib/project";
 import { matchRoute, navigate, useRoute } from "./lib/router";
 import { AgentDetailPage, AgentsPage } from "./pages/Agents";
+import { ArchivedPage } from "./pages/Archived";
+import { AutomationsPage } from "./pages/Automations";
 import { ConnectionsPage } from "./pages/Connections";
 import { GoalDetailPage, GoalsPage } from "./pages/Goals";
 import { InboxPage, InboxThreadPage } from "./pages/Inbox";
@@ -13,11 +15,18 @@ import { ProjectDetailPage, ProjectsPage } from "./pages/Projects";
 import { SecretsPage } from "./pages/Secrets";
 import { SessionDetailPage, SessionsPage } from "./pages/Sessions";
 import { TasksPage } from "./pages/Tasks";
+import { TriggerDetailPage, TriggersPage } from "./pages/Triggers";
 import { TaskDetailPage } from "./pages/TaskDetail";
 
 const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) => ReactNode }> = [
   { pattern: "/tasks", render: () => <TasksPage /> },
   { pattern: "/tasks/:taskId", render: (params) => <TaskDetailPage taskId={params.taskId ?? ""} /> },
+  // Siblings of /tasks, not children: matchRoute compares segment counts and
+  // /tasks/:taskId already owns the second segment.
+  { pattern: "/automations", render: () => <AutomationsPage /> },
+  { pattern: "/triggers", render: () => <TriggersPage /> },
+  { pattern: "/triggers/:templateId", render: (params) => <TriggerDetailPage templateId={params.templateId ?? ""} /> },
+  { pattern: "/archived", render: () => <ArchivedPage /> },
   { pattern: "/sessions", render: () => <SessionsPage /> },
   { pattern: "/sessions/:sessionId", render: (params) => <SessionDetailPage sessionId={params.sessionId ?? ""} /> },
   { pattern: "/agents", render: () => <AgentsPage /> },
