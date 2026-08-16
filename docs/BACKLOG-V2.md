@@ -79,11 +79,14 @@
 
 ## 平台修缮（自举过程中发现，小活随批次穿插）
 
-- [ ] WAITING_INBOX 挂起中的 run 工作区不应被 GC：闸门等待期间 /tmp 工作区被清，resume 报 ENOENT 只能重开会话、丢失会话内上下文（2026-08-16 批次 0 修订环节触发）
+- [x] WAITING_INBOX 挂起中的 run 工作区不应被 GC：闸门等待期间 /tmp 工作区被清，resume 报 ENOENT 只能重开会话、丢失会话内上下文（2026-08-16 批次 0 修订环节触发）— **修缮批次已合并上线，`WAITING_INBOX` 已进 `reconcile.ts` 的 `workspaceKeepStatuses`**
 - [ ] Agent 归档/下线状态（原版有 published/draft）：有任务历史的 agent 删不掉（外键 500），需要软下线——2026-08-16 裁撤 feasibility 时暴露
 - [ ] runner 并发度参数：单进程 worker 池跑 N 个 run（现=1 run/进程，扩并发只能多开进程；多进程认领 CAS 安全已验证，但产品级并发应是一个配置项）。上限设计：run 是 I/O 等待型（等模型回包），瓶颈是内存/磁盘（npm ci、build 爆发）而非 CPU——默认自适应 `min(核数-1, 内存GB/4)`（下限 2，可配置覆盖；该数=同时跑的 run 数），不用裸核数——run 稳态是等模型回包，但 npm ci/build 爆发吃核吃内存（2026-08-16 四链排队暴露 + Leo 裁：默认要随机器规格走，不固定低值）
-- [ ] 非模板任务的 approvalGate 到闸不发飞书卡：手动创建的带闸任务 run 成功后静默停 Review 列，人无从得知（2026-08-16 批次 2 PLAN 触发；批次 2 spec §8-1 已把该歧义摆上桌）
-- [ ] retry 应按 agent 当前配置重新推导 runner/model，而非复刻失败 run 的定格配置（2026-08-16：评审任务改完 agent 后 retry 仍按旧 CLAUDE runner 跑 sol，二连败，只能删任务重建）
+- [ ] 非模板任务的 approvalGate 到闸不发飞书卡：手动创建的带闸任务 run 成功后静默停 Review 列，人无从得知（2026-08-16 批次 2 PLAN 触发；批次 2 spec §8-1 已把该歧义摆上桌）— **部分修复**：批次 2 已合并，带 `chainId`/`followUpTaskId` 的任务到闸会发卡（带 PR url + 产物预览）；**纯手工独立任务仍静默**，本条留着
+- [x] retry 应按 agent 当前配置重新推导 runner/model，而非复刻失败 run 的定格配置（2026-08-16：评审任务改完 agent 后 retry 仍按旧 CLAUDE runner 跑 sol，二连败，只能删任务重建）— **修缮批次已合并上线**，retry 现调 `deriveRunConfig(task.assigneeAgent, …)` 重推导 runner/model/promptHash，改模型后直接 retry 即可
+- [ ] 迁移的破坏性守卫不对称：Files 的 `20260816060946` 有 `FileObject` 行数守卫 + `db:files-precheck` 预检脚本，批次 2 的 `20260816000000` 却是裸 `DROP TABLE Trigger/Automation/InboxConnectionWindow`（上线时库里 InboxConnectionWindow 有 4 行遥测被无声销毁）。删表/删列的迁移应统一要求预检 + 行数守卫（2026-08-16 上线迁移时发现）
+- [ ] `db:files-precheck` 未在根 `package.json` 暴露，只能 `npm run db:files-precheck -w @agentos/db`；破坏性迁移的预检应和 `db:migrate` 一样是根级命令，最好由 `db:migrate` 自己前置调用（2026-08-16 上线迁移时发现）
+- [ ] `apps/web/src/tests/styles.test.tsx` 读 `dist/assets/*.css`，裸 `npm test` 会对着陈旧产物断言（改了 CSS 不 build 就跑测试 = 假绿/假红）。测试应自己触发构建或读源文件，不该隐式依赖执行顺序（2026-08-16 合并 PR #1 时发现）
 
 ## 开源发布批次
 
