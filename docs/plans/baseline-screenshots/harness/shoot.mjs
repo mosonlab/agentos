@@ -109,8 +109,10 @@ for (const theme of ["light", "dark"]) {
   // Targeted: the Agents detail page's toggle switches, close up (G2's only
   // evidence). The Capabilities tab shows switches in both states at once.
   await goto("/agents/agt_frontend");
+  // Located by label, not by `.tabs button`: that class only exists before W13.
+  // Works against both the legacy and the migrated DOM.
   await evaluate(`(() => {
-    const tab = [...document.querySelectorAll(".tabs button")].find((b) => b.textContent.trim() === "Capabilities");
+    const tab = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Capabilities");
     if (tab) tab.click();
     return true;
   })()`);
@@ -130,8 +132,13 @@ for (const theme of ["light", "dark"]) {
 
   // Targeted: the Tasks kanban board, including a column in its resting state.
   await goto("/tasks");
+  // Likewise: `.board` is gone after W13, so fall back to the element whose four
+  // children are the status columns. Same element, same clip, either way.
   const board = await evaluate(`(() => {
-    const el = document.querySelector(".board");
+    const heads = ["Todo", "Doing", "Review", "Done"];
+    const el = document.querySelector(".board") ?? [...document.querySelectorAll("div")].find((node) =>
+      node.children.length === 4 &&
+      [...node.children].every((child, i) => child.textContent.trim().startsWith(heads[i])));
     if (!el) return null;
     const r = el.getBoundingClientRect();
     return { x: Math.max(0, r.left - 12), y: Math.max(0, r.top + window.scrollY - 12),

@@ -157,7 +157,7 @@ export const AgentChip = ({ agent, name }: { agent?: Agent | null; name?: string
 /** `border-border` is not redundant next to the primitive's `border`: Tailwind
  *  v4's preflight resets every element to `border: 0 solid` with no colour, so a
  *  width-only `border` utility paints in `currentColor`. The retired
- *  `.card { border: 1px solid var(--line) }` was supplying the colour. */
+ *  retired `.card` rule was supplying that colour with its own 1px border. */
 export const Card = ({ title, extra, children, flush }: {
   title?: ReactNode;
   extra?: ReactNode;
