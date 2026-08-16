@@ -25,6 +25,7 @@ import {
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
@@ -44,6 +45,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
 import { validateSchedule } from "./scheduler.js";
+import { authenticateWebhook, resolvePayloadVariables } from "./hooks.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -303,6 +305,15 @@ const instantiateTemplateInput = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
 });
+const webhookPayloadMapping = z.object({
+  map: z.record(z.string(), z.string().trim().min(1)).optional(),
+  defaults: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+});
+const webhookConfigPatch = z.object({
+  webhookSecretId: id.nullable().optional(),
+  webhookRepoId: id.nullable().optional(),
+  webhookPayloadMapping: webhookPayloadMapping.nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -326,7 +337,8 @@ const withoutUndefined = (value: object): Record<string, unknown> => Object.from
 );
 
 const isPublic = (path: string, method: string): boolean =>
-  path === "/" || path === "/health" || method === "OPTIONS";
+  path === "/" || path === "/health" || method === "OPTIONS"
+  || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
 
 const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
 
@@ -351,7 +363,7 @@ const goalInclude = {
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
 
-  app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret"] }));
   app.use("*", async (context, next) => {
     if (isPublic(context.req.path, context.req.method)) {
       context.set("principal", { kind: "public" });
@@ -374,6 +386,38 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       console.error("Health check failed", error);
       return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
     }
+  });
+
+  app.use("/hooks/templates/:templateId", bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (context) => context.json({ error: "Payload too large" }, 413),
+  }));
+  app.post("/hooks/templates/:templateId", async (context) => {
+    const template = await authenticateWebhook(
+      db,
+      id.parse(context.req.param("templateId")),
+      context.req.header("X-AgentOS-Webhook-Secret"),
+    );
+    if (!template) return context.json({ error: "Unauthorized" }, 401);
+    let payload: unknown;
+    try {
+      payload = await context.req.json();
+    } catch {
+      return context.json({ error: "Invalid JSON payload" }, 400);
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return context.json({ error: "Webhook payload must be an object" }, 400);
+    }
+    const resolved = resolvePayloadVariables(template, payload as Record<string, unknown>);
+    if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
+    const result = await instantiateTemplate(db, template.projectId, template.id, {
+      repoId: template.webhookRepoId!,
+      variables: resolved.variables,
+    }, {
+      actorType: "webhook",
+      activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
+    });
+    return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
   });
 
   app.get("/projects", async (context) => context.json(await db.project.findMany({ orderBy: { createdAt: "asc" } })));
@@ -906,6 +950,32 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
+  });
+  app.patch("/task-templates/:templateId", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, webhookConfigPatch);
+    const template = await db.taskTemplate.findUnique({ where: { id: templateId } });
+    if (!template) return context.json({ error: "Template not found" }, 404);
+    const secretId = body.webhookSecretId === undefined ? template.webhookSecretId : body.webhookSecretId;
+    const repoId = body.webhookRepoId === undefined ? template.webhookRepoId : body.webhookRepoId;
+    if (secretId) {
+      const secret = await db.secret.findFirst({ where: { id: secretId, purpose: SecretPurpose.WEBHOOK } });
+      if (!secret) return context.json({ error: "Webhook secret must exist and have WEBHOOK purpose" }, 400);
+      if (!repoId) return context.json({ error: "Webhook secret requires an in-project Repo" }, 400);
+    }
+    if (repoId) {
+      const repo = await db.repo.findFirst({ where: { id: repoId, projectId: template.projectId } });
+      if (!repo) return context.json({ error: "Webhook Repo does not belong to this project" }, 400);
+    }
+    return context.json(await db.taskTemplate.update({
+      where: { id: templateId },
+      data: {
+        ...withoutUndefined(body),
+        ...(body.webhookPayloadMapping !== undefined
+          ? { webhookPayloadMapping: body.webhookPayloadMapping === null ? Prisma.JsonNull : body.webhookPayloadMapping }
+          : {}),
+      },
+    }));
   });
   app.post("/projects/:projectId/task-templates/:templateId/instantiate", async (context) => {
     try {

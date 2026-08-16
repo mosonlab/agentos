@@ -19,6 +19,7 @@ export const instantiateTemplate = async (
   projectId: string,
   templateId: string,
   input: InstantiateTemplateInput,
+  options: { actorType?: string; activityMetadata?: Record<string, unknown> } = {},
 ) => {
   const [template, repo] = await Promise.all([
     db.taskTemplate.findFirst({
@@ -79,9 +80,9 @@ export const instantiateTemplate = async (
     await tx.run.update({ where: { id: run.id }, data: { branch: branchName } });
     await tx.taskActivity.createMany({ data: tasks.map((task, index) => ({
       taskId: task.id,
-      actorType: "control-plane",
+      actorType: options.actorType ?? "control-plane",
       body: index === 0 ? "Template instantiated; first step queued" : "Template instantiated; waiting for predecessor",
-      metadata: { chainId, templateId: template.id },
+      metadata: { chainId, templateId: template.id, ...options.activityMetadata },
     })) });
     return { chainId, branchName, tasks };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
