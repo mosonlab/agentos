@@ -118,7 +118,7 @@ export const GoalsPage = (): ReactNode => {
           const percent = counts.total === 0 ? 0 : Math.round((counts.done / counts.total) * 100);
           return (
             <div className={cn(GOAL_CARD, index > 0 && "mt-[12px]")} key={goal.id} onClick={() => navigate(`/goals/${goal.id}`)}>
-              <div className="flex items-center gap-[10px]">
+              <div className={ROW}>
                 <h3 className="flex-1 text-[1.17em]">{goal.title}</h3>
                 <GoalPill status={goal.status} />
               </div>
