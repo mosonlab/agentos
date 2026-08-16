@@ -42,6 +42,8 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
 import { getFileStore } from "./files/config.js";
+import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
+import { isCanonicalRelPath } from "./files/paths.js";
 import { InvalidPathError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
@@ -123,7 +125,10 @@ const mcpConnectionInput = z.object({
   credentialSecretId: id.nullable().default(null),
 });
 const filesystemGrantFields = z.object({
-  folderPath: z.string().trim().min(1).max(4096),
+  folderPath: z.string().trim().max(4096).refine(
+    (value) => value === "" || isCanonicalRelPath(value),
+    'folderPath must be "" (the whole Files Root) or a normalized Files-Root-relative POSIX path',
+  ),
   canRead: z.boolean().default(false),
   canWrite: z.boolean().default(false),
   canDelete: z.boolean().default(false),
@@ -350,6 +355,14 @@ const deleteRecursively = async (store: FileStore, path: string): Promise<void> 
   }
   await store.delete(path);
 };
+
+const SESSION_READ_LIMIT = 5 * 1024 * 1024;
+const SESSION_BASE64_BODY_LIMIT = 34 * 1024 * 1024;
+const sessionWriteInput = z.object({
+  path: z.string(),
+  content: z.string(),
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+});
 
 const withoutUndefined = (value: object): Record<string, unknown> => Object.fromEntries(
   Object.entries(value).filter(([, item]) => item !== undefined),
@@ -1641,6 +1654,86 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       return context.json(question, 201);
     } catch (error: unknown) {
       if (error instanceof Error && error.message.startsWith("Run is not resumable")) return context.json({ error: error.message }, 409);
+      throw error;
+    }
+  });
+
+  const sessionFileAccess = async (runId: string, operation: FileOperation, path: string): Promise<Response | null> => {
+    const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
+    if (!run) return new Response(JSON.stringify({ error: "Run not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+    const grants = await db.filesystemGrant.findMany({ where: { agentId: run.agentId } }) as GrantLike[];
+    const admission = grantAdmits(grants, operation, path);
+    return admission.admitted
+      ? null
+      : new Response(JSON.stringify({ error: `Filesystem grant missing ${admission.missing}` }), { status: 403, headers: { "Content-Type": "application/json" } });
+  };
+
+  app.get("/session/runs/:runId/files", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const path = context.req.query("dir") ?? "";
+    try {
+      const denied = await sessionFileAccess(runId, "list", path);
+      if (denied) return denied;
+      return context.json(await (await getFileStore()).list(path));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
+  app.get("/session/runs/:runId/files/content", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const path = context.req.query("path") ?? "";
+    try {
+      const denied = await sessionFileAccess(runId, "read", path);
+      if (denied) return denied;
+      const store = await getFileStore();
+      const file = await store.stat(path);
+      if (!file) throw new NotFoundError(`Path not found: ${path}`);
+      if (file.size > SESSION_READ_LIMIT) return context.json({ error: "File is too large for a tool result (5 MB limit)" }, 413);
+      const bytes = await store.read(path);
+      try {
+        return context.json({ content: new TextDecoder("utf-8", { fatal: true }).decode(bytes), encoding: "utf8", stat: file });
+      } catch {
+        return context.json({ content: bytes.toString("base64"), encoding: "base64", stat: file });
+      }
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
+  app.put("/session/runs/:runId/files/content", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const declaredLength = Number(context.req.header("Content-Length") ?? "0");
+    if (declaredLength > SESSION_BASE64_BODY_LIMIT) return context.json({ error: "File exceeds 25 MB decoded write limit" }, 413);
+    try {
+      const body = await readJson(context.req.raw, sessionWriteInput);
+      const denied = await sessionFileAccess(runId, "write", body.path);
+      if (denied) return denied;
+      const bytes = Buffer.from(body.content, body.encoding === "base64" ? "base64" : "utf8");
+      if (bytes.byteLength > FILE_WRITE_LIMIT) return context.json({ error: "File exceeds 25 MB decoded write limit" }, 413);
+      return context.json(await (await getFileStore()).write(body.path, bytes));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+
+  app.delete("/session/runs/:runId/files", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const path = context.req.query("path") ?? "";
+    try {
+      const denied = await sessionFileAccess(runId, "delete", path);
+      if (denied) return denied;
+      await (await getFileStore()).delete(path);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
       throw error;
     }
   });
