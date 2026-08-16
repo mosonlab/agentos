@@ -6,11 +6,14 @@ config({
   quiet: true,
 });
 
-const [{ prisma }, { app }, { defaultWorkspaceRoot, reconcileAtStartup }] = await Promise.all([
+const [{ prisma }, { app }, { defaultWorkspaceRoot, reconcileAtStartup }, { resolveFilesRoot, warnIfICloudPath }] = await Promise.all([
   import("@agentos/db"),
   import("./app.js"),
   import("./reconcile.js"),
+  import("./files/config.js"),
 ]);
+
+await warnIfICloudPath(resolveFilesRoot());
 
 const reconciliation = await reconcileAtStartup(
   prisma,

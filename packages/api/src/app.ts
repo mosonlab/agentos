@@ -22,6 +22,7 @@ import {
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
+import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
@@ -40,6 +41,8 @@ import { defaultWorkspaceRoot, reconcileDatabaseRuns, reconcileWorkspaces } from
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
+import { getFileStore } from "./files/config.js";
+import { InvalidPathError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -303,6 +306,51 @@ const inboxReplyInput = z.object({
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
 
+const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
+class PayloadTooLargeError extends Error {}
+
+const readBoundedBody = async (request: Request, limit: number): Promise<Buffer> => {
+  const length = request.headers.get("Content-Length");
+  if (length !== null && Number(length) > limit) throw new PayloadTooLargeError();
+  const reader = request.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel("File upload exceeds limit");
+        throw new PayloadTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+};
+
+const fileErrorResponse = (context: Context, error: unknown): Response | undefined => {
+  if (error instanceof PayloadTooLargeError) return context.json({ error: "File exceeds 25 MB upload limit" }, 413);
+  if (error instanceof SymlinkError || error instanceof NotADirectoryError || error instanceof InvalidPathError) {
+    return context.json({ error: error.message }, 400);
+  }
+  if (error instanceof NotFoundError) return context.json({ error: error.message }, 404);
+  return undefined;
+};
+
+const deleteRecursively = async (store: FileStore, path: string): Promise<void> => {
+  const stat = await store.stat(path);
+  if (!stat) throw new NotFoundError(`Path not found: ${path}`);
+  if (stat.kind === "dir") {
+    for (const child of await store.list(path)) await deleteRecursively(store, child.path);
+  }
+  await store.delete(path);
+};
+
 const withoutUndefined = (value: object): Record<string, unknown> => Object.fromEntries(
   Object.entries(value).filter(([, item]) => item !== undefined),
 );
@@ -355,6 +403,75 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     } catch (error: unknown) {
       console.error("Health check failed", error);
       return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
+    }
+  });
+
+  app.get("/files", async (context) => {
+    try {
+      return context.json(await (await getFileStore()).list(context.req.query("dir") ?? ""));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.get("/files/content", async (context) => {
+    const path = context.req.query("path") ?? "";
+    try {
+      const content = await (await getFileStore()).read(path);
+      return context.body(new Uint8Array(content), 200, {
+        "Content-Type": getMimeType(path) ?? "application/octet-stream",
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.split("/").at(-1) ?? "file")}`,
+      });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.put("/files/content", async (context) => {
+    try {
+      const content = await readBoundedBody(context.req.raw, FILE_WRITE_LIMIT);
+      return context.json(await (await getFileStore()).write(context.req.query("path") ?? "", content));
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.post("/files/mkdir", async (context) => {
+    try {
+      const { path } = await readJson(context.req.raw, z.object({ path: z.string() }));
+      await (await getFileStore()).mkdir(path);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.post("/files/move", async (context) => {
+    try {
+      const { from, to } = await readJson(context.req.raw, z.object({ from: z.string(), to: z.string() }));
+      await (await getFileStore()).move(from, to);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
+    }
+  });
+  app.delete("/files", async (context) => {
+    try {
+      const store = await getFileStore();
+      const path = context.req.query("path") ?? "";
+      if (context.req.query("recursive") === "true") await deleteRecursively(store, path);
+      else await store.delete(path);
+      return context.json({ ok: true });
+    } catch (error: unknown) {
+      const response = fileErrorResponse(context, error);
+      if (response) return response;
+      throw error;
     }
   });
 
