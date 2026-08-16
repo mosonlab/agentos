@@ -1,6 +1,7 @@
 # PLAN — Batch 2.5: tasks visibility (chain view, triggers & automations UI, kanban completeness)
 
-Status: **revision 1** (review findings applied) · Author: plan agent (chain step ④) · Date: 2026-08-16
+Status: **revision 1, verified** (review findings applied, then every anchor
+re-read) · Author: plan agent (chain step ④) · Date: 2026-08-16
 Spec: `docs/specs/batch-2.5-tasks-visibility.md` (approved, commit `2802d36`).
 Review answered by this revision: `docs/reviews/2026-08-16-batch-2.5-plan-review.md`
 (**FAIL — 13 must-fix, 4 should-fix**, against plan commit `cd05b9c`).
@@ -23,6 +24,29 @@ so the API sends prose and the pages own explicit result state — C10), and M8
 (`usePoll` keeps stale data on error, so "the 404 renders itself" was false —
 C11). Those three are cross-cutting and are written once in §0.2, not repeated
 per page.
+
+**Verification pass (same chain step, after revision 1 was written).** Every file,
+line anchor and API shape revision 1 introduced was re-read in the tree at
+`2802d36` before this document was persisted: `ApiError.status` and `parseError`
+(`apps/web/src/lib/api.ts:19-48`, which is what makes C11's `fatal` and C10's
+prose-error rule correct), `api.post<T>` returning the parsed body (`:70-77`,
+WI-10's `Archive All` notice), `useAction`'s `boolean` (`hooks.ts:66-88`),
+`usePoll`'s stale-data-on-error (`:41-51`), `ui.tsx`'s `NOTICE`/`GapNotice`/
+`ErrorNotice` neighbours for `InfoNotice` (`:317-353`), the exhaustive
+`taskTones` (`:117`), `enqueueTaskRun(tx, taskId, now)` and the five-status
+`activeSuccessorStatuses` (`workflow.ts:62-103`, `:160-166`), the `for(;;)` CAS
+whose re-read branch is what hangs on `BACKLOG` (`:226-252`), `fireCronTask`'s
+row-CAS and `fireAtTask`'s missing re-read (`scheduler.ts:99-152`),
+`instantiateTemplate`'s required `repoId` and Serializable retry loop
+(`templates.ts:5-8`, `:58-106`), `authenticateWebhook`'s single null-return
+(`hooks.ts:42-48`), the `Restrict` webhook-repo FK and its existing proof
+(`schema.prisma:409-410`, `migration.dbtest.ts:43-52`), `setupTestDb`'s
+single `migrate reset` (`testdb.ts:19-29`), the `Proxy`-around-`tx` race idiom
+(`chain.dbtest.ts:66-91`), and all three `GET /tasks` call sites including the
+global one (`Projects.tsx:75`). All held. The one thing that did not: §15's
+secret-hygiene commands, whose allowlist was still too narrow to pass on a clean
+tree — the exact defect review M13 raised, one layer down. They are rewritten
+there, and that is the only change this pass made to revision 1's content.
 
 Planning only. **Thirteen work items in dependency order, one commit each, on one
 feature branch, landing as one PR with two migration folders.** Every spec
@@ -481,7 +505,7 @@ applied; one (S2) is applied in part, with the declined half and its reason in
 | M10 | The plain-text cron editor the spec requires is missing | Yes — spec §3.2 excludes a *builder*, not the field | WI-12, new edit interaction |
 | M11 | `Archive All`'s result notice has no state and no surface | Yes — `useAction` returns `boolean`; Tasks owns only error notices | C10, WI-8 (`InfoNotice`), WI-10 §6 |
 | M12 | `Promise.race` does not stop a hanging transaction | Yes — the loop is `for(;;)` inside the tx (`workflow.ts:226-252`) | WI-3, replaced with a Prisma transaction `timeout` + disposable client |
-| M13 | The `OPERATOR_TOKEN` grep can never return 0 | Yes — three existing dbtests set it (`hooks.dbtest.ts:100`, `scheduler.dbtest.ts:129`, `chain.dbtest.ts:126`, `:262`) | §15, both greps rewritten |
+| M13 | The `OPERATOR_TOKEN` grep can never return 0 | Yes — three existing dbtests set it (`hooks.dbtest.ts:100`, `scheduler.dbtest.ts:129`, `chain.dbtest.ts:126`, `:262`) | §15, three greps, allowlist = **test files** (tightened in the verification pass: revision 1's message-shaped allowlist still flagged four pre-existing fixtures, and the corrected commands were executed) |
 | S1 | `GET /tasks` has three call sites, one global | Yes — `Projects.tsx:75` calls it with no `projectId` | §0.1 table + C5, keyed by `(projectId, chainId)` |
 | S2 | Record the spec deviations as authoritative errata | Yes | **§0.4** — errata written; editing the approved spec declined, see §0.4 |
 | S3 | E1/E2/E6 and the CAS re-read are claimed but untested | Yes | WI-3, WI-4, WI-7 verification blocks |
@@ -1862,23 +1886,42 @@ value** in a build artifact or a persisted artifact, not the environment key's
 name in a test that reads it. Corrected commands:
 
 ```bash
-# 1. No secret VALUE anywhere in the shipped bundle or in source. The fixture
-#    secret this batch introduces must be a single known literal so this is
-#    greppable at all — WI-7's fixtures use "wh-secret-batch25".
-grep -r "wh-secret-batch25" apps/web/dist packages/*/src | wc -l          # expect 0 outside the fixture file itself
-grep -rn "OPERATOR_TOKEN\|operator-.*-token" apps/web/dist | wc -l        # expect 0 — the bundle is strict
+# 1. The fixture secret VALUE appears only in the *.dbtest.ts files that define it.
+#    WI-7's fixtures use one known literal — "wh-secret-batch25" — precisely so
+#    this is greppable at all. Listing FILES (-l) and filtering the legitimate
+#    ones is what makes the expectation "no output", which is checkable; a
+#    `| wc -l` whose expected number is "0 outside the fixture file" is not.
+grep -rl "wh-secret-batch25" apps/web/dist apps/web/src packages/*/src \
+  | grep -v '\.dbtest\.ts$'                       # expect: NO OUTPUT
 
-# 2. No token value in anything this batch adds. Scope by the diff, not the tree:
-git diff --name-only main...HEAD | grep -E '\.(ts|tsx)$' \
-  | xargs grep -nE 'OPERATOR_TOKEN\s*=\s*"' -- | grep -v 'process\.env\.OPERATOR_TOKEN = "operator-'
-                                                                          # expect 0 new hard-coded tokens
+# 2. The bundle is absolute: neither a token value, nor the identifier, nor the
+#    fixture secret belongs in anything the browser downloads.
+grep -rn "OPERATOR_TOKEN\|operator-.*-token\|wh-secret-batch25" apps/web/dist | wc -l   # expect 0
+
+# 3. No hard-coded token in non-test source this batch adds. Scope by the diff,
+#    not the tree, and exclude test files — see the allowlist note below.
+git diff --name-only main...HEAD | grep -E '\.(ts|tsx)$' | grep -vE '\.(test|dbtest)\.tsx?$' \
+  | xargs -r grep -nE 'OPERATOR_TOKEN\s*=\s*"'    # expect: NO OUTPUT
 ```
 
-The allowlist is the existing `process.env.OPERATOR_TOKEN = "operator-…-token"`
-save/restore idiom; anything else the second command prints is a real finding.
-The **bundle** grep stays absolute — `apps/web/dist` must contain neither a token
-value nor the identifier, because the browser never needs either
-(`api.ts:5-8`: the dev proxy injects the bearer server-side).
+**The allowlist is "test files", not a message shape.** Revision 1 allowlisted the
+literal string `process.env.OPERATOR_TOKEN = "operator-` — too narrow. Run against
+this tree it reports four pre-existing, entirely legitimate fixtures:
+`control-plane.test.ts:10`, `files/grant-alias.test.ts:27`,
+`files/routes.test.ts:19` and `goals.test.ts:21`, each of which names its throwaway
+token after its own suite. That is review M13's defect one layer down — a check
+whose expected output is unachievable on a clean tree teaches the reviewer to
+ignore it. **Commands 1 and 3 were executed on the tree at `2802d36` and produce no
+output.** Command 2 must be run *after* `npm run build` — on an unbuilt tree
+`apps/web/dist` does not exist and the count is trivially 0. What the rule forbids is
+a token **value** in a build artifact or a persisted
+artifact (this plan, the PR body, the task output), not the environment key's name
+in a test that saves, sets and restores it — the idiom at
+`chain.dbtest.ts:126-137`, `hooks.dbtest.ts:100-109`, `scheduler.dbtest.ts:129-139`
+and `goals.test.ts:20-26`. Command 3 therefore excludes test files and flags an
+assignment anywhere else; `xargs -r` keeps it from reading stdin when the diff
+touches no such file. The **bundle** grep stays absolute, because the browser
+never needs either (`api.ts:5-8`: the dev proxy injects the bearer server-side).
 
 ---
 
