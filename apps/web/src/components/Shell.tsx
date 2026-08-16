@@ -1,10 +1,12 @@
 import { type ReactNode, useState } from "react";
+import { Monitor, Moon, Sun } from "lucide-react";
 
 import { useDismiss, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
 import type { Health, InboxMessage } from "../lib/types";
+import { useTheme, type ThemeMode } from "../lib/theme";
 import {
   IconActivity, IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
   IconProjects, IconSecrets, IconTasks,
@@ -54,6 +56,9 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   // GET /inbox/messages is global: the control plane has no project filter on it.
   const { data: inbox } = usePoll<InboxMessage[]>("/inbox/messages", 5_000);
   const openCount = (inbox ?? []).filter((message) => message.status === "OPEN").length;
+  const { mode, setMode } = useTheme();
+  const nextMode: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };
+  const ThemeIcon = mode === "system" ? Monitor : mode === "light" ? Sun : Moon;
 
   const active = (item: { to: string; match: string[] }): boolean =>
     item.match.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
@@ -78,6 +83,9 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
             <span className="state">{health ? (health.status === "ok" ? "online" : "degraded") : "offline"}</span>
           </div>
           <Link to="/secrets" className="navItem"><IconActivity />Settings</Link>
+          <button type="button" className="navItem w-full border-0 bg-transparent text-left" aria-label={`Theme: ${mode}. Switch to ${nextMode[mode]}.`} onClick={() => setMode(nextMode[mode])}>
+            <ThemeIcon size={15} strokeWidth={1.7} aria-hidden="true" />Theme: {mode}
+          </button>
         </div>
       </aside>
       <main className="content">{children}</main>
