@@ -7,7 +7,7 @@
  *  local process could read them.
  *
  *  Hand-rolled JSON-RPC rather than the MCP SDK: the runner package ships with
- *  no runtime dependencies, and the surface here is four tools. */
+ *  no runtime dependencies, and the surface here is eight tools. */
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -135,15 +135,56 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "files_list",
+    title: "List files",
+    description: "List one granted Files Root directory non-recursively.",
+    inputSchema: {
+      type: "object",
+      properties: { dir: { type: "string", description: "Files-Root-relative POSIX directory path; empty means root." } },
+      required: ["dir"], additionalProperties: false,
+    },
+  },
+  {
+    name: "files_read",
+    title: "Read a file",
+    description: "Read one granted file; binary content is returned with encoding base64.",
+    inputSchema: {
+      type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false,
+    },
+  },
+  {
+    name: "files_write",
+    title: "Write a file",
+    description: "Write one granted file, creating parent directories as needed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" }, content: { type: "string" }, encoding: { type: "string", enum: ["utf8", "base64"] },
+      },
+      required: ["path", "content"], additionalProperties: false,
+    },
+  },
+  {
+    name: "files_delete",
+    title: "Delete a file",
+    description: "Delete one granted file or empty directory.",
+    inputSchema: {
+      type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false,
+    },
+  },
 ] as const;
 
 const call = async (
   credentials: SessionCredentials,
-  method: "GET" | "POST" | "PUT",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: Record<string, unknown>,
+  query?: Record<string, string>,
 ): Promise<unknown> => {
-  const response = await fetch(`${credentials.apiUrl}/session/runs/${credentials.runId}${path}`, {
+  const url = new URL(`/session/runs/${credentials.runId}${path}`, credentials.apiUrl);
+  for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+  const response = await fetch(url, {
     method,
     headers: { Authorization: `Bearer ${credentials.sessionToken}`, "Content-Type": "application/json" },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -204,6 +245,30 @@ export const invokeTool = async (
       choices,
     });
     return text("Question sent. This session is suspended until the human answers; you will resume with their reply.");
+  }
+  if (name === "files_list") {
+    const dir = typeof rawArguments.dir === "string" ? rawArguments.dir : null;
+    if (dir === null) throw new Error("files_list requires dir");
+    return text(JSON.stringify(await call(credentials, "GET", "/files", undefined, { dir }), null, 2));
+  }
+  if (name === "files_read") {
+    const path = asString(rawArguments.path);
+    if (!path) throw new Error("files_read requires path");
+    return text(JSON.stringify(await call(credentials, "GET", "/files/content", undefined, { path }), null, 2));
+  }
+  if (name === "files_write") {
+    const path = asString(rawArguments.path);
+    const content = typeof rawArguments.content === "string" ? rawArguments.content : null;
+    const encoding = rawArguments.encoding === undefined ? "utf8" : rawArguments.encoding;
+    if (!path || content === null || (encoding !== "utf8" && encoding !== "base64")) {
+      throw new Error("files_write requires path, content, and optional encoding utf8 or base64");
+    }
+    return text(JSON.stringify(await call(credentials, "PUT", "/files/content", { path, content, encoding }), null, 2));
+  }
+  if (name === "files_delete") {
+    const path = asString(rawArguments.path);
+    if (!path) throw new Error("files_delete requires path");
+    return text(JSON.stringify(await call(credentials, "DELETE", "/files", undefined, { path }), null, 2));
   }
   throw new Error(`Unknown tool ${name}`);
 };

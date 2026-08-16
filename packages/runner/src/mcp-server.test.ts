@@ -37,7 +37,7 @@ const withApi = async (
   }
 };
 
-test("the MCP handshake advertises the four AgentOS tools", async () => {
+test("the MCP handshake advertises all eight AgentOS tools", async () => {
   const credentials = { apiUrl: "http://unused", runId: "run-1", sessionToken: "t", fencingToken: "f" };
   const initialize = await handleRequest(credentials, {
     jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" },
@@ -47,11 +47,58 @@ test("the MCP handshake advertises the four AgentOS tools", async () => {
   const listed = await handleRequest(credentials, { jsonrpc: "2.0", id: 2, method: "tools/list" });
   assert.deepEqual(
     ((listed?.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name),
-    ["task_activity_log", "task_output", "task_status", "inbox_ask"],
+    ["task_activity_log", "task_output", "task_status", "inbox_ask", "files_list", "files_read", "files_write", "files_delete"],
   );
-  assert.equal(TOOLS.length, 4);
+  assert.equal(TOOLS.length, 8);
   // Notifications never get a reply.
   assert.equal(await handleRequest(credentials, { jsonrpc: "2.0", method: "notifications/initialized" }), null);
+});
+
+test("four file tools hit the correct session routes and preserve base64", async () => {
+  await withApi((hit) => ({
+    status: 200,
+    body: hit.method === "GET" && hit.url.includes("content")
+      ? JSON.stringify({ content: "/+7d", encoding: "base64" })
+      : JSON.stringify({ ok: true }),
+  }), async (credentials, received) => {
+    await invokeTool(credentials, "files_list", { dir: "project/reports" });
+    const read = await invokeTool(credentials, "files_read", { path: "project/binary.bin" });
+    await invokeTool(credentials, "files_write", { path: "project/binary.bin", content: "/+7d", encoding: "base64" });
+    await invokeTool(credentials, "files_delete", { path: "project/binary.bin" });
+    assert.match(read.content[0]!.text, /"encoding": "base64"/u);
+    assert.deepEqual(received.map(({ method, url }) => `${method} ${url}`), [
+      "GET /session/runs/run-1/files?dir=project%2Freports",
+      "GET /session/runs/run-1/files/content?path=project%2Fbinary.bin",
+      "PUT /session/runs/run-1/files/content",
+      "DELETE /session/runs/run-1/files?path=project%2Fbinary.bin",
+    ]);
+    assert.deepEqual(JSON.parse(received[2]!.body), { path: "project/binary.bin", content: "/+7d", encoding: "base64" });
+    assert.ok(received.every((hit) => hit.authorization === "Bearer agos_session_test"));
+  });
+});
+
+test("file tool query encoding preserves reserved, spaced, and non-ASCII filenames", async () => {
+  const filename = "folder/a?#%& space 报告.md";
+  await withApi((hit) => {
+    const parsed = new URL(hit.url, "http://local");
+    assert.equal(parsed.searchParams.get("path"), filename);
+    return { status: 200, body: JSON.stringify({ content: "ok", encoding: "utf8" }) };
+  }, async (credentials) => {
+    await invokeTool(credentials, "files_read", { path: filename });
+  });
+});
+
+test("file route 403 and 413 responses surface as MCP tool errors", async () => {
+  for (const status of [403, 413]) {
+    await withApi(() => ({ status, body: JSON.stringify({ error: status === 403 ? "Filesystem grant missing canRead" : "too large" }) }), async (credentials) => {
+      const response = await handleRequest(credentials, {
+        jsonrpc: "2.0", id: status, method: "tools/call", params: { name: "files_read", arguments: { path: "x" } },
+      });
+      const result = response?.result as { isError: boolean; content: Array<{ text: string }> };
+      assert.equal(result.isError, true);
+      assert.match(result.content[0]!.text, new RegExp(String(status)));
+    });
+  }
 });
 
 test("tools carry the session token and fencing token to the session endpoints", async () => {
