@@ -686,6 +686,10 @@ model Session {
   signal                 String?
   terminationReason      String?
   costUsd                Decimal?               @db.Decimal(12, 4)
+  inputTokens            Int?
+  outputTokens           Int?
+  cachedInputTokens      Int?
+  totalTokens            Int? // input + output; cached excluded to avoid double counting
   failureReason          String?
   cleanupFailureReason   String?
   run                    Run                    @relation(fields: [runId, projectId], references: [id, projectId], onDelete: Cascade)
@@ -700,6 +704,7 @@ model Session {
   @@unique([runId, projectId])
   @@index([executionStatus, requestedAt])
   @@index([cleanupStatus, requestedAt])
+  @@index([projectId, requestedAt])
   @@index([agentId])
   @@index([taskId])
   @@index([goalId])
@@ -721,6 +726,7 @@ model SessionEvent {
 
   @@unique([sessionId, seq])
   @@index([runId, at])
+  @@index([runId, seq])
   @@index([sessionId, at])
 }
 
