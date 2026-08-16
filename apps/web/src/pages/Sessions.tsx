@@ -7,7 +7,7 @@ import { Link, navigate } from "../lib/router";
 import { useProjectScope } from "../lib/project";
 import { normalize, type StreamItem } from "../lib/session-stream";
 import { useEventStream } from "../lib/use-event-stream";
-import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+import type { RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 import { IconArrowLeft, IconChevron, IconRefresh } from "../components/icons";
 import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
@@ -51,6 +51,29 @@ export const lifecycleStat = (status: SessionExecutionStatus): { label: string; 
   isLive(status) ? { label: "Live", tone: "green" }
     : status === "SUCCEEDED" ? { label: "Done", tone: "green" }
       : { label: "Failed", tone: "red" };
+
+/** `Files touched` shows `(0)` whenever path extraction found nothing. For
+ *  CLAUDE that means the session really touched no file — the mapping is
+ *  verified against real captured stdout. For every other runner the argument
+ *  keys are inferred (plan §11-G1/G2), so a zero is as likely to be a gap in the
+ *  mapping as a fact about the session, and saying so is the honest rendering. */
+export const fileTrackingHint = (runner: RunnerKind, fileCount: number, toolCalls: number): string | null =>
+  runner !== "CLAUDE" && fileCount === 0 && toolCalls > 0
+    ? `File tracking is not available for ${runner} sessions.`
+    : null;
+
+/** The notice is unconditional for `WAITING_INBOX`; only the link is conditional.
+ *  A session parked before its message id lands is exactly the state where an
+ *  operator most needs to be told why nothing is happening. */
+export const WaitingNotice = ({ status, messageId }: { status: SessionExecutionStatus; messageId: string | null }): ReactNode => {
+  if (status !== "WAITING_INBOX") return null;
+  const text = "Waiting on an Inbox decision.";
+  return (
+    <div className={ROW}>
+      {messageId === null ? <span>{text}</span> : <Link to={`/inbox/${messageId}`}>{text} ↗</Link>}
+    </div>
+  );
+};
 
 const resultWord = (session: Session): string =>
   isLive(session.executionStatus) ? "In progress" : session.executionStatus === "SUCCEEDED" ? "Success" : "Failed";
@@ -101,7 +124,8 @@ export const SessionsPage = (): ReactNode => {
   const [older, setOlder] = useState<Session[]>([]);
   const [exhausted, setExhausted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  useEffect(() => { setOlder([]); setExhausted(false); }, [projectId]);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  useEffect(() => { setOlder([]); setExhausted(false); setMoreError(null); }, [projectId]);
 
   const sessions = useMemo(() => {
     const byId = new Map<string, Session>();
@@ -113,12 +137,18 @@ export const SessionsPage = (): ReactNode => {
     const oldest = sessions.at(-1);
     if (!oldest) return;
     setLoadingMore(true);
+    setMoreError(null);
     try {
       const page = await api.get<Session[]>(
         `/sessions?projectId=${encodeURIComponent(projectId)}&limit=${PAGE_SIZE}&before=${encodeURIComponent(oldest.requestedAt)}`,
       );
       setOlder((current) => [...current, ...page]);
       if (page.length < PAGE_SIZE) setExhausted(true);
+    } catch (error) {
+      // Surfaced beside the button, which stays enabled as the retry. Without
+      // this the failure is an unhandled rejection and the operator sees nothing.
+      const failure = error as { status?: number; message?: string };
+      setMoreError(failure.status === undefined ? String(failure.message ?? error) : `${failure.status} ${failure.message}`);
     } finally {
       setLoadingMore(false);
     }
@@ -162,6 +192,7 @@ export const SessionsPage = (): ReactNode => {
             <Button type="button" variant="legacy" size="legacy" disabled={loadingMore} onClick={() => void loadMore()}>
               {loadingMore ? "Loading…" : "Load more"}
             </Button>
+            {moreError === null ? null : <ErrorNotice message={moreError} />}
           </div>
         ) : null}
       </div>
@@ -370,9 +401,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   const repoUrl = repoWebUrl(session.run?.repo?.remoteUrl);
   const branch = session.run?.branch ?? null;
   const plus = stream.capped ? "+" : "";
-  const fileHint = runner === "CODEX" && files.length === 0 && counts.toolCalls > 0
-    ? "File tracking is not available for CODEX sessions."
-    : null;
+  const fileHint = fileTrackingHint(runner, files.length, counts.toolCalls);
 
   return (
     <Page className="text-foreground">
@@ -387,11 +416,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
 
       <div className={STACK}>
         {session.failureReason === null ? null : <ErrorNotice message={session.failureReason} />}
-        {session.executionStatus === "WAITING_INBOX" && session.waitingOnMessageId !== null ? (
-          <div className={ROW}>
-            <Link to={`/inbox/${session.waitingOnMessageId}`}>This session is waiting on an Inbox answer ↗</Link>
-          </div>
-        ) : null}
+        <WaitingNotice status={session.executionStatus} messageId={session.waitingOnMessageId} />
 
         <div className={STAT_PILLS}>
           <span className={STAT_PILL}>

@@ -89,6 +89,10 @@ const PAGES = [
   ["projects", "/projects"],
   ["connections", "/connections"],
   ["inbox", "/inbox"],
+  // Batch 4's pages. `ses_run_review` is a finished session, so the detail frame
+  // carries the stat bar's Done/tokens/cost state rather than a live one's `—`.
+  ["sessions", "/sessions"],
+  ["sessiondetail", "/sessions/ses_run_review"],
 ];
 
 await setViewport(1440, 1000);

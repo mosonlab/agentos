@@ -78,9 +78,13 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
               { k: "Lease generation", v: `${run.leaseGeneration}` },
               { k: "Workspace", v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? " (retained)" : ""}</span> },
               { k: "Budget", v: `${run.maxDurationMin}m wall · ${run.stallTimeoutMin}m stall · ${run.maxRunsPerTask} runs` },
-              // The pull-request anchor lives in the task Details card now; this
-              // entry is the push status and nothing else.
               { k: "Push", v: run.pushStatus.toLowerCase().replace(/_/g, " ") },
+              // The task Details card sources its anchor from the newest run
+              // alone, so without this entry an earlier run's PR — a retry, a
+              // review run, a run that failed after pushing — is reachable from
+              // nowhere. Distinct from `Push`, which is the status and not a link.
+              { k: "Pull request", v: run.pullRequestUrl === null ? "—"
+                : <ExternalLink href={run.pullRequestUrl}>{pullRequestLabel(run.pullRequestUrl)}</ExternalLink> },
               { k: "Session status", v: run.session?.executionStatus.toLowerCase().replace("_", " ") ?? "—" },
               { k: "Session", v: run.session ? <Link to={`/sessions/${run.session.id}`}>Open session ↗</Link> : "—" },
               { k: "Resume attempts", v: `${run.session?.resumeAttempt ?? 0}` },

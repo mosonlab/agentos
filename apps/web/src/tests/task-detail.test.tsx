@@ -84,3 +84,15 @@ test("the runs table's head count, cell count and expanded colSpan agree", () =>
   assert.equal(headCount, cellCount, "a head with no cell silently shifts every column right of it");
   assert.equal(colSpan, headCount, "the expanded row must span the whole table");
 });
+
+test("every run's pull request is reachable, not just the newest one's", () => {
+  // The task Details card sources its anchor from `runs[0]` alone, so without a
+  // per-run entry a retry or a review run whose PR is not the newest is
+  // reachable from nowhere in the product.
+  const row = source.slice(source.indexOf("const RunRow"), source.indexOf("const Activity"));
+  const expanded = row.slice(row.indexOf("{expanded ?"));
+  assert.match(expanded, /k: "Pull request"/);
+  assert.match(expanded, /run\.pullRequestUrl/);
+  // Distinct from Push, which is the status word and never a link.
+  assert.match(expanded, /k: "Push"/);
+});

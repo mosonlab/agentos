@@ -72,7 +72,20 @@ const mkRun = (id, taskId, n, status, extra = {}) => ({
   maxDurationMin: 240, stallTimeoutMin: 10, maxRunsPerTask: 5,
   failureClass: null, failureReason: null, retryable: null, retryAt: null, terminationReason: null,
   queuedAt: iso(400), claimedAt: iso(398), startedAt: iso(397), endedAt: status === "RUNNING" ? null : iso(120),
-  session: { id: `ses_${id}`, runId: id, agentId: "agt_frontend", runner: "CLAUDE", executionStatus: status === "RUNNING" ? "RUNNING" : "SUCCEEDED", cleanupStatus: "DONE", providerConversationId: "conv_1", waitingOnMessageId: null, resumeAttempt: 0, startedAt: iso(397), endedAt: status === "RUNNING" ? null : iso(120), exitCode: status === "RUNNING" ? null : 0, costUsd: "1.42", failureReason: null },
+  session: {
+    id: `ses_${id}`, runId: id, projectId: project.id, taskId, goalId: null,
+    agentId: "agt_frontend", runner: "CLAUDE",
+    executionStatus: status === "RUNNING" ? "RUNNING" : "SUCCEEDED", cleanupStatus: "DONE",
+    providerConversationId: "conv_1", waitingOnMessageId: null, resumeAttempt: 0,
+    requestedAt: iso(399), startedAt: iso(397), endedAt: status === "RUNNING" ? null : iso(120),
+    terminationReason: null, exitCode: status === "RUNNING" ? null : 0, costUsd: "1.42",
+    // Null while the run is live: usage lands with FINAL_OUTPUT, so the Tokens
+    // column shows both a real count and the `—` that means "never reported".
+    ...(status === "RUNNING"
+      ? { inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null }
+      : { inputTokens: 4_820, outputTokens: 48_010, cachedInputTokens: 1_204_880, totalTokens: 52_830 }),
+    failureReason: null,
+  },
   ...extra,
 });
 
@@ -196,6 +209,26 @@ const events = Array.from({ length: 14 }, (_, index) => ({
   payload: { summary: `npm run build -w @agentos/web (step ${index + 1})`, ok: true },
 }));
 
+// GET /sessions and /sessions/:id return the session with its relations
+// attached (api/src/app.ts `sessionInclude`); the session nested inside a Run
+// carries none of them, so the two shapes are built separately on purpose.
+const sessions = tasks.flatMap((task) => task.runs.map((run) => ({
+  ...run.session,
+  agent: { id: run.agentId, title: agents.find((agent) => agent.id === run.agentId)?.title ?? "Agent" },
+  task: { id: task.id, name: task.name },
+  goal: null,
+  run: {
+    id: run.id, runNumber: run.runNumber, model: run.model, branch: run.branch,
+    pullRequestUrl: run.pullRequestUrl, workspacePath: run.workspacePath,
+    repo: { id: repos[0].id, name: repos[0].name, remoteUrl: repos[0].remoteUrl },
+  },
+})));
+
+// The paged envelope GET /runs/:runId/events now returns. The harness serves
+// the whole fixture in one page; the client tolerates a bare array too, but the
+// reference frames should be shot against the shape the real API returns.
+const eventEnvelope = (rows) => ({ events: rows, nextAfterSeq: rows.at(-1)?.seq ?? null, hasMore: false, total: rows.length });
+
 const health = { status: "ok", database: "reachable", checkedAt: iso(0) };
 
 const routes = new Map([
@@ -215,9 +248,12 @@ const routes = new Map([
   ["/tasks/tsk_impl", tasks[2]],
   ["/tasks/tsk_impl/activity", activity],
   ["/tasks/tsk_impl/output", output],
-  ["/runs/run_impl/events", events],
+  ["/runs/run_impl/events", eventEnvelope(events)],
   ["/agents/agt_frontend", agents[0]],
+  ["/sessions", sessions],
 ]);
+
+for (const session of sessions) routes.set(`/sessions/${session.id}`, session);
 
 for (const agent of agents) routes.set(`/agents/${agent.id}`, agent);
 for (const goal of goals) routes.set(`/goals/${goal.id}`, goal);
@@ -225,7 +261,7 @@ for (const task of tasks) {
   routes.set(`/tasks/${task.id}`, task);
   if (!routes.has(`/tasks/${task.id}/activity`)) routes.set(`/tasks/${task.id}/activity`, activity.map((entry) => ({ ...entry, taskId: task.id })));
   if (!routes.has(`/tasks/${task.id}/output`)) routes.set(`/tasks/${task.id}/output`, { ...output, taskId: task.id });
-  for (const run of task.runs) routes.set(`/runs/${run.id}/events`, events.map((event) => ({ ...event, runId: run.id })));
+  for (const run of task.runs) routes.set(`/runs/${run.id}/events`, eventEnvelope(events.map((event) => ({ ...event, runId: run.id, sessionId: `ses_${run.id}` }))));
 }
 
 createServer((request, response) => {

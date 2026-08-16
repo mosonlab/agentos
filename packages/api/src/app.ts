@@ -1786,8 +1786,18 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // whose event was already stored still recomputes, which is what self-heals a
     // write lost between createMany and here. The guard reads the request body
     // already in memory, so a batch without one costs zero extra queries.
+    // Never fatal to the ingest. A throw here would 500 the route, and
+    // `appendEvents` has no retry (runner/src/api.ts:79), so the terminal flush
+    // would reject, `deliverWorkspace`/`completeRun` would be skipped, and the
+    // runner's outer catch would record a successful run as failed and delete
+    // its workspace unpushed. These columns are a derived cache that the next
+    // FINAL_OUTPUT or `db:backfill-session-usage` repairs (db/src/usage.ts).
     if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
-      await recomputeSessionUsage(db, run.session.id);
+      try {
+        await recomputeSessionUsage(db, run.session.id);
+      } catch (error) {
+        console.error(`Session usage recompute failed for ${run.session.id}`, error);
+      }
     }
     if (body.providerConversationId && !run.session.providerConversationId) {
       await db.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });

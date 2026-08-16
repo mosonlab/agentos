@@ -8,7 +8,8 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  DebugEvents, FilesTouched, SessionRow, StreamItemView, lifecycleStat, sessionPill, truncateBlock,
+  DebugEvents, FilesTouched, SessionRow, StreamItemView, WaitingNotice, fileTrackingHint, lifecycleStat,
+  sessionPill, truncateBlock,
 } from "../pages/Sessions";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 
@@ -92,6 +93,34 @@ test("Files touched and Debug events render collapsed by default", () => {
   const debug = renderToStaticMarkup(<DebugEvents events={[event()]} />);
   assert.match(debug, /Debug events/);
   assert.doesNotMatch(debug, /PROCESS_STARTED/, "body is absent while collapsed");
+});
+
+test("the file-tracking hint fires for every runner whose path keys are inferred", () => {
+  // CLAUDE's extraction is verified against real captured stdout, so a zero
+  // there is a fact about the session and must not be explained away.
+  assert.equal(fileTrackingHint("CLAUDE", 0, 12), null);
+  for (const runner of ["CODEX", "PI"] as const) {
+    assert.equal(fileTrackingHint(runner, 0, 12), `File tracking is not available for ${runner} sessions.`);
+    // Nothing to explain when paths were found, or when no tool ever ran.
+    assert.equal(fileTrackingHint(runner, 3, 12), null);
+    assert.equal(fileTrackingHint(runner, 0, 0), null);
+  }
+});
+
+test("a WAITING_INBOX session always says why, with or without a message id", () => {
+  const linked = renderToStaticMarkup(<WaitingNotice status="WAITING_INBOX" messageId="inb-1" />);
+  assert.match(linked, /Waiting on an Inbox decision\./);
+  assert.match(linked, /#\/inbox\/inb-1/);
+
+  // The id has not landed yet: the notice still renders, unlinked. This is the
+  // state where an operator most needs to be told why nothing is happening.
+  const bare = renderToStaticMarkup(<WaitingNotice status="WAITING_INBOX" messageId={null} />);
+  assert.match(bare, /Waiting on an Inbox decision\./);
+  assert.doesNotMatch(bare, /<a/);
+
+  for (const status of STATUSES.filter((candidate) => candidate !== "WAITING_INBOX")) {
+    assert.equal(renderToStaticMarkup(<WaitingNotice status={status} messageId="inb-1" />), "", status);
+  }
 });
 
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {

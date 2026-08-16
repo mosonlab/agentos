@@ -1057,3 +1057,106 @@ test("GET /runs/:runId/events pages by seq and reports hasMore without a second 
     assert.equal(clamped.where.seq, undefined);
   });
 });
+
+/* --------------------------------- the usage recompute's ingest wiring */
+
+/** A CLAUDE terminal `result` line, trimmed to the fields `extractUsage` reads.
+ *  Values are the captured shape from `spikes/cli-capabilities/samples/`. */
+const finalOutputPayload = {
+  type: "result",
+  total_cost_usd: 0.049117,
+  usage: { input_tokens: 4, output_tokens: 77, cache_read_input_tokens: 8_700, cache_creation_input_tokens: 120 },
+};
+
+/** The stub the three wiring tests share: one live run with a session, a
+ *  `createMany` that accepts anything, and a recording `session.update`.
+ *  `onUpdate` lets a test make the derived-cache write fail. */
+const ingestDatabase = (
+  updates: Array<Record<string, unknown>>,
+  finalOutputRows: Array<{ payload: unknown }>,
+  onUpdate?: () => never,
+): PrismaClient => ({
+  run: {
+    findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
+  },
+  sessionEvent: {
+    createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
+    findMany: async () => finalOutputRows,
+  },
+  session: {
+    findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
+    update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
+  },
+} as unknown as PrismaClient);
+
+const postEvents = async (database: PrismaClient, types: string[]): Promise<Response> =>
+  createApp(database).request("/runner/runs/run-1/events", {
+    method: "POST",
+    headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "runner-1",
+      fencingToken: "1:run-1:current",
+      events: types.map((type, index) => ({
+        seq: index + 1,
+        source: "CLAUDE",
+        type,
+        payload: type === "FINAL_OUTPUT" ? finalOutputPayload : { text: "hello" },
+      })),
+    }),
+  });
+
+test("ingesting a FINAL_OUTPUT writes the derived usage columns", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "FINAL_OUTPUT"]);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 2 });
+    assert.equal(updates.length, 1);
+    const write = updates[0] as { where: { id: string }; data: Record<string, unknown> };
+    assert.equal(write.where.id, "ses-1");
+    assert.equal(write.data.inputTokens, 4);
+    assert.equal(write.data.outputTokens, 77);
+    assert.equal(write.data.cachedInputTokens, 8_820);
+    // totalTokens is input + output by definition (spec §4.6); cache is stored
+    // separately rather than folded in.
+    assert.equal(write.data.totalTokens, 81);
+    assert.equal(String(write.data.costUsd), "0.0491");
+  });
+});
+
+test("a batch with no FINAL_OUTPUT does not touch the usage columns", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "TOOL_STARTED"]);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 2 });
+    assert.equal(updates.length, 0);
+  });
+});
+
+test("a failing usage recompute does not fail the ingest", async () => {
+  await withTokens(async () => {
+    // The derived cache must never be fatal to the write path it decorates:
+    // `appendEvents` has no retry, so a 500 here would reject the runner's
+    // terminal flush, skip deliverWorkspace/completeRun, record a successful
+    // run as failed and delete its workspace unpushed.
+    const updates: Array<Record<string, unknown>> = [];
+    const database = ingestDatabase(updates, [{ payload: finalOutputPayload }], () => {
+      throw new Error("value out of range for type integer");
+    });
+    const errors: unknown[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      const response = await postEvents(database, ["FINAL_OUTPUT"]);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { accepted: 1 });
+    } finally {
+      console.error = consoleError;
+    }
+    assert.equal(updates.length, 0);
+    assert.equal(errors.length, 1);
+  });
+});

@@ -57,8 +57,12 @@ export const compactTokens = (value: number | null | undefined): string => {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   const short = (divided: number, suffix: string): string =>
     `${divided.toFixed(1).replace(/\.0$/, "")}${suffix}`;
-  if (Math.abs(value) >= 1_000_000) return short(value / 1_000_000, "M");
-  if (Math.abs(value) >= 1_000) return short(value / 1_000, "K");
+  // Thresholds compare the *rounded* value, not the raw one: at exactly
+  // 1_000_000 the raw test renders 999_999 as `1000K`, which reads as a
+  // formatting bug rather than a number. 999_950 is where `toFixed(1)` of
+  // `value / 1_000` first reaches `1000.0`.
+  if (Math.abs(value) >= 999_950) return short(value / 1_000_000, "M");
+  if (Math.abs(value) >= 999.95) return short(value / 1_000, "K");
   return String(value);
 };
 

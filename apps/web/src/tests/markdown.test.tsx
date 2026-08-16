@@ -55,7 +55,11 @@ test("compactTokens is honest about absence and never rounds to a fake zero", ()
   assert.equal(compactTokens(999), "999");
   assert.equal(compactTokens(1_000), "1K");
   assert.equal(compactTokens(8_900), "8.9K");
-  assert.equal(compactTokens(999_999), "1000K");
+  // The threshold compares the rounded value: 999_999 / 1_000 renders as
+  // `1000.0`, and `1000K` reads as a formatting bug rather than a number.
+  assert.equal(compactTokens(999_949), "999.9K");
+  assert.equal(compactTokens(999_950), "1M");
+  assert.equal(compactTokens(999_999), "1M");
   assert.equal(compactTokens(1_200_000), "1.2M");
 });
 
