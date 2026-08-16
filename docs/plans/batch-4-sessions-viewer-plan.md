@@ -1,17 +1,22 @@
 # PLAN — Batch 4: the sessions viewer
 
-Status: first pass · Author: plan agent (chain step ②) · Date: 2026-08-16
+Status: **revision 1** · Author: plan agent (chain step ④) · Date: 2026-08-16
 Spec: `docs/specs/batch-4-sessions-viewer.md` (commit `e22c655`, approved).
+Review answered: `docs/reviews/2026-08-16-batch-4-sessions-viewer-plan-review.md`
+(verdict FAIL — 11 must-fix, 3 should-fix). **All 14 findings are accepted and
+applied; none is rejected.** §0.3 is the disposition table: finding → what
+changed → where.
 Authority behind it: `docs/BACKLOG-V2.md` 批次 4, `docs/reference/danny-agentos-video/decisions.md` §10/§13.
-Plan verified against the working tree at branch `agentos/cmsvzm4at0ac2mpyjsrib8f3w/run-1`
-(same tree as spec commit `e22c655`, i.e. post frontend-convergence merge).
+Plan verified against the working tree at commit `e22c655` (post
+frontend-convergence merge); every anchor cited by the review was re-read in the
+source before its fix was applied.
 
 Planning only. Eight work items in dependency order, one commit each, all on one
 feature branch so the batch lands as one PR with one migration. Every spec
-requirement maps to a numbered work item in §9. §0.2 lists the eleven places
-where the code contradicts or under-specifies the spec — each one is corrected
-here rather than silently re-specified. §11 lists everything this plan is still
-guessing about.
+requirement maps to a numbered work item in §9. §0.2 lists the places where the
+code contradicts or under-specifies the spec — each one is corrected here rather
+than silently re-specified. §0.3 records the review disposition. §11 lists
+everything this plan is still guessing about.
 
 ---
 
@@ -115,16 +120,41 @@ backfill script imports it relatively. **The unit test still lives at
 script at all (`packages/db/package.json`), so a test placed there would never
 run under `npm test`, while `packages/api`'s `pretest` already builds
 `@agentos/db` first.
+Note on naming: the spec's `applyUsage` no longer exists under that name. C2 (as
+revised) replaces it with `recomputeSessionUsage`, which takes a session id
+rather than a usage delta. The spec's "one implementation, two callers"
+requirement is unchanged and is what forces the placement decided here.
 
-**C2 — Prisma's `increment` is a silent no-op on a NULL column.**
-Spec §4.6.1 requires `+=` accumulation across resume attempts. `data: { inputTokens: { increment: n } }`
-compiles to `SET "inputTokens" = "inputTokens" + n`, and in SQL `NULL + n` is
-`NULL`. Since every one of the four columns starts NULL, the first write — the
-common case — would store nothing. **Resolution:** `applyUsage` does an explicit
-read-modify-write (`findUnique` on the five columns, then `update` with absolute
-values). Safe without a transaction here because a session has exactly one runner
-process posting events sequentially (`packages/runner/src/api.ts:138`); that
-assumption is written into the module's comment.
+**C2 — accumulation cannot be done by adding to the current column value.**
+Two independent reasons, the second found by the review (must-fix 2):
+
+1. Prisma's `increment` is a silent no-op on a NULL column. `data: { inputTokens: { increment: n } }`
+   compiles to `SET "inputTokens" = "inputTokens" + n`, and in SQL `NULL + n` is
+   `NULL`. Every one of the four columns starts NULL, so the first write — the
+   common case — would store nothing.
+2. Read-modify-write with `+=` is not idempotent, and the ingest route it hangs
+   off *is*: `createMany(..., skipDuplicates: true)` (`app.ts:1770-1783`) is
+   deliberately replay-safe, so any usage write that adds a delta drifts every
+   time the same `FINAL_OUTPUT` reaches it twice. It also cannot recover from a
+   crash between `createMany` and the usage write — the event is stored, the
+   tokens are not, and nothing ever revisits it.
+
+**Resolution (replaces the first pass's read-modify-write): recompute absolute
+totals from the stored events.** `recomputeSessionUsage(db, sessionId)` folds
+`extractUsage` over *all* persisted `FINAL_OUTPUT` rows for the session and
+writes absolute values. This is idempotent by construction, accumulates across
+resume attempts for free (each attempt's `FINAL_OUTPUT` is its own row at a
+higher `seq`), self-heals after a partial write, and never touches a NULL column
+arithmetically. `SessionEvent` is the source of truth; the columns are a
+derived cache. Full design in WI-2.
+
+*Accuracy note on the review's framing:* the runner has **no** automatic retry of
+`appendEvents` (`packages/runner/src/api.ts:74-88, 131-146` — `request` throws and
+no caller re-posts the same batch), so routine same-batch replay is not the live
+hazard the finding implies. The backfill's repeated-write case and the
+crash-between-writes case are unconditional, and `skipDuplicates: true` exists
+precisely because the write is *designed* to be replay-safe. The fix is accepted
+in full on those grounds.
 
 **C3 — CODEX can emit two `MODEL_DELTA` events for one item.**
 `adapters.ts:239-255`: `item.started` for any non-`command_execution` item emits
@@ -141,12 +171,41 @@ Spec §4.3.1 says "`error` present for PI"; the real `tool_execution_end` is
 block renders `payload.result.content[]`'s `text` parts joined by `\n`, falling
 back to `JSON.stringify(payload.result)`.
 
-**C5 — PI double-emits every assistant message.**
+**C5 — PI echoes each assistant message as a second `MODEL_COMPLETED`.**
 `adapters.ts:287-297` maps both `turn_end` and `message_end` to
-`MODEL_COMPLETED`, and the captures show both firing for the same message.
-**Resolution:** `session-stream.ts` drops a `text` item whose text is
-byte-identical to the immediately preceding `text` item. This is a general rule
-(it also backstops C3 when `item.id` is absent) and gets its own test.
+`MODEL_COMPLETED`. The first pass answered this with a global
+"drop text byte-identical to the previous text" rule; review must-fix 8 is right
+that this deletes legitimate messages (any agent that answers `ok` twice in a
+row loses one) and it is not scoped to the runner that needs it.
+
+**Re-derived from the captures, precisely** (`pi-tool-event.stdout`,
+`pi-resume.stdout`, `pi-start-openai-codex.stdout`, `pi-sigterm.stdout`, all
+decoded field by field):
+
+| event | role | `message.timestamp` | content parts |
+|---|---|---|---|
+| `message_end` | user | 1786788182351 | `[text]` |
+| `message_end` | assistant | 1786788182370 | `[thinking, toolCall]` |
+| `message_end` | toolResult | 1786788186732 | `[text]` |
+| **`turn_end`** | assistant | **1786788182370** | `[thinking, toolCall]` |
+| `message_end` | assistant | 1786788186733 | `[text]` |
+| **`turn_end`** | assistant | **1786788186733** | `[text]` |
+
+Every `turn_end` is an exact echo of an earlier assistant `message_end` and
+**shares its `message.timestamp`**; where the message has text, both also carry
+the same `textSignature.id` (`msg_0dd9…`). `pi-sigterm.stdout` has a
+`message_end` with **no** `turn_end` (the run was interrupted), so "just ignore
+`turn_end`" would be the wrong shape of rule to rely on.
+
+**Resolution:** dedup is **PI-only** and keyed on **message identity, never on
+text bytes**. Within a PI stream, a `MODEL_COMPLETED` is skipped when a
+previously seen one had the same identity, where identity is
+`payload.message.timestamp` when present, else the first
+`textSignature.id` found in `payload.message.content[]`, else no identity — and
+**no identity means no dedup**, because rendering a duplicate is a smaller harm
+than deleting a real message. CLAUDE gets no dedup at all. CODEX keeps its own,
+separate `payload.item.id` replacement rule (C3) — that one is a replacement, not
+a suppression, and is unaffected.
 Consequence worth knowing: PI turn 1 in the capture has content
 `[thinking, toolCall]` and therefore yields **zero** text items — correct, and
 consistent with A2's exclusion of reasoning.
@@ -166,15 +225,23 @@ Spec §8 names `apps/web/src/tests/session-stream.test.ts` — a `.ts` file that
 would never execute and would look green. **Resolution: every new web test file
 ends in `.test.tsx`**, including the ones with no JSX in them.
 
-**C8 — passing `null` to `usePoll` wipes the page.**
-`hooks.ts:32-37` clears `data`, `error` and `loading` when `path === null`. So
-the obvious way to stop the session-detail metadata poll on a terminal session
-destroys the page content. §5.5 also forbids changing `usePoll`'s signature.
-**Resolution:** on a terminal session the metadata poll keeps its path and raises
-its `intervalMs` to a long constant (`TERMINAL_POLL_MS = 300_000`); `intervalMs`
-is in the effect's dependency list (`hooks.ts:60`), so the interval is genuinely
-re-created. The spec's hard stop condition (§5.3, §9 step 5) is about the
-**events** endpoint, which is the new hook's own concern and does stop dead.
+**C8 — the metadata poll has no off switch, and does not need one.**
+`hooks.ts:32-37` clears `data`, `error` and `loading` when `path === null`, so
+passing `null` to stop the session-detail metadata poll on a terminal session
+would blank the page rather than freeze it; §5.5 also forbids changing
+`usePoll`'s signature. The first pass answered this by inventing
+`TERMINAL_POLL_MS = 300_000`. Review should-fix 1 is right that this is
+unrequested: spec §5.3 fixes session-detail metadata at `POLL_MS` with no
+terminal exception, and only the **events** endpoint is ordered to stop. A
+five-minute interval also leaves late-arriving metadata (`endedAt`,
+`terminationReason`, the backfilled token columns) stale on screen.
+
+**Resolution:** `TERMINAL_POLL_MS` is deleted. Session-detail metadata polls at
+`POLL_MS` for the whole life of the page, terminal or not — one small request
+every 2.5 s on a page the operator is actively looking at. The hard stop
+condition (spec §5.3, §9 step 5) belongs entirely to `useEventStream`, which is
+the new hook's own concern and does stop dead. The record of *why* `null` is not
+the mechanism stays here so nobody re-derives it.
 
 **C9 — `Session` has no `workspacePath` and no `model` column.**
 Spec §5.1 says `GET /sessions/:sessionId` returns "workspacePath"; §4.2's meta
@@ -204,6 +271,48 @@ Two smaller notes, recorded so nobody re-derives them:
 - `GapNotice` (`ui.tsx:323-329`) renders Chinese copy while the new pages are
   English. Accepted as-is — i18n is batch 1's scope, and inventing an English
   variant here would fork the component.
+
+---
+
+## 0.3 Review disposition — revision 1
+
+Review: `docs/reviews/2026-08-16-batch-4-sessions-viewer-plan-review.md`, verdict
+FAIL. **Every finding was re-verified against the source before being applied**;
+all 14 are accepted, **none is rejected**. Nothing else in the plan changed
+except where a fix forced it (the forced edits are named in the right-hand
+column).
+
+| # | finding, in one line | disposition | where |
+|---|---|---|---|
+| MF-1 | `StreamItem["state"]` union lacks `"incomplete"`, which the same WI returns | accepted | WI-5 type + test matrix |
+| MF-2 | usage writes and backfill are not idempotent at the `skipDuplicates` boundary | accepted — redesigned to absolute recomputation from stored events | §0.2-C2 rewritten; **WI-2 rewritten** |
+| MF-3 | bare-array tolerance re-appends the whole history every poll | accepted | WI-6 (`toEnvelope` filters by `afterSeq`; all appends dedupe by `seq`) |
+| MF-4 | session-detail response carries no repo URL, so the Branch link cannot be built | accepted | WI-3 (`run.repo.select.remoteUrl`), WI-7 types, WI-3 test |
+| MF-5 | nested `Link` inside a clickable row navigates to the session instead | accepted | WI-7 (`defaultPrevented` guard + JSDOM test) |
+| MF-6 | no `ADAPTER_ERROR` rule, and no per-runner tool-return extraction | accepted | WI-5 mapping table + test matrix |
+| MF-7 | orphan tool call both counts and does not count | accepted — count redefined from rendered items; spec self-contradiction logged | WI-5 counts; §12 open question 5 |
+| MF-8 | global consecutive-text suppression deletes legitimate messages | accepted — re-derived from captures, now PI-only and identity-keyed | §0.2-C5 rewritten; WI-5 rule + regression |
+| MF-9 | whitespace-only step output has no `EmptyState` branch | accepted | WI-8 (mirrors the Prompt card at `TaskDetail.tsx:202-206`) |
+| MF-10 | WI-6's acceptance check never exercises the hook | accepted — JSDOM hook test promoted from "if time allows" to required | WI-6 tests; §11-G8 retired |
+| MF-11 | terminal `Done`/`Failed` stat-bar pill dropped | accepted | WI-7 stat bar + mapping test |
+| SF-1 | `TERMINAL_POLL_MS = 300_000` is unrequested and staleness-prone | accepted | §0.2-C8 rewritten; constant deleted from WI-7 |
+| SF-2 | session-list pagination has no state model or acceptance check | accepted | WI-7 (live head + accumulated older pages, deduped) |
+| SF-3 | static-render tests cannot prove the interactions they are assigned | accepted | WI-7 tests split: static for initial markup, JSDOM for interaction |
+
+**One correction to the review's reasoning, recorded because the executor will
+read both documents.** MF-2 argues partly from replay of an already-stored batch.
+The runner has no automatic retry of `appendEvents` (`packages/runner/src/api.ts:74-88, 131-146`),
+so routine replay is not the live hazard. The finding is nevertheless accepted in
+full: its other two halves — the backfill re-writing a cost-only session on every
+run, and usage lost forever if the process dies between `createMany` and the
+usage write — hold unconditionally, and the fix that addresses them is simpler
+than the accumulation it replaces.
+
+**Two findings changed the plan's shape rather than patching it:** MF-2 rewrote
+WI-2 around `SessionEvent` as the source of truth, and MF-8 forced C5 to be
+re-derived from the captures, which turned up the exact identity field
+(`message.timestamp`, shared by every `turn_end`/`message_end` pair) that makes a
+safe rule possible.
 
 ---
 
@@ -317,9 +426,22 @@ Covers spec §4.6.1, §4.6.3, §5.2. Depends on WI-1.
     cachedInputTokens?: number;
     costUsd?: number;
   };
+  /** One event payload → whatever usage it carries. Total over `unknown`. */
   export const extractUsage = (payload: unknown): SessionUsage => { … };
-  export const applyUsage = async (db: PrismaClient, sessionId: string, usage: SessionUsage): Promise<void> => { … };
+  /** Fold many payloads into one absolute total. Pure; no database. */
+  export const sumUsage = (usages: SessionUsage[]): SessionUsage => { … };
+  /**
+   * Recompute this session's derived usage columns from its stored
+   * FINAL_OUTPUT events and write absolute values. Idempotent: same events in,
+   * same columns out. Returns true when it actually wrote.
+   */
+  export const recomputeSessionUsage = (db: PrismaClient, sessionId: string): Promise<boolean> => { … };
   ```
+
+  **`applyUsage` from the first pass is gone** (§0.2-C2, review MF-2). It took a
+  delta and added it to the current column values, which drifts on replay,
+  silently no-ops on NULL, and cannot recover a write lost to a crash. Nothing
+  outside this module referenced it.
 
   - `extractUsage` is **total over `unknown`** and shape-driven, not
     runner-driven (spec §4.6.1): if `payload` is a non-null object and
@@ -332,50 +454,78 @@ Covers spec §4.6.1, §4.6.3, §5.2. Depends on WI-1.
   - `reasoning_output_tokens` (present in the real CODEX payload, §0.1) is
     **not** added into `outputTokens`. That is a judgement call the spec does not
     make; it is called out in §11-G4 and is a one-line change if Leo disagrees.
-  - `applyUsage` reads the five current values, computes absolute new values
-    (`(current ?? 0) + delta` per field, only for fields present in `usage`),
-    sets `totalTokens = (newInput ?? 0) + (newOutput ?? 0)` — recomputed from the
-    accumulated values, not accumulated separately, so a payload carrying only
-    `output_tokens` cannot drift — and writes them in one `update`. `costUsd` is
-    `Decimal`: use `new Prisma.Decimal(current ?? 0).plus(delta)`. If `usage` is
-    empty, it returns without querying. See §0.2-C2 for why this is not
-    `{ increment }`.
+  - `sumUsage` adds field by field and **omits a field entirely when no input
+    carried it** — it never turns an absent field into `0`. So a run of
+    cost-only payloads yields `{costUsd}` with all three token fields absent.
+  - `recomputeSessionUsage`:
+    1. `sessionEvent.findMany({ where: { sessionId, type: "FINAL_OUTPUT" }, orderBy: { seq: "asc" }, select: { payload: true } })`;
+    2. `sumUsage(rows.map((row) => extractUsage(row.payload)))`;
+    3. derive the five column values: the three token fields as summed
+       (`undefined` → `null`), `costUsd` as `new Prisma.Decimal(sum)` or `null`,
+       and `totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0)` **only when at
+       least one of the two is present**, else `null`;
+    4. read the session's five current values and **return `false` without
+       writing when they already equal the derived ones** (`Decimal.equals` for
+       cost) — this is what makes a second backfill pass honestly report
+       `updated 0`;
+    5. otherwise one `update` with all five absolute values, and return `true`.
+  - **Why absolute, not additive** (§0.2-C2, review MF-2): `SessionEvent` is the
+    source of truth and the columns are a derived cache, so replaying the same
+    batch converges instead of drifting, a resumed session accumulates for free
+    (each attempt's `FINAL_OUTPUT` is its own row at a higher `seq`, and step 2
+    sums all of them), a write lost to a crash is repaired by the next ingest or
+    by the backfill, and no NULL column is ever used in arithmetic.
+  - Concurrency: last writer wins and both writers compute from the same table,
+    so they converge. A session has exactly one runner process posting events
+    sequentially (`packages/runner/src/api.ts:131-146`); that assumption is
+    written into the module's comment, and it is now a performance note rather
+    than a correctness requirement.
   - `totalTokens` stays `null` when both input and output are absent, so §4.6.5's
-    "never `0`, never an estimate" holds.
+    "never `0`, never an estimate" holds. A session with cost but no tokens
+    stores `costUsd` and leaves all four token columns `null` — spec §363-367's
+    independent-nullable-fields rule.
 
-- `packages/db/src/index.ts` — re-export `extractUsage`, `applyUsage`,
-  `SessionUsage` (the file already re-exports `workflow.ts`'s helpers; follow
-  that shape).
+- `packages/db/src/index.ts` — re-export `extractUsage`, `sumUsage`,
+  `recomputeSessionUsage`, `SessionUsage` (the file already re-exports
+  `workflow.ts`'s helpers; follow that shape).
 
 - `packages/api/src/app.ts:1770-1787` — inside `POST /runner/runs/:runId/events`,
   after the existing `createMany` (line 1770-1783) and before the
   `providerConversationId` update (1784-1786):
 
   ```ts
-  const usage = body.events
-    .filter((event) => event.type === "FINAL_OUTPUT")
-    .map((event) => extractUsage(event.payload))
-    .reduce(mergeUsage, {});
-  if (hasAnyField(usage)) await applyUsage(db, run.session.id, usage);
+  if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
+    await recomputeSessionUsage(db, run.session.id);
+  }
   ```
 
-  Merging inside the batch first, then one `applyUsage` call, keeps the common
-  case (no `FINAL_OUTPUT` in the batch) at **zero extra queries** — the spec's
-  §5.2 performance requirement. Import `extractUsage`/`applyUsage` from
-  `@agentos/db` alongside the existing imports at `app.ts:1-27`.
+  The guard reads the request body already in memory, so the common case (no
+  `FINAL_OUTPUT` in the batch) still costs **zero extra queries** — the spec's
+  §5.2 performance requirement. When a `FINAL_OUTPUT` *is* present, which happens
+  about once per run, the recompute costs one indexed `findMany` plus one
+  `findUnique` plus at most one `update`. Deliberately, the trigger is "a
+  `FINAL_OUTPUT` arrived", not "this payload had usage": a batch whose event was
+  already stored still recomputes, and recomputation is a no-op write, which is
+  exactly the self-healing property MF-2 asked for. Import
+  `recomputeSessionUsage` from `@agentos/db` alongside the existing imports at
+  `app.ts:1-27`.
 
-- **New `packages/db/prisma/backfill-session-usage.ts`** — one-shot, idempotent:
-  find sessions `where: { totalTokens: null }`, and for each, read its
-  `FINAL_OUTPUT` events (`sessionEvent.findMany({ where: { sessionId, type: "FINAL_OUTPUT" }, orderBy: { seq: "asc" } })`),
-  fold `extractUsage` over them, and call `applyUsage` when non-empty. Print a
-  one-line summary (`scanned N, updated M`). Running it twice must report
-  `updated 0` on the second pass — guaranteed because the first pass sets
-  `totalTokens` non-null for every session that had extractable usage, and
-  sessions with no extractable usage are re-scanned but write nothing.
-  **Known limit, state it in the script's header comment:** a session whose
-  events carry only a cost and no tokens keeps `totalTokens: null` and so is
-  rescanned on every run. Harmless, and the alternative (a sentinel) would
-  violate §4.6.5's "never `0`".
+- **New `packages/db/prisma/backfill-session-usage.ts`** — one-shot, idempotent,
+  and now sharing the ingest path's single implementation rather than
+  paraphrasing it. Select the candidate sessions as **those that have at least
+  one `FINAL_OUTPUT` event** —
+  `session.findMany({ where: { events: { some: { type: "FINAL_OUTPUT" } } }, select: { id: true } })`
+  — not `where: { totalTokens: null }`. Call `recomputeSessionUsage` on each, in
+  batches, and count the `true` returns. Print `scanned N, updated M`.
+
+  **Why the selector changed** (review MF-2): `totalTokens: null` both re-scanned
+  a cost-only session forever *and* permanently excluded a session whose
+  `totalTokens` was written by attempt 1 but whose attempt 2 usage was lost to a
+  crash — the one case a backfill exists to repair. Scanning every session with a
+  terminal event and letting the no-write comparison decide is slower and
+  correct. Running it twice reports `updated 0` on the second pass because
+  `recomputeSessionUsage` compares before writing (step 4 above) — including for
+  cost-only sessions, which the first pass could not honestly claim.
 
 - `packages/db/package.json` — add
   `"db:backfill-session-usage": "dotenv -e ../../.env -- tsx prisma/backfill-session-usage.ts"`,
@@ -385,7 +535,8 @@ Covers spec §4.6.1, §4.6.3, §5.2. Depends on WI-1.
 
 **Interfaces changed**
 
-- `@agentos/db` gains three exports. No existing export changes.
+- `@agentos/db` gains three functions and one type (`extractUsage`, `sumUsage`,
+  `recomputeSessionUsage`, `SessionUsage`). No existing export changes.
 - `POST /runner/runs/:runId/events` response is unchanged (`{accepted: N}`).
 
 **Tests / verification**
@@ -404,20 +555,40 @@ Covers spec §4.6.1, §4.6.3, §5.2. Depends on WI-1.
   - `null`, `42`, `"x"`, `{}`, `{usage:null}`, `{usage:{input_tokens:"nope"}}`
     → `{}`, no throw.
   - Partial usage: `{usage:{output_tokens:5}}` → `{outputTokens:5}` only.
-  - Accumulation: `applyUsage` against a stubbed `db` twice, asserting the second
-    `update` receives `input+input`, `output+output`, and
-    `totalTokens = (i1+i2)+(o1+o2)`; and asserting the **first** call against
-    all-null current values writes real numbers, not nulls (the §0.2-C2
-    regression).
-- Idempotence of the backfill is verified by hand at deploy time (§9 step 9 of
-  the spec) and by the accumulation test above; a DB-backed test would need
-  Postgres and `npm test` does not run `*.dbtest.ts`.
+  - `sumUsage`: `[{inputTokens:1},{outputTokens:2}]` → `{inputTokens:1,outputTokens:2}`;
+    `[{costUsd:1},{costUsd:2}]` → `{costUsd:3}` with **no** token fields present
+    (not `0`); `[]` → `{}`.
+  - **Idempotence (review MF-2, the regression that motivated the redesign).**
+    `recomputeSessionUsage` against a stubbed `db` whose `sessionEvent.findMany`
+    returns the same CLAUDE `result` row on both calls: the first call writes
+    real numbers over all-null current values and returns `true`; the **second
+    call, with the stub's session now holding those values, performs no `update`
+    and returns `false`**. This single test covers the NULL-column regression
+    (§0.2-C2 reason 1) and the replay-drift regression (reason 2) at once.
+  - **Cost-only second run.** Events carrying `total_cost_usd` and no `usage`:
+    first call writes `costUsd` and leaves all four token columns `null`; second
+    call returns `false` and writes nothing. Pins spec §385-389 (no-op second
+    run) and §363-367 (independent nullable fields) together.
+  - **Resume accumulation.** Two `FINAL_OUTPUT` rows in one session, from two
+    attempts, with different usage: one `update` carrying the **sums**, and
+    `totalTokens = (i1+i2) + (o1+o2)`. Assert it equals what a single event
+    carrying the summed usage would produce — accumulation is now a property of
+    the stored rows, not of write ordering.
+  - **Partial-resume recovery.** The same two rows, but the session's current
+    columns hold only attempt 1's numbers (simulating a crash between
+    `createMany` and the usage write): the recompute writes the full sum. Under
+    the first pass's additive design this session was unreachable.
+- The backfill script's own loop is thin (select ids → call the function →
+  count `true`s); its correctness is the function's, covered above. End-to-end
+  idempotence is still confirmed by hand at deploy time (spec §9 step 9): a
+  DB-backed test would need Postgres and `npm test` does not run `*.dbtest.ts`.
 - `npm test -w @agentos/api`, `npm run typecheck`.
 
-**Rollback.** Delete the two lines in `app.ts` and the module; the columns go
-inert (they stay whatever the last write left). No data corruption, no schema
-change. The backfill script is write-only-to-null, so re-running it after a
-re-deploy restores the numbers.
+**Rollback.** Delete the guard in `app.ts` and the module; the columns go inert
+(they stay whatever the last write left). No data corruption, no schema change.
+Because the columns are derived from `SessionEvent` and the recompute is
+absolute, re-running the backfill after a re-deploy restores every number exactly
+— including for sessions whose columns were already partly written.
 
 **Commit**: `feat(api): extract runner usage at event ingest + idempotent session-usage backfill`
 
@@ -447,13 +618,27 @@ Covers spec §5.1, §4.1.2. Depends on WI-1.
         agent: { select: { id: true, title: true } },
         task:  { select: { id: true, name: true } },
         goal:  { select: { id: true, title: true } },
-        run:   { select: { id: true, runNumber: true, model: true, branch: true, pullRequestUrl: true, workspacePath: true } },
+        run:   { select: {
+          id: true, runNumber: true, model: true, branch: true,
+          pullRequestUrl: true, workspacePath: true,
+          repo: { select: { id: true, name: true, remoteUrl: true } },
+        } },
       },
       orderBy: { requestedAt: "desc" },
       take: limit,
     }));
   });
   ```
+
+  **The nested `repo` select is required, not decorative** (review MF-4): spec
+  §4.2's meta line and §4.7.2 both want `Branch` rendered as a GitHub link, and
+  `repoWebUrl` (WI-4) needs `Repo.remoteUrl` to build one. `Run.repo` is a
+  nullable relation (`schema.prisma:643`) and `Repo.remoteUrl` is a non-null
+  `String` (`schema.prisma:298`), so the frontend sees
+  `run.repo?.remoteUrl ?? null` and falls back to plain text — spec §6's
+  "not GitHub (or null) → plain text, no broken link". Without this the Branch
+  field could only ever be plain text and the requirement would fail silently at
+  review time.
 
   Notes the implementer must not re-derive: `projectId` is optional and matches
   the `GET /tasks` convention (`app.ts:1209-1220`); relation `select`s keep the
@@ -464,8 +649,8 @@ Covers spec §5.1, §4.1.2. Depends on WI-1.
   `app.onError` as a 500; guard it with a validity check and ignore the filter if
   unparseable.
 
-- **New `GET /sessions/:sessionId`** — same includes, `findUnique`,
-  `404 {error:"Session not found"}` when absent. `Session` already carries
+- **New `GET /sessions/:sessionId`** — same includes **including the nested
+  `repo` select**, `findUnique`, `404 {error:"Session not found"}` when absent. `Session` already carries
   `terminationReason`, `exitCode`, `resumeAttempt`, `waitingOnMessageId`,
   `failureReason` and (after WI-1) the token columns, so no extra selection is
   needed; `workspacePath` and `model` come from the `run` include (§0.2-C9).
@@ -523,6 +708,9 @@ Covers spec §5.1, §4.1.2. Depends on WI-1.
   - `limit=9999` clamps to 200; `limit=abc` falls back to 50.
   - `GET /sessions/unknown` with a `findUnique` stub returning `null` → 404 with
     `{error:"Session not found"}`.
+  - **Both routes' `include.run.select` contains `repo`, and that nested select
+    names `remoteUrl`** (review MF-4) — asserted on the stub's arguments, so a
+    later tidy-up of the select cannot silently break the Branch link.
   - **`GET /sessions` with an operator token returns 200, not 403** — the
     §0.2-C11 near-collision, pinned so a later rename cannot break it silently.
   - `GET /runs/r1/events?afterSeq=7&limit=2` against a stub returning 3 rows →
@@ -624,8 +812,8 @@ of WI-1..4; it is the largest single piece of the batch.
   export type StreamItem =
     | { kind: "text";  id: string; at: string; text: string }
     | { kind: "tool";  id: string; at: string; name: string; primaryArg: string | null;
-        filePath: string | null; args: unknown; result: unknown;
-        state: "running" | "ok" | "error"; }
+        filePath: string | null; args: unknown; result: string | null;
+        state: "running" | "incomplete" | "ok" | "error"; }
     | { kind: "error"; id: string; at: string; message: string }
     | { kind: "final"; id: string; at: string; text: string };
 
@@ -641,7 +829,11 @@ of WI-1..4; it is the largest single piece of the batch.
 
   `runner` is passed explicitly rather than read per-event so the mapping tables
   are chosen once; `terminal` decides whether an unfinished tool reads `running`
-  or `incomplete` (spec §6). The `StreamItem` types live here, **not** in
+  or `incomplete` (spec §6) — **both values are in the `state` union**, which the
+  first pass omitted and which would not have typechecked (review MF-1).
+  `result` is the **already-extracted display string** (rules below), not the raw
+  payload, so WI-7 renders it without re-deriving anything per runner; `null`
+  means the tool has not returned. The `StreamItem` types live here, **not** in
   `lib/types.ts`, which mirrors API rows (spec §5.4).
 
   **Mapping rules**, per runner, all verified in §0.1 except where marked:
@@ -651,7 +843,9 @@ of WI-1..4; it is the largest single piece of the batch.
   | text | `MODEL_DELTA` → `payload.message.content[]` where `type==="text"`, joined `\n` | `MODEL_DELTA` → `payload.item.text` when `payload.item.type==="agent_message"`, **keyed on `payload.item.id`** (§0.2-C3) | `MODEL_COMPLETED` → `payload.message.content[].text` when `payload.message.role==="assistant"`, joined `\n` |
   | tool start | `TOOL_STARTED` payload = the `tool_use` part: `{id,name,input}` | `TOOL_STARTED` payload = the `command_execution` item *(inferred, §11-G1)* | `TOOL_STARTED` payload = `{toolCallId,toolName,args}` |
   | tool end | `TOOL_COMPLETED` payload = the `tool_result` part: `{tool_use_id,content,is_error}` | completed `command_execution` item *(inferred)* | `{toolCallId,toolName,result:{content[]},isError}` (§0.2-C4) |
+  | tool **result** text | `payload.content` when a string; else the `text` parts of `payload.content[]` joined `\n` *(the capture has the string form)* | `payload.aggregated_output` when a string *(inferred, §11-G1)* | `payload.result.content[]`'s `text` parts joined `\n` (§0.2-C4) |
   | error flag | `payload.is_error === true` | non-zero `exit_code` *(inferred)* | `payload.isError === true` |
+  | `error` item | `ADAPTER_ERROR` → message | `ADAPTER_ERROR` → message | `ADAPTER_ERROR` → message |
   | file paths | `payload.input.file_path` ‖ `payload.input.notebook_path`; `Glob`/`Grep` `path` **excluded** | `MODEL_DELTA` items with `payload.item.type==="file_change"` → `payload.item.changes[].path` *(inferred)* | `payload.args.file_path` ‖ `payload.args.path` ‖ `payload.args.filePath` *(container verified, keys inferred)* |
   | final | `FINAL_OUTPUT` → `payload.result` | `FINAL_OUTPUT` → the last CODEX agent message | `FINAL_OUTPUT` is `{type:"agent_settled"}` — **no text, so the Result card is always omitted for PI** (§0.1) |
 
@@ -660,19 +854,50 @@ of WI-1..4; it is the largest single piece of the batch.
     `MODEL_STARTED`, `TOOL_PROGRESS`, `PROCESS_STARTED` — yields **no item**.
     CODEX `reasoning` items are excluded (A2); PI `thinking` content parts have
     no `text` key and are dropped by the same rule that builds text.
-  - **Consecutive-duplicate suppression**: a `text` item whose text is
-    byte-identical to the immediately preceding `text` item is dropped
-    (§0.2-C5 — mandatory for PI, backstop for CODEX).
+  - **`ADAPTER_ERROR` → an `error` item, for every runner** (review MF-6; the
+    first pass declared the item type and rendered it but never said what
+    produced it). The adapter emits it from CODEX `error` events
+    (`adapters.ts:259-262`) and from an unparseable stdout line for *any* runner
+    (`adapters.ts:311-320`, payload `{error:"invalid-json", line}`). `message` is
+    the first of `payload.message`, `payload.error` (when a string),
+    `payload.error.message`, else `JSON.stringify(payload)` truncated to 500
+    characters. That order mirrors the adapter's own `eventErrorMessage`
+    (`adapters.ts:184-187`), so the stream shows the same text the run's
+    `providerError` recorded.
+  - **PI message-identity dedup** (§0.2-C5, review MF-8). **PI only**, and keyed
+    on identity rather than text: a `MODEL_COMPLETED` is skipped when an earlier
+    one in the stream had the same identity, where identity is
+    `payload.message.timestamp` if present, else the first `textSignature.id`
+    parsable out of `payload.message.content[]`, else **none — and no identity
+    means no dedup**. CLAUDE is not deduped. CODEX's `payload.item.id`
+    replacement (C3) is a separate, unchanged rule. The first pass's global
+    "drop text identical to the previous text" is **deleted**: it silently
+    removed a genuine second message whenever an agent answered `ok` twice.
   - Tools are joined `TOOL_STARTED` ↔ `TOOL_COMPLETED` by `toolCallId`. An
-    orphan `TOOL_COMPLETED` becomes an item with `args: null` and still counts.
-    A duplicate `toolCallId` resolves last-completed-wins, one item.
+    orphan `TOOL_COMPLETED` becomes an item with `args: null`. A duplicate
+    `toolCallId` resolves last-completed-wins, one item. When an event carries no
+    `toolCallId` at all, the item is keyed on the **event id** so it cannot
+    collide with another keyless tool event.
   - `primaryArg` = the extracted file path when there is one, else the command
     string (`input.command` for CLAUDE Bash — verified; `args.command` for PI —
     verified), else the first scalar value in the argument object, truncated to
     120 characters.
-  - Counts, exactly per spec §4.2: `messages` = number of `text` items;
-    `toolCalls` = distinct `toolCallId` values that have a `TOOL_STARTED`;
-    `files` = `files.length`.
+  - **Counts are derived from the normalized items, never from the raw events**
+    (review MF-7): `messages` = number of `text` items; `toolCalls` = number of
+    `tool` items (already deduplicated by `toolCallId`, or by event id when
+    absent); `files` = `files.length`. This is the plan's central invariant —
+    a stat-bar number can never disagree with what the stream renders.
+
+    **This resolves a contradiction inside the spec, not just inside the plan.**
+    Spec §4.2 defines tool calls as "distinct `toolCallId` values that have a
+    `TOOL_STARTED`", while spec §6's edge-case table says an orphan
+    `TOOL_COMPLETED` "counts as a tool call". Both cannot hold. The definition
+    above follows §6 — it is the more specific statement, it is the one written
+    about the exact case in dispute, and §4.2's phrasing is the only one of the
+    two that breaks the invariant. Logged as §12 open question 5; the spec is not
+    being rewritten here, and one line from Leo settles it either way (reverting
+    would mean subtracting orphans from the count, a two-line change plus its
+    test).
   - `normalize` is **total over `unknown`**: a payload that is `null`, a number,
     a string or an array contributes nothing and never throws. Every field access
     goes through a local `asRecord` / `asString` guard, mirroring
@@ -698,25 +923,45 @@ of WI-1..4; it is the largest single piece of the batch.
   - CLAUDE: the `assistant` event with a `tool_use` part yields **zero** text
     items; the following `assistant` with a `text` part yields one; the
     `tool_use` + `tool_result` pair yields one `tool` item with
-    `primaryArg === "printf 3"`, `state === "ok"`; a synthetic `Read` call with
-    `input.file_path` lands in `files`; a `Glob` call with `input.path` does not.
+    `primaryArg === "printf 3"`, `state === "ok"`, and — asserted explicitly —
+    **`result === "3"`**, the extracted string, not the raw payload (MF-6); a
+    synthetic `Read` call with `input.file_path` lands in `files`; a `Glob` call
+    with `input.path` does not.
   - CODEX: `item.completed` `agent_message` yields one `text`; the same item id
     arriving twice (`item.started` then `item.completed`) yields **one** item
-    with the later text (§0.2-C3).
-  - PI: the two `message_end` + two `turn_end` events from
-    `pi-tool-event.stdout` yield **one** text item, not four (§0.2-C5); the
-    `tool_execution_start`/`_end` pair yields one tool item with
-    `primaryArg === "printf 3"` and `state === "ok"`; the same pair with
-    `isError: true` yields `state === "error"` (§0.2-C4); a `message_end` with
+    with the later text (§0.2-C3); a `TOOL_COMPLETED` carrying
+    `aggregated_output: "3\n"` yields `result === "3\n"`.
+  - PI: the two assistant `message_end` + two `turn_end` events from
+    `pi-tool-event.stdout`, pasted verbatim, yield **one** text item — the
+    `[thinking, toolCall]` message contributes none and the `[text]` message
+    contributes one, with its `turn_end` echo (same `message.timestamp`
+    `1786788186733`) suppressed (§0.2-C5); the `tool_execution_start`/`_end` pair
+    yields one tool item with `primaryArg === "printf 3"`, `state === "ok"` and
+    `result === "3"` extracted from `result.content[]` (§0.2-C4); the same pair
+    with `isError: true` yields `state === "error"`; a `message_end` with
     `role:"user"` yields nothing.
-  - Counting: a mixed fixture's `messages` / `toolCalls` / `files` match §4.2's
-    definitions and match the rendered item counts.
+  - **PI dedup does not eat real messages** (review MF-8's required regression):
+    two assistant `message_end` events with **identical text** and **different
+    `message.timestamp`** yield **two** text items. Paired with a CLAUDE fixture
+    of two identical consecutive `text` messages that also yields two items,
+    since CLAUDE is not deduped at all.
+  - **`ADAPTER_ERROR`** (review MF-6): a CODEX `error` event yields one `error`
+    item whose `message` is the event's `message` field; an invalid-JSON payload
+    `{error:"invalid-json", line:"…"}` yields one `error` item reading
+    `invalid-json`; a payload with neither yields the truncated JSON and does not
+    throw. Assert the item appears **in stream order**, between its neighbours.
+  - Counting: a mixed fixture's `messages` / `toolCalls` / `files` equal the
+    number of rendered items of each kind. Pinned cases, each with an exact
+    expected number (review MF-7): an orphan `TOOL_COMPLETED` **counts as 1**; a
+    duplicate `toolCallId` counts as **1**, not 2; two tool events with **no**
+    `toolCallId` count as **2**, not 1.
   - Robustness: `payload: null`, `payload: 42`, `payload: []`, `payload: {}`,
     missing `toolCallId`, orphan `TOOL_COMPLETED`, duplicate `toolCallId` —
     all produce sane output and no throw.
   - Noise: `PROVIDER_RAW`, `STDERR`, `MODEL_STARTED`, `PROVIDER_STATUS`,
     `TOOL_PROGRESS`, `PROCESS_STARTED` produce zero items.
-  - `terminal: true` turns an unfinished `TOOL_STARTED` into `incomplete`.
+  - **Both tool states** (review MF-1): an unfinished `TOOL_STARTED` is
+    `running` under `terminal: false` and `incomplete` under `terminal: true`.
 - `npm run build && npm test -w @agentos/web`.
 
 **Rollback.** Delete the module and its test; nothing else imports it until WI-7.
@@ -766,25 +1011,71 @@ envelope (and tolerates its absence).
   - **Stop**: when `terminal` **and** a poll returns `hasMore === false` with
     zero new events, stop scheduling. `reload()` restarts one cycle.
   - `if (document.hidden) return;` before every fetch, matching `hooks.ts:41`.
-  - **Shape tolerance (spec §6):** `Array.isArray(body) ? {events: body, hasMore: false, nextAfterSeq: null, total: body.length} : body`.
-    Five lines; removes the deploy-ordering hazard.
+  - **Shape tolerance (spec §6), corrected — the adapter must filter, not just
+    wrap** (review MF-3). The old endpoint ignores `afterSeq` entirely and
+    returns the run's whole history every time (`app.ts:2199-2202`, verified), so
+    the first pass's five-line wrapper would have re-appended every event on
+    every 2.5 s poll during a staggered deploy — growing to the render cap in
+    under a minute, which is worse than the hazard it was meant to remove. The
+    adapter takes the requested `afterSeq` and filters:
+
+    ```ts
+    export const toEnvelope = (body: unknown, afterSeq: number | null): EventPage => {
+      if (!Array.isArray(body)) return body as EventPage;
+      const events = afterSeq === null ? body : body.filter((event) => event.seq > afterSeq);
+      return { events, nextAfterSeq: events.at(-1)?.seq ?? null, hasMore: false, total: body.length };
+    };
+    ```
+
+    `total` stays the full array length, which is what the old shape can honestly
+    report.
+  - **Appends are deduplicated by `seq` regardless of shape** — the hook drops
+    any incoming event whose `seq` is `<=` the highest it already holds. `seq` is
+    unique per session and ascending (it backs `@@unique` on the table and the
+    `[runId, seq]` index from WI-1), so this is a single comparison, not a `Set`
+    scan. Belt and braces on top of `toEnvelope`: it also covers a new-API
+    response that overlaps after a `reload()`.
   - A poll failure sets `error` and **keeps the accumulated events and keeps
     polling** (spec §5.3).
 
 **Tests / verification**
 
-- **New `apps/web/src/tests/event-stream.test.tsx`** — the check for this WI is
-  the pure part, which is where the contract lives:
+- **New `apps/web/src/tests/event-stream.test.tsx`**, in two halves. Both are
+  **required** — the first pass made only the pure half required, which left the
+  whole polling contract unproved (review MF-10).
+
+  *Pure functions:*
   - `nextIntervalMs(0..3) === 2_500`; `nextIntervalMs(4) === 5_000`;
     `nextIntervalMs(5) === 10_000`; `nextIntervalMs(6) === 15_000`;
     `nextIntervalMs(20) === 15_000` (ceiling holds, never exceeds).
-  - The envelope-normalising helper (export it) turns a bare array into
-    `{events, hasMore:false, total:<length>}` and passes an envelope through
-    unchanged.
-  A full hook test would need jsdom + fake timers + a stubbed `fetch`; the
-  pattern exists (`apps/web/src/tests/row-menu.test.tsx` sets up JSDOM +
-  `createRoot` + `act`) and is worth adding if time allows, but the pure tests
-  above plus spec §9 step 5's DevTools check are the required bar.
+  - `toEnvelope` passes an envelope through unchanged; turns a bare array into
+    `{events, hasMore:false, total:<length>}`; and **with `afterSeq: 7` on a bare
+    array of seq 1..10 returns exactly seq 8, 9, 10** (review MF-3).
+
+  *The hook itself*, using the JSDOM + `createRoot` + `act` pattern already in
+  `apps/web/src/tests/row-menu.test.tsx:1-49` (`jsdom` is a devDependency,
+  `apps/web/package.json:28-34`), with `fetch` replaced by a queue-backed stub and
+  timers driven by `node:test`'s `t.mock.timers` (`setTimeout` + `Date`). No new
+  dependency. One assertion per contract clause:
+  - **initial drain** — three pages with `hasMore: true, true, false` produce one
+    accumulated array in `seq` order, with the second and third requests carrying
+    the previous page's `nextAfterSeq`;
+  - **live append** — a later non-empty poll appends only the new events and
+    requests `afterSeq = <highest held>`;
+  - **duplicate suppression** — the same old-shape full array returned twice in a
+    row leaves the event count unchanged (review MF-3's named regression);
+  - **backoff and reset** — four empty polls stretch the delay to 5 s / 10 s /
+    15 s and hold at 15 s; one non-empty poll returns the next delay to 2.5 s;
+  - **ceiling** — a stub that never sets `hasMore: false` stops after 40 requests
+    with `capped === true`;
+  - **hidden tab** — with `document.hidden` forced true no fetch is issued, and
+    flipping it back resumes polling without losing the accumulated array;
+  - **error retention** — a rejected poll sets `error`, keeps every event already
+    held, and schedules the next poll anyway;
+  - **terminal stop** — with `terminal: true`, a poll returning `hasMore: false`
+    and zero events schedules nothing further (assert the fetch count is frozen
+    after advancing the clock a full minute), and `reload()` issues exactly one
+    more cycle.
 - `npm run build && npm test -w @agentos/web`.
 
 **Rollback.** Delete the module; nothing imports it until WI-7.
@@ -806,14 +1097,43 @@ Covers spec §4.1, §4.2, §4.3, §4.4, §4.5, §6's UI rows, §7. Depends on WI
   - **`SessionsPage`** — copy the project-scoped polling shape from
     `Tasks.tsx:266-269` (`projectId === "" ? null : \`/sessions?projectId=${encodeURIComponent(projectId)}&limit=50\``)
     and the clickable-table shape from `Agents.tsx:148-164`
-    (`<TableRow className="cursor-pointer" onClick={() => navigate(\`/sessions/${s.id}\`)}>`).
+    (`<TableRow className="cursor-pointer" onClick={…}>`).
     Columns exactly as spec §4.1: Started, Agent (`AgentChip`), Task (`Link` to
     `/tasks/:id`, or the goal, else `—`), Runner (`Pill`), Duration, Status,
     Result. Header carries a `Refresh` button in the `TaskDetail.tsx:166` shape.
-    `Load more` below the table appends `&before=<oldest requestedAt>`
-    (spec §4.1.2). `EmptyState` on empty; `GapNotice` when `poll.missing`.
-  - **`SessionDetailPage({ sessionId })`** — `usePoll<Session>(\`/sessions/${sessionId}\`, terminal ? TERMINAL_POLL_MS : POLL_MS)`
-    (§0.2-C8), plus `useEventStream(session?.runId ?? null, terminal)`.
+    `EmptyState` on empty; `GapNotice` when `poll.missing`.
+
+    **The row handler must not swallow the nested Task/Goal link** (review MF-5).
+    `Link` calls `event.preventDefault()` and navigates, but does **not** stop
+    propagation (`router.tsx:42-55`, verified), so a row-level `onClick` fires
+    afterwards and the session wins over the task the operator actually clicked.
+    The row handler therefore opens with
+    `if (event.defaultPrevented) return;` — one line, no change to `Link`, and it
+    covers every nested anchor the row may grow later. A JSDOM click test pins it.
+
+    **`Load more` needs a state model, because `usePoll` replaces `data`**
+    (review SF-2; `hooks.ts:38-60`). Two pieces of state, deliberately separate:
+    - the **live head** — `usePoll<Session[]>` on
+      `/sessions?projectId=…&limit=50`, still polling at `POLL_MS` so new
+      sessions keep appearing at the top;
+    - **older pages** — `useState<Session[]>([])`, appended imperatively by
+      `Load more`, which `api.get`s
+      `/sessions?projectId=…&limit=50&before=<oldest requestedAt currently held>`
+      once per click. These pages are **not** polled; they are history and do not
+      change.
+
+    The rendered list is `[...head, ...older]` deduplicated by `session.id`
+    (head wins, so a session that moves between the two never renders twice) and
+    sorted by `requestedAt` descending. Older pages **reset to `[]` whenever
+    `projectId` changes** — otherwise another project's sessions linger below the
+    fold. `Load more` hides when the last fetched page returned fewer than 50
+    rows. A `Load more` test is added to the checks below, which the first pass
+    omitted entirely.
+  - **`SessionDetailPage({ sessionId })`** — `usePoll<Session>(\`/sessions/${sessionId}\`, POLL_MS)`
+    — **plain `POLL_MS`, terminal or not** (§0.2-C8 as revised, review SF-1;
+    `TERMINAL_POLL_MS` no longer exists) — plus
+    `useEventStream(session?.runId ?? null, terminal)`, which is the thing that
+    actually stops.
     - Header: `BACK_LINK` to `/sessions`, agent title as `h1`, status pill,
       runner `Pill`, `Refresh`. Reuse `DETAIL_HEAD` / `DETAIL_HEAD_H1`
       (`ui.tsx:42-44`).
@@ -821,11 +1141,18 @@ Covers spec §4.1, §4.2, §4.3, §4.4, §4.5, §6's UI rows, §7. Depends on WI
       Model (`run.model`), Started, Duration, Branch (link per WI-8's helper),
       Workspace (`run.workspacePath`), Termination, and
       `Resume attempts` when `resumeAttempt > 0`.
-    - Stat bar: `STAT_PILLS` / `STAT_PILL` (`ui.tsx:68-69`) with `● Live`
-      (green `DOT` + `DOT_TONE.green`, `ui.tsx:55-62`) while non-terminal, then
-      `N messages`, `N tool calls`, `N files`, `compactTokens(totalTokens)`
-      tokens (omitted when null), `money(costUsd)` (omitted when null). When
-      `capped`, counts get a `+` suffix and a notice sits above the stream.
+    - Stat bar: `STAT_PILLS` / `STAT_PILL` (`ui.tsx:68-69`) leading with a
+      **lifecycle pill that is always present** — `● Live` (green `DOT` +
+      `DOT_TONE.green`, `ui.tsx:55-62`) while `executionStatus ∈ {REQUESTED,
+      PROVISIONING, RUNNING, WAITING_INBOX}`, and **on a terminal session the
+      same slot reads `Done` (green) for `SUCCEEDED` or `Failed` (red) for
+      `FAILED | TIMED_OUT | LOST | CANCELLED`** — spec §4.2's "in place of
+      `● Live`", which the first pass dropped (review MF-11). This is the stat
+      bar's own state; the header's status pill is a different element and does
+      not satisfy it. Then `N messages`, `N tool calls`, `N files`,
+      `compactTokens(totalTokens)` tokens (omitted when null), `money(costUsd)`
+      (omitted when null). When `capped`, counts get a `+` suffix and a notice
+      sits above the stream.
     - Stream: a plain list, oldest first. `text` and `final` items render in
       `MSG_CARD` with `Markdown` and an `MSG_TIME` timestamp
       (`ui.tsx:355-357`); `error` items render `ErrorNotice`; `tool` items render
@@ -872,25 +1199,53 @@ Covers spec §4.1, §4.2, §4.3, §4.4, §4.5, §6's UI rows, §7. Depends on WI
   includes WI-3 returns: `projectId`, `taskId`, `goalId`, `requestedAt`,
   `terminationReason`, `waitingOnMessageId` (already present), plus optional
   `agent?: {id,title}`, `task?: {id,name} | null`, `goal?: {id,title} | null`,
-  `run?: {id,runNumber,model,branch,pullRequestUrl,workspacePath} | null`.
+  `run?: {id,runNumber,model,branch,pullRequestUrl,workspacePath, repo?: {id,name,remoteUrl} | null} | null`
+  — the nested `repo` carries the `remoteUrl` the Branch link needs (review
+  MF-4), and it is optional-and-nullable because `Run.repo` is a nullable
+  relation (`schema.prisma:643`).
 
 **Tests / verification**
 
-- **New `apps/web/src/tests/sessions.test.tsx`**, `renderToStaticMarkup`-based
-  like `primitives.test.tsx` — testing the presentational pieces, which is what
-  can be tested without a network:
+- **New `apps/web/src/tests/sessions.test.tsx`**, in two halves — the first pass
+  assigned interaction assertions to `renderToStaticMarkup`, which can only ever
+  observe the initial markup (review SF-3).
+
+  *Static (`renderToStaticMarkup`, like `primitives.test.tsx`)* — initial markup
+  and pure mappings only:
   - export and table-test the status-pill mapping (spec §4.1.1):
     `REQUESTED`/`PROVISIONING` → grey, `RUNNING` → green, `WAITING_INBOX` →
     amber, `SUCCEEDED` → green, `FAILED`/`TIMED_OUT`/`LOST` → red, `CANCELLED`
     → grey — asserting it only uses tones that exist in `PillTone`
     (`ui.tsx:109`);
-  - render the stream component with fixture `StreamItem`s: a collapsed tool row
-    is one line carrying the path or command; expanding shows Arguments and
-    Result; a 9 000-character result renders truncated with the
+  - **the stat bar's lifecycle slot** (review MF-11): non-terminal → `● Live`;
+    `SUCCEEDED` → `Done`; each of `FAILED`/`TIMED_OUT`/`LOST`/`CANCELLED` →
+    `Failed`. Table-driven over the same status list as the pill mapping, so the
+    two cannot drift apart;
+  - a collapsed tool row is one line carrying the path or command, and its
+    Arguments/Result bodies are **absent** from the markup;
+  - a 9 000-character result renders truncated with the
     `… truncated, N more characters` line; an absolute path renders verbatim and
     unwrapped-by-ellipsis;
   - the `Files touched` and `Debug events` sections render **collapsed** by
     default (assert the body markup is absent).
+
+  *Interactive (JSDOM + `createRoot` + `act`, the `row-menu.test.tsx:1-49`
+  pattern)* — everything that needs an event:
+  - **clicking the Task link in a session row navigates to `/tasks/:id`, not to
+    the session** (review MF-5): render a row inside a container whose `onClick`
+    increments a counter, dispatch a bubbling click on the nested anchor, and
+    assert `location.hash` is the task route and the row handler took no effect;
+  - clicking a collapsed tool row **reveals** Arguments and Result;
+  - the `Debug events` `Segmented` filter switches the visible rows between all
+    events, `source === "RUNNER"` only, and the rest (§0.2-C10);
+  - with the scroll position away from the bottom, new items **do not**
+    auto-scroll and the `N new ↓` affordance appears with the right count;
+    clicking it scrolls and clears the count.
+- **`Load more` retains page one** (review SF-2): with the head poll stubbed to
+  50 rows and `api.get` stubbed to return 50 older rows, clicking `Load more`
+  renders 100 rows; a head poll that then returns an overlapping row leaves the
+  count at 100, not 101 (the id dedup); changing `projectId` drops back to the
+  head page alone.
 - Theme check (spec §9 step 10):
   `grep -nE "#[0-9a-fA-F]{3,8}" apps/web/src/pages/Sessions.tsx` returns nothing.
 - `npm run build && npm test -w @agentos/web`; `npm run typecheck`.
@@ -936,6 +1291,12 @@ Covers spec §4.5's move, §4.6.4, §4.7. Depends on WI-4 (`Markdown`, `repoWebU
   same control shape as `ShowMore` (`ui.tsx:374-382`: chevron + muted text
   button). The kind pill (line 209) and the `Updated {timeAgo(...)}` line (211)
   are unchanged.
+  **An empty or whitespace-only body renders `EmptyState`, not an empty clamp**
+  (spec §6, review MF-9): branch on `output.data.body.trim().length === 0`,
+  exactly as the Prompt card immediately above already does
+  (`TaskDetail.tsx:202-206`) — copy that shape rather than inventing one, and
+  keep the card, the kind pill and the `Updated` line visible so the operator can
+  still see that a step reported. Copy text: `No output recorded.`
 - **Branch and PR as links** (spec §4.7.2): in the task `Details` `KeyValue`
   (lines 182-199) add
   - `Branch` — the newest run's `branch` (`task.runs[0]`, already ordered
@@ -957,6 +1318,9 @@ Covers spec §4.5's move, §4.6.4, §4.7. Depends on WI-4 (`Markdown`, `repoWebU
   `https://github.com/o/r/tree/feat/x` for an https remote, an ssh remote and
   plain text for a GitLab remote; the PR label parses `#39` from
   `https://github.com/o/r/pull/39`.
+- **Step output states** (review MF-9): a body of `"   \n\t\n"` renders the
+  `EmptyState` copy and **no** `Markdown` body; a non-empty body renders the
+  markdown and no empty state. Both asserted on static markup.
 - Static guards, run as part of the WI:
   - `grep -rn "RunEvents\|EVENT_ROW\|EVENT_LOG" apps/web/src/pages/TaskDetail.tsx`
     → empty.
@@ -1081,10 +1445,11 @@ Ranked by what a wrong guess costs.
 - **G7 — `total` costs one `count()` per poll.** Cheap with WI-1's
   `[runId, seq]` index and a single operator, unmeasured at 179k rows. If it ever
   matters, return `total` only on the initial page.
-- **G8 — `useEventStream`'s full behaviour is verified by hand, not by test.**
-  WI-6 tests the pure backoff and shape-tolerance functions; the timer/fetch
-  choreography is covered by spec §9 step 5's DevTools observation. A jsdom hook
-  test is described in WI-6 as the stretch.
+- ~~**G8 — `useEventStream`'s full behaviour is verified by hand, not by
+  test.**~~ **Retired in revision 1** (review MF-10). The jsdom + fake-timer hook
+  test is now required and enumerates every state transition; see WI-6. Spec §9
+  step 5's DevTools observation remains as a second, human check rather than as
+  the only one.
 
 ---
 
@@ -1101,6 +1466,16 @@ Ranked by what a wrong guess costs.
    would be a `?v=1` bare-array flag, not worth building speculatively.
 4. **G5's token arithmetic** — worth one line from Leo before the PR, since it
    decides whether the Tokens column reads `81` or `8.9K` for CLAUDE runs.
+5. **The spec contradicts itself on whether an orphan tool call counts**
+   (new in revision 1, from review MF-7). Spec §4.2 defines tool calls as
+   "distinct `toolCallId` values that have a `TOOL_STARTED`"; spec §6's
+   edge-case table says a `TOOL_COMPLETED` with no matching `TOOL_STARTED`
+   "counts as a tool call". Both cannot hold. **This plan is not re-specifying
+   it** — it implements §6 (the more specific statement, and the only reading
+   under which the stat bar cannot disagree with the stream) and records the
+   conflict here. If Leo prefers §4.2's letter, WI-5 subtracts orphans from the
+   count and flips one test expectation. The spec text should be repaired either
+   way, in the spec, not here.
 
 None of these blocks implementation. Per the chain's standing rules they are
 recorded here and in the task activity log rather than sent to the Inbox.
