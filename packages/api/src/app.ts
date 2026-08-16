@@ -481,8 +481,35 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     return context.json(await db.agent.update({ where: { id: agentId }, data: withoutUndefined(body) as Prisma.AgentUncheckedUpdateInput }));
   });
   app.delete("/agents/:agentId", async (context) => {
-    await db.agent.delete({ where: { id: id.parse(context.req.param("agentId")) } });
-    return context.body(null, 204);
+    try {
+      await db.agent.delete({ where: { id: id.parse(context.req.param("agentId")) } });
+      return context.body(null, 204);
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        return context.json({ error: "Agent has task history; archive it instead" }, 409);
+      }
+      throw error;
+    }
+  });
+  app.post("/agents/:agentId/archive", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const agent = await db.agent.findUnique({ where: { id: agentId } });
+    if (!agent) return context.json({ error: "Agent not found" }, 404);
+    if (agent.archivedAt) return context.json(agent);
+    return context.json(await db.agent.update({
+      where: { id: agentId },
+      data: { archivedAt: new Date() },
+    }));
+  });
+  app.post("/agents/:agentId/unarchive", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const agent = await db.agent.findUnique({ where: { id: agentId } });
+    if (!agent) return context.json({ error: "Agent not found" }, 404);
+    if (!agent.archivedAt) return context.json(agent);
+    return context.json(await db.agent.update({
+      where: { id: agentId },
+      data: { archivedAt: null },
+    }));
   });
 
   app.get("/agents/:agentId/secret-grants", async (context) => context.json(await db.agentSecretGrant.findMany({

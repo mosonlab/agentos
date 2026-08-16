@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
+import { Prisma, RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
 
 import { createApp } from "./app.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
@@ -327,5 +327,91 @@ test("operator retry returns 409 when the task assignee no longer exists", async
       error: "Task assignee no longer exists; assign an agent before retrying",
     });
     assert.equal(created, undefined);
+  });
+});
+
+test("agent archive and unarchive are idempotent and preserve the original archive timestamp", async () => {
+  await withTokens(async () => {
+    let archivedAt: Date | null = null;
+    const updates: Array<Date | null> = [];
+    const database = {
+      agent: {
+        findUnique: async () => ({ id: "agent-1", name: "Agent", archivedAt }),
+        update: async ({ data }: { data: { archivedAt: Date | null } }) => {
+          archivedAt = data.archivedAt;
+          updates.push(archivedAt);
+          return { id: "agent-1", name: "Agent", archivedAt };
+        },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const request = (path: string) => app.request(path, {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+
+    const archived = await request("/agents/agent-1/archive");
+    assert.equal(archived.status, 200);
+    assert.ok(updates[0] instanceof Date);
+    const originalTimestamp = archivedAt;
+    assert.equal((await request("/agents/agent-1/archive")).status, 200);
+    assert.equal(archivedAt, originalTimestamp);
+    assert.equal(updates.length, 1);
+
+    const unarchived = await request("/agents/agent-1/unarchive");
+    assert.equal(unarchived.status, 200);
+    assert.equal(archivedAt, null);
+    assert.equal((await request("/agents/agent-1/unarchive")).status, 200);
+    assert.deepEqual(updates, [originalTimestamp, null]);
+  });
+});
+
+test("archive and unarchive return 404 for a missing agent", async () => {
+  await withTokens(async () => {
+    const database = { agent: { findUnique: async () => null } } as unknown as PrismaClient;
+    const app = createApp(database);
+    for (const action of ["archive", "unarchive"]) {
+      const response = await app.request(`/agents/missing/${action}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token" },
+      });
+      assert.equal(response.status, 404);
+    }
+  });
+});
+
+test("deleting an agent with task history maps Prisma P2003 to a guided 409", async () => {
+  await withTokens(async () => {
+    const database = {
+      agent: {
+        delete: async () => {
+          throw new Prisma.PrismaClientKnownRequestError("Foreign key constraint failed", {
+            code: "P2003",
+            clientVersion: "6.19.0",
+          });
+        },
+      },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/agents/agent-1", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: "Agent has task history; archive it instead" });
+  });
+});
+
+test("deleting a history-free agent still returns 204", async () => {
+  await withTokens(async () => {
+    let deleted = false;
+    const database = {
+      agent: { delete: async () => { deleted = true; return {}; } },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/agents/agent-1", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(deleted, true);
   });
 });
