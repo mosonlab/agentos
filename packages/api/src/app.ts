@@ -125,10 +125,13 @@ const mcpConnectionInput = z.object({
   credentialSecretId: id.nullable().default(null),
 });
 const filesystemGrantFields = z.object({
-  folderPath: z.string().trim().max(4096).refine(
-    (value) => value === "" || isCanonicalRelPath(value),
+  // "" is the sentinel for "the whole Files Root" (schema.prisma), so validation has to run
+  // on the pre-trim value: a trailing `.trim()` before `.refine()` turns " " into "" and
+  // hands a typo the entire root. Trimming still happens, but only for a real path.
+  folderPath: z.string().max(4096).refine(
+    (value) => (value.trim() === "" ? value === "" : isCanonicalRelPath(value.trim())),
     'folderPath must be "" (the whole Files Root) or a normalized Files-Root-relative POSIX path',
-  ),
+  ).transform((value) => value.trim()),
   canRead: z.boolean().default(false),
   canWrite: z.boolean().default(false),
   canDelete: z.boolean().default(false),
@@ -1707,10 +1710,13 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
 
   app.put("/session/runs/:runId/files/content", async (context) => {
     const runId = id.parse(context.req.param("runId"));
-    const declaredLength = Number(context.req.header("Content-Length") ?? "0");
-    if (declaredLength > SESSION_BASE64_BODY_LIMIT) return context.json({ error: "File exceeds 25 MB decoded write limit" }, 413);
     try {
-      const body = await readJson(context.req.raw, sessionWriteInput);
+      // Bounded read, not a Content-Length pre-check: a chunked body declares no length,
+      // so trusting the header let an agent materialize an unbounded body before the
+      // decoded-size check below ever ran. Same treatment as the operator upload route.
+      const body = sessionWriteInput.parse(JSON.parse(
+        (await readBoundedBody(context.req.raw, SESSION_BASE64_BODY_LIMIT)).toString(),
+      ));
       const denied = await sessionFileAccess(runId, "write", body.path);
       if (denied) return denied;
       const bytes = Buffer.from(body.content, body.encoding === "base64" ? "base64" : "utf8");

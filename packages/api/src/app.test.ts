@@ -54,6 +54,8 @@ test("filesystem grant CRUD accepts root/canonical paths and rejects non-canonic
     assert.equal((await request("")).status, 201);
     for (const path of ["/abs", "a/../b", "a/"]) assert.equal((await request(path)).status, 400, path);
     assert.equal((await request("  _global  ")).status, 201);
+    // Whitespace-only must not trim down to the whole-Files-Root sentinel.
+    for (const blank of [" ", "   ", "\t\n "]) assert.equal((await request(blank)).status, 400, JSON.stringify(blank));
     const patchResponse = await app.request("/agents/agent-1/filesystem-grants/grant-1", {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },

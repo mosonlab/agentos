@@ -103,6 +103,24 @@ test("session file routes enforce grants over a real filesystem", async (suite) 
     assert.equal((await put("write-limit/over.bin", over, "base64")).status, 413);
   });
 
+  await suite.test("chunked write aborts near the cap instead of materializing the whole stream", async () => {
+    grants = [grant("chunked", { canWrite: true })];
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(64 * 1024));
+        if (pulls === 1000) controller.close();
+      },
+    });
+    const request = new Request("http://localhost/session/runs/run-1/files/content", {
+      method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body, duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await app.fetch(request);
+    assert.equal(response.status, 413);
+    assert.equal(pulls <= 546, true, `reader pulled ${pulls} chunks`);
+  });
+
   await suite.test("invalid UTF-8 returns a base64 marker and round-trips", async () => {
     grants = [grant("binary", { canRead: true, canWrite: true })];
     const original = Buffer.from([0xff, 0xfe, 0xfd]);
