@@ -49,7 +49,11 @@ const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onTo
       <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
       <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
       <TableCell>{run.branch ?? run.targetBranch ?? "—"}</TableCell>
-      <TableCell className="text-[11.5px]">{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
+      {/* No size class: this cell carried `.small` before the batch, but
+          `.table td { font-size: 12.5px }` outranks `.small` on specificity, so
+          11.5px never reached it. The four `.small` spans that survive as
+          `text-[11.5px]` all sit in KeyValue lists, outside any table. */}
+      <TableCell>{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
       <TableCell>{money(run.session?.costUsd ?? null)}</TableCell>
       <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{run.failureClass.toLowerCase().replace(/_/g, " ")}</Pill>}</TableCell>
     </TableRow>
