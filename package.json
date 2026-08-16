@@ -24,6 +24,7 @@
     "db:drift-check": "npm run db:drift-check -w @agentos/db",
     "db:seed": "npm run db:seed -w @agentos/db",
     "db:validate": "npm run db:validate -w @agentos/db",
+    "db:backfill-session-usage": "npm run db:backfill-session-usage -w @agentos/db",
     "postinstall": "npm run db:generate"
   },
   "devDependencies": {

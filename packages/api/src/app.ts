@@ -17,6 +17,7 @@ import {
   PushStatus,
   RunnerKind,
   RunnerPreference,
+  recomputeSessionUsage,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -1781,6 +1782,13 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       })),
       skipDuplicates: true,
     });
+    // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
+    // whose event was already stored still recomputes, which is what self-heals a
+    // write lost between createMany and here. The guard reads the request body
+    // already in memory, so a batch without one costs zero extra queries.
+    if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
+      await recomputeSessionUsage(db, run.session.id);
+    }
     if (body.providerConversationId && !run.session.providerConversationId) {
       await db.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
     }
