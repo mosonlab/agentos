@@ -1,4 +1,5 @@
 import {
+  ACTIVE_RUN_STATUSES,
   AssigneeType,
   activateChainSuccessor,
   advanceTemplateTask,
@@ -33,6 +34,15 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
+import {
+  chainKey,
+  chainProgress,
+  chainProgressByChain,
+  positions,
+  runFactsByTask,
+  startable,
+  stepName,
+} from "./chain.js";
 import {
   completionSucceeded,
   externalFailure,
@@ -1209,14 +1219,75 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
 
   app.get("/tasks", async (context) => {
     const projectId = context.req.query("projectId");
-    return context.json(await db.task.findMany({
-      ...(projectId ? { where: { projectId } } : {}),
+    const archived = context.req.query("archived") ?? "false";
+    if (archived !== "false" && archived !== "true" && archived !== "all") {
+      return context.json({ error: "archived must be false, true, or all" }, 400);
+    }
+    // Archived tasks are finished work; a board and a per-project count that
+    // keep growing after Archive All are the bug, not the fix. `all` is the
+    // escape hatch for anyone who needs the old, archived-inclusive numbers.
+    const archivedFilter = archived === "false" ? { archivedAt: null }
+      : archived === "true" ? { archivedAt: { not: null } }
+      : {};
+    const tasks = await db.task.findMany({
+      where: { ...(projectId ? { projectId } : {}), ...archivedFilter },
       include: {
         assigneeAgent: true,
         repo: true,
+        templateStep: { select: { name: true } },
         runs: { orderBy: { runNumber: "desc" }, take: 1, include: { session: true } },
       },
       orderBy: { createdAt: "asc" },
+    });
+
+    // Progress must count *all* the chain's rows, including archived ones, so it
+    // cannot be computed from the rows above. One extra scoped query, grouped in
+    // memory — two queries per request regardless of how many tasks come back.
+    const chainIds = [...new Set(tasks.map((task) => task.chainId).filter((value): value is string => value !== null))];
+    const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
+      where: { chainId: { in: chainIds }, ...(projectId ? { projectId } : {}) },
+      select: {
+        id: true, projectId: true, chainId: true, chainIndex: true, status: true,
+        name: true, archivedAt: true, templateStep: { select: { name: true } },
+      },
+      orderBy: { chainIndex: "asc" },
+    });
+    const progressByChain = chainProgressByChain(chainRows);
+    const positionsByChain = new Map<string, Map<string, number>>();
+    for (const row of chainRows) {
+      if (!row.chainId) continue;
+      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+      const group = positionsByChain.get(key);
+      if (group) continue;
+      positionsByChain.set(key, positions(chainRows.filter((candidate) => (
+        candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
+      ))));
+    }
+
+    // The Automations page needs `Last run` on a *collapsed* row, and a poll
+    // that only mounts while a row is expanded can never supply it. Skipped
+    // entirely on a board with no automations.
+    const cronIds = tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
+    const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
+      by: ["recurringSourceTaskId"],
+      where: { recurringSourceTaskId: { in: cronIds } },
+      _max: { createdAt: true },
+      _count: { _all: true },
+    });
+    const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
+
+    return context.json(tasks.map((task) => {
+      const key = task.chainId ? chainKey({ projectId: task.projectId, chainId: task.chainId }) : null;
+      const progress = key ? progressByChain.get(key) ?? null : null;
+      const fired = firedByDefinition.get(task.id);
+      return {
+        ...task,
+        chainProgress: progress
+          ? { ...progress, position: key ? positionsByChain.get(key)?.get(task.id) ?? null : null }
+          : null,
+        recurringLastFiredAt: fired?._max.createdAt ?? null,
+        recurringFireCount: fired?._count._all ?? 0,
+      };
     }));
   });
   app.post("/projects/:projectId/tasks", async (context) => {
@@ -1277,6 +1348,64 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       include: { assigneeAgent: true, repo: true, runs: { orderBy: { runNumber: "desc" }, include: { session: true } } },
     });
     return task ? context.json(task) : context.json({ error: "Task not found" }, 404);
+  });
+  app.get("/tasks/:taskId/chain", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const subject = await db.task.findUnique({
+      where: { id: taskId },
+      select: { id: true, projectId: true, chainId: true, chainIndex: true, status: true },
+    });
+    if (!subject) return context.json({ error: "Task not found" }, 404);
+    if (!subject.chainId) return context.json({ chainId: null, total: 0, done: 0, steps: [] });
+
+    const chainInclude = {
+      assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
+      templateStep: { select: { name: true } },
+      runs: { orderBy: { runNumber: "desc" as const }, take: 1 },
+    };
+    // A chainId with a null chainIndex is a broken row the advancer already
+    // refuses to follow. PostgreSQL sorts NULL last, so leaving it in the query
+    // would render it at the bottom of somebody else's chain instead of as its
+    // own one-row chain — and would shift every real row's position by one.
+    const rows = subject.chainIndex === null
+      ? [await db.task.findUniqueOrThrow({ where: { id: taskId }, include: chainInclude })]
+      : await db.task.findMany({
+        where: { projectId: subject.projectId, chainId: subject.chainId, chainIndex: { not: null } },
+        orderBy: { chainIndex: "asc" },
+        include: chainInclude,
+      });
+
+    const runGroups = rows.length === 0 ? [] : await db.run.groupBy({
+      by: ["taskId", "status"],
+      where: { taskId: { in: rows.map((row) => row.id) } },
+      _count: { _all: true },
+    });
+    const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
+    const ordinals = positions(rows);
+    const progress = chainProgress(rows);
+
+    return context.json({
+      chainId: subject.chainId,
+      total: progress?.total ?? rows.length,
+      done: progress?.done ?? 0,
+      steps: rows.map((row) => ({
+        taskId: row.id,
+        position: ordinals.get(row.id) ?? 1,
+        chainIndex: row.chainIndex,
+        name: row.name,
+        stepName: stepName(row),
+        status: row.status,
+        approvalGate: row.approvalGate,
+        assigneeType: row.assigneeType,
+        agent: row.assigneeAgent ? { id: row.assigneeAgent.id, title: row.assigneeAgent.title } : null,
+        archivedAt: row.archivedAt,
+        failureReason: row.failureReason,
+        latestRun: row.runs[0]
+          ? { id: row.runs[0].id, status: row.runs[0].status, runNumber: row.runs[0].runNumber }
+          : null,
+        startable: startable(row, facts.get(row.id) ?? { total: 0, active: false }, row.maxSessionsPerTask),
+      })),
+    });
   });
   app.patch("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));

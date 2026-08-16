@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { activateChainSuccessor, applyInboxDecisionTx, Prisma, PrismaClient } from "@agentos/db";
 
 import { createApp } from "./app.js";
+import { instantiateTemplate } from "./templates.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 let db: PrismaClient;
@@ -350,4 +351,198 @@ test("a successor parked between the read and the claim is caught by the re-read
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "BACKLOG");
   assert.match(await latestActivity(successor.id), /parked in Backlog/);
+});
+
+// --- batch 2.5: GET /tasks/:taskId/chain and the GET /tasks extension --------
+
+const OPERATOR = "operator-db-token";
+
+const asOperator = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  try {
+    return await operation();
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+const operatorGet = async (path: string): Promise<{ status: number; body: any }> => asOperator(async () => {
+  const response = await createApp(db).request(path, { headers: { Authorization: `Bearer ${OPERATOR}` } });
+  return { status: response.status, body: response.status === 204 ? null : await response.json() };
+});
+
+/** A real three-step template, instantiated through instantiateTemplate so the
+ *  chain under test is the one the product actually creates. */
+const seedTemplateChain = async (label: string, stepCount = 3) => {
+  const project = await db.project.create({ data: { name: label, slug: `${label}-${Date.now()}` } });
+  const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
+  const agent = await db.agent.create({ data: {
+    projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
+    foundationalPrompt: "foundation", rolePrompt: "role",
+  } });
+  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
+  await db.agentRepoAccess.create({ data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
+  const template = await db.taskTemplate.create({ data: {
+    projectId: project.id, name: `${label}-template`, description: "t", variables: [],
+    steps: { create: Array.from({ length: stepCount }, (_, index) => ({
+      stepIndex: index + 1,
+      name: `Step ${index + 1}`,
+      // The last step mirrors the seeded nine-step template: a HUMAN approval gate.
+      assigneeType: index + 1 === stepCount ? "HUMAN" as const : "AGENT" as const,
+      assigneeAgentId: index + 1 === stepCount ? null : agent.id,
+      approvalGate: index + 1 === stepCount,
+      prompt: `do step ${index + 1}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, project.id, template.id, { repoId: repo.id, variables: {} });
+  return { project, agent, repo, template, chain };
+};
+
+test("GET /tasks/:id/chain returns every step in order with startable and gate flags", async () => {
+  const { chain } = await seedTemplateChain("chainroute", 9);
+  const { status, body } = await operatorGet(`/tasks/${chain.tasks[3]!.id}/chain`);
+  assert.equal(status, 200);
+  assert.equal(body.chainId, chain.chainId);
+  assert.equal(body.total, 9);
+  assert.equal(body.done, 0);
+  assert.deepEqual(body.steps.map((step: any) => step.position), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(body.steps.map((step: any) => step.stepName), Array.from({ length: 9 }, (_, index) => `Step ${index + 1}`));
+
+  const last = body.steps[8];
+  assert.equal(last.assigneeType, "HUMAN");
+  assert.equal(last.approvalGate, true);
+  assert.equal(last.startable, false, "a human gate step is never startable");
+
+  // Step 1 already holds the run instantiateTemplate queued, so it is busy;
+  // step 2 is an idle agent step and is the one the operator may start.
+  assert.equal(body.steps[0].startable, false);
+  assert.equal(body.steps[0].latestRun.status, "QUEUED");
+  assert.equal(body.steps[1].startable, true);
+  assert.equal(body.steps[1].latestRun, null);
+});
+
+test("GET /tasks/:id/chain returns an empty envelope for a task with no chain", async () => {
+  const { project } = await seedTemplateChain("nochain", 2);
+  const loner = await db.task.create({ data: { projectId: project.id, name: "Loner", description: "d" } });
+  const { status, body } = await operatorGet(`/tasks/${loner.id}/chain`);
+  assert.equal(status, 200);
+  assert.deepEqual(body, { chainId: null, total: 0, done: 0, steps: [] });
+});
+
+test("GET /tasks/:id/chain is 404 for a task that does not exist", async () => {
+  const { status } = await operatorGet("/tasks/task-that-never-existed/chain");
+  assert.equal(status, 404);
+});
+
+test("E1: a chainId with a null chainIndex is its own 1/1 chain and never joins another", async () => {
+  const { project, chain } = await seedTemplateChain("e1", 3);
+  const orphan = await db.task.create({ data: {
+    projectId: project.id, name: "Broken row", description: "d", chainId: chain.chainId, chainIndex: null, status: "DONE",
+  } });
+
+  const alone = await operatorGet(`/tasks/${orphan.id}/chain`);
+  assert.equal(alone.status, 200);
+  assert.equal(alone.body.total, 1);
+  assert.equal(alone.body.done, 1);
+  assert.equal(alone.body.steps.length, 1);
+  assert.equal(alone.body.steps[0].position, 1);
+  assert.equal(alone.body.steps[0].taskId, orphan.id);
+
+  // …and the sibling rows never see it, so nobody's position shifts.
+  const sibling = await operatorGet(`/tasks/${chain.tasks[0]!.id}/chain`);
+  assert.equal(sibling.body.total, 3);
+  assert.equal(sibling.body.steps.some((step: any) => step.taskId === orphan.id), false);
+});
+
+test("E2: two projects sharing one chainId stay separate in both chain reads", async () => {
+  const first = await seedTemplateChain("e2a", 3);
+  const second = await seedTemplateChain("e2b", 3);
+  // instantiateTemplate generates UUIDs, so a collision has to be written by
+  // hand. @@unique([chainId, chainIndex]) is global rather than per-project, so
+  // the two chains can only share an id at *disjoint* indices — which is
+  // precisely the case the (projectId, chainId) grouping key exists for: under a
+  // chainId-only key the first project's cards would read 6 steps, not 3.
+  const shared = `shared-${Date.now()}`;
+  await db.task.updateMany({ where: { chainId: first.chain.chainId }, data: { chainId: shared } });
+  for (const [offset, task] of second.chain.tasks.entries()) {
+    await db.task.update({ where: { id: task.id }, data: { chainId: shared, chainIndex: 11 + offset } });
+  }
+
+  const firstChain = await operatorGet(`/tasks/${first.chain.tasks[0]!.id}/chain`);
+  assert.equal(firstChain.body.total, 3, "three steps, never six");
+  const secondChain = await operatorGet(`/tasks/${second.chain.tasks[0]!.id}/chain`);
+  assert.equal(secondChain.body.total, 3);
+
+  // The global GET /tasks call site has no projectId at all; the grouping key is
+  // (projectId, chainId), so neither project reads the other's progress.
+  const global = await operatorGet("/tasks");
+  const firstCard = global.body.find((task: any) => task.id === first.chain.tasks[0]!.id);
+  const secondCard = global.body.find((task: any) => task.id === second.chain.tasks[0]!.id);
+  assert.equal(firstCard.chainProgress.total, 3);
+  assert.equal(secondCard.chainProgress.total, 3);
+});
+
+test("GET /tasks reports the same chainProgress on every card of a chain", async () => {
+  const { project, chain } = await seedTemplateChain("progress", 3);
+  await db.task.update({ where: { id: chain.tasks[0]!.id }, data: { status: "DONE" } });
+  const { body } = await operatorGet(`/tasks?projectId=${project.id}`);
+  assert.equal(body.length, 3);
+  for (const task of body) {
+    assert.equal(task.chainProgress.total, 3);
+    assert.equal(task.chainProgress.done, 1);
+    assert.equal(task.chainProgress.chainId, chain.chainId);
+  }
+  assert.deepEqual(body.map((task: any) => task.chainProgress.position), [1, 2, 3]);
+});
+
+test("GET /tasks counts archived chain rows toward progress but omits them from the board", async () => {
+  const { project, chain } = await seedTemplateChain("archivedprogress", 3);
+  await db.task.update({ where: { id: chain.tasks[0]!.id }, data: { status: "DONE", archivedAt: new Date() } });
+  const board = await operatorGet(`/tasks?projectId=${project.id}`);
+  assert.equal(board.body.length, 2, "the archived row is off the board");
+  assert.equal(board.body[0].chainProgress.total, 3, "but it still counts toward m");
+  assert.equal(board.body[0].chainProgress.done, 1);
+
+  const all = await operatorGet(`/tasks?projectId=${project.id}&archived=all`);
+  assert.equal(all.body.length, 3);
+  const onlyArchived = await operatorGet(`/tasks?projectId=${project.id}&archived=true`);
+  assert.equal(onlyArchived.body.length, 1);
+  const rejected = await operatorGet(`/tasks?projectId=${project.id}&archived=maybe`);
+  assert.equal(rejected.status, 400);
+});
+
+test("GET /tasks carries the last recurring fire so a collapsed automation row can render it", async () => {
+  const { project, agent, repo } = await seedTemplateChain("lastfire", 2);
+  const definition = await db.task.create({ data: {
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Nightly", description: "work",
+    scheduleKind: "CRON", cron: "0 9 * * *", timezone: "UTC", runAt: new Date("2026-08-15T09:00:00Z"),
+  } });
+  const beforeFire = await operatorGet(`/tasks?projectId=${project.id}`);
+  const collapsedBefore = beforeFire.body.find((task: any) => task.id === definition.id);
+  assert.equal(collapsedBefore.recurringLastFiredAt, null);
+  assert.equal(collapsedBefore.recurringFireCount, 0);
+
+  await db.task.create({ data: {
+    projectId: project.id, name: "Nightly — copy", description: "work", recurringSourceTaskId: definition.id, source: "CRON",
+  } });
+  const afterFire = await operatorGet(`/tasks?projectId=${project.id}`);
+  const collapsedAfter = afterFire.body.find((task: any) => task.id === definition.id);
+  assert.notEqual(collapsedAfter.recurringLastFiredAt, null);
+  assert.equal(collapsedAfter.recurringFireCount, 1);
+});
+
+test("M2 at the ceiling: a step whose runs are all spent is not startable", async () => {
+  const { project, agent, repo, chain } = await seedTemplateChain("budget", 3);
+  const step = chain.tasks[1]!;
+  await db.task.update({ where: { id: step.id }, data: { maxSessionsPerTask: 2 } });
+  for (const runNumber of [1, 2]) {
+    await db.run.create({ data: {
+      projectId: project.id, taskId: step.id, agentId: agent.id, repoId: repo.id, runNumber,
+      dedupeKey: `task:${step.id}:run:${runNumber}`, runner: "CLAUDE", model: "claude", promptHash: "hash", status: "FAILED",
+    } });
+  }
+  const { body } = await operatorGet(`/tasks/${step.id}/chain`);
+  const rendered = body.steps.find((candidate: any) => candidate.taskId === step.id);
+  assert.equal(rendered.startable, false, "two terminal runs against a ceiling of two is spent");
 });
