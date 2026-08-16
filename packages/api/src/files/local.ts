@@ -27,9 +27,10 @@
  */
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, rename, rmdir, unlink } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
+import { filesystemKey, realpathNative } from "./alias.js";
 import { normalizeRelPath } from "./paths.js";
 import {
   HardLinkError,
@@ -129,7 +130,9 @@ const requireNonRoot = (resolved: ContainedPath): void => {
 
 export const createLocalFileStore = async (logicalRoot: string): Promise<FileStore> => {
   await mkdir(logicalRoot, { recursive: true, mode: 0o750 });
-  const canonicalRoot = await realpath(logicalRoot);
+  // .native, not the JS implementation: it returns the on-disk spelling, which is what
+  // grant keys are compared in.
+  const canonicalRoot = await realpathNative(logicalRoot);
   const resolvePath = (rel: string, mode: ResolveMode): Promise<ContainedPath> =>
     resolveContained(canonicalRoot, rel, mode);
 
@@ -211,6 +214,10 @@ export const createLocalFileStore = async (logicalRoot: string): Promise<FileSto
       } catch (error: unknown) {
         return mapPathError(error, dir);
       }
+    },
+
+    async grantKey(normalized) {
+      return filesystemKey(canonicalRoot, normalizeRelPath(normalized));
     },
 
     async entries(dir) {

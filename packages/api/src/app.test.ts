@@ -42,6 +42,7 @@ test("filesystem grant CRUD accepts root/canonical paths and rejects non-canonic
       filesystemGrant: {
         upsert: async ({ create }: { create: { folderPath: string } }) => { saved.push(create.folderPath); return create; },
         findFirst: async () => ({ id: "grant-1", agentId: "agent-1" }),
+        findMany: async () => saved.map((folderPath, index) => ({ id: `grant-${index}`, folderPath })),
         update: async ({ data }: { data: { folderPath?: string } }) => { if (data.folderPath !== undefined) saved.push(data.folderPath); return data; },
       },
     } as unknown as PrismaClient;

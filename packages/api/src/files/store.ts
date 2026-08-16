@@ -9,6 +9,12 @@ export interface FileStore {
    * then fails on rmdir, destroying real files and leaving the tree undeletable.
    */
   entries(dir: string): Promise<DirEntry[]>;
+  /**
+   * The filesystem's own spelling of an already-normalized path, root-relative, or null
+   * when it is not addressable inside the root. Grant enforcement compares in this key so
+   * a grant and a request cannot name one physical subtree with two different spellings.
+   */
+  grantKey(normalized: string): Promise<string | null>;
   stat(path: string): Promise<FileStat | null>;
   read(path: string): Promise<Buffer>;
   write(path: string, data: Buffer): Promise<FileStat>;

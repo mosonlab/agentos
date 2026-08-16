@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
+import { filesystemKey, realpathNative } from "./alias.js";
 import { createLocalFileStore } from "./local.js";
 import type { FileStore } from "./store.js";
 
@@ -24,6 +25,16 @@ export const getFileStore = (): Promise<FileStore> => {
 };
 
 export const resetFileStores = (): void => stores.clear();
+
+/**
+ * The same key the store enforces in, resolved without creating the root, so grant
+ * administration can reject alias collisions before any file operation exists.
+ */
+export const filesRootGrantKey = async (normalized: string): Promise<string | null> => {
+  const root = resolve(resolveFilesRoot());
+  const canonical = await realpathNative(root).catch(() => root);
+  return filesystemKey(canonical, normalized);
+};
 
 const nearestRealPath = async (input: string): Promise<string> => {
   let candidate = resolve(input);

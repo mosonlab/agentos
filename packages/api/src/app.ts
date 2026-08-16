@@ -41,9 +41,9 @@ import { defaultWorkspaceRoot, reconcileDatabaseRuns, reconcileWorkspaces } from
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
-import { getFileStore } from "./files/config.js";
+import { filesRootGrantKey, getFileStore } from "./files/config.js";
 import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
-import { isCanonicalRelPath } from "./files/paths.js";
+import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
 import { InvalidPathError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
@@ -656,9 +656,37 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.get("/agents/:agentId/filesystem-grants", async (context) => context.json(await db.filesystemGrant.findMany({
     where: { agentId: id.parse(context.req.param("agentId")) }, orderBy: { folderPath: "asc" },
   })));
+  /**
+   * Two spellings of one physical folder must not become two grants. On a case- and
+   * normalization-insensitive volume `protected` and `Protected` are the same directory,
+   * so a read-only grant on one plus a writable grant on the other is read-write on that
+   * directory -- and the console renders the two rows identically, so nobody sees it.
+   */
+  const aliasingGrant = async (agentId: string, folderPath: string, exclude?: string): Promise<string | null> => {
+    const key = await filesRootGrantKey(normalizeRelPath(folderPath));
+    if (key === null) return null;
+    const existing = await db.filesystemGrant.findMany({ where: { agentId } });
+    for (const grant of existing) {
+      if (grant.folderPath === folderPath || grant.id === exclude) continue;
+      let other: string | null;
+      try {
+        other = await filesRootGrantKey(normalizeRelPath(grant.folderPath));
+      } catch {
+        continue;
+      }
+      if (other !== null && other === key) return grant.folderPath;
+    }
+    return null;
+  };
+  const aliasConflict = (context: Context, folderPath: string, existing: string): Response => context.json({
+    error: `folderPath "${folderPath}" resolves to the same folder as the existing grant "${existing}"; edit that grant instead`,
+  }, 409);
+
   app.post("/agents/:agentId/filesystem-grants", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const body = await readJson(context.req.raw, filesystemGrantInput);
+    const aliased = await aliasingGrant(agentId, body.folderPath);
+    if (aliased !== null) return aliasConflict(context, body.folderPath, aliased);
     return context.json(await db.filesystemGrant.upsert({
       where: { agentId_folderPath: { agentId, folderPath: body.folderPath } },
       create: { agentId, ...body },
@@ -670,9 +698,14 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const grantId = id.parse(context.req.param("grantId"));
     const existing = await db.filesystemGrant.findFirst({ where: { id: grantId, agentId } });
     if (!existing) return context.json({ error: "Filesystem grant not found" }, 404);
+    const patch = await readJson(context.req.raw, filesystemGrantPatch);
+    if (patch.folderPath !== undefined) {
+      const aliased = await aliasingGrant(agentId, patch.folderPath, grantId);
+      if (aliased !== null) return aliasConflict(context, patch.folderPath, aliased);
+    }
     return context.json(await db.filesystemGrant.update({
       where: { id: grantId },
-      data: withoutUndefined(await readJson(context.req.raw, filesystemGrantPatch)) as Prisma.FilesystemGrantUncheckedUpdateInput,
+      data: withoutUndefined(patch) as Prisma.FilesystemGrantUncheckedUpdateInput,
     }));
   });
   app.delete("/agents/:agentId/filesystem-grants/:grantId", async (context) => {
@@ -1670,7 +1703,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const run = await db.run.findUnique({ where: { id: runId }, select: { agentId: true } });
     if (!run) return new Response(JSON.stringify({ error: "Run not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
     const grants = await db.filesystemGrant.findMany({ where: { agentId: run.agentId } }) as GrantLike[];
-    const admission = grantAdmits(grants, operation, path);
+    const store = await getFileStore();
+    const admission = await grantAdmits(grants, operation, path, (value) => store.grantKey(value));
     return admission.admitted
       ? null
       : new Response(JSON.stringify({ error: `Filesystem grant missing ${admission.missing}` }), { status: 403, headers: { "Content-Type": "application/json" } });
