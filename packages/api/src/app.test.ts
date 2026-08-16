@@ -135,6 +135,90 @@ test("template approval gate still rejects operator DONE", async () => {
   });
 });
 
+test("CRON create computes runAt, ignores caller runAt, and creates no immediate run", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, any> | undefined;
+    let runs = 0;
+    const agent = { id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" };
+    const repo = { id: "repo-1", defaultBranch: "main" };
+    const tx = {
+      task: { create: async ({ data }: { data: Record<string, any> }) => { stored = data; return { id: "task-1", ...data }; } },
+      taskActivity: { create: async () => ({}) },
+      run: { create: async () => { runs += 1; return {}; } },
+    };
+    const database = {
+      agent: { findFirst: async () => agent }, repo: { findFirst: async () => repo },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Nightly", assigneeAgentId: "agent-1", repoId: "repo-1", scheduleKind: "CRON",
+        cron: "0 2 * * *", timezone: "Asia/Shanghai", runAt: "2000-01-01T00:00:00Z",
+      }),
+    });
+    assert.equal(response.status, 201);
+    assert.equal(runs, 0);
+    assert.ok(stored?.runAt instanceof Date);
+    assert.ok(stored!.runAt.getTime() > Date.now());
+  });
+});
+
+test("schedule create rejects invalid dialect, timezone, missing fields, and non-agent AT", async () => {
+  await withTokens(async () => {
+    const database = {
+      agent: { findFirst: async () => ({ id: "agent-1" }) }, repo: { findFirst: async () => ({ id: "repo-1" }) },
+      agentRepoAccess: { findFirst: async () => ({}) },
+    } as unknown as PrismaClient;
+    const cases = [
+      { scheduleKind: "CRON", cron: "0 */2 * * * *" },
+      { scheduleKind: "CRON", cron: "* * * * * *" },
+      { scheduleKind: "CRON", cron: "@daily" },
+      { scheduleKind: "CRON", cron: "0 2 * * *", timezone: "Mars/Olympus" },
+      { scheduleKind: "CRON" },
+      { scheduleKind: "AT", assigneeType: "HUMAN", runAt: new Date().toISOString() },
+      { scheduleKind: "AT", assigneeAgentId: "agent-1", runAt: null },
+    ];
+    for (const value of cases) {
+      const response = await createApp(database).request("/projects/project-1/tasks", {
+        method: "POST", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Invalid", ...value }),
+      });
+      assert.equal(response.status, 400, JSON.stringify(value));
+    }
+  });
+});
+
+test("AT create waits for the scheduler and merged-view patch cannot remove its executor", async () => {
+  await withTokens(async () => {
+    let runs = 0;
+    const runAt = new Date(Date.now() - 60_000);
+    const before = { id: "task-1", projectId: "project-1", status: "TODO", templateId: null, approvalGate: false, chainId: null, followUpTaskId: null, scheduleKind: "AT", runAt, cron: null, timezone: null, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1" };
+    const database = {
+      agent: { findFirst: async () => ({ id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
+      repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      task: { findUniqueOrThrow: async () => before },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
+        taskActivity: { create: async () => ({}) }, run: { create: async () => { runs += 1; return {}; } },
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Later", scheduleKind: "AT", runAt, assigneeAgentId: "agent-1", repoId: "repo-1" }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(runs, 0);
+    const patched = await createApp(database).request("/tasks/task-1", {
+      method: "PATCH", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ assigneeType: "HUMAN", assigneeAgentId: null }),
+    });
+    assert.equal(patched.status, 400);
+  });
+});
+
 test("fencing rejects an expired generation token", async () => {
   await withTokens(async () => {
     const currentToken = "2:run-1:current";

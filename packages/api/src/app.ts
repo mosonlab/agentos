@@ -11,6 +11,7 @@ import {
   type PrismaClient,
   RepoPermission,
   RunStatus,
+  ScheduleKind,
   PushStatus,
   RunnerKind,
   RunnerPreference,
@@ -42,6 +43,7 @@ import { reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
+import { validateSchedule } from "./scheduler.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -177,6 +179,10 @@ const taskFields = {
   maxDurationMin: z.number().int().min(1).max(24 * 60),
   stallTimeoutMin: z.number().int().min(1).max(24 * 60),
   maxSessionsPerTask: z.number().int().min(1).max(100),
+  scheduleKind: z.nativeEnum(ScheduleKind),
+  runAt: z.coerce.date().nullable(),
+  cron: z.string().trim().min(9).max(100).nullable(),
+  timezone: z.string().trim().min(1).max(64).nullable(),
 };
 const taskInput = z.object({
   ...taskFields,
@@ -190,6 +196,10 @@ const taskInput = z.object({
   maxDurationMin: taskFields.maxDurationMin.default(120),
   stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
   maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
+  scheduleKind: taskFields.scheduleKind.default(ScheduleKind.NOW),
+  runAt: taskFields.runAt.default(null),
+  cron: taskFields.cron.default(null),
+  timezone: taskFields.timezone.default(null),
   chainId: z.string().trim().min(1).max(100).optional(),
   chainIndex: z.number().int().min(0).optional(),
 }).superRefine((value, context) => {
@@ -941,12 +951,18 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       const access = await db.agentRepoAccess.findFirst({ where: { agentId: agent.id, repoId: repo.id, projectId } });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
+    let schedule;
+    try {
+      schedule = validateSchedule(body);
+    } catch (error: unknown) {
+      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
+    }
     const task = await db.$transaction(async (tx) => {
       const created = await tx.task.create({
-        data: { ...withoutUndefined(body), projectId } as Prisma.TaskUncheckedCreateInput,
+        data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
       });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
-      if (agent && repo && body.assigneeType === AssigneeType.AGENT) {
+      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
         await tx.run.create({
           data: {
@@ -1000,9 +1016,29 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
+    const effectiveAssigneeType = body.assigneeType ?? before.assigneeType;
+    let schedule;
+    try {
+      schedule = validateSchedule({
+        scheduleKind: body.scheduleKind ?? before.scheduleKind ?? ScheduleKind.NOW,
+        runAt: body.runAt === undefined ? before.runAt ?? null : body.runAt,
+        cron: body.cron === undefined ? before.cron ?? null : body.cron,
+        timezone: body.timezone === undefined ? before.timezone ?? null : body.timezone,
+        assigneeType: effectiveAssigneeType,
+        assigneeAgentId: effectiveAgentId,
+        repoId: effectiveRepoId,
+      });
+    } catch (error: unknown) {
+      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
+    }
+    const scheduleTouched = body.scheduleKind !== undefined || body.runAt !== undefined || body.cron !== undefined || body.timezone !== undefined;
+    const updateData = {
+      ...withoutUndefined(body),
+      ...(scheduleTouched ? schedule : {}),
+    } as Prisma.TaskUncheckedUpdateInput;
     const advances = body.status === TaskStatus.DONE && (before.chainId || before.followUpTaskId);
     const task = advances ? await db.$transaction(async (tx) => {
-      const updated = await tx.task.update({ where: { id: taskId }, data: withoutUndefined(body) as Prisma.TaskUncheckedUpdateInput });
+      const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
       if (!before.templateId && before.approvalGate) {
         await tx.inboxMessage.updateMany({
@@ -1013,7 +1049,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
       return updated;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted })
-      : await db.task.update({ where: { id: taskId }, data: withoutUndefined(body) as Prisma.TaskUncheckedUpdateInput });
+      : await db.task.update({ where: { id: taskId }, data: updateData });
     if (!advances && body.status && body.status !== before.status) {
       await db.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
     }
