@@ -10,7 +10,8 @@ Note: the review fan-out that was once slated for this batch is CANCELLED (Leo, 
 - `docs/reference/danny-agentos-video/decisions.md` §12 — chain = flat `chainId + chainIndex` rows, gates only at ①②, template-driven step skipping. The chain view renders THIS model; do not introduce parent/child task nesting.
 
 ## Chain configuration (fixed, do not revisit)
-- ⑤ implementation and ⑦ fixes: `frontend-dev` (claude-opus-5:xhigh / CLAUDE). ⑥ code review: review-coordinator (Sol / CODEX) — cross-vendor rule.
+- ⑤ implementation and ⑦ fixes: `frontend-dev` (claude-opus-5:high / CLAUDE).
+- ⑥ code review: **`code-reviewer` (claude-opus-5:high / CLAUDE)** — 前端例外，Leo 2026-08-16 裁决（decisions.md §12）：前端批次不走跨厂商评审。⑥ 的任务书必须声明这是同厂商评审、独立性不受保护、一切从 diff 重新推导。
 - Runs after the frontend-convergence chain is merged.
 
 ## Decided UI form (Leo, 2026-08-16 — binding, do not re-open)
@@ -37,4 +38,4 @@ Note: the review fan-out that was once slated for this batch is CANCELLED (Leo, 
 - `npm run build` then full test suite green. Rollback notes required; any enum addition (Backlog, archived flag) gets explicit migration + rollback treatment.
 
 ## Standing clauses
-- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Former Fable positions use `claude-opus-5:xhigh`. Never write OPERATOR_TOKEN into any artifact.
+- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Former Fable positions use `claude-opus-5:xhigh`（仅限 ②④ plan 步；实现/评审步用 `:high`）. Never write OPERATOR_TOKEN into any artifact.
