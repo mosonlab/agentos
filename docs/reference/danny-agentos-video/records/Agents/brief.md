@@ -1,0 +1,70 @@
+# 模块：Agents
+## 讲解区间
+- 0:03:13–0:05:36: 演示代理列表和规划代理配置，并说明代理的提示词、模型、协作代理及最小权限隔离。
+- 0:23:52–0:24:19: 以规格代理为例展示 YAML 中的模型、技能、MCP 连接、仓库和提示词配置。
+
+## 本模块字幕（旁白）
+- [0:03:13] 嗯，所以，这就是概览，
+- [0:03:13] 我现在就给你看看这个工具是怎么设置的。
+- [0:03:17] 这就是工具的样子。
+- [0:03:19] 侧边栏的所有项目都是不同的方面。
+- [0:03:23] 我在想怎么解释它运作起来最容易。
+- [0:03:27] 我觉得我就从下往上讲吧。
+- [0:03:31] 基本上，每个代理，我可以先展示代理。
+- [0:03:37] 所以，我有一堆代理。
+- [0:03:39] 我有一个默认代理、高级开发、规划，等等。
+- [0:03:43] 我们来看看规划代理。
+- [0:03:47] 规划代理，我可以设置名字、标题、用哪个模型，还有提示词。
+- [0:03:53] 有一个Agent OS基础提示词。
+- [0:03:57] 基本上，在这里我解释它们能访问哪些文件、哪些系统、
+- [0:04:02] 哪些MCP，然后我有特定的规划代理。
+- [0:04:05] 所以，你是一个规划代理，
+- [0:04:07] 你把已批准的规格变成具体的实施计划。
+- [0:04:11] 输入，我告诉它基本上能访问哪些MCP。
+- [0:04:16] 基本上，这个代理只有一个工作，就是只把规格变成计划。
+- [0:04:22] 把计划写到任务里，然后完成任务。
+- [0:04:26] 所以，你不想给代理任何它们不需要的访问权限。比如，
+- [0:04:34] 我的客户支持机器人能访问我的Front MCP，
+- [0:04:38] 但永远不能访问我的Gmail，
+- [0:04:41] 永远不能访问我的GitHub仓库，
+- [0:04:45] 因为我不想让这个代理在做客户支持时泄露我代码库的信息。
+- [0:04:52] 这个系统基本上是围绕隔离每个代理能做什么来构建的，
+- [0:04:56] 因为每个代理都会启动自己的小云容器，
+- [0:04:59] 只有特定访问权限，它不能访问不需要的东西。
+- [0:05:04] 比如，这个规划代理，它只能访问规划模式。
+- [0:05:09] 它能访问我的Agent OS MCP，
+- [0:05:13] 但不能访问HRFs或我的GitHub MCP。
+- [0:05:17] 所以，即使有提示词泄漏进来，它也做不了什么，
+- [0:05:23] 因为它没有访问权限，比如。
+- [0:05:27] 嗯，然后基本上，每个代理都有一个协作列表。
+- [0:05:30] 比如，我的规划代理可以在子任务中生成其他代理来帮忙，
+- [0:05:35] 并在彼此之间沟通。
+- [0:23:46] 模板都是YAML文件，稍后我会讲到。比如，规格代理。规格代理，
+- [0:23:52] 模型是open for put eight。
+- [0:23:57] 它有这些技能，这些MCP连接，访问这个仓库。
+- [0:23:59] 它有提示词，说明它如何工作。
+- [0:24:01] 我有一个CLI AgentOS帮助，我相信，
+- [0:24:07] 可以推送和拉取这些，但它也可以为我创建项目。
+
+## 帧清单（按时间排序，逐张查看）
+- [0:03:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0020.jpg
+- [0:03:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0021.jpg
+- [0:03:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0022.jpg
+- [0:03:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0023.jpg
+- [0:03:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0024.jpg
+- [0:04:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0025.jpg
+- [0:04:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0026.jpg
+- [0:04:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0027.jpg
+- [0:04:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0028.jpg
+- [0:04:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0029.jpg
+- [0:04:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0030.jpg
+- [0:05:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0031.jpg
+- [0:05:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0032.jpg
+- [0:05:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0033.jpg
+- [0:05:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0034.jpg
+- [0:23:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0144.jpg
+- [0:24:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0145.jpg
+- [0:24:03] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01443.10.jpg
+- [0:24:03] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01443.58.jpg
+- [0:24:04] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01444.08.jpg
+- [0:24:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0146.jpg

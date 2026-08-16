@@ -4,4 +4,5 @@ dist/
 .DS_Store
 *.log
 packages/db/generated/
+docs/reference/danny-agentos-video/frames/
 

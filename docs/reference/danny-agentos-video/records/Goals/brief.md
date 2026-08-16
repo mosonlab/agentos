@@ -1,0 +1,80 @@
+# 模块：Goals
+## 讲解区间
+- 0:19:10–0:20:57: 介绍目标模式：根据完成定义持续运行开放式实现循环，直到成功标准全部满足并完成审查落地。
+- 0:22:32–0:23:19: 展示日常使用目标的流程：早上提交规格，系统生成完成定义并运行数小时，晚上返回 PR 后人工审查合并。
+
+## 本模块字幕（旁白）
+- [0:19:04] 顺便说一句，这解释了很多。
+- [0:19:10] 现在，最后，我有目标。
+- [0:19:13] 任务非常适合结构化内容。
+- [0:19:16] 对于我没有结构且更像是开放式实现的东西，我有目标。
+- [0:19:22] 那么，什么是目标？
+- [0:19:24] 目标基本上基于完成定义运行。
+- [0:19:29] 你可以自己写，或者我直接在里面放一个规格说明书。
+- [0:19:35] 它会写一个完成定义。
+- [0:19:37] 它会说：“好的，这些是成功标准。
+- [0:19:41] ”这个循环会一直持续，直到满足所有完成定义，
+- [0:19:46] 所有复选框都打勾，然后它才停止运行。
+- [0:19:49] 所以，第一阶段是“好的，
+- [0:19:51] 按照规格说明交付字段和钻机”。
+- [0:19:55] 嗯，最后步骤是实施必须经过审查并落地。
+- [0:20:01] 所以，它会继续这个实施过程。
+- [0:20:04] 那么，它是怎么工作的？有一个协调器。
+- [0:20:08] 所以，在每个会话结束时，协调器会生成一个会话。
+- [0:20:13] 当它完成时，协调器基本上会再检查一次。
+- [0:20:17] 它说：“好的，会话完成。
+- [0:20:19] ”它检查进度日志，检查完成定义，检查已实施的内容，
+- [0:20:22] 基于所有已完成的事情，协调器说：“好的，这个完成了，
+- [0:20:29] 这个实施了，这个完成定义还开着。
+- [0:20:32] 我要生成一个高级开发人员来实施这个功能。他完成了吗？
+- [0:20:38] ”然后协调器会问：“好的，需要做什么？
+- [0:20:40] ”下一步显然是我们需要写个计划。
+- [0:20:42] 它会生成一个计划代理来为我们工作。
+- [0:20:46] 所以，这里你可以看到正在发生的事情。
+- [0:20:48] 高级开发人员正在工作。
+- [0:20:49] 嗯，我们有一个共享的收件箱和文件系统，
+- [0:20:54] 所以我可以确切看到他们在那里写了什么。
+- [0:20:56] 他们在写进度日志。
+- [0:22:31] 所以，是的。
+- [0:22:32] 我现在开始我的一天，有这么多实施工作，
+- [0:22:36] 我的整个视频游戏都是这个系统开发的。
+- [0:22:39] 我现在做的就是早上写个规格说明，嗯，什么是规格说明？
+- [0:22:49] 如果你还没用过的话。
+- [0:22:51] 哦，我不需要打开。
+- [0:22:52] 总之，就像一份需要发生的事情的清单。
+- [0:22:54] 我把它扔进目标系统。它写完成定义。
+- [0:22:58] 我批准，然后它运行5到6个小时。
+- [0:23:01] 我可以做任何我想做的事。
+- [0:23:02] 一天结束时，我收到一个PR，我审查并合并它，
+- [0:23:06] 然后第二天再开始。
+- [0:23:07] 所以，让这些代理为我做所有事情真的很有趣，我什么都不用做。嗯，所以，这
+- [0:23:15] 真的非常非常好。
+- [0:23:15] 嗯，你可能会觉得这是很多手动工作。
+
+## 帧清单（按时间排序，逐张查看）
+- [0:19:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0116.jpg
+- [0:19:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0117.jpg
+- [0:19:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0118.jpg
+- [0:19:35] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01175.87.jpg
+- [0:19:36] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01176.25.jpg
+- [0:19:36] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01176.30.jpg
+- [0:19:36] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01176.78.jpg
+- [0:19:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0119.jpg
+- [0:19:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0120.jpg
+- [0:19:53] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01193.43.jpg
+- [0:19:53] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01193.47.jpg
+- [0:19:54] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01194.57.jpg
+- [0:20:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0121.jpg
+- [0:20:00] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01200.43.jpg
+- [0:20:00] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01200.85.jpg
+- [0:20:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0122.jpg
+- [0:20:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0123.jpg
+- [0:20:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0124.jpg
+- [0:20:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0125.jpg
+- [0:20:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0126.jpg
+- [0:20:55] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01255.62.jpg
+- [0:22:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0136.jpg
+- [0:22:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0137.jpg
+- [0:22:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0138.jpg
+- [0:23:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0139.jpg
+- [0:23:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0140.jpg

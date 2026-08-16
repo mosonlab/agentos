@@ -1,0 +1,952 @@
+[
+ {
+  "t": 0.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0001.jpg"
+ },
+ {
+  "t": 10.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0002.jpg"
+ },
+ {
+  "t": 20.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0003.jpg"
+ },
+ {
+  "t": 30.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0004.jpg"
+ },
+ {
+  "t": 40.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0005.jpg"
+ },
+ {
+  "t": 50.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0006.jpg"
+ },
+ {
+  "t": 60.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0007.jpg"
+ },
+ {
+  "t": 70.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0008.jpg"
+ },
+ {
+  "t": 80.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0009.jpg"
+ },
+ {
+  "t": 90.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0010.jpg"
+ },
+ {
+  "t": 95.8,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00095.80.jpg"
+ },
+ {
+  "t": 97.283333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00097.28.jpg"
+ },
+ {
+  "t": 100.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0011.jpg"
+ },
+ {
+  "t": 110.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0012.jpg"
+ },
+ {
+  "t": 120.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0013.jpg"
+ },
+ {
+  "t": 130.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0014.jpg"
+ },
+ {
+  "t": 140.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0015.jpg"
+ },
+ {
+  "t": 150.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0016.jpg"
+ },
+ {
+  "t": 160.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0017.jpg"
+ },
+ {
+  "t": 170.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0018.jpg"
+ },
+ {
+  "t": 180.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0019.jpg"
+ },
+ {
+  "t": 190.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0020.jpg"
+ },
+ {
+  "t": 200.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0021.jpg"
+ },
+ {
+  "t": 210.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0022.jpg"
+ },
+ {
+  "t": 220.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0023.jpg"
+ },
+ {
+  "t": 230.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0024.jpg"
+ },
+ {
+  "t": 240.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0025.jpg"
+ },
+ {
+  "t": 250.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0026.jpg"
+ },
+ {
+  "t": 260.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0027.jpg"
+ },
+ {
+  "t": 270.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0028.jpg"
+ },
+ {
+  "t": 280.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0029.jpg"
+ },
+ {
+  "t": 290.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0030.jpg"
+ },
+ {
+  "t": 300.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0031.jpg"
+ },
+ {
+  "t": 310.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0032.jpg"
+ },
+ {
+  "t": 320.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0033.jpg"
+ },
+ {
+  "t": 330.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0034.jpg"
+ },
+ {
+  "t": 340.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0035.jpg"
+ },
+ {
+  "t": 350.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0036.jpg"
+ },
+ {
+  "t": 360.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0037.jpg"
+ },
+ {
+  "t": 370.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0038.jpg"
+ },
+ {
+  "t": 380.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0039.jpg"
+ },
+ {
+  "t": 390.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0040.jpg"
+ },
+ {
+  "t": 400.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0041.jpg"
+ },
+ {
+  "t": 409.566667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00409.57.jpg"
+ },
+ {
+  "t": 410.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0042.jpg"
+ },
+ {
+  "t": 420.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0043.jpg"
+ },
+ {
+  "t": 430.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0044.jpg"
+ },
+ {
+  "t": 440.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0045.jpg"
+ },
+ {
+  "t": 450.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0046.jpg"
+ },
+ {
+  "t": 460.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0047.jpg"
+ },
+ {
+  "t": 466.783333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00466.78.jpg"
+ },
+ {
+  "t": 470.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0048.jpg"
+ },
+ {
+  "t": 472.383333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00472.38.jpg"
+ },
+ {
+  "t": 473.366667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00473.37.jpg"
+ },
+ {
+  "t": 480.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0049.jpg"
+ },
+ {
+  "t": 490.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0050.jpg"
+ },
+ {
+  "t": 500.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0051.jpg"
+ },
+ {
+  "t": 510.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0052.jpg"
+ },
+ {
+  "t": 520.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0053.jpg"
+ },
+ {
+  "t": 530.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0054.jpg"
+ },
+ {
+  "t": 540.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0055.jpg"
+ },
+ {
+  "t": 550.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0056.jpg"
+ },
+ {
+  "t": 560.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0057.jpg"
+ },
+ {
+  "t": 570.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0058.jpg"
+ },
+ {
+  "t": 580.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0059.jpg"
+ },
+ {
+  "t": 590.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0060.jpg"
+ },
+ {
+  "t": 600.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0061.jpg"
+ },
+ {
+  "t": 610.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0062.jpg"
+ },
+ {
+  "t": 620.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0063.jpg"
+ },
+ {
+  "t": 630.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0064.jpg"
+ },
+ {
+  "t": 640.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0065.jpg"
+ },
+ {
+  "t": 650.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0066.jpg"
+ },
+ {
+  "t": 660.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0067.jpg"
+ },
+ {
+  "t": 670.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0068.jpg"
+ },
+ {
+  "t": 680.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0069.jpg"
+ },
+ {
+  "t": 690.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0070.jpg"
+ },
+ {
+  "t": 700.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0071.jpg"
+ },
+ {
+  "t": 710.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0072.jpg"
+ },
+ {
+  "t": 711.683333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00711.68.jpg"
+ },
+ {
+  "t": 716.933333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00716.93.jpg"
+ },
+ {
+  "t": 720.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0073.jpg"
+ },
+ {
+  "t": 726.283333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00726.28.jpg"
+ },
+ {
+  "t": 728.9,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00728.90.jpg"
+ },
+ {
+  "t": 730.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0074.jpg"
+ },
+ {
+  "t": 740.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0075.jpg"
+ },
+ {
+  "t": 750.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0076.jpg"
+ },
+ {
+  "t": 760.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0077.jpg"
+ },
+ {
+  "t": 770.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0078.jpg"
+ },
+ {
+  "t": 780.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0079.jpg"
+ },
+ {
+  "t": 781.416667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00781.42.jpg"
+ },
+ {
+  "t": 790.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0080.jpg"
+ },
+ {
+  "t": 791.5,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00791.50.jpg"
+ },
+ {
+  "t": 800.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0081.jpg"
+ },
+ {
+  "t": 810.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0082.jpg"
+ },
+ {
+  "t": 820.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0083.jpg"
+ },
+ {
+  "t": 830.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0084.jpg"
+ },
+ {
+  "t": 840.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0085.jpg"
+ },
+ {
+  "t": 850.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0086.jpg"
+ },
+ {
+  "t": 854.966667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00854.97.jpg"
+ },
+ {
+  "t": 856.516667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00856.52.jpg"
+ },
+ {
+  "t": 860.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0087.jpg"
+ },
+ {
+  "t": 861.6,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00861.60.jpg"
+ },
+ {
+  "t": 861.816667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00861.82.jpg"
+ },
+ {
+  "t": 870.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0088.jpg"
+ },
+ {
+  "t": 880.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0089.jpg"
+ },
+ {
+  "t": 890.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0090.jpg"
+ },
+ {
+  "t": 900.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0091.jpg"
+ },
+ {
+  "t": 910.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0092.jpg"
+ },
+ {
+  "t": 920.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0093.jpg"
+ },
+ {
+  "t": 930.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0094.jpg"
+ },
+ {
+  "t": 940.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0095.jpg"
+ },
+ {
+  "t": 950.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0096.jpg"
+ },
+ {
+  "t": 960.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0097.jpg"
+ },
+ {
+  "t": 970.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0098.jpg"
+ },
+ {
+  "t": 980.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0099.jpg"
+ },
+ {
+  "t": 990.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0100.jpg"
+ },
+ {
+  "t": 1000.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0101.jpg"
+ },
+ {
+  "t": 1010.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0102.jpg"
+ },
+ {
+  "t": 1020.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0103.jpg"
+ },
+ {
+  "t": 1030.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0104.jpg"
+ },
+ {
+  "t": 1040.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0105.jpg"
+ },
+ {
+  "t": 1050.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0106.jpg"
+ },
+ {
+  "t": 1060.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0107.jpg"
+ },
+ {
+  "t": 1070.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0108.jpg"
+ },
+ {
+  "t": 1080.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0109.jpg"
+ },
+ {
+  "t": 1090.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0110.jpg"
+ },
+ {
+  "t": 1100.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0111.jpg"
+ },
+ {
+  "t": 1110.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0112.jpg"
+ },
+ {
+  "t": 1120.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0113.jpg"
+ },
+ {
+  "t": 1130.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0114.jpg"
+ },
+ {
+  "t": 1140.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0115.jpg"
+ },
+ {
+  "t": 1150.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0116.jpg"
+ },
+ {
+  "t": 1160.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0117.jpg"
+ },
+ {
+  "t": 1170.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0118.jpg"
+ },
+ {
+  "t": 1175.866667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01175.87.jpg"
+ },
+ {
+  "t": 1176.25,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01176.25.jpg"
+ },
+ {
+  "t": 1176.3,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01176.30.jpg"
+ },
+ {
+  "t": 1176.783333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01176.78.jpg"
+ },
+ {
+  "t": 1180.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0119.jpg"
+ },
+ {
+  "t": 1190.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0120.jpg"
+ },
+ {
+  "t": 1193.433333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01193.43.jpg"
+ },
+ {
+  "t": 1193.466667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01193.47.jpg"
+ },
+ {
+  "t": 1194.566667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01194.57.jpg"
+ },
+ {
+  "t": 1200.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0121.jpg"
+ },
+ {
+  "t": 1200.433333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01200.43.jpg"
+ },
+ {
+  "t": 1200.85,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01200.85.jpg"
+ },
+ {
+  "t": 1210.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0122.jpg"
+ },
+ {
+  "t": 1220.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0123.jpg"
+ },
+ {
+  "t": 1230.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0124.jpg"
+ },
+ {
+  "t": 1240.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0125.jpg"
+ },
+ {
+  "t": 1250.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0126.jpg"
+ },
+ {
+  "t": 1255.616667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01255.62.jpg"
+ },
+ {
+  "t": 1258.183333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01258.18.jpg"
+ },
+ {
+  "t": 1260.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0127.jpg"
+ },
+ {
+  "t": 1262.2,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01262.20.jpg"
+ },
+ {
+  "t": 1270.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0128.jpg"
+ },
+ {
+  "t": 1280.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0129.jpg"
+ },
+ {
+  "t": 1283.416667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01283.42.jpg"
+ },
+ {
+  "t": 1290.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0130.jpg"
+ },
+ {
+  "t": 1300.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0131.jpg"
+ },
+ {
+  "t": 1308.616667,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01308.62.jpg"
+ },
+ {
+  "t": 1310.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0132.jpg"
+ },
+ {
+  "t": 1320.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0133.jpg"
+ },
+ {
+  "t": 1330.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0134.jpg"
+ },
+ {
+  "t": 1340.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0135.jpg"
+ },
+ {
+  "t": 1350.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0136.jpg"
+ },
+ {
+  "t": 1360.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0137.jpg"
+ },
+ {
+  "t": 1370.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0138.jpg"
+ },
+ {
+  "t": 1380.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0139.jpg"
+ },
+ {
+  "t": 1390.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0140.jpg"
+ },
+ {
+  "t": 1400.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0141.jpg"
+ },
+ {
+  "t": 1410.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0142.jpg"
+ },
+ {
+  "t": 1420.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0143.jpg"
+ },
+ {
+  "t": 1430.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0144.jpg"
+ },
+ {
+  "t": 1440.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0145.jpg"
+ },
+ {
+  "t": 1443.1,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01443.10.jpg"
+ },
+ {
+  "t": 1443.583333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01443.58.jpg"
+ },
+ {
+  "t": 1444.083333,
+  "src": "scene",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_01444.08.jpg"
+ },
+ {
+  "t": 1450.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0146.jpg"
+ },
+ {
+  "t": 1460.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0147.jpg"
+ },
+ {
+  "t": 1470.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0148.jpg"
+ },
+ {
+  "t": 1480.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0149.jpg"
+ },
+ {
+  "t": 1490.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0150.jpg"
+ },
+ {
+  "t": 1500.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0151.jpg"
+ },
+ {
+  "t": 1510.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0152.jpg"
+ },
+ {
+  "t": 1520.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0153.jpg"
+ },
+ {
+  "t": 1530.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0154.jpg"
+ },
+ {
+  "t": 1540.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0155.jpg"
+ },
+ {
+  "t": 1550.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0156.jpg"
+ },
+ {
+  "t": 1560.0,
+  "src": "10s",
+  "path": "/private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0157.jpg"
+ }
+]

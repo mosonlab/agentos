@@ -1,0 +1,92 @@
+# 模块：Intro_概述
+## 讲解区间
+- 0:00:00–0:03:13: 介绍 AgentOS 的起因、目标和整体工作方式：用代理、任务和自动化承载大部分业务与编码工作。
+- 0:25:48–0:26:08: 总结 AgentOS，并邀请观众反馈希望深入了解的代理、技能和提示词内容。
+
+## 本模块字幕（旁白）
+- [0:00:01] 各位，
+- [0:00:02] 我一直在跟大家聊我用我的代理系统发布了很多东西，
+- [0:00:08] 很多人问我你是怎么设置的？你用了哪些技能？
+- [0:00:11] 系统是怎么运作的？
+- [0:00:13] 所以我想，不如做个视频，
+- [0:00:16] 彻底拆解一下过去6个月我是怎么构建自己的代理系统的，
+- [0:00:22] 基本上解释我做了什么、怎么运作的，
+- [0:00:26] 这样你们也能基于这些例子构建自己的系统。
+- [0:00:30] 嗯，这基本上是一个概览性的深入讲解。
+- [0:00:33] 我以后可以针对特定部分做更深入的探讨，
+- [0:00:37] 也许是一些代码部分，如果有人感兴趣的话。
+- [0:00:40] 所以，如果想看的话，就在下面留言吧。
+- [0:00:45] 嗯，话不多说，我来解释一下我一直在做什么。我觉得6个月前，
+- [0:00:50] 我还在终端里经常和Claude Code聊天，
+- [0:00:55] 总是得开着笔记本电脑，我开始意识到，
+- [0:00:57] 尤其是随着Twitter上的开发动态，这样做挺蠢的。
+- [0:01:00] 比如你想批量处理事情，4小时后回来，它已经完成了。
+- [0:01:04] 我想要有定时任务。
+- [0:01:05] 我想要有触发器来启动任务。
+- [0:01:07] 所以，基本上这几个月我一直在构建这个系统，
+- [0:01:11] 就是你现在屏幕上看到的。第一个月，
+- [0:01:13] 基本上是我自己用Claude Code编程，
+- [0:01:17] 之后这个系统就开始自我构建了，
+- [0:01:20] 它运行着我大部分的业务和编码工作。
+- [0:01:23] 我基本上把95%的任务都自动化到这个系统里了，
+- [0:01:27] 我不再手动做那么多事了，尤其是在编程方面。
+- [0:01:31] 所以我基本上叫它Agent OS。
+- [0:01:33] 我没给它起名字，但基本上在一个概览里，那个屏幕在哪？
+- [0:01:38] 我设定一个目标，目标可以是任何东西，
+- [0:01:43] 比如发布一个新的落地页，要么我把它分解成任务，
+- [0:01:48] 像常见的风格，要么我把它放进目标里，这个稍后再细说。
+- [0:01:52] 基本上，一个任务的状态是待办、进行中、审查、完成。
+- [0:01:56] 每个任务的主题下，一个代理就开始处理它。
+- [0:02:01] 它可以访问我的GitHub仓库，可以访问文件系统，
+- [0:02:05] 基本上所有东西都设置在一个独特的容器里，
+- [0:02:11] 启动时拉取仓库，访问我的文件系统，完成任务，
+- [0:02:18] 然后结束、提交、清理。
+- [0:02:22] 所以，每次会话后，这个容器就被丢弃，
+- [0:02:26] 下一次会话必须重新干净地初始化整个项目，
+- [0:02:30] 这样它就能开始处理下一个任务。
+- [0:02:34] 嗯，基本上所有这些任务都是由代理运行的。
+- [0:02:37] 比如，我有一个规划代理，我有一个高级开发，
+- [0:02:40] 他们有自己的特定提示词和技能集，
+- [0:02:44] 有自己的MCP可以访问。
+- [0:02:47] 嗯，他们有自己的知识，有自己的文件系统，
+- [0:02:51] 基本上只要他们需要我，而且只有当他们需要我时，
+- [0:02:57] 他们才会在我的收件箱里给我发消息。
+- [0:02:59] 所以，我不需要管理他们，我不需要等他们。
+- [0:03:02] 我可以到处走走，可以去跑步，可以和妻子出去，
+- [0:03:05] 基本上他们会一直按步骤走，直到卡住需要我帮忙，
+- [0:03:10] 然后发收件箱消息。
+- [0:25:44] 这就是AgentOS。
+- [0:25:48] 一个视频里讲了很多。
+- [0:25:51] 请在评论里再次告诉我你想深入了解什么，
+- [0:25:53] 想深入探讨什么，想要什么信息。
+- [0:25:56] 如果你想要我的代理、我的技能、我的提示词，
+- [0:25:59] 我很乐意开源它们并放到GitHub上。
+- [0:26:03] 嗯，所以，就这样。
+- [0:26:05] 谢谢，希望这有用，再见。
+- [0:26:07] 再见。
+
+## 帧清单（按时间排序，逐张查看）
+- [0:00:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0001.jpg
+- [0:00:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0002.jpg
+- [0:00:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0003.jpg
+- [0:00:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0004.jpg
+- [0:00:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0005.jpg
+- [0:00:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0006.jpg
+- [0:01:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0007.jpg
+- [0:01:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0008.jpg
+- [0:01:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0009.jpg
+- [0:01:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0010.jpg
+- [0:01:35] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00095.80.jpg
+- [0:01:37] (scene) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_scene/scene_00097.28.jpg
+- [0:01:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0011.jpg
+- [0:01:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0012.jpg
+- [0:02:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0013.jpg
+- [0:02:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0014.jpg
+- [0:02:20] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0015.jpg
+- [0:02:30] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0016.jpg
+- [0:02:40] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0017.jpg
+- [0:02:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0018.jpg
+- [0:03:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0019.jpg
+- [0:03:10] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0020.jpg
+- [0:25:50] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0156.jpg
+- [0:26:00] (10s) /private/tmp/claude-501/-Users-leohe-Documents-claude-projects-agentos/c745484d-f59f-4c9a-ac06-db51ef054f52/scratchpad/video/frames_10s/t0157.jpg

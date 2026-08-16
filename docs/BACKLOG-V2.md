@@ -1,0 +1,77 @@
+# BACKLOG V2 — 对标补齐批次（2026-08-15 定案）
+
+来源：Danny Postma AgentOS 视频对标（`docs/reference/danny-agentos-video/comparison.md`）+ grilling 决议（`docs/reference/danny-agentos-video/decisions.md`，唯一决议源）。V1.5 的 pilot 挂账仍在 `docs/BACKLOG.md`，两边独立记完成度。
+
+状态标记：`[ ]` 未开始 · `[~]` 进行中 · `[x]` 完成
+
+## 批次 0 — 前端底座迁移
+
+- [ ] 引入 Tailwind v4 + shadcn/ui，现有 ~45 个 CSS 变量色值映射为自定义主题（明暗双主题令牌）
+- [ ] 存量 8 页迁移（Connections/Inbox/Projects 只做最小迁移，后续批次整页重写）
+- [ ] 亮色模式随主题令牌落地（默认跟系统，可手动切，localStorage）
+
+## 批次 1 — Settings + i18n + 侧栏全局区（第 8 项）
+
+- [ ] 新建真正的 Settings 页（语言/主题切换 + runner 信息；修复导航错链 /secrets）
+- [ ] i18n：zh/en 字典 + context hook，~548 处字符串抽取（派机械代理），UI 默认英文
+- [ ] 侧栏底部 Runner 在线状态（heartbeat 已有）+ Inbox 未读徽标
+- [ ] Agents 页：claude/codex 模型下拉 + 推理等级下拉（字段已有，纯 UI）；完成后 Leo 复核各 agent 模型
+
+## 批次 2 — Tasks 收尾三件套（第 2 项）
+
+- [ ] scheduler 轮询 cron 到期任务入队
+- [ ] webhook 加 secret 校验 + payload→变量映射
+- [ ] 任务完成/批准自动将 chainIndex+1 置 TODO（链式推进）
+- [ ] 顺手删死模型：Trigger / Automation / InboxConnectionWindow（migration）
+
+## 批次 3 — Inbox 结构化问卷重构（第 11 项）
+
+- [ ] schema 重写：`form.questions[]` / `answers` JSON（决议 §7），废 kind/choices/selectedChoiceId，一次性迁移脚本
+- [ ] 前端分页渲染 + 进度 + Back/Next + Recommended + Other（接 SurveyJS 渲染层）
+- [ ] 飞书卡片适配新结构，硬编码中文文案英文化
+
+## 批次 4 — Sessions 会话查看器（第 1 项）
+
+- [ ] /sessions 列表 + 详情页：轮询 events 渲染消息流、tool call 折叠、Files touched 聚合
+- [ ] "向运行中代理发消息"后置（依赖 runner 注入支持）
+
+## 批次 5 — Goals 协调器（第 5 项，决议 §8）
+
+- [ ] 系统 Agent：注册 `orchestrator-router` 与 `dod-generator`（system 标记、不可派发，模型/档位走 Agents 页配置，初始 Luna 级）
+- [ ] 路由循环：session 结束 → orchestrator-router 读 DoD+progress log → dispatch/complete/stuck → Task 入队
+- [ ] Phase-gating 硬规则（plan → plan review → implementation）
+- [ ] 护栏：最大迭代、预算上限、零进展熔断（判定参考 pi-goal：逐条证据、弱证据=继续、3 轮无进展）
+- [ ] UI：DoD 清单（生成→确认→自动打勾）+ Orchestrator 事件流 + 迭代/预算显示
+
+## 长尾（依赖松紧穿插）
+
+- [ ] Templates（第 4 项）：{{var}} 展开 + From template 弹窗预览 + 九步链种子模板
+- [ ] Skills 页（第 7 项）：列表 + @uiw/react-md-editor + 发布状态；附件后置
+- [ ] Files + 路径落地（第 3 项）：`~/.agentos/` + `~/Documents/agentos/` 迁移、删 AGENTOS_FILES_ROOT、存储薄接口（本地盘实现）、SVAR UI、FilesystemGrant+inside() 权限、FileObject 重设计
+- [ ] Activity 流（第 6 项）：/activity 聚合时间线（shadcn Timeline，轮询）
+- [ ] Env/Repos CRUD（第 9 项）
+- [ ] Connections 整页重写（第 10 项）：编辑表单 + 作用域标签；Last verified/Profile 后置
+- [ ] 通知渠道适配器：NotificationAdapter 接口 + 飞书实现（只做接口，不做新渠道）
+- [ ] YAML Phase 1：DB↔YAML export/import（因开源提前；兼作种子 agent 发行载体）
+
+## 开源发布批次
+
+- [ ] 英文 README + quickstart
+- [ ] docker-compose（含 Postgres）/ 安装脚本
+- [ ] 种子 agent YAML 阵容
+- [ ] runner 安全显著警示 + 远程访问文档（反向代理/Tailscale）+ pg_dump 备份文档
+- [ ] License：MIT；发布前定内部中文文档去留
+
+## 远期
+
+- [ ] YAML Phase 2（diff/pull/push）、Phase 3（task/goal 创建）
+- [ ] Costs：先评估 cc-switch 够不够，需归因再自研（Prisma groupBy + Recharts，约 2-3 天）
+- [ ] Inbox 移动端 PWA + 推送
+- [ ] Knowledge（等对标物/自身需求明确）
+- [ ] Agent 长期记忆（原版 memoryEnabled 对应能力）
+- [ ] 官方 /goal 作 session 内防泄气优化（可选）
+
+## 不做（已关闭）
+
+- Admin 管理台（单用户场景）
+- 本地/云 Runner 混合路由（无原版的省费痛点）
