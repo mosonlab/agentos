@@ -40,6 +40,59 @@ test("batch 2 migration removes dead tables and installs columns, FKs, and poll 
   assert.equal(indexes.length, 1);
 });
 
+test("batch 2.5 migrations install the backlog status, the visibility columns, and the fire ledger", async () => {
+  const statuses = await db.$queryRaw<Array<{ enumlabel: string }>>`
+    SELECT enumlabel FROM pg_enum
+    JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+    JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace
+    WHERE pg_type.typname = 'TaskStatus' AND pg_namespace.nspname = ${testDatabaseSchema}
+    ORDER BY enumsortorder
+  `;
+  assert.deepEqual(statuses.map((row) => row.enumlabel), ["backlog", "todo", "doing", "review", "done"]);
+
+  const taskColumns = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'Task'
+      AND column_name IN ('source', 'archivedAt', 'schedulePausedAt', 'recurringSourceTaskId')
+    ORDER BY column_name
+  `;
+  assert.deepEqual(
+    taskColumns.map((row) => row.column_name),
+    ["archivedAt", "recurringSourceTaskId", "schedulePausedAt", "source"],
+  );
+
+  const templateColumns = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'TaskTemplate'
+      AND column_name IN ('webhookPausedAt', 'webhookReplayWindowSec')
+    ORDER BY column_name
+  `;
+  assert.deepEqual(templateColumns.map((row) => row.column_name), ["webhookPausedAt", "webhookReplayWindowSec"]);
+
+  const ledger = await db.$queryRaw<Array<{ table_name: string }>>`
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'TriggerFire'
+  `;
+  assert.equal(ledger.length, 1);
+
+  const indexes = await db.$queryRaw<Array<{ indexname: string }>>`
+    SELECT indexname FROM pg_indexes WHERE schemaname = ${testDatabaseSchema}
+      AND indexname IN (
+        'TriggerFire_templateId_createdAt_idx',
+        'TriggerFire_templateId_dedupeKey_createdAt_idx',
+        'Task_projectId_archivedAt_status_idx',
+        'Task_recurringSourceTaskId_idx'
+      )
+    ORDER BY indexname
+  `;
+  assert.deepEqual(indexes.map((row) => row.indexname), [
+    "Task_projectId_archivedAt_status_idx",
+    "Task_recurringSourceTaskId_idx",
+    "TriggerFire_templateId_createdAt_idx",
+    "TriggerFire_templateId_dedupeKey_createdAt_idx",
+  ]);
+});
+
 test("webhook foreign keys set a deleted secret null and restrict repo deletion", async () => {
   const project = await db.project.create({ data: { name: "Migration", slug: `migration-${Date.now()}` } });
   const secret = await db.secret.create({ data: { name: `secret-${Date.now()}`, encryptedValue: "x", purpose: "WEBHOOK" } });

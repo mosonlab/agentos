@@ -157,7 +157,16 @@ type ChainTask = {
 
 type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true; assigneeAgent: true } }>;
 
-const activeSuccessorStatuses: RunStatus[] = [
+/**
+ * "This task already has a run that is alive." WAITING_INBOX belongs here: such
+ * a run resumes the moment the operator answers, so a task holding one must not
+ * gain a second run, be archived, or be parked in Backlog.
+ *
+ * This is the definition every guard added by batch 2.5 shares. `app.ts`'s
+ * `activeRunStatuses` is a different concept (a run holding a lease) and the
+ * retry route's narrower set is pre-existing; neither is this.
+ */
+export const ACTIVE_RUN_STATUSES: RunStatus[] = [
   RunStatus.QUEUED,
   RunStatus.CLAIMED,
   RunStatus.PROVISIONING,
@@ -210,7 +219,7 @@ export const activateChainSuccessor = async (
     return { nextTaskId: null, gated: false };
   }
 
-  if (successor.runs.some((run) => activeSuccessorStatuses.includes(run.status))) {
+  if (successor.runs.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {
     await tx.taskActivity.create({ data: {
       taskId: successor.id,
       actorType: "control-plane",
@@ -240,7 +249,7 @@ export const activateChainSuccessor = async (
     if (!current || current.status === TaskStatus.DONE) {
       return { nextTaskId: current?.id ?? null, gated: false };
     }
-    if (current.runs.some((run) => activeSuccessorStatuses.includes(run.status))) {
+    if (current.runs.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {
       await tx.taskActivity.create({ data: {
         taskId: current.id,
         actorType: "control-plane",

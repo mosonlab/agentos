@@ -44,10 +44,26 @@ enum RunnerPreference {
 }
 
 enum TaskStatus {
-  TODO   @map("todo")
-  DOING  @map("doing")
-  REVIEW @map("review")
-  DONE   @map("done")
+  // BACKLOG is first so the datamodel's value order matches the database's:
+  // its migration adds the value with `BEFORE 'todo'`.
+  BACKLOG @map("backlog")
+  TODO    @map("todo")
+  DOING   @map("doing")
+  REVIEW  @map("review")
+  DONE    @map("done")
+}
+
+/// How a Task came to exist. The recurring definition itself stays MANUAL;
+/// only its fired copies are CRON.
+enum TaskSource {
+  MANUAL  @map("manual")
+  CRON    @map("cron")
+  WEBHOOK @map("webhook")
+}
+
+enum TriggerFireSource {
+  WEBHOOK @map("webhook")
+  MANUAL  @map("manual")
 }
 
 enum AssigneeType {
@@ -403,6 +419,8 @@ model TaskTemplate {
   webhookSecretId       String?
   webhookRepoId         String?
   webhookPayloadMapping Json?
+  webhookPausedAt       DateTime?
+  webhookReplayWindowSec Int?
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
   project               Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -410,6 +428,7 @@ model TaskTemplate {
   webhookRepo           Repo?              @relation("WebhookRepo", fields: [webhookRepoId], references: [id], onDelete: Restrict)
   steps                 TaskTemplateStep[]
   tasks                 Task[]
+  fires                 TriggerFire[]
 
   @@unique([projectId, name])
   @@index([projectId])
@@ -452,6 +471,10 @@ model Task {
   targetBranch       String?
   failureReason      String?
   status             TaskStatus       @default(TODO)
+  source             TaskSource       @default(MANUAL)
+  archivedAt         DateTime?
+  schedulePausedAt   DateTime?
+  recurringSourceTaskId String?
   assigneeType       AssigneeType     @default(AGENT)
   approvalGate       Boolean          @default(false)
   chainId            String?
@@ -474,6 +497,8 @@ model Task {
   templateStep       TaskTemplateStep? @relation(fields: [templateStepId], references: [id], onDelete: SetNull)
   followUpTask       Task?            @relation("TaskFollowUp", fields: [followUpTaskId], references: [id], onDelete: SetNull)
   previousTask       Task?            @relation("TaskFollowUp")
+  recurringSource    Task?            @relation("TaskRecurringSource", fields: [recurringSourceTaskId], references: [id], onDelete: SetNull)
+  recurringCopies    Task[]           @relation("TaskRecurringSource")
   activity           TaskActivity[]
   sessions           Session[]
   runs               Run[]
@@ -490,6 +515,23 @@ model Task {
   @@index([templateStepId])
   @@index([repoId])
   @@index([scheduleKind, status, runAt])
+  @@index([projectId, archivedAt, status])
+  @@index([recurringSourceTaskId])
+}
+
+/// Append-only ledger of trigger fires. Nothing reads it but the Triggers UI,
+/// and the replay-window lookup keys off (templateId, dedupeKey, createdAt).
+model TriggerFire {
+  id         String            @id @default(cuid())
+  templateId String
+  chainId    String?
+  source     TriggerFireSource
+  dedupeKey  String?
+  createdAt  DateTime          @default(now())
+  template   TaskTemplate      @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@index([templateId, createdAt])
+  @@index([templateId, dedupeKey, createdAt])
 }
 
 model TaskStepOutput {
