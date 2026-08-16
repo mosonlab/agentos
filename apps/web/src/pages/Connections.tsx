@@ -7,7 +7,7 @@ import { Link } from "../lib/router";
 import { cn } from "../lib/utils";
 import type { Agent, MCPConnection, Repo } from "../lib/types";
 import {
-  COUNT, HINT, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP, STACK,
+  COUNT, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP, STACK,
   TABLE_NAME, TABLE_SUB, Card, EmptyState, ErrorNotice, Page, Pill,
 } from "../components/ui";
 import { badgeVariants } from "../components/ui/badge";
@@ -95,7 +95,7 @@ export const ConnectionsPage = (): ReactNode => {
         </Card>
 
         <Card title="Per-agent bindings">
-          <div className={HINT}>
+          <div>
             绑定表 <code>AgentMCPConnection(agentId, mcpConnectionId)</code> 与 <code>AgentRepoAccess</code>。
             仓库授权可在 Agent 详情 → Capabilities 写入（<code>POST /agents/:agentId/repos/:repoId/access</code>）；
             MCP 绑定可在 Agent 详情 → Capabilities 中管理。

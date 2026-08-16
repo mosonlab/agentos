@@ -9,7 +9,7 @@ import type { Agent, Repo, Task, TaskStatus, TaskTemplate } from "../lib/types";
 import { IconPlus, IconRobot } from "../components/icons";
 import { cn } from "../lib/utils";
 import {
-  CARD_TITLE, CODE_BLOCK, COUNT, DOT, DOT_TONE, FIELD_ROW, HINT, PAGE_ACTIONS, PAGE_HEAD,
+  CARD_TITLE, CODE_BLOCK, COUNT, DOT, DOT_TONE, FIELD_ROW, PAGE_ACTIONS, PAGE_HEAD,
   PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   Card, EmptyState, ErrorNotice, Field, FullPanel, Page, Pill, RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
@@ -198,7 +198,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
               <Toggle on={form.approvalGate} onChange={(next) => setForm({ ...form, approvalGate: next })} label="Requires approval" />
               <div>
                 <div>Requires approval</div>
-                <div className={HINT}>Template steps with a gate are decided in the Inbox — the board cannot close them.</div>
+                <div>Template steps with a gate are decided in the Inbox — the board cannot close them.</div>
               </div>
             </div>
             <div className={FIELD_ROW}>

@@ -6,9 +6,8 @@ import { useAction, usePoll } from "../lib/hooks";
 import { Link } from "../lib/router";
 import type { Run, SessionEvent, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
 import { IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
-import { cn } from "../lib/utils";
 import {
-  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, HINT, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
+  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, ShowMore, TaskPill, Toggle,
 } from "../components/ui";
@@ -201,7 +200,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         {output.data ? (
           <Card title="Step output" extra={<Pill tone="grey">{output.data.kind}</Pill>}>
             <ShowMore text={output.data.body} lines={10} />
-            <div className={cn(HINT, "mt-2.5")}>Updated {timeAgo(output.data.updatedAt)}</div>
+            <div className="mt-2.5">Updated {timeAgo(output.data.updatedAt)}</div>
           </Card>
         ) : null}
 

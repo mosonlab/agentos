@@ -9,7 +9,7 @@ import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { cn } from "../lib/utils";
 import {
-  BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW, HINT,
+  BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Page, Pill,
@@ -88,7 +88,7 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
             <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label="Inbox access" />
             <div>
               <div>Inbox access</div>
-              <div className={HINT}>Lets the agent ask questions and post updates through the Inbox MCP.</div>
+              <div>Lets the agent ask questions and post updates through the Inbox MCP.</div>
             </div>
           </div>
         </div>
@@ -196,7 +196,7 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
       <div className={ROW}>
         <div className="min-w-0 flex-1">
           <div className="text-foreground">{repo.name}</div>
-          <div className={HINT}>{repo.remoteUrl} · default {repo.defaultBranch}</div>
+          <div>{repo.remoteUrl} · default {repo.defaultBranch}</div>
         </div>
         {granted ? <Pill tone="green">granted</Pill> : null}
       </div>
@@ -318,7 +318,7 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
               <div key={skill.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
                 <div className="flex-1">
                   <div className="text-foreground">{skill.name}</div>
-                  <div className={HINT}>{skill.kind.toLowerCase()} · {skill.slug}</div>
+                  <div>{skill.kind.toLowerCase()} · {skill.slug}</div>
                 </div>
                 <BindingToggle on={mounted} label={`Mount ${skill.name}`}
                   add={() => api.post(`/agents/${agent.id}/skills`, { skillId: skill.id })}
@@ -335,7 +335,7 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
             <div key={connection.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
               <div className="flex-1">
                 <div className="text-foreground">{connection.name}</div>
-                <div className={HINT}>{connection.transport}</div>
+                <div>{connection.transport}</div>
               </div>
               <BindingToggle on={bound} label={`Bind ${connection.name}`}
                 add={() => api.post(`/agents/${agent.id}/mcp-connections`, { mcpConnectionId: connection.id })}
@@ -350,7 +350,7 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
           ? <EmptyState>No secrets granted to this agent.</EmptyState>
           : (agent.secretGrants ?? []).map((grant) => (
             <div key={`${grant.secretId}:${grant.envVar}`} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
-              <div className="flex-1"><div className="text-foreground">{grant.secret?.name ?? grant.secretId}</div><div className={HINT}>{grant.envVar}</div></div>
+              <div className="flex-1"><div className="text-foreground">{grant.secret?.name ?? grant.secretId}</div><div>{grant.envVar}</div></div>
             </div>
           ))}
       </Card>
@@ -460,7 +460,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label="Inbox access" />
                   <div>
                     <div>Inbox access</div>
-                    <div className={HINT}>Lets this agent ask questions and post updates through the Inbox.</div>
+                    <div>Lets this agent ask questions and post updates through the Inbox.</div>
                   </div>
                 </div>
               </div>
@@ -474,7 +474,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
               {draft === null
                 ? <div className={CODE_BLOCK}>{view.foundationalPrompt}</div>
                 : <Textarea rows={6} value={view.foundationalPrompt} onChange={(event) => patch({ foundationalPrompt: event.target.value })} />}
-              <div className={cn(HINT, "mt-2.5")}>This text is placed above the agent instructions for every run.</div>
+              <div className="mt-2.5">This text is placed above the agent instructions for every run.</div>
             </Card>
             <Card title="Your agent instructions">
               {draft === null
@@ -488,7 +488,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
 
         {tab === "collaborators" ? (
           <Card title="Collaborators">
-            <div className={cn(HINT, "mb-3")}>
+            <div className="mb-3">
               Agents this agent may spawn for subtasks. Bindings live in AgentCollaboration.
             </div>
             <div className="mt-3">
@@ -496,7 +496,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                 <div key={candidate.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
                   <div className="flex-1">
                     <div className="text-foreground">{candidate.title}</div>
-                    <div className={HINT}>{titleCase(candidate.name)} · {candidate.model}</div>
+                    <div>{titleCase(candidate.name)} · {candidate.model}</div>
                   </div>
                   <BindingToggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={`Allow ${candidate.name}`}
                     add={() => api.post(`/agents/${agent.id}/collaborators`, { allowedAgentId: candidate.id })}
