@@ -1,38 +1,60 @@
 # Frontend CSS layering contract
 
-Batch 0 deliberately leaves the legacy rules in `apps/web/src/styles.css` unlayered.
-Tailwind v4 emits preflight in `@layer base` and utilities (including shadcn classes) in
-`@layer utilities`. For normal declarations, an unlayered rule wins over every layered
-rule regardless of selector specificity. This is load-bearing compatibility behavior:
-legacy classes keep their established appearance while their colors resolve through the
-new theme tokens.
+The current contract is the post-convergence state described in
+[`docs/wiki/batch-frontend-convergence.md`](../wiki/batch-frontend-convergence.md).
+The old Batch 0 contract—an unlayered legacy component sheet outranking Tailwind
+utilities—is retired.
+
+## Current layer order
+
+`apps/web/src/styles.css` remains the single stylesheet. Tailwind v4 emits preflight in
+`@layer base` and utilities, including shadcn classes, in `@layer utilities`. The surviving
+generic element rules from the former compatibility sheet also live in `@layer base`.
+Theme variables in `:root` and `.dark` may remain unlayered because they declare custom
+properties only.
+
+The invariant is enforced by `apps/web/src/tests/styles.test.tsx`: no unlayered class rule may
+declare a non-custom-property. The test walks the built asset, detects class selectors even
+when they are qualified by an element, and has a live negative-control fixture. A utility on a
+component is therefore allowed to override a generic base declaration in the normal way.
 
 ## Consequences for component work
 
-- A legacy class wins over a shadcn utility when both set the same property. Neutralize
-  shadcn defaults at the primitive/wrapper boundary when an internal element has no
-  matching legacy selector.
-- Do not replace a deliberate React inline style with a utility on an element whose
-  legacy class sets the same property. Inline declarations win; layered utilities do not.
-  Keep the inline declaration or add a narrow unlayered modifier rule.
-- The form rule uses selectors such as `input[type="text"]`. An input's DOM default is
-  text-like, but the attribute selector only matches when the `type` content attribute is
-  present. `Input` therefore emits `type="text"` by default, and every call site also
-  declares its semantic type (`text`, `number`, `password`, or `search`) explicitly.
-- Preflight loses only for properties the legacy stylesheet actually declares. For
-  example, legacy Markdown list spacing did not override preflight's `list-style:none`;
-  `.md ul` and `.md ol` now restore their marker types explicitly.
+- Do not add a legacy class selector or an unlayered component rule to make a utility win.
+  Put shared behavior in the owning primitive, use a token-backed utility at the call site, or
+  add a properly layered base rule when the behavior is genuinely global.
+- Removing a class token is not enough to prove parity. Move every declaration and state rule
+  deliberately, including hover, checked, disabled, placeholder, focus, and last-child
+  behavior. The current selector ledger is
+  [`docs/plans/selector-destinations.md`](../plans/selector-destinations.md).
+- Preserve semantic attributes when converting controls. `Input` emits `type="text"` by
+  default, but production call sites should still state `text`, `number`, `password`, or
+  `search` explicitly. Native `Select` is a local wrapper in
+  `apps/web/src/components/ui/select.tsx`, not a Radix Select.
+- A raw control and a primitive control are not automatically equivalent. Existing primitive
+  utilities such as shadows, focus rings, placeholder colors, disabled opacity, and height can
+  be live even when the old component class is gone. Compare the host's computed properties,
+  not only the legacy-token scan.
+- Portals remain React-tree descendants even when they are not DOM descendants. A row menu,
+  popover, or dialog action needs an explicit bubbling test when the row itself is clickable.
+- Generic base rules are the right place for browser-wide defaults; Markdown list markers are
+  utilities on the rendered list elements. Do not reintroduce a special unlayered `.md ul`
+  exception.
 
-The web regression tests parse the production CSS asset to verify that representative
-legacy selectors remain unlayered, Tailwind utilities remain in `utilities`, and the
-Markdown reset remains in `base`. They also lock the five call sites that require inline
-overrides and reject `<Input>` calls without an explicit type.
+## When to add or change a layer
 
-## When to consider a `legacy` layer
+Use `@layer base` only for a genuine element-level or global default. Use component utilities
+and variants for component behavior. Do not create `@layer legacy`: there is no remaining
+legacy component surface for that layer to represent, and a new layer would obscure the
+normal utility-over-base contract.
 
-Consider wrapping the legacy segment in `@layer legacy` only when a later batch is ready
-to migrate the whole component surface systematically: inventory every overlapping
-property, define the layer order intentionally, and compare every route/state in both
-themes. Doing so changes the winner for all shadcn defaults at once, including internal
-elements that the legacy selectors never targeted. It therefore requires component-by-
-component visual and interaction verification and is not a safe review-fix refactor.
+Any future change to the layer boundary requires, at minimum:
+
+- a built-CSS assertion that the new selector lands in the intended layer;
+- a semantic/SSR test for changed DOM attributes or host structure;
+- state coverage for disabled, placeholder, focus, hover, portal, and empty/error paths where
+  applicable; and
+- a browser comparison at the responsive boundary and in both light and dark themes.
+
+The exact checks and current failure catalogue are maintained in the frontend convergence wiki
+page; this reference intentionally records only the reusable cascade rule.

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { Shell } from "./components/Shell";
+import { ErrorNotice, NOTICE, Page } from "./components/ui";
 import { apiBase } from "./lib/api";
 import { ProjectProvider, useProjectScope } from "./lib/project";
 import { matchRoute, navigate, useRoute } from "./lib/router";
@@ -35,19 +36,19 @@ const ConnectionBanner = (): ReactNode => {
   if (error === null) return null;
   if (error.unauthorized) {
     return (
-      <div className="page" style={{ paddingBottom: 0 }}>
-        <div className="notice error">
+      <Page className="pb-0 [@media(max-width:900px)]:pb-0">
+        <ErrorNotice message={<>
           控制面拒绝了操作员身份（{error.status}）。检查仓库根 <code>.env</code> 的 <code>OPERATOR_TOKEN</code>，
           它由 <code>vite.config.ts</code> 的 <code>{apiBase}</code> 代理注入。
-        </div>
-      </div>
+        </>} />
+      </Page>
     );
   }
   if (error.status === 0) {
     return (
-      <div className="page" style={{ paddingBottom: 0 }}>
-        <div className="notice error">无法连接控制面（{apiBase}）。先启动 <code>npm run dev:api</code>。</div>
-      </div>
+      <Page className="pb-0 [@media(max-width:900px)]:pb-0">
+        <ErrorNotice message={<>无法连接控制面（{apiBase}）。先启动 <code>npm run dev:api</code>。</>} />
+      </Page>
     );
   }
   return null;
@@ -64,9 +65,9 @@ const Routed = (): ReactNode => {
     if (params !== null) return route.render(params);
   }
   return (
-    <div className="page">
-      <div className="notice">未知路由 <code>{path}</code>。</div>
-    </div>
+    <Page>
+      <div className={NOTICE}>未知路由 <code>{path}</code>。</div>
+    </Page>
   );
 };
 

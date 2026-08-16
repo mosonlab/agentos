@@ -5,9 +5,29 @@ import { firstLine, formatDateTime, restLines, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
+import { cn } from "../lib/utils";
 import type { Agent, InboxMessage } from "../lib/types";
 import { IconArrowLeft, IconQuestion, IconRobot, IconUser } from "../components/icons";
-import { Card, EmptyState, ErrorNotice, InboxPill, Markdown, Pill, Segmented } from "../components/ui";
+import {
+  BACK_LINK, DETAIL_HEAD, LONG_TEXT, MSG_CARD, MSG_HEAD, MSG_TIME, PAGE_HEAD, PAGE_HEAD_H1,
+  PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, ROW_WRAP, STACK, STAT_PILL, TOOLBAR,
+  Card, EmptyState, ErrorNotice, InboxPill, Markdown, Page, Pill, Segmented,
+} from "../components/ui";
+import { Button } from "../components/ui/button";
+import { Textarea } from "../components/ui/textarea";
+
+/** Both stacked lists — inbox rows and decision choices — are the same grid. */
+const LIST = "grid grid-cols-[minmax(0,1fr)] gap-[10px]";
+
+/** `.inboxItem` and `.choice` stay raw `<button>`s: they are full-width cards
+ *  that happen to be clickable, not `.btn`s, so they take no Button variant
+ *  (plan §2.5) and never had a box-shadow. */
+const INBOX_ITEM = "flex w-full cursor-pointer gap-[14px] rounded-xl border border-border bg-card px-[16px] py-[13px] text-left hover:border-[color:var(--border-hover)]";
+const CHOICE = "flex w-full items-start gap-[11px] rounded-lg border border-border bg-secondary px-[14px] py-[12px] text-left text-foreground hover:border-[color:var(--primary-soft)]";
+
+/** `.msgCard + .msgCard { margin-top: 12px }` — every card but the first; here
+ *  every child of the container is a card, so the sibling combinator is exact. */
+const MSG_LIST = "[&>*+*]:mt-[12px]";
 
 const useAgentNames = (): Map<string, string> => {
   const { projectId } = useProjectScope();
@@ -26,17 +46,17 @@ export const InboxPage = (): ReactNode => {
   const messages = (data ?? []).filter((message) => (filter === "active" ? message.status === "OPEN" : message.status !== "OPEN"));
 
   return (
-    <div className="page">
-      <div className="pageHead">
-        <div className="titles">
-          <h1>Inbox</h1>
-          <div className="subtitle">Messages and updates from your agents</div>
+    <Page>
+      <div className={PAGE_HEAD}>
+        <div className={PAGE_HEAD_TITLES}>
+          <h1 className={PAGE_HEAD_H1}>Inbox</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>Messages and updates from your agents</div>
         </div>
       </div>
 
       {/* Reference puts the Active/Archived switch on the left under the title
           (inboxes-list-t0885.jpg), not in the header action slot. */}
-      <div className="toolbar">
+      <div className={TOOLBAR}>
         <Segmented
           accent
           value={filter}
@@ -45,27 +65,27 @@ export const InboxPage = (): ReactNode => {
         />
       </div>
 
-      <div className="stack">
+      <div className={STACK}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
-        <div className="inboxList">
+        <div className={LIST}>
           {messages.map((message) => (
-            <button type="button" className="inboxItem" key={message.id} onClick={() => navigate(`/inbox/${message.id}`)}>
-              <div className="body">
-                <div className="sender">
+            <button type="button" className={INBOX_ITEM} key={message.id} onClick={() => navigate(`/inbox/${message.id}`)}>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-[8px] text-[12.5px] font-bold text-foreground">
                   {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
                   {senderName(message, names)}
                   {message.status === "OPEN" ? <InboxPill status={message.status} /> : null}
                   {message.gateTaskId === null ? null : <Pill tone="violet">Approval gate</Pill>}
                 </div>
-                <div className="title">
-                  {message.status === "OPEN" ? <span className="unreadDot" /> : null}
+                <div className="mt-[5px] flex items-center gap-[8px] text-[13px] text-foreground">
+                  {message.status === "OPEN" ? <span className="size-[7px] flex-none rounded-full bg-primary" /> : null}
                   {firstLine(message.body)}
                 </div>
-                <div className="summary">{restLines(message.body) || "—"}</div>
+                <div className="mt-[4px] overflow-hidden text-[12px] text-ellipsis whitespace-nowrap text-muted-foreground">{restLines(message.body) || "—"}</div>
               </div>
-              <div className="side">
+              <div className="flex-none text-right text-[11.5px] text-muted-foreground">
                 {timeAgo(message.createdAt)}
-                <div className="src">{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</div>
+                <div className="mt-[5px] text-[color:var(--faint)]">{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</div>
               </div>
             </button>
           ))}
@@ -74,7 +94,7 @@ export const InboxPage = (): ReactNode => {
           ? <EmptyState>{loading ? "Loading…" : filter === "active" ? "Nothing waiting on you." : "No answered messages yet."}</EmptyState>
           : null}
       </div>
-    </div>
+    </Page>
   );
 };
 
@@ -85,15 +105,15 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   const { pending, error: actionError, run } = useAction();
 
   if (error !== null && data === null) {
-    return <div className="page"><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></div>;
+    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
   }
   const message = (data ?? []).find((candidate) => candidate.id === messageId) ?? null;
   if (!message) {
     return (
-      <div className="page">
-        <div className="detailHead"><Link to="/inbox" className="backLink"><IconArrowLeft />Back to Inbox</Link></div>
+      <Page>
+        <div className={DETAIL_HEAD}><Link to="/inbox" className={BACK_LINK}><IconArrowLeft />Back to Inbox</Link></div>
         <EmptyState>Message not found. The control plane only exposes agent-authored messages via <code>GET /inbox/messages</code>.</EmptyState>
-      </div>
+      </Page>
     );
   }
 
@@ -120,57 +140,57 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   const open = message.status === "OPEN";
 
   return (
-    <div className="page">
-      <div className="detailHead">
-        <Link to="/inbox" className="backLink"><IconArrowLeft />Back to Inbox</Link>
-        <span className="spacer" />
-        <span className="dim small">updated {timeAgo(message.answeredAt ?? message.createdAt)}</span>
+    <Page>
+      <div className={DETAIL_HEAD}>
+        <Link to="/inbox" className={BACK_LINK}><IconArrowLeft />Back to Inbox</Link>
+        <span className="flex-1" />
+        <span className="text-[11.5px] text-muted-foreground">updated {timeAgo(message.answeredAt ?? message.createdAt)}</span>
       </div>
 
-      <div className="stack">
-        <div className="row">
-          <h1 style={{ fontSize: 18 }}>{firstLine(message.body)}</h1>
+      <div className={STACK}>
+        <div className={ROW}>
+          <h1 className="text-[18px]">{firstLine(message.body)}</h1>
           <InboxPill status={message.status} />
           {message.gateTaskId === null ? null : <Pill tone="violet">Approval gate</Pill>}
         </div>
 
-        <div className="rowWrap">
-          {message.taskId === null ? null : <Link to={`/tasks/${message.taskId}`} className="statPill">Task {message.taskId.slice(-6)}</Link>}
-          {message.goalId === null ? null : <Link to={`/goals/${message.goalId}`} className="statPill">Goal {message.goalId.slice(-6)}</Link>}
-          <span className="statPill">{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</span>
-          {message.deliveryAttempts > 0 ? <span className="statPill">{message.deliveryAttempts} delivery attempts</span> : null}
+        <div className={ROW_WRAP}>
+          {message.taskId === null ? null : <Link to={`/tasks/${message.taskId}`} className={STAT_PILL}>Task {message.taskId.slice(-6)}</Link>}
+          {message.goalId === null ? null : <Link to={`/goals/${message.goalId}`} className={STAT_PILL}>Goal {message.goalId.slice(-6)}</Link>}
+          <span className={STAT_PILL}>{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</span>
+          {message.deliveryAttempts > 0 ? <span className={STAT_PILL}>{message.deliveryAttempts} delivery attempts</span> : null}
         </div>
 
         {message.lastDeliveryError === null ? null : <ErrorNotice message={`Delivery error: ${message.lastDeliveryError}`} />}
 
-        <div>
-          <div className="msgCard">
-            <div className="msgHead">
+        <div className={MSG_LIST}>
+          <div className={MSG_CARD}>
+            <div className={MSG_HEAD}>
               {message.agentId === null ? <IconUser /> : <IconRobot />}
-              <span className="strong">{senderName(message, names)}</span>
-              <span className="time">{formatDateTime(message.createdAt)}</span>
+              <span className="text-foreground">{senderName(message, names)}</span>
+              <span className={MSG_TIME}>{formatDateTime(message.createdAt)}</span>
             </div>
             <Markdown text={message.body} />
           </div>
 
           {(message.replies ?? []).map((replyMessage) => (
-            <div className="msgCard mine" key={replyMessage.id}>
-              <div className="msgHead">
+            <div className={cn(MSG_CARD, "ml-[40px] bg-secondary")} key={replyMessage.id}>
+              <div className={MSG_HEAD}>
                 <IconUser />
-                <span className="strong">You (web)</span>
-                <span className="time">{formatDateTime(replyMessage.createdAt)}</span>
+                <span className="text-foreground">You (web)</span>
+                <span className={MSG_TIME}>{formatDateTime(replyMessage.createdAt)}</span>
               </div>
               <Markdown text={replyMessage.body} />
             </div>
           ))}
           {(message.replies ?? []).length === 0 ? (message.decisions ?? []).map((decision) => (
-            <div className="msgCard mine" key={decision.id}>
-              <div className="msgHead">
+            <div className={cn(MSG_CARD, "ml-[40px] bg-secondary")} key={decision.id}>
+              <div className={MSG_HEAD}>
                 <IconUser />
-                <span className="strong">{decision.actorOpenId === "web-operator" ? "You (web)" : decision.actorOpenId ?? "Operator"}</span>
-                <span className="time">{formatDateTime(decision.createdAt)}</span>
+                <span className="text-foreground">{decision.actorOpenId === "web-operator" ? "You (web)" : decision.actorOpenId ?? "Operator"}</span>
+                <span className={MSG_TIME}>{formatDateTime(decision.createdAt)}</span>
               </div>
-              <div className="longText">{decision.decision}</div>
+              <div className={LONG_TEXT}>{decision.decision}</div>
             </div>
           )) : null}
         </div>
@@ -179,39 +199,44 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
 
         {open ? (
           <Card>
-            <div className="stack">
-              <div className="waitBar"><IconQuestion />The agent is waiting for your reply before continuing.</div>
+            <div className={STACK}>
+              <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />The agent is waiting for your reply before continuing.</div>
               {choices.length > 0 ? (
-                <div className="choiceList">
+                <div className={LIST}>
                   {choices.map((option) => (
-                    <button type="button" key={option.id} className="choice" disabled={pending} onClick={() => decide(option.id)}>
-                      <span className="radio" />
-                      <span className="label">{option.label}<span className="hint">{option.id}</span></span>
+                    <button type="button" key={option.id} className={CHOICE} disabled={pending} onClick={() => decide(option.id)}>
+                      <span className="mt-[2px] size-[15px] flex-none rounded-full border border-[color:var(--radio-border)]" />
+                      <span className="flex-1 text-[12.5px]">{option.label}<span className="mt-[3px] block">{option.id}</span></span>
                     </button>
                   ))}
                 </div>
               ) : message.gateTaskId !== null ? (
-                <div className="row">
-                  <button type="button" className="btn primary" disabled={pending} onClick={() => decide("approve")}>Approve</button>
-                  <button type="button" className="btn danger" disabled={pending} onClick={() => decide("reject")}>Reject</button>
+                <div className={ROW}>
+                  <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>Approve</Button>
+                  <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>Reject</Button>
                 </div>
               ) : (
                 <>
-                  <textarea rows={5} value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply…" />
-                  <div className="row"><span className="spacer" /><button type="button" className="btn primary" disabled={pending || reply.trim() === ""} onClick={sendReply}>Reply</button></div>
+                  {/* `shadow-none` and `placeholder:text-foreground/50` for the reason
+                      spelled out at Projects.tsx: this was a raw <textarea> before the
+                      batch, so it carried no shadow and took Tailwind preflight's
+                      `currentColor` at 50% for the placeholder, not the primitive's
+                      pinned `text-muted-foreground`. */}
+                  <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply…" />
+                  <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || reply.trim() === ""} onClick={sendReply}>Reply</Button></div>
                 </>
               )}
             </div>
           </Card>
         ) : (
           <Card>
-            <div className="dim">
+            <div className="text-muted-foreground">
               Answered {timeAgo(message.answeredAt)}
               {message.selectedChoiceId === null ? "" : ` · selected “${message.selectedChoiceId}”`}
             </div>
           </Card>
         )}
       </div>
-    </div>
+    </Page>
   );
 };

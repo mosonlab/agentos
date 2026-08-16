@@ -7,12 +7,17 @@ import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
+import { cn } from "../lib/utils";
 import {
-  Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Pill,
+  BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW,
+  PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
+  TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
+  Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Page, Pill,
   RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Select } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
 
@@ -44,13 +49,13 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
 
   return (
     <FullPanel title="New Agent" onClose={onClose} actions={
-      <Button type="button" className="btn primary" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === ""}
+      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === ""}
         onClick={() => void submit()}>Create</Button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Card title="Setup">
-        <div className="stack">
-          <div className="fieldRow">
+        <div className={STACK}>
+          <div className={FIELD_ROW}>
             <Field label="Name" hint="Unique inside the project; used by YAML and the CLI.">
               <Input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
             </Field>
@@ -58,14 +63,14 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
               <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Senior Developer" />
             </Field>
           </div>
-          <div className="fieldRow">
+          <div className={FIELD_ROW}>
             <Field label="Model">
               <Input type="text" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
             </Field>
             <Field label="Runner" hint="INHERIT falls back to the model heuristic in execution.ts.">
-              <select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>
+              <Select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>
                 {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
-              </select>
+              </Select>
             </Field>
           </div>
           <Field label="Environment ID" hint={environments.missing
@@ -73,23 +78,23 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
             : "Sandbox and env-var scope for this agent."}>
             {environments.data && environments.data.length > 0
               ? (
-                <select value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })}>
+                <Select value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })}>
                   {environments.data.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
-                </select>
+                </Select>
               )
               : <Input type="text" value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
           </Field>
-          <div className="row">
+          <div className={ROW}>
             <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label="Inbox access" />
             <div>
               <div>Inbox access</div>
-              <div className="hint">Lets the agent ask questions and post updates through the Inbox MCP.</div>
+              <div>Lets the agent ask questions and post updates through the Inbox MCP.</div>
             </div>
           </div>
         </div>
       </Card>
       <Card title="Prompt">
-        <div className="stack">
+        <div className={STACK}>
           <Field label="AgentOS foundation" hint="Prepended above the role prompt for every run.">
             <Textarea rows={4} value={form.foundationalPrompt} onChange={(event) => setForm({ ...form, foundationalPrompt: event.target.value })} />
           </Field>
@@ -119,55 +124,53 @@ export const AgentsPage = (): ReactNode => {
     void run(async () => { await api.post(`/agents/${agent.id}/${action}`); reload(); });
   };
 
-  if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
+  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
 
   return (
-    <div className="page text-foreground">
-      <div className="pageHead">
-        <div className="titles">
-          <h1>Agents</h1>
-          <div className="subtitle">Roles, prompts and permission boundaries in {project?.name ?? "this project"}</div>
+    <Page className="text-foreground">
+      <div className={PAGE_HEAD}>
+        <div className={PAGE_HEAD_TITLES}>
+          <h1 className={PAGE_HEAD_H1}>Agents</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>Roles, prompts and permission boundaries in {project?.name ?? "this project"}</div>
         </div>
-        <div className="pageActions">
-          <Button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />Create Agent</Button>
+        <div className={PAGE_ACTIONS}>
+          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />Create Agent</Button>
         </div>
       </div>
 
       <Segmented options={[{ value: "yours", label: "Your Agents" }]} value="yours" onChange={() => undefined} />
 
-      <div className="stack mt-4">
+      <div className={cn(STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         <Card flush>
-          <div className="tableWrap">
-            <Table className="table">
-              <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Model</TableHead><TableHead>Runner</TableHead><TableHead>Inbox</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader>
-              <TableBody>
-                {agents.map((agent) => (
-                  <TableRow key={agent.id} className="clickable" onClick={() => navigate(`/agents/${agent.id}`)}>
-                    <TableCell className="name">
-                      <span className="row">{agent.title}{agent.archivedAt ? <Pill tone="grey">Archived</Pill> : null}</span>
-                      <span className="sub">{agent.name}</span>
-                    </TableCell>
-                    <TableCell>{agent.model}</TableCell>
-                    <TableCell>{agent.runnerPreference.toLowerCase()}</TableCell>
-                    <TableCell>{agent.inboxAccess ? <Pill tone="green">Enabled</Pill> : <Pill tone="grey">Off</Pill>}</TableCell>
-                    <TableCell>{formatDate(agent.updatedAt)}</TableCell>
-                    <TableCell className="tight"><RowMenu items={[
-                      { label: agent.archivedAt ? "Unarchive" : "Archive", onSelect: () => toggleArchived(agent) },
-                      { label: "Delete", danger: true, onSelect: () => remove(agent) },
-                    ]} /></TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-            {agents.length === 0 ? <EmptyState>{loading ? "Loading…" : "No agents in this project yet."}</EmptyState> : null}
-          </div>
+          <Table>
+            <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Model</TableHead><TableHead>Runner</TableHead><TableHead>Inbox</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader>
+            <TableBody>
+              {agents.map((agent) => (
+                <TableRow key={agent.id} className="cursor-pointer" onClick={() => navigate(`/agents/${agent.id}`)}>
+                  <TableCell className={TABLE_NAME}>
+                    <span className={ROW}>{agent.title}{agent.archivedAt ? <Pill tone="grey">Archived</Pill> : null}</span>
+                    <span className={TABLE_SUB}>{agent.name}</span>
+                  </TableCell>
+                  <TableCell>{agent.model}</TableCell>
+                  <TableCell>{agent.runnerPreference.toLowerCase()}</TableCell>
+                  <TableCell>{agent.inboxAccess ? <Pill tone="green">Enabled</Pill> : <Pill tone="grey">Off</Pill>}</TableCell>
+                  <TableCell>{formatDate(agent.updatedAt)}</TableCell>
+                  <TableCell className={TABLE_TIGHT}><RowMenu items={[
+                    { label: agent.archivedAt ? "Unarchive" : "Archive", onSelect: () => toggleArchived(agent) },
+                    { label: "Delete", danger: true, onSelect: () => remove(agent) },
+                  ]} /></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {agents.length === 0 ? <EmptyState>{loading ? "Loading…" : "No agents in this project yet."}</EmptyState> : null}
         </Card>
       </div>
 
       {creating ? <NewAgent projectId={projectId} onClose={() => setCreating(false)} onCreated={reload} /> : null}
-    </div>
+    </Page>
   );
 };
 
@@ -189,27 +192,27 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
     });
   };
   return (
-    <div className="stack border-t border-[var(--border-soft)] pt-3.5">
-      <div className="row">
+    <div className={cn(STACK, "border-t border-[var(--border-soft)] pt-3.5")}>
+      <div className={ROW}>
         <div className="min-w-0 flex-1">
-          <div className="strong">{repo.name}</div>
-          <div className="hint">{repo.remoteUrl} · default {repo.defaultBranch}</div>
+          <div className="text-foreground">{repo.name}</div>
+          <div>{repo.remoteUrl} · default {repo.defaultBranch}</div>
         </div>
         {granted ? <Pill tone="green">granted</Pill> : null}
       </div>
-      <div className="fieldRow">
+      <div className={FIELD_ROW}>
         <Field label="Permission">
-          <select value={permissions} onChange={(event) => setPermissions(event.target.value as RepoPermission)}>
+          <Select value={permissions} onChange={(event) => setPermissions(event.target.value as RepoPermission)}>
             <option value="GIT_READ">git-read</option>
             <option value="GIT_WRITE">git-write</option>
-          </select>
+          </Select>
         </Field>
         <Field label="Mount path">
           <Input type="text" value={mountPath} onChange={(event) => setMountPath(event.target.value)} />
         </Field>
-        <div className="field">
-          <label>&nbsp;</label>
-          <Button type="button" className="btn primary" disabled={pending} onClick={grant}>Grant / update access</Button>
+        <div className={FIELD}>
+          <label className={FIELD_LABEL}>&nbsp;</label>
+          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={grant}>Grant / update access</Button>
         </div>
       </div>
       {error === null ? null : <ErrorNotice message={error} />}
@@ -253,11 +256,11 @@ const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant
   };
   return (
     <TableRow>
-      <TableCell className="name">{grant.folderPath}{error === null ? null : <span className="sub">{error}</span>}</TableCell>
+      <TableCell className={TABLE_NAME}>{grant.folderPath}{error === null ? null : <span className={TABLE_SUB}>{error}</span>}</TableCell>
       <TableCell><Check on={grant.canRead} onChange={(value) => patch("canRead", value)} disabled={pending} label={`Read ${grant.folderPath}`} /></TableCell>
       <TableCell><Check on={grant.canWrite} onChange={(value) => patch("canWrite", value)} disabled={pending} label={`Write ${grant.folderPath}`} /></TableCell>
       <TableCell><Check on={grant.canDelete} onChange={(value) => patch("canDelete", value)} disabled={pending} label={`Delete in ${grant.folderPath}`} /></TableCell>
-      <TableCell className="tight"><RowMenu items={[{ label: "Remove", danger: true, onSelect: remove }]} /></TableCell>
+      <TableCell className={TABLE_TIGHT}><RowMenu items={[{ label: "Remove", danger: true, onSelect: remove }]} /></TableCell>
     </TableRow>
   );
 };
@@ -272,18 +275,18 @@ const NewFilesystemGrant = ({ agentId, onDone }: { agentId: string; onDone: () =
   };
   const any = permissions.canRead || permissions.canWrite || permissions.canDelete;
   return (
-    <div className="stack mb-3.5">
+    <div className={cn(STACK, "mb-3.5")}>
       {error === null ? null : <ErrorNotice message={error} />}
-      <div className="fieldRow">
+      <div className={FIELD_ROW}>
         <Field label="Folder path"><Input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
         <Field label="Permissions">
-          <div className="row min-h-[34px]">
+          <div className={cn(ROW, "min-h-[34px]")}>
             {(["canRead", "canWrite", "canDelete"] as const).map((key) => (
-              <span className="row" key={key}><Check on={permissions[key]} onChange={(value) => setPermissions({ ...permissions, [key]: value })} label={key} />{key.slice(3)}</span>
+              <span className={ROW} key={key}><Check on={permissions[key]} onChange={(value) => setPermissions({ ...permissions, [key]: value })} label={key} />{key.slice(3)}</span>
             ))}
           </div>
         </Field>
-        <div className="field"><label>&nbsp;</label><Button type="button" className="btn primary" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>Grant access</Button></div>
+        <div className={FIELD}><label className={FIELD_LABEL}>&nbsp;</label><Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>Grant access</Button></div>
       </div>
     </div>
   );
@@ -296,8 +299,8 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
   const grantedRepos = agent.repoAccess ?? null;
 
   return (
-    <div className="stack">
-      <Card title="Repositories" extra={<span className="count">{(repos.data ?? []).length}</span>}>
+    <div className={STACK}>
+      <Card title="Repositories" extra={<span className={COUNT}>{(repos.data ?? []).length}</span>}>
         {(repos.data ?? []).length === 0
           ? <EmptyState>No repos in this project.</EmptyState>
           : (repos.data ?? []).map((repo) => (
@@ -306,16 +309,16 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
           ))}
       </Card>
 
-      <Card title="Skills" extra={<span className="count">{(skills.data ?? []).length}</span>}>
+      <Card title="Skills" extra={<span className={COUNT}>{(skills.data ?? []).length}</span>}>
         {(skills.data ?? []).length === 0
           ? <EmptyState>No skills defined in this project.</EmptyState>
           : (skills.data ?? []).map((skill) => {
             const mounted = (agent.skills ?? []).some((entry) => entry.skillId === skill.id);
             return (
-              <div key={skill.id} className="row border-t border-[var(--border-soft)] py-2.5">
+              <div key={skill.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
                 <div className="flex-1">
-                  <div className="strong">{skill.name}</div>
-                  <div className="hint">{skill.kind.toLowerCase()} · {skill.slug}</div>
+                  <div className="text-foreground">{skill.name}</div>
+                  <div>{skill.kind.toLowerCase()} · {skill.slug}</div>
                 </div>
                 <BindingToggle on={mounted} label={`Mount ${skill.name}`}
                   add={() => api.post(`/agents/${agent.id}/skills`, { skillId: skill.id })}
@@ -325,14 +328,14 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
           })}
       </Card>
 
-      <Card title="MCP Connections" extra={<span className="count">{(connections.data ?? []).length}</span>}>
+      <Card title="MCP Connections" extra={<span className={COUNT}>{(connections.data ?? []).length}</span>}>
         {(connections.data ?? []).length === 0 ? <EmptyState>No MCP connections in this project.</EmptyState> : (connections.data ?? []).map((connection) => {
           const bound = (agent.mcpConnections ?? []).some((entry) => entry.mcpConnectionId === connection.id);
           return (
-            <div key={connection.id} className="row border-t border-[var(--border-soft)] py-2.5">
+            <div key={connection.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
               <div className="flex-1">
-                <div className="strong">{connection.name}</div>
-                <div className="hint">{connection.transport}</div>
+                <div className="text-foreground">{connection.name}</div>
+                <div>{connection.transport}</div>
               </div>
               <BindingToggle on={bound} label={`Bind ${connection.name}`}
                 add={() => api.post(`/agents/${agent.id}/mcp-connections`, { mcpConnectionId: connection.id })}
@@ -342,29 +345,27 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
         })}
       </Card>
 
-      <Card title="Secrets" extra={<span className="count">{(agent.secretGrants ?? []).length}</span>}>
+      <Card title="Secrets" extra={<span className={COUNT}>{(agent.secretGrants ?? []).length}</span>}>
         {(agent.secretGrants ?? []).length === 0
           ? <EmptyState>No secrets granted to this agent.</EmptyState>
           : (agent.secretGrants ?? []).map((grant) => (
-            <div key={`${grant.secretId}:${grant.envVar}`} className="row border-t border-[var(--border-soft)] py-2.5">
-              <div className="flex-1"><div className="strong">{grant.secret?.name ?? grant.secretId}</div><div className="hint">{grant.envVar}</div></div>
+            <div key={`${grant.secretId}:${grant.envVar}`} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
+              <div className="flex-1"><div className="text-foreground">{grant.secret?.name ?? grant.secretId}</div><div>{grant.envVar}</div></div>
             </div>
           ))}
       </Card>
 
-      <Card title="Filesystem grants" extra={<span className="count">{(agent.filesystemGrants ?? []).length}</span>}>
+      <Card title="Filesystem grants" extra={<span className={COUNT}>{(agent.filesystemGrants ?? []).length}</span>}>
         <NewFilesystemGrant agentId={agent.id} onDone={onSaved} />
-        <div className="tableWrap">
-              <Table className="table">
-                <TableHeader><TableRow><TableHead>Folder</TableHead><TableHead>Read</TableHead><TableHead>Write</TableHead><TableHead>Delete</TableHead><TableHead /></TableRow></TableHeader>
-                <TableBody>
-                  {(agent.filesystemGrants ?? []).map((grant) => (
-                    <FilesystemGrantRow key={grant.id} agentId={agent.id} grant={grant} onDone={onSaved} />
-                  ))}
-                </TableBody>
-              </Table>
-              {(agent.filesystemGrants ?? []).length === 0 ? <EmptyState>No filesystem grants.</EmptyState> : null}
-            </div>
+        <Table>
+          <TableHeader><TableRow><TableHead>Folder</TableHead><TableHead>Read</TableHead><TableHead>Write</TableHead><TableHead>Delete</TableHead><TableHead /></TableRow></TableHeader>
+          <TableBody>
+            {(agent.filesystemGrants ?? []).map((grant) => (
+              <FilesystemGrantRow key={grant.id} agentId={agent.id} grant={grant} onDone={onSaved} />
+            ))}
+          </TableBody>
+        </Table>
+        {(agent.filesystemGrants ?? []).length === 0 ? <EmptyState>No filesystem grants.</EmptyState> : null}
       </Card>
     </div>
   );
@@ -379,9 +380,9 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   const { data: siblings } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
 
   if (error !== null && agent === null) {
-    return <div className="page"><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></div>;
+    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
   }
-  if (!agent) return <div className="page"><EmptyState>Loading…</EmptyState></div>;
+  if (!agent) return <Page><EmptyState>Loading…</EmptyState></Page>;
 
   const view = draft ?? agent;
   const patch = (changes: Partial<Agent>): void => setDraft({ ...view, ...changes });
@@ -396,20 +397,20 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   };
 
   return (
-    <div className="page text-foreground">
-      <div className="detailHead">
-        <Link to="/agents" className="backLink"><IconArrowLeft /></Link>
+    <Page className="text-foreground">
+      <div className={DETAIL_HEAD}>
+        <Link to="/agents" className={BACK_LINK}><IconArrowLeft /></Link>
         <span className="text-[var(--status-violet-fg)]"><IconRobot /></span>
-        <h1>{view.title}</h1>
+        <h1 className={DETAIL_HEAD_H1}>{view.title}</h1>
         <Pill tone="grey">{view.model}</Pill>
         <Pill tone="violet">runner {view.runnerPreference.toLowerCase()}</Pill>
-        <span className="spacer" />
+        <span className="flex-1" />
         {draft === null
-          ? <Button type="button" className="btn" onClick={() => setDraft(agent)}>Edit</Button>
+          ? <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(agent)}>Edit</Button>
           : (
             <>
-              <Button type="button" className="btn" onClick={() => setDraft(null)}>Cancel</Button>
-              <Button type="button" className="btn primary" disabled={pending} onClick={() => void save()}>Save</Button>
+              <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(null)}>Cancel</Button>
+              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={() => void save()}>Save</Button>
             </>
           )}
       </div>
@@ -425,7 +426,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         ]}
       />
 
-      <div className="stack">
+      <div className={STACK}>
         {actionError === null ? null : <ErrorNotice message={actionError} />}
 
         {tab === "setup" ? (
@@ -436,30 +437,30 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                 { k: "Title", v: view.title },
                 { k: "Model", v: view.model },
                 { k: "Runner preference", v: view.runnerPreference.toLowerCase() },
-                { k: "Environment", v: <span className="small">{view.environmentId}</span> },
+                { k: "Environment", v: <span className="text-[11.5px]">{view.environmentId}</span> },
                 { k: "Inbox access", v: view.inboxAccess ? "Enabled" : "Off" },
                 { k: "Created", v: formatDateTime(view.createdAt) },
                 { k: "Updated", v: formatDateTime(view.updatedAt) },
               ]} />
             ) : (
-              <div className="stack">
-                <div className="fieldRow">
+              <div className={STACK}>
+                <div className={FIELD_ROW}>
                   <Field label="Name"><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
                   <Field label="Title"><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
-                <div className="fieldRow">
+                <div className={FIELD_ROW}>
                   <Field label="Model"><Input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
                   <Field label="Runner preference" hint="INHERIT 时按 execution.ts 的模型名启发式选 runner。">
-                    <select value={view.runnerPreference} onChange={(event) => patch({ runnerPreference: event.target.value as RunnerPreference })}>
+                    <Select value={view.runnerPreference} onChange={(event) => patch({ runnerPreference: event.target.value as RunnerPreference })}>
                       {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
-                    </select>
+                    </Select>
                   </Field>
                 </div>
-                <div className="row">
+                <div className={ROW}>
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label="Inbox access" />
                   <div>
                     <div>Inbox access</div>
-                    <div className="hint">Lets this agent ask questions and post updates through the Inbox.</div>
+                    <div>Lets this agent ask questions and post updates through the Inbox.</div>
                   </div>
                 </div>
               </div>
@@ -471,13 +472,13 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
           <>
             <Card title="AgentOS Foundation" extra={<Pill tone="grey">prepended</Pill>}>
               {draft === null
-                ? <div className="codeBlock">{view.foundationalPrompt}</div>
+                ? <div className={CODE_BLOCK}>{view.foundationalPrompt}</div>
                 : <Textarea rows={6} value={view.foundationalPrompt} onChange={(event) => patch({ foundationalPrompt: event.target.value })} />}
-              <div className="hint mt-2.5">This text is placed above the agent instructions for every run.</div>
+              <div className="mt-2.5">This text is placed above the agent instructions for every run.</div>
             </Card>
             <Card title="Your agent instructions">
               {draft === null
-                ? <div className="codeBlock">{view.rolePrompt}</div>
+                ? <div className={CODE_BLOCK}>{view.rolePrompt}</div>
                 : <Textarea rows={18} value={view.rolePrompt} onChange={(event) => patch({ rolePrompt: event.target.value })} />}
             </Card>
           </>
@@ -487,15 +488,15 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
 
         {tab === "collaborators" ? (
           <Card title="Collaborators">
-            <div className="hint mb-3">
+            <div className="mb-3">
               Agents this agent may spawn for subtasks. Bindings live in AgentCollaboration.
             </div>
             <div className="mt-3">
               {(siblings ?? []).filter((candidate) => candidate.id !== agent.id).map((candidate) => (
-                <div key={candidate.id} className="row border-t border-[var(--border-soft)] py-2.5">
+                <div key={candidate.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
                   <div className="flex-1">
-                    <div className="strong">{candidate.title}</div>
-                    <div className="hint">{titleCase(candidate.name)} · {candidate.model}</div>
+                    <div className="text-foreground">{candidate.title}</div>
+                    <div>{titleCase(candidate.name)} · {candidate.model}</div>
                   </div>
                   <BindingToggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={`Allow ${candidate.name}`}
                     add={() => api.post(`/agents/${agent.id}/collaborators`, { allowedAgentId: candidate.id })}
@@ -506,6 +507,6 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
           </Card>
         ) : null}
       </div>
-    </div>
+    </Page>
   );
 };
