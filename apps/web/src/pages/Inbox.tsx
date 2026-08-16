@@ -217,7 +217,12 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
                 </div>
               ) : (
                 <>
-                  <Textarea rows={5} className="shadow-none" value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply…" />
+                  {/* `shadow-none` and `placeholder:text-foreground/50` for the reason
+                      spelled out at Projects.tsx: this was a raw <textarea> before the
+                      batch, so it carried no shadow and took Tailwind preflight's
+                      `currentColor` at 50% for the placeholder, not the primitive's
+                      pinned `text-muted-foreground`. */}
+                  <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply…" />
                   <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || reply.trim() === ""} onClick={sendReply}>Reply</Button></div>
                 </>
               )}

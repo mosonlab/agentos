@@ -153,7 +153,11 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <TaskPill status={task.status} />
         {task.templateId === null ? null : <Pill tone="violet">Template</Pill>}
         <span className="flex-1" />
-        <Select className="w-[130px]" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
+        {/* `disabled:opacity-100 disabled:cursor-default`: the retired sheet had no
+            `select:disabled` rule at all, so this control rendered at full opacity
+            with the UA cursor while a patch was in flight. The primitive dims to
+            50% and shows `not-allowed` (ui/select.tsx:21). */}
+        <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
           {STATUSES.map((status) => <option key={status} value={status}>{status.toLowerCase()}</option>)}
         </Select>
         {retryable(task) ? (

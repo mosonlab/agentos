@@ -52,7 +52,15 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
             38.75px. The primitive is 29.25px. `placeholder:text-foreground/50` is the
             same story for colour: a raw element took Tailwind preflight's
             `currentColor` at 50%, where the primitive pins `text-muted-foreground`.
-            Only these two call sites converted from a raw element. */}
+
+            Sixteen controls converted from a raw element in this batch, all of
+            them unclassed and styled solely by `styles.css:233-240` at 3f712b5 —
+            not just these two. The overrides differ per site because the retired
+            rule set `padding` and nothing else: only these two hosts had an `h-9`
+            to lose (Select carries no height, Textarea only an inert
+            `min-h-[60px]`), only three carried a `placeholder`, and only two
+            selects carry `disabled`. The full audit is in
+            docs/plans/selector-destinations.md §15 row 5. */}
         <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
       </Field>
       <Field label="Slug" hint="Lower-case, dash separated. Used by the CLI and YAML sync.">

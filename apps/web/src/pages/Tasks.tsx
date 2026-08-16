@@ -177,7 +177,11 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                 </Select>
               </Field>
               <Field label="Agent" hint="Agent tasks need an agent that already holds a grant on the repo.">
-                <Select value={form.assigneeAgentId} disabled={form.assigneeType === "HUMAN"}
+                {/* Same as TaskDetail's status select: no `select:disabled` rule
+                    existed, and this one is disabled in the form's default state
+                    (assignee HUMAN), so the primitive's dimming would be visible
+                    at rest. */}
+                <Select className="disabled:opacity-100 disabled:cursor-default" value={form.assigneeAgentId} disabled={form.assigneeType === "HUMAN"}
                   onChange={(event) => setForm({ ...form, assigneeAgentId: event.target.value })}>
                   {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.title} · {agent.model}</option>)}
                 </Select>
