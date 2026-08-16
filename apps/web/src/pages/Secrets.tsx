@@ -7,6 +7,9 @@ import { useProjectScope } from "../lib/project";
 import type { Agent, Secret, SecretPurpose } from "../lib/types";
 import { IconPlus } from "../components/icons";
 import { Card, EmptyState, ErrorNotice, Field, Modal, Pill, RowMenu } from "../components/ui";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
 const PURPOSES: SecretPurpose[] = ["ENV", "REPO", "MCP", "WEBHOOK"];
 
@@ -31,14 +34,14 @@ const SecretForm = ({ secret, onClose, onSaved }: {
   return (
     <Modal title={secret ? `Edit ${secret.name}` : "New secret"} onClose={onClose} footer={
       <>
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn primary" disabled={pending || name.trim() === "" || (secret === null && value === "")}
-          onClick={() => void submit()}>Save</button>
+        <Button type="button" className="btn" onClick={onClose}>Cancel</Button>
+        <Button type="button" className="btn primary" disabled={pending || name.trim() === "" || (secret === null && value === "")}
+          onClick={() => void submit()}>Save</Button>
       </>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Field label="Name" hint="Referenced by repos, MCP connections and agent grants.">
-        <input type="text" value={name} onChange={(event) => setName(event.target.value)} placeholder="GITHUB_PAT_VIBEVILLE" />
+        <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="GITHUB_PAT_VIBEVILLE" />
       </Field>
       <Field label="Purpose">
         <select value={purpose} onChange={(event) => setPurpose(event.target.value as SecretPurpose)}>
@@ -48,10 +51,10 @@ const SecretForm = ({ secret, onClose, onSaved }: {
       <Field label="Value" hint={secret
         ? "Leave empty to keep the stored ciphertext. Values are AES-256-GCM encrypted at rest."
         : "Encrypted with AGENTOS_SECRET_ENCRYPTION_KEY before it reaches the database."}>
-        <input type="password" value={value} onChange={(event) => setValue(event.target.value)} placeholder={secret ? "unchanged" : ""} />
+        <Input value={value} onChange={(event) => setValue(event.target.value)} placeholder={secret ? "unchanged" : ""} />
       </Field>
       <Field label="Description">
-        <input type="text" value={description} onChange={(event) => setDescription(event.target.value)} />
+        <Input value={description} onChange={(event) => setDescription(event.target.value)} />
       </Field>
     </Modal>
   );
@@ -73,14 +76,14 @@ export const SecretsPage = (): ReactNode => {
   };
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="pageHead">
         <div className="titles">
           <h1>Secrets</h1>
           <div className="subtitle">One shared library; runners inject granted values as environment variables (DECISIONS #9)</div>
         </div>
         <div className="pageActions">
-          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Secret</button>
+          <Button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Secret</Button>
         </div>
       </div>
 
@@ -90,16 +93,16 @@ export const SecretsPage = (): ReactNode => {
 
         <Card flush>
           <div className="tableWrap">
-            <table className="table">
-              <thead>
-                <tr><th>Name</th><th>Purpose</th><th>Granted to</th><th>Rotated</th><th>Status</th><th /></tr>
-              </thead>
-              <tbody>
+            <Table className="table">
+              <TableHeader>
+                <TableRow><TableHead>Name</TableHead><TableHead>Purpose</TableHead><TableHead>Granted to</TableHead><TableHead>Rotated</TableHead><TableHead>Status</TableHead><TableHead /></TableRow>
+              </TableHeader>
+              <TableBody>
                 {secrets.map((secret) => (
-                  <tr key={secret.id}>
-                    <td className="name">{secret.name}{secret.description === null ? null : <span className="sub">{secret.description}</span>}</td>
-                    <td>{titleCase(secret.purpose)}</td>
-                    <td>
+                  <TableRow key={secret.id}>
+                    <TableCell className="name">{secret.name}{secret.description === null ? null : <span className="sub">{secret.description}</span>}</TableCell>
+                    <TableCell>{titleCase(secret.purpose)}</TableCell>
+                    <TableCell>
                       {(secret.agentGrants ?? []).length === 0
                         ? <span className="faint">—</span>
                         : (
@@ -111,19 +114,19 @@ export const SecretsPage = (): ReactNode => {
                             ))}
                           </span>
                         )}
-                    </td>
-                    <td>{formatDate(secret.rotatedAt)}</td>
-                    <td>{secret.disabledAt === null ? <Pill tone="green">Enabled</Pill> : <Pill tone="red">Disabled</Pill>}</td>
-                    <td className="tight">
+                    </TableCell>
+                    <TableCell>{formatDate(secret.rotatedAt)}</TableCell>
+                    <TableCell>{secret.disabledAt === null ? <Pill tone="green">Enabled</Pill> : <Pill tone="red">Disabled</Pill>}</TableCell>
+                    <TableCell className="tight">
                       <RowMenu items={[
                         { label: "Edit", onSelect: () => setEditing(secret) },
                         { label: "Delete", danger: true, onSelect: () => remove(secret) },
                       ]} />
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
             {secrets.length === 0
               ? <EmptyState>{loading ? "Loading…" : "No secrets stored."}</EmptyState>
               : null}
