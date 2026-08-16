@@ -26,7 +26,9 @@ export const ArchivedRow = ({ task, onUnarchive }: { task: Task; onUnarchive: (t
   >
     <TableCell className={TABLE_NAME}>
       {task.name}
-      <span className={TABLE_SUB}>{task.templateStep?.name ?? task.id}</span>
+      {/* The step name when the task came from a template; a raw cuid is noise,
+          so a task that has no step name gets no sub-line at all. */}
+      {task.templateStep === null ? null : <span className={TABLE_SUB}>{task.templateStep.name}</span>}
     </TableCell>
     <TableCell><TaskPill status={task.status} /></TableCell>
     <TableCell><AgentChip agent={null} name={task.assigneeAgent?.title ?? "Unassigned"} /></TableCell>

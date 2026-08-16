@@ -11,7 +11,7 @@ import type { Trigger, TriggerDetail, TriggerFire } from "../lib/types";
 import { IconArrowLeft, IconBolt } from "../components/icons";
 import { TasksPageHead } from "../components/tasks-tabs";
 import {
-  BACK_LINK, CODE_BLOCK, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD_ROW, HINT, STACK,
+  BACK_LINK, CODE_BLOCK, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW, HINT, STACK,
   TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, EmptyState, ErrorNotice, Field, KeyValue, Page, Pill, RowMenu,
 } from "../components/ui";
@@ -156,17 +156,25 @@ export const VariablesCard = ({ trigger, mapping, defaults, onChange }: {
             const fallback = defaults[name] ?? "";
             return (
               <div className={FIELD_ROW} key={name}>
-                <Field label={name} hint="Dotted path into the delivery payload.">
+                {/* The badge rides the variable's own label rather than a third
+                    grid cell: `auto-fit` would otherwise give the badged rows one
+                    more column than the rest, so no two rows would line up — and
+                    a `1fr` cell stretches the pill into a bar. */}
+                <div className={FIELD}>
+                  <label className="flex items-center gap-[8px]">
+                    <span className={FIELD_LABEL}>{name}</span>
+                    {/* A variable with neither a payload path nor a default is
+                        the one that makes a delivery fail with 400. */}
+                    {path === "" && fallback === "" ? <Pill tone="red">required</Pill> : null}
+                  </label>
                   <Input type="text" value={path} placeholder="issue.title"
                     onChange={(event) => onChange({ mapping: { ...mapping, [name]: event.target.value }, defaults })} />
-                </Field>
+                  <div className={HINT}>Dotted path into the delivery payload.</div>
+                </div>
                 <Field label="Default">
                   <Input type="text" value={fallback} placeholder="—"
                     onChange={(event) => onChange({ mapping, defaults: { ...defaults, [name]: event.target.value } })} />
                 </Field>
-                {/* A variable with neither a payload path nor a default is the
-                    one that makes a delivery fail with 400. */}
-                {path === "" && fallback === "" ? <Pill tone="red">required</Pill> : null}
               </div>
             );
           })}
