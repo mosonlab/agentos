@@ -10,6 +10,9 @@ import {
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, Pill, RunPill, ShowMore, TaskPill, Toggle,
 } from "../components/ui";
 import { retryable } from "./Tasks";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
 const RunEvents = ({ runId }: { runId: string }): ReactNode => {
   const { data, error, loading } = usePoll<SessionEvent[]>(`/runs/${runId}/events`, 3_000);
@@ -31,20 +34,20 @@ const RunEvents = ({ runId }: { runId: string }): ReactNode => {
 
 const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onToggle: () => void }): ReactNode => (
   <>
-    <tr className="clickable" onClick={onToggle}>
-      <td className="tight"><span className="dim"><IconChevron open={expanded} /></span></td>
-      <td className="name">#{run.runNumber}<span className="sub">{run.runner.toLowerCase()} · {run.model}</span></td>
-      <td><RunPill status={run.status} /></td>
-      <td>{formatDateTime(run.startedAt ?? run.queuedAt)}</td>
-      <td>{duration(run.startedAt, run.endedAt)}</td>
-      <td>{run.branch ?? run.targetBranch ?? "—"}</td>
-      <td className="small">{sha(run.baseSha)} → {sha(run.headSha)}</td>
-      <td>{money(run.session?.costUsd ?? null)}</td>
-      <td>{run.failureClass === null ? "—" : <Pill tone="red">{run.failureClass.toLowerCase().replace(/_/g, " ")}</Pill>}</td>
-    </tr>
+    <TableRow className="clickable" onClick={onToggle}>
+      <TableCell className="tight"><span className="dim"><IconChevron open={expanded} /></span></TableCell>
+      <TableCell className="name">#{run.runNumber}<span className="sub">{run.runner.toLowerCase()} · {run.model}</span></TableCell>
+      <TableCell><RunPill status={run.status} /></TableCell>
+      <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
+      <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
+      <TableCell>{run.branch ?? run.targetBranch ?? "—"}</TableCell>
+      <TableCell className="small">{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
+      <TableCell>{money(run.session?.costUsd ?? null)}</TableCell>
+      <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{run.failureClass.toLowerCase().replace(/_/g, " ")}</Pill>}</TableCell>
+    </TableRow>
     {expanded ? (
-      <tr>
-        <td colSpan={9} style={{ background: "#1b1810" }}>
+      <TableRow>
+        <TableCell colSpan={9} className="bg-[var(--code-background)]">
           <div className="stack">
             <KeyValue columns={3} items={[
               { k: "Run ID", v: <span className="small">{run.id}</span> },
@@ -60,8 +63,8 @@ const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onTo
             {run.failureReason === null ? null : <div className="notice error">{run.failureReason}</div>}
             <RunEvents runId={run.id} />
           </div>
-        </td>
-      </tr>
+        </TableCell>
+      </TableRow>
     ) : null}
   </>
 );
@@ -97,11 +100,11 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
         )}
         {error === null ? null : <ErrorNotice message={error} />}
         <div className="row">
-          <input type="text" value={comment} placeholder="Add a comment..." onChange={(event) => setComment(event.target.value)}
+          <Input value={comment} placeholder="Add a comment..." onChange={(event) => setComment(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter") void send(); }} />
-          <button type="button" className="btn" disabled={pending || comment.trim().length === 0} onClick={() => void send()}>
+          <Button type="button" className="btn" disabled={pending || comment.trim().length === 0} onClick={() => void send()}>
             <IconSend />Send
-          </button>
+          </Button>
         </div>
       </div>
     </Card>
@@ -131,20 +134,20 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   const totalCost = runs.reduce((sum, item) => sum + Number(item.session?.costUsd ?? 0), 0);
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="detailHead">
         <Link to="/tasks" className="backLink"><IconArrowLeft /></Link>
         <h1>{task.name}</h1>
         <TaskPill status={task.status} />
         {task.templateId === null ? null : <Pill tone="violet">Template</Pill>}
         <span className="spacer" />
-        <select value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })} style={{ width: 130 }}>
+        <select value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })} className="w-[130px]">
           {STATUSES.map((status) => <option key={status} value={status}>{status.toLowerCase()}</option>)}
         </select>
         {retryable(task) ? (
-          <button type="button" className="btn" disabled={pending} onClick={retry}><IconRefresh />Retry</button>
+          <Button type="button" className="btn" disabled={pending} onClick={retry}><IconRefresh />Retry</Button>
         ) : null}
-        <button type="button" className="btn" onClick={reload}><IconRefresh />Refresh</button>
+        <Button type="button" className="btn" onClick={reload}><IconRefresh />Refresh</Button>
       </div>
 
       <div className="stack">
@@ -189,27 +192,27 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         {output.data ? (
           <Card title="Step output" extra={<Pill tone="grey">{output.data.kind}</Pill>}>
             <ShowMore text={output.data.body} lines={10} />
-            <div className="hint" style={{ marginTop: 10 }}>Updated {timeAgo(output.data.updatedAt)}</div>
+            <div className="hint mt-2.5">Updated {timeAgo(output.data.updatedAt)}</div>
           </Card>
         ) : null}
 
         <Card title="Runs" extra={<span className="count">{runs.length}</span>} flush>
           <div className="tableWrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th />
-                  <th>Run</th><th>Status</th><th>Started</th><th>Duration</th>
-                  <th>Branch</th><th>base → head</th><th>Cost</th><th>Failure class</th>
-                </tr>
-              </thead>
-              <tbody>
+            <Table className="table">
+              <TableHeader>
+                <TableRow>
+                  <TableHead />
+                  <TableHead>Run</TableHead><TableHead>Status</TableHead><TableHead>Started</TableHead><TableHead>Duration</TableHead>
+                  <TableHead>Branch</TableHead><TableHead>base → head</TableHead><TableHead>Cost</TableHead><TableHead>Failure class</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {runs.map((item) => (
                   <RunRow key={item.id} run={item} expanded={expanded === item.id}
                     onToggle={() => setExpanded(expanded === item.id ? null : item.id)} />
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
             {runs.length === 0 ? <EmptyState>No runs yet. Agent tasks queue a run on creation.</EmptyState> : null}
           </div>
         </Card>
