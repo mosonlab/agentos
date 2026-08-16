@@ -3,8 +3,10 @@ import {
   advanceTemplateTask,
   applyInboxDecision,
   CleanupStatus,
+  deriveRunConfig,
   FailureClass,
   GoalStatus,
+  isArchivedAssigneeError,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -36,7 +38,7 @@ import {
   retryDelayMs,
   runnerFor,
 } from "./execution.js";
-import { reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
+import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
@@ -332,6 +334,7 @@ const goalInclude = {
 
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
+  const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
 
   app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token"] }));
   app.use("*", async (context, next) => {
@@ -480,8 +483,36 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     return context.json(await db.agent.update({ where: { id: agentId }, data: withoutUndefined(body) as Prisma.AgentUncheckedUpdateInput }));
   });
   app.delete("/agents/:agentId", async (context) => {
-    await db.agent.delete({ where: { id: id.parse(context.req.param("agentId")) } });
-    return context.body(null, 204);
+    try {
+      await db.agent.delete({ where: { id: id.parse(context.req.param("agentId")) } });
+      return context.body(null, 204);
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        return context.json({ error: "Agent has task history; archive it instead" }, 409);
+      }
+      throw error;
+    }
+  });
+  app.post("/agents/:agentId/archive", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const agent = await db.agent.findUnique({ where: { id: agentId } });
+    if (!agent) return context.json({ error: "Agent not found" }, 404);
+    const archived = agent.archivedAt ? agent : await db.agent.update({
+      where: { id: agentId },
+      data: { archivedAt: new Date() },
+    });
+    await noteArchivedQueuedRuns(db, { agentId });
+    return context.json(archived);
+  });
+  app.post("/agents/:agentId/unarchive", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const agent = await db.agent.findUnique({ where: { id: agentId } });
+    if (!agent) return context.json({ error: "Agent not found" }, 404);
+    if (!agent.archivedAt) return context.json(agent);
+    return context.json(await db.agent.update({
+      where: { id: agentId },
+      data: { archivedAt: null },
+    }));
   });
 
   app.get("/agents/:agentId/secret-grants", async (context) => context.json(await db.agentSecretGrant.findMany({
@@ -898,7 +929,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         await readJson(context.req.raw, instantiateTemplateInput),
       ), 201);
     } catch (error: unknown) {
-      if (error instanceof Error && /(not found|has no|Missing template|Unknown template|must be agent)/i.test(error.message)) {
+      if (error instanceof Error && /(not found|has no|is archived|Missing template|Unknown template|must be agent)/i.test(error.message)) {
         return context.json({ error: error.message }, 400);
       }
       throw error;
@@ -924,6 +955,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId } })
       : null;
     if (body.assigneeAgentId && !agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
+    if (agent?.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
     const repo = body.repoId ? await db.repo.findFirst({ where: { id: body.repoId, projectId } }) : null;
     if (body.repoId && !repo) return context.json({ error: "Repo does not belong to this project" }, 400);
     if (body.assigneeType === AssigneeType.AGENT && (!agent || !repo)) {
@@ -977,6 +1009,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     if (body.assigneeAgentId) {
       const agent = await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } });
       if (!agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
+      if (agent.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
     }
     if (body.repoId) {
       const repo = await db.repo.findFirst({ where: { id: body.repoId, projectId: before.projectId } });
@@ -1006,7 +1039,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const result = await db.$transaction(async (tx) => {
       const task = await tx.task.findUnique({
         where: { id: taskId },
-        include: { runs: { orderBy: { runNumber: "desc" }, take: 1 } },
+        include: {
+          assigneeAgent: true,
+          templateStep: true,
+          runs: { orderBy: { runNumber: "desc" }, take: 1 },
+        },
       });
       if (!task) return { error: "Task not found", code: 404 as const };
       const last = task.runs[0];
@@ -1015,20 +1052,27 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         return { error: "Task already has an active run", code: 409 as const };
       }
       if (last.runNumber >= last.maxRunsPerTask) return { error: "Run budget exhausted", code: 409 as const };
+      if (!task.assigneeAgent) {
+        return { error: "Task assignee no longer exists; assign an agent before retrying", code: 409 as const };
+      }
+      if (task.assigneeAgent.archivedAt) {
+        return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
+      }
+      const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
       const run = await tx.run.create({
         data: {
           projectId: last.projectId,
           taskId,
           goalId: last.goalId,
-          agentId: last.agentId,
-          repoId: last.repoId,
+          agentId: task.assigneeAgent.id,
+          repoId: task.repoId,
           runNumber: last.runNumber + 1,
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
-          runner: last.runner,
-          model: last.model,
+          runner: derived.runner,
+          model: derived.model,
           targetBranch: last.targetBranch,
           branch: last.branch,
-          promptHash: last.promptHash,
+          promptHash: derived.promptHash,
           maxDurationMin: last.maxDurationMin,
           stallTimeoutMin: last.stallTimeoutMin,
           maxRunsPerTask: last.maxRunsPerTask,
@@ -1110,6 +1154,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
+      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -1131,6 +1176,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
+      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -1193,11 +1239,13 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const body = await readJson(context.req.raw, claimInput);
     const now = new Date();
     await reconcileDatabaseRuns(db, now);
+    await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
       const candidates = await tx.run.findMany({
         where: {
           status: RunStatus.QUEUED,
           readyAt: { lte: now },
+          agent: { archivedAt: null },
           task: { status: { in: [TaskStatus.TODO, TaskStatus.DOING] }, assigneeType: AssigneeType.AGENT },
           OR: [{ blockedByRunId: null }, { blockedBy: { status: RunStatus.SUCCEEDED } }],
         },

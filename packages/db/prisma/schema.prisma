@@ -211,6 +211,7 @@ model Agent {
   inboxAccess        Boolean              @default(false)
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
+  archivedAt         DateTime?
   project            Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   environment        Environment          @relation(fields: [environmentId, projectId], references: [id, projectId], onDelete: Restrict)
   skills             AgentSkill[]

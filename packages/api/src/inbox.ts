@@ -1,5 +1,7 @@
 import { InboxDeliveryStatus, InboxKind, InboxSender, Prisma, RunStatus, SessionExecutionStatus, type PrismaClient } from "@agentos/db";
 
+export const defaultInboxResumeWindowMs = 7 * 24 * 60 * 60 * 1_000;
+
 export type SuspendQuestion = {
   runId: string;
   fencingToken: string;
@@ -13,6 +15,9 @@ export type SuspendQuestion = {
 /** Creates the durable outbox item and releases the Run lease in one commit. */
 export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, now = new Date()) =>
   db.$transaction(async (tx) => {
+    const resumableUntil = input.resumableUntil === undefined
+      ? new Date(now.getTime() + defaultInboxResumeWindowMs)
+      : input.resumableUntil;
     const run = await tx.run.findFirst({
       where: {
         id: input.runId,
@@ -55,7 +60,7 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
     await tx.session.update({ where: { id: run.session.id }, data: {
       executionStatus: SessionExecutionStatus.WAITING_INBOX,
       waitingOnMessageId: question.id,
-      resumableUntil: input.resumableUntil ?? null,
+      resumableUntil,
       runtimeHandle: null,
     } });
     if (run.taskId) await tx.taskActivity.create({ data: {

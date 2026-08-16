@@ -47,6 +47,7 @@ export type Agent = {
   inboxAccess: boolean;
   createdAt: string;
   updatedAt: string;
+  archivedAt: string | null;
   /** Present only when the control plane starts including binding tables. */
   skills?: Array<{ skillId: string; skill?: Skill }>;
   mcpConnections?: Array<{ mcpConnectionId: string; mcpConnection?: MCPConnection }>;

@@ -19,15 +19,45 @@ type Tx = Prisma.TransactionClient;
 
 const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
 
-const chooseRunner = (preference: RunnerPreference, model: string): RunnerKind => {
+export const runnerFor = (preference: RunnerPreference, model: string): RunnerKind => {
   if (preference === RunnerPreference.CLAUDE) return RunnerKind.CLAUDE;
   if (preference === RunnerPreference.CODEX) return RunnerKind.CODEX;
   if (preference === RunnerPreference.PI) return RunnerKind.PI;
   const normalized = model.toLowerCase();
   if (normalized.includes("codex")) return RunnerKind.CODEX;
-  if (normalized.includes("deepseek") || normalized.includes("pi")) return RunnerKind.PI;
+  if (normalized.includes("deepseek") || normalized.split(/[\/:_-]+/u).includes("pi")) return RunnerKind.PI;
   return RunnerKind.CLAUDE;
 };
+
+export const deriveRunConfig = (
+  agent: {
+    runnerPreference: RunnerPreference;
+    model: string;
+    foundationalPrompt: string;
+    rolePrompt: string;
+  },
+  templateStep: { runner: RunnerKind | null } | null,
+  task: { name: string; description: string },
+): { runner: RunnerKind; model: string; promptHash: string } => ({
+  runner: templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model),
+  model: agent.model,
+  promptHash: promptHash([
+    agent.foundationalPrompt,
+    agent.rolePrompt,
+    task.name,
+    task.description,
+  ]),
+});
+
+export class ArchivedAssigneeError extends Error {
+  constructor(readonly taskId: string, readonly taskName: string, readonly agentName: string) {
+    super(`Task ${taskName} assignee ${agentName} is archived; unarchive the agent to queue this step`);
+    this.name = "ArchivedAssigneeError";
+  }
+}
+
+export const isArchivedAssigneeError = (error: unknown): error is ArchivedAssigneeError =>
+  error instanceof Error && error.name === "ArchivedAssigneeError";
 
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
   const task = await tx.task.findUniqueOrThrow({
@@ -42,9 +72,12 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   if (task.assigneeType !== AssigneeType.AGENT || !task.assigneeAgent || !task.repo) {
     throw new Error(`Task ${task.id} cannot be queued without an agent and repo`);
   }
+  if (task.assigneeAgent.archivedAt) {
+    throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
+  }
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
-  const runner = task.templateStep?.runner ?? chooseRunner(task.assigneeAgent.runnerPreference, task.assigneeAgent.model);
+  const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
   // Template steps after the first one inherit the chain's shared feature branch
   // so every step pushes to the same head and the chain lands in one PR; without
   // this the workspace falls back to a per-run branch and each step opens its own.
@@ -58,16 +91,11 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     repoId: task.repo.id,
     runNumber,
     dedupeKey: `task:${task.id}:run:${runNumber}`,
-    runner,
-    model: task.assigneeAgent.model,
+    runner: derived.runner,
+    model: derived.model,
     targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
     branch: prior?.branch ?? chainBranch,
-    promptHash: promptHash([
-      task.assigneeAgent.foundationalPrompt,
-      task.assigneeAgent.rolePrompt,
-      task.name,
-      task.description,
-    ]),
+    promptHash: derived.promptHash,
     maxDurationMin: task.maxDurationMin,
     stallTimeoutMin: task.stallTimeoutMin,
     maxRunsPerTask: task.maxSessionsPerTask,
@@ -128,7 +156,7 @@ export const advanceTemplateTask = async (
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
-    include: { followUpTask: true },
+    include: { followUpTask: { include: { assigneeAgent: true } } },
   });
   if (!task.templateId) return { gated: false, nextTaskId: null };
   if (task.approvalGate) {
@@ -143,6 +171,23 @@ export const advanceTemplateTask = async (
     await tx.task.update({ where: { id: next.id }, data: { status: TaskStatus.REVIEW } });
     await gateQuestion(tx, next.id, sourceRunId, chatId);
     return { gated: true, nextTaskId: next.id };
+  }
+  if (next.assigneeAgent?.archivedAt) {
+    await tx.task.update({
+      where: { id: next.id },
+      data: {
+        status: TaskStatus.REVIEW,
+        failureReason: `Assignee ${next.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
+      },
+    });
+    await tx.taskActivity.create({
+      data: {
+        taskId: next.id,
+        actorType: "control-plane",
+        body: `Predecessor ${task.name} completed but assignee ${next.assigneeAgent.name} is archived; step not queued`,
+      },
+    });
+    return { gated: false, nextTaskId: next.id };
   }
   await enqueueTaskRun(tx, next.id, now);
   await tx.taskActivity.create({ data: {

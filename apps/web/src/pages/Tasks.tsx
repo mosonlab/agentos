@@ -91,10 +91,11 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
   onCreated: () => void;
 }): ReactNode => {
   const templates = usePoll<TaskTemplate[]>(`/projects/${projectId}/task-templates`, 30_000);
+  const activeAgents = agents.filter((agent) => !agent.archivedAt);
   const [mode, setMode] = useState<"blank" | "template">("blank");
   const [form, setForm] = useState({
     name: "", description: "",
-    assigneeAgentId: agents[0]?.id ?? "", repoId: repos[0]?.id ?? "", targetBranch: "",
+    assigneeAgentId: activeAgents[0]?.id ?? "", repoId: repos[0]?.id ?? "", targetBranch: "",
     assigneeType: "AGENT" as "AGENT" | "HUMAN", approvalGate: false,
     maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
   });
@@ -157,7 +158,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
               <Field label="Agent" hint="Agent tasks need an agent that already holds a grant on the repo.">
                 <select value={form.assigneeAgentId} disabled={form.assigneeType === "HUMAN"}
                   onChange={(event) => setForm({ ...form, assigneeAgentId: event.target.value })}>
-                  {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.title} · {agent.model}</option>)}
+                  {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.title} · {agent.model}</option>)}
                 </select>
               </Field>
             </div>

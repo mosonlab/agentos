@@ -63,3 +63,27 @@ test("instantiating the feature template creates a nine-task chain and queues on
   assert.equal(runs[0]!.branch, "feature/nine-steps");
 });
 
+test("template instantiation rejects an archived step agent and names the step", async () => {
+  const agent = {
+    id: "agent-1", name: "Archived Agent", archivedAt: new Date(), model: "codex",
+    runnerPreference: RunnerPreference.CODEX, foundationalPrompt: "foundation", rolePrompt: "role",
+  };
+  const db = {
+    taskTemplate: {
+      findFirst: async () => ({
+        id: "template-1",
+        variables: [],
+        steps: [{
+          id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
+          outputKind: "result", attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+          assigneeAgentId: agent.id, assigneeAgent: agent, approvalGate: false, runner: null,
+        }],
+      }),
+    },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+  } as unknown as PrismaClient;
+  await assert.rejects(
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
+    /Template step Implementation agent Archived Agent is archived/,
+  );
+});

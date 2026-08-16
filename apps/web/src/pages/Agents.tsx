@@ -110,6 +110,10 @@ export const AgentsPage = (): ReactNode => {
     if (!window.confirm(`Delete agent ${agent.name}?`)) return;
     void run(async () => { await api.delete(`/agents/${agent.id}`); reload(); });
   };
+  const toggleArchived = (agent: Agent): void => {
+    const action = agent.archivedAt ? "unarchive" : "archive";
+    void run(async () => { await api.post(`/agents/${agent.id}/${action}`); reload(); });
+  };
 
   if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
 
@@ -137,12 +141,18 @@ export const AgentsPage = (): ReactNode => {
               <tbody>
                 {agents.map((agent) => (
                   <tr key={agent.id} className="clickable" onClick={() => navigate(`/agents/${agent.id}`)}>
-                    <td className="name">{agent.title}<span className="sub">{agent.name}</span></td>
+                    <td className="name">
+                      <span className="row">{agent.title}{agent.archivedAt ? <Pill tone="grey">Archived</Pill> : null}</span>
+                      <span className="sub">{agent.name}</span>
+                    </td>
                     <td>{agent.model}</td>
                     <td>{agent.runnerPreference.toLowerCase()}</td>
                     <td>{agent.inboxAccess ? <Pill tone="green">Enabled</Pill> : <Pill tone="grey">Off</Pill>}</td>
                     <td>{formatDate(agent.updatedAt)}</td>
-                    <td className="tight"><RowMenu items={[{ label: "Delete", danger: true, onSelect: () => remove(agent) }]} /></td>
+                    <td className="tight"><RowMenu items={[
+                      { label: agent.archivedAt ? "Unarchive" : "Archive", onSelect: () => toggleArchived(agent) },
+                      { label: "Delete", danger: true, onSelect: () => remove(agent) },
+                    ]} /></td>
                   </tr>
                 ))}
               </tbody>
