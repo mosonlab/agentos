@@ -29,9 +29,12 @@
 - [ ] 任务完成/批准自动将 chainIndex+1 置 TODO（链式推进）
 - [ ] 闸门消息标注链条上下文（第几步/后续还有什么/是否有并行评审在跑）——来自 2026-08-16 首次真实使用的困惑反馈
 - [ ] 顺手删死模型：Trigger / Automation / InboxConnectionWindow（migration）
-- [ ] 链条可见性：任务详情显示整条链各步状态；看板卡片标 `n/m 步`+当前活跃步名（detail-gaps #4——现在链条跑到哪一步页面上完全不可见）
-- [ ] 触发器管理 UI：cron/webhook 列表、Fire now、Recent fires、webhook replay window 防重放（detail-gaps #3；依赖本批后端，UI 可顺延到批次 4 窗口）
-- [ ] 看板补齐：Backlog 列、Archive All、Archived 视图、任务来源徽标（cron/webhook/手动）（detail-gaps #8）
+
+## 批次 2.5 — Tasks 可见性（2026-08-16 立批：批次 2 已在飞不打断，本批承接其 UI 面；批次 0/2 合并后与批次 1/4 并行）
+
+- [ ] 链条可见性：任务详情显示整条链各步状态（第几步/各步 agent/闸门位置），看板卡片标 `n/m 步`+当前活跃步名；Approval 徽标 tooltip；待跑步"立刻开跑"按钮（detail-gaps #4）
+- [ ] 触发器管理 UI：Tasks 页五标签（My Tasks/Tasks/Automations/Triggers/Archived）、Automations 表（Schedule 人类可读+可暂停+Recent sessions）、Triggers 表+详情（Fire now/required 变量标注/replay window 防重放/Recent fires）（detail-gaps #3）
+- [ ] 看板补齐：Backlog 列、Done 列 Archive All、Archived 视图、任务来源徽标（cron/webhook/手动）（detail-gaps #8）
 
 ## 批次 3 — Inbox 结构化问卷重构（第 11 项）
 
@@ -54,6 +57,7 @@
 - [ ] 路由循环：session 结束 → orchestrator-router 读 DoD+progress log → dispatch/complete/stuck → Task 入队
 - [ ] Phase-gating 硬规则（plan → plan review → implementation）
 - [ ] 护栏：最大迭代、预算上限、零进展熔断（判定参考 pi-goal：逐条证据、弱证据=继续、3 轮无进展）
+- [ ] Session 软收尾：Session budget（分钟）+ Grace period——超预算先向运行中会话注入 Nudge 消息催收尾（提交/push/摘要），宽限期后才强停（detail-gaps §8；**依赖 runner 会话注入能力**，与批次 4 后置的"向运行中代理发消息"同一底座，批次 5 时一并做）（2026-08-16 Leo 裁）
 - [ ] UI：DoD 清单（生成→确认→自动打勾）+ Orchestrator 事件流 + 迭代/预算显示
 - [ ] Goal 生命周期通知：ready-for-approval / complete 两条 Inbox 系统消息，含 DoD 计数与总花费（detail-gaps #1）
 - [ ] Goal 运行控制面：Nudge / Pause（后端已有）/ Restart session / Adjust limits / Cancel（detail-gaps #2）
