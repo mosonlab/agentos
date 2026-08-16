@@ -1,4 +1,3 @@
-import { hostname } from "node:os";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
@@ -15,8 +14,6 @@ const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
 if (!appId || !appSecret) throw new Error("FEISHU_APP_ID and FEISHU_APP_SECRET are required in the repository root .env");
 
-const instanceId = `${hostname()}-${process.pid}`;
-const window = await prisma.inboxConnectionWindow.create({ data: { instanceId } });
 await prisma.inboxMessage.updateMany({
   where: { deliveryStatus: "SENDING" },
   data: { deliveryStatus: "FAILED", nextDeliveryAt: new Date(), lastDeliveryError: "Inbox service restarted during delivery" },
@@ -98,21 +95,14 @@ const supervisor = new ConnectionSupervisor((callbacks: SocketCallbacks) => {
 }, (event, detail) => {
   const state = supervisor.state.snapshot();
   console.log(`Inbox connection ${event}; state=${state.state}; reconnects=${state.reconnectCount}`, detail ?? "");
-  if (event === "ready" || event === "reconnected") void prisma.inboxConnectionWindow.update({
-    where: { id: window.id }, data: { connectedAt: new Date(), disconnectedAt: null, reconnectCount: state.reconnectCount },
-  });
-  if (event === "reconnecting" || event === "stopped" || event === "error") void prisma.inboxConnectionWindow.update({
-    where: { id: window.id }, data: { disconnectedAt: new Date(), reconnectCount: state.reconnectCount, closeReason: event },
-  });
 });
 const socket = supervisor.start();
 void deliverPending(prisma, sender).catch((error: unknown) => console.error("Initial Inbox outbox poll failed", error));
 
-const shutdown = async (signal: string): Promise<void> => {
+const shutdown = async (): Promise<void> => {
   clearInterval(deliveryTimer);
   supervisor.stop(socket);
-  await prisma.inboxConnectionWindow.update({ where: { id: window.id }, data: { disconnectedAt: new Date(), closeReason: signal } }).catch(() => undefined);
   await prisma.$disconnect();
 };
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown());
+process.once("SIGTERM", () => void shutdown());

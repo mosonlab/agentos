@@ -9,6 +9,14 @@ export type InstantiateTemplateInput = {
   description?: string | undefined;
 };
 
+const retryableTransactionConflict = (error: unknown): boolean => (
+  error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2034" || error.code === "P2002")
+);
+
+const retryDelay = async (attempt: number): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, attempt * 10 + Math.floor(Math.random() * 25)));
+};
+
 const interpolate = (source: string, variables: Record<string, string>): string => source.replace(
   /\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}/g,
   (_match, name: string) => variables[name] ?? `{{${name}}}`,
@@ -19,6 +27,7 @@ export const instantiateTemplate = async (
   projectId: string,
   templateId: string,
   input: InstantiateTemplateInput,
+  options: { actorType?: string; activityMetadata?: Record<string, unknown> } = {},
 ) => {
   const [template, repo] = await Promise.all([
     db.taskTemplate.findFirst({
@@ -30,7 +39,9 @@ export const instantiateTemplate = async (
   if (!template) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
   if (template.steps.length === 0) throw new Error("Template has no steps");
-  const missing = template.variables.filter((variable) => !input.variables[variable]);
+  const missing = template.variables.filter((variable) => (
+    !Object.prototype.hasOwnProperty.call(input.variables, variable) || input.variables[variable] === undefined
+  ));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
   if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
   if (unknown.length > 0) throw new Error(`Unknown template variables: ${unknown.join(", ")}`);
@@ -44,46 +55,53 @@ export const instantiateTemplate = async (
       if (!access) throw new Error(`Agent ${step.assigneeAgent.name} has no grant for Repo ${repo.name}`);
     }
   }
-  const chainId = randomUUID();
-  const branchName = input.variables.branchName ?? `agentos/${chainId}`;
-  return db.$transaction(async (tx) => {
-    const tasks = [];
-    for (const step of template.steps) {
-      const context = [
-        interpolate(step.prompt, input.variables),
-        input.description ? `\nFeature brief:\n${input.description}` : "",
-        step.attachmentsFromPrevious ? "\nRead the prior template steps' persisted outputs before working." : "",
-        `\nPersist the final ${step.outputKind} output for this step through the AgentOS task output endpoint.`,
-      ].join("");
-      tasks.push(await tx.task.create({ data: {
-        projectId,
-        repoId: repo.id,
-        templateId: template.id,
-        templateStepId: step.id,
-        name: `${input.name ?? template.name}: ${step.name}`,
-        description: context,
-        assigneeType: step.assigneeType,
-        assigneeAgentId: step.assigneeAgentId,
-        approvalGate: step.approvalGate,
-        chainId,
-        chainIndex: step.stepIndex,
-        status: TaskStatus.TODO,
-        targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
-      } }));
+  for (let attempt = 1; ; attempt += 1) {
+    const chainId = randomUUID();
+    const branchName = input.variables.branchName ?? `agentos/${chainId}`;
+    try {
+      return await db.$transaction(async (tx) => {
+        const tasks = [];
+        for (const step of template.steps) {
+          const context = [
+            interpolate(step.prompt, input.variables),
+            input.description ? `\nFeature brief:\n${input.description}` : "",
+            step.attachmentsFromPrevious ? "\nRead the prior template steps' persisted outputs before working." : "",
+            `\nPersist the final ${step.outputKind} output for this step through the AgentOS task output endpoint.`,
+          ].join("");
+          tasks.push(await tx.task.create({ data: {
+            projectId,
+            repoId: repo.id,
+            templateId: template.id,
+            templateStepId: step.id,
+            name: `${input.name ?? template.name}: ${step.name}`,
+            description: context,
+            assigneeType: step.assigneeType,
+            assigneeAgentId: step.assigneeAgentId,
+            approvalGate: step.approvalGate,
+            chainId,
+            chainIndex: step.stepIndex,
+            status: TaskStatus.TODO,
+            targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
+          } }));
+        }
+        for (let index = 0; index < tasks.length - 1; index += 1) {
+          await tx.task.update({ where: { id: tasks[index]!.id }, data: { followUpTaskId: tasks[index + 1]!.id } });
+        }
+        const first = tasks[0]!;
+        if (first.assigneeType !== AssigneeType.AGENT) throw new Error("The first template step must be agent-executable");
+        const run = await enqueueTaskRun(tx, first.id);
+        await tx.run.update({ where: { id: run.id }, data: { branch: branchName } });
+        await tx.taskActivity.createMany({ data: tasks.map((task, index) => ({
+          taskId: task.id,
+          actorType: options.actorType ?? "control-plane",
+          body: index === 0 ? "Template instantiated; first step queued" : "Template instantiated; waiting for predecessor",
+          metadata: { chainId, templateId: template.id, ...options.activityMetadata },
+        })) });
+        return { chainId, branchName, tasks };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error: unknown) {
+      if (!retryableTransactionConflict(error) || attempt >= 5) throw error;
+      await retryDelay(attempt);
     }
-    for (let index = 0; index < tasks.length - 1; index += 1) {
-      await tx.task.update({ where: { id: tasks[index]!.id }, data: { followUpTaskId: tasks[index + 1]!.id } });
-    }
-    const first = tasks[0]!;
-    if (first.assigneeType !== AssigneeType.AGENT) throw new Error("The first template step must be agent-executable");
-    const run = await enqueueTaskRun(tx, first.id);
-    await tx.run.update({ where: { id: run.id }, data: { branch: branchName } });
-    await tx.taskActivity.createMany({ data: tasks.map((task, index) => ({
-      taskId: task.id,
-      actorType: "control-plane",
-      body: index === 0 ? "Template instantiated; first step queued" : "Template instantiated; waiting for predecessor",
-      metadata: { chainId, templateId: template.id },
-    })) });
-    return { chainId, branchName, tasks };
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
 };

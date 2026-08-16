@@ -114,7 +114,7 @@ const outputPreview = async (tx: Tx, taskId: string | null): Promise<string> => 
   return `\n\n产物（${output.kind}）：\n${shown}`;
 };
 
-const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, chatId: string | null) => {
+export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, chatId: string | null) => {
   const [task, run] = await Promise.all([
     tx.task.findUniqueOrThrow({ where: { id: gateTaskId } }),
     tx.run.findUniqueOrThrow({ where: { id: sourceRunId }, include: { session: true } }),
@@ -146,6 +146,176 @@ const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: string, cha
   } });
 };
 
+type ChainTask = {
+  id: string;
+  projectId: string;
+  name: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  followUpTaskId: string | null;
+};
+
+type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true; assigneeAgent: true } }>;
+
+const activeSuccessorStatuses: RunStatus[] = [
+  RunStatus.QUEUED,
+  RunStatus.CLAIMED,
+  RunStatus.PROVISIONING,
+  RunStatus.RUNNING,
+  RunStatus.WAITING_INBOX,
+];
+
+const isUniqueConflict = (error: unknown): boolean => (
+  error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
+);
+
+/** Activates at most one chain/follow-up successor using the observed updatedAt as a CAS token. */
+export const activateChainSuccessor = async (
+  tx: Tx,
+  task: ChainTask,
+  options: { sourceRunId?: string | null; chatId?: string | null; archivedAssignee?: "park" | "throw" } = {},
+  now = new Date(),
+): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+  let successor: ChainSuccessor | null = null;
+  if (task.chainId && task.chainIndex !== null) {
+    successor = await tx.task.findFirst({
+      where: { projectId: task.projectId, chainId: task.chainId, chainIndex: { gt: task.chainIndex } },
+      orderBy: { chainIndex: "asc" },
+      include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
+    });
+  } else {
+    if (task.chainId) {
+      await tx.taskActivity.create({ data: {
+        taskId: task.id,
+        actorType: "control-plane",
+        body: "Chain row missing chainIndex; auto-advance skipped",
+      } });
+    }
+    if (task.followUpTaskId) {
+      successor = await tx.task.findUnique({
+        where: { id: task.followUpTaskId },
+        include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
+      });
+    }
+  }
+
+  if (!successor) {
+    if (task.chainId && task.chainIndex !== null) {
+      await tx.taskActivity.create({ data: {
+        taskId: task.id,
+        actorType: "control-plane",
+        body: "Chain complete",
+      } });
+    }
+    return { nextTaskId: null, gated: false };
+  }
+
+  if (successor.runs.some((run) => activeSuccessorStatuses.includes(run.status))) {
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: "Predecessor completed; successor already active",
+    } });
+    return { nextTaskId: successor.id, gated: false };
+  }
+
+  // A lost updatedAt CAS can mean either another advancer won or an unrelated
+  // operator edit landed between the read and claim. Re-read and retry the
+  // latter instead of silently stalling the chain. The status predicate is a
+  // second idempotency boundary: a completed successor is never resurrected.
+  for (;;) {
+    const claimed = await tx.task.updateMany({
+      where: {
+        id: successor.id,
+        updatedAt: successor.updatedAt,
+        status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
+      },
+      data: { status: TaskStatus.TODO },
+    });
+    if (claimed.count === 1) break;
+    const current: ChainSuccessor | null = await tx.task.findUnique({
+      where: { id: successor.id },
+      include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
+    });
+    if (!current || current.status === TaskStatus.DONE) {
+      return { nextTaskId: current?.id ?? null, gated: false };
+    }
+    if (current.runs.some((run) => activeSuccessorStatuses.includes(run.status))) {
+      await tx.taskActivity.create({ data: {
+        taskId: current.id,
+        actorType: "control-plane",
+        body: "Predecessor completed; successor already active",
+      } });
+      return { nextTaskId: current.id, gated: false };
+    }
+    successor = current;
+  }
+
+  if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {
+    if (options.sourceRunId) {
+      await tx.task.update({ where: { id: successor.id }, data: { status: TaskStatus.REVIEW } });
+      await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
+      return { nextTaskId: successor.id, gated: true };
+    }
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: "Predecessor completed; successor awaits operator",
+    } });
+    return { nextTaskId: successor.id, gated: false };
+  }
+
+  // An archived assignee parks the successor instead of throwing. enqueueTaskRun
+  // raises ArchivedAssigneeError, which is not a P2002 and would escape the
+  // savepoint catch below and roll back the caller's whole transaction — for
+  // completeRun that means discarding a run that actually succeeded.
+  //
+  // Interactive callers pass archivedAssignee: "throw" instead: a human is
+  // waiting on the response, so they get a named 409 rather than a silent park
+  // they would have to go hunting for.
+  if (successor.assigneeAgent?.archivedAt) {
+    if (options.archivedAssignee === "throw") {
+      throw new ArchivedAssigneeError(successor.id, successor.name, successor.assigneeAgent.name);
+    }
+    await tx.task.update({
+      where: { id: successor.id },
+      data: {
+        status: TaskStatus.REVIEW,
+        failureReason: `Assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
+      },
+    });
+    await tx.taskActivity.create({
+      data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: `Predecessor ${task.name} completed but assignee ${successor.assigneeAgent.name} is archived; step not queued`,
+      },
+    });
+    return { nextTaskId: successor.id, gated: false };
+  }
+
+  const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
+  if (hasSavepoint) await rawTx.$executeRawUnsafe!("SAVEPOINT chain_successor_enqueue");
+  try {
+    await enqueueTaskRun(tx, successor.id, now);
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
+  } catch (error: unknown) {
+    if (!isUniqueConflict(error)) throw error;
+    if (hasSavepoint) {
+      await rawTx.$executeRawUnsafe!("ROLLBACK TO SAVEPOINT chain_successor_enqueue");
+      await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
+    }
+    return { nextTaskId: successor.id, gated: false };
+  }
+  await tx.taskActivity.create({ data: {
+    taskId: successor.id,
+    actorType: "control-plane",
+    body: `Predecessor ${task.name} completed; step queued`,
+  } });
+  return { nextTaskId: successor.id, gated: false };
+};
+
 /** Marks a completed template task done and activates exactly one successor or gate. */
 export const advanceTemplateTask = async (
   tx: Tx,
@@ -153,49 +323,29 @@ export const advanceTemplateTask = async (
   sourceRunId: string,
   chatId: string | null,
   now = new Date(),
+  expectedStatus?: TaskStatus,
 ): Promise<{ gated: boolean; nextTaskId: string | null }> => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
-    include: { followUpTask: { include: { assigneeAgent: true } } },
   });
   if (!task.templateId) return { gated: false, nextTaskId: null };
   if (task.approvalGate) {
-    await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.REVIEW } });
+    if (expectedStatus) {
+      const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.REVIEW } });
+      if (claimed.count !== 1) return { gated: false, nextTaskId: null };
+    } else {
+      await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.REVIEW } });
+    }
     await gateQuestion(tx, task.id, sourceRunId, chatId);
     return { gated: true, nextTaskId: task.followUpTaskId };
   }
-  await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
-  const next = task.followUpTask;
-  if (!next) return { gated: false, nextTaskId: null };
-  if (next.assigneeType === AssigneeType.HUMAN || next.approvalGate && !next.assigneeAgentId) {
-    await tx.task.update({ where: { id: next.id }, data: { status: TaskStatus.REVIEW } });
-    await gateQuestion(tx, next.id, sourceRunId, chatId);
-    return { gated: true, nextTaskId: next.id };
+  if (expectedStatus) {
+    const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.DONE, failureReason: null } });
+    if (claimed.count !== 1) return { gated: false, nextTaskId: null };
+  } else {
+    await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
   }
-  if (next.assigneeAgent?.archivedAt) {
-    await tx.task.update({
-      where: { id: next.id },
-      data: {
-        status: TaskStatus.REVIEW,
-        failureReason: `Assignee ${next.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
-      },
-    });
-    await tx.taskActivity.create({
-      data: {
-        taskId: next.id,
-        actorType: "control-plane",
-        body: `Predecessor ${task.name} completed but assignee ${next.assigneeAgent.name} is archived; step not queued`,
-      },
-    });
-    return { gated: false, nextTaskId: next.id };
-  }
-  await enqueueTaskRun(tx, next.id, now);
-  await tx.taskActivity.create({ data: {
-    taskId: next.id,
-    actorType: "control-plane",
-    body: `Template predecessor ${task.name} completed; step queued`,
-  } });
-  return { gated: false, nextTaskId: next.id };
+  return activateChainSuccessor(tx, task, { sourceRunId, chatId }, now);
 };
 
 export type InboxDecisionInput = {
@@ -225,6 +375,7 @@ export const applyInboxDecisionTx = async (
     include: {
       session: { include: { run: true } },
       gateTask: { include: { previousTask: true } },
+      thread: true,
     },
   });
   if (!question?.session?.run) throw new Error("No matching Inbox question");
@@ -276,15 +427,29 @@ export const applyInboxDecisionTx = async (
     if (input.decision === "approve") {
       await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.DONE, failureReason: null } });
       await tx.taskActivity.create({ data: { taskId: question.gateTask.id, actorType: "operator", body: "Approval gate approved" } });
-      if (question.gateTask.followUpTaskId) {
-        const successor = await tx.task.findUniqueOrThrow({ where: { id: question.gateTask.followUpTaskId } });
-        if (successor.assigneeType === AssigneeType.AGENT) await enqueueTaskRun(tx, successor.id, now);
-      }
+      await activateChainSuccessor(tx, question.gateTask, {
+        sourceRunId: question.session.run.id,
+        chatId: question.thread?.externalChatId ?? null,
+        archivedAssignee: "throw",
+      }, now);
       return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
     }
-    const redo = question.gateTask.assigneeType === AssigneeType.AGENT
+    let redo = question.gateTask.assigneeType === AssigneeType.AGENT
       ? question.gateTask
       : question.gateTask.previousTask;
+    if (!redo && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
+      redo = await tx.task.findFirst({
+        where: {
+          projectId: question.gateTask.projectId,
+          chainId: question.gateTask.chainId,
+          chainIndex: { lt: question.gateTask.chainIndex },
+          assigneeType: AssigneeType.AGENT,
+          assigneeAgentId: { not: null },
+          repoId: { not: null },
+        },
+        orderBy: { chainIndex: "desc" },
+      });
+    }
     if (!redo) throw new Error("Approval gate has no executable previous task to reject to");
     await tx.task.update({ where: { id: redo.id }, data: { status: TaskStatus.TODO, failureReason: null } });
     if (redo.id !== question.gateTask.id) {

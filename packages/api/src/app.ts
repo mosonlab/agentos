@@ -1,5 +1,6 @@
 import {
   AssigneeType,
+  activateChainSuccessor,
   advanceTemplateTask,
   applyInboxDecision,
   CleanupStatus,
@@ -12,6 +13,7 @@ import {
   type PrismaClient,
   RepoPermission,
   RunStatus,
+  ScheduleKind,
   PushStatus,
   RunnerKind,
   RunnerPreference,
@@ -20,10 +22,12 @@ import {
   SessionEventSource,
   SessionExecutionStatus,
   TaskStatus,
+  gateQuestion,
   prisma,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
@@ -42,6 +46,8 @@ import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileData
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
+import { validateSchedule } from "./scheduler.js";
+import { authenticateWebhook, resolvePayloadVariables } from "./hooks.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
 
@@ -177,6 +183,10 @@ const taskFields = {
   maxDurationMin: z.number().int().min(1).max(24 * 60),
   stallTimeoutMin: z.number().int().min(1).max(24 * 60),
   maxSessionsPerTask: z.number().int().min(1).max(100),
+  scheduleKind: z.nativeEnum(ScheduleKind),
+  runAt: z.coerce.date().nullable(),
+  cron: z.string().trim().min(9).max(100).nullable(),
+  timezone: z.string().trim().min(1).max(64).nullable(),
 };
 const taskInput = z.object({
   ...taskFields,
@@ -190,6 +200,16 @@ const taskInput = z.object({
   maxDurationMin: taskFields.maxDurationMin.default(120),
   stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
   maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
+  scheduleKind: taskFields.scheduleKind.default(ScheduleKind.NOW),
+  runAt: taskFields.runAt.default(null),
+  cron: taskFields.cron.default(null),
+  timezone: taskFields.timezone.default(null),
+  chainId: z.string().trim().min(1).max(100).optional(),
+  chainIndex: z.number().int().min(0).optional(),
+}).superRefine((value, context) => {
+  if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
+    context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
+  }
 });
 const taskPatch = z.object(taskFields).partial().extend({ status: z.nativeEnum(TaskStatus).optional() })
   .refine((value) => Object.keys(value).length > 0);
@@ -287,6 +307,15 @@ const instantiateTemplateInput = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
 });
+const webhookPayloadMapping = z.object({
+  map: z.record(z.string(), z.string().trim().min(1)).optional(),
+  defaults: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+});
+const webhookConfigPatch = z.object({
+  webhookSecretId: id.nullable().optional(),
+  webhookRepoId: id.nullable().optional(),
+  webhookPayloadMapping: webhookPayloadMapping.nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -310,7 +339,8 @@ const withoutUndefined = (value: object): Record<string, unknown> => Object.from
 );
 
 const isPublic = (path: string, method: string): boolean =>
-  path === "/" || path === "/health" || method === "OPTIONS";
+  path === "/" || path === "/health" || method === "OPTIONS"
+  || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
 
 const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
 
@@ -336,7 +366,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
 
-  app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret"] }));
   app.use("*", async (context, next) => {
     if (isPublic(context.req.path, context.req.method)) {
       context.set("principal", { kind: "public" });
@@ -358,6 +388,44 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     } catch (error: unknown) {
       console.error("Health check failed", error);
       return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
+    }
+  });
+
+  app.use("/hooks/templates/:templateId", bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (context) => context.json({ error: "Payload too large" }, 413),
+  }));
+  app.post("/hooks/templates/:templateId", async (context) => {
+    const template = await authenticateWebhook(
+      db,
+      id.parse(context.req.param("templateId")),
+      context.req.header("X-AgentOS-Webhook-Secret"),
+    );
+    if (!template) return context.json({ error: "Unauthorized" }, 401);
+    let payload: unknown;
+    try {
+      payload = await context.req.json();
+    } catch {
+      return context.json({ error: "Invalid JSON payload" }, 400);
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return context.json({ error: "Webhook payload must be an object" }, 400);
+    }
+    const resolved = resolvePayloadVariables(template, payload as Record<string, unknown>);
+    if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
+    try {
+      const result = await instantiateTemplate(db, template.projectId, template.id, {
+        repoId: template.webhookRepoId!, variables: resolved.variables,
+      }, {
+        actorType: "webhook",
+        activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
+      });
+      return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
+        return context.json({ error: "Webhook instantiation is busy; retry later" }, 503);
+      }
+      throw error;
     }
   });
 
@@ -920,6 +988,32 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
   });
+  app.patch("/task-templates/:templateId", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, webhookConfigPatch);
+    const template = await db.taskTemplate.findUnique({ where: { id: templateId } });
+    if (!template) return context.json({ error: "Template not found" }, 404);
+    const secretId = body.webhookSecretId === undefined ? template.webhookSecretId : body.webhookSecretId;
+    const repoId = body.webhookRepoId === undefined ? template.webhookRepoId : body.webhookRepoId;
+    if (secretId) {
+      const secret = await db.secret.findFirst({ where: { id: secretId, purpose: SecretPurpose.WEBHOOK } });
+      if (!secret) return context.json({ error: "Webhook secret must exist and have WEBHOOK purpose" }, 400);
+      if (!repoId) return context.json({ error: "Webhook secret requires an in-project Repo" }, 400);
+    }
+    if (repoId) {
+      const repo = await db.repo.findFirst({ where: { id: repoId, projectId: template.projectId } });
+      if (!repo) return context.json({ error: "Webhook Repo does not belong to this project" }, 400);
+    }
+    return context.json(await db.taskTemplate.update({
+      where: { id: templateId },
+      data: {
+        ...withoutUndefined(body),
+        ...(body.webhookPayloadMapping !== undefined
+          ? { webhookPayloadMapping: body.webhookPayloadMapping === null ? Prisma.JsonNull : body.webhookPayloadMapping }
+          : {}),
+      },
+    }));
+  });
   app.post("/projects/:projectId/task-templates/:templateId/instantiate", async (context) => {
     try {
       return context.json(await instantiateTemplate(
@@ -965,10 +1059,18 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       const access = await db.agentRepoAccess.findFirst({ where: { agentId: agent.id, repoId: repo.id, projectId } });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
+    let schedule;
+    try {
+      schedule = validateSchedule(body);
+    } catch (error: unknown) {
+      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
+    }
     const task = await db.$transaction(async (tx) => {
-      const created = await tx.task.create({ data: { ...body, projectId } });
+      const created = await tx.task.create({
+        data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
+      });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
-      if (agent && repo && body.assigneeType === AssigneeType.AGENT) {
+      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
         await tx.run.create({
           data: {
@@ -1023,8 +1125,47 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
-    const task = await db.task.update({ where: { id: taskId }, data: withoutUndefined(body) as Prisma.TaskUncheckedUpdateInput });
-    if (body.status && body.status !== before.status) {
+    const effectiveAssigneeType = body.assigneeType ?? before.assigneeType;
+    const scheduleTouched = body.scheduleKind !== undefined || body.runAt !== undefined || body.cron !== undefined || body.timezone !== undefined;
+    const atExecutorTouched = before.scheduleKind === ScheduleKind.AT
+      && (body.assigneeType !== undefined || body.assigneeAgentId !== undefined || body.repoId !== undefined);
+    let schedule;
+    if (scheduleTouched || atExecutorTouched) {
+      try {
+        schedule = validateSchedule({
+          scheduleKind: body.scheduleKind ?? before.scheduleKind ?? ScheduleKind.NOW,
+          runAt: body.runAt === undefined ? before.runAt ?? null : body.runAt,
+          cron: body.cron === undefined ? before.cron ?? null : body.cron,
+          timezone: body.timezone === undefined ? before.timezone ?? null : body.timezone,
+          assigneeType: effectiveAssigneeType,
+          assigneeAgentId: effectiveAgentId,
+          repoId: effectiveRepoId,
+        });
+      } catch (error: unknown) {
+        return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
+      }
+    }
+    const updateData = {
+      ...withoutUndefined(body),
+      ...(scheduleTouched ? schedule : {}),
+    } as Prisma.TaskUncheckedUpdateInput;
+    const advances = before.status !== TaskStatus.DONE
+      && body.status === TaskStatus.DONE
+      && Boolean(before.chainId || before.followUpTaskId);
+    const task = advances ? await db.$transaction(async (tx) => {
+      const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
+      if (!before.templateId && before.approvalGate) {
+        await tx.inboxMessage.updateMany({
+          where: { gateTaskId: before.id, status: "OPEN" },
+          data: { status: "CLOSED" },
+        });
+      }
+      await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
+      return updated;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted })
+      : await db.task.update({ where: { id: taskId }, data: updateData });
+    if (!advances && body.status && body.status !== before.status) {
       await db.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
     }
     return context.json(task);
@@ -1672,7 +1813,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       }
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
-        if (succeeded && run.task?.templateId) {
+        if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
           const existingOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } });
           if (existingOutput) {
             await tx.taskStepOutput.update({
@@ -1691,10 +1832,30 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
               metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
             } });
           }
-          await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now);
+        }
+        if (succeeded && run.task?.templateId) {
+          await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+        } else if (succeeded && (run.task?.chainId || run.task?.followUpTaskId)) {
+          if (run.task.approvalGate) {
+            const claimed = await tx.task.updateMany({
+              where: { id: run.taskId, status: run.task.status },
+              data: { status: TaskStatus.REVIEW, failureReason: null },
+            });
+            if (claimed.count === 1) await gateQuestion(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null);
+          } else {
+            const completed = await tx.task.updateMany({
+              where: { id: run.taskId, status: run.task.status }, data: { status: TaskStatus.DONE, failureReason: null },
+            });
+            if (completed.count === 1) {
+              await activateChainSuccessor(tx, run.task, {
+                sourceRunId: run.id,
+                chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
+              }, now);
+            }
+          }
         } else {
-          await tx.task.update({
-            where: { id: run.taskId },
+          await tx.task.updateMany({
+            where: { id: run.taskId, ...(run.task ? { status: run.task.status } : {}) },
             data: {
               status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
               failureReason: succeeded ? null : budgetExhausted
@@ -1708,7 +1869,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             taskId: run.taskId,
             actorType: "runner",
             actorId: body.runnerId,
-            body: succeeded && run.task?.templateId ? `Run ${run.runNumber} succeeded; template chain advanced`
+            body: succeeded && (run.task?.templateId || run.task?.chainId || run.task?.followUpTaskId) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
               : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
               : retryCreated ? `Run ${run.runNumber} failed; retry queued`
                 : `Run ${run.runNumber} failed; task moved to review`,
@@ -1757,7 +1918,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         });
       }
       return { taskId: run.taskId, succeeded, retryCreated, failureClass };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    // ReadCommitted lets successor CAS losers observe count=0 instead of
+    // surfacing a serialization failure to runners. Every task status write
+    // above has its own status CAS so concurrent operator decisions win.
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if (!result) {
       const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
       return waiting

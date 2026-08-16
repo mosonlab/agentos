@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  activateChainSuccessor,
   advanceTemplateTask,
   applyInboxDecisionTx,
   ArchivedAssigneeError,
@@ -102,6 +103,60 @@ test("task creation keeps its runner, model, and promptHash output while derivat
     if (previousToken === undefined) delete process.env.OPERATOR_TOKEN;
     else process.env.OPERATOR_TOKEN = previousToken;
   }
+});
+
+test("chain successor lookup is project-scoped, gap tolerant, and CAS claimed before queueing", async () => {
+  const queued: Record<string, unknown>[] = [];
+  let lookup: Record<string, unknown> | undefined;
+  const successor = {
+    id: "task-3", projectId: "project-1", name: "Ship", description: "ship", chainId: "chain-1", chainIndex: 3,
+    updatedAt: new Date(), assigneeType: AssigneeType.AGENT, assigneeAgentId: "agent-1", repoId: "repo-1",
+    templateId: null, targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
+    assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r" },
+    repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null,
+  };
+  const tx = {
+    task: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => { lookup = where; return successor; },
+      updateMany: async () => ({ count: 1 }),
+      findUniqueOrThrow: async () => successor,
+    },
+    run: { create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1" }; } },
+    taskActivity: { create: async () => ({}) },
+  } as any;
+  const result = await activateChainSuccessor(tx, {
+    id: "task-1", projectId: "project-1", name: "Build", chainId: "chain-1", chainIndex: 0, followUpTaskId: null,
+  });
+  assert.deepEqual(lookup, { projectId: "project-1", chainId: "chain-1", chainIndex: { gt: 0 } });
+  assert.equal(result.nextTaskId, "task-3");
+  assert.equal(queued.length, 1);
+});
+
+test("chain activation skips an already-active successor and marks the final step complete", async () => {
+  const activities: string[] = [];
+  let successor: any = { id: "task-2", runs: [{ status: RunStatus.RUNNING }] };
+  const tx = {
+    task: { findFirst: async () => successor },
+    taskActivity: { create: async ({ data }: { data: { body: string } }) => { activities.push(data.body); return {}; } },
+  } as any;
+  const task = { id: "task-1", projectId: "project-1", name: "One", chainId: "chain-1", chainIndex: 0, followUpTaskId: null };
+  assert.equal((await activateChainSuccessor(tx, task)).nextTaskId, "task-2");
+  successor = null;
+  assert.deepEqual(await activateChainSuccessor(tx, task), { nextTaskId: null, gated: false });
+  assert.deepEqual(activities, ["Predecessor completed; successor already active", "Chain complete"]);
+});
+
+test("a malformed chain row records an activity and falls back to followUpTaskId", async () => {
+  const activities: string[] = [];
+  const successor = { id: "fallback", updatedAt: new Date(), assigneeType: AssigneeType.HUMAN, assigneeAgentId: null, repoId: null, runs: [] };
+  const tx = {
+    task: { findUnique: async () => successor, updateMany: async () => ({ count: 1 }) },
+    taskActivity: { create: async ({ data }: { data: { body: string } }) => { activities.push(data.body); return {}; } },
+  } as any;
+  await activateChainSuccessor(tx, {
+    id: "broken", projectId: "project-1", name: "Broken", chainId: "chain-1", chainIndex: null, followUpTaskId: "fallback",
+  });
+  assert.deepEqual(activities, ["Chain row missing chainIndex; auto-advance skipped", "Predecessor completed; successor awaits operator"]);
 });
 
 test("a later chain step runs on the chain's shared branch so the chain lands in one PR", async () => {
@@ -261,6 +316,7 @@ test("chain advancement parks an archived successor without throwing or enqueuei
   let creates = 0;
   const next = {
     id: "task-2", assigneeType: AssigneeType.AGENT, assigneeAgentId: "agent-2", approvalGate: false,
+    repoId: "repo-1", updatedAt: new Date(), runs: [],
     assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
   };
   const tx = {
@@ -269,6 +325,10 @@ test("chain advancement parks an archived successor without throwing or enqueuei
         id: "task-1", name: "Completed predecessor", templateId: "template-1", approvalGate: false,
         followUpTaskId: next.id, followUpTask: next,
       }),
+      // advanceTemplateTask now delegates to the shared activateChainSuccessor,
+      // which re-reads the successor itself and CAS-claims it before enqueueing.
+      findUnique: async () => next,
+      updateMany: async () => ({ count: 1 }),
       update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         updates.push({ id: where.id, ...data });
         return {};

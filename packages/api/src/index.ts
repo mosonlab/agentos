@@ -6,10 +6,11 @@ config({
   quiet: true,
 });
 
-const [{ prisma }, { app }, { reconcileAtStartup }] = await Promise.all([
+const [{ prisma }, { app }, { reconcileAtStartup }, { startScheduler }] = await Promise.all([
   import("@agentos/db"),
   import("./app.js"),
   import("./reconcile.js"),
+  import("./scheduler.js"),
 ]);
 
 const reconciliation = await reconcileAtStartup(
@@ -32,9 +33,11 @@ const server = serve(
     console.log(`AgentOS API listening on http://${hostname}:${info.port}`);
   },
 );
+const schedulerTimer = startScheduler(prisma);
 
 const shutdown = async (signal: string): Promise<void> => {
   console.log(`Received ${signal}; shutting down AgentOS API`);
+  if (schedulerTimer) clearInterval(schedulerTimer);
   server.close();
   await prisma.$disconnect();
   process.exit(0);
