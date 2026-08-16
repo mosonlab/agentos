@@ -4,9 +4,11 @@ import { api } from "../lib/api";
 import { compactTokens, duration, formatDateTime, money, repoWebUrl, sha, timeAgo, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { Link } from "../lib/router";
-import type { Run, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
+import { fatal } from "../lib/poll-state";
+import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
-import { IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
+import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
+import { ChainList } from "../components/chain-list";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, SHOW_MORE_BUTTON, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
@@ -167,16 +169,23 @@ export const StepOutput = ({ output }: { output: TaskStepOutput }): ReactNode =>
   );
 };
 
-const STATUSES: TaskStatus[] = ["TODO", "DOING", "REVIEW", "DONE"];
+// BACKLOG first, so the header select can park a task as well as move it on.
+const STATUSES: TaskStatus[] = ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"];
 
 export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<Task>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
+  // No new cadence: the chain rides the page's default poll.
+  const chain = usePoll<Chain>(`/tasks/${taskId}/chain`);
   const [expanded, setExpanded] = useState<string | null>(null);
   const { pending, error: actionError, run } = useAction();
 
-  if (error !== null && task === null) {
-    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
+  // `usePoll` keeps the last good data on error, which is right for a blip and
+  // wrong for a deletion — `fatal` is what makes a 404 authoritative. The chain
+  // poll deliberately has no error branch of its own: its 404 can also mean
+  // "this task never had a chain", and it must not paper over a live task.
+  if (fatal(error, task)) {
+    return <Page><ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /></Page>;
   }
   if (!task) return <Page><EmptyState>Loading…</EmptyState></Page>;
 
@@ -185,6 +194,16 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   };
   const retry = (): void => {
     void run(async () => { await api.post(`/tasks/${taskId}/retry`, {}); reload(); });
+  };
+  const startStep = (step: ChainStep): void => {
+    void run(async () => { await api.post(`/tasks/${step.taskId}/start`, {}); reload(); chain.reload(); });
+  };
+  const setArchived = (archived: boolean): void => {
+    void run(async () => {
+      await api.post(`/tasks/${taskId}/${archived ? "archive" : "unarchive"}`, {});
+      reload();
+      chain.reload();
+    });
   };
   const runs = task.runs;
   const totalCost = runs.reduce((sum, item) => sum + Number(item.session?.costUsd ?? 0), 0);
@@ -205,6 +224,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <h1 className={DETAIL_HEAD_H1}>{task.name}</h1>
         <TaskPill status={task.status} />
         {task.templateId === null ? null : <Pill tone="violet">Template</Pill>}
+        {task.archivedAt === null ? null : <Pill tone="grey">archived</Pill>}
         <span className="flex-1" />
         {/* `disabled:opacity-100 disabled:cursor-default`: the retired sheet had no
             `select:disabled` rule at all, so this control rendered at full opacity
@@ -216,6 +236,9 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         {retryable(task) ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />Retry</Button>
         ) : null}
+        <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>
+          <IconArchive />{task.archivedAt === null ? "Archive" : "Unarchive"}
+        </Button>
         <Button type="button" variant="legacy" size="legacy" onClick={reload}><IconRefresh />Refresh</Button>
       </div>
 
@@ -263,6 +286,10 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
             { k: "Created", v: formatDateTime(task.createdAt) },
           ]} />
         </Card>
+
+        {chain.data && chain.data.chainId !== null
+          ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
+          : null}
 
         <Card title="Prompt">
           {task.description.trim().length === 0
