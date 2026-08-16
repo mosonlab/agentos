@@ -11,6 +11,10 @@ import {
   Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Pill,
   RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { Textarea } from "../components/ui/textarea";
 
 const RUNNERS: RunnerPreference[] = ["INHERIT", "AUTO", "CLAUDE", "CODEX", "PI"];
 
@@ -40,23 +44,23 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
 
   return (
     <FullPanel title="New Agent" onClose={onClose} actions={
-      <button type="button" className="btn primary" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === ""}
-        onClick={() => void submit()}>Create</button>
+      <Button type="button" className="btn primary" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === ""}
+        onClick={() => void submit()}>Create</Button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Card title="Setup">
         <div className="stack">
           <div className="fieldRow">
             <Field label="Name" hint="Unique inside the project; used by YAML and the CLI.">
-              <input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
+              <Input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
             </Field>
             <Field label="Title">
-              <input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Senior Developer" />
+              <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Senior Developer" />
             </Field>
           </div>
           <div className="fieldRow">
             <Field label="Model">
-              <input type="text" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
+              <Input type="text" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
             </Field>
             <Field label="Runner" hint="INHERIT falls back to the model heuristic in execution.ts.">
               <select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>
@@ -73,7 +77,7 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
                   {environments.data.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
                 </select>
               )
-              : <input type="text" value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
+              : <Input type="text" value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
           </Field>
           <div className="row">
             <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label="Inbox access" />
@@ -87,10 +91,10 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
       <Card title="Prompt">
         <div className="stack">
           <Field label="AgentOS foundation" hint="Prepended above the role prompt for every run.">
-            <textarea rows={4} value={form.foundationalPrompt} onChange={(event) => setForm({ ...form, foundationalPrompt: event.target.value })} />
+            <Textarea rows={4} value={form.foundationalPrompt} onChange={(event) => setForm({ ...form, foundationalPrompt: event.target.value })} />
           </Field>
           <Field label="Your agent instructions">
-            <textarea rows={10} value={form.rolePrompt} onChange={(event) => setForm({ ...form, rolePrompt: event.target.value })}
+            <Textarea rows={10} value={form.rolePrompt} onChange={(event) => setForm({ ...form, rolePrompt: event.target.value })}
               placeholder="You are Senior Dev — a senior engineer with strong taste…" />
           </Field>
         </div>
@@ -118,45 +122,45 @@ export const AgentsPage = (): ReactNode => {
   if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="pageHead">
         <div className="titles">
           <h1>Agents</h1>
           <div className="subtitle">Roles, prompts and permission boundaries in {project?.name ?? "this project"}</div>
         </div>
         <div className="pageActions">
-          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />Create Agent</button>
+          <Button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />Create Agent</Button>
         </div>
       </div>
 
       <Segmented options={[{ value: "yours", label: "Your Agents" }]} value="yours" onChange={() => undefined} />
 
-      <div className="stack" style={{ marginTop: 16 }}>
+      <div className="stack mt-4">
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         <Card flush>
           <div className="tableWrap">
-            <table className="table">
-              <thead><tr><th>Name</th><th>Model</th><th>Runner</th><th>Inbox</th><th>Updated</th><th /></tr></thead>
-              <tbody>
+            <Table className="table">
+              <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Model</TableHead><TableHead>Runner</TableHead><TableHead>Inbox</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader>
+              <TableBody>
                 {agents.map((agent) => (
-                  <tr key={agent.id} className="clickable" onClick={() => navigate(`/agents/${agent.id}`)}>
-                    <td className="name">
+                  <TableRow key={agent.id} className="clickable" onClick={() => navigate(`/agents/${agent.id}`)}>
+                    <TableCell className="name">
                       <span className="row">{agent.title}{agent.archivedAt ? <Pill tone="grey">Archived</Pill> : null}</span>
                       <span className="sub">{agent.name}</span>
-                    </td>
-                    <td>{agent.model}</td>
-                    <td>{agent.runnerPreference.toLowerCase()}</td>
-                    <td>{agent.inboxAccess ? <Pill tone="green">Enabled</Pill> : <Pill tone="grey">Off</Pill>}</td>
-                    <td>{formatDate(agent.updatedAt)}</td>
-                    <td className="tight"><RowMenu items={[
+                    </TableCell>
+                    <TableCell>{agent.model}</TableCell>
+                    <TableCell>{agent.runnerPreference.toLowerCase()}</TableCell>
+                    <TableCell>{agent.inboxAccess ? <Pill tone="green">Enabled</Pill> : <Pill tone="grey">Off</Pill>}</TableCell>
+                    <TableCell>{formatDate(agent.updatedAt)}</TableCell>
+                    <TableCell className="tight"><RowMenu items={[
                       { label: agent.archivedAt ? "Unarchive" : "Archive", onSelect: () => toggleArchived(agent) },
                       { label: "Delete", danger: true, onSelect: () => remove(agent) },
-                    ]} /></td>
-                  </tr>
+                    ]} /></TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
             {agents.length === 0 ? <EmptyState>{loading ? "Loading…" : "No agents in this project yet."}</EmptyState> : null}
           </div>
         </Card>
@@ -185,9 +189,9 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
     });
   };
   return (
-    <div className="stack" style={{ borderTop: "1px solid var(--line-soft)", paddingTop: 14 }}>
+    <div className="stack border-t border-[var(--border-soft)] pt-3.5">
       <div className="row">
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="min-w-0 flex-1">
           <div className="strong">{repo.name}</div>
           <div className="hint">{repo.remoteUrl} · default {repo.defaultBranch}</div>
         </div>
@@ -201,11 +205,11 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
           </select>
         </Field>
         <Field label="Mount path">
-          <input type="text" value={mountPath} onChange={(event) => setMountPath(event.target.value)} />
+          <Input type="text" value={mountPath} onChange={(event) => setMountPath(event.target.value)} />
         </Field>
         <div className="field">
           <label>&nbsp;</label>
-          <button type="button" className="btn primary" disabled={pending} onClick={grant}>Grant / update access</button>
+          <Button type="button" className="btn primary" disabled={pending} onClick={grant}>Grant / update access</Button>
         </div>
       </div>
       {error === null ? null : <ErrorNotice message={error} />}
@@ -248,13 +252,13 @@ const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant
     });
   };
   return (
-    <tr>
-      <td className="name">{grant.folderPath}{error === null ? null : <span className="sub">{error}</span>}</td>
-      <td><Check on={grant.canRead} onChange={(value) => patch("canRead", value)} disabled={pending} label={`Read ${grant.folderPath}`} /></td>
-      <td><Check on={grant.canWrite} onChange={(value) => patch("canWrite", value)} disabled={pending} label={`Write ${grant.folderPath}`} /></td>
-      <td><Check on={grant.canDelete} onChange={(value) => patch("canDelete", value)} disabled={pending} label={`Delete in ${grant.folderPath}`} /></td>
-      <td className="tight"><RowMenu items={[{ label: "Remove", danger: true, onSelect: remove }]} /></td>
-    </tr>
+    <TableRow>
+      <TableCell className="name">{grant.folderPath}{error === null ? null : <span className="sub">{error}</span>}</TableCell>
+      <TableCell><Check on={grant.canRead} onChange={(value) => patch("canRead", value)} disabled={pending} label={`Read ${grant.folderPath}`} /></TableCell>
+      <TableCell><Check on={grant.canWrite} onChange={(value) => patch("canWrite", value)} disabled={pending} label={`Write ${grant.folderPath}`} /></TableCell>
+      <TableCell><Check on={grant.canDelete} onChange={(value) => patch("canDelete", value)} disabled={pending} label={`Delete in ${grant.folderPath}`} /></TableCell>
+      <TableCell className="tight"><RowMenu items={[{ label: "Remove", danger: true, onSelect: remove }]} /></TableCell>
+    </TableRow>
   );
 };
 
@@ -268,18 +272,18 @@ const NewFilesystemGrant = ({ agentId, onDone }: { agentId: string; onDone: () =
   };
   const any = permissions.canRead || permissions.canWrite || permissions.canDelete;
   return (
-    <div className="stack" style={{ marginBottom: 14 }}>
+    <div className="stack mb-3.5">
       {error === null ? null : <ErrorNotice message={error} />}
       <div className="fieldRow">
-        <Field label="Folder path"><input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
+        <Field label="Folder path"><Input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
         <Field label="Permissions">
-          <div className="row" style={{ minHeight: 34 }}>
+          <div className="row min-h-[34px]">
             {(["canRead", "canWrite", "canDelete"] as const).map((key) => (
               <span className="row" key={key}><Check on={permissions[key]} onChange={(value) => setPermissions({ ...permissions, [key]: value })} label={key} />{key.slice(3)}</span>
             ))}
           </div>
         </Field>
-        <div className="field"><label>&nbsp;</label><button type="button" className="btn primary" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>Grant access</button></div>
+        <div className="field"><label>&nbsp;</label><Button type="button" className="btn primary" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>Grant access</Button></div>
       </div>
     </div>
   );
@@ -308,8 +312,8 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
           : (skills.data ?? []).map((skill) => {
             const mounted = (agent.skills ?? []).some((entry) => entry.skillId === skill.id);
             return (
-              <div key={skill.id} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
-                <div style={{ flex: 1 }}>
+              <div key={skill.id} className="row border-t border-[var(--border-soft)] py-2.5">
+                <div className="flex-1">
                   <div className="strong">{skill.name}</div>
                   <div className="hint">{skill.kind.toLowerCase()} · {skill.slug}</div>
                 </div>
@@ -325,8 +329,8 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
         {(connections.data ?? []).length === 0 ? <EmptyState>No MCP connections in this project.</EmptyState> : (connections.data ?? []).map((connection) => {
           const bound = (agent.mcpConnections ?? []).some((entry) => entry.mcpConnectionId === connection.id);
           return (
-            <div key={connection.id} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
-              <div style={{ flex: 1 }}>
+            <div key={connection.id} className="row border-t border-[var(--border-soft)] py-2.5">
+              <div className="flex-1">
                 <div className="strong">{connection.name}</div>
                 <div className="hint">{connection.transport}</div>
               </div>
@@ -342,8 +346,8 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
         {(agent.secretGrants ?? []).length === 0
           ? <EmptyState>No secrets granted to this agent.</EmptyState>
           : (agent.secretGrants ?? []).map((grant) => (
-            <div key={`${grant.secretId}:${grant.envVar}`} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
-              <div style={{ flex: 1 }}><div className="strong">{grant.secret?.name ?? grant.secretId}</div><div className="hint">{grant.envVar}</div></div>
+            <div key={`${grant.secretId}:${grant.envVar}`} className="row border-t border-[var(--border-soft)] py-2.5">
+              <div className="flex-1"><div className="strong">{grant.secret?.name ?? grant.secretId}</div><div className="hint">{grant.envVar}</div></div>
             </div>
           ))}
       </Card>
@@ -351,14 +355,14 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
       <Card title="Filesystem grants" extra={<span className="count">{(agent.filesystemGrants ?? []).length}</span>}>
         <NewFilesystemGrant agentId={agent.id} onDone={onSaved} />
         <div className="tableWrap">
-              <table className="table">
-                <thead><tr><th>Folder</th><th>Read</th><th>Write</th><th>Delete</th><th /></tr></thead>
-                <tbody>
+              <Table className="table">
+                <TableHeader><TableRow><TableHead>Folder</TableHead><TableHead>Read</TableHead><TableHead>Write</TableHead><TableHead>Delete</TableHead><TableHead /></TableRow></TableHeader>
+                <TableBody>
                   {(agent.filesystemGrants ?? []).map((grant) => (
                     <FilesystemGrantRow key={grant.id} agentId={agent.id} grant={grant} onDone={onSaved} />
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
               {(agent.filesystemGrants ?? []).length === 0 ? <EmptyState>No filesystem grants.</EmptyState> : null}
             </div>
       </Card>
@@ -392,20 +396,20 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   };
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="detailHead">
         <Link to="/agents" className="backLink"><IconArrowLeft /></Link>
-        <span style={{ color: "var(--violet-fg)" }}><IconRobot /></span>
+        <span className="text-[var(--status-violet-fg)]"><IconRobot /></span>
         <h1>{view.title}</h1>
         <Pill tone="grey">{view.model}</Pill>
         <Pill tone="violet">runner {view.runnerPreference.toLowerCase()}</Pill>
         <span className="spacer" />
         {draft === null
-          ? <button type="button" className="btn" onClick={() => setDraft(agent)}>Edit</button>
+          ? <Button type="button" className="btn" onClick={() => setDraft(agent)}>Edit</Button>
           : (
             <>
-              <button type="button" className="btn" onClick={() => setDraft(null)}>Cancel</button>
-              <button type="button" className="btn primary" disabled={pending} onClick={() => void save()}>Save</button>
+              <Button type="button" className="btn" onClick={() => setDraft(null)}>Cancel</Button>
+              <Button type="button" className="btn primary" disabled={pending} onClick={() => void save()}>Save</Button>
             </>
           )}
       </div>
@@ -440,11 +444,11 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
             ) : (
               <div className="stack">
                 <div className="fieldRow">
-                  <Field label="Name"><input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
-                  <Field label="Title"><input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
+                  <Field label="Name"><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
+                  <Field label="Title"><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
                 <div className="fieldRow">
-                  <Field label="Model"><input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
+                  <Field label="Model"><Input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
                   <Field label="Runner preference" hint="INHERIT 时按 execution.ts 的模型名启发式选 runner。">
                     <select value={view.runnerPreference} onChange={(event) => patch({ runnerPreference: event.target.value as RunnerPreference })}>
                       {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
@@ -468,13 +472,13 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
             <Card title="AgentOS Foundation" extra={<Pill tone="grey">prepended</Pill>}>
               {draft === null
                 ? <div className="codeBlock">{view.foundationalPrompt}</div>
-                : <textarea rows={6} value={view.foundationalPrompt} onChange={(event) => patch({ foundationalPrompt: event.target.value })} />}
-              <div className="hint" style={{ marginTop: 10 }}>This text is placed above the agent instructions for every run.</div>
+                : <Textarea rows={6} value={view.foundationalPrompt} onChange={(event) => patch({ foundationalPrompt: event.target.value })} />}
+              <div className="hint mt-2.5">This text is placed above the agent instructions for every run.</div>
             </Card>
             <Card title="Your agent instructions">
               {draft === null
                 ? <div className="codeBlock">{view.rolePrompt}</div>
-                : <textarea rows={18} value={view.rolePrompt} onChange={(event) => patch({ rolePrompt: event.target.value })} />}
+                : <Textarea rows={18} value={view.rolePrompt} onChange={(event) => patch({ rolePrompt: event.target.value })} />}
             </Card>
           </>
         ) : null}
@@ -483,13 +487,13 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
 
         {tab === "collaborators" ? (
           <Card title="Collaborators">
-            <div className="hint" style={{ marginBottom: 12 }}>
+            <div className="hint mb-3">
               Agents this agent may spawn for subtasks. Bindings live in AgentCollaboration.
             </div>
-            <div style={{ marginTop: 12 }}>
+            <div className="mt-3">
               {(siblings ?? []).filter((candidate) => candidate.id !== agent.id).map((candidate) => (
-                <div key={candidate.id} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
-                  <div style={{ flex: 1 }}>
+                <div key={candidate.id} className="row border-t border-[var(--border-soft)] py-2.5">
+                  <div className="flex-1">
                     <div className="strong">{candidate.title}</div>
                     <div className="hint">{titleCase(candidate.name)} · {candidate.model}</div>
                   </div>

@@ -1,9 +1,11 @@
 import { fileURLToPath } from "node:url";
 
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type ProxyOptions } from "vite";
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+const sourceRoot = fileURLToPath(new URL("./src", import.meta.url));
 
 /** DECISIONS #17: no login on localhost. The operator bearer token therefore
  *  stays in this dev/preview server — it is attached to every proxied request
@@ -26,7 +28,8 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
-    plugins: [react()],
+    plugins: [react(), tailwindcss()],
+    resolve: { alias: { "@": sourceRoot } },
     server: { port: 5173, proxy },
     preview: { port: 4173, proxy },
   };
