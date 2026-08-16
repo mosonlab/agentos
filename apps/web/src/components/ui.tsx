@@ -303,7 +303,7 @@ export const ErrorNotice = ({ message, onRetry }: { message: string; onRetry?: (
   </div>
 );
 
-const LONG_TEXT = "text-[12.5px] leading-[1.75] whitespace-pre-wrap text-secondary-foreground [overflow-wrap:anywhere]";
+export const LONG_TEXT = "text-[12.5px] leading-[1.75] whitespace-pre-wrap text-secondary-foreground [overflow-wrap:anywhere]";
 
 export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }): ReactNode => {
   const [open, setOpen] = useState(false);
