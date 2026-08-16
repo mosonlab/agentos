@@ -16,6 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
+    "db:files-precheck": "dotenv -e ../../.env -- tsx prisma/precheck-files.ts",
     "db:validate": "dotenv -e ../../.env -- prisma validate",
     "db:seed": "dotenv -e ../../.env -- prisma db seed"
   },

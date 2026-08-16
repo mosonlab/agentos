@@ -177,7 +177,6 @@ model Project {
   goals              Goal[]
   triggers           Trigger[]
   automations        Automation[]
-  files              FileObject[]
   runs               Run[]
 }
 
@@ -329,6 +328,7 @@ model AgentRepoAccess {
   @@index([repoId])
 }
 
+// folderPath is a canonical Files-Root-relative POSIX path; "" grants the whole Files Root.
 model FilesystemGrant {
   id         String  @id @default(cuid())
   agentId    String
@@ -470,7 +470,6 @@ model Task {
   templateStep       TaskTemplateStep? @relation(fields: [templateStepId], references: [id], onDelete: SetNull)
   followUpTask       Task?            @relation("TaskFollowUp", fields: [followUpTaskId], references: [id], onDelete: SetNull)
   previousTask       Task?            @relation("TaskFollowUp")
-  attachments        TaskAttachment[]
   activity           TaskActivity[]
   sessions           Session[]
   runs               Run[]
@@ -501,16 +500,6 @@ model TaskStepOutput {
   run       Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
 
   @@index([runId])
-}
-
-model TaskAttachment {
-  taskId       String
-  fileObjectId String
-  task         Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  fileObject   FileObject @relation(fields: [fileObjectId], references: [id], onDelete: Cascade)
-
-  @@id([taskId, fileObjectId])
-  @@index([fileObjectId])
 }
 
 model TaskActivity {
@@ -890,20 +879,4 @@ model Automation {
   @@unique([projectId, name])
   @@index([agentId])
   @@index([taskTemplateId])
-}
-
-model FileObject {
-  id          String           @id @default(cuid())
-  projectId   String
-  path        String
-  storagePath String
-  mime        String
-  size        BigInt
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  tasks       TaskAttachment[]
-
-  @@unique([projectId, path])
-  @@index([projectId])
 }
