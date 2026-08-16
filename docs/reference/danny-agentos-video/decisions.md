@@ -99,6 +99,9 @@
 - **模型额度策略**：Fable 只用于 plan 步（全链质量杠杆最大处）；spec 与 review-coordinator 降 opus-5:high；实现层 Sol（Luna 待验证能力后再回归）；批次间可按代码冲突面并行（前端批次等批次 0，后端批次可即行）。
 - 每个 agent 所用模型在批次 1 的下拉做好后由 Leo 统一复核调整。
 - 模型路由备忘：Luna(gpt-5.6-luna) 机械批量、**一律显式 max**；Sol(gpt-5.6-sol) 语义校验 high+；升级链 Luna→Sonnet→Opus；spawn 必显式指定 model（钩子强制）。
+- **前端链评审例外**（2026-08-16 Leo 裁决，frontend-convergence 链 plan 闸门时定）：**前端批次的 ⑥ 代码评审用 `code-reviewer`（claude-opus-5:high / CLAUDE），不用 `review-coordinator`（Sol）。** 跨厂商对写规则在前端批次让位——主题是 CSS 层叠层级、Tailwind v4 任意值、视觉一致性，Opus 侧读得更准。代价是 ⑤ 与 ⑥ 同厂商，独立性只剩"不同 agent 不同提示词"这一层，因此**评审任务书里必须写明这是同厂商评审**，并要求评审员不把计划、实现者的提交信息与活动日志当依据，一切从 diff 和文件本身重新推导、实现者声称通过的检查一律自己重跑。③ 计划评审仍用 Sol（审的是文档不是 CSS，跨厂商在那里仍然划算）。**新建前端链时必须手动指定 ⑥ 的 assignee，不能沿用默认。** `code-reviewer` 已补 `GIT_WRITE`（评审步要提交推送评审文档）。
+- **推理等级校准**（同上裁决）：`frontend-dev` 由 `claude-opus-5:xhigh` 降为 `:high`。原 xhigh 来自 Fable 配额耗尽后的"原用 Fable 处一律换 opus-5:xhigh"替换规则，是产物不是校准结果；前端实现绝大部分是照计划对照表做机械替换，难的判断在 ② plan 已经做完。**xhigh 保留给 ④ plan 修订**（要把评审发现与闸门裁决揉回长计划、还要判断驳回哪些，是链上判断密度最高且只跑一次的一步）。
+- **配置生效时机**（`packages/db/src/workflow.ts:41-43`）：run 的 `model`、`runner`、`promptHash`（含 `task.description`）是在**前一步完成、`activateChainSuccessor` 创建下一步 run 的那一刻**才从 agent 记录与任务行读取的，不是建链时定死。因此链跑到一半仍可改尚未起 run 的步骤的 assignee/模型/任务书，改动会生效；已在跑或已完成的步骤不受影响。
 
 ## 13. 权限与可观测性裁决（2026-08-16 二轮查漏定案）
 
