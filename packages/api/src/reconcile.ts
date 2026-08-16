@@ -1,5 +1,6 @@
 import { readdir, rm, stat } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
 
 import {
   CleanupStatus,
@@ -13,6 +14,8 @@ import {
 import { makeDedupeKey } from "./execution.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
+
+export const defaultWorkspaceRoot = (): string => join(homedir(), ".agentos", "runs");
 
 export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()): Promise<number> => {
   const candidates = await db.run.findMany({

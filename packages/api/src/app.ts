@@ -36,7 +36,7 @@ import {
   retryDelayMs,
   runnerFor,
 } from "./execution.js";
-import { reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
+import { defaultWorkspaceRoot, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
@@ -1718,7 +1718,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     }
     await reconcileWorkspaces(
       db,
-      process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
+      process.env.RUNNER_WORKSPACE_ROOT ?? defaultWorkspaceRoot(),
       Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     ).catch((error: unknown) => console.error("Post-run workspace reconciliation failed", error));
     return context.json(result);

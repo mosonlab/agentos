@@ -6,7 +6,7 @@ config({
   quiet: true,
 });
 
-const [{ prisma }, { app }, { reconcileAtStartup }] = await Promise.all([
+const [{ prisma }, { app }, { defaultWorkspaceRoot, reconcileAtStartup }] = await Promise.all([
   import("@agentos/db"),
   import("./app.js"),
   import("./reconcile.js"),
@@ -14,7 +14,7 @@ const [{ prisma }, { app }, { reconcileAtStartup }] = await Promise.all([
 
 const reconciliation = await reconcileAtStartup(
   prisma,
-  process.env.RUNNER_WORKSPACE_ROOT ?? "/tmp/agentos-runs",
+  process.env.RUNNER_WORKSPACE_ROOT ?? defaultWorkspaceRoot(),
   Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
 );
 console.log(`Startup reconciliation: ${reconciliation.runs} orphan runs, ${reconciliation.workspaces} workspaces cleaned`);
