@@ -47,16 +47,29 @@ const inspectDirectory = async (path: string): Promise<void> => {
   if (!info.isDirectory()) throw new NotADirectoryError(`Not a directory: ${path}`);
 };
 
+/**
+ * The store's last-line containment assertion: whatever the lexical layer produced, the
+ * resolved target must be the canonical root itself or sit under `root + sep`. Exported
+ * as a predicate because `resolveContained` can only ever feed it values normalizeRelPath
+ * already accepted, so the assertion is unreachable from the store's public surface and
+ * would otherwise be pinned by no test at all. `${root}-evil` is the shape a bare
+ * `startsWith(canonicalRoot)` admits.
+ */
+export const assertContainedTarget = (canonicalRoot: string, normalized: string): string => {
+  const target = normalized === "" ? canonicalRoot : resolve(canonicalRoot, normalized);
+  if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${sep}`)) {
+    throw new InvalidPathError(`Resolved path escapes the Files Root: ${normalized}`);
+  }
+  return target;
+};
+
 export const resolveContained = async (
   canonicalRoot: string,
   rel: string,
   mode: ResolveMode,
 ): Promise<ContainedPath> => {
   const normalized = normalizeRelPath(rel);
-  const target = normalized === "" ? canonicalRoot : resolve(canonicalRoot, normalized);
-  if (target !== canonicalRoot && !target.startsWith(`${canonicalRoot}${sep}`)) {
-    throw new InvalidPathError(`Path escapes the Files Root: ${rel}`);
-  }
+  const target = assertContainedTarget(canonicalRoot, normalized);
 
   const segments = normalized === "" ? [] : normalized.split("/");
   let parent = canonicalRoot;

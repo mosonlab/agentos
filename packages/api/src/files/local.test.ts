@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
-import { createLocalFileStore } from "./local.js";
+import { assertContainedTarget, createLocalFileStore, resolveContained } from "./local.js";
 import { InvalidPathError, NotFoundError, SymlinkError } from "./store.js";
 
 const withRoot = async (run: (root: string, outside: string) => Promise<void>): Promise<void> => {
@@ -155,10 +155,13 @@ test("probe 15: traversal, absolute paths, and outside-directory links touch no 
   assert.equal(await readFile(sentinel, "utf8"), "SAFE");
 }));
 
-test("probe 16: paths beginning with the root string cannot escape", async () => withRoot(async (root) => {
+test("probe 16: sibling-root shapes are rejected at the lexical layer, before containment", async () => withRoot(async (root) => {
+  // These inputs never reach the store's root-prefix assertion: the absolute form is
+  // rejected by normalizeRelPath's leading-slash guard and the relative form by its ".."
+  // guard. The assertion itself is pinned by probes 20 and 21, not here.
   const store = await createLocalFileStore(root);
-  await assert.rejects(store.read(`${root}-evil/x`), InvalidPathError);
-  await assert.rejects(store.read(`../${basename(root)}-evil/x`), InvalidPathError);
+  await assert.rejects(store.read(`${root}-evil/x`), /Absolute paths are not allowed/u);
+  await assert.rejects(store.read(`../${basename(root)}-evil/x`), /Path escapes the Files Root/u);
 }));
 
 test("probe 17: all seven FileStore methods round-trip within the root", async () => withRoot(async (root) => {
@@ -191,3 +194,25 @@ test("probe 19: traversal normalizing inside is accepted and traversal escaping 
   assert.equal(await readFile(join(root, "b.txt"), "utf8"), "inside");
   await assert.rejects(store.write("a/../../b.txt", Buffer.from("outside")), InvalidPathError);
 }));
+
+test("probe 20: the containment assertion itself rejects every escaping resolved target", () => {
+  // Deleting the assertion, or weakening it to a bare startsWith(canonicalRoot), turns
+  // this red. No other test in the repository fails on either mutation.
+  const root = "/srv/files-root";
+  assert.equal(assertContainedTarget(root, ""), root);
+  assert.equal(assertContainedTarget(root, "a/b.txt"), join(root, "a/b.txt"));
+  for (const escaping of ["../outside/secret", "/etc/passwd", `${root}-evil/x`, `${root}x`]) {
+    assert.throws(() => assertContainedTarget(root, escaping), InvalidPathError);
+  }
+});
+
+test("probe 21: resolveContained applies the containment assertion to its own output", async () => {
+  // A root that is not already canonical (trailing separator) resolves to targets that
+  // are not under `root + sep`. Removing the assertion from resolveContained makes this
+  // fall through to the segment walk and fail with a different error, so this pins the
+  // call site as probe 20 pins the predicate.
+  await assert.rejects(
+    resolveContained("/srv/files-root/", "a/b.txt", "existing"),
+    /Resolved path escapes the Files Root/u,
+  );
+});
