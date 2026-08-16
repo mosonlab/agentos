@@ -108,6 +108,7 @@
 - [ ] runner 安全显著警示 + 远程访问文档（反向代理/Tailscale）+ pg_dump 备份文档
 - [ ] 权限诚实化（2026-08-16 Leo 裁，替代做强制）：filesystem grants / Environment networking 等未执行项在 UI 标注 "not enforced"；文档给出两个真隔离方案——受限 macOS 用户运行 runner（推荐）与 `RUNNER_RUN_AS_PREFIX` 套 Docker；不做应用层沙箱
 - [ ] License：MIT；发布前定内部中文文档去留
+- [ ] **示例 plist 不设 `RUNNER_PATH`，全新安装大概率开局就 `BINARY_NOT_FOUND`**（`deploy/com.agentos.runner.plist:12` 只给了 `PATH`，没有 `RUNNER_PATH`）。runner 传给 CLI 子进程的是 `RUNNER_PATH`（`packages/runner/src/config.ts:33`），缺省值 `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` 不含 `~/.npm-global/bin` 与 `~/.local/bin`——而 `claude` 通常就装在 npm 全局前缀下。后果：装完即用会直接撞 `BINARY_NOT_FOUND`，且该分类 `retryable: false`，新用户第一条任务就死且无从下手。修：示例 plist 补 `RUNNER_PATH` 并在 quickstart 里写明"用 `which claude` 的结果所在目录填进去"；另可在 runner 启动预检里对 `binaries` 做一次 `which`，缺失时明确报「CLI 不在 RUNNER_PATH 上」而不是等第一个 run 失败。**2026-08-16 实测**：本机 6 个 plist 的 `RUNNER_PATH` 同样缺 `~/.local/bin`，导致 agent 读得到 `~/.claude/skills/ego-browser` 技能却跑不了它的二进制，只能自己用 CDP 驱动 headless Chrome 顶上（已现场补齐并重载 runner）。
 
 ## Files / 平台缺陷（Files 批次评审产出，2026-08-16）
 
