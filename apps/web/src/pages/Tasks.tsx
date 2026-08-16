@@ -10,6 +10,9 @@ import { IconPlus, IconRobot } from "../components/icons";
 import {
   Card, EmptyState, ErrorNotice, Field, FullPanel, Pill, RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 
 const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
   { status: "TODO", label: "Todo" },
@@ -54,8 +57,8 @@ const TaskCard = ({ task, onDelete, onRetry }: {
       onDragStart={(event) => event.dataTransfer.setData("text/plain", task.id)}
       onClick={() => navigate(`/tasks/${task.id}`)}
     >
-      <div className="row" style={{ alignItems: "flex-start" }}>
-        <h3 style={{ flex: 1 }}>{task.name}</h3>
+      <div className="row items-start">
+        <h3 className="flex-1">{task.name}</h3>
         <RowMenu items={[
           ...(retryable(task) ? [{ label: "Retry", onSelect: () => onRetry(task) }] : []),
           { label: "Delete", danger: true, onSelect: () => onDelete(task) },
@@ -68,12 +71,12 @@ const TaskCard = ({ task, onDelete, onRetry }: {
           {task.templateId ? <Pill tone="violet">Template</Pill> : null}
         </div>
         <div className="metaRow">{runLabel(task)}</div>
-        {task.failureReason === null ? null : <div className="metaRow" style={{ color: "var(--red-fg)" }}>{task.failureReason}</div>}
+        {task.failureReason === null ? null : <div className="metaRow text-[var(--destructive-fg)]">{task.failureReason}</div>}
       </div>
       <div className="foot">
-        <span className="row nowrap" style={{ gap: 6, minWidth: 0, overflow: "hidden" }}>
+        <span className="row nowrap min-w-0 gap-1.5 overflow-hidden">
           <IconRobot />
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{task.assigneeAgent?.title ?? "Unassigned"}</span>
+          <span className="overflow-hidden text-ellipsis">{task.assigneeAgent?.title ?? "Unassigned"}</span>
         </span>
         <span className="spacer" />
         {run?.session?.costUsd ? <span className="nowrap">{money(run.session.costUsd)}</span> : null}
@@ -132,10 +135,10 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
 
   return (
     <FullPanel title="New Task" onClose={onClose} actions={
-      <button type="button" className="btn primary" disabled={pending || (mode === "blank" ? form.name.trim() === "" : template === null)}
+      <Button type="button" className="btn primary" disabled={pending || (mode === "blank" ? form.name.trim() === "" : template === null)}
         onClick={() => void (mode === "blank" ? createBlank() : createFromTemplate())}>
         Create
-      </button>
+      </Button>
     }>
       <Tabs value={mode} onChange={setMode} options={[{ value: "blank", label: "Blank task" }, { value: "template", label: "From template" }]} />
       {error === null ? null : <ErrorNotice message={error} />}
@@ -143,9 +146,9 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
       {mode === "blank" ? (
         <Card title="Task">
           <div className="stack">
-            <Field label="Title"><input type="text" value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Implement feat/inbox-search" /></Field>
+            <Field label="Title"><Input value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Implement feat/inbox-search" /></Field>
             <Field label="Prompt" hint="Handed to the agent verbatim together with its foundation and role prompt.">
-              <textarea rows={10} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
+              <Textarea rows={10} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
             </Field>
             <div className="fieldRow">
               <Field label="Assignee type">
@@ -169,7 +172,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                 </select>
               </Field>
               <Field label="Target branch" hint="Empty falls back to the repo default branch.">
-                <input type="text" value={form.targetBranch} onChange={(event) => setForm({ ...form, targetBranch: event.target.value })} placeholder="feat/…" />
+                <Input value={form.targetBranch} onChange={(event) => setForm({ ...form, targetBranch: event.target.value })} placeholder="feat/…" />
               </Field>
             </div>
             <div className="row">
@@ -181,13 +184,13 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
             </div>
             <div className="fieldRow">
               <Field label="Wall-clock limit (minutes)" hint="The run is killed and the task moves to review after this many minutes.">
-                <input type="number" min={1} value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: Number(event.target.value) })} />
+                <Input type="number" min={1} value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: Number(event.target.value) })} />
               </Field>
               <Field label="Stall timeout (minutes)" hint="No new tool call for this long counts as dead.">
-                <input type="number" min={1} value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: Number(event.target.value) })} />
+                <Input type="number" min={1} value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: Number(event.target.value) })} />
               </Field>
               <Field label="Max runs per task" hint="Retries stop here and the Inbox gets an operator message.">
-                <input type="number" min={1} value={form.maxSessionsPerTask} onChange={(event) => setForm({ ...form, maxSessionsPerTask: Number(event.target.value) })} />
+                <Input type="number" min={1} value={form.maxSessionsPerTask} onChange={(event) => setForm({ ...form, maxSessionsPerTask: Number(event.target.value) })} />
               </Field>
             </div>
           </div>
@@ -212,7 +215,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                 </Field>
                 {(template?.variables ?? []).map((variable) => (
                   <Field key={variable} label={variable}>
-                    <input type="text" value={variables[variable] ?? ""}
+                    <Input value={variables[variable] ?? ""}
                       onChange={(event) => setVariables({ ...variables, [variable]: event.target.value })}
                       placeholder={/branch/i.test(variable) ? "feat/…" : ""} />
                   </Field>
@@ -264,20 +267,20 @@ export const TasksPage = (): ReactNode => {
   if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="pageHead">
         <div className="titles">
           <h1>Tasks</h1>
           <div className="subtitle">Work queued for agents in {project?.name ?? "this project"}</div>
         </div>
         <div className="pageActions">
-          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />Create Task</button>
+          <Button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />Create Task</Button>
         </div>
       </div>
 
       <Segmented options={[{ value: "board", label: "Tasks" }]} value="board" onChange={() => undefined} />
 
-      <div className="stack" style={{ marginTop: 16 }}>
+      <div className="stack mt-4">
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
 
