@@ -5,6 +5,8 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] },
     "noEmit": true,
     "declaration": false,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
@@ -12,4 +14,3 @@
   },
   "include": ["src"]
 }
-
