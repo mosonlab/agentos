@@ -1,7 +1,10 @@
 /** Wire shapes as serialised by the control plane (packages/db/prisma/schema.prisma).
  *  Decimal columns arrive as strings, DateTime as ISO strings. */
 
-export type TaskStatus = "TODO" | "DOING" | "REVIEW" | "DONE";
+export type TaskStatus = "BACKLOG" | "TODO" | "DOING" | "REVIEW" | "DONE";
+/** How a task came to exist. A recurring definition stays MANUAL; only its
+ *  fired copies are CRON. */
+export type TaskSource = "MANUAL" | "CRON" | "WEBHOOK";
 export type AssigneeType = "AGENT" | "HUMAN";
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 export type RunnerPreference = RunnerKind | "AUTO" | "INHERIT";
@@ -238,6 +241,11 @@ export type Task = {
   assigneeType: AssigneeType;
   approvalGate: boolean;
   scheduleKind: "NOW" | "AT" | "CRON";
+  // The scheduler's own columns. `runAt === null` on a live CRON definition is
+  // the quarantine marker, not an absence — see lib/schedule.ts.
+  runAt: string | null;
+  cron: string | null;
+  timezone: string | null;
   maxDurationMin: number;
   stallTimeoutMin: number;
   maxSessionsPerTask: number;
@@ -246,6 +254,112 @@ export type Task = {
   assigneeAgent: Agent | null;
   repo: Repo | null;
   runs: Run[];
+  chainId: string | null;
+  chainIndex: number | null;
+  source: TaskSource;
+  archivedAt: string | null;
+  schedulePausedAt: string | null;
+  recurringSourceTaskId: string | null;
+  templateStep: { name: string } | null;
+  /** Assembled by the API, never recomputed here: a second implementation could
+   *  disagree with the board's own numbers. Null when the task is not in a chain. */
+  chainProgress: ChainProgress | null;
+  /** Present only on recurring definitions, so a collapsed Automations row can
+   *  render `Last run` without opening a second poll per row. */
+  recurringLastFiredAt: string | null;
+  recurringFireCount: number;
+};
+
+export type ChainProgress = {
+  chainId: string;
+  done: number;
+  total: number;
+  activeStepName: string;
+  activeStatus: string;
+};
+
+export type ChainStep = {
+  taskId: string;
+  position: number;
+  chainIndex: number | null;
+  name: string;
+  stepName: string;
+  status: TaskStatus;
+  approvalGate: boolean;
+  assigneeType: AssigneeType;
+  agent: { id: string; title: string } | null;
+  archivedAt: string | null;
+  failureReason: string | null;
+  latestRun: { id: string; status: RunStatus; runNumber: number } | null;
+  /** The API's own answer, not a second derivation: the button's enabled state
+   *  and the route's guard must not be able to disagree. */
+  startable: boolean;
+};
+
+export type Chain = {
+  chainId: string | null;
+  total: number;
+  done: number;
+  steps: ChainStep[];
+};
+
+/** A webhook-configured template. `repo` is nullable: a trigger is defined by
+ *  its secret, so one without a repository is listed and un-fireable rather
+ *  than hidden. */
+export type Trigger = {
+  id: string;
+  name: string;
+  description: string;
+  repo: { id: string; name: string } | null;
+  stepCount: number;
+  paused: boolean;
+  secretDisabled: boolean;
+  lastFiredAt: string | null;
+  fireCount: number;
+};
+
+export type TriggerDetail = {
+  id: string;
+  name: string;
+  description: string;
+  projectId: string;
+  endpointPath: string;
+  secretName: string | null;
+  secretDisabled: boolean;
+  repo: { id: string; name: string } | null;
+  variables: string[];
+  mapping: Record<string, string>;
+  defaults: Record<string, unknown>;
+  replayWindowSec: number | null;
+  paused: boolean;
+  stepCount: number;
+  fireCount: number;
+  lastFiredAt: string | null;
+  canFire: boolean;
+  cannotFireReason: string | null;
+};
+
+export type TriggerFire = {
+  id: string;
+  createdAt: string;
+  source: "WEBHOOK" | "MANUAL";
+  chainId: string | null;
+  firstTask: { id: string; name: string } | null;
+  progress: ChainProgress | null;
+};
+
+/** One fired copy of a recurring definition, newest first. */
+export type RecurringFire = {
+  taskId: string;
+  name: string;
+  createdAt: string;
+  status: TaskStatus;
+  latestRun: {
+    id: string;
+    status: RunStatus;
+    runNumber: number;
+    session: { id: string; costUsd: string | null } | null;
+  } | null;
 };
 
 export type TaskActivity = {

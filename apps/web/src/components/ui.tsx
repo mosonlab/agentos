@@ -114,7 +114,7 @@ export const Pill = ({ tone, children }: { tone: PillTone; children: ReactNode }
 
 /** Status semantics follow ui-notes §0: green = succeeded, amber = a human or a
  *  runner is still owed something, red = danger, grey = inert. */
-const taskTones: Record<TaskStatus, PillTone> = { TODO: "grey", DOING: "amber", REVIEW: "accent", DONE: "green" };
+const taskTones: Record<TaskStatus, PillTone> = { BACKLOG: "grey", TODO: "grey", DOING: "amber", REVIEW: "accent", DONE: "green" };
 const runTones: Record<RunStatus, PillTone> = {
   QUEUED: "grey", CLAIMED: "amber", PROVISIONING: "amber", RUNNING: "amber", WAITING_INBOX: "accent",
   SUCCEEDED: "green", FAILED: "red", TIMED_OUT: "red", CANCELLED: "grey", LOST: "red",
@@ -344,6 +344,21 @@ export const ErrorNotice = ({ message, onRetry }: { message: ReactNode; onRetry?
         {/* `shadow-none`: `.btn small` on a bare <button> never picked up the
             primitive's shadow, and R-1 keeps the appearance identical. */}
         <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onRetry}>Retry</Button>
+      </>
+    ) : null}
+  </div>
+);
+
+/** The only surface in the app that can say something *succeeded*. Built from
+ *  the same `NOTICE` base as `GapNotice`, with no tone override, so a neutral
+ *  result never borrows the amber or destructive palette. */
+export const InfoNotice = ({ message, onDismiss }: { message: ReactNode; onDismiss?: () => void }): ReactNode => (
+  <div className={cn(NOTICE)}>
+    {typeof message === "string" ? <span>{message}</span> : message}
+    {onDismiss ? (
+      <>
+        <span className="flex-1" />
+        <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onDismiss}>Dismiss</Button>
       </>
     ) : null}
   </div>
