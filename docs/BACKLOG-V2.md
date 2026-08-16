@@ -4,6 +4,8 @@
 
 状态标记：`[ ]` 未开始 · `[~]` 进行中 · `[x]` 完成
 
+细节层差距全量清单（179 条判定：✅61/🟡70/❌41/🚫7）：`docs/reference/danny-agentos-video/detail-gaps.md`（2026-08-16 扫描）——本文件只吸收其前 10 条高价值项，其余以该文件为准逐批次消化。
+
 ## 批次 0 — 前端底座迁移
 
 - [ ] 引入 Tailwind v4 + shadcn/ui，现有 ~45 个 CSS 变量色值映射为自定义主题（明暗双主题令牌）
@@ -17,6 +19,8 @@
 - [ ] 侧栏底部 Runner 在线状态（heartbeat 已有）+ Inbox 未读徽标
 - [ ] Agents 页：claude/codex 模型下拉 + 推理等级下拉（字段已有，纯 UI）；完成后 Leo 复核各 agent 模型
 - [ ] 模型选择联动 runnerPreference（选 gpt 系自动落 CODEX、claude 系落 CLAUDE），消灭 model/runner 错配——来自 2026-08-16 评审 run model_not_found 事故
+- [ ] Runner 状态浮层补字段：名称/Busy/heartbeat/daemon 版本/CLI 版本/磁盘剩余（detail-gaps #6）
+- [ ] Agents 页逐项工具开关（Bash/Read/Write/Edit/…）→ 落到 CLI 原生 --allowedTools：真执行、低成本，不属 §13 裁掉的沙箱范畴（detail-gaps 建议重审项，本窗裁：做）
 
 ## 批次 2 — Tasks 收尾三件套（第 2 项）
 
@@ -25,12 +29,16 @@
 - [ ] 任务完成/批准自动将 chainIndex+1 置 TODO（链式推进）
 - [ ] 闸门消息标注链条上下文（第几步/后续还有什么/是否有并行评审在跑）——来自 2026-08-16 首次真实使用的困惑反馈
 - [ ] 顺手删死模型：Trigger / Automation / InboxConnectionWindow（migration）
+- [ ] 链条可见性：任务详情显示整条链各步状态；看板卡片标 `n/m 步`+当前活跃步名（detail-gaps #4——现在链条跑到哪一步页面上完全不可见）
+- [ ] 触发器管理 UI：cron/webhook 列表、Fire now、Recent fires、webhook replay window 防重放（detail-gaps #3；依赖本批后端，UI 可顺延到批次 4 窗口）
+- [ ] 看板补齐：Backlog 列、Archive All、Archived 视图、任务来源徽标（cron/webhook/手动）（detail-gaps #8）
 
 ## 批次 3 — Inbox 结构化问卷重构（第 11 项）
 
 - [ ] schema 重写：`form.questions[]` / `answers` JSON（决议 §7），废 kind/choices/selectedChoiceId，一次性迁移脚本
 - [ ] 前端分页渲染 + 进度 + Back/Next + Recommended + Other（接 SurveyJS 渲染层）
 - [ ] 飞书卡片适配新结构，硬编码中文文案英文化
+- [ ] Inbox 正文 Markdown 渲染（含表格）+ Archive all + "阻塞中"提示条（detail-gaps #5）
 
 ## 批次 4 — Sessions 会话查看器（第 1 项；2026-08-16 Leo 裁：**提前**，批次 0 合并后与批次 1 并行首发——dogfood 最大痛点是"看不懂 agent 在干嘛"）
 
@@ -47,12 +55,16 @@
 - [ ] Phase-gating 硬规则（plan → plan review → implementation）
 - [ ] 护栏：最大迭代、预算上限、零进展熔断（判定参考 pi-goal：逐条证据、弱证据=继续、3 轮无进展）
 - [ ] UI：DoD 清单（生成→确认→自动打勾）+ Orchestrator 事件流 + 迭代/预算显示
+- [ ] Goal 生命周期通知：ready-for-approval / complete 两条 Inbox 系统消息，含 DoD 计数与总花费（detail-gaps #1）
+- [ ] Goal 运行控制面：Nudge / Pause（后端已有）/ Restart session / Adjust limits / Cancel（detail-gaps #2）
+- [ ] DoD 产出结构规范 + waived 三态语义（护栏"弱证据=继续"的出口）（detail-gaps #7）
+- [ ] Agents 页 System Agents 分区 + draft/published/archived 三态（与修缮清单 agent 软下线合并实现）（detail-gaps #10）
 
 ## 长尾（依赖松紧穿插）
 
-- [ ] Templates（第 4 项）：{{var}} 展开 + From template 弹窗预览 + 种子模板 = 轻链（5 步）/ 重链（7 步）两条（定义见 decisions.md §12）
+- [ ] Templates（第 4 项）：{{var}} 展开 + From template 弹窗预览 + 种子模板 = 单链九步一条，小任务靠模板跳步（decisions §12 终版；2026-08-16 细节扫描纠正旧的轻/重链残留）
 - [ ] Skills 页（第 7 项）：列表 + @uiw/react-md-editor + 发布状态；附件后置
-- [ ] Files + 路径落地（第 3 项）：`~/.agentos/` + `~/Documents/agentos/` 迁移、删 AGENTOS_FILES_ROOT、存储薄接口（本地盘实现）、SVAR UI、FilesystemGrant+inside() 权限、FileObject 重设计
+- [ ] Files + 路径落地（第 3 项）：`~/.agentos/` + `~/Documents/agentos/` 迁移、删 AGENTOS_FILES_ROOT、存储薄接口（本地盘实现）、SVAR UI、FilesystemGrant+inside() 权限、FileObject 重设计、根目录约定（specs/plans/reviews/goals/）+ 文件创建者 agent 溯源 + 未保存离开确认（detail-gaps #9）
 - [ ] Activity 流（第 6 项）：/activity 聚合时间线（shadcn Timeline，轮询）
 - [ ] Env/Repos CRUD（第 9 项）
 - [ ] Connections 整页重写（第 10 项）：编辑表单 + 作用域标签；Last verified/Profile 后置
