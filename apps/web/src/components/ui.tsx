@@ -303,6 +303,13 @@ export const ErrorNotice = ({ message, onRetry }: { message: string; onRetry?: (
   </div>
 );
 
+/** The message card is shared by the Inbox thread and the Goals progress log.
+ *  `.msgCard + .msgCard`'s 12px is applied per call site, because in the progress
+ *  log the first card follows a form rather than another card. */
+export const MSG_CARD = "rounded-xl border border-border bg-card px-[18px] py-[14px]";
+export const MSG_HEAD = "mb-[10px] flex items-center gap-[8px] text-[12.5px] text-secondary-foreground";
+export const MSG_TIME = "ml-auto text-[11.5px] text-[color:var(--faint)]";
+
 export const LONG_TEXT = "text-[12.5px] leading-[1.75] whitespace-pre-wrap text-secondary-foreground [overflow-wrap:anywhere]";
 
 export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }): ReactNode => {

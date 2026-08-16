@@ -9,8 +9,8 @@ import { cn } from "../lib/utils";
 import type { Agent, InboxMessage } from "../lib/types";
 import { IconArrowLeft, IconQuestion, IconRobot, IconUser } from "../components/icons";
 import {
-  BACK_LINK, DETAIL_HEAD, LONG_TEXT, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE,
-  PAGE_HEAD_TITLES, ROW, ROW_WRAP, STACK, STAT_PILL, TOOLBAR,
+  BACK_LINK, DETAIL_HEAD, LONG_TEXT, MSG_CARD, MSG_HEAD, MSG_TIME, PAGE_HEAD, PAGE_HEAD_H1,
+  PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, ROW_WRAP, STACK, STAT_PILL, TOOLBAR,
   Card, EmptyState, ErrorNotice, InboxPill, Markdown, Page, Pill, Segmented,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
@@ -25,10 +25,8 @@ const LIST = "grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 const INBOX_ITEM = "flex w-full cursor-pointer gap-[14px] rounded-xl border border-border bg-card px-[16px] py-[13px] text-left hover:border-[color:var(--border-hover)]";
 const CHOICE = "flex w-full items-start gap-[11px] rounded-lg border border-border bg-secondary px-[14px] py-[12px] text-left text-foreground hover:border-[color:var(--primary-soft)]";
 
-const MSG_CARD = "rounded-xl border border-border bg-card px-[18px] py-[14px]";
-const MSG_HEAD = "mb-[10px] flex items-center gap-[8px] text-[12.5px] text-secondary-foreground";
-const MSG_TIME = "ml-auto text-[11.5px] text-[color:var(--faint)]";
-/** `.msgCard + .msgCard { margin-top: 12px }` — every card but the first. */
+/** `.msgCard + .msgCard { margin-top: 12px }` — every card but the first; here
+ *  every child of the container is a card, so the sibling combinator is exact. */
 const MSG_LIST = "[&>*+*]:mt-[12px]";
 
 const useAgentNames = (): Map<string, string> => {
