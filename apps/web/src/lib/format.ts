@@ -51,6 +51,28 @@ export const restLines = (body: string): string => {
 
 export const initial = (value: string): string => (value.trim()[0] ?? "?").toUpperCase();
 
+/** Token counts, shortened for a stat pill. `null` means the runner never
+ *  reported usage — never `0`, which would read as "this run spent nothing". */
+export const compactTokens = (value: number | null | undefined): string => {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  const short = (divided: number, suffix: string): string =>
+    `${divided.toFixed(1).replace(/\.0$/, "")}${suffix}`;
+  if (Math.abs(value) >= 1_000_000) return short(value / 1_000_000, "M");
+  if (Math.abs(value) >= 1_000) return short(value / 1_000, "K");
+  return String(value);
+};
+
+/** A repo remote as a browsable GitHub URL, or `null` when it is anything else.
+ *  No other forge is recognised: a wrong guess would render a broken link. */
+export const repoWebUrl = (remoteUrl: string | null | undefined): string | null => {
+  if (!remoteUrl) return null;
+  const https = /^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(remoteUrl);
+  if (https) return `https://github.com/${https[1]}/${https[2]}`;
+  const ssh = /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(remoteUrl);
+  if (ssh) return `https://github.com/${ssh[1]}/${ssh[2]}`;
+  return null;
+};
+
 export const compact = (value: unknown, max = 160): string => {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
   return text.length > max ? `${text.slice(0, max)}…` : text;

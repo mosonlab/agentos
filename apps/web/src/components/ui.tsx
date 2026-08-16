@@ -412,19 +412,41 @@ const MD_PARAGRAPH = "mb-[10px] [overflow-wrap:anywhere]";
  *  `@layer base`, and a utility outranks a base rule by layer order. */
 const MD_LIST = "mb-[10px] pl-[22px]";
 
+const MD_FENCE_LANGUAGE = "mb-[4px] text-[11px] text-[color:var(--faint)]";
+const MD_LINK_PARTS = /^\[([^\]]*)\]\(([^)\s]*)\)$/;
+
 const inline = (text: string, keyPrefix: string): ReactNode[] =>
-  text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter((part) => part.length > 0).map((part, index) => {
+  text.split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]*\]\([^)\s]*\))/g).filter((part) => part.length > 0).map((part, index) => {
     const key = `${keyPrefix}-${index}`;
     if (part.startsWith("**") && part.endsWith("**")) return <strong key={key} className="text-foreground">{part.slice(2, -2)}</strong>;
     if (part.startsWith("`") && part.endsWith("`")) return <code key={key} className={MD_CODE}>{part.slice(1, -1)}</code>;
+    const link = MD_LINK_PARTS.exec(part);
+    // Only http/https becomes an anchor; `javascript:` and every other scheme
+    // renders as its literal source text rather than a clickable payload.
+    if (link && /^https?:\/\//i.test(link[2] ?? "")) {
+      return <a key={key} href={link[2]} target="_blank" rel="noreferrer" className="text-primary hover:underline">{link[1]}</a>;
+    }
     return <span key={key}>{part}</span>;
   });
 
-/** Agents write markdown into inbox bodies and progress logs; this covers the
- *  subset seen in the reference screenshots (headings, lists, bold, code). */
+/** Agents write markdown into inbox bodies, progress logs and step outputs; this
+ *  covers the subset seen in the reference screenshots (headings, lists, bold,
+ *  code) plus fenced code blocks and http/https links. Tables stay unsupported. */
 export const Markdown = ({ text }: { text: string }): ReactNode => {
   const blocks: ReactNode[] = [];
   let list: { ordered: boolean; items: string[] } | null = null;
+  let fence: { language: string; lines: string[] } | null = null;
+  const flushFence = (): void => {
+    if (!fence) return;
+    const { language, lines } = fence;
+    blocks.push(
+      <div key={`b${blocks.length}`} className="mb-[10px]">
+        {language.length > 0 ? <div className={MD_FENCE_LANGUAGE}>{language}</div> : null}
+        <div className={CODE_BLOCK}>{lines.join("\n")}</div>
+      </div>,
+    );
+    fence = null;
+  };
   const flush = (): void => {
     if (!list) return;
     const { ordered, items } = list;
@@ -434,6 +456,14 @@ export const Markdown = ({ text }: { text: string }): ReactNode => {
     list = null;
   };
   for (const line of text.split("\n")) {
+    const fenceMarker = /^\s*```(\w*)\s*$/.exec(line);
+    if (fenceMarker) {
+      if (fence) flushFence();
+      else { flush(); fence = { language: fenceMarker[1] ?? "", lines: [] }; }
+      continue;
+    }
+    // Inside a fence nothing is markdown: no bullets, no headings, no inline.
+    if (fence) { fence.lines.push(line); continue; }
     const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
     const ordered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
     const heading = /^#{1,6}\s+(.*)$/.exec(line);
@@ -452,6 +482,9 @@ export const Markdown = ({ text }: { text: string }): ReactNode => {
     else if (line.trim().length > 0) blocks.push(<p key={`b${blocks.length}`} className={MD_PARAGRAPH}>{inline(line, `p${blocks.length}`)}</p>);
   }
   flush();
+  // An unterminated fence still renders what it collected, rather than dropping
+  // the tail of a truncated agent message.
+  flushFence();
   return <div className="text-[12.5px] leading-[1.75] text-secondary-foreground [&>*:last-child]:mb-0">{blocks}</div>;
 };
 
