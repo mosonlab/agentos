@@ -44,6 +44,21 @@ export const DETAIL_HEAD_H1 = "text-[20px]";
 export const BACK_LINK = "inline-flex items-center gap-[8px] text-[12.5px] text-muted-foreground hover:text-foreground";
 export const TOOLBAR = "mb-[16px] flex items-center gap-[10px]";
 
+/** `.fieldRow` — `align-items: start` keeps a hint-less control from stretching to
+ *  the height of a neighbour that carries a hint line. */
+export const FIELD_ROW = "grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] items-start gap-[14px]";
+
+/** The status dot and its tones, as a lookup rather than a built class string
+ *  (plan B13). `.dot.on` carries a glow; `.dot.green` deliberately does not. */
+export const DOT = "size-[7px] rounded-full bg-[color:var(--faint)]";
+export const DOT_TONE = {
+  on: "bg-[color:var(--status-green-fg)] shadow-[0_0_8px_color-mix(in_srgb,var(--status-green-fg)_55%,transparent)]",
+  off: "bg-destructive",
+  green: "bg-[color:var(--status-green-fg)]",
+  amber: "bg-[color:var(--status-amber-fg)]",
+  red: "bg-[color:var(--destructive-fg)]",
+} as const;
+
 export const CARD_TITLE = "mb-[14px] flex items-center gap-[9px] text-[13.5px]";
 export const COUNT = "inline-grid h-[19px] min-w-[20px] place-items-center rounded-md bg-accent px-[6px] text-[11.5px] text-muted-foreground";
 export const HINT = "text-[11.5px] leading-[1.5] text-[color:var(--faint)]";

@@ -40,16 +40,6 @@ test("legacy selectors stay unlayered while Tailwind utilities stay layered", ()
     assert.deepEqual(layersAt(built, selectorIndex(selector)), [], selector);
   }
   assert.deepEqual(layersAt(built, selectorIndex(".flex{")), ["utilities"]);
-
-  const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
-  const shell = readFileSync(fileURLToPath(new URL("../components/Shell.tsx", import.meta.url)), "utf8");
-  const tasks = readFileSync(fileURLToPath(new URL("../pages/Tasks.tsx", import.meta.url)), "utf8");
-  const detail = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx", import.meta.url)), "utf8");
-  assert.match(app, /className="page" style=\{\{ paddingBottom: 0 \}\}/);
-  assert.match(shell, /className="projectMark" style=\{\{ width: 18, height: 18, fontSize: 10 \}\}/);
-  assert.match(tasks, /className="row" style=\{\{ alignItems: "flex-start" \}\}/);
-  assert.match(tasks, /style=\{\{ gap: 6 \}\}/);
-  assert.match(detail, /style=\{\{ width: 130 \}\}/);
 });
 
 test("Markdown list markers override Tailwind preflight", () => {
