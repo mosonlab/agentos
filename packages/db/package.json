@@ -18,6 +18,7 @@
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "db:drift-check": "node scripts/check-drift.mjs",
     "db:files-precheck": "dotenv -e ../../.env -- tsx prisma/precheck-files.ts",
+    "db:backfill-session-usage": "dotenv -e ../../.env -- tsx prisma/backfill-session-usage.ts",
     "db:validate": "dotenv -e ../../.env -- prisma validate",
     "db:seed": "dotenv -e ../../.env -- prisma db seed",
     "db:fixture": "dotenv -e ../../.env -- tsx prisma/acceptance-fixture.ts"

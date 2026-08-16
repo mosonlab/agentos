@@ -29,6 +29,12 @@ checked against `agents-toggle-*.png`.
 R-3 asks for 18; this is 20, because both targeted shots were taken in **both** themes rather than
 only in the comparison theme. Nothing was skipped.
 
+**Batch 4 addendum.** The harness now also serves `/sessions` and `/sessions/:id` (and its run
+fixtures carry a `session` with the token columns), and `shoot.mjs` captures `sessions-{light,dark}`
+and `sessiondetail-{light,dark}`. Those four frames have **no baseline counterpart** — the pages did
+not exist at `82b1de5` — so they are not part of the W16/E5 pairwise comparison. They exist so the
+batch's headline page is inside the visual-regression tool rather than outside it.
+
 ## Reproducing them (W16/E5 re-shoots the identical frames)
 
 `harness/` is committed for exactly that reason — E5 requires a pairwise comparison at the same

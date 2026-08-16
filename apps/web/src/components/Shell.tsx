@@ -15,12 +15,13 @@ import {
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
   IconActivity, IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
-  IconProjects, IconSecrets, IconTasks,
+  IconProjects, IconSecrets, IconSessions, IconTasks,
 } from "./icons";
 
 const NAV: Array<{ to: string; label: string; icon: ReactNode; match: string[] }> = [
   { to: "/inbox", label: "Inbox", icon: <IconInbox />, match: ["/inbox"] },
   { to: "/tasks", label: "Tasks", icon: <IconTasks />, match: ["/tasks"] },
+  { to: "/sessions", label: "Sessions", icon: <IconSessions />, match: ["/sessions"] },
   { to: "/goals", label: "Goals", icon: <IconGoals />, match: ["/goals"] },
   { to: "/agents", label: "Agents", icon: <IconAgents />, match: ["/agents"] },
   { to: "/projects", label: "Projects", icon: <IconProjects />, match: ["/projects", "/"] },

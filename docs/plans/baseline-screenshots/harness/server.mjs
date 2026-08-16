@@ -72,7 +72,20 @@ const mkRun = (id, taskId, n, status, extra = {}) => ({
   maxDurationMin: 240, stallTimeoutMin: 10, maxRunsPerTask: 5,
   failureClass: null, failureReason: null, retryable: null, retryAt: null, terminationReason: null,
   queuedAt: iso(400), claimedAt: iso(398), startedAt: iso(397), endedAt: status === "RUNNING" ? null : iso(120),
-  session: { id: `ses_${id}`, runId: id, agentId: "agt_frontend", runner: "CLAUDE", executionStatus: status === "RUNNING" ? "RUNNING" : "SUCCEEDED", cleanupStatus: "DONE", providerConversationId: "conv_1", waitingOnMessageId: null, resumeAttempt: 0, startedAt: iso(397), endedAt: status === "RUNNING" ? null : iso(120), exitCode: status === "RUNNING" ? null : 0, costUsd: "1.42", failureReason: null },
+  session: {
+    id: `ses_${id}`, runId: id, projectId: project.id, taskId, goalId: null,
+    agentId: "agt_frontend", runner: "CLAUDE",
+    executionStatus: status === "RUNNING" ? "RUNNING" : "SUCCEEDED", cleanupStatus: "DONE",
+    providerConversationId: "conv_1", waitingOnMessageId: null, resumeAttempt: 0,
+    requestedAt: iso(399), startedAt: iso(397), endedAt: status === "RUNNING" ? null : iso(120),
+    terminationReason: null, exitCode: status === "RUNNING" ? null : 0, costUsd: "1.42",
+    // Null while the run is live: usage lands with FINAL_OUTPUT, so the Tokens
+    // column shows both a real count and the `—` that means "never reported".
+    ...(status === "RUNNING"
+      ? { inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null }
+      : { inputTokens: 4_820, outputTokens: 48_010, cachedInputTokens: 1_204_880, totalTokens: 52_830 }),
+    failureReason: null,
+  },
   ...extra,
 });
 
@@ -188,13 +201,58 @@ const activity = [
 
 const output = { id: "out_impl", taskId: "tsk_impl", runId: "run_impl", kind: "result", body: "# Result\n\nSection A landed.\n\n1. `buttonVariants` gained four legacy variants\n2. `input`/`textarea` carry the legacy geometry\n\nSee `docs/plans/legacy-class-check.sh` for the acceptance sweep.", createdAt: iso(120), updatedAt: iso(110) };
 
-const events = Array.from({ length: 14 }, (_, index) => ({
+// The real event vocabulary and the real CLAUDE payload shapes, so `normalize`
+// (web/src/lib/session-stream.ts) actually produces a stream. The pre-batch
+// fixtures used invented type names, which the raw Debug table rendered happily
+// but the message stream normalizes to nothing — a session frame with an empty
+// stream would document the wrong thing.
+const mkEvent = (index, type, payload, toolCallId = null, source = "CLAUDE") => ({
   id: `evt_${index}`, sessionId: "ses_run_impl", runId: "run_impl", seq: index + 1,
-  at: iso(400 - index * 12), source: index % 3 === 0 ? "system" : "assistant",
-  type: ["session.started", "tool.bash", "tool.read", "assistant.message", "tool.edit"][index % 5],
-  toolCallId: index % 2 === 0 ? `call_${index}` : null,
-  payload: { summary: `npm run build -w @agentos/web (step ${index + 1})`, ok: true },
-}));
+  at: iso(400 - index * 12), source, type, toolCallId, payload,
+});
+
+const events = [
+  mkEvent(0, "PROCESS_STARTED", { pid: 40_112 }, null, "RUNNER"),
+  mkEvent(1, "MODEL_DELTA", { message: { content: [{ type: "text", text: "Reading the plan, then starting Section A.\n\nThe four legacy `buttonVariants` land first: they are what every other section links against." }] } }),
+  mkEvent(2, "TOOL_STARTED", { id: "call_read", name: "Read", input: { file_path: "/Users/leohe/repo/apps/web/src/components/ui/button.tsx" } }, "call_read"),
+  mkEvent(3, "TOOL_COMPLETED", { tool_use_id: "call_read", content: "export const buttonVariants = cva(…)  // 84 lines" }, "call_read"),
+  mkEvent(4, "MODEL_DELTA", { message: { content: [{ type: "text", text: "`buttonVariants` already carries the shape. Adding the legacy variants:\n\n```ts\nlegacy: \"h-[26px] rounded-[5px] px-[9px] text-[12px]\",\n```\n\nSee the [plan](https://github.com/mosonlab/agentos/blob/main/docs/plans/batch-frontend-convergence-plan.md) for the full table." }] } }),
+  mkEvent(5, "TOOL_STARTED", { id: "call_edit", name: "Edit", input: { file_path: "/Users/leohe/repo/apps/web/src/components/ui/button.tsx" } }, "call_edit"),
+  mkEvent(6, "TOOL_COMPLETED", { tool_use_id: "call_edit", content: "Applied 1 edit." }, "call_edit"),
+  mkEvent(7, "TOOL_STARTED", { id: "call_build", name: "Bash", input: { command: "npm run build -w @agentos/web" } }, "call_build"),
+  mkEvent(8, "TOOL_COMPLETED", { tool_use_id: "call_build", content: "dist/assets/index-BhXLlOrV.css  43.55 kB\n✓ built in 1.74s" }, "call_build"),
+  mkEvent(9, "TOOL_STARTED", { id: "call_test", name: "Bash", input: { command: "npm test -w @agentos/web" } }, "call_test"),
+  // An error state, so the frame carries the red tool row too.
+  mkEvent(10, "TOOL_COMPLETED", { tool_use_id: "call_test", content: "styles.test.tsx: 1 failing — read dist before build", is_error: true }, "call_test"),
+  mkEvent(11, "PROVIDER_RAW", { line: "{\"type\":\"assistant\"}" }),
+  // Never returns: reads `running` while live, `incomplete` once terminal.
+  mkEvent(12, "TOOL_STARTED", { id: "call_open", name: "Edit", input: { file_path: "/Users/leohe/repo/apps/web/src/tests/styles.test.tsx" } }, "call_open"),
+  mkEvent(13, "FINAL_OUTPUT", {
+    type: "result", result: "Section A landed: the four legacy variants are in `buttonVariants` and the build is green.",
+    total_cost_usd: 1.42,
+    usage: { input_tokens: 4_820, output_tokens: 48_010, cache_read_input_tokens: 1_204_880, cache_creation_input_tokens: 0 },
+  }),
+];
+
+// GET /sessions and /sessions/:id return the session with its relations
+// attached (api/src/app.ts `sessionInclude`); the session nested inside a Run
+// carries none of them, so the two shapes are built separately on purpose.
+const sessions = tasks.flatMap((task) => task.runs.map((run) => ({
+  ...run.session,
+  agent: { id: run.agentId, title: agents.find((agent) => agent.id === run.agentId)?.title ?? "Agent" },
+  task: { id: task.id, name: task.name },
+  goal: null,
+  run: {
+    id: run.id, runNumber: run.runNumber, model: run.model, branch: run.branch,
+    pullRequestUrl: run.pullRequestUrl, workspacePath: run.workspacePath,
+    repo: { id: repos[0].id, name: repos[0].name, remoteUrl: repos[0].remoteUrl },
+  },
+})));
+
+// The paged envelope GET /runs/:runId/events now returns. The harness serves
+// the whole fixture in one page; the client tolerates a bare array too, but the
+// reference frames should be shot against the shape the real API returns.
+const eventEnvelope = (rows) => ({ events: rows, nextAfterSeq: rows.at(-1)?.seq ?? null, hasMore: false, total: rows.length });
 
 const health = { status: "ok", database: "reachable", checkedAt: iso(0) };
 
@@ -215,9 +273,12 @@ const routes = new Map([
   ["/tasks/tsk_impl", tasks[2]],
   ["/tasks/tsk_impl/activity", activity],
   ["/tasks/tsk_impl/output", output],
-  ["/runs/run_impl/events", events],
+  ["/runs/run_impl/events", eventEnvelope(events)],
   ["/agents/agt_frontend", agents[0]],
+  ["/sessions", sessions],
 ]);
+
+for (const session of sessions) routes.set(`/sessions/${session.id}`, session);
 
 for (const agent of agents) routes.set(`/agents/${agent.id}`, agent);
 for (const goal of goals) routes.set(`/goals/${goal.id}`, goal);
@@ -225,7 +286,7 @@ for (const task of tasks) {
   routes.set(`/tasks/${task.id}`, task);
   if (!routes.has(`/tasks/${task.id}/activity`)) routes.set(`/tasks/${task.id}/activity`, activity.map((entry) => ({ ...entry, taskId: task.id })));
   if (!routes.has(`/tasks/${task.id}/output`)) routes.set(`/tasks/${task.id}/output`, { ...output, taskId: task.id });
-  for (const run of task.runs) routes.set(`/runs/${run.id}/events`, events.map((event) => ({ ...event, runId: run.id })));
+  for (const run of task.runs) routes.set(`/runs/${run.id}/events`, eventEnvelope(events.map((event) => ({ ...event, runId: run.id, sessionId: `ses_${run.id}` }))));
 }
 
 createServer((request, response) => {

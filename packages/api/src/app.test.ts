@@ -979,3 +979,184 @@ test("archived successor errors from gate approve and reject map to named 409 re
     }
   });
 });
+
+test("GET /sessions is project-scoped, clamped, cursored, and reachable by the operator", async () => {
+  await withTokens(async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const database = {
+      session: {
+        findMany: async (args: Record<string, unknown>) => { calls.push(args); return []; },
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const get = (query: string) => app.request(`/sessions${query}`, { headers: { Authorization: "Bearer operator-unit-token" } });
+
+    // The route is one character from "/session/", which principalMayAccess
+    // denies the operator. Pin the 200 so a rename cannot silently 403.
+    const scoped = await get("?projectId=p&limit=5&before=2026-08-16T00:00:00.000Z");
+    assert.equal(scoped.status, 200);
+    const args = calls[0] as { where: { projectId: string; requestedAt: { lt: Date } }; take: number; orderBy: { requestedAt: string }; include: Record<string, unknown> };
+    assert.equal(args.where.projectId, "p");
+    assert.ok(args.where.requestedAt.lt instanceof Date);
+    assert.equal(args.take, 5);
+    assert.equal(args.orderBy.requestedAt, "desc");
+    assert.deepEqual(Object.keys(args.include).sort(), ["agent", "goal", "run", "task"]);
+    // Without remoteUrl the detail page's Branch field could never be a link.
+    const run = args.include.run as { select: { repo: { select: Record<string, boolean> } } };
+    assert.deepEqual(Object.keys(run.select.repo.select).sort(), ["id", "name", "remoteUrl"]);
+
+    await get("?limit=9999");
+    assert.equal((calls[1] as { take: number }).take, 200);
+    await get("?limit=abc");
+    assert.equal((calls[2] as { take: number }).take, 50);
+    await get("?before=not-a-date");
+    assert.equal((calls[3] as { where: Record<string, unknown> }).where.requestedAt, undefined);
+  });
+});
+
+test("GET /sessions/:sessionId 404s cleanly and carries the repo remote URL", async () => {
+  await withTokens(async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const database = {
+      session: { findUnique: async (args: Record<string, unknown>) => { calls.push(args); return null; } },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/sessions/unknown", { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Session not found" });
+    const include = (calls[0] as { include: { run: { select: { repo: { select: Record<string, boolean> } } } } }).include;
+    assert.equal(include.run.select.repo.select.remoteUrl, true);
+  });
+});
+
+test("GET /runs/:runId/events pages by seq and reports hasMore without a second count", async () => {
+  await withTokens(async () => {
+    const rows = (count: number, from: number) => Array.from({ length: count }, (_, index) => ({ id: `e${from + index}`, seq: from + index }));
+    const findManyArgs: Array<Record<string, unknown>> = [];
+    const makeApp = (returned: Array<{ seq: number }>) => createApp({
+      sessionEvent: {
+        findMany: async (args: Record<string, unknown>) => { findManyArgs.push(args); return returned; },
+        count: async () => 12,
+      },
+    } as unknown as PrismaClient);
+
+    const more = await makeApp(rows(3, 8)).request("/runs/r1/events?afterSeq=7&limit=2", { headers: { Authorization: "Bearer operator-unit-token" } });
+    const body = await more.json() as { events: Array<{ seq: number }>; hasMore: boolean; nextAfterSeq: number; total: number };
+    assert.equal(body.events.length, 2);
+    assert.equal(body.hasMore, true);
+    assert.equal(body.nextAfterSeq, 9);
+    assert.equal(body.total, 12);
+    assert.deepEqual((findManyArgs[0] as { where: { seq: { gt: number } } }).where.seq, { gt: 7 });
+    assert.equal((findManyArgs[0] as { take: number }).take, 3);
+
+    const done = await makeApp(rows(2, 8)).request("/runs/r1/events?afterSeq=7&limit=2", { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal((await done.json() as { hasMore: boolean }).hasMore, false);
+
+    await makeApp([]).request("/runs/r1/events?limit=99999", { headers: { Authorization: "Bearer operator-unit-token" } });
+    const clamped = findManyArgs.at(-1) as { take: number; where: Record<string, unknown> };
+    assert.equal(clamped.take, 2001);
+    assert.equal(clamped.where.seq, undefined);
+  });
+});
+
+/* --------------------------------- the usage recompute's ingest wiring */
+
+/** A CLAUDE terminal `result` line, trimmed to the fields `extractUsage` reads.
+ *  Values are the captured shape from `spikes/cli-capabilities/samples/`. */
+const finalOutputPayload = {
+  type: "result",
+  total_cost_usd: 0.049117,
+  usage: { input_tokens: 4, output_tokens: 77, cache_read_input_tokens: 8_700, cache_creation_input_tokens: 120 },
+};
+
+/** The stub the three wiring tests share: one live run with a session, a
+ *  `createMany` that accepts anything, and a recording `session.update`.
+ *  `onUpdate` lets a test make the derived-cache write fail. */
+const ingestDatabase = (
+  updates: Array<Record<string, unknown>>,
+  finalOutputRows: Array<{ payload: unknown }>,
+  onUpdate?: () => never,
+): PrismaClient => ({
+  run: {
+    findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
+  },
+  sessionEvent: {
+    createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
+    findMany: async () => finalOutputRows,
+  },
+  session: {
+    findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
+    update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
+  },
+} as unknown as PrismaClient);
+
+const postEvents = async (database: PrismaClient, types: string[]): Promise<Response> =>
+  createApp(database).request("/runner/runs/run-1/events", {
+    method: "POST",
+    headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "runner-1",
+      fencingToken: "1:run-1:current",
+      events: types.map((type, index) => ({
+        seq: index + 1,
+        source: "CLAUDE",
+        type,
+        payload: type === "FINAL_OUTPUT" ? finalOutputPayload : { text: "hello" },
+      })),
+    }),
+  });
+
+test("ingesting a FINAL_OUTPUT writes the derived usage columns", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "FINAL_OUTPUT"]);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 2 });
+    assert.equal(updates.length, 1);
+    const write = updates[0] as { where: { id: string }; data: Record<string, unknown> };
+    assert.equal(write.where.id, "ses-1");
+    assert.equal(write.data.inputTokens, 4);
+    assert.equal(write.data.outputTokens, 77);
+    assert.equal(write.data.cachedInputTokens, 8_820);
+    // totalTokens is input + output by definition (spec §4.6); cache is stored
+    // separately rather than folded in.
+    assert.equal(write.data.totalTokens, 81);
+    assert.equal(String(write.data.costUsd), "0.0491");
+  });
+});
+
+test("a batch with no FINAL_OUTPUT does not touch the usage columns", async () => {
+  await withTokens(async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const response = await postEvents(ingestDatabase(updates, [{ payload: finalOutputPayload }]), ["MODEL_COMPLETED", "TOOL_STARTED"]);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 2 });
+    assert.equal(updates.length, 0);
+  });
+});
+
+test("a failing usage recompute does not fail the ingest", async () => {
+  await withTokens(async () => {
+    // The derived cache must never be fatal to the write path it decorates:
+    // `appendEvents` has no retry, so a 500 here would reject the runner's
+    // terminal flush, skip deliverWorkspace/completeRun, record a successful
+    // run as failed and delete its workspace unpushed.
+    const updates: Array<Record<string, unknown>> = [];
+    const database = ingestDatabase(updates, [{ payload: finalOutputPayload }], () => {
+      throw new Error("value out of range for type integer");
+    });
+    const errors: unknown[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      const response = await postEvents(database, ["FINAL_OUTPUT"]);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { accepted: 1 });
+    } finally {
+      console.error = consoleError;
+    }
+    assert.equal(updates.length, 0);
+    assert.equal(errors.length, 1);
+  });
+});

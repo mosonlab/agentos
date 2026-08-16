@@ -34,6 +34,11 @@ export const IconSecrets = (): ReactNode => (
 export const IconRepos = (): ReactNode => (
   <Svg><circle cx="4.4" cy="3.6" r="1.6" /><circle cx="4.4" cy="12.4" r="1.6" /><circle cx="11.6" cy="6" r="1.6" /><path d="M4.4 5.2v5.6M11.6 7.6c0 2.2-2.2 2.2-3.6 2.8" /></Svg>
 );
+/** Two stacked speech bubbles — a session is a conversation. Local rather than
+ *  lucide because every other sidebar glyph comes from this set. */
+export const IconSessions = (): ReactNode => (
+  <Svg><path d="M2 3.4a1 1 0 0 1 1-1h7.2a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1H5.4L3 10.8V8.6a1 1 0 0 1-1-1z" /><path d="M11.2 5.6h1.8a1 1 0 0 1 1 1v4.2a1 1 0 0 1-1 1v2.2l-2.4-2.2H6.6" /></Svg>
+);
 export const IconActivity = (): ReactNode => (
   <Svg><path d="M1.6 8h3l1.6-4.6L9.4 12l1.4-4h3.6" /></Svg>
 );

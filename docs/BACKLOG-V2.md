@@ -52,6 +52,11 @@
 - [ ] run 表加 Cost/Tokens 两列（原版每 run 显示 $ 与 token 数；runner 事件是否已带用量数据实现时验证）——总账最便宜实现，可能免掉整个 Costs 页
 - [ ] "向运行中代理发消息"后置（依赖 runner 注入支持）
 
+批次 4 实现后挂账（spec §4.4 / §4.6.5 的验证义务落地为台账，2026-08-16 评审 SF-2）：
+
+- [ ] **PI / CODEX 的文件路径提取未经真实会话验证**：`Files touched` 的 CLAUDE 路径已用真实抓包验证，PI 的工具参数键名（`file_path`/`path`/`filename` 三选一）是推断的，CODEX 的 `file_change` 形状至今没有任何抓包（`spikes/cli-capabilities/samples/` 里 CODEX 的样例被沙箱掐掉了 shell 调用）。当前实现对**所有非 CLAUDE runner** 在"有工具调用但零文件"时显示诚实提示，而不是假装没有文件。补法：跑一个真实的 PI 和 CODEX 写文件会话，抓 `TOOL_STARTED` 的 payload，把真实键名补进 `apps/web/src/lib/session-stream.ts` 的提取表
+- [ ] **PI 的用量与成本本批未采集**：PI 确实上报用量，但形状与 CLAUDE/CODEX 都不同——在 `message_end` / `turn_end` 上按**每条消息**给出 `message.usage.{input,output,cacheRead,cacheWrite,reasoning,totalTokens,cost.total}`，而不是终局事件上的累计值。直接求和会双重计数，因为 `adapters.ts:287-297` 把 `turn_end` 和 `message_end` 都映射成 `MODEL_COMPLETED`，同一条消息出现两次（会话流里已按消息身份去重，用量侧还没有）。所以 PI 会话的 tokens/cost 目前显示 `—`。补法：按消息身份去重后累加，或改在 runner 侧只在终局折叠一次
+
 ## 批次 5 — Goals 协调器（第 5 项，决议 §8）
 
 - [ ] 系统 Agent：注册 `orchestrator-router` 与 `dod-generator`（system 标记、不可派发，模型/档位走 Agents 页配置，初始 Luna 级）

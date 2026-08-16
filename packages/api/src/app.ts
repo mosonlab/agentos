@@ -17,6 +17,7 @@ import {
   PushStatus,
   RunnerKind,
   RunnerPreference,
+  recomputeSessionUsage,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -1781,6 +1782,23 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       })),
       skipDuplicates: true,
     });
+    // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
+    // whose event was already stored still recomputes, which is what self-heals a
+    // write lost between createMany and here. The guard reads the request body
+    // already in memory, so a batch without one costs zero extra queries.
+    // Never fatal to the ingest. A throw here would 500 the route, and
+    // `appendEvents` has no retry (runner/src/api.ts:79), so the terminal flush
+    // would reject, `deliverWorkspace`/`completeRun` would be skipped, and the
+    // runner's outer catch would record a successful run as failed and delete
+    // its workspace unpushed. These columns are a derived cache that the next
+    // FINAL_OUTPUT or `db:backfill-session-usage` repairs (db/src/usage.ts).
+    if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
+      try {
+        await recomputeSessionUsage(db, run.session.id);
+      } catch (error) {
+        console.error(`Session usage recompute failed for ${run.session.id}`, error);
+      }
+    }
     if (body.providerConversationId && !run.session.providerConversationId) {
       await db.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
     }
@@ -2196,10 +2214,63 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     return context.json(result);
   });
 
-  app.get("/runs/:runId/events", async (context) => context.json(await db.sessionEvent.findMany({
-    where: { runId: id.parse(context.req.param("runId")) },
-    orderBy: { seq: "asc" },
-  })));
+  // Plural, and it must stay plural: principalMayAccess denies the operator any
+  // path starting with "/session/" (auth.ts), which "/sessions" misses by one
+  // character. A singular route here 403s with no useful message.
+  const sessionInclude = {
+    agent: { select: { id: true, title: true } },
+    task: { select: { id: true, name: true } },
+    goal: { select: { id: true, title: true } },
+    run: {
+      select: {
+        id: true, runNumber: true, model: true, branch: true,
+        pullRequestUrl: true, workspacePath: true,
+        // remoteUrl is what turns the detail page's Branch field into a link.
+        repo: { select: { id: true, name: true, remoteUrl: true } },
+      },
+    },
+  } as const;
+
+  app.get("/sessions", async (context) => {
+    const projectId = context.req.query("projectId");
+    const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "50", 10) || 50, 1), 200);
+    const before = context.req.query("before");
+    const beforeDate = before ? new Date(before) : null;
+    return context.json(await db.session.findMany({
+      where: {
+        ...(projectId ? { projectId } : {}),
+        // An unparseable cursor drops the filter rather than reaching Prisma as
+        // an Invalid Date and surfacing as a 500.
+        ...(beforeDate && !Number.isNaN(beforeDate.getTime()) ? { requestedAt: { lt: beforeDate } } : {}),
+      },
+      include: sessionInclude,
+      orderBy: { requestedAt: "desc" },
+      take: limit,
+    }));
+  });
+
+  app.get("/sessions/:sessionId", async (context) => {
+    const session = await db.session.findUnique({
+      where: { id: id.parse(context.req.param("sessionId")) },
+      include: sessionInclude,
+    });
+    return session ? context.json(session) : context.json({ error: "Session not found" }, 404);
+  });
+
+  app.get("/runs/:runId/events", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const afterSeq = Number.parseInt(context.req.query("afterSeq") ?? "", 10);
+    const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "500", 10) || 500, 1), 2_000);
+    const where = { runId, ...(Number.isFinite(afterSeq) ? { seq: { gt: afterSeq } } : {}) };
+    const [events, total] = await Promise.all([
+      // One extra row decides hasMore without a second count on the filtered set.
+      db.sessionEvent.findMany({ where, orderBy: { seq: "asc" }, take: limit + 1 }),
+      db.sessionEvent.count({ where: { runId } }),
+    ]);
+    const hasMore = events.length > limit;
+    const page = hasMore ? events.slice(0, limit) : events;
+    return context.json({ events: page, nextAfterSeq: page.at(-1)?.seq ?? null, hasMore, total });
+  });
 
   app.onError((error, context) => {
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
