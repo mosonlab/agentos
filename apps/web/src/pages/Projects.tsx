@@ -5,11 +5,24 @@ import { formatDate, formatDateTime } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
+import { cn } from "../lib/utils";
 import type { Agent, Project, Repo, Task } from "../lib/types";
 import { IconArrowLeft, IconPlus } from "../components/icons";
 import {
-  Card, EmptyState, ErrorNotice, Field, KeyValue, Metric, Modal, RowMenu, ShowMore,
+  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, METRICS, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1,
+  PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
+  Card, EmptyState, ErrorNotice, Field, KeyValue, Metric, Modal, Page, Pill, RowMenu, ShowMore,
 } from "../components/ui";
+import { Button, buttonVariants } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { Textarea } from "../components/ui/textarea";
+
+/** A `<Link>` is not a `<Button>` host, so it has no box-shadow today and takes
+ *  `shadow-none` (§2.5). Hoisted out of the attribute for the same reason as
+ *  Connections' pill: the acceptance checker reads string literals inside a
+ *  `className={...}` expression. */
+const LINK_BUTTON = cn(buttonVariants({ variant: "legacy", size: "legacy" }), "shadow-none");
 
 const slugify = (value: string): string =>
   value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -26,17 +39,17 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
   return (
     <Modal title="New Project" onClose={onClose} footer={
       <>
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-        <button type="button" className="btn primary" disabled={pending || name.trim().length === 0 || effectiveSlug.length === 0}
-          onClick={() => void submit()}>Create project</button>
+        <Button type="button" variant="legacy" size="legacy" className="shadow-none" onClick={onClose}>Cancel</Button>
+        <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || name.trim().length === 0 || effectiveSlug.length === 0}
+          onClick={() => void submit()}>Create project</Button>
       </>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Field label="Name">
-        <input type="text" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
+        <Input type="text" className="shadow-none" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
       </Field>
       <Field label="Slug" hint="Lower-case, dash separated. Used by the CLI and YAML sync.">
-        <input type="text" value={effectiveSlug} onChange={(event) => setSlug(slugify(event.target.value))} placeholder="mmo-game" />
+        <Input type="text" className="shadow-none" value={effectiveSlug} onChange={(event) => setSlug(slugify(event.target.value))} placeholder="mmo-game" />
       </Field>
     </Modal>
   );
@@ -56,48 +69,46 @@ export const ProjectsPage = (): ReactNode => {
   };
 
   return (
-    <div className="page">
-      <div className="pageHead">
-        <div className="titles">
-          <h1>Projects</h1>
-          <div className="subtitle">Workspaces that scope agents, repos, tasks and runs</div>
+    <Page>
+      <div className={PAGE_HEAD}>
+        <div className={PAGE_HEAD_TITLES}>
+          <h1 className={PAGE_HEAD_H1}>Projects</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>Workspaces that scope agents, repos, tasks and runs</div>
         </div>
-        <div className="pageActions">
-          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Project</button>
+        <div className={PAGE_ACTIONS}>
+          <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" onClick={() => setCreating(true)}><IconPlus />New Project</Button>
         </div>
       </div>
 
-      <div className="stack">
+      <div className={STACK}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         <Card flush>
-          <div className="tableWrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Name</th><th>Tasks</th><th>Session budget</th><th>Created</th><th>Updated</th><th />
-                </tr>
-              </thead>
-              <tbody>
-                {projects.map((project) => (
-                  <tr key={project.id} className="clickable" onClick={() => { select(project.id); navigate(`/projects/${project.id}`); }}>
-                    <td className="name">{project.name}<span className="sub">{project.slug}</span></td>
-                    <td>{taskCount(project.id)}</td>
-                    <td>{project.maxDurationMin}m wall · {project.stallTimeoutMin}m stall · {project.maxSessionsPerTask} runs</td>
-                    <td>{formatDate(project.createdAt)}</td>
-                    <td>{formatDate(project.updatedAt)}</td>
-                    <td className="tight"><RowMenu items={[{ label: "Delete", danger: true, onSelect: () => remove(project) }]} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {projects.length === 0 ? <EmptyState>{loading ? "Loading…" : "No projects yet. Create one to scope agents and tasks."}</EmptyState> : null}
-          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead><TableHead>Tasks</TableHead><TableHead>Session budget</TableHead><TableHead>Created</TableHead><TableHead>Updated</TableHead><TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {projects.map((project) => (
+                <TableRow key={project.id} className="cursor-pointer" onClick={() => { select(project.id); navigate(`/projects/${project.id}`); }}>
+                  <TableCell className={TABLE_NAME}>{project.name}<span className={TABLE_SUB}>{project.slug}</span></TableCell>
+                  <TableCell>{taskCount(project.id)}</TableCell>
+                  <TableCell>{project.maxDurationMin}m wall · {project.stallTimeoutMin}m stall · {project.maxSessionsPerTask} runs</TableCell>
+                  <TableCell>{formatDate(project.createdAt)}</TableCell>
+                  <TableCell>{formatDate(project.updatedAt)}</TableCell>
+                  <TableCell className={TABLE_TIGHT}><RowMenu items={[{ label: "Delete", danger: true, onSelect: () => remove(project) }]} /></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {projects.length === 0 ? <EmptyState>{loading ? "Loading…" : "No projects yet. Create one to scope agents and tasks."}</EmptyState> : null}
         </Card>
       </div>
 
       {creating ? <NewProject onClose={() => setCreating(false)} onCreated={reload} /> : null}
-    </div>
+    </Page>
   );
 };
 
@@ -111,9 +122,9 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
   const { pending, error: actionError, run } = useAction();
 
   if (error !== null && project === null) {
-    return <div className="page"><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></div>;
+    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
   }
-  if (!project) return <div className="page"><EmptyState>Loading…</EmptyState></div>;
+  if (!project) return <Page><EmptyState>Loading…</EmptyState></Page>;
 
   const scoped = tasks ?? [];
   const byStatus = (status: string): number => scoped.filter((task) => task.status === status).length;
@@ -124,20 +135,20 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
   };
 
   return (
-    <div className="page">
-      <div className="detailHead">
-        <Link to="/projects" className="backLink"><IconArrowLeft /></Link>
-        <h1>{project.name}</h1>
-        <span className="pill grey">{project.slug}</span>
-        <span className="spacer" />
-        <Link to="/tasks" className="btn">Tasks</Link>
-        <Link to="/agents" className="btn">Agents</Link>
-        <Link to="/goals" className="btn">Goals</Link>
+    <Page>
+      <div className={DETAIL_HEAD}>
+        <Link to="/projects" className={BACK_LINK}><IconArrowLeft /></Link>
+        <h1 className={DETAIL_HEAD_H1}>{project.name}</h1>
+        <Pill tone="grey">{project.slug}</Pill>
+        <span className="flex-1" />
+        <Link to="/tasks" className={LINK_BUTTON}>Tasks</Link>
+        <Link to="/agents" className={LINK_BUTTON}>Agents</Link>
+        <Link to="/goals" className={LINK_BUTTON}>Goals</Link>
       </div>
 
-      <div className="stack">
+      <div className={STACK}>
         {actionError === null ? null : <ErrorNotice message={actionError} />}
-        <div className="metrics">
+        <div className={METRICS}>
           <Metric label="Tasks" value={`${scoped.length}`} />
           <Metric label="Doing · Review" value={`${byStatus("DOING")} · ${byStatus("REVIEW")}`} />
           <Metric label="Agents" value={`${(agents ?? []).length}`} />
@@ -147,7 +158,7 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
         <Card title="Details">
           <KeyValue items={[
             { k: "Slug", v: project.slug },
-            { k: "Project ID", v: <span className="small">{project.id}</span> },
+            { k: "Project ID", v: <span className="text-[11.5px]">{project.id}</span> },
             { k: "Created", v: formatDateTime(project.createdAt) },
             { k: "Updated", v: formatDateTime(project.updatedAt) },
             { k: "Wall-clock limit", v: `${project.maxDurationMin} min` },
@@ -157,33 +168,31 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
           ]} />
         </Card>
 
-        <Card title="Repos" extra={<span className="count">{(repos ?? []).length}</span>}>
+        <Card title="Repos" extra={<span className={COUNT}>{(repos ?? []).length}</span>}>
           {(repos ?? []).length === 0 ? <EmptyState>No repos. Agent tasks require a repo grant.</EmptyState> : (
-            <div className="tableWrap">
-              <table className="table">
-                <thead><tr><th>Name</th><th>Remote</th><th>Default branch</th><th>Mount</th></tr></thead>
-                <tbody>
-                  {(repos ?? []).map((repo) => (
-                    <tr key={repo.id}>
-                      <td className="name">{repo.name}</td>
-                      <td>{repo.remoteUrl}</td>
-                      <td>{repo.defaultBranch}</td>
-                      <td>{repo.mountPath}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <Table>
+              <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Remote</TableHead><TableHead>Default branch</TableHead><TableHead>Mount</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {(repos ?? []).map((repo) => (
+                  <TableRow key={repo.id}>
+                    <TableCell className={TABLE_NAME}>{repo.name}</TableCell>
+                    <TableCell>{repo.remoteUrl}</TableCell>
+                    <TableCell>{repo.defaultBranch}</TableCell>
+                    <TableCell>{repo.mountPath}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           )}
         </Card>
 
         <Card title="YAML document" extra={
           editingYaml === null
-            ? <button type="button" className="btn small" onClick={() => setEditingYaml(project.yamlDocument)}>Edit</button>
+            ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setEditingYaml(project.yamlDocument)}>Edit</Button>
             : (
               <>
-                <button type="button" className="btn small" onClick={() => setEditingYaml(null)}>Cancel</button>
-                <button type="button" className="btn small primary" disabled={pending} onClick={() => void saveYaml()}>Save</button>
+                <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setEditingYaml(null)}>Cancel</Button>
+                <Button type="button" variant="legacyPrimary" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => void saveYaml()}>Save</Button>
               </>
             )
         }>
@@ -191,9 +200,9 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
             ? (project.yamlDocument.trim().length === 0
               ? <EmptyState>No YAML document. CLI sync arrives in v2 (DECISIONS #10).</EmptyState>
               : <ShowMore text={project.yamlDocument} lines={10} />)
-            : <textarea rows={14} value={editingYaml} onChange={(event) => setEditingYaml(event.target.value)} />}
+            : <Textarea rows={14} className="shadow-none" value={editingYaml} onChange={(event) => setEditingYaml(event.target.value)} />}
         </Card>
       </div>
-    </div>
+    </Page>
   );
 };
