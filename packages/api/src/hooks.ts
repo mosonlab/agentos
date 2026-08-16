@@ -45,7 +45,13 @@ export const authenticateWebhook = async (
   suppliedSecret: string | undefined,
 ): Promise<WebhookTemplate | null> => {
   const template = await db.taskTemplate.findUnique({ where: { id: templateId }, include: { webhookSecret: true } });
-  if (!template?.webhookSecretId || !template.webhookRepoId || !template.webhookSecret || template.webhookSecret.disabledAt || suppliedSecret === undefined) return null;
+  // A paused trigger fails here rather than in the route, so a pause is
+  // indistinguishable from a wrong secret on the wire: one place produces the
+  // 401, and no second response shape can drift into existence.
+  if (
+    !template?.webhookSecretId || !template.webhookRepoId || !template.webhookSecret
+    || template.webhookSecret.disabledAt || template.webhookPausedAt || suppliedSecret === undefined
+  ) return null;
   try {
     const expected = decryptSecret(template.webhookSecret.encryptedValue, template.webhookSecret.ciphertextVersion);
     const suppliedHash = createHash("sha256").update(suppliedSecret).digest();
