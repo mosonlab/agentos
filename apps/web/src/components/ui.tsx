@@ -46,6 +46,8 @@ export const TOOLBAR = "mb-[16px] flex items-center gap-[10px]";
 
 /** `.fieldRow` — `align-items: start` keeps a hint-less control from stretching to
  *  the height of a neighbour that carries a hint line. */
+export const FIELD = "grid grid-cols-[minmax(0,1fr)] gap-[6px]";
+export const FIELD_LABEL = "text-[12.5px] text-secondary-foreground";
 export const FIELD_ROW = "grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] items-start gap-[14px]";
 
 /** The status dot and its tones, as a lookup rather than a built class string
@@ -467,8 +469,8 @@ export const FullPanel = ({ title, onClose, actions, children }: {
 );
 
 export const Field = ({ label, hint, children }: { label: string; hint?: string; children: ReactNode }): ReactNode => (
-  <div className="grid grid-cols-[minmax(0,1fr)] gap-[6px]">
-    <label className="text-[12.5px] text-secondary-foreground">{label}</label>
+  <div className={FIELD}>
+    <label className={FIELD_LABEL}>{label}</label>
     {children}
     {hint === undefined ? null : <div className={HINT}>{hint}</div>}
   </div>
