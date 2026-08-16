@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, api, errorMessage } from "./api";
+import { storage } from "./storage";
 
 /** DECISIONS #16: realtime is polling. 2.5s matches the runner heartbeat cadence. */
 export const POLL_MS = 2_500;
@@ -88,9 +89,9 @@ export const useAction = (): {
 };
 
 export const useLocalStorage = (key: string, fallback: string): [string, (value: string) => void] => {
-  const [value, setValue] = useState(() => window.localStorage.getItem(key) ?? fallback);
+  const [value, setValue] = useState(() => storage.get(key) ?? fallback);
   const update = useCallback((next: string) => {
-    window.localStorage.setItem(key, next);
+    storage.set(key, next);
     setValue(next);
   }, [key]);
   return [value, update];
