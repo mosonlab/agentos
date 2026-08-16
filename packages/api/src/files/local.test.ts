@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
 import { assertContainedTarget, createLocalFileStore, resolveContained } from "./local.js";
-import { InvalidPathError, NotFoundError, SymlinkError } from "./store.js";
+import { HardLinkError, InvalidPathError, NotFoundError, SymlinkError } from "./store.js";
 
 const withRoot = async (run: (root: string, outside: string) => Promise<void>): Promise<void> => {
   const base = await mkdtemp(join(tmpdir(), "agentos-files-"));
@@ -108,11 +108,53 @@ test("probe 9: a deterministic final-component swap is caught by read open", asy
   await assert.rejects(store.read("x.txt"), SymlinkError);
 }));
 
-test("probe 10: pre-planted intermediate symlink is refused; post-walk swaps require OS isolation", async () => withRoot(async (root, outside) => {
-  // A post-walk intermediate swap cannot be closed in pure Node; deployment isolation covers it.
+test("probe 10: pre-planted intermediate symlinks are refused — post-walk swaps are a KNOWN OPEN GAP", async () => withRoot(async (root, outside) => {
+  // This covers the planted case only. The post-walk swap is NOT covered and NOT closed:
+  // probe 24 wins it in milliseconds. Do not read this pass as containment against an
+  // attacker with concurrent write access inside the root.
   await symlink(outside, join(root, "planted"), "dir");
   await assert.rejects((await createLocalFileStore(root)).read("planted/x"), SymlinkError);
 }));
+
+test(
+  "probe 24: KNOWN OPEN GAP — a post-walk directory swap reads outside the root",
+  { skip: process.env.AGENTOS_RACE_PROBE === "1" ? false : "opt-in: AGENTOS_RACE_PROBE=1 runs the post-walk swap race" },
+  async () => withRoot(async (root, outside) => {
+    // Executable evidence for the gap the threat model declares. Opt-in because it is a
+    // race: it asserts the gap is still open, so it will fail the day fd-relative
+    // traversal closes it, which is the moment the threat model needs rewriting.
+    await writeFile(join(outside, "secret.txt"), "OUTSIDE-SECRET");
+    await mkdir(join(root, "a"));
+    await writeFile(join(root, "a", "secret.txt"), "INSIDE");
+    await symlink(outside, join(root, ".decoy"), "dir");
+    const store = await createLocalFileStore(root);
+    const [real, decoy, swapped] = [join(root, ".real"), join(root, ".decoy"), join(root, "a")];
+
+    let stop = false;
+    let flips = 0;
+    const attacker = (async () => {
+      while (!stop) {
+        try { await rename(swapped, real); await rename(decoy, swapped); flips += 1; } catch { /* lost the step */ }
+        try { await rename(swapped, decoy); await rename(real, swapped); flips += 1; } catch { /* lost the step */ }
+      }
+    })();
+
+    let [attempts, penetrated, rejected, benign] = [0, 0, 0, 0];
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && penetrated === 0) {
+      attempts += 1;
+      try {
+        if ((await store.read("a/secret.txt")).toString().includes("OUTSIDE")) penetrated += 1;
+        else benign += 1;
+      } catch { rejected += 1; }
+    }
+    stop = true;
+    await attacker;
+
+    console.log(`probe 24: attempts=${attempts} flips=${flips} penetrated=${penetrated} rejected=${rejected} benign=${benign}`);
+    assert.equal(penetrated > 0, true, "post-walk swap did not win here; if it is genuinely closed now, update the threat model in local.ts");
+  }),
+);
 
 test("probe 11: write lazily creates mode-0750 parents but refuses a symlink parent", async () => withRoot(async (root, outside) => {
   const store = await createLocalFileStore(root);
@@ -193,6 +235,23 @@ test("probe 19: traversal normalizing inside is accepted and traversal escaping 
   await store.write("a/../b.txt", Buffer.from("inside"));
   assert.equal(await readFile(join(root, "b.txt"), "utf8"), "inside");
   await assert.rejects(store.write("a/../../b.txt", Buffer.from("outside")), InvalidPathError);
+}));
+
+test("probe 23: a hardlink to an outside file is refused on read and never written through", async () => withRoot(async (root, outside) => {
+  // O_NOFOLLOW says nothing about hardlinks and lstat reports one as an ordinary file,
+  // so this escape is persistent rather than a race. Reads refuse the shared inode;
+  // writes land on a private new inode, leaving the outside file untouched.
+  const secret = join(outside, "secret.txt");
+  await writeFile(secret, "TOP-SECRET");
+  await link(secret, join(root, "innocent.txt"));
+  await mkdir(join(root, "nested"));
+  await link(secret, join(root, "nested", "innocent.txt"));
+  const store = await createLocalFileStore(root);
+  await assert.rejects(store.read("innocent.txt"), HardLinkError);
+  await assert.rejects(store.read("nested/innocent.txt"), HardLinkError);
+  await store.write("innocent.txt", Buffer.from("OVERWRITTEN"));
+  assert.equal(await readFile(secret, "utf8"), "TOP-SECRET");
+  assert.equal((await store.read("innocent.txt")).toString(), "OVERWRITTEN");
 }));
 
 test("probe 22: entries() exposes the symlinks list() hides, without following them", async () => withRoot(async (root, outside) => {

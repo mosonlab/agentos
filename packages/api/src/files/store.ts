@@ -19,5 +19,7 @@ export interface FileStore {
 
 export class InvalidPathError extends Error {}
 export class SymlinkError extends InvalidPathError {}
+/** A regular file whose inode is also reachable from outside the Files Root. */
+export class HardLinkError extends InvalidPathError {}
 export class NotFoundError extends Error {}
 export class NotADirectoryError extends InvalidPathError {}

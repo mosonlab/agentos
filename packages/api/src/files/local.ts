@@ -7,19 +7,32 @@
  * roots remain separate so legitimate symlinked roots (including /tmp and iCloud-
  * relocated Documents) work.
  *
- * This does not close a post-walk swap of an already-checked intermediate directory
- * by an adversary with concurrent write access inside the Files Root. Pure Node has
- * no openat/fd-relative primitive with which to close that TOCTOU. Deployment must
- * therefore isolate the model CLI under a principal that cannot traverse or write
- * FILES_ROOT. The algorithm alone does not claim absolute containment; OS isolation
- * is the backstop for the concurrent-attacker case.
+ * Hardlinks are a second, distinct escape and O_NOFOLLOW does nothing about them: a
+ * hardlink is an ordinary directory entry for an inode that may also live outside the
+ * root, lstat reports it as a plain file, and there is no race to win -- the escape is
+ * persistent. Reads therefore refuse a regular file whose fstat reports nlink > 1, and
+ * writes land on a private new inode that is renamed over the target instead of
+ * truncating whatever inode is already sitting there.
+ *
+ * KNOWN OPEN GAP: a post-walk swap of an already-checked intermediate directory by an
+ * adversary with concurrent write access inside the Files Root. It is not theoretical --
+ * probe 24 in local.test.ts wins it in milliseconds -- and pure Node has no openat/
+ * fd-relative primitive with which to close it. Closing it needs fd-relative traversal
+ * in a native helper (docs/BACKLOG-V2.md). Until then deployment must isolate the model
+ * CLI under a principal that cannot traverse or write FILES_ROOT, and that backstop is
+ * now checked at startup rather than assumed: assertFilesRootIsolated refuses to boot
+ * when FILES_ROOT overlaps the run workspace root, and warnIfRunnerSharesPrincipal warns
+ * when RUNNER_RUN_AS_PREFIX is empty (files/config.ts). The algorithm alone does not
+ * claim absolute containment against an attacker who can already write inside the root.
  */
-import { constants } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 import { normalizeRelPath } from "./paths.js";
 import {
+  HardLinkError,
   InvalidPathError,
   NotADirectoryError,
   NotFoundError,
@@ -39,6 +52,15 @@ const mapPathError = (error: unknown, path: string): never => {
   if (codeOf(error) === "ENOTDIR") throw new NotADirectoryError(`Not a directory: ${path}`);
   if (codeOf(error) === "ENOTEMPTY") throw new InvalidPathError(`Directory is not empty: ${path}`);
   throw error;
+};
+
+const lstatOrNull = async (path: string): Promise<Stats | null> => {
+  try {
+    return await lstat(path);
+  } catch (error: unknown) {
+    if (codeOf(error) === "ENOENT" || codeOf(error) === "ENOTDIR") return null;
+    throw error;
+  }
 };
 
 const inspectDirectory = async (path: string): Promise<void> => {
@@ -118,9 +140,13 @@ export const createLocalFileStore = async (logicalRoot: string): Promise<FileSto
       let handle;
       try {
         handle = await open(resolved.target, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const info = await handle.stat();
+        if (info.isFile() && info.nlink > 1) {
+          throw new HardLinkError(`Hard link refused: ${resolved.normalized}`);
+        }
         return await handle.readFile();
       } catch (error: unknown) {
-        return mapPathError(error, `${logicalRoot}/${resolved.normalized}`);
+        return mapPathError(error, resolved.normalized);
       } finally {
         await handle?.close();
       }
@@ -129,20 +155,31 @@ export const createLocalFileStore = async (logicalRoot: string): Promise<FileSto
     async write(path, data) {
       const resolved = await resolvePath(path, "create-parents");
       requireNonRoot(resolved);
+      const existing = await lstatOrNull(resolved.target);
+      if (existing?.isSymbolicLink()) throw new SymlinkError(`Symlink refused: ${resolved.normalized}`);
+      // Write into a private new inode and replace the directory entry, never into the
+      // inode already sitting at the target: a hardlinked target would otherwise carry
+      // the write straight through to whatever else links that inode, and a failed write
+      // would leave the previous contents truncated.
+      const temporary = join(resolved.parent, `.agentos-write-${randomUUID()}`);
       let handle;
       try {
         handle = await open(
-          resolved.target,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+          temporary,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
           0o640,
         );
         await handle.writeFile(data);
         const info = await handle.stat();
+        await handle.close();
+        handle = undefined;
+        await rename(temporary, resolved.target);
         return fileStat(resolved.normalized, "file", info.size, info.mtime);
       } catch (error: unknown) {
-        return mapPathError(error, `${logicalRoot}/${resolved.normalized}`);
+        return mapPathError(error, resolved.normalized);
       } finally {
         await handle?.close();
+        await unlink(temporary).catch(() => undefined);
       }
     },
 

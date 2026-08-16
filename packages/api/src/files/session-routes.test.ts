@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -101,6 +101,21 @@ test("session file routes enforce grants over a real filesystem", async (suite) 
     assert.equal((await put("write-limit/exact.bin", exactly, "base64")).status, 200);
     const over = Buffer.alloc(25 * 1024 * 1024 + 1).toString("base64");
     assert.equal((await put("write-limit/over.bin", over, "base64")).status, 413);
+  });
+
+  await suite.test("a hardlink under a granted folder leaks no outside file through read or write", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "agentos-session-outside-"));
+    const sentinel = join(outside, "sentinel.txt");
+    await writeFile(sentinel, "SAFE");
+    await mkdir(join(root, "granted"), { recursive: true });
+    await link(sentinel, join(root, "granted", "innocent.txt"));
+    grants = [grant("granted", { canRead: true, canWrite: true })];
+    const denied = await read("granted/innocent.txt");
+    assert.equal(denied.status, 400);
+    assert.match(await denied.text(), /Hard link refused/u);
+    assert.equal((await put("granted/innocent.txt", "PWNED")).status, 200);
+    assert.equal(await readFile(sentinel, "utf8"), "SAFE");
+    await rm(outside, { recursive: true, force: true });
   });
 
   await suite.test("chunked write aborts near the cap instead of materializing the whole stream", async () => {
