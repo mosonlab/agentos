@@ -16,9 +16,9 @@ and operational rules of the whole batch. The source requirements and execution 
 
 Batch 0 moved the web app's styling base to Tailwind v4 plus shadcn/ui-backed primitives.
 The shadcn components use Radix primitives where a behavior-preserving primitive exists.
-The batch added 81 packages to the lockfile. React, ReactDOM, and Vite were not upgraded:
-the final versions are React 19.2.8, ReactDOM 19.2.8, and Vite 7.3.6. The package manager
-remains npm workspaces.
+The batch added 81 packages to the lockfile. Existing React, ReactDOM, and Vite versions
+had zero changes: the final versions remain React 19.2.8, ReactDOM 19.2.8, and Vite 7.3.6.
+The package manager remains npm workspaces.
 
 The old hand-written stylesheet is still present as a compatibility surface. Its surviving
 legacy selectors are intentionally unlayered, while Tailwind preflight is in `@layer base`
@@ -323,10 +323,14 @@ The final automated gates were green:
 - React 19.2.8, ReactDOM 19.2.8, and Vite 7.3.6 unchanged;
 - built-CSS layer parsing, the WCAG surface matrix, and the red-to-green negative controls.
 
-Three things were not actually exercised in the review-fix environment because they require
-a browser and/or Postgres: new `189b7c9` screenshots and visual focus/viewport review, the
-remaining §8.5 browser behavior matrix and real first-paint/no-JS walk, and the Postgres
-fixture `reset → actions → reset` idempotency run (including the browser walk around it).
+These three items were not actually exercised in the review-fix environment because they
+require a browser and/or Postgres:
+
+1. New `189b7c9` screenshots, visual focus-ring review, and the ≤900px viewport review.
+2. The remaining §8.5 browser behavior matrix, including the real first-paint/no-JS walk.
+3. Postgres-backed fixture `reset → actions → reset` idempotency, including the browser
+   walk around it.
+
 They are explicitly **not counted as passed**, and they are not described here as product
 defects; they remain Leo's PR-review decision or follow-up work.
 
