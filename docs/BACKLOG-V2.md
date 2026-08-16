@@ -16,12 +16,14 @@
 - [ ] i18n：zh/en 字典 + context hook，~548 处字符串抽取（派机械代理），UI 默认英文
 - [ ] 侧栏底部 Runner 在线状态（heartbeat 已有）+ Inbox 未读徽标
 - [ ] Agents 页：claude/codex 模型下拉 + 推理等级下拉（字段已有，纯 UI）；完成后 Leo 复核各 agent 模型
+- [ ] 模型选择联动 runnerPreference（选 gpt 系自动落 CODEX、claude 系落 CLAUDE），消灭 model/runner 错配——来自 2026-08-16 评审 run model_not_found 事故
 
 ## 批次 2 — Tasks 收尾三件套（第 2 项）
 
 - [ ] scheduler 轮询 cron 到期任务入队
 - [ ] webhook 加 secret 校验 + payload→变量映射
 - [ ] 任务完成/批准自动将 chainIndex+1 置 TODO（链式推进）
+- [ ] 闸门消息标注链条上下文（第几步/后续还有什么/是否有并行评审在跑）——来自 2026-08-16 首次真实使用的困惑反馈
 - [ ] 顺手删死模型：Trigger / Automation / InboxConnectionWindow（migration）
 
 ## 批次 3 — Inbox 结构化问卷重构（第 11 项）
@@ -45,7 +47,7 @@
 
 ## 长尾（依赖松紧穿插）
 
-- [ ] Templates（第 4 项）：{{var}} 展开 + From template 弹窗预览 + 九步链种子模板
+- [ ] Templates（第 4 项）：{{var}} 展开 + From template 弹窗预览 + 种子模板 = 轻链（5 步）/ 重链（7 步）两条（定义见 decisions.md §12）
 - [ ] Skills 页（第 7 项）：列表 + @uiw/react-md-editor + 发布状态；附件后置
 - [ ] Files + 路径落地（第 3 项）：`~/.agentos/` + `~/Documents/agentos/` 迁移、删 AGENTOS_FILES_ROOT、存储薄接口（本地盘实现）、SVAR UI、FilesystemGrant+inside() 权限、FileObject 重设计
 - [ ] Activity 流（第 6 项）：/activity 聚合时间线（shadcn Timeline，轮询）
@@ -53,6 +55,13 @@
 - [ ] Connections 整页重写（第 10 项）：编辑表单 + 作用域标签；Last verified/Profile 后置
 - [ ] 通知渠道适配器：NotificationAdapter 接口 + 飞书实现（只做接口，不做新渠道）
 - [ ] YAML Phase 1：DB↔YAML export/import（因开源提前；兼作种子 agent 发行载体）
+
+## 平台修缮（自举过程中发现，小活随批次穿插）
+
+- [ ] WAITING_INBOX 挂起中的 run 工作区不应被 GC：闸门等待期间 /tmp 工作区被清，resume 报 ENOENT 只能重开会话、丢失会话内上下文（2026-08-16 批次 0 修订环节触发）
+- [ ] Agent 归档/下线状态（原版有 published/draft）：有任务历史的 agent 删不掉（外键 500），需要软下线——2026-08-16 裁撤 feasibility 时暴露
+- [ ] 非模板任务的 approvalGate 到闸不发飞书卡：手动创建的带闸任务 run 成功后静默停 Review 列，人无从得知（2026-08-16 批次 2 PLAN 触发；批次 2 spec §8-1 已把该歧义摆上桌）
+- [ ] retry 应按 agent 当前配置重新推导 runner/model，而非复刻失败 run 的定格配置（2026-08-16：评审任务改完 agent 后 retry 仍按旧 CLAUDE runner 跑 sol，二连败，只能删任务重建）
 
 ## 开源发布批次
 

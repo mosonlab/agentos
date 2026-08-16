@@ -91,6 +91,12 @@
 
 - 用 AgentOS 开发 AgentOS：批次任务写成 spec 投喂系统，spec→plan→执行链走现有 Tasks/闸门；批次 2 前链式推进手动放行，批次 5 后 Goal 全自动。
 - **自举隔离**（无需另行克隆）：平台实例跑 master 工作副本；agent 在 runner 工作区的独立克隆里开发并提 PR，互不冲突。合并后空闲时重启平台吃进新版（含 migration）；批次 0 这类大改动选无 run 在跑时合并。
+- **单链定义**（2026-08-16 终版：废除轻/重链之分，一条链照抄原版九步；落地为一个种子 TaskTemplate，小任务由模板跳步解决，编排归模板不归阵容）：
+  ① spec(fable:medium)＋闸门 → ② plan(fable:medium)＋闸门 → ③ 计划评审 review-coordinator(sol:high/CODEX，单会话三镜片：可行性/范围/一致性＋一次重点复查，跨厂商天然成立) → ④ plan 新会话按评审修订 → ⑤ 实现 executioner(sol:medium) → ⑥ 代码评审 review-coordinator → ⑦ senior-dev(sol:high) 修复 → ⑧ librarian(luna:xhigh/CODEX) 更新 wiki → ⑨ 人审 PR 合并。
+  - **卡点只有两处＋终审**（2026-08-16 对照原版视频修正）：闸门仅在 ① spec 与 ② plan（与原版 Approval 徽章 1:1）；③–⑧ 全自动流转不再请示，人最后在 ⑨ 用 PR 审查兜底。修订步原多设的一道闸已删。
+  - **阵容收敛至 7**（与原版视频执行者 1:1）：default/spec/plan/review-coordinator/executioner/senior-dev/librarian。plan-reviser、scope-guardian、coherence 已删除；feasibility 因有任务历史外键暂不可删，退役搁置（催生"agent 归档/下线"需求）。三个评审镜片并入 review-coordinator 提示词（`agents/roles/review-coordinator.md` 已重写，不再散子代理，因此可跑 Sol/CODEX）。
+  - 实战依据：2026-08-16 首单 Sol 单会话评审（批次 0 SPEC）未散子代理即产出 6 条带代码证据的 must-fix，证明单审质量足够，多代理评审矩阵为过度设计。
+- **模型额度策略**：Fable 只用于 plan 步（全链质量杠杆最大处）；spec 与 review-coordinator 降 opus-5:high；实现层 Sol（Luna 待验证能力后再回归）；批次间可按代码冲突面并行（前端批次等批次 0，后端批次可即行）。
 - 每个 agent 所用模型在批次 1 的下拉做好后由 Leo 统一复核调整。
 - 模型路由备忘：Luna(gpt-5.6-luna) 机械批量、**一律显式 max**；Sol(gpt-5.6-sol) 语义校验 high+；升级链 Luna→Sonnet→Opus；spawn 必显式指定 model（钩子强制）。
 
