@@ -89,21 +89,19 @@ test("AT task queues once under sequential and concurrent ticks", async () => {
         return typeof value === "function" ? value.bind(target) : value;
       }
       return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
-        const taskDelegate = new Proxy(tx.task, {
-          get(taskTarget, taskProperty, taskReceiver) {
-            if (taskProperty !== "findUniqueOrThrow") return Reflect.get(taskTarget, taskProperty, taskReceiver);
-            return async (args: Parameters<typeof tx.task.findUniqueOrThrow>[0]) => {
-              const result = await tx.task.findUniqueOrThrow(args);
+        // Both callers must reach the row lock before either takes it. The
+        // rendezvous has to sit *before* the lock is issued, not after: the
+        // loser blocks inside PostgreSQL until the winner commits, so a gate
+        // that waits for its return would never open.
+        const instrumentedTx = new Proxy(tx, {
+          get(txTarget, txProperty, txReceiver) {
+            if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+            return async (...args: Parameters<typeof tx.$queryRaw>) => {
               arrived += 1;
               if (arrived === 2) release();
               await bothRead;
-              return result;
+              return (tx.$queryRaw as (...inner: unknown[]) => Promise<unknown>)(...args);
             };
-          },
-        });
-        const instrumentedTx = new Proxy(tx, {
-          get(txTarget, txProperty, txReceiver) {
-            return txProperty === "task" ? taskDelegate : Reflect.get(txTarget, txProperty, txReceiver);
           },
         });
         return operation(instrumentedTx);
@@ -166,4 +164,79 @@ test("a concurrent cron repair survives stale quarantine and receives no failure
   assert.equal(row.cron, "*/5 * * * *");
   assert.notEqual(row.runAt, null);
   assert.equal(await db.taskActivity.count({ where: { taskId: stale.id } }), 0);
+});
+
+// --- batch 2.5: pause flag, provenance, and archive-vs-scheduler races -------
+
+test("a paused definition does not fire across a due time, and resume moves runAt into the future", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const definition = await db.task.create({ data: {
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Paused", description: "work",
+    scheduleKind: "CRON", cron: "*/5 * * * *", timezone: "UTC", runAt: new Date("2026-08-15T11:00:00Z"),
+    schedulePausedAt: new Date("2026-08-15T10:00:00Z"),
+  } });
+  const dueLater = new Date("2026-08-15T12:00:00Z");
+  assert.deepEqual(await schedulerTick(db, dueLater), { cronFired: 0, atFired: 0, quarantined: 0 });
+  assert.equal(await db.task.count({ where: { projectId: project.id } }), 1, "no copy exists");
+  // Even a direct fire is refused: the claim, not the poll, is the guard.
+  assert.equal(await fireCronTask(db, definition, dueLater), false);
+
+  await db.task.update({ where: { id: definition.id }, data: {
+    schedulePausedAt: null, runAt: new Date("2026-08-15T11:00:00Z"),
+  } });
+  const result = await schedulerTick(db, dueLater);
+  assert.equal(result.cronFired, 1);
+  const refreshed = await db.task.findUniqueOrThrow({ where: { id: definition.id } });
+  assert.ok(refreshed.runAt!.getTime() > dueLater.getTime());
+});
+
+test("a fired copy is cron-sourced and linked, while the definition stays manual", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const definition = await db.task.create({ data: {
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Nightly", description: "work",
+    scheduleKind: "CRON", cron: "*/2 * * * *", timezone: "UTC", runAt: new Date("2026-08-15T11:00:00Z"),
+  } });
+  assert.equal(await fireCronTask(db, definition, new Date("2026-08-15T12:05:00Z")), true);
+  const copy = await db.task.findFirstOrThrow({ where: { projectId: project.id, id: { not: definition.id } } });
+  assert.equal(copy.source, "CRON");
+  assert.equal(copy.recurringSourceTaskId, definition.id);
+  const refreshed = await db.task.findUniqueOrThrow({ where: { id: definition.id } });
+  assert.equal(refreshed.source, "MANUAL");
+  assert.equal(refreshed.recurringSourceTaskId, null);
+});
+
+test("an archived recurring definition does not fire", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const definition = await db.task.create({ data: {
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Archived cron", description: "work",
+    scheduleKind: "CRON", cron: "*/5 * * * *", runAt: new Date("2026-08-15T11:00:00Z"), archivedAt: new Date(),
+  } });
+  const now = new Date("2026-08-15T12:00:00Z");
+  assert.equal((await schedulerTick(db, now)).cronFired, 0);
+  assert.equal(await fireCronTask(db, definition, now), false);
+  assert.equal(await db.task.count({ where: { projectId: project.id } }), 1);
+});
+
+test("archiving between the CRON poll and the claim wins the race", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const definition = await db.task.create({ data: {
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Race cron", description: "work",
+    scheduleKind: "CRON", cron: "*/5 * * * *", runAt: new Date("2026-08-15T11:00:00Z"),
+  } });
+  // `definition` is the stale poll row; archive lands after it was read.
+  await db.task.update({ where: { id: definition.id }, data: { archivedAt: new Date() } });
+  assert.equal(await fireCronTask(db, definition, new Date("2026-08-15T12:00:00Z")), false);
+  assert.equal(await db.task.count({ where: { projectId: project.id } }), 1);
+});
+
+test("archiving between the AT poll and the fire wins the race", async () => {
+  const { project, agent, repo } = await seedExecutor();
+  const definition = await db.task.create({ data: {
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Race at", description: "work",
+    scheduleKind: "AT", runAt: new Date("2026-08-15T11:00:00Z"),
+  } });
+  await db.task.update({ where: { id: definition.id }, data: { archivedAt: new Date() } });
+  // Without fireAtTask's lock and re-read this enqueues off the stale row.
+  assert.equal(await fireAtTask(db, definition, new Date("2026-08-15T12:00:00Z")), false);
+  assert.equal(await db.run.count({ where: { taskId: definition.id } }), 0);
 });

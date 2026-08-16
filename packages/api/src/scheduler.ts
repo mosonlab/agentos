@@ -5,6 +5,7 @@ import {
   type PrismaClient,
   ScheduleKind,
   type Task,
+  TaskSource,
   TaskStatus,
 } from "@agentos/db";
 import { CronExpressionParser } from "cron-parser";
@@ -98,7 +99,19 @@ export const fireCronTask = async (
 
   return db.$transaction(async (tx) => {
     const claimed = await tx.task.updateMany({
-      where: { id: task.id, scheduleKind: ScheduleKind.CRON, status: TaskStatus.TODO, runAt: task.runAt },
+      // The poll below is only a hint — it is read outside any transaction and
+      // is stale by the time this runs. This claim is a single-statement CAS on
+      // the Task row, so its predicate *is* re-checked after a concurrent
+      // writer's lock releases: a pause or an archive that lands between the
+      // poll and here wins the race instead of firing one more copy.
+      where: {
+        id: task.id,
+        scheduleKind: ScheduleKind.CRON,
+        status: TaskStatus.TODO,
+        runAt: task.runAt,
+        schedulePausedAt: null,
+        archivedAt: null,
+      },
       data: { runAt: nextRunAt },
     });
     if (claimed.count !== 1) return false;
@@ -126,6 +139,10 @@ export const fireCronTask = async (
       chainIndex: null,
       followUpTaskId: null,
       templateId: null,
+      // The copy is CRON-sourced; the recurring definition itself stays MANUAL
+      // — an operator made it by hand and it is still theirs.
+      source: TaskSource.CRON,
+      recurringSourceTaskId: task.id,
     } });
     if (copy.assigneeType === AssigneeType.AGENT && copy.assigneeAgentId && copy.repoId) {
       await enqueueTaskRun(tx, copy.id, now);
@@ -142,6 +159,24 @@ export const fireCronTask = async (
 export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promise<boolean> => {
   try {
     return await db.$transaction(async (tx) => {
+      // This path used to enqueue straight off the poll row, so a task archived
+      // after the poll still fired. Lock the Task row and re-check, returning
+      // false rather than throwing — the same shape as the unique-conflict path
+      // below, so schedulerTick's atFired count stays honest.
+      const [locked] = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Task" WHERE "id" = ${task.id} FOR UPDATE
+      `;
+      if (!locked) return false;
+      const current = await tx.task.findUniqueOrThrow({
+        where: { id: task.id },
+        select: { status: true, archivedAt: true, _count: { select: { runs: true } } },
+      });
+      if (current.archivedAt !== null || current.status !== TaskStatus.TODO) return false;
+      // An AT task fires exactly once — the same predicate the poll uses. Before
+      // the lock this was enforced only accidentally, by two racing callers
+      // deriving the same runNumber and losing to the dedupe key; serialised,
+      // the loser would otherwise observe run 1 and happily queue run 2.
+      if (current._count.runs > 0) return false;
       await enqueueTaskRun(tx, task.id, now);
       return true;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
@@ -153,13 +188,20 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
 
 export const schedulerTick = async (db: PrismaClient, now = new Date()): Promise<{ cronFired: number; atFired: number; quarantined: number }> => {
   const [cronTasks, atTasks] = await Promise.all([
-    db.task.findMany({ where: { scheduleKind: ScheduleKind.CRON, status: TaskStatus.TODO, runAt: { lte: now } } }),
+    db.task.findMany({ where: {
+      scheduleKind: ScheduleKind.CRON,
+      status: TaskStatus.TODO,
+      runAt: { lte: now },
+      schedulePausedAt: null,
+      archivedAt: null,
+    } }),
     db.task.findMany({ where: {
       scheduleKind: ScheduleKind.AT,
       status: TaskStatus.TODO,
       runAt: { lte: now },
       runs: { none: {} },
       assigneeType: AssigneeType.AGENT,
+      archivedAt: null,
     } }),
   ]);
   let cronFired = 0;

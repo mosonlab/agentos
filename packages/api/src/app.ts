@@ -60,7 +60,7 @@ import { createArchivedRunNoticeScheduler, defaultWorkspaceRoot, noteArchivedQue
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
-import { validateSchedule } from "./scheduler.js";
+import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
 import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
@@ -1710,6 +1710,66 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       return { archived: archive.length, skipped };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     return context.json(result);
+  });
+  app.post("/tasks/:taskId/schedule/pause", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const task = await db.task.findUnique({ where: { id: taskId }, select: { scheduleKind: true } });
+    if (!task) return context.json({ error: "Task not found" }, 404);
+    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be paused" }, 400);
+    // In-flight copies are left alone: pausing stops future occurrences, it does
+    // not reach into work that already started.
+    const paused = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
+    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
+    return context.json(paused);
+  });
+  app.post("/tasks/:taskId/schedule/resume", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const task = await db.task.findUnique({
+      where: { id: taskId },
+      select: { scheduleKind: true, cron: true, timezone: true },
+    });
+    if (!task) return context.json({ error: "Task not found" }, 404);
+    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be resumed" }, 400);
+    let runAt: Date;
+    try {
+      if (!task.cron) throw new Error("CRON tasks require cron");
+      // Recomputed from *now*, so a long pause produces no catch-up burst.
+      runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
+    } catch (error: unknown) {
+      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
+    }
+    const resumed = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
+    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
+    return context.json(resumed);
+  });
+  app.get("/tasks/:taskId/recurring-fires", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const requested = Number(context.req.query("take") ?? 5);
+    const take = Number.isSafeInteger(requested) ? Math.min(50, Math.max(1, requested)) : 5;
+    const copies = await db.task.findMany({
+      where: { recurringSourceTaskId: taskId },
+      orderBy: { createdAt: "desc" },
+      take,
+      include: {
+        runs: {
+          orderBy: { runNumber: "desc" },
+          take: 1,
+          include: { session: { select: { id: true, costUsd: true } } },
+        },
+      },
+    });
+    return context.json(copies.map((copy) => ({
+      taskId: copy.id,
+      name: copy.name,
+      createdAt: copy.createdAt,
+      status: copy.status,
+      latestRun: copy.runs[0] ? {
+        id: copy.runs[0].id,
+        status: copy.runs[0].status,
+        runNumber: copy.runs[0].runNumber,
+        session: copy.runs[0].session ? { id: copy.runs[0].session.id, costUsd: copy.runs[0].session.costUsd } : null,
+      } : null,
+    })));
   });
   app.get("/tasks/:taskId/activity", async (context) => context.json(await db.taskActivity.findMany({
     where: { taskId: id.parse(context.req.param("taskId")) },
