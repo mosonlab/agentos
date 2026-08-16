@@ -1,12 +1,13 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 
-import { useDismiss, usePoll } from "../lib/hooks";
+import { usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
 import type { Health, InboxMessage } from "../lib/types";
 import { useTheme, type ThemeMode } from "../lib/theme";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
   IconActivity, IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
   IconProjects, IconSecrets, IconTasks,
@@ -24,29 +25,25 @@ const NAV: Array<{ to: string; label: string; icon: ReactNode; match: string[] }
 
 const ProjectSwitcher = (): ReactNode => {
   const { projects, project, select } = useProjectScope();
-  const [open, setOpen] = useState(false);
-  useDismiss(() => setOpen(false), open);
   return (
-    <>
-      <button type="button" className="projectSwitcher" onClick={(event) => { event.stopPropagation(); setOpen(!open); }}>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild><button type="button" className="projectSwitcher hover:bg-sidebar-accent">
         <span className="projectMark">{project ? initial(project.name) : "·"}</span>
         <span className="projectName">{project?.name ?? (projects.length === 0 ? "No project" : "Select project")}</span>
-        <span className="chevron"><IconChevron open={open} /></span>
-      </button>
-      {open ? (
-        <div className="projectMenu" onClick={(event) => event.stopPropagation()}>
+        <span className="chevron"><IconChevron /></span>
+      </button></DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-[194px] border-sidebar-border bg-popover font-mono text-popover-foreground">
           {projects.map((candidate) => (
-            <button key={candidate.id} type="button" className={candidate.id === project?.id ? "current" : ""}
-              onClick={() => { select(candidate.id); setOpen(false); }}>
-              <span className="projectMark" style={{ width: 18, height: 18, fontSize: 10 }}>{initial(candidate.name)}</span>
+            <DropdownMenuItem key={candidate.id} className={candidate.id === project?.id ? "text-primary focus:bg-accent" : "focus:bg-accent"}
+              onSelect={() => select(candidate.id)}>
+              <span className="projectMark size-[18px] text-[10px]">{initial(candidate.name)}</span>
               {candidate.name}
-            </button>
+            </DropdownMenuItem>
           ))}
-          {projects.length === 0 ? <span className="faint small" style={{ padding: "6px 8px" }}>No projects yet</span> : null}
-          <button type="button" onClick={() => { setOpen(false); navigate("/projects"); }}>Manage projects…</button>
-        </div>
-      ) : null}
-    </>
+          {projects.length === 0 ? <span className="faint small block px-2 py-1.5">No projects yet</span> : null}
+          <DropdownMenuItem className="focus:bg-accent" onSelect={() => navigate("/projects")}>Manage projects…</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 };
 
@@ -64,12 +61,12 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
     item.match.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className="shell min-h-screen bg-background text-foreground">
+      <aside className="sidebar border-sidebar-border bg-sidebar text-sidebar-foreground">
         <ProjectSwitcher />
-        <nav style={{ display: "grid", gap: 2 }}>
+        <nav className="grid gap-0.5">
           {NAV.map((item) => (
-            <Link key={item.to} to={item.to} className={active(item) ? "navItem active" : "navItem"}>
+            <Link key={item.to} to={item.to} className={`${active(item) ? "navItem active" : "navItem"} hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`}>
               {item.icon}
               {item.label}
               {item.to === "/inbox" && openCount > 0 ? <span className="count"><span className="badge">{openCount}</span></span> : null}
@@ -88,7 +85,7 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
           </button>
         </div>
       </aside>
-      <main className="content">{children}</main>
+      <main className="content bg-popover">{children}</main>
     </div>
   );
 };
