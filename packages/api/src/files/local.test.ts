@@ -36,7 +36,13 @@ test("probe 2: read refuses a final symlink to an outside file", async () => wit
   await writeFile(secret, "SECRET");
   await symlink(secret, join(root, "leak.txt"));
   const store = await createLocalFileStore(root);
-  await assert.rejects(store.read("leak.txt"), SymlinkError);
+  // The message a session sees must name the path root-relative: it used to embed the
+  // absolute Files Root, and app.ts returns error.message verbatim to the agent.
+  await assert.rejects(store.read("leak.txt"), (error: Error) => {
+    assert.equal(error instanceof SymlinkError, true);
+    assert.equal(error.message, "Symlink refused: leak.txt");
+    return true;
+  });
 }));
 
 test("probe 3: write refuses a final symlink and preserves the outside file", async () => withRoot(async (root, outside) => {
@@ -44,7 +50,11 @@ test("probe 3: write refuses a final symlink and preserves the outside file", as
   await writeFile(secret, "SECRET");
   await symlink(secret, join(root, "leak.txt"));
   const store = await createLocalFileStore(root);
-  await assert.rejects(store.write("leak.txt", Buffer.from("PWN")), SymlinkError);
+  await assert.rejects(store.write("leak.txt", Buffer.from("PWN")), (error: Error) => {
+    assert.equal(error instanceof SymlinkError, true);
+    assert.equal(error.message, "Symlink refused: leak.txt");
+    return true;
+  });
   assert.equal(await readFile(secret, "utf8"), "SECRET");
 }));
 

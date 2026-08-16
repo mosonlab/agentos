@@ -149,7 +149,7 @@ Session routes mirror the four MCP tools: `GET /session/runs/:runId/files`, `GET
 
 - Path scheme: revert the config default / set `RUNNER_WORKSPACE_ROOT=/tmp/agentos-runs`; workspaces are disposable so nothing is lost either direction.
 - Storage/API/MCP: additive code; revert the commit. The four new MCP tools disappear from the next session's tool list; running sessions fail those calls loudly.
-- DB: the dropped models were empty (verified pre-drop, §9); `prisma migrate` down or a forward migration re-adding them restores the schema without data loss. Files on disk are never deleted by rollback.
+- DB: **there is no rollback.** Prisma 6.19 has no `migrate down` (`npx prisma migrate --help` lists no such command) and this repository carries no restoration migration. Recovery is forward-only: re-insert `FilesystemGrant` rows from the pre-migration export as Files-Root-relative paths, and, if the dropped models are ever needed again, write a new forward migration re-adding them from the pre-drop schema. The dropped models were required to be empty (guarded in SQL, §9), so there is no row data to restore. Files on disk are never deleted by the migration in either direction. Full procedure: `docs/runbooks/files-deployment.md` §5.
 
 ## 11. Acceptance criteria (reviewer checklist)
 
