@@ -4,6 +4,7 @@ import {
   adapters,
   buildChildEnvironment,
   buildPrompt,
+  failureReasonFromEvidence,
   manifestFor,
   type AdapterEvent,
   type ExitEvidence,
@@ -59,6 +60,7 @@ const preflightEvidence = (message: string): ExitEvidence => ({
   terminalEventSeen: false,
   terminalSuccess: false,
   finalOutput: null,
+  providerError: null,
   terminationReason: null,
   stdout: "",
   stderr: message,
@@ -229,14 +231,15 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     }
     if (executionSucceeded) delivery = await deliverWorkspace(config, claim, { ...workspace, branch: gitResult.branch });
     else {
-      // The workspace is about to be destroyed; salvage whatever the agent committed.
+      // The workspace is about to be destroyed; commit and salvage its trackable changes.
       const salvage = await deliverFailedWorkspace(config, claim, { ...workspace, branch: gitResult.branch })
         .catch((error: unknown) => {
-          void appendActivity(config, claim, `WIP salvage push failed: ${errorMessage(error)}`, { stream: "runner" }).catch(() => undefined);
+          void appendActivity(config, claim, `WIP salvage failed: ${errorMessage(error)}`, { stream: "runner" }).catch(() => undefined);
           return null;
         });
       if (salvage) {
         delivery = salvage;
+        if (salvage.headSha) gitResult = { ...gitResult, headSha: salvage.headSha };
         await appendActivity(config, claim, salvage.deliveryInstructions ?? salvage.pushError ?? "WIP salvage attempted", { stream: "runner" })
           .catch(() => undefined);
       }
@@ -254,7 +257,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       terminationReason: budgetReason ?? evidence.terminationReason,
       ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
-      ...(!succeeded ? { failureReason: budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? (evidence.stderr.trim() || `CLI exited with code ${evidence.exitCode}`) } : {}),
+      ...(!succeeded ? { failureReason: budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence) } : {}),
       output: (evidence.finalOutput ?? evidence.stdout).trim().slice(-500_000) || null,
       ...gitResult,
       ...(delivery ?? { pushStatus: "NOT_REQUESTED" as const }),

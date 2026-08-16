@@ -9,7 +9,7 @@ const config = { runAsPrefix: [], path: "/fake/bin", home: "/fake/home" } as unk
 const claim = {
   task: { id: "task-1", name: "Feature" },
   repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
-  run: { runNumber: 2 },
+  run: { id: "run-2", runNumber: 2 },
 } as ClaimedTask;
 const workspace = { path: "/fake/work", branch: "feature/test", baseSha: "base" };
 
@@ -70,23 +70,47 @@ test("delivery opens one pull request titled after the chain, not the step", asy
   assert.ok(calls.some((call) => call.includes("--title lines subcommand")));
 });
 
-test("a failed run pushes its commits as WIP and opens no pull request", async () => {
+test("a failed run commits uncommitted changes, pushes them as WIP, and opens no pull request", async () => {
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
-    return executable === "git" && args[0] === "rev-parse" ? "head-sha" : "";
+    if (executable === "git" && args[0] === "status") return "M tracked.ts\n?? new.ts";
+    return executable === "git" && args[0] === "rev-parse" ? "salvage-sha" : "";
   };
   const result = await deliverFailedWorkspace(config, claim, workspace, fake);
   assert.equal(result?.pushStatus, "SUCCEEDED");
+  assert.equal(result?.headSha, "salvage-sha");
+  assert.equal(result?.failureClass, undefined);
   assert.equal(result?.pullRequestUrl, undefined);
   assert.deepEqual(calls, [
+    "git add -A",
+    "git status --porcelain",
+    "git -c user.name=AgentOS Runner -c user.email=runner@agentos.local -c commit.gpgSign=false -c core.hooksPath=/dev/null commit --no-verify -m WIP salvage for AgentOS run run-2",
     "git rev-parse HEAD",
     "git push origin HEAD:refs/heads/agentos/task-1/run-2",
   ]);
+  assert.equal(calls.some((call) => call.includes("--force")), false);
+  assert.equal(calls.some((call) => call.startsWith("gh ")), false);
 });
 
 test("a failed run with no new commit is not pushed at all", async () => {
-  const fake: CommandExecutor = async (executable, args) =>
-    executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return executable === "git" && args[0] === "rev-parse" ? workspace.baseSha : "";
+  };
   assert.equal(await deliverFailedWorkspace(config, claim, workspace, fake), null);
+  assert.deepEqual(calls, ["git add -A", "git status --porcelain", "git rev-parse HEAD"]);
+});
+
+test("a failed run still pushes commits the agent made before crashing", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    return executable === "git" && args[0] === "rev-parse" ? "agent-commit-sha" : "";
+  };
+  const result = await deliverFailedWorkspace(config, claim, workspace, fake);
+  assert.equal(result?.headSha, "agent-commit-sha");
+  assert.equal(calls.some((call) => call.includes(" commit ")), false);
+  assert.equal(calls.at(-1), "git push origin HEAD:refs/heads/agentos/task-1/run-2");
 });

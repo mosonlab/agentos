@@ -3,4 +3,4 @@
 export HTTP_PROXY=http://127.0.0.1:7897
 export HTTPS_PROXY=http://127.0.0.1:7897
 export NO_PROXY=127.0.0.1,localhost
-exec /opt/homebrew/bin/codex "$@"
+exec /Users/leohe/.npm-global/bin/codex "$@"

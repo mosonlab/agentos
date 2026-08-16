@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  adapterExecutionSucceeded, argsForRunner, buildChildEnvironment, buildPrompt, mcpConfig, type ExitEvidence,
+  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, failureReasonFromEvidence,
+  mcpConfig, type ExitEvidence,
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -109,6 +110,7 @@ test("exit code zero without a provider terminal event is failure", () => {
     signal: null,
     terminalEventSeen: false,
     finalOutput: null,
+    providerError: null,
     terminalSuccess: false,
     terminationReason: null,
     stdout: "",
@@ -116,4 +118,36 @@ test("exit code zero without a provider terminal event is failure", () => {
   };
   assert.equal(adapterExecutionSucceeded(evidence), false);
   assert.equal(adapterExecutionSucceeded({ ...evidence, terminalEventSeen: true, terminalSuccess: true }), true);
+});
+
+test("Codex structured errors take precedence over stderr warnings", async () => {
+  const script = "process.stdout.write(JSON.stringify({type:'error',message:'policy denied'})+'\\n')";
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", script],
+  } as unknown as RunnerConfig;
+  const handle = await adapters.CODEX.start({
+    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
+    credentialsPath: "/tmp/session.json",
+  }, () => undefined);
+  const evidence = await handle.exit;
+
+  assert.equal(evidence.providerError, "policy denied");
+  assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
+});
+
+test("source text cannot misclassify a provider failure as a missing binary", () => {
+  const evidence: ExitEvidence = {
+    exitCode: 1,
+    signal: null,
+    terminalEventSeen: false,
+    terminalSuccess: false,
+    terminationReason: null,
+    finalOutput: null,
+    providerError: "request rejected by provider policy",
+    stdout: "throw new Error('No such file or directory')",
+    stderr: "models cache warning",
+  };
+
+  assert.equal(adapters.CODEX.classifyError(evidence).failureClass, "TASK_FAILED");
 });

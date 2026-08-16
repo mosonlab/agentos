@@ -88,6 +88,18 @@
 - [ ] `db:files-precheck` 未在根 `package.json` 暴露，只能 `npm run db:files-precheck -w @agentos/db`；破坏性迁移的预检应和 `db:migrate` 一样是根级命令，最好由 `db:migrate` 自己前置调用（2026-08-16 上线迁移时发现）
 - [ ] `apps/web/src/tests/styles.test.tsx` 读 `dist/assets/*.css`，裸 `npm test` 会对着陈旧产物断言（改了 CSS 不 build 就跑测试 = 假绿/假红）。测试应自己触发构建或读源文件，不该隐式依赖执行顺序（2026-08-16 合并 PR #1 时发现）
 
+## 失败恢复与交付流（2026-08-16 挂账；原 failure-recovery-and-pr-flow 链已撤）
+
+**背景**：2026-08-16 曾为这批开过一条九步链（`chainId 38948720-…`），因与另一窗直接在 master 上修 Sol 崩溃的工作撞车而当场撤销（① 已 DONE 并留说明，②–⑨ 已删）。那一窗已落地的部分**不在本节范围内**：codex `0.144.1 → 0.147.0`、结构化 provider 错误优先写 `failureReason`（不再被 models-cache 告警刷掉）、`ENOENT|No such file` 不再被误判成 `BINARY_NOT_FOUND`（只认 exit 127）。以下是**没人做**的剩余部分。
+
+**共同前置**：四条里三条动 `packages/runner/src/*` 与 `packages/api/src/app.ts`，与上述改动同文件。**必须等那一窗的改动提交并合入 master 之后才能派**，否则链上 ⑤ 从 GitHub master 克隆，看不到未提交的改动，必然冲突。
+
+- [ ] **失败 run 的 stdout 落盘（取证）** — 中价值。runner 已经在发（`runner.ts` completeRun body 的 `output`，尾部 50 万字符），API 只在成功时写进 `TaskStepOutput`（`app.ts` 约 2076-2095），失败直接丢；`Run` 表无 output 列。约束：`TaskStepOutput.taskId` 是 `@unique`，一个任务一行，而一个任务可以死 5 次（Files ⑥ 实测），所以按 run 存需要新地方。**验收**：下次猝死能从库里归因；做不到就升级为把全量 stdout 落进工作区文件再随 WIP 一起抢救。注：codex 升级 0.147 后急性痛点可能已消失，本条现在的价值是"下一次再猝死时不再瞎"的保险
+- [x] **WIP 抢救先 commit 再推** — **已完成**：`deliverFailedWorkspace` 先暂存并提交可追踪改动，再以普通 push 推送 run 分支；保持绝不 force-push、绝不开 PR、抢救失败不得盖住真实失败原因，并将抢救提交的新 `headSha` 上报平台
+- [ ] **一链一 PR** — 中价值，且**现在仍在发生**：2026-08-16 前端链的 ① 是纯文档步，照样开了 PR #33。按 head 分支复用 open PR 的逻辑**早已实现**（`delivery.ts` 用 `gh pr list --head <branch> --state open`），缺的是两件：①`enqueueTaskRun`（`packages/db/src/workflow.ts`）里算 `chainBranch` 的条件写死了 `task.templateId`，**API 建的 `chainId` 链拿不到共享分支**，于是每步落回 `agentos/<taskId>/run-<n>` 各自一个 head、各自一个 PR（四条链刷 32 个 PR 的成因）；②"哪些步开 PR"要放进建链数据（如 `opensPullRequest` 布尔），纯文档步只推分支不开 PR，**不许在 runner 里 grep 步骤名**
+- [ ] **工作区依赖注入（APFS clonefile）** — 低价值，纯效率。`provisionWorkspace`（`packages/runner/src/workspace.ts`）clone 后按 `package-lock.json` hash 分桶，命中用 `cp -Rc` 克隆 node_modules，未命中跑一次 `npm ci` 存新桶。注意 runner 里**现在根本没有 `npm ci` 调用**，依赖是 agent 自己在会话里装的。边界：clonefile 仅同 APFS 卷有效，跨卷静默退化成普通复制（慢但正确），Linux 等价物 `--reflink=auto`；损坏的桶绝不能交给 agent；缓存需要容量上限。**已实测推翻的理由不要再写进 spec**：npm 输出撑爆上下文导致猝死（热缓存 21.2 秒/37 行）
+- [x] ~~新增 `USAGE_LIMIT`/`PROVIDER_ERROR` 可重试分类~~ — **已由上述分类器修复顺带解决**：`BINARY_NOT_FOUND` 不再抢在前面吃掉文本，用量超限现在正常命中既有的 `RATE_LIMITED` 分支（`/429|rate.?limit|usage.?limit|quota/`，`retryable: true`），自动重试生效。无需新分类
+
 ## 开源发布批次
 
 - [ ] 英文 README + quickstart

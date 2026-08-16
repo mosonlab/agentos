@@ -8,6 +8,7 @@ import { workspaceEnvironment } from "./workspace.js";
 export type DeliveryResult = {
   pushStatus: "SUCCEEDED" | "FAILED";
   pushRemote: string;
+  headSha?: string;
   pushError?: string;
   pullRequestUrl?: string;
   pullRequestNumber?: number;
@@ -129,9 +130,9 @@ export const deliverWorkspace = async (
 };
 
 /**
- * Salvage for a failed run: if the agent committed anything, push its run branch
- * as WIP so the work survives workspace cleanup. Never opens a PR, and never
- * reports a failureClass — the run already has one from the CLI evidence.
+ * Salvage for a failed run: commit any trackable worktree changes, then push the
+ * run branch as WIP so the work survives workspace cleanup. Never opens a PR,
+ * and never reports a failureClass — the run already has one from CLI evidence.
  */
 export const deliverFailedWorkspace = async (
   config: RunnerConfig,
@@ -141,26 +142,34 @@ export const deliverFailedWorkspace = async (
 ): Promise<DeliveryResult | null> => {
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
-  // A run branch that never diverged from its base has nothing worth salvaging.
   const branch = `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
   try {
+    // Respect .gitignore while including tracked deletions and untracked files.
+    await command("git", ["add", "-A"], workspace.path, env);
+    const status = await command("git", ["status", "--porcelain"], workspace.path, env);
+    if (status) {
+      await command("git", [
+        "-c", "user.name=AgentOS Runner",
+        "-c", "user.email=runner@agentos.local",
+        "-c", "commit.gpgSign=false",
+        "-c", "core.hooksPath=/dev/null",
+        "commit", "--no-verify", "-m", `WIP salvage for AgentOS run ${claim.run.id}`,
+      ], workspace.path, env);
+    }
     const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env);
+    // A clean run branch that never diverged from its base has nothing to push.
     if (head === workspace.baseSha) return null;
-  } catch {
-    return null;
-  }
-  try {
     // Plain push, never forced: the run branch is unique per (task, run), so a
     // rejection means something else is there and salvaging must not clobber it.
     await command("git", ["push", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env);
     return {
       pushStatus: "SUCCEEDED",
       pushRemote: remote,
+      headSha: head,
       deliveryInstructions: `Run failed; its commits were pushed to '${branch}' as work in progress. No pull request was opened.`,
     };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    return { pushStatus: "FAILED", pushRemote: remote, pushError: `WIP salvage push failed: ${message}` };
+    return { pushStatus: "FAILED", pushRemote: remote, pushError: `WIP salvage failed: ${message}` };
   }
 };
-

@@ -94,6 +94,7 @@ export type ExitEvidence = {
   terminalSuccess: boolean;
   terminationReason: string | null;
   finalOutput: string | null;
+  providerError: string | null;
   stdout: string;
   stderr: string;
 };
@@ -124,6 +125,7 @@ export type RuntimeHandle = {
   terminalSuccess: boolean;
   terminationReason: string | null;
   sawError: boolean;
+  providerError: string | null;
   piTurnCompleted: boolean;
   finalOutput: string | null;
   stdout: string;
@@ -178,6 +180,11 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
 
 const stringField = (object: Record<string, unknown> | null, field: string): string | null =>
   typeof object?.[field] === "string" ? object[field] as string : null;
+
+const eventErrorMessage = (event: Record<string, unknown>): string | null =>
+  stringField(event, "message")
+  ?? stringField(event, "error")
+  ?? stringField(asRecord(event.error), "message");
 
 const emit = (handle: RuntimeHandle, sink: SessionEventSink, type: string, payload: Record<string, unknown>, toolCallId?: string | null): void => {
   handle.lastProgressEventAt = new Date();
@@ -251,6 +258,7 @@ const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink:
     if (item?.error) handle.sawError = true;
   } else if (type === "error") {
     handle.sawError = true;
+    handle.providerError = eventErrorMessage(event) ?? handle.providerError;
     emit(handle, sink, "ADAPTER_ERROR", event);
   } else if (type === "turn.completed") {
     handle.terminalEventSeen = true;
@@ -388,6 +396,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     terminalSuccess: false,
     terminationReason: null,
     sawError: false,
+    providerError: null,
     piTurnCompleted: false,
     finalOutput: null,
     stdout: "",
@@ -421,6 +430,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
         terminalSuccess: handle.terminalSuccess,
         terminationReason: handle.terminationReason,
         finalOutput: handle.finalOutput,
+        providerError: handle.providerError,
         stdout: handle.stdout,
         stderr: handle.stderr,
       });
@@ -501,10 +511,17 @@ export const adapterExecutionSucceeded = (evidence: ExitEvidence): boolean =>
   && evidence.terminalEventSeen
   && evidence.terminalSuccess;
 
+export const failureReasonFromEvidence = (evidence: ExitEvidence): string =>
+  evidence.providerError?.trim()
+  || evidence.stderr.trim()
+  || `CLI exited with code ${evidence.exitCode}`;
+
 const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
-  const text = `${evidence.stdout}\n${evidence.stderr}`;
+  const text = evidence.providerError?.trim()
+    ? `${evidence.providerError}\n${evidence.stderr}`
+    : `${evidence.stderr}\n${evidence.stdout}`;
   if (evidence.terminationReason) return { failureClass: "CANCELLED_OR_TIMED_OUT", retryable: false };
-  if (evidence.exitCode === 127 || /ENOENT|No such file or directory/u.test(text)) {
+  if (evidence.exitCode === 127) {
     return { failureClass: "BINARY_NOT_FOUND", retryable: false, operatorAction: "Install the configured CLI or repair RUNNER_PATH" };
   }
   if (/authentication_failed|\b401\b|Missing authentication|No API key found|not logged in/iu.test(text)) {
