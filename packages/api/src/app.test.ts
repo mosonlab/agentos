@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import type { PrismaClient } from "@agentos/db";
+import { RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
 
 import { createApp } from "./app.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
@@ -190,4 +191,141 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
   assert.deepEqual(lost, ["run-dead"]);
+});
+
+const retryRequest = async (
+  assigneeAgent: {
+    id: string;
+    model: string;
+    runnerPreference: RunnerPreference;
+    foundationalPrompt: string;
+    rolePrompt: string;
+  } | null,
+  templateStep: { runner: RunnerKind | null } | null = null,
+) => {
+  let created: Record<string, unknown> | undefined;
+  const last = {
+    id: "run-1",
+    projectId: "project-1",
+    taskId: "task-1",
+    goalId: "goal-1",
+    agentId: "old-agent",
+    repoId: "repo-1",
+    runNumber: 1,
+    status: "FAILED",
+    runner: RunnerKind.CLAUDE,
+    model: "old-model",
+    targetBranch: "main",
+    branch: "feature/retry",
+    promptHash: createHash("sha256").update("foundation\nrole\nRetry me\nUse current config").digest("hex"),
+    maxDurationMin: 90,
+    stallTimeoutMin: 7,
+    maxRunsPerTask: 4,
+  };
+  const database = {
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      task: {
+        findUnique: async () => ({
+          id: "task-1",
+          name: "Retry me",
+          description: "Use current config",
+          assigneeAgent,
+          templateStep,
+          runs: [last],
+        }),
+        update: async () => ({}),
+      },
+      run: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          created = data;
+          return { id: "run-2", ...data };
+        },
+      },
+      taskActivity: { create: async () => ({}) },
+    }),
+  } as unknown as PrismaClient;
+  const response = await createApp(database).request("/tasks/task-1/retry", {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-unit-token" },
+  });
+  return { response, created, last };
+};
+
+test("operator retry re-derives runner, model, promptHash and current agent id", async () => {
+  await withTokens(async () => {
+    const { response, created, last } = await retryRequest({
+      id: "current-agent",
+      model: "deepseek-current",
+      runnerPreference: RunnerPreference.PI,
+      foundationalPrompt: "new foundation",
+      rolePrompt: "new role",
+    });
+    assert.equal(response.status, 201);
+    assert.equal(created?.agentId, "current-agent");
+    assert.equal(created?.runner, RunnerKind.PI);
+    assert.equal(created?.model, "deepseek-current");
+    assert.notEqual(created?.promptHash, last.promptHash);
+    assert.equal(created?.branch, last.branch);
+    assert.equal(created?.targetBranch, last.targetBranch);
+    assert.equal(created?.maxRunsPerTask, last.maxRunsPerTask);
+  });
+});
+
+test("operator retry with unchanged agent preserves the previously derived config", async () => {
+  await withTokens(async () => {
+    const { response, created, last } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    });
+    assert.equal(response.status, 201);
+    assert.deepEqual({
+      agentId: created?.agentId,
+      runner: created?.runner,
+      model: created?.model,
+      branch: created?.branch,
+      targetBranch: created?.targetBranch,
+      maxDurationMin: created?.maxDurationMin,
+      stallTimeoutMin: created?.stallTimeoutMin,
+      maxRunsPerTask: created?.maxRunsPerTask,
+      promptHash: created?.promptHash,
+    }, {
+      agentId: "old-agent",
+      runner: RunnerKind.CLAUDE,
+      model: "old-model",
+      branch: "feature/retry",
+      targetBranch: "main",
+      maxDurationMin: 90,
+      stallTimeoutMin: 7,
+      maxRunsPerTask: 4,
+      promptHash: last.promptHash,
+    });
+  });
+});
+
+test("operator retry honors a template-step runner override", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-1",
+      model: "deepseek-current",
+      runnerPreference: RunnerPreference.PI,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, { runner: RunnerKind.CODEX });
+    assert.equal(response.status, 201);
+    assert.equal(created?.runner, RunnerKind.CODEX);
+  });
+});
+
+test("operator retry returns 409 when the task assignee no longer exists", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest(null);
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Task assignee no longer exists; assign an agent before retrying",
+    });
+    assert.equal(created, undefined);
+  });
 });

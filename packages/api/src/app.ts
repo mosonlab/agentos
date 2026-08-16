@@ -3,6 +3,7 @@ import {
   advanceTemplateTask,
   applyInboxDecision,
   CleanupStatus,
+  deriveRunConfig,
   FailureClass,
   GoalStatus,
   NetworkingMode,
@@ -1006,7 +1007,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const result = await db.$transaction(async (tx) => {
       const task = await tx.task.findUnique({
         where: { id: taskId },
-        include: { runs: { orderBy: { runNumber: "desc" }, take: 1 } },
+        include: {
+          assigneeAgent: true,
+          templateStep: true,
+          runs: { orderBy: { runNumber: "desc" }, take: 1 },
+        },
       });
       if (!task) return { error: "Task not found", code: 404 as const };
       const last = task.runs[0];
@@ -1015,20 +1020,24 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         return { error: "Task already has an active run", code: 409 as const };
       }
       if (last.runNumber >= last.maxRunsPerTask) return { error: "Run budget exhausted", code: 409 as const };
+      if (!task.assigneeAgent) {
+        return { error: "Task assignee no longer exists; assign an agent before retrying", code: 409 as const };
+      }
+      const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
       const run = await tx.run.create({
         data: {
           projectId: last.projectId,
           taskId,
           goalId: last.goalId,
-          agentId: last.agentId,
+          agentId: task.assigneeAgent.id,
           repoId: last.repoId,
           runNumber: last.runNumber + 1,
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
-          runner: last.runner,
-          model: last.model,
+          runner: derived.runner,
+          model: derived.model,
           targetBranch: last.targetBranch,
           branch: last.branch,
-          promptHash: last.promptHash,
+          promptHash: derived.promptHash,
           maxDurationMin: last.maxDurationMin,
           stallTimeoutMin: last.stallTimeoutMin,
           maxRunsPerTask: last.maxRunsPerTask,
