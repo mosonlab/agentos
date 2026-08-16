@@ -100,7 +100,14 @@
 - 每个 agent 所用模型在批次 1 的下拉做好后由 Leo 统一复核调整。
 - 模型路由备忘：Luna(gpt-5.6-luna) 机械批量、**一律显式 max**；Sol(gpt-5.6-sol) 语义校验 high+；升级链 Luna→Sonnet→Opus；spawn 必显式指定 model（钩子强制）。
 
-## 13. 记账
+## 13. 权限与可观测性裁决（2026-08-16 二轮查漏定案）
+
+- 执行面审计结论：真执行的只有 repo 白名单与 secret 注入；filesystem grants、每 agent MCP 开关、GIT_READ/WRITE、Environment networking 均为未接线的 DB 元数据。
+- **裁决**：不做应用层权限强制/沙箱——真隔离走 OS 层（受限 macOS 用户运行 runner，推荐；或 `RUNNER_RUN_AS_PREFIX` 套 Docker），开源批次做未执行项的 UI 诚实标注。**MCP 连接真注入单独保留**（长尾）：定性为功能补缺而非权限工程。
+- 可观测性：批次 4 提前（批次 0 合并后与批次 1 并行首发），范围扩为对齐原版会话画面（渲染消息流/统计条/Files touched/run 级 Cost·Tokens/产出 Markdown 渲染），原始事件流收进折叠 Debug 视图。
+- runner 并发做成配置项，默认自适应 `min(核数-1, 内存GB/4)`、下限 2；并发数=同时跑的 run 数。
+
+## 14. 记账
 
 - 本决议对应执行清单：`docs/BACKLOG-V2.md`（新开对标批次文件）。
 - `docs/BACKLOG.md`（pilot 驱动 V1.5）不动，其三条挂账（一链一 PR 历史链、闸门富渲染、WIP 分支回收）留在原处。

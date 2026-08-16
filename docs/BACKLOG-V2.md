@@ -32,9 +32,12 @@
 - [ ] 前端分页渲染 + 进度 + Back/Next + Recommended + Other（接 SurveyJS 渲染层）
 - [ ] 飞书卡片适配新结构，硬编码中文文案英文化
 
-## 批次 4 — Sessions 会话查看器（第 1 项）
+## 批次 4 — Sessions 会话查看器（第 1 项；2026-08-16 Leo 裁：**提前**，批次 0 合并后与批次 1 并行首发——dogfood 最大痛点是"看不懂 agent 在干嘛"）
 
-- [ ] /sessions 列表 + 详情页：轮询 events 渲染消息流、tool call 折叠、Files touched 聚合
+- [ ] /sessions 列表 + 详情页：轮询 events 渲染消息流（agent 文本 / 代码片段带路径 / tool call 折叠展开含参数与返回）、顶部统计条（N messages · N tool calls · N files）、Files touched 聚合折叠区——对齐原版 [0:16:30] 画面
+- [ ] 原始事件表（现 TaskDetail 的 JSON 截断流）收进默认折叠的 Debug events 视图，排障用
+- [ ] 任务产出（outputs）在任务详情渲染为 Markdown + 分支名/PR 可点链接——spec/plan 正文当前只能去 GitHub 读（2026-08-16 Leo 反馈）
+- [ ] run 表加 Cost/Tokens 两列（原版每 run 显示 $ 与 token 数；runner 事件是否已带用量数据实现时验证）——总账最便宜实现，可能免掉整个 Costs 页
 - [ ] "向运行中代理发消息"后置（依赖 runner 注入支持）
 
 ## 批次 5 — Goals 协调器（第 5 项，决议 §8）
@@ -53,6 +56,7 @@
 - [ ] Activity 流（第 6 项）：/activity 聚合时间线（shadcn Timeline，轮询）
 - [ ] Env/Repos CRUD（第 9 项）
 - [ ] Connections 整页重写（第 10 项）：编辑表单 + 作用域标签；Last verified/Profile 后置
+- [ ] MCP 连接真注入：AgentMCPConnection 授权随 claim 载荷下发，runner 生成 CLI 的 MCP 配置真正启动外部连接（现为纯 DB 元数据，agent 配了 GitHub MCP 等也用不了——2026-08-16 执行面审计发现；定性为功能补缺，非权限工程）
 - [ ] 通知渠道适配器：NotificationAdapter 接口 + 飞书实现（只做接口，不做新渠道）
 - [ ] YAML Phase 1：DB↔YAML export/import（因开源提前；兼作种子 agent 发行载体）
 
@@ -60,6 +64,7 @@
 
 - [ ] WAITING_INBOX 挂起中的 run 工作区不应被 GC：闸门等待期间 /tmp 工作区被清，resume 报 ENOENT 只能重开会话、丢失会话内上下文（2026-08-16 批次 0 修订环节触发）
 - [ ] Agent 归档/下线状态（原版有 published/draft）：有任务历史的 agent 删不掉（外键 500），需要软下线——2026-08-16 裁撤 feasibility 时暴露
+- [ ] runner 并发度参数：单进程 worker 池跑 N 个 run（现=1 run/进程，扩并发只能多开进程；多进程认领 CAS 安全已验证，但产品级并发应是一个配置项）。上限设计：run 是 I/O 等待型（等模型回包），瓶颈是内存/磁盘（npm ci、build 爆发）而非 CPU——默认自适应 `min(核数-1, 内存GB/4)`（下限 2，可配置覆盖；该数=同时跑的 run 数），不用裸核数——run 稳态是等模型回包，但 npm ci/build 爆发吃核吃内存（2026-08-16 四链排队暴露 + Leo 裁：默认要随机器规格走，不固定低值）
 - [ ] 非模板任务的 approvalGate 到闸不发飞书卡：手动创建的带闸任务 run 成功后静默停 Review 列，人无从得知（2026-08-16 批次 2 PLAN 触发；批次 2 spec §8-1 已把该歧义摆上桌）
 - [ ] retry 应按 agent 当前配置重新推导 runner/model，而非复刻失败 run 的定格配置（2026-08-16：评审任务改完 agent 后 retry 仍按旧 CLAUDE runner 跑 sol，二连败，只能删任务重建）
 
@@ -69,6 +74,7 @@
 - [ ] docker-compose（含 Postgres）/ 安装脚本
 - [ ] 种子 agent YAML 阵容
 - [ ] runner 安全显著警示 + 远程访问文档（反向代理/Tailscale）+ pg_dump 备份文档
+- [ ] 权限诚实化（2026-08-16 Leo 裁，替代做强制）：filesystem grants / Environment networking 等未执行项在 UI 标注 "not enforced"；文档给出两个真隔离方案——受限 macOS 用户运行 runner（推荐）与 `RUNNER_RUN_AS_PREFIX` 套 Docker；不做应用层沙箱
 - [ ] License：MIT；发布前定内部中文文档去留
 
 ## 远期
