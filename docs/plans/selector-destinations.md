@@ -88,7 +88,7 @@ foot of the same file, so that utilities now beat them instead of losing to them
 | `.btn.danger` / `:hover` | `variant.legacyDanger` — runs on `--danger-button*`, not the stock `destructive` variant, whose `text-destructive-foreground` names a token that does not exist here |
 | `.btn.small` | `size.legacySmall` |
 | `.iconBtn` / `:hover` | `variant.icon` + `size.legacyIcon`; `shadow-none` lives in the variant because its only host is a raw `<button>` |
-| `.iconBtn.danger:hover` | `ui.tsx` `RowMenu` → `text-destructive focus:bg-destructive/10 focus:text-destructive` on the menu item |
+| `.iconBtn.danger:hover` | **dead at baseline — dropped, see §13** |
 | `.segmented` | `ui.tsx` `Segmented` root |
 | `.segmented button` | `ui.tsx` `SEGMENTED_BUTTON` |
 | `.segmented button:hover` | `SEGMENTED_BUTTON`, attached to **unselected** buttons only, matching the legacy `:not(.on)` effect |
@@ -183,8 +183,10 @@ foot of the same file, so that utilities now beat them instead of losing to them
 | `.msgHead .time` | `ui.tsx` `MSG_TIME` |
 | `.waitBar` | `pages/Inbox.tsx` — the amber `color-mix` bar, inline on the element |
 | `.choiceList` | `pages/Inbox.tsx` `LIST` |
-| `.choice` / `:hover` / `.choice.on` | `pages/Inbox.tsx` `CHOICE` |
-| `.choice .radio` / `.choice.on .radio` | `pages/Inbox.tsx` — `"mt-[2px] size-[15px] flex-none rounded-full border border-[color:var(--radio-border)]"` |
+| `.choice` / `:hover` | `pages/Inbox.tsx` `CHOICE` |
+| `.choice.on` | **dead at baseline — dropped, see §13** |
+| `.choice .radio` | `pages/Inbox.tsx` — `"mt-[2px] size-[15px] flex-none rounded-full border border-[color:var(--radio-border)]"` |
+| `.choice.on .radio` | **dead at baseline — dropped, see §13** |
 | `.choice .label` | `pages/Inbox.tsx` — `"flex-1 text-[12.5px]"` |
 | `.choice .hint` | `pages/Inbox.tsx` — `"mt-[3px] block"` **only**. Deliberately not `HINT`: `.choice` has no `.field` ancestor, so `.field .hint`'s colour and size never applied here; the plan's A.3 mapping would have shrunk and greyed it. |
 
@@ -263,6 +265,16 @@ built sheet: `grep -c "max-width: *900px" apps/web/dist/assets/*.css` → 1.
 |---|---|---|---|
 | `:root { --ink-* … --radius-ctl }` | 30 alias custom properties | canonical token names used directly | The aliases had exactly one consumer each — the legacy stylesheet. |
 | `.table td.right, .table th.right` | `text-align: right` | — | Dead at baseline; no element in the app carried `right`. |
+| `.iconBtn.danger:hover` | `color: var(--red-fg)` | — | Dead at baseline. `iconBtn` occurs exactly once in the whole 3f712b5 tree (`ui.tsx:184`, the RowMenu trigger) and never alongside `danger`. §4 previously pointed this at `RowMenu`'s `text-destructive focus:…`, but that styling is on the *menu item*, already existed at `3f712b5:ui.tsx:188`, and is untouched by this batch — so no relocation happened. |
+| `.choice.on` | `border-color`/`background` of the selected choice | — | Dead at baseline. `className="choice"` appears twice (`3f712b5:Inbox.tsx:185,187`) and is never combined with `on`; the decision buttons are momentary, not a selected set. `CHOICE` implements the base and hover only, so calling it the destination overstated its coverage. |
+| `.choice.on .radio` | the filled radio dot | — | Same: no selected state ever rendered. |
+
+Verified with, at the repository root:
+
+```sh
+git grep -n 'iconBtn' 3f712b5 -- 'apps/web/src/**/*.tsx'   # 1 hit, no `danger`
+git grep -n '"choice'  3f712b5 -- 'apps/web/src/**/*.tsx'   # 2 hits, neither with `on`
+```
 
 ## 14. Appearance deltas recorded elsewhere
 
@@ -277,6 +289,16 @@ reviewer sees the complete set in one place.
 3. **`color-mix()` gets an `@supports` wrapper.** Tailwind emits arbitrary `color-mix()`
    values inside `@supports` with a solid fallback outside it. Identical in every browser
    that supports `color-mix`; a browser-support difference only.
+4. **The sixteen converted raw controls gain `focus-visible:ring-1 focus-visible:ring-ring`.**
+   `input.tsx:25`, `textarea.tsx:17` and `select.tsx:21` all carry it; the retired sheet gave
+   focus only `border-color: var(--primary)` with `outline: 0`, and that border change is
+   preserved (`focus:border-primary`). Accepted rather than neutralised, unlike the two
+   deltas in §16, for three reasons: it is a focus-visible state, never the resting one;
+   the ring was already live at 3f712b5 on every control that was *already* a primitive —
+   nothing unlayered set `box-shadow`, which is what `ring-1` compiles to — so suppressing
+   it on the converted sixteen would make the app internally inconsistent in the other
+   direction; and removing a keyboard focus indicator is an accessibility regression.
+   Same precedent as delta 2 above.
 
 ## 15. Plan deviations found at W16, with their measurements
 
@@ -291,7 +313,7 @@ and the plan predicted the wrong winner.
 | 2 | §W6: `text-sm` → `text-[12.5px]` is size-for-size | `text-sm` also paired a line-height that `.table td`'s font-size override left inherited | `table.tsx` pins `leading-[1.4285714]`; 4 raw-`<table>` call sites take `leading-normal` |
 | 3 | `.hint` is a legacy class to translate | No standalone `.hint` rule exists — only `.field .hint` and `.choice .hint` | `HINT` removed from 12 sites; kept at the one `.field .hint` |
 | 4 | `.small` is a legacy class to translate | `.table td` outranks `.small` on specificity, so it was inert in that `<td>` | size class dropped from the commit-range cell; the 4 non-table spans keep it |
-| 5 | §1.5 covers every input | Two Projects inputs were raw `<input>`: 38.75px and a preflight placeholder | `h-auto placeholder:text-foreground/50` at those two sites |
+| 5 | §1.5 covers every input | **Sixteen** controls converted from a raw, unclassed element styled only by `styles.css:233-240`; that rule set `padding` and nothing else, so what each host loses differs. Two had an `h-9` to lose, three a preflight placeholder, two a `:disabled` appearance | W16 repaired the two Projects inputs (`h-auto placeholder:text-foreground/50`); §16 repairs the rest |
 | 6 | `CARD_TITLE` carries the modal title | `h1..h4 { font-weight: 700 }` was unlayered and beat `font-semibold`; and tailwind-merge deletes `leading-none` behind a font-size utility | `font-bold leading-none` at the DialogTitle call site |
 
 Measured heights, baseline → after repair, all in CSS px:
@@ -326,3 +348,49 @@ by neither, and no fixture exercises a `<Textarea>` inside a captured frame — 
 primitive was checked by deriving its geometry from the legacy declarations
 instead (every call site passes `rows`, and `text-[12.5px] leading-[1.6] py-[9px]`
 reproduces the retired `textarea` rule exactly).
+
+## 16. Code-review repairs
+
+`docs/reviews/2026-08-16-batch-frontend-convergence-review.md` failed the batch on two
+must-fix findings and raised five should-fix. Both must-fix landed in exactly the region
+the residual risk above names: states no sweep renders. Every repair below was derived
+from the retired declarations, not from a screenshot.
+
+| Finding | What was wrong | Repair |
+|---|---|---|
+| MF-1 | `ErrorNotice` wrapped its `ReactNode` message in a `<span>`. `NOTICE` is `flex gap-[10px]`, so the App 401 banner's 9 flex items (5 text runs, 4 `<code>`) collapsed to 1 and its eight 10px gaps vanished; the offline banner lost two the same way. The batch had widened `message` from `string` to `ReactNode` to route `App.tsx:38-44`'s inline children through the component, and `3f712b5` laid those out unwrapped. | `ui.tsx` renders `{message}` directly unless it is a string. A string still gets the baseline `<span>`, so the 5 sites that pass one are byte-identical. Verified by SSR: the rich message emits 0 `<span>` and 4 `<code>` children; `message="boom"` still emits `<span>boom</span>`. |
+| MF-2 | The audit behind W16 deviation 5 was scoped by "only these two call sites converted from a raw element". Sixteen did — 4 Agents, 1 Goals, 1 Inbox, 3 Projects, 1 Secrets, 1 TaskDetail, 5 Tasks — all unclassed, all styled by `styles.css:233-240`, which sets `padding` and nothing else. | The claim is corrected at `Projects.tsx:49` and in §15 row 5; the three unrepaired deltas are below. |
+
+MF-2's deltas, one row per property the primitives add that the retired sheet did not have:
+
+| Delta | Sites | Repair |
+|---|---|---|
+| `placeholder:text-muted-foreground` (`textarea.tsx:17`) where a raw element took preflight's `currentColor` at 50% | `Inbox.tsx` reply textarea — the third and last converted host with a `placeholder`; the other two were repaired at W16 | `placeholder:text-foreground/50`, identical to the Projects pair |
+| `disabled:opacity-50 disabled:cursor-not-allowed` (`select.tsx:21`) where the sheet had **no** `select:disabled` rule — its only `:disabled` rules were `.btn:disabled` and `.toggle:disabled` | the only two converted controls with a `disabled` prop: `TaskDetail.tsx` status select (`disabled={pending}`) and `Tasks.tsx` agent select (`disabled={form.assigneeType === "HUMAN"}`, the new-task form's default state) | `disabled:opacity-100 disabled:cursor-default` at both |
+| `focus-visible:ring-1 focus-visible:ring-ring` on all 16 hosts | every converted control | **accepted, not neutralised** — recorded as §14 delta 4 with its reasoning |
+
+Related, same root cause: `button.tsx`'s base carries `disabled:pointer-events-none`, which
+makes a disabled button inert to the pointer so its own `cursor` never applies. The retired
+`.btn:disabled { opacity:.45; cursor:not-allowed }` and `.btn:hover` both applied at
+baseline — nothing there removed pointer events — so `disabled:pointer-events-auto
+disabled:cursor-not-allowed` joins `disabled:opacity-45` on `legacy`, `legacyPrimary` and
+`legacyDanger`. `pointer-events-auto` is not redundant with the cursor class; without it the
+cursor class is inert. A disabled `<button>` dispatches no click either way, so this is
+presentation only. `variant.icon` is left alone: `.iconBtn` had no `:disabled` rule, and its
+one host is never disabled.
+
+The five should-fix, all applied:
+
+| # | Repair |
+|---|---|
+| SF-1 | `styles.test.tsx`'s `CLASS_TOKEN` was anchored to `(?:^|[\s,>+~()])`, so `td.legacyProbe` and `button.btn` were invisible to the batch's only mechanical layer guard. Widened to `/\.[A-Za-z_-]/` over the selector with bracketed attribute values blanked. A second test pins the guard's own detection on fixtures — the two element-qualified positives fail under the old regex. Re-scanning the shipped sheet with the wide regex still finds 0 offenders, so this was latent, not live. |
+| SF-2 | `legacy-class-check.sh` extracted `className` with a line-oriented `grep`, so a `className={cn(` whose arguments wrap contributed nothing — 31 such sites. Replaced with a brace-balanced whole-file `perl -0777` extractor that tracks quote state, plus `--self-test` over the new `legacy-class-check-fixture.tsx`, which hides two legacy names inside a wrapped `cn(`. The full scan still returns 0 on all 36 tracked `.tsx`. |
+| SF-3 | The row hover moved from `TableRow` to `TableBody` as `[&_tr]:hover:bg-[color:var(--row-hover)]`. `TableHeader` renders a `TableRow` too, so header rows had taken a hover background the `tbody`-scoped `.table tbody tr:hover` never gave them. Built CSS now emits `… tr:hover{background-color:var(--row-hover)}` once, under the tbody class. |
+| SF-4 | `.iconBtn.danger:hover`, `.choice.on` and `.choice.on .radio` were dead at baseline and had been given live destinations. Moved into §13 with the greps that show it. |
+| SF-5 | `Goals.tsx` now uses `ROW` where it had inlined `ROW`'s exact string, so §9's mapping is true of the code. |
+
+The two open questions the review recorded — the `/tasks/tsk_impl` 52px overflow at a 500px
+viewport, and `npm test --workspaces` exiting 1 because `@agentos/cli` and `@agentos/db` have
+no `test` script — are both out of this batch's scope and were left for the backlog. Note
+that the root `npm test` script already passes `--if-present`; only the bare
+`npm test --workspaces` form exits 1.
