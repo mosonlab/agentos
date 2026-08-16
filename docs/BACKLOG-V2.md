@@ -86,6 +86,7 @@
 - [x] retry 应按 agent 当前配置重新推导 runner/model，而非复刻失败 run 的定格配置（2026-08-16：评审任务改完 agent 后 retry 仍按旧 CLAUDE runner 跑 sol，二连败，只能删任务重建）— **修缮批次已合并上线**，retry 现调 `deriveRunConfig(task.assigneeAgent, …)` 重推导 runner/model/promptHash，改模型后直接 retry 即可
 - [ ] 迁移的破坏性守卫不对称：Files 的 `20260816060946` 有 `FileObject` 行数守卫 + `db:files-precheck` 预检脚本，批次 2 的 `20260816000000` 却是裸 `DROP TABLE Trigger/Automation/InboxConnectionWindow`（上线时库里 InboxConnectionWindow 有 4 行遥测被无声销毁）。删表/删列的迁移应统一要求预检 + 行数守卫（2026-08-16 上线迁移时发现）
 - [ ] `db:files-precheck` 未在根 `package.json` 暴露，只能 `npm run db:files-precheck -w @agentos/db`；破坏性迁移的预检应和 `db:migrate` 一样是根级命令，最好由 `db:migrate` 自己前置调用（2026-08-16 上线迁移时发现）
+- [ ] **Agents「Capabilities」面板整体下移 3.00 CSS px**（前端收敛批次 `3c1f186` 合并后实测，未记入偏差台账）。用批次自带的截图夹具重拍 20 帧与基线逐像素比对：8 个整页最大偏差 0.232%、Connections 明暗两态**恰好为 0**、20 帧尺寸全等（无重排）；唯独 3× 开关特写帧差 5.0–5.4%，做垂直互相关后**最佳位移恰为 9px@3× = 3.00 CSS px**，对齐后残差从 306,302 掉到 52,008。开关本体（旋钮尺寸、行程、配色）与基线一致，**G2 无回归**；整页帧最佳位移均为 0，说明漂移只在 Capabilities 面板内部。3px 这个整数值指向某处 padding/border 的令牌换算，非随机渲染差。属小活，随批次 1 顺手查（那批要动 Agents 页的每工具开关）
 - [ ] `apps/web/src/tests/styles.test.tsx` 读 `dist/assets/*.css`，裸 `npm test` 会对着陈旧产物断言（改了 CSS 不 build 就跑测试 = 假绿/假红）。测试应自己触发构建或读源文件，不该隐式依赖执行顺序（2026-08-16 合并 PR #1 时发现）
 
 ## 失败恢复与交付流（2026-08-16 挂账；原 failure-recovery-and-pr-flow 链已撤）
