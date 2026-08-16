@@ -175,8 +175,6 @@ model Project {
   taskTemplates      TaskTemplate[]
   tasks              Task[]
   goals              Goal[]
-  triggers           Trigger[]
-  automations        Automation[]
   files              FileObject[]
   runs               Run[]
 }
@@ -225,8 +223,6 @@ model Agent {
   sessions           Session[]
   runs               Run[]
   inboxMessages      InboxMessage[]
-  triggers           Trigger[]
-  automations        Automation[]
 
   @@unique([projectId, name])
   @@unique([id, projectId])
@@ -309,6 +305,7 @@ model Repo {
   agentAccess        AgentRepoAccess[]
   tasks              Task[]
   runs               Run[]
+  webhookTemplates   TaskTemplate[]    @relation("WebhookRepo")
 
   @@unique([projectId, name])
   @@unique([id, projectId])
@@ -367,7 +364,7 @@ model Secret {
   updatedAt         DateTime            @updatedAt
   mcpCredentials    MCPConnection[]     @relation("McpCredential")
   repoCredentials   Repo[]              @relation("RepoCredential")
-  webhookTriggers   Trigger[]           @relation("WebhookCredential")
+  webhookTemplates  TaskTemplate[]      @relation("WebhookCredential")
   agentGrants       AgentSecretGrant[]
   environments      EnvironmentSecret[]
 }
@@ -397,20 +394,26 @@ model EnvironmentSecret {
 }
 
 model TaskTemplate {
-  id          String             @id @default(cuid())
-  projectId   String
-  name        String
-  description String
-  variables   String[]
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
-  project     Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  steps       TaskTemplateStep[]
-  tasks       Task[]
-  automations Automation[]
+  id                    String             @id @default(cuid())
+  projectId             String
+  name                  String
+  description           String
+  variables             String[]
+  webhookSecretId       String?
+  webhookRepoId         String?
+  webhookPayloadMapping Json?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+  project               Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  webhookSecret         Secret?            @relation("WebhookCredential", fields: [webhookSecretId], references: [id], onDelete: SetNull)
+  webhookRepo           Repo?              @relation("WebhookRepo", fields: [webhookRepoId], references: [id], onDelete: Restrict)
+  steps                 TaskTemplateStep[]
+  tasks                 Task[]
 
   @@unique([projectId, name])
   @@index([projectId])
+  @@index([webhookSecretId])
+  @@index([webhookRepoId])
 }
 
 model TaskTemplateStep {
@@ -486,6 +489,7 @@ model Task {
   @@index([templateId])
   @@index([templateStepId])
   @@index([repoId])
+  @@index([scheduleKind, status, runAt])
 }
 
 model TaskStepOutput {
@@ -836,60 +840,6 @@ model InboxDecision {
 
   @@index([inboxMessageId])
   @@index([runId])
-}
-
-model InboxConnectionWindow {
-  id            String   @id @default(cuid())
-  instanceId    String
-  startedAt     DateTime @default(now())
-  connectedAt   DateTime?
-  disconnectedAt DateTime?
-  reconnectCount Int     @default(0)
-  closeReason   String?
-
-  @@index([instanceId, startedAt])
-  @@index([disconnectedAt])
-}
-
-model Trigger {
-  id              String   @id @default(cuid())
-  projectId       String
-  webhookSecretId String
-  agentId         String
-  name            String
-  jobPrompt       String
-  payloadMapping  Json?
-  enabled         Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  webhookSecret   Secret   @relation("WebhookCredential", fields: [webhookSecretId], references: [id], onDelete: Restrict)
-  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Restrict)
-
-  @@unique([projectId, name])
-  @@index([webhookSecretId])
-  @@index([agentId])
-}
-
-model Automation {
-  id             String        @id @default(cuid())
-  projectId      String
-  agentId        String
-  taskTemplateId String?
-  name           String
-  cron           String
-  timezone       String
-  taskBody       String?
-  enabled        Boolean       @default(true)
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  agent          Agent         @relation(fields: [agentId], references: [id], onDelete: Restrict)
-  taskTemplate   TaskTemplate? @relation(fields: [taskTemplateId], references: [id], onDelete: SetNull)
-
-  @@unique([projectId, name])
-  @@index([agentId])
-  @@index([taskTemplateId])
 }
 
 model FileObject {

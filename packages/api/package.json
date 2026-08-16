@@ -8,6 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build -w @agentos/db",
     "test": "node --import tsx --test src/*.test.ts",
+    "pretest:db": "npm run build -w @agentos/db",
+    "test:db": "node --import tsx --test src/*.dbtest.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },
