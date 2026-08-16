@@ -357,10 +357,16 @@ export const MSG_HEAD = "mb-[10px] flex items-center gap-[8px] text-[12.5px] tex
 export const MSG_TIME = "ml-auto text-[11.5px] text-[color:var(--faint)]";
 
 export const LONG_TEXT = "text-[12.5px] leading-[1.75] whitespace-pre-wrap text-secondary-foreground [overflow-wrap:anywhere]";
+/** Shared so the markdown clamp on the task page (WI-8) is the same control as
+ *  this one rather than a look-alike that drifts. */
+export const SHOW_MORE_BUTTON = "mt-[10px] inline-flex items-center gap-[6px] border-0 bg-transparent p-0 text-[12px] text-muted-foreground hover:text-foreground";
+/** A body is worth clamping past this much text — reused by both clamps. */
+export const isLongText = (text: string, lines: number): boolean =>
+  text.split("\n").length > lines || text.length > 480;
 
 export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }): ReactNode => {
   const [open, setOpen] = useState(false);
-  const long = text.split("\n").length > lines || text.length > 480;
+  const long = isLongText(text, lines);
   return (
     <div>
       {/* The clamp height stays an inline style: it is driven by the `lines`
@@ -374,7 +380,7 @@ export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }):
       {long ? (
         <button
           type="button"
-          className="mt-[10px] inline-flex items-center gap-[6px] border-0 bg-transparent p-0 text-[12px] text-muted-foreground hover:text-foreground"
+          className={SHOW_MORE_BUTTON}
           onClick={() => setOpen(!open)}
         >
           <IconChevron open={open} />{open ? "Show less" : "Show more"}

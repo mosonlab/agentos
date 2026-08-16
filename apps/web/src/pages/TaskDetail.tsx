@@ -1,15 +1,16 @@
 import { type ReactNode, useState } from "react";
 
 import { api } from "../lib/api";
-import { compact, duration, formatDateTime, money, sha, timeAgo, titleCase } from "../lib/format";
+import { compactTokens, duration, formatDateTime, money, repoWebUrl, sha, timeAgo, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { Link } from "../lib/router";
-import type { Run, SessionEvent, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
+import type { Run, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
+import { cn } from "../lib/utils";
 import { IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import {
-  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
+  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, SHOW_MORE_BUTTON, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, ShowMore, TaskPill, Toggle,
+  Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, ShowMore, TaskPill, Toggle, isLongText,
 } from "../components/ui";
 import { retryable } from "./Tasks";
 import { Button } from "../components/ui/button";
@@ -17,30 +18,39 @@ import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
-/** `.eventLog` is the scroll container and `.eventRow` is the row grid — two
- *  different boxes, not one. The last row drops its rule. */
-const EVENT_LOG = "max-h-[420px] overflow-auto rounded-lg border border-[color:var(--border-soft)] bg-[color:var(--code-background)]";
-const EVENT_ROW = "grid grid-cols-[46px_92px_1fr] gap-[10px] border-b border-[color:var(--event-line)] px-[12px] py-[7px] text-[11.5px] last:border-b-0";
+/** The raw event table used to live here. It now lives on the session page
+ *  (`pages/Sessions.tsx`) so the product has exactly one of them; the run row
+ *  links there instead (plan WI-8, open question A1). */
 
-const RunEvents = ({ runId }: { runId: string }): ReactNode => {
-  const { data, error, loading } = usePoll<SessionEvent[]>(`/runs/${runId}/events`, 3_000);
-  const events = data ?? [];
-  if (error !== null) return <ErrorNotice message={`${error.status} ${error.message}`} />;
-  if (events.length === 0) return <EmptyState>{loading ? "Loading events…" : "No session events recorded for this run."}</EmptyState>;
-  return (
-    <div className={EVENT_LOG}>
-      {events.map((event) => (
-        <div className={EVENT_ROW} key={event.id}>
-          <span className="text-[color:var(--faint)]">#{event.seq}</span>
-          <span className="overflow-hidden text-ellipsis text-primary">{event.type}</span>
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground" title={compact(event.payload, 2_000)}>{compact(event.payload)}</span>
-        </div>
-      ))}
-    </div>
+const ExternalLink = ({ href, children }: { href: string; children: ReactNode }): ReactNode => (
+  <a href={href} target="_blank" rel="noreferrer">{children}</a>
+);
+
+/** `null` whenever the remote is not a GitHub repo we can address, which is the
+ *  caller's signal to render plain text rather than a link that 404s. */
+export const branchUrl = (remoteUrl: string | null | undefined, branch: string | null | undefined): string | null => {
+  const base = repoWebUrl(remoteUrl);
+  if (base === null || !branch) return null;
+  return `${base}/tree/${branch}`;
+};
+
+/** `#39` from a `/pull/39` tail; the whole URL when it does not parse, because a
+ *  link with no label is worse than a long one. */
+export const pullRequestLabel = (url: string): string => {
+  const parsed = /\/pull\/(\d+)\/?$/.exec(url);
+  return parsed === null ? url : `#${parsed[1]}`;
+};
+
+const BranchCell = ({ remoteUrl, branch }: { remoteUrl: string | null | undefined; branch: string | null | undefined }): ReactNode => {
+  if (!branch) return <>—</>;
+  const href = branchUrl(remoteUrl, branch);
+  // The row toggles on click; opening the branch must not also expand it.
+  return href === null ? <>{branch}</> : (
+    <a href={href} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>{branch}</a>
   );
 };
 
-const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onToggle: () => void }): ReactNode => (
+const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => (
   <>
     <TableRow className="cursor-pointer" onClick={onToggle}>
       <TableCell className={TABLE_TIGHT}><span className="text-muted-foreground"><IconChevron open={expanded} /></span></TableCell>
@@ -48,18 +58,19 @@ const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onTo
       <TableCell><RunPill status={run.status} /></TableCell>
       <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
       <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
-      <TableCell>{run.branch ?? run.targetBranch ?? "—"}</TableCell>
+      <TableCell><BranchCell remoteUrl={remoteUrl} branch={run.branch ?? run.targetBranch} /></TableCell>
       {/* No size class: this cell carried `.small` before the batch, but
           `.table td { font-size: 12.5px }` outranks `.small` on specificity, so
           11.5px never reached it. The four `.small` spans that survive as
           `text-[11.5px]` all sit in KeyValue lists, outside any table. */}
       <TableCell>{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
       <TableCell>{money(run.session?.costUsd ?? null)}</TableCell>
+      <TableCell>{compactTokens(run.session?.totalTokens ?? null)}</TableCell>
       <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{run.failureClass.toLowerCase().replace(/_/g, " ")}</Pill>}</TableCell>
     </TableRow>
     {expanded ? (
       <TableRow>
-        <TableCell colSpan={9} className="bg-[color:var(--surface-run-detail)]">
+        <TableCell colSpan={10} className="bg-[color:var(--surface-run-detail)]">
           <div className={STACK}>
             <KeyValue columns={3} items={[
               { k: "Run ID", v: <span className="text-[11.5px]">{run.id}</span> },
@@ -67,13 +78,15 @@ const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onTo
               { k: "Lease generation", v: `${run.leaseGeneration}` },
               { k: "Workspace", v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? " (retained)" : ""}</span> },
               { k: "Budget", v: `${run.maxDurationMin}m wall · ${run.stallTimeoutMin}m stall · ${run.maxRunsPerTask} runs` },
-              { k: "Push", v: run.pullRequestUrl ? <a href={run.pullRequestUrl} target="_blank" rel="noreferrer">{run.pushStatus.toLowerCase()}</a> : run.pushStatus.toLowerCase().replace(/_/g, " ") },
+              // The pull-request anchor lives in the task Details card now; this
+              // entry is the push status and nothing else.
+              { k: "Push", v: run.pushStatus.toLowerCase().replace(/_/g, " ") },
               { k: "Session status", v: run.session?.executionStatus.toLowerCase().replace("_", " ") ?? "—" },
+              { k: "Session", v: run.session ? <Link to={`/sessions/${run.session.id}`}>Open session ↗</Link> : "—" },
               { k: "Resume attempts", v: `${run.session?.resumeAttempt ?? 0}` },
               { k: "Termination", v: run.terminationReason ?? "—" },
             ]} />
             {run.failureReason === null ? null : <ErrorNotice message={run.failureReason} />}
-            <RunEvents runId={run.id} />
           </div>
         </TableCell>
       </TableRow>
@@ -123,6 +136,33 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
   );
 };
 
+/** The step output is markdown, so it cannot use `ShowMore`'s line clamp — that
+ *  clamp needs a single text node. A height clamp plus the same control does the
+ *  same job over rendered blocks. Whitespace-only bodies get the Prompt card's
+ *  empty state rather than an empty box (spec §6). */
+export const StepOutput = ({ output }: { output: TaskStepOutput }): ReactNode => {
+  const [open, setOpen] = useState(false);
+  const empty = output.body.trim().length === 0;
+  const long = isLongText(output.body, 10);
+  return (
+    <Card title="Step output" extra={<Pill tone="grey">{output.kind}</Pill>}>
+      {empty ? <EmptyState>No output recorded.</EmptyState> : (
+        <div>
+          <div className={cn(!open && long && "max-h-[420px] overflow-hidden")}>
+            <Markdown text={output.body} />
+          </div>
+          {long ? (
+            <button type="button" className={SHOW_MORE_BUTTON} onClick={() => setOpen(!open)}>
+              <IconChevron open={open} />{open ? "Show less" : "Show more"}
+            </button>
+          ) : null}
+        </div>
+      )}
+      <div className="mt-2.5">Updated {timeAgo(output.updatedAt)}</div>
+    </Card>
+  );
+};
+
 const STATUSES: TaskStatus[] = ["TODO", "DOING", "REVIEW", "DONE"];
 
 export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
@@ -144,6 +184,15 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   };
   const runs = task.runs;
   const totalCost = runs.reduce((sum, item) => sum + Number(item.session?.costUsd ?? 0), 0);
+  // `—`, never `0`: a task whose sessions all predate the usage columns has an
+  // unknown token count, not a zero one (spec §4.6.5).
+  const counted = runs.map((item) => item.session?.totalTokens).filter((value): value is number => typeof value === "number");
+  const totalTokens = counted.length === 0 ? null : counted.reduce((sum, value) => sum + value, 0);
+  // `app.ts` orders runs `runNumber desc`, so the newest run is the head.
+  const newest = runs[0];
+  const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
+  const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
+  const pullRequestUrl = newest?.pullRequestUrl ?? null;
 
   return (
     <Page className="text-foreground">
@@ -173,6 +222,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <div className={STAT_PILLS}>
           <span className={STAT_PILL}>{runs.length} runs</span>
           <span className={STAT_PILL}>{money(totalCost === 0 ? null : totalCost)} spend</span>
+          <span className={STAT_PILL}>{compactTokens(totalTokens)} tokens</span>
           <span className={STAT_PILL}>{task.maxDurationMin}m wall-clock</span>
           <span className={STAT_PILL}>{task.stallTimeoutMin}m stall</span>
           <span className={STAT_PILL}>max {task.maxSessionsPerTask} runs</span>
@@ -184,6 +234,17 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
             { k: "Assignee", v: task.assigneeType === "AGENT" ? "Agent" : "Human" },
             { k: "Repo", v: task.repo ? `${task.repo.name} · ${task.repo.remoteUrl}` : "—" },
             { k: "Target branch", v: task.targetBranch ?? task.repo?.defaultBranch ?? "—" },
+            {
+              k: "Branch",
+              v: newestBranch === null ? "—"
+                : newestBranchUrl === null ? newestBranch
+                  : <ExternalLink href={newestBranchUrl}>{newestBranch}</ExternalLink>,
+            },
+            {
+              k: "Pull request",
+              v: pullRequestUrl === null ? "—"
+                : <ExternalLink href={pullRequestUrl}>{pullRequestLabel(pullRequestUrl)}</ExternalLink>,
+            },
             { k: "Schedule", v: task.scheduleKind === "NOW" ? "Run once" : titleCase(task.scheduleKind) },
             { k: "Working directory", v: task.workingDirectory ?? "—" },
             {
@@ -205,12 +266,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
             : <ShowMore text={task.description} lines={8} />}
         </Card>
 
-        {output.data ? (
-          <Card title="Step output" extra={<Pill tone="grey">{output.data.kind}</Pill>}>
-            <ShowMore text={output.data.body} lines={10} />
-            <div className="mt-2.5">Updated {timeAgo(output.data.updatedAt)}</div>
-          </Card>
-        ) : null}
+        {output.data ? <StepOutput output={output.data} /> : null}
 
         <Card title="Runs" extra={<span className={COUNT}>{runs.length}</span>} flush>
           <Table>
@@ -218,12 +274,12 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
               <TableRow>
                 <TableHead />
                 <TableHead>Run</TableHead><TableHead>Status</TableHead><TableHead>Started</TableHead><TableHead>Duration</TableHead>
-                <TableHead>Branch</TableHead><TableHead>base → head</TableHead><TableHead>Cost</TableHead><TableHead>Failure class</TableHead>
+                <TableHead>Branch</TableHead><TableHead>base → head</TableHead><TableHead>Cost</TableHead><TableHead>Tokens</TableHead><TableHead>Failure class</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {runs.map((item) => (
-                <RunRow key={item.id} run={item} expanded={expanded === item.id}
+                <RunRow key={item.id} run={item} remoteUrl={task.repo?.remoteUrl} expanded={expanded === item.id}
                   onToggle={() => setExpanded(expanded === item.id ? null : item.id)} />
               ))}
             </TableBody>
