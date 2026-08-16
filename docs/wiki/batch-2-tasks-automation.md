@@ -184,9 +184,10 @@ There is deliberately no replay window, idempotency key, or duplicate-fire
 dedupe in this version. Every authenticated repeat creates a separate chain;
 the caller must provide replay protection if it needs it. Under concurrent
 instantiation, the server retries `P2034`/`P2002` transaction conflicts up to
-five attempts with jitter and a fresh chain id per attempt. If contention still
-exhausts the retry budget, the webhook returns `503` so the caller can retry.
-The created tasks and activities are the durable fire trail; `chainId` and
+five attempts with jitter and a fresh chain id per attempt. Exhausted `P2034`
+contention is mapped to `503` so the caller can retry; any other residual
+database error follows the normal API error handler. The created tasks and
+activities are the durable fire trail; `chainId` and
 `taskIds` from the response should be retained by the caller for correlation.
 
 ## 4. Fixed failure signatures (A/B/C/D)
@@ -403,4 +404,3 @@ conflict resolution, preserve the repair's archive pre-check by moving that
 pre-check down into `activateChainSuccessor`; do not leave it only in a caller
 or choose one side's old helper wholesale. Re-run the chain DB race and gate
 approval/rejection tests after the merge.
-
