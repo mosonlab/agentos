@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { Prisma, RunStatus, RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp, partitionArchivable } from "./app.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
 import { noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
 
@@ -425,7 +425,10 @@ const retryRequest = async (
   };
   const database = {
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      // Retry takes the shared task-row lock before it reads anything else.
+      $queryRaw: async () => [{ id: "task-1" }],
       task: {
+        findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
         findUnique: async () => ({
           id: "task-1",
           name: "Retry me",
@@ -1159,4 +1162,12 @@ test("a failing usage recompute does not fail the ingest", async () => {
     assert.equal(updates.length, 0);
     assert.equal(errors.length, 1);
   });
+});
+
+test("partitionArchivable keeps the busy tasks out of the archive set and counts them as skipped", () => {
+  assert.deepEqual(partitionArchivable(["a", "b", "c"], ["b"]), { archive: ["a", "c"], skipped: 1 });
+  assert.deepEqual(partitionArchivable(["a", "b"], []), { archive: ["a", "b"], skipped: 0 });
+  assert.deepEqual(partitionArchivable([], ["b"]), { archive: [], skipped: 0 });
+  // A busy id that is not a candidate cannot inflate the skipped count.
+  assert.deepEqual(partitionArchivable(["a"], ["z"]), { archive: ["a"], skipped: 0 });
 });

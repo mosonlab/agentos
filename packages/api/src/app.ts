@@ -8,6 +8,8 @@ import {
   deriveRunConfig,
   FailureClass,
   GoalStatus,
+  enqueueTaskRun,
+  InboxStatus,
   isArchivedAssigneeError,
   NetworkingMode,
   Prisma,
@@ -428,6 +430,65 @@ const isPublic = (path: string, method: string): boolean =>
   || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
 
 const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
+
+type LockedTask = { id: string; status: TaskStatus; archivedAt: Date | null };
+
+/**
+ * The exclusion protocol every writer that can give a task a run shares.
+ *
+ * Start, retry, archive, archive-done and the AT fire all answer "may this task
+ * gain a run right now?" in different transactions. Reading `runs` and then
+ * writing is not atomic under ReadCommitted: PostgreSQL re-checks a predicate on
+ * the *locked row* after a blocking write commits, but a subquery over another
+ * table is re-evaluated against the statement's original snapshot. So the Task
+ * row is the mutex — every writer takes it before it reads anything else.
+ *
+ * `fireCronTask` is already compliant: its claim is a single-statement CAS on
+ * the Task row, whose predicate does get re-checked.
+ */
+const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<LockedTask | null> => {
+  const [locked] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${taskId} FOR UPDATE
+  `;
+  if (!locked) return null;
+  // Read the typed row only after the lock is held. $queryRaw hands back raw
+  // PostgreSQL enum labels ('backlog'), not Prisma's member names, so comparing
+  // its status against TaskStatus.BACKLOG silently never matches — and the lock
+  // is exactly what makes this second read consistent for the rest of the
+  // transaction.
+  return tx.task.findUniqueOrThrow({
+    where: { id: taskId },
+    select: { id: true, status: true, archivedAt: true },
+  });
+};
+
+/** Locks a whole candidate set in one statement. `ORDER BY "id"` is not
+ *  decoration: it is what stops two concurrent Archive All presses from
+ *  deadlocking against each other. */
+const lockTasks = async (tx: Prisma.TransactionClient, taskIds: string[]): Promise<string[]> => {
+  if (taskIds.length === 0) return [];
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task"
+    WHERE "id" = ANY(${taskIds}) AND "archivedAt" IS NULL
+    ORDER BY "id" FOR UPDATE
+  `;
+  return rows.map((row) => row.id);
+};
+
+const hasActiveRun = async (tx: Prisma.TransactionClient, taskId: string): Promise<boolean> => (
+  await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } })
+) > 0;
+
+/** `{archived, skipped}` from a candidate set and the ids that turned out busy.
+ *  Extracted so the partitioning is unit-testable without a database. */
+export const partitionArchivable = (
+  candidateIds: string[],
+  busyIds: string[],
+): { archive: string[]; skipped: number } => {
+  const busy = new Set(busyIds);
+  const archive = candidateIds.filter((taskId) => !busy.has(taskId));
+  return { archive, skipped: candidateIds.length - archive.length };
+};
 
 const secretPublicSelect = {
   id: true,
@@ -1414,6 +1475,14 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     if (body.status === TaskStatus.DONE && before.templateId && before.approvalGate) {
       return context.json({ error: "Template approval gates must be decided through Inbox" }, 409);
     }
+    // Read outside a transaction, like the gate guard above it. Losing this race
+    // parks a task in Backlog with a live run, which the chain advancer's parked
+    // guard already handles and the next run completion resolves — not worth
+    // making the whole PATCH handler transactional.
+    if (body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG) {
+      const active = await db.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } });
+      if (active > 0) return context.json({ error: "Cannot move a task with an active run to Backlog" }, 409);
+    }
     if (body.assigneeAgentId) {
       const agent = await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } });
       if (!agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
@@ -1484,6 +1553,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const taskId = id.parse(context.req.param("taskId"));
     const now = new Date();
     const result = await db.$transaction(async (tx) => {
+      const locked = await lockTask(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      // Retry joins the exclusion protocol: a guard set in which one writer
+      // ignores archivedAt excludes nothing.
+      if (locked.archivedAt !== null) return { error: "Cannot retry an archived task", code: 409 as const };
       const task = await tx.task.findUnique({
         where: { id: taskId },
         include: {
@@ -1532,6 +1606,110 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.run, 201);
+  });
+  app.post("/tasks/:taskId/start", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    try {
+      const result = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return { error: "Task not found", code: 404 as const };
+        if (locked.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
+        if (locked.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
+        const task = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
+        if (task.assigneeType !== AssigneeType.AGENT) {
+          return { error: "Human steps cannot be started", code: 409 as const };
+        }
+        if (await hasActiveRun(tx, taskId)) {
+          return { error: "Task already has an active run", code: 409 as const };
+        }
+        // A count, not the latest run number: Run is one-to-many and a task at
+        // its ceiling whose last run failed must not look startable.
+        if (await tx.run.count({ where: { taskId } }) >= task.maxSessionsPerTask) {
+          return { error: "Run budget exhausted", code: 409 as const };
+        }
+        const run = await enqueueTaskRun(tx, taskId);
+        if (locked.status === TaskStatus.BACKLOG) {
+          await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO } });
+        }
+        await tx.taskActivity.create({ data: {
+          taskId, actorType: "operator", body: "Started manually from the chain view",
+        } });
+        return { run };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      if ("error" in result) return context.json({ error: result.error }, result.code);
+      return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
+    } catch (error: unknown) {
+      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+      // Unreachable under the lock, because the loser sees the winner's run and
+      // returns the 409 above. Mapped anyway: a 500 on a double-click is exactly
+      // the failure the guard exists to prevent.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return context.json({ error: "Task already has an active run" }, 409);
+      }
+      throw error;
+    }
+  });
+  app.post("/tasks/:taskId/archive", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockTask(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (await hasActiveRun(tx, taskId)) {
+        return { error: "Cannot archive a task with an active run", code: 409 as const };
+      }
+      if (locked.status === TaskStatus.REVIEW) {
+        const open = await tx.inboxMessage.count({ where: { gateTaskId: taskId, status: InboxStatus.OPEN } });
+        if (open > 0) return { error: "Decide the approval gate in the Inbox first", code: 409 as const };
+      }
+      if (locked.archivedAt !== null) {
+        return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
+      }
+      const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: new Date() } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task archived" } });
+      return { task };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
+  });
+  app.post("/tasks/:taskId/unarchive", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    // No lock: unarchiving cannot race a run into existence.
+    const before = await db.task.findUnique({ where: { id: taskId }, select: { archivedAt: true } });
+    if (!before) return context.json({ error: "Task not found" }, 404);
+    if (before.archivedAt === null) return context.json(await db.task.findUniqueOrThrow({ where: { id: taskId } }));
+    const task = await db.task.update({ where: { id: taskId }, data: { archivedAt: null } });
+    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
+    return context.json(task);
+  });
+  app.post("/projects/:projectId/tasks/archive-done", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const result = await db.$transaction(async (tx) => {
+      const candidates = await tx.task.findMany({
+        where: { projectId, status: TaskStatus.DONE, archivedAt: null },
+        select: { id: true },
+      });
+      // Lock before reading runs, so a retry cannot slip a run in between the
+      // selection and the write. Ids that vanished in between simply do not come
+      // back from the lock and count as neither archived nor skipped.
+      const lockedIds = await lockTasks(tx, candidates.map((task) => task.id));
+      const busy = lockedIds.length === 0 ? [] : await tx.run.findMany({
+        where: { taskId: { in: lockedIds }, status: { in: ACTIVE_RUN_STATUSES } },
+        select: { taskId: true },
+        distinct: ["taskId"],
+      });
+      const { archive, skipped } = partitionArchivable(
+        lockedIds,
+        busy.map((run) => run.taskId).filter((taskId): taskId is string => taskId !== null),
+      );
+      if (archive.length > 0) {
+        await tx.task.updateMany({ where: { id: { in: archive } }, data: { archivedAt: new Date() } });
+        await tx.taskActivity.createMany({ data: archive.map((taskId) => ({
+          taskId, actorType: "operator", body: "Task archived",
+        })) });
+      }
+      return { archived: archive.length, skipped };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    return context.json(result);
   });
   app.get("/tasks/:taskId/activity", async (context) => context.json(await db.taskActivity.findMany({
     where: { taskId: id.parse(context.req.param("taskId")) },

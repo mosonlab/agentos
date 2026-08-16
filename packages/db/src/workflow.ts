@@ -187,8 +187,8 @@ const isUniqueConflict = (error: unknown): boolean => (
  * inside the caller's transaction and run completion never returns. Returning
  * early is what makes Backlog a place a chain step can sit.
  */
-const parkedReason = (successor: { status: TaskStatus; archivedAt: Date | null }): string | null => {
-  if (successor.archivedAt !== null) return "successor is archived and was not queued";
+const parkedReason = (successor: { status: TaskStatus; archivedAt?: Date | null }): string | null => {
+  if (successor.archivedAt) return "successor is archived and was not queued";
   if (successor.status === TaskStatus.BACKLOG) return "successor is parked in Backlog — use Start now";
   return null;
 };
