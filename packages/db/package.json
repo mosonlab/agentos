@@ -17,7 +17,8 @@
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "db:validate": "dotenv -e ../../.env -- prisma validate",
-    "db:seed": "dotenv -e ../../.env -- prisma db seed"
+    "db:seed": "dotenv -e ../../.env -- prisma db seed",
+    "db:fixture": "dotenv -e ../../.env -- tsx prisma/acceptance-fixture.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
