@@ -5,8 +5,12 @@
  *  the token must not ship inside the bundle). Setting VITE_API_URL switches to
  *  a direct cross-origin call, in which case VITE_API_TOKEN is required. */
 
-const configuredUrl = import.meta.env.VITE_API_URL as string | undefined;
-const configuredToken = import.meta.env.VITE_API_TOKEN as string | undefined;
+/* Read through the whole `import.meta.env` object rather than two member
+ * accesses: Vite injects the object in a build, and node (which the test runner
+ * uses directly, without Vite) leaves it undefined. */
+const environment = (import.meta as { env?: Record<string, string | undefined> }).env ?? {};
+const configuredUrl = environment.VITE_API_URL;
+const configuredToken = environment.VITE_API_TOKEN;
 
 export const apiBase = configuredUrl && configuredUrl.length > 0 ? configuredUrl.replace(/\/$/, "") : "/api";
 const directToken = configuredToken && configuredToken.length > 0 ? configuredToken : null;
