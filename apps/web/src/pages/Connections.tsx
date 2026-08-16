@@ -47,7 +47,7 @@ export const ConnectionsPage = (): ReactNode => {
           {/* The `.tableWrap` div is gone: `Table` brings its own
               `relative w-full overflow-auto` wrapper, and `<Card flush>` adds no
               padding, so `EmptyState` sits beside the table without moving. */}
-          <Table>
+          <Table className="leading-normal">
             <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Transport</TableHead><TableHead>Operations</TableHead><TableHead>Bound agents</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader>
             <TableBody>
               {list.map((connection) => (
@@ -77,7 +77,7 @@ export const ConnectionsPage = (): ReactNode => {
         </Card>
 
         <Card title="Repos" extra={<span className={COUNT}>{(repos ?? []).length}</span>} flush>
-          <Table>
+          <Table className="leading-normal">
             <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Remote</TableHead><TableHead>Credential</TableHead><TableHead>Default branch</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader>
             <TableBody>
               {(repos ?? []).map((repo) => (

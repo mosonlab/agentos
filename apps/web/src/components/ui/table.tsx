@@ -2,6 +2,13 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
+/** `leading-[1.4285714]` is not decoration and is not a guess: before this batch
+ *  the `<table>` carried shadcn's `text-sm`, whose paired line-height is
+ *  `calc(1.25 / 0.875)`. `.table td { font-size: 12.5px }` overrode the size but
+ *  not the leading, so every descendant computed its line box from that number
+ *  rather than from the root's `1.5`. Replacing `text-sm` with `text-[12.5px]`
+ *  drops the pairing, and each table row grows 2px. Measured against
+ *  docs/plans/baseline-screenshots: row pitch 64px before, 66px without this. */
 const Table = React.forwardRef<
   HTMLTableElement,
   React.HTMLAttributes<HTMLTableElement>
@@ -9,7 +16,7 @@ const Table = React.forwardRef<
   <div className="relative w-full overflow-auto">
     <table
       ref={ref}
-      className={cn("w-full caption-bottom border-collapse text-[12.5px]", className)}
+      className={cn("w-full caption-bottom border-collapse text-[12.5px] leading-[1.4285714]", className)}
       {...props}
     />
   </div>

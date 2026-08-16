@@ -84,7 +84,7 @@ export const ProjectsPage = (): ReactNode => {
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         <Card flush>
-          <Table>
+          <Table className="leading-normal">
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead><TableHead>Tasks</TableHead><TableHead>Session budget</TableHead><TableHead>Created</TableHead><TableHead>Updated</TableHead><TableHead />
@@ -170,7 +170,7 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
 
         <Card title="Repos" extra={<span className={COUNT}>{(repos ?? []).length}</span>}>
           {(repos ?? []).length === 0 ? <EmptyState>No repos. Agent tasks require a repo grant.</EmptyState> : (
-            <Table>
+            <Table className="leading-normal">
               <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Remote</TableHead><TableHead>Default branch</TableHead><TableHead>Mount</TableHead></TableRow></TableHeader>
               <TableBody>
                 {(repos ?? []).map((repo) => (
