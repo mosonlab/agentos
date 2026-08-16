@@ -343,3 +343,49 @@ test("the detail page does not call the initial drain `N new`", async () => {
     dom.window.close();
   }
 });
+
+test("a failed Load more tells the operator instead of vanishing into the console", async () => {
+  const dom = jsdom();
+  const headRows = Array.from({ length: 50 }, (_, index) =>
+    session({ id: `new-${index}`, requestedAt: `2026-08-16T02:${String(index).padStart(2, "0")}:00.000Z` }));
+
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      if (path.includes("/projects")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify([{ id: "p1", name: "Demo" }]) } as unknown as Response;
+      }
+      // Only the older page fails, so the live head stays on screen.
+      if (path.includes("before=")) {
+        return { ok: false, status: 503, text: async () => JSON.stringify({ error: "Service unavailable" }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify(headRows) } as unknown as Response;
+    },
+  });
+
+  const { ProjectProvider } = await import("../lib/project");
+  const { SessionsPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+  };
+  await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
+  await flush();
+
+  const more = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
+  assert.ok(more, container.innerHTML);
+  await click(dom, more);
+  await flush();
+
+  assert.match(container.textContent ?? "", /503/, "the failure is on the page, not only in the console");
+  assert.equal(dom.window.document.querySelectorAll("tbody tr").length, 50, "page one survives a failed page two");
+  const retry = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
+  assert.ok(retry, "the button stays available as the retry");
+  assert.equal(retry.hasAttribute("disabled"), false);
+
+  await act(async () => root.unmount());
+  dom.window.close();
+});

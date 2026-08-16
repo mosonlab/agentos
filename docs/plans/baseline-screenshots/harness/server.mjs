@@ -201,13 +201,38 @@ const activity = [
 
 const output = { id: "out_impl", taskId: "tsk_impl", runId: "run_impl", kind: "result", body: "# Result\n\nSection A landed.\n\n1. `buttonVariants` gained four legacy variants\n2. `input`/`textarea` carry the legacy geometry\n\nSee `docs/plans/legacy-class-check.sh` for the acceptance sweep.", createdAt: iso(120), updatedAt: iso(110) };
 
-const events = Array.from({ length: 14 }, (_, index) => ({
+// The real event vocabulary and the real CLAUDE payload shapes, so `normalize`
+// (web/src/lib/session-stream.ts) actually produces a stream. The pre-batch
+// fixtures used invented type names, which the raw Debug table rendered happily
+// but the message stream normalizes to nothing — a session frame with an empty
+// stream would document the wrong thing.
+const mkEvent = (index, type, payload, toolCallId = null, source = "CLAUDE") => ({
   id: `evt_${index}`, sessionId: "ses_run_impl", runId: "run_impl", seq: index + 1,
-  at: iso(400 - index * 12), source: index % 3 === 0 ? "system" : "assistant",
-  type: ["session.started", "tool.bash", "tool.read", "assistant.message", "tool.edit"][index % 5],
-  toolCallId: index % 2 === 0 ? `call_${index}` : null,
-  payload: { summary: `npm run build -w @agentos/web (step ${index + 1})`, ok: true },
-}));
+  at: iso(400 - index * 12), source, type, toolCallId, payload,
+});
+
+const events = [
+  mkEvent(0, "PROCESS_STARTED", { pid: 40_112 }, null, "RUNNER"),
+  mkEvent(1, "MODEL_DELTA", { message: { content: [{ type: "text", text: "Reading the plan, then starting Section A.\n\nThe four legacy `buttonVariants` land first: they are what every other section links against." }] } }),
+  mkEvent(2, "TOOL_STARTED", { id: "call_read", name: "Read", input: { file_path: "/Users/leohe/repo/apps/web/src/components/ui/button.tsx" } }, "call_read"),
+  mkEvent(3, "TOOL_COMPLETED", { tool_use_id: "call_read", content: "export const buttonVariants = cva(…)  // 84 lines" }, "call_read"),
+  mkEvent(4, "MODEL_DELTA", { message: { content: [{ type: "text", text: "`buttonVariants` already carries the shape. Adding the legacy variants:\n\n```ts\nlegacy: \"h-[26px] rounded-[5px] px-[9px] text-[12px]\",\n```\n\nSee the [plan](https://github.com/mosonlab/agentos/blob/main/docs/plans/batch-frontend-convergence-plan.md) for the full table." }] } }),
+  mkEvent(5, "TOOL_STARTED", { id: "call_edit", name: "Edit", input: { file_path: "/Users/leohe/repo/apps/web/src/components/ui/button.tsx" } }, "call_edit"),
+  mkEvent(6, "TOOL_COMPLETED", { tool_use_id: "call_edit", content: "Applied 1 edit." }, "call_edit"),
+  mkEvent(7, "TOOL_STARTED", { id: "call_build", name: "Bash", input: { command: "npm run build -w @agentos/web" } }, "call_build"),
+  mkEvent(8, "TOOL_COMPLETED", { tool_use_id: "call_build", content: "dist/assets/index-BhXLlOrV.css  43.55 kB\n✓ built in 1.74s" }, "call_build"),
+  mkEvent(9, "TOOL_STARTED", { id: "call_test", name: "Bash", input: { command: "npm test -w @agentos/web" } }, "call_test"),
+  // An error state, so the frame carries the red tool row too.
+  mkEvent(10, "TOOL_COMPLETED", { tool_use_id: "call_test", content: "styles.test.tsx: 1 failing — read dist before build", is_error: true }, "call_test"),
+  mkEvent(11, "PROVIDER_RAW", { line: "{\"type\":\"assistant\"}" }),
+  // Never returns: reads `running` while live, `incomplete` once terminal.
+  mkEvent(12, "TOOL_STARTED", { id: "call_open", name: "Edit", input: { file_path: "/Users/leohe/repo/apps/web/src/tests/styles.test.tsx" } }, "call_open"),
+  mkEvent(13, "FINAL_OUTPUT", {
+    type: "result", result: "Section A landed: the four legacy variants are in `buttonVariants` and the build is green.",
+    total_cost_usd: 1.42,
+    usage: { input_tokens: 4_820, output_tokens: 48_010, cache_read_input_tokens: 1_204_880, cache_creation_input_tokens: 0 },
+  }),
+];
 
 // GET /sessions and /sessions/:id return the session with its relations
 // attached (api/src/app.ts `sessionInclude`); the session nested inside a Run
