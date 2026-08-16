@@ -277,3 +277,52 @@ reviewer sees the complete set in one place.
 3. **`color-mix()` gets an `@supports` wrapper.** Tailwind emits arbitrary `color-mix()`
    values inside `@supports` with a solid fallback outside it. Identical in every browser
    that supports `color-mix`; a browser-support difference only.
+
+## 15. Plan deviations found at W16, with their measurements
+
+Six repairs that the W0 baseline contradicted after the fact. Each is a separate
+commit; each was found by measuring, not by reading. The shared shape is that a
+legacy declaration and a primitive utility were competing for the same property,
+and the plan predicted the wrong winner.
+
+| # | Plan said | The baseline said | Repair |
+|---|---|---|---|
+| 1 | §1.5: an Input is 38.75px and collapses to `h-9` when the legacy rule goes | The legacy rule sets `padding`, never `height`, so `h-9` always won: 29.25px | `input.tsx` keeps `h-9`; ~26 call sites unchanged |
+| 2 | §W6: `text-sm` → `text-[12.5px]` is size-for-size | `text-sm` also paired a line-height that `.table td`'s font-size override left inherited | `table.tsx` pins `leading-[1.4285714]`; 4 raw-`<table>` call sites take `leading-normal` |
+| 3 | `.hint` is a legacy class to translate | No standalone `.hint` rule exists — only `.field .hint` and `.choice .hint` | `HINT` removed from 12 sites; kept at the one `.field .hint` |
+| 4 | `.small` is a legacy class to translate | `.table td` outranks `.small` on specificity, so it was inert in that `<td>` | size class dropped from the commit-range cell; the 4 non-table spans keep it |
+| 5 | §1.5 covers every input | Two Projects inputs were raw `<input>`: 38.75px and a preflight placeholder | `h-auto placeholder:text-foreground/50` at those two sites |
+| 6 | `CARD_TITLE` carries the modal title | `h1..h4 { font-weight: 700 }` was unlayered and beat `font-semibold`; and tailwind-merge deletes `leading-none` behind a font-size utility | `font-bold leading-none` at the DialogTitle call site |
+
+Measured heights, baseline → after repair, all in CSS px:
+
+| Control | Baseline | Before repair | After repair |
+|---|---|---|---|
+| Input (TaskDetail comment) | 29.00 | 39.00 | 29.25 |
+| Table row (`tr`, Agents) | 64.00 | 66.00 | 64.27 |
+| Projects form input | 38.75 | 29.25 | 38.75 |
+| Modal title `h2` | 13.50 line-height / 700 | 20.25 / 600 | 13.50 / 700 |
+| Commit-range `<td>` | 12.50px | 11.50px | 12.50px |
+
+### How the residue was checked
+
+Two independent sweeps, both against a 3f712b5 worktree served beside the migrated
+tree so the same fixture answers both:
+
+- **Computed-style sweep.** Every element with a text child on 9 routes — the 8
+  pages plus the agent detail, each with its create form opened — keyed by tag and
+  text, comparing `font-size`, `line-height`, `font-weight`, `color`,
+  `letter-spacing` and box height. **0 differing leaves.** The only three unmatched
+  keys are fixture clocks (`7h ago` → `8h ago`, two elapsed counters).
+- **Pixel sweep.** The 20 committed W0 frames plus 10 form/overlay frames. What
+  remains is the §14 `<select>` shadow (one 69px band per select), the same fixture
+  clock drift, and sub-pixel antialiasing on the `⋮` glyph and the New Project
+  button corner (16–411px per frame, ≤0.007%). `connections-*` and
+  `walk-newtask-dark` diff at exactly 0.
+
+Residual risk, stated rather than resolved: both sweeps only see what the fixture
+renders. Empty states, error states and the tabs behind a second click are covered
+by neither, and no fixture exercises a `<Textarea>` inside a captured frame — that
+primitive was checked by deriving its geometry from the legacy declarations
+instead (every call site passes `rows`, and `text-[12.5px] leading-[1.6] py-[9px]`
+reproduces the retired `textarea` rule exactly).
