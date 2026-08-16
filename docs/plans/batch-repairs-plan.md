@@ -671,9 +671,13 @@ scenarios depend on a run staying unclaimed. Export
    - `curl -X PATCH -H "Authorization: Bearer $OPERATOR" -H 'Content-Type: application/json' \
       -d '{"model":"openai-codex/gpt-5.6-luna","runnerPreference":"PI"}' localhost:3000/agents/$AGENT`
    - `curl -X POST -H "Authorization: Bearer $OPERATOR" localhost:3000/tasks/$TASK/retry`
-   - Assert the new run row's `runner` is `PI`, `model` is the new one, and
-     `promptHash` differs from the failed run's; confirm the runner log shows
-     the PI adapter starting.
+   - Assert the new run row's `runner` is `PI` and `model` is the new one.
+     Because `promptHash` identifies only the effective prompt text
+     (foundational prompt, role prompt, task name, and task description), assert
+     that it stays equal when those four inputs are unchanged. Confirm the
+     runner log shows the PI adapter selected, preflight passed, and a child
+     process spawn attempted; this is not evidence that a protocol-capable PI
+     run completed end to end.
 
 4. **Scenario 3 (Item 3) — archive.** Runner **stopped** before the queued run
    is created, so nothing races to claim it.
