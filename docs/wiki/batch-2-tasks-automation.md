@@ -18,9 +18,11 @@ All three entry points converge on `activateChainSuccessor`:
 | Inbox gate approval | The gate task is set to `DONE` and an approval activity is written. | `applyInboxDecisionTx` calls `activateChainSuccessor` with the gate run and chat context. |
 
 Gate rejection does not advance forward. It requeues the gate task when it is
-agent-executable; otherwise it finds the nearest lower `chainIndex` in the same
-project/chain that has an agent and repo, requeues that predecessor, and queues
-its run again.
+agent-executable. For a human gate, the implementation first uses the direct
+`previousTask` relation when present; when that relation is absent, it finds the
+nearest lower `chainIndex` in the same project/chain that has an agent and repo,
+requeues that predecessor, and queues its run again. This chain-ordered fallback
+is the repair for HUMAN gates assembled without a usable predecessor relation.
 
 ### Successor selection
 
@@ -61,7 +63,9 @@ without an executable agent/repo, follows two distinct paths:
 
 - With a successful source run: set the successor to `REVIEW`, create a Feishu
   approval card through `gateQuestion`, and include the persisted output preview
-  when available. The card is deduplicated by
+  when available. `FEISHU_DEFAULT_CHAT_ID` supplies the Feishu thread context;
+  without it the Inbox message still records the gate but has no external chat
+  thread. The card is deduplicated by
   `gate:task:<taskId>:run:<sourceRunId>`.
 - From operator `PATCH ... status=DONE`: leave the successor `TODO`, write
   `Predecessor completed; successor awaits operator`, and send no card because
@@ -180,9 +184,10 @@ unconfigured templates intentionally return the same `401` shape and create no
 rows. Invalid JSON/object shape is `400`; an unresolved variable list is `400`;
 an over-limit body is `413`.
 
-There is deliberately no replay window, idempotency key, or duplicate-fire
-dedupe in this version. Every authenticated repeat creates a separate chain;
-the caller must provide replay protection if it needs it. Under concurrent
+Replay handling is deliberately absent: there is no replay window, timestamp
+tolerance, idempotency key, or duplicate-fire dedupe in this version. Every
+authenticated repeat creates a separate chain; the caller must provide replay
+protection if it needs it. Under concurrent
 instantiation, the server retries `P2034`/`P2002` transaction conflicts up to
 five attempts with jitter and a fresh chain id per attempt. Exhausted `P2034`
 contention is mapped to `503` so the caller can retry; any other residual
@@ -211,11 +216,11 @@ root cause and current guard before changing behavior.
 
 - **Symptom:** rejecting a gate on a human successor fails with “no executable
   previous task” even though an earlier chain step can run.
-- **Root cause:** the direct `previousTask` relation is absent or points to a
-  non-executable human row; the old path did not use chain ordering.
-- **Now guarded by:** rejection searches the same project and `chainId` for the
-  nearest lower `chainIndex` whose assignee and repo are executable, then
-  requeues and enqueues that row.
+- **Root cause:** the direct `previousTask` relation can be absent for a
+  chain-ordered HUMAN gate; the old path had no chain-order fallback.
+- **Now guarded by:** when that relation is absent, rejection searches the same
+  project and `chainId` for the nearest lower `chainIndex` whose assignee and
+  repo are executable, then requeues and enqueues that row.
 
 **A3 — scheduler interval parses garbage**
 
