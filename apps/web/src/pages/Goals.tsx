@@ -10,6 +10,10 @@ import { IconArrowLeft, IconPlus } from "../components/icons";
 import {
   Card, EmptyState, ErrorNotice, Field, FullPanel, GoalPill, KeyValue, Markdown, Metric, ShowMore, Tabs,
 } from "../components/ui";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Progress } from "../components/ui/progress";
+import { Textarea } from "../components/ui/textarea";
 
 const NewGoal = ({ projectId, onClose, onCreated }: {
   projectId: string;
@@ -42,31 +46,31 @@ const NewGoal = ({ projectId, onClose, onCreated }: {
     && Number(form.stallTimeoutMin) > 0 && Number(form.stuckThreshold) > 0;
   return (
     <FullPanel title="New Goal" onClose={onClose} actions={
-      <button type="button" className="btn primary" disabled={pending || !valid} onClick={() => void submit()}>Create</button>
+      <Button type="button" className="btn primary" disabled={pending || !valid} onClick={() => void submit()}>Create</Button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Card title="Goal">
         <div className="stack">
-          <Field label="Title"><input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ship the next release" /></Field>
-          <Field label="Spec"><textarea rows={10} value={form.spec} onChange={(event) => setForm({ ...form, spec: event.target.value })} placeholder="Describe the objective, constraints, and context…" /></Field>
+          <Field label="Title"><Input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ship the next release" /></Field>
+          <Field label="Spec"><Textarea rows={10} value={form.spec} onChange={(event) => setForm({ ...form, spec: event.target.value })} placeholder="Describe the objective, constraints, and context…" /></Field>
           <div className="fieldRow">
-            <Field label="Spend cap (USD)" hint="Leave empty for no cap."><input type="number" min="0" step="0.01" value={form.spendCap} onChange={(event) => setForm({ ...form, spendCap: event.target.value })} /></Field>
-            <Field label="Wall-clock limit (min)" hint="Leave empty for no limit."><input type="number" min="1" value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: event.target.value })} /></Field>
+            <Field label="Spend cap (USD)" hint="Leave empty for no cap."><Input min="0" step="0.01" value={form.spendCap} onChange={(event) => setForm({ ...form, spendCap: event.target.value })} /></Field>
+            <Field label="Wall-clock limit (min)" hint="Leave empty for no limit."><Input min="1" value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: event.target.value })} /></Field>
           </div>
           <div className="fieldRow">
-            <Field label="Stall timeout (min)"><input type="number" min="1" value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: event.target.value })} /></Field>
-            <Field label="Stuck threshold"><input type="number" min="1" value={form.stuckThreshold} onChange={(event) => setForm({ ...form, stuckThreshold: event.target.value })} /></Field>
+            <Field label="Stall timeout (min)"><Input min="1" value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: event.target.value })} /></Field>
+            <Field label="Stuck threshold"><Input min="1" value={form.stuckThreshold} onChange={(event) => setForm({ ...form, stuckThreshold: event.target.value })} /></Field>
             <Field label="Runner"><select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>{["AUTO", "CLAUDE", "CODEX", "PI"].map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}</select></Field>
           </div>
-          <Field label="Shared folder" hint="Optional path available to work on this goal."><input type="text" value={form.sharedFolderPath} onChange={(event) => setForm({ ...form, sharedFolderPath: event.target.value })} placeholder="/path/to/shared/folder" /></Field>
+          <Field label="Shared folder" hint="Optional path available to work on this goal."><Input value={form.sharedFolderPath} onChange={(event) => setForm({ ...form, sharedFolderPath: event.target.value })} placeholder="/path/to/shared/folder" /></Field>
         </div>
       </Card>
-      <Card title="Definition of Done" extra={<button type="button" className="btn small" onClick={() => setItems([...items, ""])}><IconPlus />Add item</button>}>
+      <Card title="Definition of Done" extra={<Button type="button" className="btn small" onClick={() => setItems([...items, ""])}><IconPlus />Add item</Button>}>
         <div className="stack">
           {items.map((item, index) => (
             <div className="row" key={index}>
-              <input type="text" value={item} onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder={`Criterion ${index + 1}`} />
-              {items.length > 1 ? <button type="button" className="btn small" onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))}>Remove</button> : null}
+              <Input value={item} onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder={`Criterion ${index + 1}`} />
+              {items.length > 1 ? <Button type="button" className="btn small" onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))}>Remove</Button> : null}
             </div>
           ))}
         </div>
@@ -89,14 +93,14 @@ export const GoalsPage = (): ReactNode => {
   if (projectId === "") return <div className="page"><EmptyState>Select a project first.</EmptyState></div>;
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="pageHead">
         <div className="titles">
           <h1>Goals</h1>
           <div className="subtitle">Long-running objectives in {project?.name ?? "this project"}</div>
         </div>
         <div className="pageActions">
-          <button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Goal</button>
+          <Button type="button" className="btn primary" onClick={() => setCreating(true)}><IconPlus />New Goal</Button>
         </div>
       </div>
 
@@ -109,14 +113,14 @@ export const GoalsPage = (): ReactNode => {
           return (
             <div className="goalCard clickable" key={goal.id} onClick={() => navigate(`/goals/${goal.id}`)}>
               <div className="top">
-                <h3 style={{ flex: 1 }}>{goal.title}</h3>
+                <h3 className="flex-1">{goal.title}</h3>
                 <GoalPill status={goal.status} />
               </div>
               <div className="mid">
                 <span>{counts.done} of {counts.total} done</span>
                 <span>{money(goal.spendUsd)} / {goal.spendCap === null ? "no cap" : money(goal.spendCap)}</span>
               </div>
-              <div className="progressTrack"><div className="progressFill" style={{ width: `${percent}%` }} /></div>
+              <Progress value={percent} className="progressTrack" />
               <div className="bottom">
                 {goal.startedAt === null ? "Not started" : `${duration(goal.startedAt, goal.endedAt)} elapsed`}
                 {" · "}stuck threshold {goal.stuckThreshold}
@@ -155,7 +159,7 @@ export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
   const percent = counts.total === 0 ? 0 : Math.round((counts.done / counts.total) * 100);
 
   return (
-    <div className="page">
+    <div className="page text-foreground">
       <div className="detailHead">
         <Link to="/goals" className="backLink"><IconArrowLeft /></Link>
         <h1>{goal.title}</h1>
@@ -170,7 +174,7 @@ export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
           <Metric label="Runner" value={goal.runnerPreference.toLowerCase()} />
         </div>
 
-        <div className="progressTrack"><div className="progressFill" style={{ width: `${percent}%` }} /></div>
+        <Progress value={percent} className="progressTrack" />
 
         <Card title="Details">
           <KeyValue items={[
@@ -196,9 +200,9 @@ export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
             {(goal.definitionOfDone ?? []).length === 0
               ? <EmptyState>No criteria recorded.</EmptyState>
               : (goal.definitionOfDone ?? []).map((item) => (
-                <div key={item.id} className="row" style={{ padding: "10px 0", borderTop: "1px solid var(--line-soft)" }}>
+                <div key={item.id} className="row border-t border-[var(--border-soft)] py-2.5">
                   <span className={item.done ? "pill green" : "pill grey"}>{item.done ? "done" : "open"}</span>
-                  <span style={{ flex: 1 }}>{item.text}</span>
+                  <span className="flex-1">{item.text}</span>
                 </div>
               ))}
           </Card>
@@ -206,12 +210,12 @@ export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
 
         {tab === "log" ? (
           <Card title="Progress log" extra={<span className="count">{(goal.progressLog ?? []).length}</span>}>
-            <div className="stack" style={{ marginBottom: 14 }}>
+            <div className="stack mb-3.5">
               {actionError === null ? null : <ErrorNotice message={actionError} />}
               <Field label="Add progress update">
-                <textarea rows={4} value={progress} onChange={(event) => setProgress(event.target.value)} placeholder="What changed, what remains, and any blockers…" />
+                <Textarea rows={4} value={progress} onChange={(event) => setProgress(event.target.value)} placeholder="What changed, what remains, and any blockers…" />
               </Field>
-              <div className="row"><span className="spacer" /><button type="button" className="btn primary" disabled={pending || progress.trim() === ""} onClick={() => void addProgress()}>Add update</button></div>
+              <div className="row"><span className="spacer" /><Button type="button" className="btn primary" disabled={pending || progress.trim() === ""} onClick={() => void addProgress()}>Add update</Button></div>
             </div>
             {(goal.progressLog ?? []).length === 0
               ? <EmptyState>No entries yet.</EmptyState>
