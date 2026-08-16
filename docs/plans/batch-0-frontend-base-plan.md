@@ -25,6 +25,12 @@ re-expressed on theme tokens in step 2, all 8 pages render correctly in both the
 that commit on ("mixed-base period does not ship", spec §6), and page migration becomes a
 pure markup refactor with zero visual risk budget.
 
+The cascade half of that contract is documented in
+`docs/reference/frontend-css-layering.md`: legacy rules are intentionally unlayered and
+outweigh Tailwind/shadcn layers. Call-site inline styles, explicit input attributes, and
+preflight properties must be reviewed under that rule. Batch 0 consumes the dedicated
+`--surface-input` token in the legacy form-control rule (AMB-2 is not collapsed).
+
 Execution is **one serial pass, steps 1–11 in order, single implementer** (rev 2: the
 previously suggested parallel lanes are withdrawn — current runner concurrency is low, so
 lanes buy no wall-clock and only add conflict surface). Commit boundaries are fixed:

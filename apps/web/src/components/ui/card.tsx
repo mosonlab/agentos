@@ -3,13 +3,13 @@ import * as React from "react"
 import { cn } from "@/lib/utils"
 
 const Card = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
+  HTMLElement,
+  React.HTMLAttributes<HTMLElement>
 >(({ className, ...props }, ref) => (
-  <div
+  <section
     ref={ref}
     className={cn(
-      "rounded-xl border bg-card text-card-foreground shadow",
+      "rounded-xl border bg-card text-card-foreground shadow-none",
       className
     )}
     {...props}

@@ -6,7 +6,6 @@ import { Checkbox } from "./ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import { Switch } from "./ui/switch";
-import { Tabs as TabsRoot, TabsList, TabsTrigger } from "./ui/tabs";
 import { titleCase } from "../lib/format";
 import type { Agent, GoalStatus, InboxStatus, RunStatus, TaskStatus } from "../lib/types";
 import { IconChevron, IconDots, IconRobot, IconUser } from "./icons";
@@ -91,15 +90,13 @@ export const Segmented = <T extends string>({ options, value, onChange, accent }
   onChange: (value: T) => void;
   accent?: boolean;
 }): ReactNode => (
-  <TabsRoot value={value} onValueChange={(next) => onChange(next as T)} className={accent ? "segmented accent" : "segmented"}>
-    <TabsList>
+  <div className={accent ? "segmented accent" : "segmented"}>
     {options.map((option) => (
-      <TabsTrigger key={option.value} value={option.value} className={option.value === value ? "on" : ""}>
+      <button type="button" key={option.value} className={option.value === value ? "on" : ""} onClick={() => onChange(option.value)}>
         {option.label}
-      </TabsTrigger>
+      </button>
     ))}
-    </TabsList>
-  </TabsRoot>
+  </div>
 );
 
 export const Tabs = <T extends string>({ options, value, onChange }: {
@@ -107,15 +104,13 @@ export const Tabs = <T extends string>({ options, value, onChange }: {
   value: T;
   onChange: (value: T) => void;
 }): ReactNode => (
-  <TabsRoot value={value} onValueChange={(next) => onChange(next as T)} className="tabs">
-    <TabsList>
+  <div className="tabs">
     {options.map((option) => (
-      <TabsTrigger key={option.value} value={option.value} className={option.value === value ? "on" : ""}>
+      <button type="button" key={option.value} className={option.value === value ? "on" : ""} onClick={() => onChange(option.value)}>
         {option.label}
-      </TabsTrigger>
+      </button>
     ))}
-    </TabsList>
-  </TabsRoot>
+  </div>
 );
 
 export const Toggle = ({ on, onChange, disabled, label }: {
@@ -188,7 +183,7 @@ export const RowMenu = ({ items }: { items: Array<{ label: string; danger?: bool
       <span className="menuWrap" onClick={(event) => event.stopPropagation()}>
         <DropdownMenuTrigger asChild><button type="button" className="iconBtn" aria-label="More actions"><IconDots /></button></DropdownMenuTrigger>
       </span>
-      <DropdownMenuContent align="end" className="min-w-32 border-border bg-popover font-mono text-popover-foreground">
+      <DropdownMenuContent align="end" className="min-w-32 border-border bg-popover font-mono text-popover-foreground" onClick={(event) => event.stopPropagation()}>
         {items.map((item) => (
           <DropdownMenuItem key={item.label} className={item.danger === true ? "text-destructive focus:bg-destructive/10 focus:text-destructive" : "focus:bg-accent focus:text-accent-foreground"} onSelect={item.onSelect}>
             {item.label}
@@ -253,7 +248,7 @@ export const Modal = ({ title, onClose, children, footer }: {
   footer?: ReactNode;
 }): ReactNode => (
   <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-    <DialogContent className="modal border-border bg-card font-mono text-card-foreground">
+    <DialogContent className="modal max-w-none gap-0 border-border bg-card font-mono text-card-foreground">
       <DialogHeader><DialogTitle className="cardTitle">{title}</DialogTitle></DialogHeader>
       <div className="stack">{children}</div>
       {footer === undefined ? null : <DialogFooter className="row mt-[18px] justify-end">{footer}</DialogFooter>}

@@ -57,7 +57,7 @@ const TaskCard = ({ task, onDelete, onRetry }: {
       onDragStart={(event) => event.dataTransfer.setData("text/plain", task.id)}
       onClick={() => navigate(`/tasks/${task.id}`)}
     >
-      <div className="row items-start">
+      <div className="row" style={{ alignItems: "flex-start" }}>
         <h3 className="flex-1">{task.name}</h3>
         <RowMenu items={[
           ...(retryable(task) ? [{ label: "Retry", onSelect: () => onRetry(task) }] : []),
@@ -74,7 +74,7 @@ const TaskCard = ({ task, onDelete, onRetry }: {
         {task.failureReason === null ? null : <div className="metaRow text-[var(--destructive-fg)]">{task.failureReason}</div>}
       </div>
       <div className="foot">
-        <span className="row nowrap min-w-0 gap-1.5 overflow-hidden">
+        <span className="row nowrap min-w-0 overflow-hidden" style={{ gap: 6 }}>
           <IconRobot />
           <span className="overflow-hidden text-ellipsis">{task.assigneeAgent?.title ?? "Unassigned"}</span>
         </span>
@@ -146,7 +146,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
       {mode === "blank" ? (
         <Card title="Task">
           <div className="stack">
-            <Field label="Title"><Input value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Implement feat/inbox-search" /></Field>
+            <Field label="Title"><Input type="text" value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Implement feat/inbox-search" /></Field>
             <Field label="Prompt" hint="Handed to the agent verbatim together with its foundation and role prompt.">
               <Textarea rows={10} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
             </Field>
@@ -172,7 +172,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                 </select>
               </Field>
               <Field label="Target branch" hint="Empty falls back to the repo default branch.">
-                <Input value={form.targetBranch} onChange={(event) => setForm({ ...form, targetBranch: event.target.value })} placeholder="feat/…" />
+                <Input type="text" value={form.targetBranch} onChange={(event) => setForm({ ...form, targetBranch: event.target.value })} placeholder="feat/…" />
               </Field>
             </div>
             <div className="row">
@@ -215,7 +215,7 @@ const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                 </Field>
                 {(template?.variables ?? []).map((variable) => (
                   <Field key={variable} label={variable}>
-                    <Input value={variables[variable] ?? ""}
+                    <Input type="text" value={variables[variable] ?? ""}
                       onChange={(event) => setVariables({ ...variables, [variable]: event.target.value })}
                       placeholder={/branch/i.test(variable) ? "feat/…" : ""} />
                   </Field>

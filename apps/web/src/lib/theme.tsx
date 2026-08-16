@@ -10,7 +10,7 @@ const readMode = (): ThemeMode => {
   return value === "light" || value === "dark" ? value : "system";
 };
 const systemIsDark = (): boolean => {
-  try { return typeof window.matchMedia !== "function" || window.matchMedia("(prefers-color-scheme: dark)").matches; }
+  try { return !(typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: light)").matches); }
   catch { return true; }
 };
 export const ThemeProvider = ({ children }: { children: ReactNode }): ReactNode => {
@@ -22,9 +22,9 @@ export const ThemeProvider = ({ children }: { children: ReactNode }): ReactNode 
   useEffect(() => {
     if (mode !== "system" || typeof window.matchMedia !== "function") return;
     let query: MediaQueryList;
-    try { query = window.matchMedia("(prefers-color-scheme: dark)"); setSystemDark(query.matches); }
+    try { query = window.matchMedia("(prefers-color-scheme: light)"); setSystemDark(!query.matches); }
     catch { setSystemDark(true); return; }
-    const update = (event: MediaQueryListEvent): void => setSystemDark(event.matches);
+    const update = (event: MediaQueryListEvent): void => setSystemDark(!event.matches);
     query.addEventListener("change", update);
     return () => query.removeEventListener("change", update);
   }, [mode]);

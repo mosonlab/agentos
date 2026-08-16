@@ -12,6 +12,7 @@
 
 ## 批次 1 — Settings + i18n + 侧栏全局区（第 8 项）
 
+- [ ] 统一升级 Batch 0 留下的 Tailwind v3 版 shadcn 生成组件到 v4 版次；届时统一决定采用 `tw-animate-css` 或保持无动画，避免两代模板混用（Batch 0 已移除当前无效的 `animate-*` / v3 `origin-[--radix-…]` 类）
 - [ ] 新建真正的 Settings 页（语言/主题切换 + runner 信息；修复导航错链 /secrets）
 - [ ] i18n：zh/en 字典 + context hook，~548 处字符串抽取（派机械代理），UI 默认英文
 - [ ] 侧栏底部 Runner 在线状态（heartbeat 已有）+ Inbox 未读徽标

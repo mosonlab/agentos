@@ -6,6 +6,7 @@ import { useAction, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import type { Agent, Secret, SecretPurpose } from "../lib/types";
 import { IconPlus } from "../components/icons";
+import { SecretValueInput } from "../components/secret-value-input";
 import { Card, EmptyState, ErrorNotice, Field, Modal, Pill, RowMenu } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -41,7 +42,7 @@ const SecretForm = ({ secret, onClose, onSaved }: {
     }>
       {error === null ? null : <ErrorNotice message={error} />}
       <Field label="Name" hint="Referenced by repos, MCP connections and agent grants.">
-        <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="GITHUB_PAT_VIBEVILLE" />
+        <Input type="text" value={name} onChange={(event) => setName(event.target.value)} placeholder="GITHUB_PAT_VIBEVILLE" />
       </Field>
       <Field label="Purpose">
         <select value={purpose} onChange={(event) => setPurpose(event.target.value as SecretPurpose)}>
@@ -51,10 +52,10 @@ const SecretForm = ({ secret, onClose, onSaved }: {
       <Field label="Value" hint={secret
         ? "Leave empty to keep the stored ciphertext. Values are AES-256-GCM encrypted at rest."
         : "Encrypted with AGENTOS_SECRET_ENCRYPTION_KEY before it reaches the database."}>
-        <Input value={value} onChange={(event) => setValue(event.target.value)} placeholder={secret ? "unchanged" : ""} />
+        <SecretValueInput value={value} onChange={(event) => setValue(event.target.value)} placeholder={secret ? "unchanged" : ""} />
       </Field>
       <Field label="Description">
-        <Input value={description} onChange={(event) => setDescription(event.target.value)} />
+        <Input type="text" value={description} onChange={(event) => setDescription(event.target.value)} />
       </Field>
     </Modal>
   );

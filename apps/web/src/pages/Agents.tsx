@@ -52,15 +52,15 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
         <div className="stack">
           <div className="fieldRow">
             <Field label="Name" hint="Unique inside the project; used by YAML and the CLI.">
-              <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
+              <Input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
             </Field>
             <Field label="Title">
-              <Input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Senior Developer" />
+              <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Senior Developer" />
             </Field>
           </div>
           <div className="fieldRow">
             <Field label="Model">
-              <Input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
+              <Input type="text" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
             </Field>
             <Field label="Runner" hint="INHERIT falls back to the model heuristic in execution.ts.">
               <select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>
@@ -77,7 +77,7 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
                   {environments.data.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
                 </select>
               )
-              : <Input value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
+              : <Input type="text" value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
           </Field>
           <div className="row">
             <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label="Inbox access" />
@@ -195,7 +195,7 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
           </select>
         </Field>
         <Field label="Mount path">
-          <Input value={mountPath} onChange={(event) => setMountPath(event.target.value)} />
+          <Input type="text" value={mountPath} onChange={(event) => setMountPath(event.target.value)} />
         </Field>
         <div className="field">
           <label>&nbsp;</label>
@@ -265,7 +265,7 @@ const NewFilesystemGrant = ({ agentId, onDone }: { agentId: string; onDone: () =
     <div className="stack mb-3.5">
       {error === null ? null : <ErrorNotice message={error} />}
       <div className="fieldRow">
-        <Field label="Folder path"><Input value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
+        <Field label="Folder path"><Input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
         <Field label="Permissions">
           <div className="row min-h-[34px]">
             {(["canRead", "canWrite", "canDelete"] as const).map((key) => (
@@ -434,11 +434,11 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
             ) : (
               <div className="stack">
                 <div className="fieldRow">
-                  <Field label="Name"><Input value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
-                  <Field label="Title"><Input value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
+                  <Field label="Name"><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
+                  <Field label="Title"><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
                 <div className="fieldRow">
-                  <Field label="Model"><Input value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
+                  <Field label="Model"><Input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
                   <Field label="Runner preference" hint="INHERIT 时按 execution.ts 的模型名启发式选 runner。">
                     <select value={view.runnerPreference} onChange={(event) => patch({ runnerPreference: event.target.value as RunnerPreference })}>
                       {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}

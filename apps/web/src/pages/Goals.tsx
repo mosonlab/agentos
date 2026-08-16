@@ -7,6 +7,7 @@ import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import type { Goal, RunnerPreference } from "../lib/types";
 import { IconArrowLeft, IconPlus } from "../components/icons";
+import { GoalLimitInputs } from "../components/goal-limit-inputs";
 import {
   Card, EmptyState, ErrorNotice, Field, FullPanel, GoalPill, KeyValue, Markdown, Metric, ShowMore, Tabs,
 } from "../components/ui";
@@ -51,25 +52,19 @@ const NewGoal = ({ projectId, onClose, onCreated }: {
       {error === null ? null : <ErrorNotice message={error} />}
       <Card title="Goal">
         <div className="stack">
-          <Field label="Title"><Input value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ship the next release" /></Field>
+          <Field label="Title"><Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Ship the next release" /></Field>
           <Field label="Spec"><Textarea rows={10} value={form.spec} onChange={(event) => setForm({ ...form, spec: event.target.value })} placeholder="Describe the objective, constraints, and context…" /></Field>
-          <div className="fieldRow">
-            <Field label="Spend cap (USD)" hint="Leave empty for no cap."><Input min="0" step="0.01" value={form.spendCap} onChange={(event) => setForm({ ...form, spendCap: event.target.value })} /></Field>
-            <Field label="Wall-clock limit (min)" hint="Leave empty for no limit."><Input min="1" value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: event.target.value })} /></Field>
-          </div>
-          <div className="fieldRow">
-            <Field label="Stall timeout (min)"><Input min="1" value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: event.target.value })} /></Field>
-            <Field label="Stuck threshold"><Input min="1" value={form.stuckThreshold} onChange={(event) => setForm({ ...form, stuckThreshold: event.target.value })} /></Field>
+          <GoalLimitInputs values={form} onChange={(key, value) => setForm({ ...form, [key]: value })} runner={
             <Field label="Runner"><select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>{["AUTO", "CLAUDE", "CODEX", "PI"].map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}</select></Field>
-          </div>
-          <Field label="Shared folder" hint="Optional path available to work on this goal."><Input value={form.sharedFolderPath} onChange={(event) => setForm({ ...form, sharedFolderPath: event.target.value })} placeholder="/path/to/shared/folder" /></Field>
+          } />
+          <Field label="Shared folder" hint="Optional path available to work on this goal."><Input type="text" value={form.sharedFolderPath} onChange={(event) => setForm({ ...form, sharedFolderPath: event.target.value })} placeholder="/path/to/shared/folder" /></Field>
         </div>
       </Card>
       <Card title="Definition of Done" extra={<Button type="button" className="btn small" onClick={() => setItems([...items, ""])}><IconPlus />Add item</Button>}>
         <div className="stack">
           {items.map((item, index) => (
             <div className="row" key={index}>
-              <Input value={item} onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder={`Criterion ${index + 1}`} />
+              <Input type="text" value={item} onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} placeholder={`Criterion ${index + 1}`} />
               {items.length > 1 ? <Button type="button" className="btn small" onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))}>Remove</Button> : null}
             </div>
           ))}

@@ -47,7 +47,7 @@ const RunRow = ({ run, expanded, onToggle }: { run: Run; expanded: boolean; onTo
     </TableRow>
     {expanded ? (
       <TableRow>
-        <TableCell colSpan={9} className="bg-[var(--code-background)]">
+        <TableCell colSpan={9} style={{ background: "var(--surface-run-detail)" }}>
           <div className="stack">
             <KeyValue columns={3} items={[
               { k: "Run ID", v: <span className="small">{run.id}</span> },
@@ -100,7 +100,7 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
         )}
         {error === null ? null : <ErrorNotice message={error} />}
         <div className="row">
-          <Input value={comment} placeholder="Add a comment..." onChange={(event) => setComment(event.target.value)}
+          <Input type="text" value={comment} placeholder="Add a comment..." onChange={(event) => setComment(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter") void send(); }} />
           <Button type="button" className="btn" disabled={pending || comment.trim().length === 0} onClick={() => void send()}>
             <IconSend />Send
@@ -141,7 +141,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <TaskPill status={task.status} />
         {task.templateId === null ? null : <Pill tone="violet">Template</Pill>}
         <span className="spacer" />
-        <select value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })} className="w-[130px]">
+        <select value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })} style={{ width: 130 }}>
           {STATUSES.map((status) => <option key={status} value={status}>{status.toLowerCase()}</option>)}
         </select>
         {retryable(task) ? (

@@ -39,9 +39,10 @@ const main = async (): Promise<void> => {
     select: { id: true },
   });
   const taskIds = fixtureTasks.map(({ id }) => id);
+  const threadIds = [ids.openThread, ids.answeredThread];
   // The acceptance walk can create retries, sessions, and Inbox replies with generated
   // ids. Delete by fixture task ownership so a reset remains deterministic afterward.
-  await db.inboxMessage.deleteMany({ where: { taskId: { in: taskIds } } });
+  await db.inboxMessage.deleteMany({ where: { OR: [{ taskId: { in: taskIds } }, { threadId: { in: threadIds } }] } });
   await db.inboxThread.deleteMany({ where: { taskId: { in: taskIds } } });
   await db.session.deleteMany({ where: { taskId: { in: taskIds } } });
   await db.run.deleteMany({ where: { taskId: { in: taskIds } } });

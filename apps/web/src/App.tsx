@@ -35,8 +35,8 @@ const ConnectionBanner = (): ReactNode => {
   if (error === null) return null;
   if (error.unauthorized) {
     return (
-      <div className="page pb-0 text-foreground">
-        <div className="notice error border-[var(--destructive-line)] bg-[var(--destructive-bg)] text-[var(--destructive-fg)]">
+      <div className="page" style={{ paddingBottom: 0 }}>
+        <div className="notice error">
           控制面拒绝了操作员身份（{error.status}）。检查仓库根 <code>.env</code> 的 <code>OPERATOR_TOKEN</code>，
           它由 <code>vite.config.ts</code> 的 <code>{apiBase}</code> 代理注入。
         </div>
@@ -45,8 +45,8 @@ const ConnectionBanner = (): ReactNode => {
   }
   if (error.status === 0) {
     return (
-      <div className="page pb-0 text-foreground">
-        <div className="notice error border-[var(--destructive-line)] bg-[var(--destructive-bg)] text-[var(--destructive-fg)]">无法连接控制面（{apiBase}）。先启动 <code>npm run dev:api</code>。</div>
+      <div className="page" style={{ paddingBottom: 0 }}>
+        <div className="notice error">无法连接控制面（{apiBase}）。先启动 <code>npm run dev:api</code>。</div>
       </div>
     );
   }
@@ -64,8 +64,8 @@ const Routed = (): ReactNode => {
     if (params !== null) return route.render(params);
   }
   return (
-    <div className="page text-foreground">
-      <div className="notice border-border bg-muted text-muted-foreground">未知路由 <code>{path}</code>。</div>
+    <div className="page">
+      <div className="notice">未知路由 <code>{path}</code>。</div>
     </div>
   );
 };

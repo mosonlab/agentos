@@ -110,6 +110,9 @@ Non-goals (explicitly out of scope):
 - **Tailwind v4 CSS-first.** Theme lives in CSS (`@theme` / `:root` + `.dark` blocks per
   the shadcn Tailwind-v4 convention); no `tailwind.config.js`. Dark mode is class-based
   (`.dark` on the document element) so the manual override can win over the OS.
+- **Cascade contract.** The legacy segment remains unlayered and therefore outranks
+  Tailwind's layered base/utilities; see `docs/reference/frontend-css-layering.md` before
+  changing a legacy inline style, an input type, or the layer structure.
 
 ### 4.2 Mapping table (dark values shown; light column filled at implementation)
 
@@ -383,11 +386,17 @@ page is not supported, by design (the token base is all-or-nothing).
 3. Generate/obtain the §8.2 baseline set; walk §8.3 (dark), §8.4 (light + switching),
    then the §8.5 behavior matrix.
 4. Grep-level spot checks: no `react-router`/`zustand`/`redux`/`jotai` in any
-   `package.json`; `styles.css` has no hardcoded hex outside token blocks; the key
+   `package.json`; `styles.css` has no hardcoded color literals outside token blocks
+   (check hex and functional forms with
+   `grep -En '#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(' apps/web/src/styles.css`); every
+   `<Input>` call has an explicit semantic `type` (also enforced by
+   `input-semantics.test.tsx`); the key
    `agentos.theme` is referenced only by the theme module, and every `localStorage`
    access in `apps/web/src` (theme *and* the pre-existing `agentos.projectId` path)
    goes through the guarded storage helper of §2 item 6 — no bare
    `window.localStorage` calls outside that helper.
+   The CSS layer/preflight and light-surface contrast checks are executable in
+   `styles.test.tsx`; build the web app before running the test suite.
 5. Confirm Connections/Inbox/Projects diffs are minimal (token/base fallout only), and
    that the only changes outside `apps/web` are the lockfile and the §8.1 fixture.
 

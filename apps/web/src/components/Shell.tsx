@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 
 import { usePoll } from "../lib/hooks";
@@ -25,18 +25,19 @@ const NAV: Array<{ to: string; label: string; icon: ReactNode; match: string[] }
 
 const ProjectSwitcher = (): ReactNode => {
   const { projects, project, select } = useProjectScope();
+  const [open, setOpen] = useState(false);
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild><button type="button" className="projectSwitcher hover:bg-sidebar-accent">
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild><button type="button" className="projectSwitcher">
         <span className="projectMark">{project ? initial(project.name) : "·"}</span>
         <span className="projectName">{project?.name ?? (projects.length === 0 ? "No project" : "Select project")}</span>
-        <span className="chevron"><IconChevron /></span>
+        <span className="chevron"><IconChevron open={open} /></span>
       </button></DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-[194px] border-sidebar-border bg-popover font-mono text-popover-foreground">
           {projects.map((candidate) => (
             <DropdownMenuItem key={candidate.id} className={candidate.id === project?.id ? "text-primary focus:bg-accent" : "focus:bg-accent"}
               onSelect={() => select(candidate.id)}>
-              <span className="projectMark size-[18px] text-[10px]">{initial(candidate.name)}</span>
+              <span className="projectMark" style={{ width: 18, height: 18, fontSize: 10 }}>{initial(candidate.name)}</span>
               {candidate.name}
             </DropdownMenuItem>
           ))}
@@ -61,12 +62,12 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
     item.match.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 
   return (
-    <div className="shell min-h-screen bg-background text-foreground">
-      <aside className="sidebar border-sidebar-border bg-sidebar text-sidebar-foreground">
+    <div className="shell">
+      <aside className="sidebar">
         <ProjectSwitcher />
         <nav className="grid gap-0.5">
           {NAV.map((item) => (
-            <Link key={item.to} to={item.to} className={`${active(item) ? "navItem active" : "navItem"} hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`}>
+            <Link key={item.to} to={item.to} className={active(item) ? "navItem active" : "navItem"}>
               {item.icon}
               {item.label}
               {item.to === "/inbox" && openCount > 0 ? <span className="count"><span className="badge">{openCount}</span></span> : null}
@@ -85,7 +86,7 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
           </button>
         </div>
       </aside>
-      <main className="content bg-popover">{children}</main>
+      <main className="content">{children}</main>
     </div>
   );
 };

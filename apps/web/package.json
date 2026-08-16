@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
+    "test": "TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx --test src/**/*.test.tsx",
     "dev": "vite",
     "preview": "vite preview"
   },
@@ -29,7 +30,10 @@
     "vite": "^7.2.2"
   },
   "devDependencies": {
+    "@types/jsdom": "^21.1.7",
     "@types/react": "^19.2.2",
-    "@types/react-dom": "^19.2.2"
+    "@types/react-dom": "^19.2.2",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.20.6"
   }
 }
