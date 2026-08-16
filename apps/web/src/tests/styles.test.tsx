@@ -43,9 +43,9 @@ const selectorIndex = (selector: string): number => {
  *  pattern excludes braces, so an at-rule header is never captured as a
  *  selector — the walker descends into `@media`/`@supports`/`@layer` and yields
  *  the rules inside them. */
-const rules = (): Array<{ selector: string; body: string; brace: number }> => {
+const rules = (css: string): Array<{ selector: string; body: string; brace: number }> => {
   const found: Array<{ selector: string; body: string; brace: number }> = [];
-  for (const match of built.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+  for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const selector = (match[1] ?? "").trim();
     found.push({ selector, body: match[2] ?? "", brace: match.index + (match[1] ?? "").length });
   }
@@ -61,24 +61,51 @@ const declaresAppearance = (body: string): boolean =>
     return property.length > 0 && !property.startsWith("--");
   });
 
-const CLASS_TOKEN = /(?:^|[\s,>+~()])\.[A-Za-z_-]/;
+/** Any class token anywhere in the selector. Deliberately not anchored to a
+ *  preceding delimiter: `td.legacyProbe` and `button.btn` are unlayered class
+ *  rules too, and an anchored form (`(?:^|[\s,>+~()])\.`) cannot see them.
+ *  Bracketed attribute values are blanked first so `[href$=".pdf"]` does not
+ *  read as a class. `@`-headed blocks are filtered out before this runs. */
+const CLASS_TOKEN = /\.[A-Za-z_-]/;
+const withoutAttributeValues = (selector: string): string => selector.replace(/\[[^\]]*\]/g, "[]");
+
+const unlayeredScan = (css: string): { unlayered: number; offenders: string[] } => {
+  const unlayered = rules(css).filter((rule) => layersAt(css, rule.brace).length === 0);
+  const offenders = unlayered
+    .filter((rule) => !rule.selector.startsWith("@"))
+    .filter((rule) => CLASS_TOKEN.test(withoutAttributeValues(rule.selector)))
+    .filter((rule) => declaresAppearance(rule.body))
+    .map((rule) => `${rule.selector}{${rule.body.slice(0, 60)}}`);
+  return { unlayered: unlayered.length, offenders };
+};
 
 test("no unlayered class rule styles the app", () => {
-  const walked = rules();
-  const unlayered = walked.filter((rule) => layersAt(built, rule.brace).length === 0);
+  const { unlayered, offenders } = unlayeredScan(built);
 
   // Guards against a parser change quietly making the assertion vacuous: the
   // sheet does still contain unlayered rules (`:root`, `.dark`, `@property`).
-  assert.ok(unlayered.length > 0, "walker found no unlayered rules at all");
+  assert.ok(unlayered > 0, "walker found no unlayered rules at all");
 
-  const offenders = unlayered
-    .filter((rule) => !rule.selector.startsWith("@"))
-    .filter((rule) => CLASS_TOKEN.test(rule.selector))
-    .filter((rule) => declaresAppearance(rule.body))
-    .map((rule) => `${rule.selector}{${rule.body.slice(0, 60)}}`);
   assert.deepEqual(offenders, []);
 
   assert.deepEqual(layersAt(built, selectorIndex(".flex{")), ["utilities"]);
+});
+
+/** The guard above is the batch's only mechanical protection against a rule that
+ *  re-appears outside `@layer`, and an unlayered rule beats every layered utility
+ *  regardless of specificity. So the guard's own detection is pinned here, on
+ *  fixtures rather than on the shipped sheet: the first two positives are the
+ *  ones the narrower anchored regex missed, the third is the shape it did catch,
+ *  and the negatives are what must stay allowed. */
+test("the layer guard sees element-qualified class selectors", () => {
+  const flagged = (css: string): string[] => unlayeredScan(css).offenders;
+
+  assert.equal(flagged("td.legacyProbe{color:red}").length, 1, "element-qualified class missed");
+  assert.equal(flagged("button.btn:disabled{opacity:.45}").length, 1, "compound class missed");
+  assert.equal(flagged(".rowProbe{display:flex}").length, 1, "plain class missed");
+  assert.equal(flagged("@layer utilities{td.legacyProbe{color:red}}").length, 0, "layered rule flagged");
+  assert.equal(flagged(":root{--background:#fff}").length, 0, "token-only rule flagged");
+  assert.equal(flagged('a[href$=".pdf"]{color:red}').length, 0, "attribute value read as a class");
 });
 
 test("Markdown list markers override Tailwind preflight", () => {
