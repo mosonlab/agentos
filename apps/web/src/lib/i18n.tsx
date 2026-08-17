@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
+import { createContext, Fragment, type ReactNode, useContext, useEffect, useState } from "react";
 
 import { setFormatLocale } from "./format";
 import { isLocale, type Locale, LOCALE_KEY, translate } from "./i18n-core";
@@ -72,4 +72,27 @@ export const useT = (): Translate => {
   const held = useContext(LocaleContext);
   if (held === null) return (key, vars) => translate("en", key, vars);
   return held.t;
+};
+
+/**
+ * The same interpolation, with nodes instead of strings.
+ *
+ * Four strings in the app wrap a technical identifier in `<code>`: the three
+ * App banners and `GapNotice`. Their dictionary values stay plain text with a
+ * `{placeholder}` where the identifier goes, and the markup lives here, in the
+ * caller's tree — a translated value never contains a tag, so a translator can
+ * never break the DOM and the identifiers are not translated by accident.
+ *
+ * An unsubstituted placeholder renders as itself, exactly as `interpolate` does,
+ * so a missing node is visible rather than silently blank.
+ */
+export const useTNodes = (): ((key: string, nodes: Record<string, ReactNode>) => ReactNode) => {
+  const t = useT();
+  return (key, nodes) => (
+    t(key).split(/(\{\w+\})/g).map((part, index) => {
+      const name = /^\{(\w+)\}$/.exec(part);
+      const node = name === null ? undefined : nodes[name[1]!];
+      return <Fragment key={index}>{node === undefined ? part : node}</Fragment>;
+    })
+  );
 };

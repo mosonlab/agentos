@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { formatDateTime, setFormatLocale } from "../lib/format";
 import { type Dictionary, DICTIONARIES, interpolate, isLocale, LOCALE_KEY, type Locale, translate } from "../lib/i18n-core";
-import { LocaleProvider, useLocale, useT } from "../lib/i18n";
+import { LocaleProvider, useLocale, useT, useTNodes } from "../lib/i18n";
 import { storage } from "../lib/storage";
 
 const { en, zh } = DICTIONARIES;
@@ -112,6 +113,39 @@ test("initialLocale overrides storage, which is what the Chinese tests use", () 
     storage.set(LOCALE_KEY, "en");
     assert.match(renderToStaticMarkup(<LocaleProvider initialLocale="zh"><Probe /></LocaleProvider>), /zh:设置/);
   });
+});
+
+/* ------------------------------------------------------- node interpolation */
+
+const Banner = (): ReactNode => {
+  const tn = useTNodes();
+  return <div>{tn("errors.route.unknown", { path: <code>/nope</code> })}</div>;
+};
+
+test("a node substitution keeps the markup out of the dictionary, in both locales", () => {
+  // Byte-identical to what App.tsx rendered before batch 1 — the Chinese value
+  // is the pre-batch wording and the <code> comes from the caller's tree.
+  assert.equal(
+    renderToStaticMarkup(<LocaleProvider initialLocale="zh"><Banner /></LocaleProvider>),
+    "<div>未知路由 <code>/nope</code>。</div>",
+  );
+  assert.equal(
+    renderToStaticMarkup(<LocaleProvider initialLocale="en"><Banner /></LocaleProvider>),
+    "<div>Unknown route <code>/nope</code>.</div>",
+  );
+});
+
+const Unmatched = (): ReactNode => {
+  const tn = useTNodes();
+  return <div>{tn("errors.unreachable", { base: "/api" })}</div>;
+};
+
+test("a placeholder with no node renders as itself rather than vanishing", () => {
+  // The same contract `interpolate` keeps: a missing substitution has to be
+  // visible, because a silently blank banner reads as working copy.
+  const markup = renderToStaticMarkup(<LocaleProvider initialLocale="en"><Unmatched /></LocaleProvider>);
+  assert.match(markup, /\/api/);
+  assert.match(markup, /\{command\}/);
 });
 
 /* ---------------------------------------------------- the format.ts seam */

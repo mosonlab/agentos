@@ -1,6 +1,7 @@
 import { type ReactNode, useState } from "react";
 
 import { usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { navigate } from "../lib/router";
 import type { Agent, Repo } from "../lib/types";
@@ -13,11 +14,11 @@ import { Button } from "./ui/button";
 
 export type TasksTab = "tasks" | "automations" | "triggers" | "archived";
 
-const TABS: Array<{ value: TasksTab; label: string }> = [
-  { value: "tasks", label: "Tasks" },
-  { value: "automations", label: "Automations" },
-  { value: "triggers", label: "Triggers" },
-  { value: "archived", label: "Archived" },
+const TAB_KEYS: Array<{ value: TasksTab; labelKey: string }> = [
+  { value: "tasks", labelKey: "tasks.tab.tasks" },
+  { value: "automations", labelKey: "tasks.tab.automations" },
+  { value: "triggers", labelKey: "tasks.tab.triggers" },
+  { value: "archived", labelKey: "tasks.tab.archived" },
 ];
 
 /**
@@ -37,20 +38,22 @@ export const TasksPageHead = ({ active, onCreated }: {
   const { data: agents } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
   const { data: repos } = usePoll<Repo[]>(projectId === "" ? null : `/projects/${projectId}/repos`, 15_000);
   const [creating, setCreating] = useState(false);
+  const t = useT();
+  const tabs = TAB_KEYS.map((tab) => ({ value: tab.value, label: t(tab.labelKey) }));
 
   return (
     <>
       <div className={PAGE_HEAD}>
         <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Tasks</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>Work queued for agents in {project?.name ?? "this project"}</div>
+          <h1 className={PAGE_HEAD_H1}>{t("tasks.head.title")}</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>{t("tasks.head.subtitle", { project: project?.name ?? t("tasks.head.thisProject") })}</div>
         </div>
         <div className={PAGE_ACTIONS}>
-          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />Create Task</Button>
+          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />{t("tasks.create")}</Button>
         </div>
       </div>
 
-      <Segmented options={TABS} value={active} onChange={(value) => navigate(`/${value}`)} />
+      <Segmented options={tabs} value={active} onChange={(value) => navigate(`/${value}`)} />
 
       {creating && projectId !== "" ? (
         <NewTask projectId={projectId} agents={agents ?? []} repos={repos ?? []}

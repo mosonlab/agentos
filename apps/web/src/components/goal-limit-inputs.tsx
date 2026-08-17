@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { useT } from "../lib/i18n";
 import { FIELD_ROW, Field } from "./ui";
 import { Input } from "./ui/input";
 
@@ -14,16 +15,19 @@ export const GoalLimitInputs = ({ values, onChange, runner }: {
   values: GoalLimitValues;
   onChange: (key: keyof GoalLimitValues, value: string) => void;
   runner?: ReactNode;
-}): ReactNode => (
-  <>
-    <div className={FIELD_ROW}>
-      <Field label="Spend cap (USD)" hint="Leave empty for no cap."><Input type="number" min="0" step="0.01" value={values.spendCap} onChange={(event) => onChange("spendCap", event.target.value)} /></Field>
-      <Field label="Wall-clock limit (min)" hint="Leave empty for no limit."><Input type="number" min="1" value={values.maxDurationMin} onChange={(event) => onChange("maxDurationMin", event.target.value)} /></Field>
-    </div>
-    <div className={FIELD_ROW}>
-      <Field label="Stall timeout (min)"><Input type="number" min="1" value={values.stallTimeoutMin} onChange={(event) => onChange("stallTimeoutMin", event.target.value)} /></Field>
-      <Field label="Stuck threshold"><Input type="number" min="1" value={values.stuckThreshold} onChange={(event) => onChange("stuckThreshold", event.target.value)} /></Field>
-      {runner}
-    </div>
-  </>
-);
+}): ReactNode => {
+  const t = useT();
+  return (
+    <>
+      <div className={FIELD_ROW}>
+        <Field label={t("goals.limits.spendCap.label")} hint={t("goals.limits.spendCap.hint")}><Input type="number" min="0" step="0.01" value={values.spendCap} onChange={(event) => onChange("spendCap", event.target.value)} /></Field>
+        <Field label={t("goals.limits.duration.label")} hint={t("goals.limits.duration.hint")}><Input type="number" min="1" value={values.maxDurationMin} onChange={(event) => onChange("maxDurationMin", event.target.value)} /></Field>
+      </div>
+      <div className={FIELD_ROW}>
+        <Field label={t("goals.limits.stall.label")}><Input type="number" min="1" value={values.stallTimeoutMin} onChange={(event) => onChange("stallTimeoutMin", event.target.value)} /></Field>
+        <Field label={t("goals.limits.stuck.label")}><Input type="number" min="1" value={values.stuckThreshold} onChange={(event) => onChange("stuckThreshold", event.target.value)} /></Field>
+        {runner}
+      </div>
+    </>
+  );
+};
