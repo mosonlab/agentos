@@ -13,14 +13,15 @@ Revision sources, in order:
 1. `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Must-fix/§Should-fix — round 1, 7 must-fix and 2 should-fix, all closed.
 2. `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Current-master plan-revision disposition — round 2, current-master review of base `a4a4ba36c116c775d5d1c28ed55b17600869d904` against head `5d1a1fea89f3f0635b53bc298e5d2881bf363bf7`, 2 must-fix and 0 should-fix, all closed.
 3. `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Round-3 disposition — round 3, final independent review of base `a4a4ba36c116c775d5d1c28ed55b17600869d904` against head `4d2a4be5f5a859dd7a92a41be13825c435bfc421` with peer `4a35da5c428241c43de5b91158cfb6b2d61bc8b7`, 4 must-fix and 0 should-fix, all closed. Round 3 **discards** round 2's recorded `… → Agent → AgentRepoAccess` lock order: current master takes the exact grant *before* the Agent row, and the corrected canonical order below is authoritative.
+4. `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Round-4 disposition — round 4, independent review of base `a4a4ba36c116c775d5d1c28ed55b17600869d904` against head `2e25c48fd785879fe5814dfb454d2adc4a6298f1` with peer `4a35da5c428241c43de5b91158cfb6b2d61bc8b7`, 1 must-fix and 0 should-fix, closed. Round 4 **corrects the dependency identity**: **#97 is the Goal 5a0 implementation issue — an open work ticket — and is never a pull request.** Rounds 2–3 wrote "#97 merges"; that shorthand is replaced everywhere below by the actual implementation pull request recorded under "Implementation PR identity of record".
 
-All three rounds stay in the append-only disposition ledger below. Where round 3 contradicts round 2, round 3 governs and the round-2 entry remains visible as history.
+All four rounds stay in the append-only disposition ledger below. Where a later round contradicts an earlier one, the later round governs and the earlier entry remains visible as history.
 
 Audited planning base: `188d21e279b8feae816b4f9580a961f5c9ee0cbc` (2026-08-17)
 
 Current-master convergence base: `a4a4ba36c116c775d5d1c28ed55b17600869d904` (merge of PR #105, Review/Approval Convergence). Every current-master fact cited in this plan was read at that commit and must be re-read in Step 1.
 
-Dependency decision of record (Leo, 2026-08-17): Goal 5a0 implementation and merge (#97) goes first; Inbox 3a implementation (#98) is strictly dependency-held until #97 is merged and revalidated. See "Goal 5a0 and Inbox 3a dependency, ownership, and handoff" below.
+Dependency decision of record (Leo, 2026-08-17): Goal 5a0 implementation goes first; Inbox 3a implementation is strictly dependency-held behind it. Both identifiers are **open GitHub issues / work tickets, not pull requests**: **issue #97** is the Goal 5a0 implementation ticket and **issue #98** is the Inbox 3a implementation ticket. Neither can ever be "merged" — issues close, pull requests merge. The dependency is discharged by the *actual* Goal 5a0 implementation pull request, whose number does not exist yet and is not invented here; it is recorded under "Implementation PR identity of record" when it exists. See "Goal 5a0 and Inbox 3a dependency, ownership, and handoff" below.
 
 ## Outcome and approach
 
@@ -36,7 +37,7 @@ The work is ordered so no route can expose a transition before its durable schem
 4. **Evidence fuse.** A rerun is not a green gate until the first failure is explained and dispositioned. Every reviewer finding remains in the final disposition ledger.
 5. **Rollback default.** Disable `GOAL_SAFETY_KERNEL_ENABLED` first. Prefer roll-forward with the flag off whenever live lineage must be retained; destructive down-migration requires an approved export and explicit operator approvals described in Step 14.
 6. **Exclusion-protocol fuse.** Goal 5a0 joins the merged Review/Approval Convergence exclusion protocols; it does not fork them. No Goal-linked Task or Run may be created without holding the exact-grant mutex (`packages/db/src/workflow.ts::lockAgentRepoGrant`) and then the Agent-row mutex (`::lockAgentRow`) — in that direction, which is the direction current master's `POST /tasks/:taskId/start` takes them — and re-reading both under those locks. Any implementation path that creates a Goal Run outside the canonical row order in Step 4.3, or that takes the Agent row before the exact grant, is a stop condition, not a follow-up.
-7. **Inbox 3a fuse.** Goal 5a0 owns and may change the symbols listed in the ownership table below; it must not implement Inbox 3a. Inbox 3a (#98) does not begin until #97 is merged and Step 1's revalidation is rerun on the merged tail. Goal 5a0 leaves a written handoff, not a partial Inbox implementation.
+7. **Inbox 3a fuse.** Goal 5a0 owns and may change the symbols listed in the ownership table below; it must not implement Inbox 3a. Inbox 3a (issue #98) does not begin until the **actual Goal 5a0 implementation pull request** — the one recorded under "Implementation PR identity of record", not issue #97 itself — is merged, its recorded merge commit is proven an ancestor of a freshly fetched `origin/master`, and Step 1's revalidation is rerun on that merged tail. Closing issue #97 is not evidence of a merge, and neither is an open or unmerged linked pull request. The two dry checks in "Dependency-gate dry checks" below decide `STOPPED_FOR_REROUTE` versus `SAFE_TO_IMPLEMENT`; an ambiguous or absent record is `STOPPED_FOR_REROUTE`, a stop condition rather than a follow-up. Goal 5a0 leaves a written handoff, not a partial Inbox implementation.
 
 ## Audited current-tree conflicts that implementation must resolve
 
@@ -266,7 +267,9 @@ find packages/db/prisma/migrations -mindepth 1 -maxdepth 1 -type d -exec basenam
 
    > Goal (`FOR UPDATE`) → existing Task rows (`FOR UPDATE`, ascending `id`) → existing Run rows (`FOR UPDATE`, ascending `id`) → exact `AgentRepoAccess` row (`FOR KEY SHARE`, `(projectId, agentId, repoId)`) → `Agent` (`FOR UPDATE`) → inserts.
 
-   This is the order the Inbox 3a docs PR **#95** must adopt when it inherits the handoff. #95 currently records `Goal → Task → Agent → exact AgentRepoAccess → Run/lineage` (its plan's step 1.5, step 2 claim, and `claimInboxResumeRequest` in step 8) and, separately, `Goal → Task prefix → exact AgentRepoAccess → Run → Session → Question` in its fixed decision 13. Neither matches current master: the first inverts grant and Agent, and both are inconsistent with each other. Goal 5a0 does not edit #95 — the ownership table below assigns that correction to #98's post-merge write-surface review, which must replace both wordings with the sentence above and re-derive it from the merged tree rather than from either document.
+   This is the order the Inbox 3a docs PR **#95** must adopt when it inherits the handoff. #95 currently records `Goal → Task → Agent → exact AgentRepoAccess → Run/lineage` (its plan's step 1.5, step 2 claim, and `claimInboxResumeRequest` in step 8) and, separately, `Goal → Task prefix → exact AgentRepoAccess → Run → Session → Question` in its fixed decision 13. Neither matches current master: the first inverts grant and Agent, and both are inconsistent with each other. Goal 5a0 does not edit #95 — the ownership table below assigns that correction to issue #98's post-merge write-surface review, which must replace both wordings with the sentence above and re-derive it from the merged tree rather than from either document.
+
+   **PR #95 is itself dependency-held.** It is a real docs pull request, unlike issues #97 and #98, but it must not be merged or treated as authoritative until it (a) adopts the dynamic actual-PR identity rule below — no text asserting that issue #97 merges, and the Goal dependency expressed as the recorded actual implementation pull request, its exact reviewed head, and its exact merge commit — and (b) adopts this canonical row order in both places, re-derived from the merged tree. Until both hold, #95 records a lock order that would deadlock against the unmodified manual start writer and a dependency that can never be satisfied as written.
 
 **Verification:** Unit tests cover canonical hashing/default equivalence, every conflict mapping, event dedupe keys, canonical row order, manual-vs-Goal construction, replay-before-state behavior, no prompt/token leakage, exact per-operation event cardinality (including two for restart), and transaction rollback on an injected failure between each logical write/event. A lock-order test records the emitted statement sequence for every public operation listed in 4.4's assignment table and asserts the observed rows are a strictly ascending subsequence of Goal → Task → Run → `AgentRepoAccess` → `Agent` with no reach-back and no row 5 before row 4; the same test asserts each operation takes exactly the rows its table entry names and no others. A construction test asserts that no Goal Run is created on any path that did not first hold rows 4 and 5. A route-classification test asserts the exact status and body of each cell in 4.5's table against the current-master sentences read in Step 1.
 
@@ -547,7 +550,7 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
    3. **Exact GoalStatus rebuild:** execute `CREATE TYPE "GoalStatus_goal5a0_rollback" AS ENUM ('active','paused','completed','stopped-spend','stopped-time','stopped-stuck')`; cast with `ALTER TABLE "Goal" ALTER COLUMN "status" TYPE "GoalStatus_goal5a0_rollback" USING ("status"::text::"GoalStatus_goal5a0_rollback")`; execute `DROP TYPE "GoalStatus"`; rename with `ALTER TYPE "GoalStatus_goal5a0_rollback" RENAME TO "GoalStatus"`; restore the exact old default with `ALTER TABLE "Goal" ALTER COLUMN "status" SET DEFAULT 'paused'::"GoalStatus"`; recreate only old-schema indexes/checks/views/functions recorded from the baseline; validate label order, default expression, row counts/status counts, and zero unexpected dependencies before commit. Any failed assertion rolls back the whole phase.
    4. **Post-commit gate:** retain `pgcrypto` unless the evidence says Goal 5a0 installed it and `pg_depend` proves no non-extension user; only then may the operator drop it. Start an old-client build against the disposable rolled-back schema, run Goal CRUD/list plus manual Task/Run scheduler smoke tests, run old-schema Prisma drift validation, and compare the archive checksum/readability again before old code is considered deployable.
 4. Include operator stop points and explicit evidence fields for who approved destructive translation/removal. Alerts and lifecycle notifications are named as Goal 5a1, not added here.
-5. Add an "Inbox 3a handoff" section reproducing the dependency decision, the ownership inventory, the directory-only migration-tail rule from Step 1.6, the "Canonical Goal execution row order" sentence from Step 4.9 with the note that #95's two conflicting orders must be replaced by it, and the `goalRunResumeAuthority` seam, so #98 reads one operational document rather than reconstructing the boundary from this plan's steps. State plainly what an operator sees: cancelling a Goal with a waiting Inbox card **closes the card, terminalizes and fences the Run, and does not resume**; an answer that arrives afterwards is a harmless duplicate that records nothing — no reply, no decision row — while an answer that arrived *before* the cancel keeps its recorded reply and decision row, which the cancel does not erase.
+5. Add an "Inbox 3a handoff" section reproducing the dependency decision, the "Implementation PR identity of record" fields and the two dependency-gate dry checks verbatim (including the `git fetch` + `git merge-base --is-ancestor` commands and the `STOPPED_FOR_REROUTE`/`SAFE_TO_IMPLEMENT` outcomes), the ownership inventory, the directory-only migration-tail rule from Step 1.6, the "Canonical Goal execution row order" sentence from Step 4.9 with the note that PR #95's two conflicting orders must be replaced by it and that #95 stays dependency-held until it also adopts the actual-PR identity rule, and the `goalRunResumeAuthority` seam, so the Inbox 3a work stream reads one operational document rather than reconstructing the boundary from this plan's steps. State in that section that issues #97 and #98 are work tickets that close and never merge, and that the runbook must carry the actual pull-request number, URL, reviewed head, and merge commit once they exist — never an invented number. State plainly what an operator sees: cancelling a Goal with a waiting Inbox card **closes the card, terminalizes and fences the Run, and does not resume**; an answer that arrives afterwards is a harmless duplicate that records nothing — no reply, no decision row — while an answer that arrived *before* the cancel keeps its recorded reply and decision row, which the cancel does not erase.
 
 **Verification:** Execute the runbook only against the disposable rehearsal from Step 13. A reviewer can trace every command to an artifact, target schema, expected result, transaction boundary, abort/rollback condition, dependency query, approval identity, and recovery action. Evidence includes the temporary/final enum names, cast/default SQL, pre/post enum labels and counts, old-client smoke output, Prisma drift result, and `pgcrypto` retention decision.
 
@@ -557,6 +560,7 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 
 - `docs/reviews/goal-5a0-implementation-evidence.md` (new)
 - `docs/reviews/goal-5a0-review-disposition.md` (new)
+- `docs/runbooks/goal-5a0-safety-kernel-rollout-and-rollback.md` (its "Inbox 3a handoff" section only)
 - all files changed by Steps 1–14
 
 **Work:**
@@ -577,19 +581,61 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 3. Assemble the ten-part reviewer packet required by spec §15.3: current-master/Control-plane A evidence; schema/raw SQL including `pgcrypto` and composite audit FKs; preflight/backfill/rehearsal counts; all command/test output; controlled interleavings including cancel/claim, dispatch-versus-archive, dispatch-versus-grant-revocation, cancel-versus-Inbox-answer in both orders, and manual-start-versus-Goal-dispatch/successor/retry in both orders; zero invariant results including predecessor/event/Session identity; canary Goal→generation→Task→Run/retry JSON with restart's exact two events; partial/late/concurrent Session cost evidence; feature-flag/rollout/exact enum-rebuild rollback state; and complete finding disposition table. Attach raw observability JSONL plus executable aggregation output and the Goal-path Inbox negative-test evidence. Include the Step 1 exclusion-protocol symbol map, the rebuilt multi-row writer table with the both-row-writer enumeration, the "Canonical Goal execution row order" record from Step 4.9, the route-classification test output proving the create-like 400s and retry-style 409s, the refreshed Inbox 3a ownership inventory, and the directory-only merged migration-tail ordering proof with all three assertions.
 4. The disposition ledger has one row per finding with source/ID, severity, accepted/rejected/deferred, rationale, exact contract/code/doc change, and verification. Findings are append-only across revisions; a rejected or deferred finding remains visible. Any must-fix stays open until verified; every should-fix is adopted or explicitly declined with one-line reasoning.
 5. Obtain an independent review against the reviewer checklist in spec §16. With an approval gate, move the implementation task to review rather than done; the human decides.
+6. **Record the implementation PR identity of record.** The implementation work stream for issue #97 must write the four fields defined in "Implementation PR identity of record" — actual pull-request number, pull-request URL, exact reviewed head SHA, and exact merge commit SHA — into the AgentOS task output of its own implementation task, and mirror them into `docs/reviews/goal-5a0-implementation-evidence.md` and the runbook's "Inbox 3a handoff" section. The number and URL are recorded when the pull request is opened; the reviewed head when exact-head human authorization is given; the merge commit only after the merge actually happens, taken from `git rev-parse` on a freshly fetched `origin/master` tip that contains it. Until the merge commit exists, the field reads `not yet merged` — never a guess, never an issue number, never a predicted pull-request number. Issue #97 is then closed as a consequence of that merge; closing it is not itself evidence.
 
-**Verification:** Every reviewer checklist answer is backed by a file/command/test/result in the evidence document. The final invariant query returns zero rows. `git diff --check` is clean, the reviewed SHA matches the evidence SHA, and the disposition ledger contains every finding from every review round.
+**Verification:** Every reviewer checklist answer is backed by a file/command/test/result in the evidence document. The final invariant query returns zero rows. `git diff --check` is clean, the reviewed SHA matches the evidence SHA, and the disposition ledger contains every finding from every review round. The AgentOS task output for issue #97's implementation task carries all four identity fields with the merge commit either a real 40-hex SHA proven by `git merge-base --is-ancestor <merge-commit> origin/master` after `git fetch origin master` or the literal `not yet merged`; no field contains an invented pull-request number, and the same four values appear identically in the evidence document and the runbook.
 
 ## Goal 5a0 and Inbox 3a dependency, ownership, and handoff
 
 ### Decision of record
 
-Leo's explicit dependency decision, 2026-08-17: **Goal 5a0 implementation and merge (#97) is first. Inbox 3a implementation (#98) is strictly dependency-held until #97 is merged and revalidated.** Concretely:
+Leo's explicit dependency decision, 2026-08-17: **Goal 5a0 implementation is first. Inbox 3a implementation is strictly dependency-held behind the merged Goal 5a0 implementation pull request.**
 
-1. #98 does not start implementation while #97 is open. Its task stays dependency-held, not merely deprioritized.
-2. When #97 merges, #98's first action is to rerun this plan's Step 1 revalidation against the merged tail and record the merged Goal migration folder name and the merged state of every symbol in the ownership table.
-3. If that revalidation shows a symbol moved, was renamed, or changed shape, #98 revises its own plan before writing code. It does not reinterpret this table from memory.
+**Identifier discipline.** **Issue #97 is the Goal 5a0 implementation issue — an open GitHub issue and work ticket. Issue #98 is the Inbox 3a implementation issue.** Neither is a pull request, and neither can be merged; an issue closes, a pull request merges. There is no PR #97 and this plan does not invent one. The work that actually lands Goal 5a0 is a *distinct* pull request opened by issue #97's implementation task, whose number is unknown at planning time. PR #94 (this docs stream) and PR #95 (the Inbox 3a docs stream) are the only real pull requests named in this plan. Concretely:
+
+1. Issue #98's implementation does not start while the Goal 5a0 implementation pull request is unopened, open, or closed-unmerged. Its task stays dependency-held, not merely deprioritized.
+2. When that pull request is merged, issue #98's first action is to run the two dependency-gate dry checks below and, on `SAFE_TO_IMPLEMENT`, rerun this plan's Step 1 revalidation against the merged tail, recording the merged Goal migration folder name and the merged state of every symbol in the ownership table.
+3. If that revalidation shows a symbol moved, was renamed, or changed shape, issue #98 revises its own plan before writing code. It does not reinterpret this table from memory.
 4. Goal 5a0 does not implement, partially implement, or design Inbox 3a. Where the two meet, Goal 5a0 leaves the named fence and seam in Step 9 and nothing more.
+
+### Implementation PR identity of record
+
+The dependency is expressed as recorded facts about the actual pull request, never as an issue number. Issue #97's implementation task persists these four fields in its AgentOS task output, and Step 15.6 mirrors them into `docs/reviews/goal-5a0-implementation-evidence.md` and the runbook:
+
+| Field | Meaning | Recorded when | Placeholder before that |
+| --- | --- | --- | --- |
+| `ACTUAL_IMPL_PR_NUMBER` | the number of the pull request that implements Goal 5a0 — a distinct pull request, not `97` | the pull request is opened | `not yet opened` |
+| `ACTUAL_IMPL_PR_URL` | its full `https://github.com/mosonlab/agentos/pull/<n>` URL | the pull request is opened | `not yet opened` |
+| `ACTUAL_REVIEWED_HEAD` | the exact 40-hex head SHA that received exact-head human merge authorization | authorization is given; re-recorded if head drift invalidates it | `not yet authorized` |
+| `ACTUAL_MERGE_COMMIT` | the exact 40-hex merge commit produced by that merge | the merge has actually happened | `not yet merged` |
+
+No field may hold a guessed or predicted pull-request number, and `ACTUAL_MERGE_COMMIT` may never hold an issue number, a branch name, or the reviewed head. If the pull request is closed without merging, or is superseded by another, the fields reset to their placeholders and the successor pull request's identity is recorded from scratch; a stale merge commit is never carried forward.
+
+### Dependency-gate dry checks
+
+Any work stream that believes the Goal 5a0 dependency is discharged — issue #98 first, and any other consumer of this handoff — runs both checks and records their raw output before touching code. Both are read-only.
+
+**Dry check A — is the dependency still held?**
+
+```sh
+gh issue view 97 --json number,state,title,url
+gh issue view 97 --json closedByPullRequestsReferences   # linked pull requests, if any
+gh pr view <ACTUAL_IMPL_PR_NUMBER> --json number,state,merged,mergeCommit,headRefOid,url
+```
+
+Outcome `STOPPED_FOR_REROUTE` — stop, do not implement, return the task for rerouting — when **any** of the following holds: issue #97 is `OPEN`; no `ACTUAL_IMPL_PR_NUMBER` is recorded; the recorded pull request does not exist, is `OPEN`, or is `CLOSED` with `merged: false`; `ACTUAL_MERGE_COMMIT` is a placeholder, absent, or not a 40-hex SHA; or the recorded merge commit disagrees with the pull request's own `mergeCommit`. A closed issue #97 with no merged pull request behind it is also `STOPPED_FOR_REROUTE`: closing a work ticket is not a merge.
+
+**Dry check B — is the recorded merge actually in `master`?**
+
+```sh
+git fetch origin master
+git merge-base --is-ancestor <ACTUAL_MERGE_COMMIT> origin/master && echo ANCESTOR || echo NOT_ANCESTOR
+git rev-parse origin/master
+```
+
+Outcome `SAFE_TO_IMPLEMENT` only when dry check A found a merged pull request with a real recorded merge commit **and** this check, run after a fresh `git fetch origin master`, prints `ANCESTOR`. `NOT_ANCESTOR`, a stale fetch, an unknown commit, or a rewritten history is `STOPPED_FOR_REROUTE`. `SAFE_TO_IMPLEMENT` authorizes only Step 1's revalidation against the recorded `origin/master` tip; it is not implementation authorization by itself, and it expires if `origin/master` moves before Step 1 completes — refetch and rerun check B.
+
+Both checks record the recorded four identity fields, the raw command output, the `origin/master` SHA observed, and the resulting outcome token. No other evidence of the dependency is accepted: not a green CI badge, not a closed issue, not a branch that appears to contain the work.
 
 ### Overlapping symbol inventory and ownership
 
@@ -602,7 +648,8 @@ Read at `a4a4ba3`; Step 1 re-reads it. "Goal 5a0" means this plan may change the
 | schema | `InboxMessage`, `InboxThread`, `InboxDecision`, their `goalId`/`taskId` columns | Inbox 3a | read-only; cancel may close an `OPEN` card, nothing else | #98 owns all shape changes |
 | workflow | `applyInboxDecisionTx` / `applyInboxDecision` | merged/shared | Step 9.5 adds the leading `lockGoalRow`, the resume-authority branch, and — on the Goal path only — the duplicate return that replaces the `workflow.ts:769-771` throw | #98 replaces the `no-resume` branch; it must not remove the Goal lock or the predicate, and it owns the paused-Goal resume-window policy |
 | workflow | `goalRunResumeAuthority` (new, `packages/db/src/goal-execution.ts`), returning `"resume" \| "no-resume"` | Goal 5a0 | Step 9.6 creates it as the single seam | #98's integration point |
-| docs | the canonical row order recorded in Step 4.9 | Goal 5a0 records it; #98 adopts it | Step 4.9 writes it into the revalidation document and the runbook | #98's post-merge write-surface review replaces #95's `Goal → Task → Agent → exact AgentRepoAccess → Run/lineage` and `Goal → Task prefix → grant → Run → Session → Question` wordings with it, re-derived from the merged tree |
+| docs | the canonical row order recorded in Step 4.9 | Goal 5a0 records it; issue #98 adopts it | Step 4.9 writes it into the revalidation document and the runbook | issue #98's post-merge write-surface review replaces PR #95's `Goal → Task → Agent → exact AgentRepoAccess → Run/lineage` and `Goal → Task prefix → grant → Run → Session → Question` wordings with it, re-derived from the merged tree; PR #95 stays dependency-held until it adopts both that order and the actual-PR identity rule |
+| docs | the dependency identity — issues #97/#98 versus the actual implementation pull request | Goal 5a0 records the identity fields and the two dry checks | Step 15.6 persists the four fields in the AgentOS task output, the evidence document, and the runbook; Step 14.5 reproduces the dry checks | issue #98 and PR #95 consume the recorded fields and the dry-check outcomes; neither may restate the dependency as "#97 merged" or invent a pull-request number |
 | workflow | `gateQuestion`, approval-gate cards | Inbox 3a | no change; Goal Tasks may not carry an approval gate (Step 2 runtime shape check, Step 9.1) | #98 owns gate behaviour |
 | workflow | `ACTIVE_RUN_STATUSES`, `LIVE_TASK_STATUSES` | merged/shared | consume, never redefine | consume, never redefine |
 | workflow | `enqueueTaskRun`, `lockAgentRow`, `lockAgentRows`, `lockTaskRow`, `lockAgentRepoGrant`, `lockAgentRepoGrantForRevocation`, `agentArchiveBlocker` | merged/shared | Step 4 extends the lock order above them; `enqueueTaskRun` gains only the Goal-linked rejection | unchanged |
@@ -619,15 +666,15 @@ Read at `a4a4ba3`; Step 1 re-reads it. "Goal 5a0" means this plan may change the
 
 Goal 5a0 reserves `packages/db/prisma/migrations/20260818000000_goal_execution_safety_kernel/`. Step 1's ordering fuse still applies: if that name no longer sorts after every migration on the then-current tail, or already exists, stop and revise this plan rather than renumber during implementation.
 
-Inbox 3a's migration timestamp must sort strictly after **the actual merged Goal tail** — the folder name as it exists on `master` after #97 merges — not merely after the literal string `20260818000000`. If the ordering fuse forced Goal 5a0 to a different folder name, that new name is the tail #98 must clear.
+Inbox 3a's migration timestamp must sort strictly after **the actual merged Goal tail** — the folder name as it exists on `master` at the recorded `ACTUAL_MERGE_COMMIT`, after the Goal 5a0 implementation pull request has merged and dry check B has printed `ANCESTOR` — not merely after the literal string `20260818000000`, and not after whatever is on any branch while issue #97 is still open. If the ordering fuse forced Goal 5a0 to a different folder name, that new name is the tail issue #98 must clear.
 
-#98 uses **the same evidence procedure as Step 1.6**, not a `ls … | tail`:
+Issue #98 uses **the same evidence procedure as Step 1.6**, not a `ls … | tail`:
 
 ```sh
 find packages/db/prisma/migrations -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort
 ```
 
-`ls packages/db/prisma/migrations | sort | tail -1` returns `migration_lock.toml`, so it is not a valid tail proof for either work stream: `m` sorts after `2`, and that file is Prisma's provider lock rather than a migration. #98 validates each returned name against `^[0-9]{14}_[a-z0-9_]+$`, asserts its own chosen folder is **absent** from the list, and asserts its chosen name sorts strictly after **every** directory in the list — not merely after the last one — recording the full list and all assertions in its write-surface review before authoring its migration. `migration_lock.toml` is never treated as a migration by either work stream.
+`ls packages/db/prisma/migrations | sort | tail -1` returns `migration_lock.toml`, so it is not a valid tail proof for either work stream: `m` sorts after `2`, and that file is Prisma's provider lock rather than a migration. Issue #98 validates each returned name against `^[0-9]{14}_[a-z0-9_]+$`, asserts its own chosen folder is **absent** from the list, and asserts its chosen name sorts strictly after **every** directory in the list — not merely after the last one — recording the full list and all assertions in its write-surface review before authoring its migration. `migration_lock.toml` is never treated as a migration by either work stream.
 
 ### Cancellation fence and non-scope
 
@@ -660,6 +707,7 @@ Explicitly out of scope for Goal 5a0, and named here so #98 inherits them rather
 | Route-specific typed archived-assignee and missing-grant behavior preserved (create-like 400, retry-style 409), no uniform 409 | 4, 5, 6, 12 |
 | Cancellation fence and handoff seam on the Inbox resume path, with both-order final states | 7, 8, 9, 12 |
 | Goal 5a0 before Inbox 3a: ownership inventory, directory-only migration tail ordering, canonical-order handoff, and written handoff | 1, 9, 13, 14, 15 |
+| Dependency expressed as the actual implementation pull request — issues #97/#98 never "merge", four recorded identity fields, two dependency-gate dry checks with `STOPPED_FOR_REROUTE`/`SAFE_TO_IMPLEMENT`, no invented PR number | 14, 15 |
 | PostgreSQL 16 enum-removal rollback rehearsal | 13, 14, 15 |
 | Ordered static/DB gates and reviewer packet | 15 |
 | Every review finding disposition | 15 |
@@ -697,6 +745,8 @@ Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Current-master plan-
 
 Round-3 supersessions of round 2, recorded here so the earlier rows stay readable without being mistaken for current: CM-MF-1's `… → Agent → AgentRepoAccess` order is **wrong and discarded** (see R3-MF-1); CM-MF-2's "record-only cancelled-Goal answer" and the `record-only` seam name are **not implementable and removed** (see R3-MF-2); CM-MF-2's `ls … | sort | tail -1` tail proof is **invalid** (see R3-MF-3).
 
+Round-4 supersession of round 2, same convention: CM-MF-2's phrase "#98 dependency-held until #97 merges" treats an issue as a mergeable pull request. **Issue #97 cannot merge.** The row stays verbatim as history; read every "#97 merges" in rounds 2 and 3 as "the actual Goal 5a0 implementation pull request merges", per "Implementation PR identity of record" and R4-MF-1.
+
 ### Round 3 — final independent plan review
 
 Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Round-3 disposition. Review base `a4a4ba36c116c775d5d1c28ed55b17600869d904`, head `4d2a4be5f5a859dd7a92a41be13825c435bfc421`, peer `4a35da5c428241c43de5b91158cfb6b2d61bc8b7` (Inbox 3a docs, PR #95). Verdict FAIL, 4 must-fix and 0 should-fix. All four are closed here; there was no should-fix to adopt or decline.
@@ -708,8 +758,24 @@ Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Round-3 disposition.
 | R3-MF-3 | Must-fix | Accepted | `ls packages/db/prisma/migrations \| sort \| tail -1` returns `migration_lock.toml`, so the tail proof was invalid. | Step 1.6 replaces it with `find … -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \| sort`, name validation against `^[0-9]{14}_[a-z0-9_]+$`, and three assertions: the reserved folder is absent, the reserved name sorts strictly after **every** directory, and no Inbox 3a migration has landed. Step 1.3 and the Step 1 verification commands follow. The "Migration ordering" handoff section gives #98 the identical procedure. Step 13.2 cross-checks the directory list against `_prisma_migrations`. `migration_lock.toml` is never treated as a migration anywhere. | Step 1's revalidation document carries the full directory list and all three assertions; Step 13's rehearsal records the applied set from the same enumeration; Step 15.3 attaches the proof. |
 | R3-MF-4 | Must-fix | Accepted | Spec §7.1 step 4 and §8 require current route-specific 400/404 behavior, so a create-like Goal dispatch must not borrow the start route's `ArchivedAssigneeError` 409. | Step 4.5 replaces the single-mapping paragraph with a per-operation classification table derived from source: create-like initial/successor/restart return `400 "Assignee <name> is archived"` and `400 "Assignee has no grant for this Repo"` exactly as `POST /projects/:projectId/tasks` does; the source-based retry keeps the retry route's `409 "Assignee <name> is archived; unarchive it to retry"`; the runner completion route gains no new status and falls to the awaiting-decision branch. Step 5.5 maps it at the HTTP layer and states there is no uniform 409. Steps 6.3/6.4 and 7.1 carry the internal-path behaviour. | Step 5 HTTP route-classification tests assert exact status and body for already-archived and missing-grant cases on initial dispatch, successor dispatch, restart, and source-based retry, each with zero mutation (no Task, Run, event, consumed iteration/generation/key, predecessor still `AWAITING_DECISION`); Step 12 tests 21-23 and 30 assert the archive-wins interleavings at the same statuses; Step 4's route-classification unit test pins the sentences read in Step 1. |
 
+### Round 4 — dependency-identity plan review
+
+Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Round-4 disposition. Review task `cmsxrmnhs02wampmxo1iqi5a9`. Review base `a4a4ba36c116c775d5d1c28ed55b17600869d904`, head `2e25c48fd785879fe5814dfb454d2adc4a6298f1`, peer `4a35da5c428241c43de5b91158cfb6b2d61bc8b7` (Inbox 3a docs, PR #95). Verdict FAIL, 1 must-fix and 0 should-fix. It is closed here; there was no should-fix to adopt or decline.
+
+| Finding | Severity | Decision | One-line rationale | Exact plan change | Required verification |
+| --- | --- | --- | --- | --- | --- |
+| R4-MF-1 | Must-fix | Accepted | #97 is an open GitHub issue and work ticket, so it can never be PR #97 or "merge"; the dependency gate as written could never be satisfied and invited an invented PR number. | The dependency decision, gate 7, the "Decision of record" list, the migration-ordering rule, the ownership table, and the completion boundary now name issue #97 (Goal 5a0 implementation ticket) and issue #98 (Inbox 3a implementation ticket) as work tickets that close and never merge, and express the dependency as the **actual** implementation pull request. New "Implementation PR identity of record" defines four recorded fields — `ACTUAL_IMPL_PR_NUMBER`, `ACTUAL_IMPL_PR_URL`, `ACTUAL_REVIEWED_HEAD`, `ACTUAL_MERGE_COMMIT` — with placeholders and a reset rule, and no invented number anywhere. New "Dependency-gate dry checks" adds dry check A (`gh issue view 97` / `gh pr view <ACTUAL_IMPL_PR_NUMBER>`: open issue, absent, open, or unmerged linked pull request → `STOPPED_FOR_REROUTE`) and dry check B (`git fetch origin master` then `git merge-base --is-ancestor <ACTUAL_MERGE_COMMIT> origin/master`: only `ANCESTOR` on a recorded real merge commit → `SAFE_TO_IMPLEMENT`). Step 15.6 persists the four fields in the AgentOS task output plus the evidence document and runbook; Step 14.5 reproduces the identity fields and both dry checks in the runbook. Step 4.9 and the ownership table state that PR #95 remains dependency-held until it adopts both the same dynamic actual-PR identity and the merged canonical row order. | Step 15's verification requires all four fields present, `ACTUAL_MERGE_COMMIT` either a real 40-hex SHA proven by `git merge-base --is-ancestor <merge-commit> origin/master` after `git fetch origin master` or the literal `not yet merged`, no invented pull-request number, and identical values in the task output, the evidence document, and the runbook. Both dry checks record their raw command output, the observed `origin/master` SHA, and the resulting outcome token before any Inbox 3a code is written; a closed issue #97 without a merged pull request behind it must yield `STOPPED_FOR_REROUTE`. |
+
+### Should-fix
+
+None in round 4. Nothing to adopt or decline.
+
+### Consequential edits beyond the finding
+
+Only what the fix forced. The revision-source header gained round 4 and its identity correction. Issue #98 is now labelled a work ticket wherever the plan named it, because the finding's reasoning applies identically to it and leaving it ambiguous would reintroduce the same defect on the other side of the gate. Step 15 gained item 6 and one runbook file in its file list, so the recorded identity has a numbered owner with files and verification. Step 14.5's runbook sentence gained the identity fields and the dry checks. The requirement-to-step coverage table gained one row. The round-2 ledger row is unchanged and carries a round-4 supersession note. All round-3 lock-order, cancellation-fence, migration-tail, and typed-route content is unchanged.
+
 ## Completion boundary
 
 This plan is complete when persisted for review. It does not authorize implementation. The future implementation task must stop at Step 1 unless Control-plane A and Review/Approval Convergence (`a4a4ba3`) are both merged and the then-current `master` revalidation passes; production migration, restart, flag enablement, public release, Inbox 3a integration, waiver UX, and Goal 5a1 notification behavior remain outside this contract.
 
-Inbox 3a (#98) stays dependency-held until Goal 5a0 (#97) is merged and revalidated. Goal 5a0 discharges that boundary with the Step 9 fence and seam and the written handoff; it does not implement Inbox 3a.
+Inbox 3a (issue #98) stays dependency-held until the actual Goal 5a0 implementation pull request — recorded under "Implementation PR identity of record", never issue #97 itself — has merged, dry check A finds it merged with a real recorded merge commit, dry check B prints `ANCESTOR` against a freshly fetched `origin/master`, and Step 1's revalidation is rerun on that tail. Goal 5a0 discharges that boundary with the Step 9 fence and seam, the recorded identity fields, and the written handoff; it does not implement Inbox 3a.

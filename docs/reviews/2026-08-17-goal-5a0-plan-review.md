@@ -143,6 +143,43 @@ Round 2 mapped every archived-assignee refusal to `ArchivedAssigneeError` 409. S
 
 None in round 3. Nothing to adopt or decline.
 
-### Consequential edits beyond the four findings
+### Consequential edits beyond the four findings (round 3)
 
 Only what the fixes forced. The audited-conflicts section gained nine current-master evidence bullets (grant-before-`Agent`, no explicit `Run` lock, claim, completion, retry, create/PATCH, `applyInboxDecisionTx`'s two write-free refusals, `reconcile.ts`'s idempotent card close, and the `migration_lock.toml` tail defect) because all four findings are grounded in them. Step 4 gained items 9 and a rewritten verification paragraph after 4.3 was split into a derivation table plus a canonical table, 4.4 into a per-operation assignment, and 4.5 into a route-classification table. Steps 6.1/6.3/6.4, 6's verification, 7.1, 7.5, 8.2, 8.4, 12's tests 21-25, 13.2, 14.5, and 15.3 gained the matching evidence sentences. Step 12 gained tests 28-30 and a rewritten mutation-note and verification paragraph. The requirement-to-step coverage table gained three rows and rewrote one. The ownership table gained one row and rewrote two. The revision-source header and the disposition ledger gained round 3, with an explicit note recording which round-2 statements round 3 supersedes.
+
+## Round-4 disposition
+
+Round 4. This section is appended, not a rewrite: rounds 1, 2, and 3 stay verbatim above with their original dispositions. Where round 4 contradicts an earlier round, round 4 governs and the earlier text remains visible as history.
+
+**Review task:** `cmsxrmnhs02wampmxo1iqi5a9` (independent review, dependency identity).
+
+**Review base:** `a4a4ba36c116c775d5d1c28ed55b17600869d904` (merge of PR #105, Review/Approval Convergence — `master` at review time).
+
+**Review head:** `2e25c48fd785879fe5814dfb454d2adc4a6298f1` (`docs: close Goal 5a0 round-3 plan review findings`, PR #94 branch `agentos/chain/w2-2026-08-17-goal-5a0-p-06fa0ea4`).
+
+**Peer head:** `4a35da5c428241c43de5b91158cfb6b2d61bc8b7` (`docs: order Inbox 3a implementation behind merged Goal 5a0`, Inbox 3a docs PR #95).
+
+**Verdict reviewed:** FAIL — 1 must-fix, 0 should-fix.
+
+**Revision scope:** docs-only. `docs/plans/goal-5a0-idempotent-execution-kernel-plan.md` and this file. The approved specification `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md` was again left unmodified, and no Product Contract version was required: the finding is an identifier-and-evidence defect in the dependency gate, not a change to objective, scope, acceptance criteria, evidence classes, authority, or risk boundary. Product Contract scope and order are unchanged: Goal 5a0 still goes first and Inbox 3a is still strictly dependency-held. Planned Critical classification, the `senior-dev`/high-effort route, the named 409 set, gate placement, the canonical row order, the cancellation fence, the migration-tail procedure, and the route-specific 400/409 classification are all unchanged. The peer PR #95 was read but **not modified**; it remains dependency-held, and correcting its wording is still assigned to issue #98's post-merge write-surface review.
+
+### R4-MF-1 — the dependency was gated on "#97 merged", but #97 is an open issue and can never be a pull request
+
+**Status: closed.**
+
+#97 is an open GitHub issue — the Goal 5a0 implementation work ticket — not a pull request. There is no PR #97 and there may never be one with that number. Rounds 2 and 3 wrote "until #97 is merged", "when #97 merges", and "after #97 merges", which is unsatisfiable as written: issues close, pull requests merge. The gate therefore had no executable success condition, and the nearest reading — treat the issue number as a pull-request number, or predict the future pull request's number — would either strand Inbox 3a permanently or fabricate an identifier. Closed by:
+
+- **Identifier discipline.** The dependency decision of record, gate 7, the "Decision of record" list, the migration-ordering section, the ownership table, and the completion boundary now state that **issue #97 is the Goal 5a0 implementation issue / work ticket and issue #98 is the Inbox 3a implementation issue / work ticket**, that neither can merge, and that PR #94 and PR #95 are the only real pull requests the plan names. No future pull-request number is invented anywhere.
+- **Implementation PR identity of record.** A new subsection defines four fields the implementation task for issue #97 must persist in its AgentOS task output: `ACTUAL_IMPL_PR_NUMBER`, `ACTUAL_IMPL_PR_URL`, `ACTUAL_REVIEWED_HEAD` (the exact head that received exact-head human merge authorization), and `ACTUAL_MERGE_COMMIT` (the exact merge commit, recorded only after the merge happened). Each has an explicit pre-record placeholder (`not yet opened` / `not yet authorized` / `not yet merged`), a prohibition on guessed numbers and on holding an issue number or the reviewed head in the merge-commit field, and a reset rule if the pull request is closed unmerged or superseded.
+- **Two dependency-gate dry checks.** Dry check A reads issue #97 and the recorded pull request (`gh issue view 97 --json number,state,title,url`, its linked-pull-request view, and `gh pr view <ACTUAL_IMPL_PR_NUMBER> --json number,state,merged,mergeCommit,headRefOid,url`) and yields **`STOPPED_FOR_REROUTE`** when the issue is `OPEN`, no pull request is recorded, the recorded pull request is absent, `OPEN`, or `CLOSED` with `merged: false`, the merge commit is a placeholder or not a 40-hex SHA, or the recorded merge commit disagrees with the pull request's own `mergeCommit` — and explicitly when issue #97 is closed with no merged pull request behind it, because closing a work ticket is not a merge. Dry check B runs `git fetch origin master` and `git merge-base --is-ancestor <ACTUAL_MERGE_COMMIT> origin/master` and yields **`SAFE_TO_IMPLEMENT`** only on `ANCESTOR` with a real recorded merge commit from check A; `NOT_ANCESTOR`, a stale fetch, an unknown commit, or rewritten history is `STOPPED_FOR_REROUTE`. `SAFE_TO_IMPLEMENT` authorizes only Step 1's revalidation, expires if `origin/master` moves, and is not implementation authorization by itself. Both checks are read-only and record raw output plus the observed `origin/master` SHA.
+- **Every ambiguity replaced.** No live plan text says "#97 merged" or "when #97 merges". The migration-ordering rule now pins the merged Goal tail to the folder name as it exists at the recorded `ACTUAL_MERGE_COMMIT` after dry check B prints `ANCESTOR`, not to a branch while the issue is open. The round-2 ledger row keeps its original wording as append-only history and carries a round-4 supersession note directing the reader to the actual-pull-request reading.
+- **Owned by numbered steps.** Step 15.6 persists the four fields in the AgentOS task output and mirrors them into `docs/reviews/goal-5a0-implementation-evidence.md` and the runbook, and Step 15's verification asserts all four are present, the merge commit is either a proven ancestor or the literal `not yet merged`, no invented number appears, and the three copies agree. Step 14.5 reproduces the identity fields and both dry checks verbatim in the rollout/rollback runbook so the Inbox 3a stream reads one operational document.
+- **PR #95 dependency-held.** Step 4.9 and the ownership table now state that PR #95 — a real docs pull request — must not be merged or treated as authoritative until it adopts both the same dynamic actual-PR identity (no text asserting that issue #97 merges) and the merged canonical row order re-derived from the merged tree, because today it records a lock order that would deadlock against the unmodified manual start writer and a dependency that can never be satisfied as written.
+
+### Should-fix
+
+None in round 4. Nothing to adopt or decline.
+
+### Consequential edits beyond the finding (round 4)
+
+Only what the fix forced. The revision-source header gained round 4. Issue #98 is now labelled a work ticket wherever the plan named it, since the same defect would otherwise survive on the other side of the gate. Step 15 gained item 6, one runbook file in its file list, and two verification sentences. Step 14.5's handoff sentence gained the identity fields and both dry checks. The ownership table gained one row and rewrote the docs row. The requirement-to-step coverage table gained one row. The round-2 ledger row is unchanged and carries a supersession note; all round-3 lock-order, cancellation-fence, migration-tail, and typed-route content is unchanged.
