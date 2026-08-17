@@ -29,7 +29,7 @@ test("DB-HARNESS-GUARD refuses default, equal, cross-server, and cross-role targ
   }), /must-differ/u);
   assert.throws(() => validateScratchDatabaseEnvironment({
     ...safeEnvironment,
-    TEST_DATABASE_MAINTENANCE_URL: "postgresql://scratch_role:secret@127.0.0.2:55432/postgres_maintenance",
+    TEST_DATABASE_MAINTENANCE_URL: "postgresql://scratch_role:secret@localhost:55432/postgres_maintenance",
   }), /server-mismatch/u);
   assert.throws(() => validateScratchDatabaseEnvironment({
     ...safeEnvironment,

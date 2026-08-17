@@ -190,11 +190,6 @@
       "category": "credential-placeholder",
       "glob": "packages/api/src/testdb.test.ts",
       "reason": "synthetic loopback scratch-database URLs used by harness guard tests"
-    },
-    {
-      "category": "credential",
-      "glob": "packages/api/src/testdb.test.ts",
-      "reason": "synthetic 127.0.0.2 loopback URL used to test host-mismatch refusal"
     }
   ],
   "generatedRuntimePatterns": [
