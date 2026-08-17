@@ -21,3 +21,54 @@ Verdict: **FAIL — 7 must-fix, 2 should-fix.**
 1. **SF-1 — [Coherence] Predecessor and event identity are only ID-linked, so the database/verifier can accept a cross-Goal or cross-generation audit chain.** The predecessor FK points only to `Task.id`, and its check only distinguishes iteration 1 from iteration >1 (`docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md:303-320`). `GoalExecutionEvent` independently references Goal, Task, and Run IDs without a tuple-consistency constraint (`:359-383`), while the verifier list omits predecessor/event mismatches (`docs/plans/goal-5a0-idempotent-execution-kernel-plan.md:115-117`). Add composite constraints where practical or, at minimum, invariant queries plus direct-corruption tests proving predecessor continuity and event Goal/generation/iteration consistency. Evidence command: `rg -n 'goalPredecessorTaskId|GoalExecutionEvent|event.*mismatch|predecessor' docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md docs/plans/goal-5a0-idempotent-execution-kernel-plan.md`. Output: spec lines 305 and 320 show the ID-only FK/shape check; no event/predecessor mismatch verifier is returned.
 
 2. **SF-2 — [Feasibility, observability] “Aggregation-stable structured records” does not yet name a queryable logging contract.** Step 10 lists metric names but not the logger, record discriminator/version, numeric value field, sink/retention assumption, or executable aggregation queries (`docs/plans/goal-5a0-idempotent-execution-kernel-plan.md:247-265`). This is survivable because raw JSON logs can carry the data, but it weakens the acceptance claim that signals are queryable. Define the exact JSON schema and evidence queries (including gauge semantics) without adding Goal 5a1 alerts. Evidence command: `rg -n 'prom-client|opentelemetry|metrics|pino|winston' package.json packages/*/package.json`. Output: no matches (`rg` exit 1), matching the plan's stated baseline.
+
+## Current-master plan-revision disposition
+
+Round 2. This section is appended, not a rewrite: the round-1 findings above stay verbatim and keep their round-1 dispositions.
+
+**Old review base:** `a4a4ba36c116c775d5d1c28ed55b17600869d904` (merge of PR #105, Review/Approval Convergence — `master` at review time).
+
+**Old review head:** `5d1a1fea89f3f0635b53bc298e5d2881bf363bf7` (`docs: close Goal 5a0 plan review findings`, PR #94 branch `agentos/chain/w2-2026-08-17-goal-5a0-p-06fa0ea4`).
+
+**Reviewed diff:** the four Goal 5a0 docs commits `cd32d3c`, `93218dd`, `1cecb77`, `5d1a1fe`.
+
+**Verdict reviewed:** FAIL — 2 must-fix, 0 should-fix.
+
+**Revision scope:** docs-only. `docs/plans/goal-5a0-idempotent-execution-kernel-plan.md` and this file. The approved specification `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md` was deliberately left unmodified — both closures fit inside its existing boundaries (§7.1 step 4 "validate the assignee, repo grant, and Task configuration exactly as current Task creation does"; §11 "current 409/400 semantics"; §11 "`WAITING_INBOX` remains an active Task Run … cancel may terminalize such a Run"), so no Product Contract version and no new conflict code were required. Planned Critical classification, the `senior-dev`/high-effort route, the named 409 set, and the accepted contract are unchanged.
+
+### CM-MF-1 — Goal dispatch did not join the merged Agent/archive and exact `AgentRepoAccess` exclusion protocols
+
+**Status: closed.**
+
+The plan's Step 4 makes `enqueueTaskRun` reject Goal-linked Tasks, which also removes that function's locked assignee re-read (`packages/db/src/workflow.ts:326-329`) from every Goal path. Nothing replaced it, so a Goal dispatch could create a Task and Run for an agent that a concurrent `POST /agents/:agentId/archive` had just archived, or for a repo whose exact `AgentRepoAccess` grant had just been revoked — exactly the stranded-run class the merged protocol closed.
+
+Closed by:
+
+- Audited-conflicts section now records the merged protocol by symbol and line: `lockAgentRow` / `agentArchiveBlocker` / `assignmentBlocked` / `reactivationBlocked` / the archive route, and `lockAgentRepoGrant` (`FOR KEY SHARE`, exact triple, `count === 1`) / `lockAgentRepoGrantForRevocation` (`FOR UPDATE`) / the revocation route, together with the merged acyclicity argument.
+- Step 1.5 revalidates every one of those symbols by name on the then-current tree and stops if the protocol changed shape.
+- Step 4.3 defines the executable **extended global lock order** as a table: Goal `FOR UPDATE` → Task `FOR UPDATE` (ascending `id`) → Run `FOR UPDATE` (ascending `id`) → Agent `FOR UPDATE` → `AgentRepoAccess` `FOR KEY SHARE`, with the argument that rows 2–5 are the merged order and the Goal row is a new strict prefix, so archive (row 4 only) and revocation (row 5 only) still cannot form a cycle.
+- Step 4.4 applies it to both paths — the new-Task path (initial dispatch, successor dispatch, restart, where no target Task row exists yet) and the existing-Task path (completion, retry, reconciliation, decision, pause, resume, cancel) — and mandates locked re-reads of `Agent.archivedAt`/`Agent.projectId` and the exact grant immediately before any Task or Run insert. A pre-lock discovery read never authorizes a write.
+- Step 4.5 preserves typed conflicts: the archived assignee returns the existing `ArchivedAssigneeError` 409 and a missing exact grant the existing `400 "Assignee has no grant for this Repo"`. No new conflict code; no iteration, generation, dispatch key, or event consumed. Step 5.5 maps this at the HTTP layer.
+- Step 12 tests 21–23 add the controlled real-PostgreSQL races: initial dispatch versus agent archive, successor dispatch versus agent archive, and both dispatch kinds versus exact grant revocation — each in both barrier orders, each asserting one of exactly two outcomes (dispatch commits and keeps its authority while the competing change is refused with its existing status, or the competing change commits and the dispatch performs **zero mutation**), plus a row-exactness companion proving an unrelated `(agentId, repoId)` grant neither blocks nor is blocked.
+
+### CM-MF-2 — Goal 5a0 and Inbox 3a had no recorded dependency order, ownership, or cancellation fence
+
+**Status: closed.**
+
+Closed with Leo's explicit dependency decision and a written boundary, not by expanding Goal 5a0 into Inbox 3a:
+
+- New plan section "Goal 5a0 and Inbox 3a dependency, ownership, and handoff" records the decision of record: **Goal 5a0 implementation and merge (#97) is first; Inbox 3a implementation (#98) is strictly dependency-held until #97 is merged and revalidated.** #98's first action after the merge is to rerun Step 1 against the merged tail. New gate 7 makes violating this a stop condition.
+- That section inventories every overlapping schema / workflow / app / reconcile / runner / `WAITING_INBOX` symbol with a per-symbol owner (Goal 5a0, Inbox 3a, or merged/shared), the obligation Goal 5a0 carries, and the handoff #98 inherits.
+- Migration: Goal 5a0 keeps its reservation of `20260818000000_goal_execution_safety_kernel` under Step 1's existing ordering fuse, and the plan now requires Inbox 3a's later migration to sort strictly after **the actual merged Goal tail** — the folder name as it exists on `master` after #97 merges — verified with `ls packages/db/prisma/migrations | sort | tail -1`, not against the literal reserved string.
+- Cancellation fence: Step 9.5 fences `packages/db/src/workflow.ts::applyInboxDecisionTx`, which today moves a `WAITING_INBOX` Run to `QUEUED` under a bare status CAS with no Goal lock (`workflow.ts:876-887`). The Goal is resolved and locked **before** any Task lock so the extended order still descends; resume is authorized only for an `ACTIVE` Goal at the current tuple; otherwise the answer and `InboxDecision` are still recorded and the card is still closed, but no Run, lease, fencing token, or Goal event is produced. A cancelled Goal can therefore never later regain Inbox resume authority, and no `OPEN` card is stranded.
+- Handoff: Step 9.6 exports `goalRunResumeAuthority(tx, runId)` from `packages/db/src/goal-execution.ts` as the single seam #98 replaces, and Step 14.5 reproduces the whole boundary in the runbook.
+- Step 7.5 makes the `reconcile.ts` expired-`WAITING_INBOX` sweep Goal-aware (`AWAITING_DECISION`, no successor, no Inbox row, no revival of a cancelled Goal) while leaving manual behaviour unchanged.
+- Oracles: Step 12 test 24 cancel versus Inbox answer (both orders), test 25 cancel versus Inbox connector `STARTING`/`RECONNECTING` replay (`packages/inbox/src/connection.ts`), test 26 cancel versus reconcile Inbox expiry, test 27 the `packages/db/prisma/acceptance-fixture.ts` acceptance oracle, and the pre-existing test 12 cancel versus claim.
+
+### Should-fix
+
+None in round 2. Nothing to adopt or decline.
+
+### Consequential edits beyond the two findings
+
+Only what the fixes forced: Step 1's files/verification grew to cover the exclusion-protocol symbol map, the Inbox overlap inventory, and the merged migration-tail proof; Step 4's items were renumbered 3–8 after the lock-order expansion split one item into four; Step 5.5, Step 8.4, Step 12's file list and closing verification, Step 14.5, and Step 15.3 gained the matching evidence sentences; the requirement-to-step coverage table gained four rows; the disposition ledger was split into an append-only round 1 and round 2.

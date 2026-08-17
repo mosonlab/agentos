@@ -8,9 +8,18 @@ Routing Contract: v1.0, Planned Critical, future implementation role `senior-dev
 
 Plan source: approved `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md`
 
-Revision source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` (7 must-fix and 2 should-fix findings; disposition ledger below)
+Revision sources, in order:
+
+1. `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Must-fix/§Should-fix — round 1, 7 must-fix and 2 should-fix, all closed.
+2. `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Current-master plan-revision disposition — round 2, current-master review of base `a4a4ba36c116c775d5d1c28ed55b17600869d904` against head `5d1a1fea89f3f0635b53bc298e5d2881bf363bf7`, 2 must-fix and 0 should-fix, all closed.
+
+Both rounds stay in the append-only disposition ledger below.
 
 Audited planning base: `188d21e279b8feae816b4f9580a961f5c9ee0cbc` (2026-08-17)
+
+Current-master convergence base: `a4a4ba36c116c775d5d1c28ed55b17600869d904` (merge of PR #105, Review/Approval Convergence). Every current-master fact cited in this plan was read at that commit and must be re-read in Step 1.
+
+Dependency decision of record (Leo, 2026-08-17): Goal 5a0 implementation and merge (#97) goes first; Inbox 3a implementation (#98) is strictly dependency-held until #97 is merged and revalidated. See "Goal 5a0 and Inbox 3a dependency, ownership, and handoff" below.
 
 ## Outcome and approach
 
@@ -25,6 +34,8 @@ The work is ordered so no route can expose a transition before its durable schem
 3. **Migration fuse.** Preflight must fail closed on ambiguous or active historical Goal lineage. Goal 5a0 may build and rehearse against disposable/private PostgreSQL schemas, but may not run a production migration or restart.
 4. **Evidence fuse.** A rerun is not a green gate until the first failure is explained and dispositioned. Every reviewer finding remains in the final disposition ledger.
 5. **Rollback default.** Disable `GOAL_SAFETY_KERNEL_ENABLED` first. Prefer roll-forward with the flag off whenever live lineage must be retained; destructive down-migration requires an approved export and explicit operator approvals described in Step 14.
+6. **Exclusion-protocol fuse.** Goal 5a0 joins the merged Review/Approval Convergence exclusion protocols; it does not fork them. No Goal-linked Task or Run may be created without holding the Agent-row mutex (`packages/db/src/workflow.ts::lockAgentRow`) and the exact-grant mutex (`::lockAgentRepoGrant`) and re-reading both under those locks. Any implementation path that creates a Goal Run outside the extended lock order in Step 4 is a stop condition, not a follow-up.
+7. **Inbox 3a fuse.** Goal 5a0 owns and may change the symbols listed in the ownership table below; it must not implement Inbox 3a. Inbox 3a (#98) does not begin until #97 is merged and Step 1's revalidation is rerun on the merged tail. Goal 5a0 leaves a written handoff, not a partial Inbox implementation.
 
 ## Audited current-tree conflicts that implementation must resolve
 
@@ -34,6 +45,15 @@ The work is ordered so no route can expose a transition before its durable schem
 - The claim query does not join Goal status/Task dispatch state.
 - `apps/web/src/pages/Goals.tsx` labels the nullable-cost subtotal as “Spend”; it must expose known provider cost and coverage instead of implying a total.
 - No metrics library is present. Goal 5a0 will use one stable structured-JSON logging adapter whose fields can be aggregated into the required counters/gauges; alerts remain Goal 5a1.
+
+Added by the current-master convergence review at `a4a4ba3`:
+
+- The merged Agent-row exclusion protocol is now the only legal way to create a Run for an agent. `packages/db/src/workflow.ts::enqueueTaskRun` re-reads `Agent.archivedAt` under `lockAgentRow` (`workflow.ts:326-329`) and raises `ArchivedAssigneeError`; `packages/api/src/app.ts::assignmentBlocked` (`:641-649`) and `::reactivationBlocked` (`:666-685`) take the same Agent mutex on the assignment and reactivation halves; `POST /agents/:agentId/archive` takes it on the archive half and fails closed through `agentArchiveBlocker` (`app.ts:1052-1063`, `workflow.ts:455-478`). Goal 5a0's Step 4 kernel deliberately bypasses `enqueueTaskRun`, so it must re-implement the *protocol*, not inherit it by accident.
+- The exact-grant protocol is `AgentRepoAccess`-row scoped, not agent scoped. `lockAgentRepoGrant` takes `FOR KEY SHARE` on the exact `(projectId, agentId, repoId)` row and confirms `count === 1` (`workflow.ts:160-173`); `POST /tasks/:taskId/start` calls it after the Task/chain-prefix locks and before `enqueueTaskRun` (`app.ts:2514-2521`). Revocation takes `FOR UPDATE` on the same exact row through `lockAgentRepoGrantForRevocation` (`workflow.ts:177-189`) and refuses while an `ACTIVE_RUN_STATUSES` Run exists on that repo (`app.ts:1349-1357`).
+- The merged acyclicity argument is that archive takes only the Agent row and revocation takes only the grant row, while run writers take Task rows first (`workflow.ts:108-110`, `:157-159`). Goal 5a0 must extend that order rather than insert Goal locks below Agent or grant locks.
+- `packages/db/src/workflow.ts::applyInboxDecisionTx` resumes a `WAITING_INBOX` Run straight to `QUEUED` under no Goal lock (`workflow.ts:876-887`). On current master a Goal-linked Run therefore regains claimable authority from an Inbox answer that arrives after the Goal was cancelled. Goal 5a0 must fence this; it must not implement Inbox 3a.
+- `packages/api/src/reconcile.ts` expires `WAITING_INBOX` Runs to `TIMED_OUT` and closes the open card (`reconcile.ts:112-122`, `:218-257`) without Goal awareness, and creates lease-loss Inbox rows at `:208-215`.
+- `packages/inbox/src/connection.ts` opens in state `STARTING` (`:1`, `:16`); decisions delivered while the connector is `STARTING`/`RECONNECTING` replay into `applyInboxDecisionTx` and therefore into the same resume path.
 
 ## Exact implementation surface
 
@@ -72,15 +92,20 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 - `packages/api/src/scheduler.ts`
 - `packages/api/src/index.ts`
 - `packages/api/src/testdb.ts`
+- `packages/api/src/inbox.ts`
+- `packages/inbox/src/connection.ts`
+- `packages/db/prisma/acceptance-fixture.ts`
 
 **Work:**
 
-1. On then-current `master`, record `git rev-parse HEAD`, the Control-plane A merge commit, and proof that the latter is an ancestor of the former.
+1. On then-current `master`, record `git rev-parse HEAD`, the Control-plane A merge commit, and proof that the latter is an ancestor of the former. Record the same proof for the Review/Approval Convergence merge `a4a4ba36c116c775d5d1c28ed55b17600869d904`; if it is not an ancestor, stop.
 2. Refresh every audited fact in specification §3: exact models/columns/relations; all Task/Run creation sites; Goal/Task/runner routes; completion, claim, lease-loss, startup, CRON/AT, chain, template, and delete/status writers; PostgreSQL/Prisma versions; feature-flag and logging mechanisms.
 3. Record schema/API/migration name conflicts, especially any migration newer than this plan's reserved folder. The implementation migration is `packages/db/prisma/migrations/20260818000000_goal_execution_safety_kernel/migration.sql`; if that name no longer sorts after every Control-plane A migration or already exists, stop and revise the plan artifact before editing schema.
 4. Carry forward the approved spec's assumptions A1–A8 unchanged and revalidate only the tree-dependent facts behind them. If current-master evidence would force a different assumption, stop for Product Contract revision rather than silently reinterpret it.
+5. Re-read the exclusion protocols by symbol and record their then-current line numbers and behaviour: `lockTaskRow`, `lockAgentRow`, `lockAgentRows`, `lockChainPrefixRows`, `lockAgentRepoGrant`, `lockAgentRepoGrantForRevocation`, `agentArchiveBlocker`, `ACTIVE_RUN_STATUSES`, `LIVE_TASK_STATUSES`, `enqueueTaskRun`'s locked assignee re-read, `assignmentBlocked`, `reactivationBlocked`, the archive route, and the grant-revocation route. Record every current caller. If the merged protocol changed shape — a different lock mode, a different acyclicity argument, a new writer — revise Step 4's extended order before writing code.
+6. Re-run the Inbox 3a overlap inventory in the ownership table below against the then-current tree. Confirm each listed symbol still exists at the named file, and add any new overlapping symbol. Confirm the reserved migration folder `20260818000000_goal_execution_safety_kernel` still sorts strictly after every migration on the merged tail and that no Inbox 3a migration has landed; if one has, stop and revise this plan rather than renumbering under time pressure.
 
-**Verification:** The revalidation document contains the two SHAs, `merge-base --is-ancestor` result, refreshed file/function map, current migration tail, explicit A1–A8 dispositions, and a “no contract boundary changed” conclusion. Any contrary result stops implementation.
+**Verification:** The revalidation document contains the three SHAs (current `master`, Control-plane A merge, Review/Approval Convergence merge `a4a4ba3`), `merge-base --is-ancestor` results for both merges, refreshed file/function map, the symbol-by-symbol exclusion-protocol map, the refreshed Inbox 3a overlap inventory, current migration tail with the reserved-folder ordering proof, explicit A1–A8 dispositions, and a “no contract boundary changed” conclusion. Any contrary result stops implementation. Evidence commands: `rg -n 'lockAgentRow|lockAgentRepoGrant|lockAgentRepoGrantForRevocation|agentArchiveBlocker|assignmentBlocked|reactivationBlocked' packages/api/src packages/db/src` and `ls packages/db/prisma/migrations | sort | tail -5`.
 
 ### 2. Add the exact schema and one additive forward migration
 
@@ -137,12 +162,30 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 
 1. Define exported typed inputs/results/conflicts for initial dispatch, decision, retry, pause/resume, cancel, and restart. Preserve the required 409 codes and distinguish created/replayed/conflict/error outcomes.
 2. Implement canonical JSON serialization after validation/defaulting, sorted object keys, and SHA-256 request hashes. Equivalent absent/defaulted inputs hash identically; reused keys with different bodies produce `IDEMPOTENCY_KEY_REUSED` without echoing bodies.
-3. Implement `lockGoalRow`, then Task and Run lock helpers with raw `FOR UPDATE`; all Goal-linked mutators use the same Goal → Task → Run order. Reads used only to discover IDs are re-read and fenced after locks.
-4. Centralize Goal-linked Task/Run data construction, existing assignee/repo-grant validation, `deriveRunConfig`, `resolveRunBranches`, limits, ordinary NOW Task fields, copied lineage tuple, Run number/dedupe fields, retry ancestry, and deterministic event creation. `enqueueTaskRun` rejects Goal-linked Tasks so no caller can bypass the kernel.
-5. Implement `createInitialGoalDispatch`, `applyGoalDecision`, `retryGoalTaskRun`, pause/resume, cancel, and restart exactly as spec §7. Each public operation runs in one Serializable transaction with bounded retry only for PostgreSQL serialization/deadlock failures; logical 409s are not retried.
-6. Replay lookup occurs before current-state validation while holding the Goal lock. Same-key replay returns stored IDs/result; different-key stale work conflicts. Event cardinality is explicit: every successful non-no-op transition writes exactly one durable event except restart, which is one compound operation that atomically writes exactly two events—`GOAL_RESTARTED` and `DISPATCH_CREATED`—for the same new Goal/Task/Run tuple. This restart-specific rule in spec §7.7 governs the generic singular wording in I10/§14; it does not add an event type or broaden scope. Replay/no-op writes zero events. The one post-commit operation log records `eventCount` (`2` for restart, `1` for other transitions, `0` for replay/no-op).
+3. Implement `lockGoalRow` with raw `SELECT "id","status","goalGeneration","nextGoalIteration" FROM "Goal" WHERE "id" = $1 FOR UPDATE`, and a Run lock helper with raw `FOR UPDATE`. Reuse the merged `lockTaskRow`, `lockAgentRow`, and `lockAgentRepoGrant` helpers from `packages/db/src/workflow.ts` rather than adding parallel ones. Every Goal-linked mutator takes locks in exactly this **extended global order**, and never a prefix out of order:
 
-**Verification:** Unit tests cover canonical hashing/default equivalence, every conflict mapping, event dedupe keys, lock order, manual-vs-Goal construction, replay-before-state behavior, no prompt/token leakage, exact per-operation event cardinality (including two for restart), and transaction rollback on an injected failure between each logical write/event.
+   | # | Row | Statement | Helper |
+   | --- | --- | --- | --- |
+   | 1 | `Goal` | `FOR UPDATE` | `lockGoalRow` (new) |
+   | 2 | `Task` (ascending `id` when more than one) | `FOR UPDATE` | `lockTaskRow` (Goal Tasks carry no chain identity, so `lockChainPrefixRows` never applies to them) |
+   | 3 | `Run` (ascending `id` when more than one) | `FOR UPDATE` | `lockGoalRunRows` (new) |
+   | 4 | `Agent` | `FOR UPDATE` | `lockAgentRow` |
+   | 5 | `AgentRepoAccess` (exact `projectId`/`agentId`/`repoId`) | `FOR KEY SHARE` | `lockAgentRepoGrant` |
+
+   This is an extension, not a fork. Rows 2–5 are the merged order already used by `POST /tasks/:taskId/start` (Task prefix → grant) and `enqueueTaskRun` (Task → Agent); the Goal row is a new strict prefix, so a writer that never touches a Goal is unchanged. `POST /agents/:agentId/archive` still takes only row 4 and `DELETE /agents/:agentId/repos/:repoId/access` still takes only row 5, so neither can form a cycle with a Goal mutator that always descends 1→5. A Goal mutator must not take row 4 or 5 and then reach back for row 1, 2, or 3.
+
+4. Apply the extended order on both dispatch paths, with mandatory locked re-reads immediately before any Task or Run insert:
+
+   - **New-Task path** (initial dispatch, successor dispatch, restart). No Task row exists yet for the target iteration, so the sequence is: lock Goal (1); lock the predecessor Task and its Runs if the operation reads or mutates them (2, 3); lock the assignee Agent (4); lock the exact grant (5); then insert Task and Run. Rows created inside the transaction need no lock — they are invisible until commit, and `Task_one_open_goal_dispatch_key` remains the backstop.
+   - **Existing-Task path** (completion, automatic retry, reconciliation retry, decision, pause, resume, cancel). Lock Goal (1), Task (2), Run (3); then, only if the operation will create a Run, Agent (4) and grant (5).
+   - **Locked re-reads.** The pre-lock discovery read never authorizes a write. After row 4 is held, re-read `Agent.archivedAt` and `Agent.projectId` from the locked row; after row 5, require `lockAgentRepoGrant` to return true for the exact triple. Re-read `Goal.status`, `Goal.goalGeneration`, `Goal.nextGoalIteration`, the Task lineage tuple, dispatch state, and Run status/lease/fence under their own locks before evaluating eligibility.
+
+5. Preserve the typed conflict contract exactly: an archived assignee or a revoked grant discovered under locks is a validation failure with the **current** semantics, not a new code. An archived assignee rolls the whole transaction back and returns the existing `ArchivedAssigneeError` 409 with its existing sentence; a missing exact grant returns the existing `400 "Assignee has no grant for this Repo"`. No iteration number, generation, dispatch key, or event is consumed, and the predecessor remains awaiting decision (spec §11). The named 409 set in "Exact implementation surface" is unchanged — Goal 5a0 adds no conflict code for these two cases.
+6. Centralize Goal-linked Task/Run data construction, the locked assignee/exact-grant validation above, `deriveRunConfig`, `resolveRunBranches`, limits, ordinary NOW Task fields, copied lineage tuple, Run number/dedupe fields, retry ancestry, and deterministic event creation. `enqueueTaskRun` rejects Goal-linked Tasks so no caller can bypass the kernel; because that rejection also removes `enqueueTaskRun`'s own locked-assignee re-read from the Goal path, the kernel's row-4/row-5 sequence is the sole replacement and every Goal Run constructor must route through it.
+7. Implement `createInitialGoalDispatch`, `applyGoalDecision`, `retryGoalTaskRun`, pause/resume, cancel, and restart exactly as spec §7. Each public operation runs in one Serializable transaction with bounded retry only for PostgreSQL serialization/deadlock failures; logical 409s are not retried.
+8. Replay lookup occurs before current-state validation while holding the Goal lock. Same-key replay returns stored IDs/result; different-key stale work conflicts. Event cardinality is explicit: every successful non-no-op transition writes exactly one durable event except restart, which is one compound operation that atomically writes exactly two events—`GOAL_RESTARTED` and `DISPATCH_CREATED`—for the same new Goal/Task/Run tuple. This restart-specific rule in spec §7.7 governs the generic singular wording in I10/§14; it does not add an event type or broaden scope. Replay/no-op writes zero events. The one post-commit operation log records `eventCount` (`2` for restart, `1` for other transitions, `0` for replay/no-op).
+
+**Verification:** Unit tests cover canonical hashing/default equivalence, every conflict mapping, event dedupe keys, extended lock order, manual-vs-Goal construction, replay-before-state behavior, no prompt/token leakage, exact per-operation event cardinality (including two for restart), and transaction rollback on an injected failure between each logical write/event. A lock-order test records the emitted statement sequence for every public operation on both the new-Task and existing-Task paths and asserts the observed rows are a strictly ascending subsequence of Goal → Task → Run → Agent → AgentRepoAccess with no reach-back. A construction test asserts that no Goal Run is created on any path that did not first hold rows 4 and 5.
 
 ### 5. Register the Goal execution HTTP contract and read models
 
@@ -160,7 +203,7 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 2. Register the exact routes/payloads/statuses from spec §8: initial dispatch; iteration decision; resume/cancel/restart; source-based retry; lineage; and cursor/limit execution events. Keep operator authentication and reject Goal control fencing tokens.
 3. Make `GOAL_SAFETY_KERNEL_ENABLED` default false. Disabled state rejects creation of initial/successor dispatch, retry, and restart without mutation; completion of already-running Goal work may record terminal evidence but may not create a retry/successor. Pause/cancel remain safety controls.
 4. Add generation, next iteration, open dispatch summary, and computed `spendEvidence` to Goal list/detail. Build lineage from persisted tuple fields—not event timestamps—and order generations/iterations/runs deterministically. Page events by the located `after` event's `(createdAt,id)` tuple with a limit of 1–500.
-5. Classify named P2002 constraints into replay or the required 409 response; unexpected database errors remain errors. Conflict payloads include only current identity/state, never stored request bodies.
+5. Classify named P2002 constraints into replay or the required 409 response; unexpected database errors remain errors. Conflict payloads include only current identity/state, never stored request bodies. Map the kernel's locked exclusion-protocol outcomes to the **existing** responses and add no new code: `ArchivedAssigneeError` from a Goal dispatch, successor, restart, or retry becomes the same 409 the manual start/retry routes already return, and a failed exact-grant lock becomes the existing `400 "Assignee has no grant for this Repo"`.
 6. Change Goal DoD routes so approval/item edits only maintain DoD facts. They no longer directly complete or reopen a governed Goal; `applyGoalDecision(action=complete)` is the sole completion writer and revalidates approved/non-empty/all-satisfied DoD under lock. Preserve explicitly revalidated legacy empty-Goal behavior only if Step 1 proves it is still required and record that branch.
 7. Guard Goal deletion: empty Goals retain current behavior; any Task/Run/event lineage returns 409.
 
@@ -203,8 +246,9 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 2. If Goal is paused/cancelled/stale or the kernel is disabled, preserve the terminal LOST evidence, move the open Task to `AWAITING_DECISION` where applicable, and create no child.
 3. Two startup/reconciliation callers read the one existing child on retry-parent conflict; a replayed pass creates neither a second LOST transition nor event.
 4. Add startup invariant reporting after database reconciliation. Impossible lineage, missing Task/Run for an open dispatch, or multiple open dispatches prevents kernel enablement and emits queryable structured evidence; startup does not auto-repair it.
+5. Make the `WAITING_INBOX` expiry sweep Goal-aware without giving it Goal authority. `reconcile.ts` selects expired waiting Runs and moves them to `TIMED_OUT` while closing the open card with no Goal lock. For a Goal-linked expired Run, take the extended order Goal → Task → Run first, keep the same terminal Run/Session/card writes, move the open Task to `AWAITING_DECISION` instead of the generic `REVIEW` + `failureReason` write, and create no successor and no Inbox row. A Run whose Goal is already terminal is left as cancel left it; the sweep never revives it. Manual (`goalId` null) expiry behaviour is unchanged.
 
-**Verification:** Two independent clients and a pre-lock rendezvous prove one LOST transition/event and at most one child. Repeat after constructing new clients to prove restart safety. Unit tests prove impossible-state reporting and no guessed successor.
+**Verification:** Two independent clients and a pre-lock rendezvous prove one LOST transition/event and at most one child. Repeat after constructing new clients to prove restart safety. Unit tests prove impossible-state reporting and no guessed successor. Real-DB tests prove the Goal-linked expiry sweep produces `AWAITING_DECISION` with no successor and no Inbox row, that it is a no-op on an already-cancelled Goal, and that `packages/api/src/reconcile.test.ts`'s existing manual `WAITING_INBOX` retention and eviction assertions pass unchanged.
 
 ### 8. Enforce pause, claim, decision, cancel, and restart race semantics
 
@@ -219,9 +263,9 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 **Work:**
 
 1. Pause/resume are Goal-row-locked, idempotent state transitions with one event on a real transition and no event on a same-state replay. Pause leaves a claimed Run's fence valid but blocks claims, retries, and decisions.
-2. Extend claim eligibility without reversing the global lock order. Candidate discovery remains non-locking. A manual candidate retains the current claim transaction. For a Goal-linked candidate, begin a fresh Serializable attempt, set the bounded lock timeout, lock/re-read Goal `FOR UPDATE`, then Task `FOR UPDATE`, then Run `FOR UPDATE`; only then re-evaluate Goal `ACTIVE`, Task `EXECUTING`, exact Goal/Task/Run tuple, current generation, queued status, lease generation, readiness, agent/repo eligibility, and dependency state. Update the locked Run lease/fence, Session, then Task without acquiring any later Goal/Task lock. The Run CAS remains defense in depth/winner selection, but a pre-lock candidate row never authorizes the write.
+2. Extend claim eligibility without reversing the global lock order. Candidate discovery remains non-locking. A manual candidate retains the current claim transaction. For a Goal-linked candidate, begin a fresh Serializable attempt, set the bounded lock timeout, lock/re-read Goal `FOR UPDATE`, then Task `FOR UPDATE`, then Run `FOR UPDATE`; only then re-evaluate Goal `ACTIVE`, Task `EXECUTING`, exact Goal/Task/Run tuple, current generation, queued status, lease generation, readiness, agent/repo eligibility, and dependency state. Update the locked Run lease/fence, Session, then Task without acquiring any later Goal/Task lock. The Run CAS remains defense in depth/winner selection, but a pre-lock candidate row never authorizes the write. Claiming creates no Run, so it takes rows 1–3 of the extended order only; agent and repo eligibility stay the merged claim path's own unlocked checks — the candidate query's `agent: { archivedAt: null }` predicate and the per-candidate `agent.repoAccess.some(grant => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)` filter — unchanged. If a claim is ever made to create or requeue a Run, it must extend to rows 4 and 5 first.
 3. Retry the entire Goal-linked claim transaction at most three times for PostgreSQL `40P01` deadlock or `40001` serialization failures, with the same candidate identity and bounded per-attempt timeout; after exhaustion return the existing retryable service failure and no claim mutation. Logical ineligibility/CAS loss is not retried. Add structured attempt/outcome evidence so the concurrency suite distinguishes a valid losing claim from an unclassified database error.
-4. Cancel serializes against claim/completion/decision through the same Goal → Task → Run locks, fills deterministic decision fields on the open Task, terminalizes Goal/open Task/active Run/Session, clears lease authority/revokes tokens, and writes one `GOAL_CANCELLED` event. Repeated cancel returns state without a second event.
+4. Cancel serializes against claim/completion/decision through the same extended lock order, fills deterministic decision fields on the open Task, terminalizes Goal/open Task/active Run/Session, clears lease authority/revokes tokens, and writes one `GOAL_CANCELLED` event. Repeated cancel returns state without a second event. Cancel also terminalizes a `WAITING_INBOX` Run of the Goal Task and closes its `OPEN` waiting card, and is the point at which the Step 9 Inbox resume fence becomes effective; pause leaves such a Run suspended (spec §11).
 5. Restart is one transaction and allowed only from the specified terminal non-completed statuses. Same key replays; a new key/generation conflict returns 409. It increments generation once, preserves old rows, creates iteration-1 Task/Run, sets next iteration 2, and writes exactly two events—`GOAL_RESTARTED` plus `DISPATCH_CREATED`—atomically.
 6. Old-generation completion and decisions fail both Run and Goal fences without changing new-generation counts/state.
 
@@ -240,6 +284,8 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 - `packages/api/src/chain.dbtest.ts`
 - `packages/api/src/triggers.dbtest.ts`
 - `packages/api/src/workflow.test.ts`
+- `packages/api/src/inbox.test.ts`
+- `packages/api/src/goal-execution.dbtest.ts`
 
 **Work:**
 
@@ -247,8 +293,14 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 2. Public Task creation and patch schemas never accept Goal lineage fields. Internal scheduler/template/chain constructors explicitly set none and are defended by database checks.
 3. Preserve every manual/chain/template/CRON/AT code path and current lock/CAS behavior. Do not merge Goal succession with chain successor authority.
 4. Preserve workspace retention, branch routing, delivery, Task output, Session usage, and existing human Inbox waiting records except cancellation may terminalize an existing `WAITING_INBOX` Goal Run. Enforce Step 6's side-effect split: generic/manual Task messages and the system-wide runner-backend preflight/circuit alert remain; Goal-linked completion/retry/control/reconciliation creates no Inbox record in Goal 5a0.
+5. **Cancellation fence on the Inbox resume path.** `packages/db/src/workflow.ts::applyInboxDecisionTx` today moves a `WAITING_INBOX` Run to `QUEUED` with a status CAS and no Goal lock, so a Goal-linked Run can regain claimable authority from an answer that arrives after cancellation. Fence it without implementing Inbox 3a:
+   1. After loading the question, resolve `question.session.run.goalId` **before** taking any Task lock. When it is non-null, take `lockGoalRow` first so the transaction still descends the Step 4 extended order Goal → Task → Run; when it is null, the function keeps its current lock sequence byte for byte.
+   2. Under that Goal lock, re-read Goal status and generation and compare them with the Run's persisted `goalGeneration`/`goalIteration`. Resume is authorized only when the Goal is `ACTIVE` and the tuple is current.
+   3. When resume is not authorized — Goal `CANCELLED`, `COMPLETED`, `FAILED`, `PAUSED`, or a stale generation — the answer is still *recorded* and the card is still *closed*: claim the message `ANSWERED`, write the human reply and the `InboxDecision` row exactly as today (so the external event stays idempotent and the operator's answer is not lost), skip the Run/Session resume writes, and return `{ duplicate: false, resumed: false }`. No Goal event, no new Run, no lease, no fencing token. This is the fence: a cancelled Goal can never later regain Inbox resume authority, and no `OPEN` card is stranded on a terminal Goal.
+   4. Goal 5a0 adds no Inbox message here. It does not notify, retarget, or re-ask.
+6. **Handoff seam for Inbox 3a.** Express the fence as one exported predicate in `packages/db/src/goal-execution.ts` — `goalRunResumeAuthority(tx, runId): "resume" | "record-only"` — called from `applyInboxDecisionTx`. Inbox 3a (#98) later replaces the `record-only` branch with its own orchestration; it must not delete the predicate or the Goal lock that precedes it. Record this seam in the runbook and in the ownership table below so #98 inherits a named contract rather than a merge conflict.
 
-**Verification:** Negative tests cover every forbidden generic operation on a Goal Task. Existing manual start/retry, API chain successor, template, webhook, CRON, AT, claim, fencing, completion, and archive suites remain green. Direct manual all-null Task/Run creation still works.
+**Verification:** Negative tests cover every forbidden generic operation on a Goal Task. Existing manual start/retry, API chain successor, template, webhook, CRON, AT, claim, fencing, completion, and archive suites remain green. Direct manual all-null Task/Run creation still works. `packages/api/src/inbox.test.ts` gains: a manual (`goalId` null) answer whose lock sequence and result are byte-for-byte unchanged; a Goal-linked answer on an `ACTIVE` Goal that resumes exactly as today; and a Goal-linked answer on a `CANCELLED` Goal that records the reply and `InboxDecision`, closes the card, leaves the Run terminal, creates no Run and no Goal event, and returns `resumed: false`.
 
 ### 10. Add evidence-scoped spend reads and structured observability
 
@@ -306,6 +358,8 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 - `packages/api/src/goal-execution.dbtest.ts` (new)
 - `packages/api/src/testdb.ts`
 - `packages/api/src/migration.dbtest.ts`
+- `packages/api/src/inbox.test.ts`
+- `packages/db/prisma/acceptance-fixture.ts` (read-only fixture; seeded, not edited)
 - `packages/api/package.json` (only if a focused script is needed; aggregate `test:db` remains authoritative)
 
 **Work and required named tests:**
@@ -332,10 +386,17 @@ Use the real PostgreSQL harness, two separately constructed `PrismaClient` insta
 18. `Goal paths emit no Inbox lifecycle rows` — budget, auth failure, terminal failure, retry/control/reconcile remain zero while manual/system-wide alert regressions stay green.
 19. `manual/scheduler/chain/claim/fencing/completion regressions remain green`.
 20. `spend evidence stays evidence scoped and current` — complete, partial, none priced, zero terminal, late/concurrent FINAL_OUTPUT recomputes, equality of computed `spendUsd`/known subtotal, and wide sums.
+21. `initial dispatch versus agent archive` — client A runs `POST /goals/:goalId/dispatches`, client B runs `POST /agents/:agentId/archive`, with a rendezvous released at the Agent-row (row 4) lock in both orders. Exactly one of two outcomes holds and the oracle asserts which: **dispatch wins** → 201, one Task, one Run, one `DISPATCH_CREATED`, `nextGoalIteration = 2`, and the archive returns the existing 409 from `agentArchiveBlocker` with `Agent.archivedAt` still null (dispatch kept its authority); or **archive wins** → `Agent.archivedAt` set, dispatch returns the existing `ArchivedAssigneeError` 409, and **zero mutation** — no Task, no Run, no event, `nextGoalIteration` still 1, no dispatch key or generation consumed. Neither order deadlocks or produces an unclassified error.
+22. `successor dispatch versus agent archive` — the same two barriers around `POST /goals/:goalId/iterations/:goalIteration/decision` with `action=continue`. Dispatch-wins asserts iteration N+1 Task/Run/`ITERATION_ADVANCED`; archive-wins asserts the predecessor is still `AWAITING_DECISION`, no iteration number consumed, no decision fields written, and no event.
+23. `initial and successor dispatch versus exact grant revocation` — client B runs `DELETE /agents/:agentId/repos/:repoId/access` against the **exact** `(projectId, agentId, repoId)` triple the dispatch needs, with the rendezvous at the grant row (row 5). Dispatch-wins asserts the Run exists and the revocation returns the existing 409 (`ACTIVE_RUN_STATUSES` Run on that repo) with the grant row still present; revocation-wins asserts the grant row is gone, dispatch returns the existing `400 "Assignee has no grant for this Repo"`, and zero mutation as in test 21. A companion case revokes a *different* `(agentId, repoId)` grant and asserts it neither blocks nor is blocked by the dispatch — the protocol is row-exact, not agent-wide.
+24. `cancel versus Inbox answer` — a Goal Task Run suspended by `suspendForInbox`, then `POST /goals/:goalId/cancel` against `applyInboxDecisionTx` in both orders. Cancel-first: the answer records the reply and `InboxDecision`, closes the card, returns `resumed: false`, and the Run stays terminal — zero Runs created, zero Goal events beyond the single `GOAL_CANCELLED`. Answer-first: the Run reaches `QUEUED`, cancel then terminalizes and fences it, and the final state is cancelled with no successor. Neither order leaves an `OPEN` card, a live lease, a fencing token, or a claimable Run.
+25. `cancel versus Inbox connector STARTING replay` — drive `applyInboxDecisionTx` twice with the same `externalEventId` the way `packages/inbox/src/connection.ts` replays while its state is `STARTING`/`RECONNECTING`, straddling the cancel. Assert exactly one `InboxDecision` row, one reply message, `duplicate: true` on the replay, `resumed: false` on both after cancellation, and no Run or Goal event created by either delivery.
+26. `cancel versus reconcile Inbox expiry` — a Goal-linked `WAITING_INBOX` Run past `resumableUntil` racing cancel. Cancel-first leaves the sweep a no-op; sweep-first leaves `TIMED_OUT` plus `AWAITING_DECISION` and cancel then terminalizes the Goal. Both orders end with one Run, no successor, and no Inbox row.
+27. `acceptance fixture survives the kernel` — seed `packages/db/prisma/acceptance-fixture.ts` unchanged, which carries a manual `WAITING_INBOX` Run and Session, then run the full Goal cancel/answer/claim suite alongside it. Assert every manual fixture row keeps its pre-kernel status, that the fixture's waiting Run still answers and resumes on the unfenced path, and that the acceptance seed still applies cleanly after the migration.
 
-Each race records barrier arrival/release, exact HTTP/service result, row/event counts, tuples, and the final invariant query. Include a mutation note explaining which lock/unique/fence removal makes each proof fail.
+Each race records barrier arrival/release, exact HTTP/service result, row/event counts, tuples, and the final invariant query. Include a mutation note explaining which lock/unique/fence removal makes each proof fail. For tests 21–23 the mutation note must name the row-4/row-5 lock whose removal reintroduces the stranded-run class the merged exclusion protocol closed; for tests 24–26 it must name the `lockGoalRow` call in `applyInboxDecisionTx` and the resume-authority predicate.
 
-**Verification:** Focused file passes twice without changing the rendezvous, then aggregate `npm run test:db` passes. Every independent client disconnects in `finally`; timeouts are bounded and report the contended Goal/Task/Run lock or CAS rather than masking hangs. The test artifact records restart's two-event oracle and shows the cancel/claim race produced no `40P01`, exhausted `40001`, or forbidden Inbox row.
+**Verification:** Focused file passes twice without changing the rendezvous, then aggregate `npm run test:db` passes. Every independent client disconnects in `finally`; timeouts are bounded and report the contended Goal/Task/Run/Agent/grant lock or CAS rather than masking hangs. The test artifact records restart's two-event oracle and shows the cancel/claim race produced no `40P01`, exhausted `40001`, or forbidden Inbox row. It also records, for each of tests 21–23, which side won and the full zero-mutation row/event counts for the losing dispatch; and for tests 24–26, the `InboxDecision`/reply/card/Run/event counts in both orders.
 
 ### 13. Rehearse the migration and rollback paths on disposable schemas
 
@@ -374,6 +435,7 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
    3. **Exact GoalStatus rebuild:** execute `CREATE TYPE "GoalStatus_goal5a0_rollback" AS ENUM ('active','paused','completed','stopped-spend','stopped-time','stopped-stuck')`; cast with `ALTER TABLE "Goal" ALTER COLUMN "status" TYPE "GoalStatus_goal5a0_rollback" USING ("status"::text::"GoalStatus_goal5a0_rollback")`; execute `DROP TYPE "GoalStatus"`; rename with `ALTER TYPE "GoalStatus_goal5a0_rollback" RENAME TO "GoalStatus"`; restore the exact old default with `ALTER TABLE "Goal" ALTER COLUMN "status" SET DEFAULT 'paused'::"GoalStatus"`; recreate only old-schema indexes/checks/views/functions recorded from the baseline; validate label order, default expression, row counts/status counts, and zero unexpected dependencies before commit. Any failed assertion rolls back the whole phase.
    4. **Post-commit gate:** retain `pgcrypto` unless the evidence says Goal 5a0 installed it and `pg_depend` proves no non-extension user; only then may the operator drop it. Start an old-client build against the disposable rolled-back schema, run Goal CRUD/list plus manual Task/Run scheduler smoke tests, run old-schema Prisma drift validation, and compare the archive checksum/readability again before old code is considered deployable.
 4. Include operator stop points and explicit evidence fields for who approved destructive translation/removal. Alerts and lifecycle notifications are named as Goal 5a1, not added here.
+5. Add an "Inbox 3a handoff" section reproducing the dependency decision, the ownership inventory, the migration-tail rule, and the `goalRunResumeAuthority` seam, so #98 reads one operational document rather than reconstructing the boundary from this plan's steps. State plainly that an operator cancelling a Goal with a waiting Inbox card gets the card closed and the answer recorded, and no resume.
 
 **Verification:** Execute the runbook only against the disposable rehearsal from Step 13. A reviewer can trace every command to an artifact, target schema, expected result, transaction boundary, abort/rollback condition, dependency query, approval identity, and recovery action. Evidence includes the temporary/final enum names, cast/default SQL, pre/post enum labels and counts, old-client smoke output, Prisma drift result, and `pgcrypto` retention decision.
 
@@ -400,11 +462,57 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
    ```
 
 2. Also run the preflight, disposable migration rehearsal, invariant verifier, rollback rehearsal, and focused concurrency suite. Record the first result of each command; explain and disposition every failure before a rerun.
-3. Assemble the ten-part reviewer packet required by spec §15.3: current-master/Control-plane A evidence; schema/raw SQL including `pgcrypto` and composite audit FKs; preflight/backfill/rehearsal counts; all command/test output; controlled interleavings including cancel/claim; zero invariant results including predecessor/event/Session identity; canary Goal→generation→Task→Run/retry JSON with restart's exact two events; partial/late/concurrent Session cost evidence; feature-flag/rollout/exact enum-rebuild rollback state; and complete finding disposition table. Attach raw observability JSONL plus executable aggregation output and the Goal-path Inbox negative-test evidence.
+3. Assemble the ten-part reviewer packet required by spec §15.3: current-master/Control-plane A evidence; schema/raw SQL including `pgcrypto` and composite audit FKs; preflight/backfill/rehearsal counts; all command/test output; controlled interleavings including cancel/claim, dispatch-versus-archive, dispatch-versus-grant-revocation, and cancel-versus-Inbox-answer; zero invariant results including predecessor/event/Session identity; canary Goal→generation→Task→Run/retry JSON with restart's exact two events; partial/late/concurrent Session cost evidence; feature-flag/rollout/exact enum-rebuild rollback state; and complete finding disposition table. Attach raw observability JSONL plus executable aggregation output and the Goal-path Inbox negative-test evidence. Include the Step 1 exclusion-protocol symbol map, the refreshed Inbox 3a ownership inventory, and the merged migration-tail ordering proof.
 4. The disposition ledger has one row per finding with source/ID, severity, accepted/rejected/deferred, rationale, exact contract/code/doc change, and verification. Findings are append-only across revisions; a rejected or deferred finding remains visible. Any must-fix stays open until verified; every should-fix is adopted or explicitly declined with one-line reasoning.
 5. Obtain an independent review against the reviewer checklist in spec §16. With an approval gate, move the implementation task to review rather than done; the human decides.
 
 **Verification:** Every reviewer checklist answer is backed by a file/command/test/result in the evidence document. The final invariant query returns zero rows. `git diff --check` is clean, the reviewed SHA matches the evidence SHA, and the disposition ledger contains every finding from every review round.
+
+## Goal 5a0 and Inbox 3a dependency, ownership, and handoff
+
+### Decision of record
+
+Leo's explicit dependency decision, 2026-08-17: **Goal 5a0 implementation and merge (#97) is first. Inbox 3a implementation (#98) is strictly dependency-held until #97 is merged and revalidated.** Concretely:
+
+1. #98 does not start implementation while #97 is open. Its task stays dependency-held, not merely deprioritized.
+2. When #97 merges, #98's first action is to rerun this plan's Step 1 revalidation against the merged tail and record the merged Goal migration folder name and the merged state of every symbol in the ownership table.
+3. If that revalidation shows a symbol moved, was renamed, or changed shape, #98 revises its own plan before writing code. It does not reinterpret this table from memory.
+4. Goal 5a0 does not implement, partially implement, or design Inbox 3a. Where the two meet, Goal 5a0 leaves the named fence and seam in Step 9 and nothing more.
+
+### Overlapping symbol inventory and ownership
+
+Read at `a4a4ba3`; Step 1 re-reads it. "Goal 5a0" means this plan may change the symbol; "Inbox 3a" means #98 owns it and Goal 5a0 must leave it byte-for-byte alone; "merged/shared" means neither may fork it.
+
+| Surface | Symbol | Owner in Goal 5a0 | Goal 5a0 obligation | Handoff to Inbox 3a (#98) |
+| --- | --- | --- | --- | --- |
+| schema | `GoalStatus` (`FAILED`/`CANCELLED`), `GoalDispatchState`, `GoalExecutionEvent`, Task/Run lineage columns | Goal 5a0 | Step 2 adds them in the reserved migration | #98 treats them as existing baseline |
+| schema | `RunStatus.WAITING_INBOX`, `SessionExecutionStatus.WAITING_INBOX` | merged/shared | no change | no change |
+| schema | `InboxMessage`, `InboxThread`, `InboxDecision`, their `goalId`/`taskId` columns | Inbox 3a | read-only; cancel may close an `OPEN` card, nothing else | #98 owns all shape changes |
+| workflow | `applyInboxDecisionTx` / `applyInboxDecision` | merged/shared | Step 9.5 adds the leading `lockGoalRow` and the resume-authority branch only | #98 replaces the `record-only` branch; it must not remove the Goal lock or the predicate |
+| workflow | `goalRunResumeAuthority` (new, `packages/db/src/goal-execution.ts`) | Goal 5a0 | Step 9.6 creates it as the single seam | #98's integration point |
+| workflow | `gateQuestion`, approval-gate cards | Inbox 3a | no change; Goal Tasks may not carry an approval gate (Step 2 runtime shape check, Step 9.1) | #98 owns gate behaviour |
+| workflow | `ACTIVE_RUN_STATUSES`, `LIVE_TASK_STATUSES` | merged/shared | consume, never redefine | consume, never redefine |
+| workflow | `enqueueTaskRun`, `lockAgentRow`, `lockAgentRows`, `lockTaskRow`, `lockAgentRepoGrant`, `lockAgentRepoGrantForRevocation`, `agentArchiveBlocker` | merged/shared | Step 4 extends the lock order above them; `enqueueTaskRun` gains only the Goal-linked rejection | unchanged |
+| app | `WAITING_INBOX` 409 guards on the runner routes, `activeRunStatuses` | merged/shared | no change | no change |
+| app | run-budget-exhausted and authentication-circuit `inboxMessage.create` on completion | merged/shared | Step 6.6 fences them off Goal paths; manual behaviour unchanged | #98 (with Goal 5a1) owns any Goal-facing replacement message |
+| app | Goal execution routes, Goal DoD routes, Goal delete guard | Goal 5a0 | Steps 5–9 | #98 does not change them |
+| reconcile | expired-`WAITING_INBOX` sweep and its card close | merged/shared | Step 7.5 adds Goal awareness and `AWAITING_DECISION`; manual path unchanged | #98 owns the resume-window policy itself |
+| reconcile | lease-loss `inboxMessage.create` | merged/shared | Step 6.6 restricts to manual Tasks | #98/Goal 5a1 own a Goal-facing replacement |
+| runner | `packages/api/src/inbox.ts::suspendForInbox` | Inbox 3a | read-only; it already persists `run.goalId` and needs no Goal 5a0 edit | #98 owns it |
+| runner | `packages/api/src/auth.ts` `WAITING_INBOX` session-token validity | merged/shared | no change; cancel revokes through `sessionTokenRevokedAt` | no change |
+| runner | `packages/inbox/src/connection.ts` `STARTING`/`RECONNECTING` replay | Inbox 3a | no change; Goal 5a0 only adds the Step 12 test 25 oracle against it | #98 owns connector behaviour |
+
+### Migration ordering
+
+Goal 5a0 reserves `packages/db/prisma/migrations/20260818000000_goal_execution_safety_kernel/`. Step 1's ordering fuse still applies: if that name no longer sorts after every migration on the then-current tail, or already exists, stop and revise this plan rather than renumber during implementation.
+
+Inbox 3a's migration timestamp must sort strictly after **the actual merged Goal tail** — the folder name as it exists on `master` after #97 merges — not merely after the literal string `20260818000000`. If the ordering fuse forced Goal 5a0 to a different folder name, that new name is the tail #98 must clear. #98 verifies this with `ls packages/db/prisma/migrations | sort | tail -1` on the merged tree and records the result before authoring its migration.
+
+### Cancellation fence and non-scope
+
+The fence is Step 9.5: a cancelled, completed, failed, paused, or stale-generation Goal can never regain Inbox resume authority, because `applyInboxDecisionTx` takes the Goal lock first and consults `goalRunResumeAuthority` before the resume writes. The handoff is Step 9.6's exported predicate. The oracles are Step 12 tests 24–27.
+
+Explicitly out of scope for Goal 5a0, and named here so #98 inherits them rather than discovers them: Goal-facing Inbox messages of any kind, Goal lifecycle or budget notifications, resume-window policy changes, waiver UX, approval-gate integration for Goal Tasks, and any change to `suspendForInbox` or the Feishu connector.
 
 ## Requirement-to-step coverage
 
@@ -425,6 +533,10 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 | Predecessor/event/Session audit identity continuity | 2, 3, 12, 13 |
 | Executable two-client PostgreSQL concurrency proofs | 12 |
 | Goal claim/cancel global lock order and bounded retries | 8, 12 |
+| Merged Agent-archive and exact-`AgentRepoAccess` exclusion protocols joined by initial and successor dispatch | 1, 4, 5, 12 |
+| Extended lock order Goal → Task → Run → Agent → grant on new-Task and existing-Task paths, with locked re-reads before creation | 4, 6, 7, 8, 12 |
+| Cancellation fence and handoff seam on the Inbox resume path | 7, 8, 9, 12 |
+| Goal 5a0 before Inbox 3a: ownership inventory, migration tail ordering, and written handoff | 1, 9, 13, 14, 15 |
 | PostgreSQL 16 enum-removal rollback rehearsal | 13, 14, 15 |
 | Ordered static/DB gates and reviewer packet | 15 |
 | Every review finding disposition | 15 |
@@ -433,7 +545,11 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 
 ## Consolidated review finding disposition
 
-Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md`. All findings are retained below; no should-fix was declined.
+The ledger is append-only across rounds. A finding closed in an earlier round stays visible with its original decision.
+
+### Round 1 — plan review
+
+Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Must-fix and §Should-fix. All findings are retained below; no should-fix was declined.
 
 | Finding | Severity | Decision | One-line rationale | Exact plan change | Required verification |
 | --- | --- | --- | --- | --- | --- |
@@ -447,6 +563,17 @@ Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md`. All findings are reta
 | SF-1 | Should-fix | Accepted | Cheap database backstops plus verifier queries materially improve audit-chain integrity. | Steps 2/3 add composite predecessor/event FKs where expressible and verifier queries for previous-iteration and per-event identity continuity. | Direct corruption tests reject cross-Goal/generation writes and detect wrong-iteration/event-shape corruption. |
 | SF-2 | Should-fix | Accepted | Queryability requires a versioned record and reproducible aggregation, not metric names alone. | Step 10 defines the stdout JSONL schema, discriminator/version/value/type/labels, counter/gauge semantics, sink assumption, and exact `jq` queries without alerts. | Captured JSONL passes schema/non-secret assertions and the documented queries return expected counter sums/latest gauges. |
 
+### Round 2 — current-master plan review
+
+Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` §Current-master plan-revision disposition. Review base `a4a4ba36c116c775d5d1c28ed55b17600869d904`, head `5d1a1fea89f3f0635b53bc298e5d2881bf363bf7`. Verdict FAIL, 2 must-fix and 0 should-fix. Both are closed here; there was no should-fix to adopt or decline.
+
+| Finding | Severity | Decision | One-line rationale | Exact plan change | Required verification |
+| --- | --- | --- | --- | --- | --- |
+| CM-MF-1 | Must-fix | Accepted | The kernel bypasses `enqueueTaskRun`, so it must join the merged Agent-archive and exact-grant exclusion protocols explicitly instead of inheriting them. | Audited-conflicts section records the merged protocol by symbol and line; Step 1.5 revalidates it; Step 4.3 defines the extended global order Goal → Task → Run → Agent → `AgentRepoAccess` with its acyclicity argument; Step 4.4 applies it to the new-Task and existing-Task paths with mandatory locked re-reads before any Task/Run insert; Step 4.5 preserves the typed conflict contract by reusing the existing `ArchivedAssigneeError` 409 and `400 "Assignee has no grant for this Repo"` and adding no new code; Step 5.5 maps them at the HTTP layer. | Step 4 lock-order and construction unit tests; Step 12 tests 21–23 prove, for initial and successor dispatch against Agent archive and exact grant revocation, either dispatch-plus-retained-authority or competing-change-plus-zero-mutation, in both barrier orders, with no deadlock and no unclassified error. |
+| CM-MF-2 | Must-fix | Accepted | The Goal/Inbox overlap needs a recorded dependency order, symbol ownership, migration tail rule, and a cancellation fence — not a second implementation. | New section "Goal 5a0 and Inbox 3a dependency, ownership, and handoff" records Leo's decision (#97 first, #98 dependency-held until #97 merges and Step 1 reruns), the overlapping schema/workflow/app/reconcile/runner/`WAITING_INBOX` inventory with per-symbol ownership, the reserved `20260818000000_goal_execution_safety_kernel` folder, and the rule that Inbox 3a's migration must sort after the actual merged Goal tail; gate 7 makes it a stop condition; Step 7.5 makes the `WAITING_INBOX` expiry sweep Goal-aware; Step 9.5 adds the `lockGoalRow`-first cancellation fence in `applyInboxDecisionTx`; Step 9.6 exports `goalRunResumeAuthority` as the single handoff seam. | Step 9 unit tests for unchanged manual answers, resumed active-Goal answers, and record-only cancelled-Goal answers; Step 12 tests 24–27 give the real-DB cancel-versus-answer, cancel-versus-connector-`STARTING`-replay, cancel-versus-reconcile-expiry, and acceptance-fixture oracles; cancel-versus-claim remains test 12. |
+
 ## Completion boundary
 
-This plan is complete when persisted for review. It does not authorize implementation. The future implementation task must stop at Step 1 unless Control-plane A is merged and the then-current `master` revalidation passes; production migration, restart, flag enablement, public release, Inbox integration, waiver UX, and Goal 5a1 notification behavior remain outside this contract.
+This plan is complete when persisted for review. It does not authorize implementation. The future implementation task must stop at Step 1 unless Control-plane A and Review/Approval Convergence (`a4a4ba3`) are both merged and the then-current `master` revalidation passes; production migration, restart, flag enablement, public release, Inbox 3a integration, waiver UX, and Goal 5a1 notification behavior remain outside this contract.
+
+Inbox 3a (#98) stays dependency-held until Goal 5a0 (#97) is merged and revalidated. Goal 5a0 discharges that boundary with the Step 9 fence and seam and the written handoff; it does not implement Inbox 3a.
