@@ -48,16 +48,9 @@ const parseError = async (response: Response, path: string): Promise<ApiError> =
   return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`);
 };
 
-/** The response body as text, before anyone decides to parse it.
- *
- *  `usePoll` compares this against the body it already holds: `GET /tasks` on a
- *  full board is ~1.3 MB, and a poll that returns the identical bytes should
- *  cost a string comparison rather than a `JSON.parse` of 1.3 MB followed by a
- *  re-render of everything the parse produced. */
-const requestText = async (path: string, init?: RequestInit): Promise<string> => {
-  let response: Response;
+const requestRaw = async (path: string, init?: RequestInit): Promise<Response> => {
   try {
-    response = await fetch(`${apiBase}${path}`, {
+    return await fetch(`${apiBase}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
@@ -68,9 +61,43 @@ const requestText = async (path: string, init?: RequestInit): Promise<string> =>
   } catch (reason: unknown) {
     throw new ApiError(0, path, reason instanceof Error ? reason.message : "Network error");
   }
+};
+
+const requestText = async (path: string, init?: RequestInit): Promise<string> => {
+  const response = await requestRaw(path, init);
   if (!response.ok) throw await parseError(response, path);
   if (response.status === 204) return "";
   return response.text();
+};
+
+/** One poll's answer: whether anything arrived, and the validator to send next
+ *  time. `changed: false` means the server said 304 and `body` is meaningless. */
+export type Polled = { changed: boolean; body: string; etag: string | null };
+
+/**
+ * A conditional GET for the polling loop.
+ *
+ * Two layers, because they fail in different places. The `If-None-Match` header
+ * is the good one: an unchanged `GET /tasks` costs a header exchange instead of
+ * a payload, which on a full board is 1.58 MB the page never reads. The text
+ * comparison in `usePoll` is the fallback for a control plane that mints no
+ * validator — it still skips the `JSON.parse` and the re-render, just not the
+ * transfer.
+ *
+ * `cache: "no-store"` so the browser's own HTTP cache never intercepts: with a
+ * cached copy it would attach its own validator and hand back a synthesised 200,
+ * and the caller could not tell a fresh payload from a replayed one.
+ */
+const requestPolled = async (path: string, etag: string | null): Promise<Polled> => {
+  const response = await requestRaw(path, {
+    cache: "no-store",
+    ...(etag === null ? {} : { headers: { "If-None-Match": etag } }),
+  });
+  const nextTag = response.headers.get("ETag");
+  if (response.status === 304) return { changed: false, body: "", etag: nextTag ?? etag };
+  if (!response.ok) throw await parseError(response, path);
+  if (response.status === 204) return { changed: true, body: "", etag: nextTag };
+  return { changed: true, body: await response.text(), etag: nextTag };
 };
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -80,7 +107,7 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
 
 export const api = {
   get: <T>(path: string): Promise<T> => request<T>(path),
-  getText: (path: string): Promise<string> => requestText(path),
+  poll: (path: string, etag: string | null): Promise<Polled> => requestPolled(path, etag),
   post: <T>(path: string, body?: unknown): Promise<T> =>
     request<T>(path, { method: "POST", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
   patch: <T>(path: string, body: unknown): Promise<T> => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
