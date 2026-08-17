@@ -26,11 +26,16 @@
 
 ## Round 2 已定案（Leo 2026-08-15）
 
+> **历史快照，已被 2026-08-17 canonical roster/model convergence 取代。**
+> 下列名册和路由只记录当时问答，不再授权 seed、task routing 或 Run
+> 创建；当前 authority 是 `DECISIONS.md` #22、`agents/roles/*.md` 与
+> `packages/db/prisma/agent-contract.ts`。
+
 - 通知通道：**飞书自建应用 bot**（长连接模式收事件，免公网回调）。Web Push 排 v2 且已告知国内仅 iOS APNs 可用。
 - 技术栈：照抄 TS+Hono+Prisma+Postgres+React/Vite。
-- v1 agent 名册：10 个流水线必需（default/plan/spec/senior-dev/review-coordinator/feasibility/scope-guardian/coherence/implementation-plan-executioner/librarian）。已向 Leo 讲清 agent（角色+模型+权限边界）vs skill（挂在 agent 上的方法论文件）两层概念。
+- 历史 v1 名册曾列十个流水线角色；`scope-guardian`/`coherence` 后续删除，`plan-reviser`/`frontend-dev` 进入 canonical 配置，`feasibility`/`code-reviewer` 仅保留历史兼容直至可归档。agent 与 skill 的两层概念仍有效。
 - 护栏：会话最长 2h / 停滞 10min 判死 / 同任务最多 3 会话；spend cap 字段留 schema 不生效。
-- 路由：规划/评审=claude、实现=codex、librarian 杂活=pi/DeepSeek，YAML 逐 agent 覆盖。
+- 历史路由（已废）：规划/评审=claude、实现=codex、librarian=pi/DeepSeek。当前模型/runner 必须使用 `DECISIONS.md` #22 的最终矩阵；逐 agent 配置机制仍有效。
 - Leo 质疑成立并已修正口径：runner 在 Mac ⇒ Mac 必须常开 ⇒ 控制面上云的可用性收益不成立；对象存储不需要（Danny 用 R2 是因一次性云容器无持久盘），文件 MCP 的 ACL 逻辑照建、后端换本地目录。
 
 ## Round 3 已发问题（等答案）

@@ -1,8 +1,14 @@
-# 批量过目呈裁件 — 10 角色提示词（DECISIONS #19 管线产物）
+# 历史批量过目呈裁件 — 原十角色提示词（DECISIONS #19 管线产物）
 
-产物清单：`agents/foundational.md`（共享底座）、`agents/roles/` 10 角色、`agents/skills/` 2 技能（plan-mode、review-report）、`agents/README.md`（形态契约：frontmatter 与 schema Agent/Skill 字段一一对应，可被 seed 导入）。互盲对照稿的关键原文已摘录进下方分歧节，过程稿目录已删除。
+> **Superseded routing evidence (2026-08-17):** 本件只保存早期 prompt
+> 形成与裁决历史，不再定义 active roster、模型、runner、review delegation
+> 或模板。当前唯一配置 authority 是 `agents/roles/*.md` 与
+> `packages/db/prisma/agent-contract.ts`；当前评审职责以
+> `agents/roles/review-coordinator.md` 为准。
 
-管线执行情况：① writing-for-agents 起草 10 角色 → ② 三承重角色互盲双写（codex exec Sol+high，输入仅 BLUEPRINT 规格原文；产出结构差异明显，无污染信号）→ ③ 其余 7 角色单轮 codex 交叉评审 → ④ 术语与 packages/api 九步实现（templates.ts，已落地）对齐。
+历史产物清单：`agents/foundational.md`（共享底座）、当时的 `agents/roles/` 十角色、`agents/skills/` 两技能（plan-mode、review-report）、`agents/README.md`。此数量与下方拓扑均已 superseded；互盲对照稿的关键原文只作为沿革保留。
+
+历史管线执行情况：① writing-for-agents 起草十角色 → ② 三承重角色互盲双写 → ③ 其余角色交叉评审 → ④ 与当时九步实现对齐。该过程不授权复建已删除角色或旧模型路由。
 
 ## 裁定（Leo，2026-08-15，审讯 8 问全落）
 
@@ -28,14 +34,14 @@
 | spec | roles/spec.md | 规格六要素（问题/场景行为/数据接口/边界失败/明确不做/验收方式）；歧义取最简读法并标注 assumption；门约束+就绪即 inbox |
 | plan | roles/plan.md | 首轮=spec→编号计划；修订轮=must-fix 全改、should-fix 逐条采纳或一句话拒绝、评审没碰的不动；挂 plan-mode 技能 |
 | senior-dev | roles/senior-dev.md | 实现或改评审项；偏离计划须记 activity；must-fix 全清、便宜安全的 should-fix 顺手做；无关失败要记录不背锅；阻塞才 inbox |
-| review-coordinator | roles/review-coordinator.md | 只派活与合并，绝不自己评/自己改；评审互不见报告；合并规则=去重留 lens、冲突记双方+裁定、严重度看后果、空类别显式声明 |
+| review-coordinator | roles/review-coordinator.md | **历史职责，已 superseded**：当时只派活与合并；当前角色以单会话证据评审为准，不再散子代理 |
 | feasibility | roles/feasibility.md | 单 lens：能不能建起来；判据=对着真仓核对而非合理性；lens 外只报「导致不可建」的 |
-| scope-guardian | roles/scope-guardian.md | 单 lens：与 spec 的贴合，双向抓（creep+shortfall），每条 finding 点名 spec 行 |
-| coherence | roles/coherence.md | 单 lens：内部自洽（步骤矛盾/悬空依赖/命名漂移/契约不一致），每条引矛盾两端 |
+| scope-guardian | roles/scope-guardian.md | **已删除的历史角色**：其 scope lens 已并入 Review Coordinator |
+| coherence | roles/coherence.md | **已删除的历史角色**：其 coherence lens 已并入 Review Coordinator |
 | implementation-plan-executioner | roles/implementation-plan-executioner.md | 忠实执行不翻案；先通读计划做步骤—代码映射；小失配做最小调整并记录；E2E 属于本步；逐步 commit 引用计划步号 |
 | librarian | roles/librarian.md | wiki 对齐真实行为；错页比缺页糟（要删）；只写现状不写沿革；代码与 wiki 冲突以代码为准 |
 
-路由与权限（frontmatter）：按 DECISIONS #6 —— 规划/评审类 model claude；senior-dev、IPE model codex；librarian runner pi + model openai-codex/gpt-5.6-luna。`inboxAccess` 最小授权：default/spec/plan/senior-dev/IPE 有，评审四件套与 librarian 无。collaborators 仅 review-coordinator 非空（三评审员）。
+当前路由已取代本件早期 frontmatter：Specification Writer 与 Planner = CLAUDE/Fable Medium；Plan Reviser、IPE、Frontend Developer、Senior Developer = CLAUDE/Opus High；Review Coordinator = CODEX/Sol High；Librarian = CODEX/Luna High。具体值与权限只读 `agents/roles/*.md` 和 `packages/db/prisma/agent-contract.ts`；旧的 Codex implementation、PI Librarian、四件套 reviewer 与 delegation 说法均不得用于新任务。
 
 ## 互盲分歧项（3 承重角色，逐条呈裁）
 

@@ -424,7 +424,7 @@ Every item below is a `node --test` file under the existing harness (`apps/web` 
 
 **Models, effort, runner linkage**
 
-7. Catalog integrity: every model id in `agents/roles/*.md` is either in the catalog or explicitly listed as intentionally absent; every entry's `defaultEffort` is in its `efforts`; no entry has an empty `efforts`.
+7. Catalog integrity: every model id in `agents/roles/*.md` is present in the catalog with no intentionally-absent exception; every entry's `defaultEffort` is in its `efforts`; no entry has an empty `efforts`.
 8. Split/join round-trips for `claude-opus-5:high`, `gpt-5.6-luna:max`, `openai-codex/gpt-5.6-luna:xhigh`, and a bare `claude-opus-5` — and matches `adapters.ts`'s rule on a leading-colon input.
 9. `runnerForModel` returns `PI` for `openai-codex/gpt-5.6-luna` — the case the `workflow.ts:22-30` substring heuristic gets wrong.
 10. Form behaviour: choosing a gpt catalog model sets `CODEX`; choosing a claude model sets `CLAUDE`; the runner control is read-only for catalog models and editable for `Custom…`; a contradictory loaded pair renders the notice; save is blocked while a validation error is present; switching to a model without the current effort falls back to that model's default.

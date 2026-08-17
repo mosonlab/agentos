@@ -60,7 +60,7 @@
 ### 4. Templates 管理 UI + 变量展开 —— 做
 **原版做法**（`records/Templates/record.md`）：From template 建任务时选模板（显示任务数如 "22 tasks"），填 `{{feature_description}}`/`{{branch_name}}` 等变量，`Will create` 预览将创建的任务树；模板 YAML 用 `include` 复用子模板、`parent`/`unblocked_by` 表依赖、`requires_approval` 设审批门、并行 review 组。
 **我方现状**：`TaskTemplate`+`TaskTemplateStep`+instantiate API 已有；**无 UI、无变量展开、无种子模板**。
-**最佳方案**：① prompt 中 `{{var}}` 替换（instantiate 时传入 variables）；② 建任务弹窗加 "From template" 分支 + Will create 预览；③ 照原版 Compound Engineering Workflow 造一个种子模板（九步链我方 agents 阵容已齐：senior-dev/plan/plan-reviser(Sol)/review 等）。模板编辑器可后置，先 JSON/DB 手工维护。
+**最佳方案**：① prompt 中 `{{var}}` 替换（instantiate 时传入 variables）；② 建任务弹窗加 "From template" 分支 + Will create 预览；③ 照原版 Compound Engineering Workflow 造一个种子模板。**2026-08-17 supersession:** 完整链的当前角色/模型以 `packages/db/prisma/agent-contract.ts` 为准，Plan Reviser 是 CLAUDE/Opus High，不再使用本比较稿早期的 Sol 分配。模板编辑器可后置，先 JSON/DB 手工维护。
 
 ### 5. Goals 协调器 —— 做
 **原版做法**（`records/Goals/record.md`，19:10–20:57）：DoD checklist 驱动开放循环；Orchestrator 标签页展示事件流（Dispatched / Routed / Session completed – router re-evaluating）；协调器依据 progress log+DoD+实现内容自动选下一位 agent；phase-gating（Plan→Plan Review→Implementation）；日常节奏"早上给规格、跑数小时、晚上审 PR"。
