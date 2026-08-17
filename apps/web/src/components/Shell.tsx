@@ -16,8 +16,8 @@ import {
 import { RunnerRow } from "./runner-status";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
-  IconActivity, IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
-  IconProjects, IconSecrets, IconSessions, IconTasks,
+  IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
+  IconProjects, IconSecrets, IconSessions, IconSettings, IconTasks,
 } from "./icons";
 
 /** The table keeps its shape; only the label moves from a literal to a key, so a
@@ -59,18 +59,25 @@ const ProjectSwitcher = (): ReactNode => {
   );
 };
 
+export const ThemeCycleButton = (): ReactNode => {
+  const { mode, setMode } = useTheme();
+  const t = useT();
+  const nextMode: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };
+  const ThemeIcon = mode === "system" ? Monitor : mode === "light" ? Sun : Moon;
+  const modeWord = (value: ThemeMode): string => t(`sidebar.theme.${value}`);
+  return (
+    <button type="button" className={cn(NAV_ITEM, "w-full border-0 bg-transparent text-left")} aria-label={t("sidebar.theme.aria", { mode: modeWord(mode), next: modeWord(nextMode[mode]) })} onClick={() => setMode(nextMode[mode])}>
+      <ThemeIcon size={15} strokeWidth={1.7} aria-hidden="true" />{t("sidebar.theme.label", { mode: modeWord(mode) })}
+    </button>
+  );
+};
+
 export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   const path = useRoute();
   // GET /inbox/messages is global: the control plane has no project filter on it.
   const { data: inbox } = usePoll<InboxMessage[]>("/inbox/messages", 5_000);
   const openCount = (inbox ?? []).filter((message) => message.status === "OPEN").length;
-  const { mode, setMode } = useTheme();
   const t = useT();
-  const nextMode: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };
-  const ThemeIcon = mode === "system" ? Monitor : mode === "light" ? Sun : Moon;
-  // The three mode words are their own keys, so `Theme: system` and its
-  // `aria-label` read the same word rather than one translating and one not.
-  const modeWord = (value: ThemeMode): string => t(`sidebar.theme.${value}`);
 
   const active = (item: { to: string; match: string[] }): boolean =>
     item.match.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
@@ -95,10 +102,8 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
         </nav>
         <div className={SIDEBAR_FOOT}>
           <RunnerRow />
-          <Link to="/secrets" className={NAV_ITEM}><IconActivity />{t("sidebar.settings")}</Link>
-          <button type="button" className={cn(NAV_ITEM, "w-full border-0 bg-transparent text-left")} aria-label={t("sidebar.theme.aria", { mode: modeWord(mode), next: modeWord(nextMode[mode]) })} onClick={() => setMode(nextMode[mode])}>
-            <ThemeIcon size={15} strokeWidth={1.7} aria-hidden="true" />{t("sidebar.theme.label", { mode: modeWord(mode) })}
-          </button>
+          <Link to="/settings" className={cn(NAV_ITEM, path === "/settings" && NAV_ITEM_ACTIVE)}><IconSettings />{t("sidebar.settings")}</Link>
+          <ThemeCycleButton />
         </div>
       </aside>
       <main className={CONTENT}>{children}</main>

@@ -15,12 +15,13 @@ import { GoalDetailPage, GoalsPage } from "./pages/Goals";
 import { InboxPage, InboxThreadPage } from "./pages/Inbox";
 import { ProjectDetailPage, ProjectsPage } from "./pages/Projects";
 import { SecretsPage } from "./pages/Secrets";
+import { SettingsPage } from "./pages/Settings";
 import { SessionDetailPage, SessionsPage } from "./pages/Sessions";
 import { TasksPage } from "./pages/Tasks";
 import { TriggerDetailPage, TriggersPage } from "./pages/Triggers";
 import { TaskDetailPage } from "./pages/TaskDetail";
 
-const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) => ReactNode }> = [
+export const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) => ReactNode }> = [
   { pattern: "/tasks", render: () => <TasksPage /> },
   { pattern: "/tasks/:taskId", render: (params) => <TaskDetailPage taskId={params.taskId ?? ""} /> },
   // Siblings of /tasks, not children: matchRoute compares segment counts and
@@ -41,6 +42,7 @@ const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) 
   { pattern: "/projects/:projectId", render: (params) => <ProjectDetailPage projectId={params.projectId ?? ""} /> },
   { pattern: "/connections", render: () => <ConnectionsPage /> },
   { pattern: "/secrets", render: () => <SecretsPage /> },
+  { pattern: "/settings", render: () => <SettingsPage /> },
 ];
 
 /** The only auth surface: the proxy injects the operator token, so a 401 here

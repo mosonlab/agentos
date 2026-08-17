@@ -42,6 +42,9 @@ export const IconSessions = (): ReactNode => (
 export const IconActivity = (): ReactNode => (
   <Svg><path d="M1.6 8h3l1.6-4.6L9.4 12l1.4-4h3.6" /></Svg>
 );
+export const IconSettings = (): ReactNode => (
+  <Svg><circle cx="8" cy="8" r="2.2" /><path d="M8 1.7v1.5M8 12.8v1.5M1.7 8h1.5M12.8 8h1.5M3.5 3.5l1 1M11.5 11.5l1 1M12.5 3.5l-1 1M4.5 11.5l-1 1" /></Svg>
+);
 export const IconChevron = ({ open }: { open?: boolean }): ReactNode => (
   <Svg size={14}><path d={open ? "M4 9.5 8 5.5l4 4" : "M4 6.5 8 10.5l4-4"} /></Svg>
 );
