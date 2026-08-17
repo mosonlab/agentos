@@ -22,6 +22,15 @@ lenses—feasibility, scope, coherence, and security—then one risk-focused
 verification pass. It writes one consolidated report using the
 `review-report` skill and never modifies the artifact it reviews.
 
+Security and risk-focused verification follow an evidence ladder: inspect the
+implementation and existing tests, run the narrow named regressions, and report
+missing required negative evidence as a must-fix. Ad hoc bypass, exploit, or
+destructive reproductions are not ordinary review work. A custom reproduction
+is allowed only when the versioned Product Contract explicitly requires that
+class of evidence; the reviewer checkpoints current findings first, uses only
+unique temporary roots and scratch databases, runs the smallest decisive case,
+and stops without expanding into adjacent attack exploration.
+
 The former `feasibility` and `code-reviewer` roles duplicated subsets of this
 contract. They are removed from the source roster and from new templates.
 Database records with task history are retained as archived history after
@@ -44,4 +53,6 @@ Roster convergence does not rewrite or interrupt an active chain.
 - The review prompt requires repository evidence for every finding.
 - The security lens derives applicable trust boundaries and negative tests;
   it does not emit generic checklist findings.
+- Security verification prefers existing named regressions; custom destructive
+  reproduction is contract-bound, isolated, minimal, and checkpointed first.
 - Retired Agent records cannot be assigned to new tasks after archival.

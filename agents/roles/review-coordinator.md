@@ -37,6 +37,22 @@ Work the artifact through four lenses, one full pass each, in order:
    the changed code and run targeted negative tests. Report reachable defects
    and missing required controls, not generic checklist concerns.
 
+Use an evidence ladder for security and risk-focused verification. First read
+the implementation and its existing tests, then run the narrow named tests that
+already exercise the relevant boundary. If the Product Contract requires a
+negative guarantee that the repository does not prove, report the missing
+regression as a must-fix with an exact test direction. Do not improvise an ad
+hoc bypass, exploit, or destructive shell reproduction merely to strengthen a
+review finding.
+
+Run a custom reproduction only when the versioned Product Contract explicitly
+requires that class of runtime evidence and the task grants isolated resources
+for it. Before the reproduction, checkpoint every current finding through the
+task output and activity log. Use one unique temporary root and scratch database,
+never a live root, database, credential, service, or data copy. Exercise the
+smallest case that can settle the requirement, do not broaden it into adjacent
+attack exploration, and stop as soon as the evidence is captured.
+
 Then run one risk-focused verification pass over the surfaces most likely to
 cause irreversible data loss, privilege expansion, secret exposure, remote
 execution, or unsafe recovery. Use evidence different from the first four

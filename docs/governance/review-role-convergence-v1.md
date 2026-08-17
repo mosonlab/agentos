@@ -2,7 +2,7 @@
 
 Contract ID: ARC-2026-08-17
 
-Version: 1.0
+Version: 1.1
 
 Status: Active
 
@@ -17,6 +17,9 @@ risk-focused verification coverage.
 - Make `review-coordinator` the reviewer for Full Assurance plan-review and
   code-review steps.
 - Add an evidence-driven security lens to the Review Coordinator prompt.
+- Bound security verification with an evidence ladder so ordinary review uses
+  existing named regressions and any custom destructive reproduction is
+  explicitly authorized, isolated, minimal, and checkpointed first.
 - Remove `feasibility` and `code-reviewer` from the canonical source roster.
 - Retire their database records only after the existing CP-A chain reaches
   its human-review gate.
@@ -39,8 +42,12 @@ risk-focused verification coverage.
    performs four named lenses plus a distinct risk-focused pass.
 4. Security findings require an applicable trust boundary, reachable defect,
    or missing required control, with repository or runtime evidence.
-5. Source build, tests, typecheck, and diff checks pass.
-6. Live archival and database-template verification occur only after CP-A
+5. The reviewer does not improvise bypass, exploit, or destructive shell
+   reproductions during ordinary review. A custom reproduction requires an
+   explicit Product Contract evidence requirement, isolated resources, a
+   pre-reproduction findings checkpoint, and the smallest decisive case.
+6. Source build, tests, typecheck, and diff checks pass.
+7. Live archival and database-template verification occur only after CP-A
    reaches human review and no queued or active task references either
    retiring Agent.
 
