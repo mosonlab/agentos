@@ -3,8 +3,13 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
+import { translate } from "../lib/i18n-core";
 import { BoardColumn, COLUMNS, TaskCard, archiveDoneNotice } from "../pages/Tasks";
 import type { ChainProgress, Task, TaskStatus } from "../lib/types";
+
+/* Same expected values as before batch 1, sourced from the `en` dictionary
+ * rather than from a literal in the page (spec §7.20). */
+const en = (key: string): string => translate("en", key);
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "t1", projectId: "p1", assigneeAgentId: null, repoId: null, templateId: null, templateStepId: null,
@@ -49,12 +54,12 @@ const column = (status: TaskStatus, tasks: Task[] = [], loading = false): string
 /* ------------------------------------------------------------- the columns */
 
 test("the board has five columns, in order, with Backlog first", () => {
-  assert.deepEqual(COLUMNS.map((c) => c.label), ["Backlog", "Todo", "Doing", "Review", "Done"]);
+  assert.deepEqual(COLUMNS.map((c) => en(c.labelKey)), ["Backlog", "Todo", "Doing", "Review", "Done"]);
   assert.deepEqual(COLUMNS.map((c) => c.status), ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"]);
   // Each label reaches the DOM with its own count, so an added column cannot
   // pass by being present in the array and absent from the render.
-  for (const { status, label } of COLUMNS) {
-    assert.match(column(status), new RegExp(`${label}<span[^>]*>0</span>`));
+  for (const { status, labelKey } of COLUMNS) {
+    assert.match(column(status), new RegExp(`${en(labelKey)}<span[^>]*>0</span>`));
   }
 });
 
@@ -68,16 +73,16 @@ test("an empty column still invites a drop, Backlog included (E16)", () => {
   // A positive assertion per column: the previous `doesNotMatch(/status !==
   // "BACKLOG"/)` could not fail, because it tested for a string nobody writes.
   for (const { status } of COLUMNS) {
-    assert.match(column(status), /Drop tasks here/);
+    assert.match(column(status), new RegExp(en("tasks.column.drop")));
   }
-  assert.match(column("BACKLOG", [], true), /Loading…/);
-  assert.doesNotMatch(column("BACKLOG", [task({ status: "BACKLOG" })]), /Drop tasks here/);
+  assert.match(column("BACKLOG", [], true), new RegExp(en("common.loading")));
+  assert.doesNotMatch(column("BACKLOG", [task({ status: "BACKLOG" })]), new RegExp(en("tasks.column.drop")));
 });
 
 test("Archive All is offered only on a non-empty Done column", () => {
-  assert.match(column("DONE", [task({ status: "DONE" })]), /Archive All/);
-  assert.doesNotMatch(column("DONE", []), /Archive All/);
-  assert.doesNotMatch(column("TODO", [task()]), /Archive All/);
+  assert.match(column("DONE", [task({ status: "DONE" })]), new RegExp(en("tasks.archiveAll")));
+  assert.doesNotMatch(column("DONE", []), new RegExp(en("tasks.archiveAll")));
+  assert.doesNotMatch(column("TODO", [task()]), new RegExp(en("tasks.archiveAll")));
 });
 
 /* ---------------------------------------------------------------- the card */
@@ -117,5 +122,5 @@ test("InfoNotice borrows neither the amber nor the destructive palette", () => {
   // warning.
   const markup = renderToStaticMarkup(<InfoNotice message="Archived 6" onDismiss={() => undefined} />);
   assert.doesNotMatch(markup, /status-amber|destructive/);
-  assert.match(markup, /Dismiss/);
+  assert.match(markup, new RegExp(en("common.dismiss")));
 });

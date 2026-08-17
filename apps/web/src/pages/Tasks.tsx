@@ -1,8 +1,9 @@
 import { type ReactNode, useMemo, useState } from "react";
 
 import { api } from "../lib/api";
-import { money, timeAgo } from "../lib/format";
+import { formatT, money, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { type Translate, useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { navigate } from "../lib/router";
 import type { Task, TaskStatus } from "../lib/types";
@@ -30,27 +31,29 @@ const TASK_META_ROW = "flex flex-wrap items-center gap-[8px]";
 /** `size-[13px]`, not the button base's `[&_svg]:size-4`. */
 const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-muted-foreground [&_svg]:size-[13px] [&_svg]:flex-none [&_svg]:opacity-85";
 
-export const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
+/** The array keeps its shape and its order; only the label moves to a key, so
+ *  the board's column titles stay one readable table. */
+export const COLUMNS: Array<{ status: TaskStatus; labelKey: string }> = [
   // Backlog is first: it is where work waits before it is queued, and the
   // scheduler never picks anything out of it.
-  { status: "BACKLOG", label: "Backlog" },
-  { status: "TODO", label: "Todo" },
-  { status: "DOING", label: "Doing" },
-  { status: "REVIEW", label: "Review" },
-  { status: "DONE", label: "Done" },
+  { status: "BACKLOG", labelKey: "tasks.column.BACKLOG" },
+  { status: "TODO", labelKey: "tasks.column.TODO" },
+  { status: "DOING", labelKey: "tasks.column.DOING" },
+  { status: "REVIEW", labelKey: "tasks.column.REVIEW" },
+  { status: "DONE", labelKey: "tasks.column.DONE" },
 ];
 
 // The board card keeps the run line light — a status dot plus text, as in
 // kanban-tasks-board-t1560.jpg; pills are reserved for the task detail header.
-const runLabel = (task: Task): ReactNode => {
+const runLabel = (task: Task, t: Translate): ReactNode => {
   const run = task.runs[0];
-  if (!run) return <span className="text-[color:var(--faint)]">no runs</span>;
+  if (!run) return <span className="text-[color:var(--faint)]">{t("tasks.card.noRuns")}</span>;
   const tone = run.status === "SUCCEEDED" ? "green" : run.status === "FAILED" || run.status === "TIMED_OUT" || run.status === "LOST" ? "red" : "amber";
   return (
     <span className="inline-flex items-center gap-[6px] whitespace-nowrap">
       <span className={cn(DOT, DOT_TONE[tone])} />
-      <span className="text-primary">run {run.runNumber}</span>
-      <span className="text-[color:var(--faint)]"> · {run.status.toLowerCase().replace("_", " ")}</span>
+      <span className="text-primary">{t("tasks.card.run", { n: run.runNumber })}</span>
+      <span className="text-[color:var(--faint)]"> · {t(`status.run.${run.status}`)}</span>
     </span>
   );
 };
@@ -65,10 +68,13 @@ export const retryable = (task: Task): boolean => {
 
 /** The two shapes of the Archive All result, as one string. Exported so the
  *  message is testable without driving a click through a static render. */
+/* Pure, exported and asserted directly by `tasks-board.test.tsx`, so it reads the
+ * locale through `formatT` — the WI-4 registration seam — rather than gaining a
+ * `Translate` parameter its two call sites would have to thread. */
 export const archiveDoneNotice = (result: { archived: number; skipped: number }): string =>
   (result.skipped > 0
-    ? `Archived ${result.archived}, skipped ${result.skipped} (running)`
-    : `Archived ${result.archived}`);
+    ? formatT("tasks.archiveDone.some", result)
+    : formatT("tasks.archiveDone.all", result));
 
 export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
   task: Task;
@@ -77,6 +83,7 @@ export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
   onArchive: (task: Task) => void;
 }): ReactNode => {
   const run = task.runs[0];
+  const t = useT();
   return (
     <article
       className={TASK_CARD}
@@ -87,19 +94,19 @@ export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
       <div className={cn(ROW, "items-start")}>
         <h3 className="flex-1 text-[13px] leading-[1.45]">{task.name}</h3>
         <RowMenu items={[
-          ...(retryable(task) ? [{ label: "Retry", onSelect: () => onRetry(task) }] : []),
-          { label: "Archive", onSelect: () => onArchive(task) },
-          { label: "Delete", danger: true, onSelect: () => onDelete(task) },
+          ...(retryable(task) ? [{ label: t("common.retry"), onSelect: () => onRetry(task) }] : []),
+          { label: t("tasks.menu.archive"), onSelect: () => onArchive(task) },
+          { label: t("common.delete"), danger: true, onSelect: () => onDelete(task) },
         ]} />
       </div>
       <div className={TASK_META}>
         <div className={TASK_META_ROW}>
-          <span>{task.scheduleKind === "NOW" ? "Once" : task.scheduleKind.toLowerCase()}</span>
-          {task.approvalGate ? <Pill tone="amber">Approval</Pill> : null}
-          {task.templateId ? <Pill tone="violet">Template</Pill> : null}
+          <span>{t(`tasks.schedule.${task.scheduleKind}`)}</span>
+          {task.approvalGate ? <Pill tone="amber">{t("tasks.pill.approval")}</Pill> : null}
+          {task.templateId ? <Pill tone="violet">{t("tasks.pill.template")}</Pill> : null}
           {/* MANUAL renders nothing: most tasks are manual, and a pill on every
               card would be noise rather than provenance ([A8]). */}
-          {task.source === "CRON" ? <Pill tone="grey">cron</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent">webhook</Pill> : null}
+          {task.source === "CRON" ? <Pill tone="grey">{t("tasks.pill.cron")}</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent">{t("tasks.pill.webhook")}</Pill> : null}
         </div>
         {/* No placeholder for a chain-less card (K4). */}
         {task.chainProgress ? (
@@ -107,13 +114,13 @@ export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
             {chainMarker(task.chainProgress)}
           </div>
         ) : null}
-        <div className={TASK_META_ROW}>{runLabel(task)}</div>
+        <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
         {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, "text-[var(--destructive-fg)]")}>{task.failureReason}</div>}
       </div>
       <div className={TASK_FOOT}>
         <span className={cn(ROW, "min-w-0 gap-[6px] overflow-hidden whitespace-nowrap")}>
           <IconRobot />
-          <span className="overflow-hidden text-ellipsis">{task.assigneeAgent?.title ?? "Unassigned"}</span>
+          <span className="overflow-hidden text-ellipsis">{task.assigneeAgent?.title ?? t("ui.chip.unassigned")}</span>
         </span>
         <span className="flex-1" />
         {run?.session?.costUsd ? <span className="whitespace-nowrap">{money(run.session.costUsd)}</span> : null}
@@ -127,7 +134,7 @@ export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
  *  presence rule and the empty-state drop invitation — can be asserted from
  *  rendered markup rather than from the page's source text. */
 export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, cardProps }: {
-  column: { status: TaskStatus; label: string };
+  column: { status: TaskStatus; labelKey: string };
   tasks: Task[];
   loading: boolean;
   dragOver: TaskStatus | null;
@@ -136,36 +143,39 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   onDrop: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
   cardProps: { onDelete: (task: Task) => void; onRetry: (task: Task) => void; onArchive: (task: Task) => void };
-}): ReactNode => (
-  <div className={COLUMN}>
-    <div className={COLUMN_HEAD}>
-      {column.label}<span className={COUNT}>{tasks.length}</span>
-      {/* Only on a non-empty Done column: a button that would archive nothing
-          is not offered (A2). */}
-      {column.status === "DONE" && tasks.length > 0 ? (
-        <>
-          <span className="flex-1" />
-          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
-            Archive All
-          </Button>
-        </>
-      ) : null}
+}): ReactNode => {
+  const t = useT();
+  return (
+    <div className={COLUMN}>
+      <div className={COLUMN_HEAD}>
+        {t(column.labelKey)}<span className={COUNT}>{tasks.length}</span>
+        {/* Only on a non-empty Done column: a button that would archive nothing
+            is not offered (A2). */}
+        {column.status === "DONE" && tasks.length > 0 ? (
+          <>
+            <span className="flex-1" />
+            <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
+              {t("tasks.archiveAll")}
+            </Button>
+          </>
+        ) : null}
+      </div>
+      <div
+        className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
+        onDragOver={(event) => { event.preventDefault(); onDragOver(column.status); }}
+        onDragLeave={() => onDragLeave(column.status)}
+        onDrop={(event) => {
+          event.preventDefault();
+          onDrop(event.dataTransfer.getData("text/plain"), column.status);
+        }}
+      >
+        {tasks.map((task) => <TaskCard key={task.id} task={task} {...cardProps} />)}
+        {/* Every column gets the same invitation, Backlog included (E16). */}
+        {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{t(loading ? "common.loading" : "tasks.column.drop")}</div> : null}
+      </div>
     </div>
-    <div
-      className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
-      onDragOver={(event) => { event.preventDefault(); onDragOver(column.status); }}
-      onDragLeave={() => onDragLeave(column.status)}
-      onDrop={(event) => {
-        event.preventDefault();
-        onDrop(event.dataTransfer.getData("text/plain"), column.status);
-      }}
-    >
-      {tasks.map((task) => <TaskCard key={task.id} task={task} {...cardProps} />)}
-      {/* Every column gets the same invitation, Backlog included (E16). */}
-      {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
-    </div>
-  </div>
-);
+  );
+};
 
 export const TasksPage = (): ReactNode => {
   const { projectId } = useProjectScope();
@@ -174,6 +184,7 @@ export const TasksPage = (): ReactNode => {
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const { error: actionError, run } = useAction();
+  const t = useT();
   const tasks = useMemo(() => data ?? [], [data]);
 
   const move = (taskId: string, status: TaskStatus): void => {
@@ -182,7 +193,7 @@ export const TasksPage = (): ReactNode => {
     void run(async () => { await api.patch(`/tasks/${taskId}`, { status }); reload(); });
   };
   const remove = (task: Task): void => {
-    if (!window.confirm(`Delete task ${task.name}?`)) return;
+    if (!window.confirm(t("tasks.confirm.delete", { name: task.name }))) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
   };
   const retry = (task: Task): void => {
@@ -197,7 +208,7 @@ export const TasksPage = (): ReactNode => {
    *  information surface. */
   const archiveDone = async (): Promise<void> => {
     const done = tasks.filter((task) => task.status === "DONE");
-    if (!window.confirm(`Archive ${done.length} done tasks?`)) return;
+    if (!window.confirm(t("tasks.confirm.archiveDone", { n: done.length }))) return;
     setNotice(null);
     let result: { archived: number; skipped: number } | null = null;
     const ok = await run(async () => {
@@ -207,7 +218,7 @@ export const TasksPage = (): ReactNode => {
     if (ok && result !== null) setNotice(archiveDoneNotice(result));
   };
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">

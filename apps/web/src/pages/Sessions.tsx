@@ -1,8 +1,9 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compact, compactTokens, duration, formatDateTime, money, repoWebUrl } from "../lib/format";
+import { compact, compactTokens, duration, formatDateTime, formatT, money, repoWebUrl } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { Link, navigate } from "../lib/router";
 import { useProjectScope } from "../lib/project";
 import { normalize, type StreamItem } from "../lib/session-stream";
@@ -36,21 +37,23 @@ export const isLive = (status: SessionExecutionStatus): boolean => LIVE_STATUSES
 
 /** §4.1.1. Reuses the existing tone vocabulary; no new tones. */
 export const sessionPill = (status: SessionExecutionStatus): { tone: PillTone; label: string } => {
-  if (status === "REQUESTED" || status === "PROVISIONING") return { tone: "grey", label: "queued" };
-  if (status === "RUNNING") return { tone: "green", label: "running" };
-  if (status === "WAITING_INBOX") return { tone: "amber", label: "waiting" };
-  if (status === "SUCCEEDED") return { tone: "green", label: "done" };
-  if (status === "CANCELLED") return { tone: "grey", label: "cancelled" };
-  return { tone: "red", label: status.toLowerCase().replace(/_/g, " ") };
+  if (status === "REQUESTED" || status === "PROVISIONING") return { tone: "grey", label: formatT("sessions.pill.queued") };
+  if (status === "RUNNING") return { tone: "green", label: formatT("sessions.pill.running") };
+  if (status === "WAITING_INBOX") return { tone: "amber", label: formatT("sessions.pill.waiting") };
+  if (status === "SUCCEEDED") return { tone: "green", label: formatT("sessions.pill.done") };
+  if (status === "CANCELLED") return { tone: "grey", label: formatT("sessions.pill.cancelled") };
+  // The remaining three — FAILED, TIMED_OUT, LOST — read exactly as the shared
+  // per-enum status table already spells them.
+  return { tone: "red", label: formatT(`status.session.${status}`) };
 };
 
 /** The stat bar's own lifecycle slot: `● Live` while the session runs, and on a
  *  terminal session the same slot reads Done or Failed. The header's status pill
  *  is a different element and does not satisfy this. */
 export const lifecycleStat = (status: SessionExecutionStatus): { label: string; tone: "green" | "red" } =>
-  isLive(status) ? { label: "Live", tone: "green" }
-    : status === "SUCCEEDED" ? { label: "Done", tone: "green" }
-      : { label: "Failed", tone: "red" };
+  isLive(status) ? { label: formatT("sessions.lifecycle.live"), tone: "green" }
+    : status === "SUCCEEDED" ? { label: formatT("sessions.lifecycle.done"), tone: "green" }
+      : { label: formatT("sessions.lifecycle.failed"), tone: "red" };
 
 /** `Files touched` shows `(0)` whenever path extraction found nothing. For
  *  CLAUDE that means the session really touched no file — the mapping is
@@ -59,15 +62,16 @@ export const lifecycleStat = (status: SessionExecutionStatus): { label: string; 
  *  mapping as a fact about the session, and saying so is the honest rendering. */
 export const fileTrackingHint = (runner: RunnerKind, fileCount: number, toolCalls: number): string | null =>
   runner !== "CLAUDE" && fileCount === 0 && toolCalls > 0
-    ? `File tracking is not available for ${runner} sessions.`
+    ? formatT("sessions.files.hint", { runner })
     : null;
 
 /** The notice is unconditional for `WAITING_INBOX`; only the link is conditional.
  *  A session parked before its message id lands is exactly the state where an
  *  operator most needs to be told why nothing is happening. */
 export const WaitingNotice = ({ status, messageId }: { status: SessionExecutionStatus; messageId: string | null }): ReactNode => {
+  const t = useT();
   if (status !== "WAITING_INBOX") return null;
-  const text = "Waiting on an Inbox decision.";
+  const text = t("sessions.waiting");
   return (
     <div className={ROW}>
       {messageId === null ? <span>{text}</span> : <Link to={`/inbox/${messageId}`}>{text} ↗</Link>}
@@ -76,7 +80,8 @@ export const WaitingNotice = ({ status, messageId }: { status: SessionExecutionS
 };
 
 const resultWord = (session: Session): string =>
-  isLive(session.executionStatus) ? "In progress" : session.executionStatus === "SUCCEEDED" ? "Success" : "Failed";
+  formatT(isLive(session.executionStatus) ? "sessions.result.inProgress"
+    : session.executionStatus === "SUCCEEDED" ? "sessions.result.success" : "sessions.result.failed");
 
 const SessionStatusPill = ({ status }: { status: SessionExecutionStatus }): ReactNode => {
   const { tone, label } = sessionPill(status);
@@ -86,6 +91,7 @@ const SessionStatusPill = ({ status }: { status: SessionExecutionStatus }): Reac
 /* -------------------------------------------------------------- the list */
 
 export const SessionRow = ({ session }: { session: Session }): ReactNode => {
+  const t = useT();
   const target = session.task
     ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link>
     : session.goal
@@ -100,7 +106,7 @@ export const SessionRow = ({ session }: { session: Session }): ReactNode => {
     >
       <TableCell className={TABLE_NAME}>
         {formatDateTime(session.startedAt ?? session.requestedAt)}
-        <span className={TABLE_SUB}>{session.run ? `run #${session.run.runNumber}` : session.id}</span>
+        <span className={TABLE_SUB}>{session.run ? t("sessions.row.run", { n: session.run.runNumber }) : session.id}</span>
       </TableCell>
       <TableCell><AgentChip agent={null} name={session.agent?.title ?? session.agentId} /></TableCell>
       <TableCell>{target}</TableCell>
@@ -125,6 +131,7 @@ export const SessionsPage = (): ReactNode => {
   const [exhausted, setExhausted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
+  const t = useT();
   useEffect(() => { setOlder([]); setExhausted(false); setMoreError(null); }, [projectId]);
 
   const sessions = useMemo(() => {
@@ -154,29 +161,29 @@ export const SessionsPage = (): ReactNode => {
     }
   };
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">
       <div className={PAGE_HEAD}>
         <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Sessions</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>Every agent run in {project?.name ?? "this project"}, newest first</div>
+          <h1 className={PAGE_HEAD_H1}>{t("sessions.head.title")}</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>{t("sessions.head.subtitle", { project: project?.name ?? t("tasks.head.thisProject") })}</div>
         </div>
         <div className={PAGE_ACTIONS}>
-          <Button type="button" variant="legacy" size="legacy" onClick={head.reload}><IconRefresh />Refresh</Button>
+          <Button type="button" variant="legacy" size="legacy" onClick={head.reload}><IconRefresh />{t("common.refresh")}</Button>
         </div>
       </div>
 
       <div className={STACK}>
-        {head.missing ? <GapNotice endpoint="GET /sessions" what="会话列表" /> : null}
+        {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
         {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
         <Card flush>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Started</TableHead><TableHead>Agent</TableHead><TableHead>Task</TableHead>
-                <TableHead>Runner</TableHead><TableHead>Duration</TableHead><TableHead>Status</TableHead><TableHead>Result</TableHead>
+                <TableHead>{t("sessions.table.started")}</TableHead><TableHead>{t("sessions.table.agent")}</TableHead><TableHead>{t("sessions.table.task")}</TableHead>
+                <TableHead>{t("sessions.table.runner")}</TableHead><TableHead>{t("sessions.table.duration")}</TableHead><TableHead>{t("sessions.table.status")}</TableHead><TableHead>{t("sessions.table.result")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -184,13 +191,13 @@ export const SessionsPage = (): ReactNode => {
             </TableBody>
           </Table>
           {sessions.length === 0
-            ? <EmptyState>{head.loading ? "Loading…" : "No sessions yet. Agent tasks create a session when a run starts."}</EmptyState>
+            ? <EmptyState>{t(head.loading ? "common.loading" : "sessions.empty")}</EmptyState>
             : null}
         </Card>
         {sessions.length >= PAGE_SIZE && !exhausted ? (
           <div className={ROW}>
             <Button type="button" variant="legacy" size="legacy" disabled={loadingMore} onClick={() => void loadMore()}>
-              {loadingMore ? "Loading…" : "Load more"}
+              {t(loadingMore ? "common.loading" : "sessions.loadMore")}
             </Button>
             {moreError === null ? null : <ErrorNotice message={moreError} />}
           </div>
@@ -205,7 +212,7 @@ export const SessionsPage = (): ReactNode => {
 export const truncateBlock = (text: string): string =>
   text.length <= BLOCK_MAX
     ? text
-    : `${text.slice(0, BLOCK_MAX)}\n… truncated, ${text.length - BLOCK_MAX} more characters`;
+    : `${text.slice(0, BLOCK_MAX)}\n${formatT("sessions.truncated", { n: text.length - BLOCK_MAX })}`;
 
 const TOOL_STATE_TONE: Record<string, string> = {
   running: "text-[color:var(--status-amber-fg)]",
@@ -216,13 +223,14 @@ const TOOL_STATE_TONE: Record<string, string> = {
 
 const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): ReactNode => {
   const [open, setOpen] = useState(false);
+  const t = useT();
   return (
     <div className="rounded-lg border border-[color:var(--border-soft)] bg-card">
       <button type="button" className="flex w-full items-center gap-[8px] border-0 bg-transparent px-[14px] py-[9px] text-left text-[12px]" onClick={() => setOpen(!open)}>
         <span className="text-muted-foreground"><IconChevron open={open} /></span>
         <span className="text-foreground">{item.name}</span>
         <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">{item.primaryArg ?? ""}</span>
-        <span className={cn("text-[11.5px]", TOOL_STATE_TONE[item.state] ?? "text-muted-foreground")}>{item.state}</span>
+        <span className={cn("text-[11.5px]", TOOL_STATE_TONE[item.state] ?? "text-muted-foreground")}>{t(`sessions.tool.state.${item.state}`)}</span>
         <span className={MSG_TIME}>{formatDateTime(item.at)}</span>
       </button>
       {open ? (
@@ -231,11 +239,11 @@ const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): Re
             <div className="text-[12px] text-secondary-foreground [overflow-wrap:anywhere]">{item.filePath}</div>
           )}
           <div>
-            <div className="mb-[5px] text-[11.5px] text-muted-foreground">Arguments</div>
+            <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.arguments")}</div>
             <div className={CODE_BLOCK}>{truncateBlock(JSON.stringify(item.args ?? null, null, 2))}</div>
           </div>
           <div>
-            <div className="mb-[5px] text-[11.5px] text-muted-foreground">Result</div>
+            <div className="mb-[5px] text-[11.5px] text-muted-foreground">{t("sessions.tool.result")}</div>
             <div className={CODE_BLOCK}>{item.result === null ? "—" : truncateBlock(item.result)}</div>
           </div>
         </div>
@@ -245,12 +253,13 @@ const ToolItem = ({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): Re
 };
 
 export const StreamItemView = ({ item }: { item: StreamItem }): ReactNode => {
+  const t = useT();
   if (item.kind === "tool") return <ToolItem item={item} />;
   if (item.kind === "error") return <ErrorNotice message={item.message} />;
   return (
     <div className={MSG_CARD}>
       <div className={MSG_HEAD}>
-        <span className="text-foreground">{item.kind === "final" ? "Result" : "Agent"}</span>
+        <span className="text-foreground">{t(item.kind === "final" ? "sessions.stream.result" : "sessions.stream.agent")}</span>
         <span className={MSG_TIME}>{formatDateTime(item.at)}</span>
       </div>
       <Markdown text={item.text} />
@@ -263,6 +272,7 @@ type DebugFilter = "all" | "provider" | "runner";
 export const DebugEvents = ({ events }: { events: SessionEvent[] }): ReactNode => {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<DebugFilter>("all");
+  const t = useT();
   // SessionEventSource is RUNNER | CLAUDE | CODEX | PI — "provider" means
   // "not RUNNER"; there is no literal provider value.
   const rows = events.filter((event) =>
@@ -270,7 +280,7 @@ export const DebugEvents = ({ events }: { events: SessionEvent[] }): ReactNode =
   return (
     <Card
       title={<button type="button" className="flex items-center gap-[8px] border-0 bg-transparent p-0 text-[13.5px]" onClick={() => setOpen(!open)}>
-        <span className="text-muted-foreground"><IconChevron open={open} /></span>Debug events
+        <span className="text-muted-foreground"><IconChevron open={open} /></span>{t("sessions.debug.title")}
       </button>}
       extra={<span className={COUNT}>{events.length}</span>}
     >
@@ -279,9 +289,9 @@ export const DebugEvents = ({ events }: { events: SessionEvent[] }): ReactNode =
           <Segmented
             value={filter}
             onChange={setFilter}
-            options={[{ value: "all", label: "All" }, { value: "provider", label: "Provider" }, { value: "runner", label: "Runner" }]}
+            options={[{ value: "all", label: t("sessions.debug.filter.all") }, { value: "provider", label: t("sessions.debug.filter.provider") }, { value: "runner", label: t("sessions.debug.filter.runner") }]}
           />
-          {rows.length === 0 ? <EmptyState>No events.</EmptyState> : (
+          {rows.length === 0 ? <EmptyState>{t("sessions.debug.empty")}</EmptyState> : (
             <div className={EVENT_LOG}>
               {rows.map((event) => (
                 <div className={EVENT_ROW} key={event.id}>
@@ -300,17 +310,18 @@ export const DebugEvents = ({ events }: { events: SessionEvent[] }): ReactNode =
 
 export const FilesTouched = ({ files, hint }: { files: Array<{ path: string; count: number }>; hint: string | null }): ReactNode => {
   const [open, setOpen] = useState(false);
+  const t = useT();
   return (
     <Card
       title={<button type="button" className="flex items-center gap-[8px] border-0 bg-transparent p-0 text-[13.5px]" onClick={() => setOpen(!open)}>
-        <span className="text-muted-foreground"><IconChevron open={open} /></span>Files touched
+        <span className="text-muted-foreground"><IconChevron open={open} /></span>{t("sessions.files.title")}
       </button>}
       extra={<span className={COUNT}>{files.length}</span>}
     >
       {open ? (
         <div className={STACK}>
           {hint === null ? null : <div className={HINT}>{hint}</div>}
-          {files.length === 0 ? <EmptyState>No files recorded.</EmptyState> : (
+          {files.length === 0 ? <EmptyState>{t("sessions.files.empty")}</EmptyState> : (
             <div className="[&>*+*]:mt-[6px]">
               {files.map((file) => (
                 <div className={ROW} key={file.path}>
@@ -332,6 +343,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   // metadata (endedAt, terminationReason, the backfilled token columns) must
   // not sit stale. Only the event stream stops.
   const { data: session, error, reload } = usePoll<Session>(`/sessions/${sessionId}`, POLL_MS);
+  const t = useT();
   const terminal = session ? !isLive(session.executionStatus) : false;
   const stream = useEventStream(session?.runId ?? null, terminal);
 
@@ -395,7 +407,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   if (error !== null && session === null) {
     return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
   }
-  if (!session) return <Page><EmptyState>Loading…</EmptyState></Page>;
+  if (!session) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const lifecycle = lifecycleStat(session.executionStatus);
   const repoUrl = repoWebUrl(session.run?.repo?.remoteUrl);
@@ -411,7 +423,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
         <SessionStatusPill status={session.executionStatus} />
         <Pill tone="grey">{session.runner}</Pill>
         <span className="flex-1" />
-        <Button type="button" variant="legacy" size="legacy" onClick={() => { reload(); stream.reload(); }}><IconRefresh />Refresh</Button>
+        <Button type="button" variant="legacy" size="legacy" onClick={() => { reload(); stream.reload(); }}><IconRefresh />{t("common.refresh")}</Button>
       </div>
 
       <div className={STACK}>
@@ -423,46 +435,46 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
             <span className={cn(DOT, lifecycle.tone === "green" ? DOT_TONE.green : DOT_TONE.red)} />
             {lifecycle.label}
           </span>
-          <span className={STAT_PILL}>{counts.messages}{plus} messages</span>
-          <span className={STAT_PILL}>{counts.toolCalls}{plus} tool calls</span>
-          <span className={STAT_PILL}>{counts.files}{plus} files</span>
-          {session.totalTokens === null ? null : <span className={STAT_PILL}>{compactTokens(session.totalTokens)} tokens</span>}
+          <span className={STAT_PILL}>{t("sessions.stat.messages", { n: `${counts.messages}${plus}` })}</span>
+          <span className={STAT_PILL}>{t("sessions.stat.toolCalls", { n: `${counts.toolCalls}${plus}` })}</span>
+          <span className={STAT_PILL}>{t("sessions.stat.files", { n: `${counts.files}${plus}` })}</span>
+          {session.totalTokens === null ? null : <span className={STAT_PILL}>{t("sessions.stat.tokens", { n: compactTokens(session.totalTokens) })}</span>}
           {session.costUsd === null ? null : <span className={STAT_PILL}>{money(session.costUsd)}</span>}
         </div>
 
-        <Card title="Details">
+        <Card title={t("sessions.detail.title")}>
           <KeyValue columns={3} items={[
-            { k: "Task", v: session.task ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link> : session.goal ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link> : "—" },
-            { k: "Run", v: session.run ? (session.task ? <Link to={`/tasks/${session.task.id}`}>#{session.run.runNumber}</Link> : `#${session.run.runNumber}`) : "—" },
-            { k: "Model", v: session.run?.model ?? "—" },
-            { k: "Started", v: formatDateTime(session.startedAt ?? session.requestedAt) },
-            { k: "Duration", v: duration(session.startedAt, session.endedAt) },
+            { k: t("sessions.detail.task"), v: session.task ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link> : session.goal ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link> : "—" },
+            { k: t("sessions.detail.run"), v: session.run ? (session.task ? <Link to={`/tasks/${session.task.id}`}>#{session.run.runNumber}</Link> : `#${session.run.runNumber}`) : "—" },
+            { k: t("sessions.detail.model"), v: session.run?.model ?? "—" },
+            { k: t("sessions.detail.started"), v: formatDateTime(session.startedAt ?? session.requestedAt) },
+            { k: t("sessions.detail.duration"), v: duration(session.startedAt, session.endedAt) },
             {
-              k: "Branch",
+              k: t("sessions.detail.branch"),
               v: branch === null ? "—" : repoUrl === null
                 ? branch
                 : <a href={`${repoUrl}/tree/${branch}`} target="_blank" rel="noreferrer">{branch}</a>,
             },
-            { k: "Workspace", v: <span className="text-[11.5px]">{session.run?.workspacePath ?? "—"}</span> },
-            { k: "Termination", v: session.terminationReason ?? "—" },
-            ...(session.resumeAttempt > 0 ? [{ k: "Resume attempts", v: `${session.resumeAttempt}` }] : []),
+            { k: t("sessions.detail.workspace"), v: <span className="text-[11.5px]">{session.run?.workspacePath ?? "—"}</span> },
+            { k: t("sessions.detail.termination"), v: session.terminationReason ?? "—" },
+            ...(session.resumeAttempt > 0 ? [{ k: t("sessions.detail.resumeAttempts"), v: `${session.resumeAttempt}` }] : []),
           ]} />
         </Card>
 
-        <Card title="Stream" extra={<span className={COUNT}>{items.length}{plus}</span>}>
+        <Card title={t("sessions.stream.title")} extra={<span className={COUNT}>{items.length}{plus}</span>}>
           <div className={STACK}>
             {stream.capped ? (
-              <div className={HINT}>Showing the first {stream.events.length} of {stream.total} events. Older events are in the database.</div>
+              <div className={HINT}>{t("sessions.stream.capped", { shown: stream.events.length, total: stream.total })}</div>
             ) : null}
             {stream.error === null ? null : <ErrorNotice message={`${stream.error.status} ${stream.error.message}`} onRetry={stream.reload} />}
-            {items.length === 0 ? <EmptyState>{stream.loading ? "Loading events…" : "No events yet."}</EmptyState> : (
+            {items.length === 0 ? <EmptyState>{t(stream.loading ? "sessions.stream.loading" : "sessions.stream.empty")}</EmptyState> : (
               <div ref={scroller} className="max-h-[720px] overflow-auto [&>*+*]:mt-[12px]">
                 {items.map((item) => <StreamItemView key={`${item.kind}-${item.id}`} item={item} />)}
               </div>
             )}
             {unseen > 0 ? (
               <button type="button" className="self-start border-0 bg-transparent p-0 text-[12px] text-primary" onClick={scrollToBottom}>
-                {unseen} new ↓
+                {t("sessions.stream.new", { n: unseen })}
               </button>
             ) : null}
           </div>

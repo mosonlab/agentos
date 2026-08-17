@@ -1,8 +1,9 @@
 import { type ReactNode, useState } from "react";
 
 import { api } from "../lib/api";
-import { money, timeAgo } from "../lib/format";
+import { formatT, money, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
@@ -20,11 +21,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { cn } from "../lib/utils";
 
 /** §4.7's three states, as the pill each one renders. */
+/* Pure, exported and asserted directly by `automations.test.tsx`, so — like
+ * `archiveDoneNotice` — it reads the locale through `formatT`, the WI-4
+ * registration seam, rather than taking a `Translate` parameter. */
 export const stateLabel = (task: Task): { tone: "green" | "amber" | "red"; label: string; note: string | null } => {
   const state = automationState(task);
-  if (state === "paused") return { tone: "amber", label: "Paused", note: null };
-  if (state === "quarantined") return { tone: "red", label: "Quarantined", note: "Fix the cron expression" };
-  return { tone: "green", label: "Active", note: `Next run ${nextRunLabel(task.runAt)}` };
+  if (state === "paused") return { tone: "amber", label: formatT("automations.state.paused"), note: null };
+  if (state === "quarantined") return { tone: "red", label: formatT("automations.state.quarantined"), note: formatT("automations.note.fixCron") };
+  return { tone: "green", label: formatT("automations.state.active"), note: formatT("automations.nextRun", { at: nextRunLabel(task.runAt) }) };
 };
 
 /** The copies a recurring definition has fired, polled only while the row is
@@ -33,20 +37,21 @@ export const stateLabel = (task: Task): { tone: "green" | "amber" | "red"; label
  *  a mounted-when-expanded poll reads `Never` on every collapsed row. */
 const Fires = ({ taskId }: { taskId: string }): ReactNode => {
   const { data, loading } = usePoll<RecurringFire[]>(`/tasks/${taskId}/recurring-fires?take=5`, 10_000);
+  const t = useT();
   const fires = data ?? [];
-  if (fires.length === 0) return <div className={HINT}>{loading ? "Loading…" : "No sessions yet"}</div>;
+  if (fires.length === 0) return <div className={HINT}>{t(loading ? "common.loading" : "automations.fires.empty")}</div>;
   return (
     <div className={STACK}>
       {fires.map((fire) => (
         <div key={fire.taskId} className="flex flex-wrap items-center gap-[10px] text-[12px]">
           <span className="text-muted-foreground">{timeAgo(fire.createdAt)}</span>
           <Link to={`/tasks/${fire.taskId}`}>{fire.name}</Link>
-          {fire.latestRun ? <RunPill status={fire.latestRun.status} /> : <Pill tone="grey">no run</Pill>}
-          {fire.latestRun?.session ? <Link to={`/sessions/${fire.latestRun.session.id}`}>session</Link> : null}
+          {fire.latestRun ? <RunPill status={fire.latestRun.status} /> : <Pill tone="grey">{t("automations.fires.noRun")}</Pill>}
+          {fire.latestRun?.session ? <Link to={`/sessions/${fire.latestRun.session.id}`}>{t("automations.fires.session")}</Link> : null}
           <span className="text-muted-foreground">{money(fire.latestRun?.session?.costUsd ?? null)}</span>
         </div>
       ))}
-      <div><Link to="/sessions">View all sessions →</Link></div>
+      <div><Link to="/sessions">{t("automations.fires.viewAll")}</Link></div>
     </div>
   );
 };
@@ -60,6 +65,7 @@ export const CronEditor = ({ task, onSaved }: { task: Task; onSaved: () => void 
   const [cron, setCron] = useState(task.cron ?? "");
   const [timezone, setTimezone] = useState(task.timezone ?? "");
   const { pending, error, run } = useAction();
+  const t = useT();
   const save = (): void => {
     // The row keeps whatever the operator typed on a rejection, so a typo is
     // corrected rather than retyped.
@@ -72,16 +78,16 @@ export const CronEditor = ({ task, onSaved }: { task: Task; onSaved: () => void 
     <div className={STACK}>
       {error === null ? null : <ErrorNotice message={error} />}
       <div className={FIELD_ROW}>
-        <Field label="Cron expression" hint="Five fields. Validated by the control plane on save.">
+        <Field label={t("automations.cron.label")} hint={t("automations.cron.hint")}>
           <Input type="text" value={cron} onChange={(event) => setCron(event.target.value)} placeholder="0 9 * * *" />
         </Field>
-        <Field label="Timezone" hint="IANA name. Empty means UTC.">
+        <Field label={t("automations.timezone.label")} hint={t("automations.timezone.hint")}>
           <Input type="text" value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="Asia/Shanghai" />
         </Field>
       </div>
       <div className={HINT}>{cronProse(cron === "" ? null : cron, timezone === "" ? null : timezone)}</div>
       <div>
-        <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={save}>Save</Button>
+        <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={save}>{t("common.save")}</Button>
       </div>
     </div>
   );
@@ -97,13 +103,14 @@ export const AutomationRow = ({ task, expanded, onToggle, onPause, onDelete, onS
 }): ReactNode => {
   const state = stateLabel(task);
   const paused = task.schedulePausedAt !== null;
+  const t = useT();
   return (
     <>
       <TableRow className="cursor-pointer" onClick={(event) => { if (!event.defaultPrevented) onToggle(); }}>
         <TableCell className={TABLE_TIGHT}><span className="text-muted-foreground"><IconChevron open={expanded} /></span></TableCell>
         <TableCell className={TABLE_NAME}>
           <Link to={`/tasks/${task.id}`}>{task.name}</Link>
-          <span className={TABLE_SUB}>{task.recurringFireCount} fired</span>
+          <span className={TABLE_SUB}>{t("automations.fired", { n: task.recurringFireCount })}</span>
         </TableCell>
         <TableCell><AgentChip agent={null} {...(task.assigneeAgent ? { name: task.assigneeAgent.title } : {})} /></TableCell>
         <TableCell>
@@ -115,16 +122,16 @@ export const AutomationRow = ({ task, expanded, onToggle, onPause, onDelete, onS
             <Pill tone={state.tone}>{state.label}</Pill>
             {/* B5/O3: a parked definition is still scheduled — the scheduler only
                 ever picks up TODO, so saying just "Active" would be a lie. */}
-            {task.status === "BACKLOG" ? <span className="text-[11.5px] text-muted-foreground">in Backlog</span> : null}
+            {task.status === "BACKLOG" ? <span className="text-[11.5px] text-muted-foreground">{t("automations.inBacklog")}</span> : null}
           </span>
           {state.note === null ? null : <span className={TABLE_SUB}>{state.note}</span>}
         </TableCell>
-        <TableCell>{task.recurringLastFiredAt === null ? "Never" : timeAgo(task.recurringLastFiredAt)}</TableCell>
+        <TableCell>{task.recurringLastFiredAt === null ? t("automations.never") : timeAgo(task.recurringLastFiredAt)}</TableCell>
         <TableCell className={TABLE_TIGHT}>
           <RowMenu items={[
-            { label: paused ? "Resume" : "Pause", onSelect: () => onPause(task) },
-            { label: "Open task", onSelect: () => navigate(`/tasks/${task.id}`) },
-            { label: "Delete", danger: true, onSelect: () => onDelete(task) },
+            { label: t(paused ? "automations.menu.resume" : "automations.menu.pause"), onSelect: () => onPause(task) },
+            { label: t("automations.menu.openTask"), onSelect: () => navigate(`/tasks/${task.id}`) },
+            { label: t("common.delete"), danger: true, onSelect: () => onDelete(task) },
           ]} />
         </TableCell>
       </TableRow>
@@ -133,7 +140,7 @@ export const AutomationRow = ({ task, expanded, onToggle, onPause, onDelete, onS
           <TableCell colSpan={7} className="bg-[color:var(--surface-run-detail)]">
             <div className={cn(STACK, "py-[6px]")}>
               <CronEditor task={task} onSaved={onSaved} />
-              <Card title="Recent fires"><Fires taskId={task.id} /></Card>
+              <Card title={t("automations.fires.title")}><Fires taskId={task.id} /></Card>
             </div>
           </TableCell>
         </TableRow>
@@ -148,6 +155,7 @@ export const AutomationsPage = (): ReactNode => {
   const { data, loading, error, reload } = usePoll<Task[]>(path);
   const [expanded, setExpanded] = useState<string | null>(null);
   const { error: actionError, run } = useAction();
+  const t = useT();
 
   // The board's own query already returns exactly this set, so the page adds no
   // endpoint and shares one cache with it. No `archivedAt` predicate: `GET /tasks`
@@ -160,11 +168,11 @@ export const AutomationsPage = (): ReactNode => {
     void run(async () => { await api.post(`/tasks/${task.id}/schedule/${action}`, {}); reload(); });
   };
   const remove = (task: Task): void => {
-    if (!window.confirm(`Delete automation ${task.name}?`)) return;
+    if (!window.confirm(t("automations.confirm.delete", { name: task.name }))) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
   };
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">
@@ -176,19 +184,19 @@ export const AutomationsPage = (): ReactNode => {
         {automations.length === 0 ? (
           <EmptyState>
             <span className="mb-[10px] inline-flex text-[color:var(--faint)]"><IconBolt size={22} /></span>
-            <div>{loading ? "Loading…" : "No automations yet"}</div>
-            <div className={cn(HINT, "mt-[6px]")}>A task with a cron schedule becomes an automation: it fires a copy of itself on every occurrence.</div>
+            <div>{t(loading ? "common.loading" : "automations.empty.title")}</div>
+            <div className={cn(HINT, "mt-[6px]")}>{t("automations.empty.hint")}</div>
           </EmptyState>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead className={TABLE_TIGHT} />
-                <TableHead>Title</TableHead>
-                <TableHead>Agent</TableHead>
-                <TableHead>Schedule</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last run</TableHead>
+                <TableHead>{t("automations.table.title")}</TableHead>
+                <TableHead>{t("automations.table.agent")}</TableHead>
+                <TableHead>{t("automations.table.schedule")}</TableHead>
+                <TableHead>{t("automations.table.status")}</TableHead>
+                <TableHead>{t("automations.table.lastRun")}</TableHead>
                 <TableHead className={TABLE_TIGHT} />
               </TableRow>
             </TableHeader>

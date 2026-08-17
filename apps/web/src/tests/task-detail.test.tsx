@@ -69,7 +69,9 @@ test("the raw event table has left the task page", () => {
   for (const symbol of ["RunEvents", "EVENT_LOG", "EVENT_ROW"]) {
     assert.doesNotMatch(source, new RegExp(`\\b${symbol}\\b`), symbol);
   }
-  assert.match(source, /Open session ↗/);
+  // The link moved to a dictionary key in batch 1, so the guard follows it: the
+  // point of the assertion is that the session is reachable from the run row.
+  assert.match(source, /taskDetail\.run\.openSession/);
 });
 
 test("the runs table's head count, cell count and expanded colSpan agree", () => {
@@ -91,8 +93,8 @@ test("every run's pull request is reachable, not just the newest one's", () => {
   // reachable from nowhere in the product.
   const row = source.slice(source.indexOf("const RunRow"), source.indexOf("const Activity"));
   const expanded = row.slice(row.indexOf("{expanded ?"));
-  assert.match(expanded, /k: "Pull request"/);
+  assert.match(expanded, /k: t\("taskDetail\.run\.pullRequest"\)/);
   assert.match(expanded, /run\.pullRequestUrl/);
   // Distinct from Push, which is the status word and never a link.
-  assert.match(expanded, /k: "Push"/);
+  assert.match(expanded, /k: t\("taskDetail\.run\.push"\)/);
 });

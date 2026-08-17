@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 import { api } from "../lib/api";
 import { compactTokens, duration, formatDateTime, money, repoWebUrl, sha, timeAgo, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
@@ -52,58 +53,64 @@ const BranchCell = ({ remoteUrl, branch }: { remoteUrl: string | null | undefine
   );
 };
 
-const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => (
-  <>
-    <TableRow className="cursor-pointer" onClick={onToggle}>
-      <TableCell className={TABLE_TIGHT}><span className="text-muted-foreground"><IconChevron open={expanded} /></span></TableCell>
-      <TableCell className={TABLE_NAME}>#{run.runNumber}<span className={TABLE_SUB}>{run.runner.toLowerCase()} · {run.model}</span></TableCell>
-      <TableCell><RunPill status={run.status} /></TableCell>
-      <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
-      <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
-      <TableCell><BranchCell remoteUrl={remoteUrl} branch={run.branch ?? run.targetBranch} /></TableCell>
-      {/* No size class: this cell carried `.small` before the batch, but
-          `.table td { font-size: 12.5px }` outranks `.small` on specificity, so
-          11.5px never reached it. The four `.small` spans that survive as
-          `text-[11.5px]` all sit in KeyValue lists, outside any table. */}
-      <TableCell>{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
-      <TableCell>{money(run.session?.costUsd ?? null)}</TableCell>
-      <TableCell>{compactTokens(run.session?.totalTokens ?? null)}</TableCell>
-      <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{run.failureClass.toLowerCase().replace(/_/g, " ")}</Pill>}</TableCell>
-    </TableRow>
-    {expanded ? (
-      <TableRow>
-        <TableCell colSpan={10} className="bg-[color:var(--surface-run-detail)]">
-          <div className={STACK}>
-            <KeyValue columns={3} items={[
-              { k: "Run ID", v: <span className="text-[11.5px]">{run.id}</span> },
-              { k: "Runner instance", v: run.runnerId ?? "—" },
-              { k: "Lease generation", v: `${run.leaseGeneration}` },
-              { k: "Workspace", v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? " (retained)" : ""}</span> },
-              { k: "Budget", v: `${run.maxDurationMin}m wall · ${run.stallTimeoutMin}m stall · ${run.maxRunsPerTask} runs` },
-              { k: "Push", v: run.pushStatus.toLowerCase().replace(/_/g, " ") },
-              // The task Details card sources its anchor from the newest run
-              // alone, so without this entry an earlier run's PR — a retry, a
-              // review run, a run that failed after pushing — is reachable from
-              // nowhere. Distinct from `Push`, which is the status and not a link.
-              { k: "Pull request", v: run.pullRequestUrl === null ? "—"
-                : <ExternalLink href={run.pullRequestUrl}>{pullRequestLabel(run.pullRequestUrl)}</ExternalLink> },
-              { k: "Session status", v: run.session?.executionStatus.toLowerCase().replace("_", " ") ?? "—" },
-              { k: "Session", v: run.session ? <Link to={`/sessions/${run.session.id}`}>Open session ↗</Link> : "—" },
-              { k: "Resume attempts", v: `${run.session?.resumeAttempt ?? 0}` },
-              { k: "Termination", v: run.terminationReason ?? "—" },
-            ]} />
-            {run.failureReason === null ? null : <ErrorNotice message={run.failureReason} />}
-          </div>
-        </TableCell>
+const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
+  const t = useT();
+  return (
+    <>
+      <TableRow className="cursor-pointer" onClick={onToggle}>
+        <TableCell className={TABLE_TIGHT}><span className="text-muted-foreground"><IconChevron open={expanded} /></span></TableCell>
+        <TableCell className={TABLE_NAME}>#{run.runNumber}<span className={TABLE_SUB}>{run.runner.toLowerCase()} · {run.model}</span></TableCell>
+        <TableCell><RunPill status={run.status} /></TableCell>
+        <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
+        <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
+        <TableCell><BranchCell remoteUrl={remoteUrl} branch={run.branch ?? run.targetBranch} /></TableCell>
+        {/* No size class: this cell carried `.small` before the batch, but
+            `.table td { font-size: 12.5px }` outranks `.small` on specificity, so
+            11.5px never reached it. The four `.small` spans that survive as
+            `text-[11.5px]` all sit in KeyValue lists, outside any table. */}
+        <TableCell>{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
+        <TableCell>{money(run.session?.costUsd ?? null)}</TableCell>
+        <TableCell>{compactTokens(run.session?.totalTokens ?? null)}</TableCell>
+        <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{t(`status.failure.${run.failureClass}`)}</Pill>}</TableCell>
       </TableRow>
-    ) : null}
-  </>
-);
+      {expanded ? (
+        <TableRow>
+          <TableCell colSpan={10} className="bg-[color:var(--surface-run-detail)]">
+            <div className={STACK}>
+              <KeyValue columns={3} items={[
+                { k: t("taskDetail.run.id"), v: <span className="text-[11.5px]">{run.id}</span> },
+                { k: t("taskDetail.run.runnerInstance"), v: run.runnerId ?? "—" },
+                { k: t("taskDetail.run.leaseGeneration"), v: `${run.leaseGeneration}` },
+                { k: t("taskDetail.run.workspace"), v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? ` ${t("taskDetail.run.retained")}` : ""}</span> },
+                { k: t("taskDetail.run.budget"), v: t("taskDetail.run.budgetValue", { wall: run.maxDurationMin, stall: run.stallTimeoutMin, runs: run.maxRunsPerTask }) },
+                // `pushStatus` is an open string on the wire, not a closed union, so
+                // it stays a technical identifier (spec §4.3.7's carve-out).
+                { k: t("taskDetail.run.push"), v: run.pushStatus.toLowerCase().replace(/_/g, " ") },
+                // The task Details card sources its anchor from the newest run
+                // alone, so without this entry an earlier run's PR — a retry, a
+                // review run, a run that failed after pushing — is reachable from
+                // nowhere. Distinct from `Push`, which is the status and not a link.
+                { k: t("taskDetail.run.pullRequest"), v: run.pullRequestUrl === null ? "—"
+                  : <ExternalLink href={run.pullRequestUrl}>{pullRequestLabel(run.pullRequestUrl)}</ExternalLink> },
+                { k: t("taskDetail.run.sessionStatus"), v: run.session ? t(`status.session.${run.session.executionStatus}`) : "—" },
+                { k: t("taskDetail.run.session"), v: run.session ? <Link to={`/sessions/${run.session.id}`}>{t("taskDetail.run.openSession")}</Link> : "—" },
+                { k: t("taskDetail.run.resumeAttempts"), v: `${run.session?.resumeAttempt ?? 0}` },
+                { k: t("taskDetail.run.termination"), v: run.terminationReason ?? "—" },
+              ]} />
+              {run.failureReason === null ? null : <ErrorNotice message={run.failureReason} />}
+            </div>
+          </TableCell>
+        </TableRow>
+      ) : null}
+    </>
+  );
+};
 
 const Activity = ({ taskId }: { taskId: string }): ReactNode => {
   const { data, reload } = usePoll<TaskActivity[]>(`/tasks/${taskId}/activity`);
   const [comment, setComment] = useState("");
   const { pending, error, run } = useAction();
+  const t = useT();
   const items = data ?? [];
 
   const send = async (): Promise<void> => {
@@ -113,9 +120,9 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
   };
 
   return (
-    <Card title="Activity" extra={<span className={COUNT}>{items.length}</span>}>
+    <Card title={t("taskDetail.activity.title")} extra={<span className={COUNT}>{items.length}</span>}>
       <div className={STACK}>
-        {items.length === 0 ? <EmptyState>No activity yet.</EmptyState> : (
+        {items.length === 0 ? <EmptyState>{t("taskDetail.activity.empty")}</EmptyState> : (
           <div className="[&>*+*]:mt-[12px]">
             {items.map((item) => (
               <div className={MSG_CARD} key={item.id}>
@@ -131,10 +138,10 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
         )}
         {error === null ? null : <ErrorNotice message={error} />}
         <div className={ROW}>
-          <Input type="text" value={comment} placeholder="Add a comment..." onChange={(event) => setComment(event.target.value)}
+          <Input type="text" value={comment} placeholder={t("taskDetail.activity.placeholder")} onChange={(event) => setComment(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter") void send(); }} />
           <Button type="button" variant="legacy" size="legacy" disabled={pending || comment.trim().length === 0} onClick={() => void send()}>
-            <IconSend />Send
+            <IconSend />{t("taskDetail.activity.send")}
           </Button>
         </div>
       </div>
@@ -148,23 +155,24 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
  *  empty state rather than an empty box (spec §6). */
 export const StepOutput = ({ output }: { output: TaskStepOutput }): ReactNode => {
   const [open, setOpen] = useState(false);
+  const t = useT();
   const empty = output.body.trim().length === 0;
   const long = isLongText(output.body, 10);
   return (
-    <Card title="Step output" extra={<Pill tone="grey">{output.kind}</Pill>}>
-      {empty ? <EmptyState>No output recorded.</EmptyState> : (
+    <Card title={t("taskDetail.output.title")} extra={<Pill tone="grey">{output.kind}</Pill>}>
+      {empty ? <EmptyState>{t("taskDetail.output.empty")}</EmptyState> : (
         <div>
           <div className={cn(!open && long && "max-h-[420px] overflow-hidden")}>
             <Markdown text={output.body} />
           </div>
           {long ? (
             <button type="button" className={SHOW_MORE_BUTTON} onClick={() => setOpen(!open)}>
-              <IconChevron open={open} />{open ? "Show less" : "Show more"}
+              <IconChevron open={open} />{t(open ? "ui.showMore.less" : "ui.showMore.more")}
             </button>
           ) : null}
         </div>
       )}
-      <div className="mt-2.5">Updated {timeAgo(output.updatedAt)}</div>
+      <div className="mt-2.5">{t("taskDetail.output.updated", { at: timeAgo(output.updatedAt) })}</div>
     </Card>
   );
 };
@@ -179,6 +187,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   const chain = usePoll<Chain>(`/tasks/${taskId}/chain`);
   const [expanded, setExpanded] = useState<string | null>(null);
   const { pending, error: actionError, run } = useAction();
+  const t = useT();
 
   // `usePoll` keeps the last good data on error, which is right for a blip and
   // wrong for a deletion — `fatal` is what makes a 404 authoritative. The chain
@@ -187,7 +196,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   if (fatal(error, task)) {
     return <Page><ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /></Page>;
   }
-  if (!task) return <Page><EmptyState>Loading…</EmptyState></Page>;
+  if (!task) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const patch = (body: Record<string, unknown>): void => {
     void run(async () => { await api.patch(`/tasks/${taskId}`, body); reload(); });
@@ -223,23 +232,23 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <Link to="/tasks" className={BACK_LINK}><IconArrowLeft /></Link>
         <h1 className={DETAIL_HEAD_H1}>{task.name}</h1>
         <TaskPill status={task.status} />
-        {task.templateId === null ? null : <Pill tone="violet">Template</Pill>}
-        {task.archivedAt === null ? null : <Pill tone="grey">archived</Pill>}
+        {task.templateId === null ? null : <Pill tone="violet">{t("tasks.pill.template")}</Pill>}
+        {task.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
         <span className="flex-1" />
         {/* `disabled:opacity-100 disabled:cursor-default`: the retired sheet had no
             `select:disabled` rule at all, so this control rendered at full opacity
             with the UA cursor while a patch was in flight. The primitive dims to
             50% and shows `not-allowed` (ui/select.tsx:21). */}
         <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
-          {STATUSES.map((status) => <option key={status} value={status}>{status.toLowerCase()}</option>)}
+          {STATUSES.map((status) => <option key={status} value={status}>{t(`status.task.${status}`)}</option>)}
         </Select>
         {retryable(task) ? (
-          <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />Retry</Button>
+          <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>
-          <IconArchive />{task.archivedAt === null ? "Archive" : "Unarchive"}
+          <IconArchive />{t(task.archivedAt === null ? "tasks.menu.archive" : "archived.menu.unarchive")}
         </Button>
-        <Button type="button" variant="legacy" size="legacy" onClick={reload}><IconRefresh />Refresh</Button>
+        <Button type="button" variant="legacy" size="legacy" onClick={reload}><IconRefresh />{t("common.refresh")}</Button>
       </div>
 
       <div className={STACK}>
@@ -247,43 +256,43 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         {task.failureReason === null ? null : <ErrorNotice message={task.failureReason} />}
 
         <div className={STAT_PILLS}>
-          <span className={STAT_PILL}>{runs.length} runs</span>
-          <span className={STAT_PILL}>{money(totalCost === 0 ? null : totalCost)} spend</span>
-          <span className={STAT_PILL}>{compactTokens(totalTokens)} tokens</span>
-          <span className={STAT_PILL}>{task.maxDurationMin}m wall-clock</span>
-          <span className={STAT_PILL}>{task.stallTimeoutMin}m stall</span>
-          <span className={STAT_PILL}>max {task.maxSessionsPerTask} runs</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.runs", { n: runs.length })}</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.spend", { amount: money(totalCost === 0 ? null : totalCost) })}</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.tokens", { n: compactTokens(totalTokens) })}</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.wallClock", { n: task.maxDurationMin })}</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.stall", { n: task.stallTimeoutMin })}</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.maxRuns", { n: task.maxSessionsPerTask })}</span>
         </div>
 
-        <Card title="Details">
+        <Card title={t("taskDetail.details.title")}>
           <KeyValue items={[
-            { k: "Agent", v: task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : "No agent" },
-            { k: "Assignee", v: task.assigneeType === "AGENT" ? "Agent" : "Human" },
-            { k: "Repo", v: task.repo ? `${task.repo.name} · ${task.repo.remoteUrl}` : "—" },
-            { k: "Target branch", v: task.targetBranch ?? task.repo?.defaultBranch ?? "—" },
+            { k: t("taskDetail.details.agent"), v: task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("taskDetail.details.noAgent") },
+            { k: t("taskDetail.details.assignee"), v: t(task.assigneeType === "AGENT" ? "newTask.option.agent" : "newTask.option.human") },
+            { k: t("taskDetail.details.repo"), v: task.repo ? `${task.repo.name} · ${task.repo.remoteUrl}` : "—" },
+            { k: t("taskDetail.details.targetBranch"), v: task.targetBranch ?? task.repo?.defaultBranch ?? "—" },
             {
-              k: "Branch",
+              k: t("taskDetail.details.branch"),
               v: newestBranch === null ? "—"
                 : newestBranchUrl === null ? newestBranch
                   : <ExternalLink href={newestBranchUrl}>{newestBranch}</ExternalLink>,
             },
             {
-              k: "Pull request",
+              k: t("taskDetail.details.pullRequest"),
               v: pullRequestUrl === null ? "—"
                 : <ExternalLink href={pullRequestUrl}>{pullRequestLabel(pullRequestUrl)}</ExternalLink>,
             },
-            { k: "Schedule", v: task.scheduleKind === "NOW" ? "Run once" : titleCase(task.scheduleKind) },
-            { k: "Working directory", v: task.workingDirectory ?? "—" },
+            { k: t("taskDetail.details.schedule"), v: t(`taskDetail.details.scheduleKind.${task.scheduleKind}`) },
+            { k: t("taskDetail.details.workingDirectory"), v: task.workingDirectory ?? "—" },
             {
-              k: "Requires approval",
+              k: t("taskDetail.details.approval"),
               v: (
                 <span className={ROW}>
-                  <Toggle on={task.approvalGate} onChange={(next) => patch({ approvalGate: next })} label="Requires approval" />
-                  <span className="text-[11.5px] text-muted-foreground">{task.approvalGate ? "Decided in the Inbox" : "Off"}</span>
+                  <Toggle on={task.approvalGate} onChange={(next) => patch({ approvalGate: next })} label={t("taskDetail.details.approval")} />
+                  <span className="text-[11.5px] text-muted-foreground">{t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff")}</span>
                 </span>
               ),
             },
-            { k: "Created", v: formatDateTime(task.createdAt) },
+            { k: t("taskDetail.details.created"), v: formatDateTime(task.createdAt) },
           ]} />
         </Card>
 
@@ -291,21 +300,21 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
           ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
           : null}
 
-        <Card title="Prompt">
+        <Card title={t("taskDetail.prompt.title")}>
           {task.description.trim().length === 0
-            ? <EmptyState>No prompt recorded.</EmptyState>
+            ? <EmptyState>{t("taskDetail.prompt.empty")}</EmptyState>
             : <ShowMore text={task.description} lines={8} />}
         </Card>
 
         {output.data ? <StepOutput output={output.data} /> : null}
 
-        <Card title="Runs" extra={<span className={COUNT}>{runs.length}</span>} flush>
+        <Card title={t("taskDetail.runs.title")} extra={<span className={COUNT}>{runs.length}</span>} flush>
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead />
-                <TableHead>Run</TableHead><TableHead>Status</TableHead><TableHead>Started</TableHead><TableHead>Duration</TableHead>
-                <TableHead>Branch</TableHead><TableHead>base → head</TableHead><TableHead>Cost</TableHead><TableHead>Tokens</TableHead><TableHead>Failure class</TableHead>
+                <TableHead>{t("taskDetail.runs.table.run")}</TableHead><TableHead>{t("taskDetail.runs.table.status")}</TableHead><TableHead>{t("taskDetail.runs.table.started")}</TableHead><TableHead>{t("taskDetail.runs.table.duration")}</TableHead>
+                <TableHead>{t("taskDetail.runs.table.branch")}</TableHead><TableHead>base → head</TableHead><TableHead>{t("taskDetail.runs.table.cost")}</TableHead><TableHead>{t("taskDetail.runs.table.tokens")}</TableHead><TableHead>{t("taskDetail.runs.table.failureClass")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -315,7 +324,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
               ))}
             </TableBody>
           </Table>
-          {runs.length === 0 ? <EmptyState>No runs yet. Agent tasks queue a run on creation.</EmptyState> : null}
+          {runs.length === 0 ? <EmptyState>{t("taskDetail.runs.empty")}</EmptyState> : null}
         </Card>
 
         <Activity taskId={taskId} />
