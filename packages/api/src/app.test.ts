@@ -1076,7 +1076,12 @@ test("GET /runs/:runId/events pages by seq and reports hasMore without a second 
 /* --------------------------------- the usage recompute's ingest wiring */
 
 /** A CLAUDE terminal `result` line, trimmed to the fields `extractUsage` reads.
- *  Values are the captured shape from `spikes/cli-capabilities/samples/`. */
+ *  Values are the captured shape from `spikes/cli-capabilities/samples/`.
+ *
+ *  It stays trimmed ON PURPOSE, and specifically it carries no `modelUsage`:
+ *  these three tests are what keep `extractUsage`'s top-level snake_case
+ *  fallback branch covered — the branch CODEX and PI always take. The complete
+ *  captures, `modelUsage` included, live in `usage.test.ts`. */
 const finalOutputPayload = {
   type: "result",
   total_cost_usd: 0.049117,
