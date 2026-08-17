@@ -1,6 +1,6 @@
 # PLAN — CP-A v1.0: cross-database workspace-root ownership
 
-Status: first-pass implementation plan for review  
+Status: authoritative implementation plan for review
 Author: plan agent · Date: 2026-08-17  
 Product Contract: **CP-A v1.0**  
 Routing: **Planned Critical** · implementation agent **`senior-dev`** · high effort  
@@ -140,9 +140,11 @@ database URL or credential.
    an exclusive non-blocking `flock`.
 3. If the kernel reports contention, close the descriptor, read owner evidence
    only for diagnostics, emit `CONTROL_PLANE_OWNERSHIP_CONFLICT`, and exit with
-   a dedicated non-zero code before any database/app import, reconciliation,
-   scheduler creation, or listen attempt. Missing/malformed diagnostics do not
-   weaken the conflict.
+   `CONTROL_PLANE_OWNERSHIP_EXIT_CODE=75` before any database/app import,
+   reconciliation, scheduler creation, or listen attempt. Exit 75 is the
+   dedicated temporary-failure status for every refused acquisition; the marker
+   and a bounded `reason` distinguish held-lock conflicts from ambiguous stale
+   evidence. Missing/malformed diagnostics do not weaken the conflict.
 4. If the lock is acquired and there is no prior owner record, this is a first
    acquisition. Create/load the stable ID, atomically write `state=owned`, and
    continue.
@@ -194,6 +196,27 @@ Shutdown or startup-failure order:
 descriptor, the `owned` record remains as crash evidence, and the next process
 must pass the dead-owner rule above.
 
+### 2.5 Lock ordering and failure surface
+
+The process-wide order is always **workspace-root flock → Prisma/database work
+or task-row locks**. Ownership is acquired once before Prisma is imported and
+is never acquired or upgraded inside a request, database transaction, runner
+claim, reconciliation pass, or scheduler tick. Metadata temp-file writes occur
+while the flock is held and do not acquire an application/database lock.
+Shutdown finishes HTTP/database work before releasing the flock. This single
+outer lock order prevents an ownership/transaction cycle and leaves all
+existing task-row and Run fencing order unchanged.
+
+The exact markers are `CONTROL_PLANE_OWNERSHIP_ACQUIRED`,
+`CONTROL_PLANE_OWNERSHIP_RECOVERED`, `CONTROL_PLANE_OWNERSHIP_CONFLICT` (held
+flock), `CONTROL_PLANE_OWNERSHIP_REFUSED` (ambiguous evidence or lock failure),
+and `CONTROL_PLANE_OWNERSHIP_RELEASED`. Each is a one-line, machine-greppable
+record with the canonical root, safe identity fields, and a bounded reason; it
+never contains `DATABASE_URL`. A supervisor such as the shipped launchd
+`KeepAlive` configuration may retry exit 75, so operations must identify and
+stop the duplicate service/process instead of deleting lock or evidence files.
+No launchd behavior is changed by CP-A.
+
 ## 3. Ordered implementation steps
 
 ### Step 1 — Add the canonical-root ownership primitive
@@ -235,8 +258,11 @@ existing imports.
 ### Step 2 — Make ownership the first and last API lifecycle operation
 
 **Files:** `packages/api/src/index.ts`; `packages/api/src/app.ts`;
-`packages/api/src/reconcile.ts`; `packages/api/src/app.test.ts`; optionally
-`packages/api/src/control-plane.test.ts` for entrypoint-order assertions.
+`packages/api/src/reconcile.ts`; new `packages/api/src/test-app.ts`;
+`packages/api/src/app.test.ts`; `packages/api/src/control-plane.test.ts`; and
+the existing direct app-factory callers migrated mechanically to the test-only
+factory: `packages/api/src/{agent-foundation.dbtest.ts,agent-tools.dbtest.ts,chain-branch.dbtest.ts,chain.dbtest.ts,goals.test.ts,hooks.dbtest.ts,hooks.test.ts,runners.test.ts,scheduler.dbtest.ts,tasks.dbtest.ts,triggers.dbtest.ts,workflow.test.ts}`
+and `packages/api/src/files/{grant-alias.test.ts,routes.test.ts,session-routes.test.ts}`.
 
 **Changes:**
 
@@ -244,33 +270,40 @@ existing imports.
    exact startup state machine in §2.4. Import `@agentos/db`, `app`, reconcile,
    scheduler, and Files configuration only after acquisition.
 2. Import `createApp`, not the eager exported singleton. Extend `createApp` with
-   immutable live options containing the canonical workspace root and
+   required immutable live options containing the canonical workspace root and
    ownership assertion; remove the unused module-level `app` export so the
-   production entrypoint cannot silently use default/env-derived GC state.
+   production entrypoint cannot silently use default/env-derived GC state. Add
+   a test-only app factory/capability for direct Hono tests; production code
+   cannot obtain or default to that no-op capability.
 3. Pass the canonical root to Files/root isolation and
    `reconcileAtStartup`; call `assertHeld()` immediately before startup
    reconciliation.
-4. Change the post-run completion GC in `app.ts` to use the captured canonical
-   root and assert ownership before `reconcileWorkspaces`. Keep claim-time
-   database reconciliation inside the already-owned served application.
+4. Assert the same held capability immediately before claim-time
+   `reconcileDatabaseRuns` and post-run `reconcileWorkspaces`; the latter uses
+   only the captured canonical root. An assertion failure must prevent that
+   reconciliation call and must not be swallowed as an ordinary GC failure.
 5. Make server close awaitable and implement one idempotent shutdown path for
    `SIGINT`, `SIGTERM`, startup exceptions, and normal test teardown. Release
    ownership only after scheduler, HTTP, and Prisma are stopped.
-6. Emit stable machine-greppable acquired/conflict/recovered/released markers.
+6. Emit the exact machine-greppable markers from §2.5 and exit 75 on every
+   conflict/refusal before importing database/application code.
    A conflict message names root and available owner identity, says that no
    reconciliation/listen occurred, and exits non-zero without a stack trace or
    secret.
 
 **Verification:**
 
-- API unit tests capture `createApp` options and prove post-run GC receives the
-  immutable canonical root and refuses when `assertHeld()` fails.
+- API unit tests capture `createApp` options and prove both claim-time database
+  reconciliation and post-run GC assert ownership first; post-run GC receives
+  the immutable canonical root and neither reconciler runs when
+  `assertHeld()` fails.
 - An entrypoint ordering test supplies an already-held root and an invalid or
   query-trapping database URL; the process must emit only the ownership
-  conflict and exit without importing/connecting to Prisma, printing
+  conflict, exit 75, and avoid importing/connecting to Prisma, printing
   `Startup reconciliation`, or printing `listening`.
-- Existing reconciliation tests remain green, proving the ownership metadata
-  files are not considered workspace directories.
+- Existing reconciliation tests remain green, with a focused fixture proving
+  the three exact ownership metadata files survive a GC pass because they are
+  non-directories.
 - Run `npm run test -w @agentos/api` and
   `npm run typecheck -w @agentos/api`.
 
@@ -284,24 +317,26 @@ suite if it spawns `dist/index.js`).
 **Changes:**
 
 1. Extend test infrastructure with a narrowly guarded scratch database helper.
-   It creates uniquely prefixed empty databases, applies only committed
-   migrations, clones a source scratch database to a second scratch database
-   before either API connects, and drops only names created by that test.
+   It creates uniquely prefixed, distinct PostgreSQL **database names** (not
+   merely two schemas), applies only committed migrations to source database A,
+   clones A to database B with PostgreSQL's template-copy operation before
+   either API connects, and drops only names created by that test.
    Refuse `public`/production targets, existing names, unrecognized prefixes,
    source/target equality, or cleanup outside the recorded test IDs. Never log
    credential-bearing URLs.
 2. Spawn the built production entrypoint with explicit isolated environment:
-   scratch `DATABASE_URL`, `API_HOST=127.0.0.1`, `API_PORT=0`, scheduler disabled,
-   distinct Files temp root, shared workspace temp root, and test-only tokens.
-   Treat `CONTROL_PLANE_OWNERSHIP_ACQUIRED` followed by `listening` as ready.
+   scratch `DATABASE_URL`, `API_HOST=127.0.0.1`, `API_PORT=0`,
+   `SCHEDULER_POLL_INTERVAL_MS=0`, distinct Files temp root, shared workspace
+   temp root, and test-only tokens. Treat
+   `CONTROL_PLANE_OWNERSHIP_ACQUIRED` followed by `listening` as ready.
 3. **Same DB / same canonical root:** after owner A listens, insert an expired
    active Run and an orphan directory. Start B with the same database/root.
-   Assert B exits non-zero with conflict before reconciliation/listen, the Run
+   Assert B exits 75 with conflict before reconciliation/listen, the Run
    is unchanged, and the directory still exists.
 4. **Copied DB / same canonical root:** create DB B as a physical copy of an
    empty, migrated scratch DB A before startup. Start owner A, then put an
    expired active Run in copied DB B and an orphan directory in the shared temp
-   root. Start B against the copy. Assert the same early conflict and that both
+   root. Start B against the copy. Assert the same exit-75 early conflict and that both
    database state and directory are unchanged.
 5. Assert the losing process never writes acquired/recovered/released evidence
    and that owner A remains healthy. Teardown terminates only recorded child
