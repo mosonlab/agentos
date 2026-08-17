@@ -633,6 +633,10 @@ Then, against a live control plane with at least one finished and one running ag
    cost `—`; for anything unknown, `—` and never `0`.
 9. **Backfill.** Run `npm run db:backfill-session-usage` twice. Expect: the first run fills historic
    sessions (the task page's older runs stop showing `—`), the second reports zero updates.
+   *(Corrected 2026-08-16 by batch 4 FIXES: run it **after** the API is restarted onto the fixed
+   code, and the second run must report `updated 0` **and exit zero** — the script now exits
+   non-zero if any session failed. Full sequence:
+   [`docs/runbooks/batch-4-rollback.md`](../runbooks/batch-4-rollback.md) §1.6.)*
 10. **Themes.** Toggle the theme control. Expect: the session page is correct in light and dark; no
     hardcoded colour anywhere in the diff (`grep -nE "#[0-9a-fA-F]{3,8}" apps/web/src/pages/Sessions.tsx`
     returns nothing).
@@ -661,8 +665,30 @@ The batch is **not** purely UI. Three layers, three rollback stories:
    reverted, `ALTER TABLE "Session" DROP COLUMN` on the four columns loses only derived data that
    the backfill script can recompute from `SessionEvent` at any time. **No destructive migration, no
    precheck script required** (contrast BACKLOG-V2's 破坏性守卫 item).
-5. **The backfill script** is idempotent and write-only-to-null. Re-running it after a rollback and
-   re-deploy restores the numbers.
+5. **The backfill script** is idempotent and ~~write-only-to-null~~ *(false — see the superseding
+   note below)*. Re-running it after a rollback and re-deploy restores the numbers.
+
+> **Superseded 2026-08-16 by batch 4 FIXES**
+> ([spec](batch-4-fixes-usage-correctness.md) MF-3/MF-3b,
+> [runbook](../runbooks/batch-4-rollback.md)). Two corrections to items 4 and 5.
+>
+> **Item 4 omits the migration's two indexes.** `20260816165548_batch4_session_usage`
+> also creates `Session_projectId_requestedAt_idx` and `SessionEvent_runId_seq_idx`.
+> On a production-sized `SessionEvent` an ordinary `CREATE INDEX` blocks every
+> insert for its duration and queues every later writer behind it, so the indexes
+> are built **out of band** with `CREATE INDEX CONCURRENTLY` before the migration
+> runs, and rolling them back is `DROP INDEX CONCURRENTLY`, one statement per
+> `psql -c`, outside any transaction. `docs/runbooks/batch-4-rollback.md` is the
+> authoritative procedure for both directions; it also records that
+> **`Session.costUsd` predates this migration and must never be dropped with the
+> four token columns**.
+>
+> **Item 5's "write-only-to-null" is false.** The backfill is an absolute
+> recompute from `SessionEvent` of every session that has a `FINAL_OUTPUT` event;
+> it overwrites any populated cache that differs from the recomputed value and
+> writes nothing when they match. That distinction is load-bearing — a
+> write-only-to-null backfill would skip every already-populated session, which is
+> exactly the population batch 4 FIXES' corrected extractor has to repair.
 
 ---
 
