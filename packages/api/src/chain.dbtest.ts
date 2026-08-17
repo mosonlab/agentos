@@ -185,6 +185,73 @@ const completeIntoHumanGate = async () => {
   return { ...seeded, gate };
 };
 
+const seedDuplicateGateCards = async () => {
+  const seeded = await seedExecutableChain();
+  await db.task.update({ where: { id: seeded.predecessor.id }, data: { status: "REVIEW" } });
+  const run = await db.run.create({ data: {
+    projectId: seeded.project.id, taskId: seeded.predecessor.id, agentId: seeded.agent.id, repoId: seeded.repo.id,
+    runNumber: 1, dedupeKey: `task:${seeded.predecessor.id}:duplicate-gates`, runner: "CLAUDE",
+    model: seeded.agent.model, promptHash: "hash", status: "SUCCEEDED",
+  } });
+  const session = await db.session.create({ data: {
+    runId: run.id, projectId: seeded.project.id, agentId: seeded.agent.id,
+    taskId: seeded.predecessor.id, runner: "CLAUDE",
+  } });
+  const first = await db.inboxMessage.create({ data: {
+    from: "AGENT", agentId: seeded.agent.id, sessionId: session.id, taskId: seeded.predecessor.id,
+    gateTaskId: seeded.predecessor.id, kind: "MULTIPLE_CHOICE", body: "first gate card",
+    choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    dedupeKey: `gate:duplicate:first:${seeded.predecessor.id}`,
+  } });
+  const second = await db.inboxMessage.create({ data: {
+    from: "AGENT", agentId: seeded.agent.id, sessionId: session.id, taskId: seeded.predecessor.id,
+    gateTaskId: seeded.predecessor.id, kind: "MULTIPLE_CHOICE", body: "second gate card",
+    choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    dedupeKey: `gate:duplicate:second:${seeded.predecessor.id}`,
+  } });
+  const unrelated = await db.inboxMessage.create({ data: {
+    from: "AGENT", agentId: seeded.agent.id, sessionId: session.id, taskId: seeded.successor.id,
+    gateTaskId: seeded.successor.id, kind: "MULTIPLE_CHOICE", body: "unrelated gate",
+    choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    dedupeKey: `gate:unrelated:${seeded.successor.id}`,
+  } });
+  return { ...seeded, first, second, unrelated };
+};
+
+const assertDuplicateGateCardsHaveOneWinner = async (firstDecision: "approve" | "reject") => {
+  const { predecessor, successor, first, second, unrelated } = await seedDuplicateGateCards();
+  const secondDecision = firstDecision === "approve" ? "reject" : "approve";
+  const decide = (inboxMessageId: string, decision: "approve" | "reject", event: string) => db.$transaction(
+    (tx) => applyInboxDecisionTx(tx, { inboxMessageId, externalEventId: event, decision }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+  );
+
+  const winner = await decide(first.id, firstDecision, `duplicate-winner-${firstDecision}-${Date.now()}`);
+  const loser = await decide(second.id, secondDecision, `duplicate-loser-${secondDecision}-${Date.now()}`);
+  const replay = await decide(first.id, firstDecision, `duplicate-replay-${firstDecision}-${Date.now()}`);
+
+  assert.equal(winner.duplicate, false);
+  assert.equal(winner.gateAction, firstDecision === "approve" ? "approved" : "rejected");
+  assert.deepEqual(loser, { duplicate: true, resumed: false });
+  assert.deepEqual(replay, { duplicate: true, resumed: false });
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: first.id } })).status, "ANSWERED");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: second.id } })).status, "CLOSED");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: unrelated.id } })).status, "OPEN");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: { in: [first.id, second.id] } } }), 1);
+  assert.equal(await db.inboxMessage.count({ where: { replyToMessageId: { in: [first.id, second.id] } } }), 1);
+
+  if (firstDecision === "approve") {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
+    assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+    assert.equal(await db.taskActivity.count({ where: { taskId: predecessor.id, body: "Approval gate approved" } }), 1);
+  } else {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "TODO");
+    assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 2);
+    assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+    assert.equal(await db.taskActivity.count({ where: { taskId: predecessor.id, body: "Approval gate rejected; step queued again" } }), 1);
+  }
+};
+
 test("rejecting a gate on a non-template HUMAN successor requeues its chain predecessor", async () => {
   const { predecessor, successor, gate } = await completeIntoHumanGate();
   const decision = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
@@ -204,6 +271,14 @@ test("approving a gate on a non-template HUMAN successor completes it", async ()
   }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   assert.equal(decision.gateAction, "approved");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "DONE");
+});
+
+test("duplicate OPEN gate cards allow approve then reject to have exactly one winner", async () => {
+  await assertDuplicateGateCardsHaveOneWinner("approve");
+});
+
+test("duplicate OPEN gate cards allow reject then approve to have exactly one winner", async () => {
+  await assertDuplicateGateCardsHaveOneWinner("reject");
 });
 
 test("completion status CAS preserves a concurrent operator DONE decision", async () => {
@@ -379,6 +454,97 @@ test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () =>
     ],
   } });
   assert.equal(winnerActivities, 1);
+});
+
+test("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock order", { timeout: 20_000 }, async () => {
+  const { predecessor, successor, gate } = await completeIntoHumanGate();
+  // Recreate the legitimate P -> G activation edge while preserving the OPEN
+  // HUMAN gate on G. Before the fix, reject locked G -> P and this interleaving
+  // deterministically deadlocked against PATCH's P -> G order.
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "REVIEW" } });
+
+  const patchClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const rejectClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let patchHasPredecessor!: () => void;
+  let releasePatch!: () => void;
+  let rejectReachedOrderBarrier!: () => void;
+  const predecessorLocked = new Promise<void>((resolve) => { patchHasPredecessor = resolve; });
+  const patchMayContinue = new Promise<void>((resolve) => { releasePatch = resolve; });
+  const lockOrderObserved = new Promise<void>((resolve) => { rejectReachedOrderBarrier = resolve; });
+  let patchPaused = false;
+  const instrumentedPatchClient = new Proxy(patchClient, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return async (...args: any[]) => {
+          const result = await (tx.$queryRaw as any)(...args);
+          if (!patchPaused && args[1] === predecessor.id) {
+            patchPaused = true;
+            patchHasPredecessor();
+            await patchMayContinue;
+          }
+          return result;
+        };
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+
+  let firstRejectLock = true;
+  const reject = () => rejectClient.$transaction(async (tx) => {
+    const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+      if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+      return async (...args: any[]) => {
+        if (!firstRejectLock) return (tx.$queryRaw as any)(...args);
+        firstRejectLock = false;
+        const taskId = args[1];
+        // Fixed order: the first P lock waits behind PATCH, so release PATCH as
+        // soon as the attempt is made. Old order: first acquire G, then release
+        // PATCH; PATCH and reject proceed into the P/G cycle and PostgreSQL
+        // reports 40P01.
+        if (taskId === predecessor.id) rejectReachedOrderBarrier();
+        const result = await (tx.$queryRaw as any)(...args);
+        if (taskId === successor.id) rejectReachedOrderBarrier();
+        return result;
+      };
+    } });
+    return applyInboxDecisionTx(instrumentedTx as any, {
+      inboxMessageId: gate.id, externalEventId: `predecessor-patch-reject-${Date.now()}`, decision: "reject",
+    });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+
+  const priorToken = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-db-token";
+  try {
+    const patchPromise = createApp(instrumentedPatchClient).request(`/tasks/${predecessor.id}`, {
+      method: "PATCH", headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    });
+    await predecessorLocked;
+    const rejectPromise = reject();
+    await lockOrderObserved;
+    releasePatch();
+    const [patchResponse, decision] = await Promise.all([patchPromise, rejectPromise]);
+    assert.equal(patchResponse.status, 200);
+    assert.equal(decision.gateAction, "rejected");
+  } finally {
+    releasePatch();
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
+    await Promise.all([patchClient.$disconnect(), rejectClient.$disconnect()]);
+  }
+
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "TODO");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "TODO");
+  assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 2);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: predecessor.id, body: "Approval gate rejected; step queued again",
+  } }), 1);
 });
 
 // A parked successor used to hang: the CAS matches TODO/DOING/REVIEW, so a
