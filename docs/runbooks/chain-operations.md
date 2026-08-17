@@ -92,6 +92,21 @@ python3 scratchpad/mkbatch.py docs/briefs/<brief>.md <slug> "<title>" "<Prefix>"
 - clone/push 的网络错误应进 retry 白名单（现在 `TOOL_FAILED`/`TASK_FAILED` 不可重试）
 - **push 之后的交付失败根本不该把 run 标失败**——代码早推上去了，只因建 PR 时 EOF 就整个判死
 
+### 已确认的交付可靠性要求
+
+Leo 已确认：这类瞬时网络错误应自动重试，而不是直接把任务判失败。实现时至少满足：
+
+1. clone / fetch / push 与 `gh pr list` / `gh pr create` 共尝试 3 次（首次 + 2 次重试），采用短退避；
+2. 只重试明确的瞬时错误，例如 `SSL_ERROR_SYSCALL`、连接 EOF、`ECONNRESET`、`ETIMEDOUT` 与 HTTP 5xx；
+   401 / 403、认证失败、权限失败等确定性错误不得重试；
+3. `gh pr create` 返回不确定结果时，必须先按 head branch 查询 open PR，再决定是否重试创建，避免重复 PR；
+4. branch 已成功 push 而 PR 创建最终失败时，保留 pushed branch/head 作为成功交付证据并给出补 PR 指引，
+   不得把已完成的 agent 工作整体判成失败；
+5. 测试必须覆盖“前两次瞬断、第三次成功”、确定性错误不重试、PR 实际已创建但响应 EOF、push 成功但 PR
+   最终失败四条路径。
+
+该修复涉及 runner 交付代码；部署中的 runner 需要在发布窗口重启后才会加载新逻辑。
+
 **手工操作时的自救**：push/fetch 套重试循环
 `for i in 1 2 3 4 5; do … && break; sleep 6; done` —— 实测每次都是第 1–2 次就通。
 

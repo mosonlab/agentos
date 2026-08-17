@@ -25,6 +25,7 @@ export const parseStatus = (raw: string | null | undefined): TaskStatus | null =
 };
 
 export type Counts = Record<TaskStatus, number>;
+const DEFAULT_STATUS: TaskStatus = "TODO";
 
 export const countByStatus = (tasks: readonly { status: TaskStatus }[]): Counts => {
   const counts = Object.fromEntries(STATUSES.map((status) => [status, 0])) as Counts;
@@ -41,8 +42,8 @@ export const countByStatus = (tasks: readonly { status: TaskStatus }[]): Counts 
  * has answered a question nobody asked.
  */
 export const defaultTab = (counts: Counts): TaskStatus => {
-  if (counts.TODO > 0) return "TODO";
-  return STATUSES.filter((status) => status !== "DONE").find((status) => counts[status] > 0) ?? "TODO";
+  if (counts.TODO > 0) return DEFAULT_STATUS;
+  return STATUSES.filter((status) => status !== "DONE").find((status) => counts[status] > 0) ?? DEFAULT_STATUS;
 };
 
 /* ------------------------------------------------------------- the schedule */
@@ -50,6 +51,7 @@ export const defaultTab = (counts: Counts): TaskStatus => {
 export type ScheduleSubject = Pick<
   BoardTask, "scheduleKind" | "runAt" | "cron" | "timezone" | "status" | "chainId" | "chainIndex" | "chainProgress"
 >;
+const WAITING_STATUSES = new Set<TaskStatus>(["TODO", "BACKLOG"]);
 
 /**
  * Is this task's `runAt` a parking value rather than a schedule?
@@ -87,7 +89,7 @@ export const scheduleLabel = (task: ScheduleSubject): string => {
   if (chainParked(task)) {
     // The same fact from two sides: a step that has not started is waiting, and
     // one that has is no longer waiting for anything.
-    return task.status === "TODO" || task.status === "BACKLOG"
+    return WAITING_STATUSES.has(task.status)
       ? formatT("tasks.schedule.waitingForPrevious")
       : formatT("tasks.schedule.startedByChain");
   }

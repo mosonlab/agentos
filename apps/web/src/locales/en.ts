@@ -632,10 +632,10 @@ export const en = {
   "taskDetail.stats.tokens": "{n} tokens",
   "taskDetail.stats.wallClock": "{n}m wall-clock",
 
+  "tasks.announcement.moved": "Moved {name} to {status}",
   "tasks.archiveAll": "Archive All",
   "tasks.archiveDone.all": "Archived {archived}",
   "tasks.archiveDone.some": "Archived {archived}, skipped {skipped} (running)",
-  "tasks.announcement.moved": "Moved {name} to {status}",
   "tasks.board.label": "Task board",
   "tasks.board.scrollHint": "Scroll or drag to reach the other columns",
   "tasks.board.scrollLeft": "Scroll one column left",

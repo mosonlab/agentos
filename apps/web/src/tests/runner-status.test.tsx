@@ -106,7 +106,12 @@ const withProvider = async (
     const count = (counts.get(path) ?? 0) + 1;
     counts.set(path, count);
     const response = respond(path, count);
-    return { ok: response.ok, status: response.ok ? 200 : 503, text: async () => JSON.stringify(response.body) } as Response;
+    return {
+      ok: response.ok,
+      status: response.ok ? 200 : 503,
+      headers: new Headers(),
+      text: async () => JSON.stringify(response.body),
+    } as Response;
   } });
 
   let clock = now.getTime();

@@ -625,10 +625,10 @@ export const zh = {
   "taskDetail.stats.tokens": "{n} token",
   "taskDetail.stats.wallClock": "{n} 分钟总时长",
 
+  "tasks.announcement.moved": "已将 {name} 移至{status}",
   "tasks.archiveAll": "全部归档",
   "tasks.archiveDone.all": "已归档 {archived} 个",
   "tasks.archiveDone.some": "已归档 {archived} 个，跳过 {skipped} 个（运行中）",
-  "tasks.announcement.moved": "已将 {name} 移至{status}",
   "tasks.board.label": "任务看板",
   "tasks.board.scrollHint": "滚动或拖动以查看其他列",
   "tasks.board.scrollLeft": "向左滚动一列",
