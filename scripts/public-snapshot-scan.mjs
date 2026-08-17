@@ -24,8 +24,8 @@ const SCAN_CATEGORIES = [
   "binary-material",
 ];
 
-const PLACEHOLDER_WORDS =
-  /(?:change|dummy|example|local|placeholder|replace|test|token|secret|operator|runner|development|xxxx|^<[^>]+>$|^\$\{[^}]+\}$)/i;
+const PLACEHOLDER_SENTINELS = new Set(["CHANGE_ME"]);
+const VARIABLE_REFERENCE = /^\$\{[A-Z_][A-Z0-9_]*\}$/;
 
 export function globToRegExp(glob) {
   let source = "^";
@@ -57,11 +57,16 @@ function matches(glob, path) {
 }
 
 function validateManifest(manifest) {
-  if (manifest.schemaVersion !== 1) throw new Error("unsupported manifest schema");
+  if (manifest.schemaVersion !== 2) throw new Error("unsupported manifest schema");
   if (manifest.source !== "git-tracked-files") throw new Error("manifest source must be git-tracked-files");
   if (manifest.defaultDisposition !== "blocker") throw new Error("manifest must default to blocker");
-  for (const key of ["include", "exclude", "approvedFindings", "generatedRuntimePatterns"]) {
+  for (const key of ["include", "deny", "exclude", "approvedFindings", "generatedRuntimePatterns"]) {
     if (!Array.isArray(manifest[key])) throw new Error(`manifest ${key} must be an array`);
+  }
+  for (const rule of manifest.deny) {
+    if (!new Set(["internal-only-artifact", "generated-runtime-data"]).has(rule.category)) {
+      throw new Error(`invalid deny category for ${rule.glob}`);
+    }
   }
   for (const rule of manifest.exclude) {
     if (!DISPOSITIONS.has(rule.disposition) || rule.disposition === "approved-public-material") {
@@ -70,12 +75,20 @@ function validateManifest(manifest) {
   }
 }
 
-function scopeFor(path, manifest) {
+export function scopeFor(path, manifest) {
   const includes = manifest.include.filter((rule) => matches(rule.glob, path));
+  const denies = manifest.deny.filter((rule) => matches(rule.glob, path));
   const excludes = manifest.exclude.filter((rule) => matches(rule.glob, path));
+  let classification = "unclassified";
+  if (denies.length > 0) classification = "excluded";
+  else if (includes.length === 1 && excludes.length === 0) classification = "included";
+  else if (includes.length === 0 && excludes.length === 1) classification = "excluded";
+  else if (includes.length > 0 || excludes.length > 0) classification = "overlapping";
   return {
-    included: includes.length === 1 && excludes.length === 0,
+    classification,
+    included: classification === "included",
     includes,
+    denies,
     excludes,
   };
 }
@@ -99,14 +112,13 @@ function countMatches(text, expression, predicate = () => true) {
   return count;
 }
 
-function looksLikePlaceholder(value, path) {
+function looksLikePlaceholder(value) {
   const unquoted = value
     .replace(/\s+#.*$/, "")
     .trim()
     .replace(/^(["'])(.*)\1$/, "$2");
   if (unquoted === "") return true;
-  if (PLACEHOLDER_WORDS.test(unquoted)) return true;
-  return path === ".env.example" && unquoted.length < 12;
+  return PLACEHOLDER_SENTINELS.has(unquoted) || VARIABLE_REFERENCE.test(unquoted);
 }
 
 export function scanTextFindings(path, text) {
@@ -148,7 +160,7 @@ export function scanTextFindings(path, text) {
     let placeholders = 0;
     let credentials = 0;
     for (const match of text.matchAll(assignment)) {
-      if (looksLikePlaceholder(match[2], path)) placeholders += 1;
+      if (looksLikePlaceholder(match[2])) placeholders += 1;
       else credentials += 1;
     }
     add("credential-placeholder", placeholders);
@@ -186,6 +198,12 @@ export function scanTextFindings(path, text) {
 }
 
 function dispositionFor(category, path, scope, manifest) {
+  if (scope.denies.length > 0) {
+    return {
+      disposition: "later-release-follow-up",
+      reason: scope.denies[0].reason,
+    };
+  }
   const approval = manifest.approvedFindings.find(
     (rule) => rule.category === category && matches(rule.glob, path),
   );
@@ -216,7 +234,22 @@ function addFinding(target, finding) {
   else target.push(finding);
 }
 
-export function scanRepository(root = resolve(dirname(fileURLToPath(import.meta.url)), "..")) {
+function assertCleanTrackedWorktree(root) {
+  const changes = execFileSync(
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=no"],
+    { cwd: root },
+  ).toString("utf8");
+  if (changes.length > 0) {
+    throw new Error("tracked worktree must match HEAD before scanning");
+  }
+}
+
+export function scanRepository(
+  root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+  { requireClean = true } = {},
+) {
+  if (requireClean) assertCleanTrackedWorktree(root);
   const manifestPath = resolve(root, "public-snapshot.json");
   const manifestBytes = readFileSync(manifestPath);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
@@ -234,15 +267,19 @@ export function scanRepository(root = resolve(dirname(fileURLToPath(import.meta.
   const findings = [];
   const includedPaths = [];
   const excludedPaths = [];
+  const unclassifiedPaths = [];
+  const overlappingPaths = [];
   const scopeByPath = new Map();
 
   for (const path of paths) {
     const scope = scopeFor(path, manifest);
     scopeByPath.set(path, scope);
-    if (scope.included) includedPaths.push(path);
-    else excludedPaths.push(path);
+    if (scope.classification === "included") includedPaths.push(path);
+    else if (scope.classification === "excluded") excludedPaths.push(path);
+    else if (scope.classification === "unclassified") unclassifiedPaths.push(path);
+    else overlappingPaths.push(path);
 
-    if (scope.includes.length > 1 || scope.excludes.length > 1 || (scope.includes.length && scope.excludes.length)) {
+    if (scope.classification === "overlapping") {
       addFinding(findings, {
         category: "snapshot-scope",
         disposition: "blocker",
@@ -250,13 +287,26 @@ export function scanRepository(root = resolve(dirname(fileURLToPath(import.meta.
         count: 1,
         reason: "path matches overlapping manifest rules",
       });
-    } else if (scope.includes.length === 0 && scope.excludes.length === 0) {
+    } else if (scope.classification === "unclassified") {
       addFinding(findings, {
         category: "snapshot-scope",
         disposition: "blocker",
         path,
         count: 1,
         reason: "tracked path is not explicitly included or excluded",
+      });
+    }
+  }
+
+  for (const rule of manifest.deny) {
+    const count = paths.filter((path) => matches(rule.glob, path)).length;
+    if (count > 0) {
+      addFinding(findings, {
+        category: rule.category,
+        disposition: "later-release-follow-up",
+        path: rule.glob,
+        count,
+        reason: rule.reason,
       });
     }
   }
@@ -341,13 +391,16 @@ export function scanRepository(root = resolve(dirname(fileURLToPath(import.meta.
 
   return {
     report: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       commit,
+      source: "clean-tracked-worktree",
       manifestSha256: createHash("sha256").update(manifestBytes).digest("hex"),
       scope: {
         trackedFiles: paths.length,
         includedFiles: includedPaths.length,
         excludedFiles: excludedPaths.length,
+        unclassifiedFiles: unclassifiedPaths.length,
+        overlappingFiles: overlappingPaths.length,
       },
       summary: {
         countsByDisposition,
