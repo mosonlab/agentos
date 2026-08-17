@@ -1,6 +1,5 @@
 import { readdir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { resolve, sep } from "node:path";
 
 import {
   CleanupStatus,
@@ -83,8 +82,6 @@ export const removeWorkspaceDirectory = async (path: string): Promise<void> => {
   // force makes a concurrent runner cleanup between readdir and rm a harmless no-op.
   await rm(path, { recursive: true, force: true });
 };
-
-export const defaultWorkspaceRoot = (): string => join(homedir(), ".agentos", "runs");
 
 export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()): Promise<number> => {
   const [candidates, expiredInboxRuns] = await Promise.all([

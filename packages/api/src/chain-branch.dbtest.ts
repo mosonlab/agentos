@@ -5,7 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { instantiateTemplate } from "./templates.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";

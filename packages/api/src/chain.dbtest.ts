@@ -4,7 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { activateChainSuccessor, applyInboxDecisionTx, Prisma, PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 import { instantiateTemplate } from "./templates.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 

@@ -20,7 +20,7 @@ import {
   type PrismaClient,
 } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 import { noteArchivedQueuedRuns } from "./reconcile.js";
 
 test("runnerFor preserves explicit preferences and every inherited model heuristic", () => {

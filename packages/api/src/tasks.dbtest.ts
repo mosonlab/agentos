@@ -3,7 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 let db: PrismaClient;
