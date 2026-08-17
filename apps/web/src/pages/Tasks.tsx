@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type DragEvent, type ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import { money, timeAgo } from "../lib/format";
@@ -16,12 +16,41 @@ import {
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 
-const BOARD = "grid grid-flow-col auto-cols-[minmax(250px,1fr)] gap-[14px] overflow-x-auto pb-[10px]";
-const COLUMN = "flex min-h-[420px] flex-col";
+/** The board owns the viewport instead of the document.
+ *
+ *  Five columns need 1306px minimum (5 x 250 + 4 x 14) and the content box is
+ *  ~680px wide at a 972px viewport, so the board has always been horizontally
+ *  scrollable. What made that scrollbar unusable was the board's *height*: the
+ *  Done column rendered all 85 cards, so the board grew to ~20,900px and its
+ *  horizontal scrollbar sat ~19,600px below the fold. Bounding the page to one
+ *  viewport and giving each column its own vertical scroller bounds the board
+ *  at ~1 viewport regardless of card count, which puts that scrollbar back on
+ *  screen. Card pixels are unchanged; only the column body's height is.
+ *
+ *  Rejected: a sticky horizontal scrollbar (a second, synthetic scroll surface
+ *  that still leaves a 20,000px document to fall through); capping Done with a
+ *  "show all" (hides the volume rather than handling it, and the acceptance
+ *  bar is explicitly a *full* Done column); paginating Done (the same, plus a
+ *  control that has no analogue in the other four columns). */
+export const BOARD_PAGE = "flex h-[100dvh] flex-col overflow-hidden pb-[16px] [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:overflow-visible [@media(max-width:900px)]:pb-[16px]";
+const BOARD_STACK = "flex min-h-0 flex-1 flex-col gap-[16px]";
+/** `overflow-y-hidden`: the board scrolls sideways only. Vertical travel
+ *  belongs to the columns, so the wheel never has two candidates. */
+export const BOARD = "grid min-h-0 flex-1 grid-flow-col auto-cols-[minmax(250px,1fr)] gap-[14px] overflow-x-auto overflow-y-hidden pb-[10px] [@media(max-width:900px)]:max-h-[72dvh]";
+const COLUMN = "flex min-h-0 flex-col";
 const COLUMN_HEAD = "flex items-center gap-[8px] px-[2px] pt-0 pb-[12px] text-[12.5px] text-secondary-foreground";
 /** The 1% tint is the faint drop region the board draws behind every column,
- *  cards or not — it is a declaration, not decoration. */
-const COLUMN_BODY = "grid flex-1 grid-cols-[minmax(0,1fr)] content-start gap-[10px] rounded-xl border border-[color:var(--border-soft)] bg-[color-mix(in_srgb,var(--foreground)_1%,transparent)] p-[10px]";
+ *  cards or not — it is a declaration, not decoration.
+ *
+ *  Scroll contract, stated rather than discovered: the body is the only
+ *  vertical scroller on the page. `overscroll-contain` stops a wheel that has
+ *  reached the column's end from being handed to an ancestor — there is no
+ *  ancestor that scrolls vertically, so chaining would only ever be a surprise.
+ *  `overflow-x-hidden` keeps the body from claiming horizontal wheel/trackpad
+ *  gestures, which chain up to the board and move it sideways. The head sits
+ *  outside the scroller, so `Archive All` and the column count never leave the
+ *  screen; `RowMenu` portals out of the DOM, so a card menu is not clipped. */
+export const COLUMN_BODY = "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] content-start gap-[10px] overflow-y-auto overflow-x-hidden overscroll-contain rounded-xl border border-[color:var(--border-soft)] bg-[color-mix(in_srgb,var(--foreground)_1%,transparent)] p-[10px]";
 const COLUMN_BODY_OVER = "border-[color:var(--primary-soft)] bg-[color-mix(in_srgb,var(--primary)_4%,transparent)]";
 const COLUMN_EMPTY = "px-0 py-[26px] text-center text-[12px] text-[color:var(--faint)]";
 const TASK_CARD = "cursor-pointer rounded-xl border border-border bg-card px-[14px] py-[13px] hover:border-[color:var(--border-hover)]";
@@ -70,12 +99,14 @@ export const archiveDoneNotice = (result: { archived: number; skipped: number })
     ? `Archived ${result.archived}, skipped ${result.skipped} (running)`
     : `Archived ${result.archived}`);
 
-export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
+type CardProps = {
   task: Task;
   onDelete: (task: Task) => void;
   onRetry: (task: Task) => void;
   onArchive: (task: Task) => void;
-}): ReactNode => {
+};
+
+const TaskCardBody = ({ task, onDelete, onRetry, onArchive }: CardProps): ReactNode => {
   const run = task.runs[0];
   return (
     <article
@@ -123,6 +154,16 @@ export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
   );
 };
 
+/** A card re-renders only when its own row changed.
+ *
+ *  This is half of the fix; it is inert without the other half. `usePoll` now
+ *  drops a byte-identical response, and `TasksPage` keeps the previous object
+ *  for a row whose serialization did not change, so an unchanged card's `task`
+ *  prop keeps its identity across a poll and this comparison short-circuits.
+ *  The card props are `useCallback`-stable for the same reason. */
+export const TaskCard = memo(TaskCardBody);
+TaskCard.displayName = "TaskCard";
+
 /** One board column, extracted so its three rules — the head, the `Archive All`
  *  presence rule and the empty-state drop invitation — can be asserted from
  *  rendered markup rather than from the page's source text. */
@@ -135,7 +176,7 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   onDragLeave: (status: TaskStatus) => void;
   onDrop: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
-  cardProps: { onDelete: (task: Task) => void; onRetry: (task: Task) => void; onArchive: (task: Task) => void };
+  cardProps: Omit<CardProps, "task">;
 }): ReactNode => (
   <div className={COLUMN}>
     <div className={COLUMN_HEAD}>
@@ -167,30 +208,129 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   </div>
 );
 
+/** How close to the board's edge a drag has to get before the board starts
+ *  moving under it, and how many pixels per tick it then moves. */
+const DRAG_EDGE_PX = 76;
+const DRAG_STEP_PX = 12;
+const DRAG_TICK_MS = 16;
+
+export type HeldRows = Map<string, { key: string; row: Task }>;
+
+/** Keeps the previous object for every row whose serialization is unchanged.
+ *
+ *  `usePoll` already drops an identical *payload*; this handles the case where
+ *  one row moved and 111 did not. Without it a single `updatedAt` tick hands
+ *  112 fresh objects to 112 memoized cards and defeats all of them. Runs once
+ *  per genuinely-changed payload, not once per poll. */
+export const stableRows = (rows: readonly Task[], held: HeldRows): { rows: Task[]; held: HeldRows } => {
+  const next: HeldRows = new Map();
+  return {
+    rows: rows.map((row) => {
+      const key = JSON.stringify(row);
+      const previous = held.get(row.id);
+      const kept = previous !== undefined && previous.key === key ? previous.row : row;
+      next.set(row.id, { key, row: kept });
+      return kept;
+    }),
+    held: next,
+  };
+};
+
+/** Which way the board should travel while a drag hovers at `clientX`, in
+ *  pixels per tick. Zero anywhere but within `DRAG_EDGE_PX` of an edge. */
+export const dragEdgeStep = (clientX: number, box: { left: number; right: number }): number =>
+  (clientX - box.left < DRAG_EDGE_PX ? -DRAG_STEP_PX
+    : box.right - clientX < DRAG_EDGE_PX ? DRAG_STEP_PX
+      : 0);
+
+const useStableRows = (rows: readonly Task[]): Task[] => {
+  const held = useRef<HeldRows>(new Map());
+  return useMemo(() => {
+    const result = stableRows(rows, held.current);
+    held.current = result.held;
+    return result.rows;
+  }, [rows]);
+};
+
 export const TasksPage = (): ReactNode => {
   const { projectId } = useProjectScope();
+  // `enrich` stays on: the board card reads `chainProgress` (`chainMarker`), so
+  // the Projects page's `?enrich=false` opt-out is not available here. The two
+  // *other* enriched fields — `recurringLastFiredAt` / `recurringFireCount` —
+  // are dead weight for this page but ride the same flag, and splitting the
+  // flag is an API change, not a board fix.
   const tasksPath = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}`;
   const { data, loading, error, reload } = usePoll<Task[]>(tasksPath);
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const { error: actionError, run } = useAction();
-  const tasks = useMemo(() => data ?? [], [data]);
+  const tasks = useStableRows(useMemo(() => data ?? [], [data]));
+  const byStatus = useMemo(() => {
+    const groups = new Map<TaskStatus, Task[]>(COLUMNS.map((column) => [column.status, []]));
+    for (const task of tasks) groups.get(task.status)?.push(task);
+    return groups;
+  }, [tasks]);
 
-  const move = (taskId: string, status: TaskStatus): void => {
-    const task = tasks.find((candidate) => candidate.id === taskId);
+  // Held in a ref so `move` does not have to re-declare itself, and the memoized
+  // card callbacks below stay stable, every time a task list arrives.
+  const latest = useRef(tasks);
+  latest.current = tasks;
+
+  const move = useCallback((taskId: string, status: TaskStatus): void => {
+    const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
     void run(async () => { await api.patch(`/tasks/${taskId}`, { status }); reload(); });
-  };
-  const remove = (task: Task): void => {
+  }, [run, reload]);
+  const remove = useCallback((task: Task): void => {
     if (!window.confirm(`Delete task ${task.name}?`)) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
-  };
-  const retry = (task: Task): void => {
+  }, [run, reload]);
+  const retry = useCallback((task: Task): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/retry`, {}); reload(); });
-  };
-  const archive = (task: Task): void => {
+  }, [run, reload]);
+  const archive = useCallback((task: Task): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/archive`, {}); reload(); });
-  };
+  }, [run, reload]);
+  const cardProps = useMemo(() => ({ onDelete: remove, onRetry: retry, onArchive: archive }), [remove, retry, archive]);
+
+  // Only ~2.5 of five columns fit at a 972px viewport, so a drag that starts in
+  // Todo cannot reach Done without the board moving — and a drag is holding the
+  // pointer, so the scrollbar is not available. Holding near an edge scrolls the
+  // board under the drag.
+  //
+  // `setInterval`, not `requestAnimationFrame`: measured in Chrome, rAF is
+  // starved while a native HTML5 drag loop owns the main thread (a two-second
+  // edge hold produced a single 16px frame), and it is throttled to ~1 fps in an
+  // occluded window. A timer keeps firing in both cases. The loop is also what
+  // makes a *stationary* hold work — `dragover` is not guaranteed to keep firing
+  // when the pointer does not move.
+  const boardRef = useRef<HTMLDivElement>(null);
+  const edge = useRef(0);
+  const timer = useRef(0);
+  const stopEdgeScroll = useCallback((): void => {
+    edge.current = 0;
+    if (timer.current !== 0) { window.clearInterval(timer.current); timer.current = 0; }
+  }, []);
+  const onBoardDragOver = useCallback((event: DragEvent<HTMLDivElement>): void => {
+    const board = boardRef.current;
+    if (!board) return;
+    edge.current = dragEdgeStep(event.clientX, board.getBoundingClientRect());
+    if (edge.current === 0) { stopEdgeScroll(); return; }
+    if (timer.current === 0) {
+      timer.current = window.setInterval(() => {
+        if (boardRef.current && edge.current !== 0) boardRef.current.scrollLeft += edge.current;
+      }, DRAG_TICK_MS);
+    }
+  }, [stopEdgeScroll]);
+  // `dragleave` bubbles: crossing from a card to its column fires one at the
+  // board with `relatedTarget` still inside the board. Stopping on those would
+  // reduce the edge scroll to one tick per `dragover`.
+  const onBoardDragLeave = useCallback((event: DragEvent<HTMLDivElement>): void => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && event.currentTarget.contains(next)) return;
+    stopEdgeScroll();
+  }, [stopEdgeScroll]);
+  useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
   /** `api.post` is called for its payload, which `useAction.run` discards — but
    *  the call still runs *inside* `run`, so failures land in the same
    *  `ErrorNotice` as everything else on the page. One error surface, one
@@ -210,27 +350,34 @@ export const TasksPage = (): ReactNode => {
   if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
 
   return (
-    <Page className="text-foreground">
+    <Page className={cn("text-foreground", BOARD_PAGE)}>
       <TasksPageHead active="tasks" onCreated={reload} />
 
-      <div className={cn(STACK, "mt-4")}>
+      <div className={cn(STACK, BOARD_STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         {notice === null ? null : <InfoNotice message={notice} onDismiss={() => setNotice(null)} />}
 
-        <div className={BOARD}>
+        <div
+          ref={boardRef}
+          className={BOARD}
+          onDragOver={onBoardDragOver}
+          onDragLeave={onBoardDragLeave}
+          onDragEnd={stopEdgeScroll}
+          onDrop={stopEdgeScroll}
+        >
           {COLUMNS.map((column) => (
             <BoardColumn
               key={column.status}
               column={column}
-              tasks={tasks.filter((task) => task.status === column.status)}
+              tasks={byStatus.get(column.status) ?? []}
               loading={loading}
               dragOver={dragOver}
               onDragOver={setDragOver}
               onDragLeave={(status) => setDragOver((current) => (current === status ? null : current))}
-              onDrop={(taskId, status) => { setDragOver(null); move(taskId, status); }}
+              onDrop={(taskId, status) => { setDragOver(null); stopEdgeScroll(); move(taskId, status); }}
               onArchiveDone={() => void archiveDone()}
-              cardProps={{ onDelete: remove, onRetry: retry, onArchive: archive }}
+              cardProps={cardProps}
             />
           ))}
         </div>

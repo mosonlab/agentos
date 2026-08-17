@@ -3,7 +3,10 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
-import { BoardColumn, COLUMNS, TaskCard, archiveDoneNotice } from "../pages/Tasks";
+import {
+  BOARD, BOARD_PAGE, BoardColumn, COLUMNS, TaskCard,
+  archiveDoneNotice, dragEdgeStep, stableRows,
+} from "../pages/Tasks";
 import type { ChainProgress, Task, TaskStatus } from "../lib/types";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
@@ -93,6 +96,81 @@ test("cron and webhook tasks are badged and manual ones are not", () => {
   const manual = card({ source: "MANUAL" });
   assert.doesNotMatch(manual, />cron</);
   assert.doesNotMatch(manual, />webhook</);
+});
+
+/* ---------------------------------------------------------- the board frame */
+
+test("the board's height comes from the viewport, not from the card count", () => {
+  // Measured before this: 85 Done cards grew the board to 20,926px and left its
+  // horizontal scrollbar 19,600px below the fold — nominally scrollable, in
+  // practice a permanently truncated fifth column.
+  assert.match(BOARD_PAGE, /\bh-\[100dvh\]/);
+  assert.match(BOARD_PAGE, /\boverflow-hidden\b/);
+  // The board is the flex child that absorbs whatever the page head leaves, and
+  // `min-h-0` is what lets it shrink below its content instead of growing.
+  assert.match(BOARD, /\bflex-1\b/);
+  assert.match(BOARD, /\bmin-h-0\b/);
+  assert.match(BOARD, /\boverflow-x-auto\b/);
+  // The board itself must never take vertical scroll: that is the columns' job,
+  // and two vertical scrollers under one pointer is the scroll trap.
+  assert.match(BOARD, /\boverflow-y-hidden\b/);
+});
+
+test("the column body is the only vertical scroller, and it does not trap", () => {
+  const markup = column("DONE", [task({ status: "DONE" })]);
+  assert.match(markup, /overflow-y-auto/);
+  // No chaining to an ancestor when the column bottoms out...
+  assert.match(markup, /overscroll-contain/);
+  // ...and no claim on horizontal gestures, which belong to the board.
+  assert.match(markup, /overflow-x-hidden/);
+});
+
+test("Archive All and the column count sit outside the scroller", () => {
+  // Per-column scrolling would otherwise carry the head off-screen, and a board
+  // whose Archive All you have to hunt for is the same defect in a new place.
+  const markup = column("DONE", [task({ status: "DONE" })]);
+  const head = markup.indexOf("Archive All");
+  const scroller = markup.indexOf("overflow-y-auto");
+  assert.ok(head >= 0, "Archive All is absent");
+  assert.ok(scroller > head, "Archive All must render before the scrolling body, not inside it");
+});
+
+test("a drag scrolls the board only near its edges", () => {
+  const box = { left: 248, right: 938 };
+  assert.equal(dragEdgeStep(600, box), 0, "the middle of the board does not scroll");
+  assert.ok(dragEdgeStep(260, box) < 0, "the left edge pulls the board left");
+  assert.ok(dragEdgeStep(930, box) > 0, "the right edge pushes the board right");
+  // Only ~2.5 of five columns fit at a 972px viewport, so without this a drag
+  // from Todo can never reach Done: the pointer is busy holding the card.
+  assert.equal(dragEdgeStep(box.left, box), dragEdgeStep(box.left + 1, box));
+});
+
+/* --------------------------------------------------------- the render cost */
+
+test("a re-fetched but unchanged row keeps its object identity", () => {
+  // The poll used to replace all 112 rows every 2.5s and re-render every card.
+  // `TaskCard` is memoized, which is worth nothing unless the row it is handed
+  // is the same object it was handed last time.
+  const todo = task({ id: "a" });
+  const done = task({ id: "b", status: "DONE" });
+  const first = stableRows([todo, done], new Map());
+  assert.deepEqual(first.rows, [todo, done]);
+
+  // A fresh parse of the same bytes: structurally equal, referentially new.
+  const second = stableRows([{ ...todo }, { ...done }], first.held);
+  assert.equal(second.rows[0], todo);
+  assert.equal(second.rows[1], done);
+
+  // One row really moved: it — and only it — gets the new object.
+  const moved: Task = { ...done, status: "REVIEW" };
+  const third = stableRows([{ ...todo }, moved], second.held);
+  assert.equal(third.rows[0], todo, "the untouched row must not be replaced");
+  assert.equal(third.rows[1], moved);
+  assert.notEqual(third.rows[1], done);
+});
+
+test("TaskCard is memoized", () => {
+  assert.equal((TaskCard as unknown as { $$typeof: symbol }).$$typeof, Symbol.for("react.memo"));
 });
 
 /* -------------------------------------------------------------- the notice */

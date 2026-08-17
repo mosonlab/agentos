@@ -15,13 +15,27 @@ export type Poll<T> = {
   reload: () => void;
 };
 
-/** Polls a GET endpoint. Pass `null` to stay idle (e.g. no project selected). */
+/** Polls a GET endpoint. Pass `null` to stay idle (e.g. no project selected).
+ *
+ *  The poll is change-aware: a response byte-identical to the one already held
+ *  is dropped rather than stored. Most polls on a mostly-idle board return the
+ *  same payload, and `setData` with a *new* array of *new* objects re-renders
+ *  every consumer — 112 task cards, four times a minute, for no new
+ *  information. Keeping the previous reference lets React bail out of the
+ *  update entirely, and lets `React.memo` downstream mean something.
+ *
+ *  The comparison is on the raw response *text*, so an unchanged poll also
+ *  skips the `JSON.parse` — on a full board that is 1.3 MB of parsing saved
+ *  per poll, which was itself a long task. */
 export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> => {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(path !== null);
   const [nonce, setNonce] = useState(0);
   const alive = useRef(true);
+  /** The serialization of whatever `data` currently holds, or `null` when the
+   *  held value cannot be trusted to match the path being polled. */
+  const held = useRef<string | null>(null);
 
   useEffect(() => {
     alive.current = true;
@@ -30,19 +44,26 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
 
   useEffect(() => {
     if (path === null) {
+      held.current = null;
       setData(null);
       setError(null);
       setLoading(false);
       return;
     }
+    // A new path — or a `reload()` — invalidates the held payload: the next
+    // response must land even if it happens to serialize the same.
+    held.current = null;
     let cancelled = false;
     setLoading(true);
     const load = async (): Promise<void> => {
       if (document.hidden) return;
       try {
-        const result = await api.get<T>(path);
+        const body = await api.getText(path);
         if (cancelled || !alive.current) return;
-        setData(result);
+        if (body !== held.current) {
+          held.current = body;
+          setData(body.length > 0 ? (JSON.parse(body) as T) : null);
+        }
         setError(null);
       } catch (reason: unknown) {
         if (cancelled || !alive.current) return;
