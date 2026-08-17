@@ -30,7 +30,8 @@ const task = (overrides: Partial<Task> = {}): Task => ({
 });
 
 const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
-  chainId: "c1", done: 4, total: 9, activeStepName: "Implementation", activeStatus: "doing", ...overrides,
+  chainId: "c1", done: 4, total: 9, activeStepName: "Implementation", activeStatus: "doing", position: 5,
+  ...overrides,
 });
 
 /* ------------------------------------------------------------- the tab head */

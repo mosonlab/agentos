@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ErrorNotice } from "../components/ui";
-import { EndpointCard, FiresCard, TriggerRow, VariablesCard, triggerState } from "../pages/Triggers";
+import { EndpointCard, FiresCard, TriggerNotices, TriggerRow, VariablesCard, endpointUrl, triggerState } from "../pages/Triggers";
 import type { Trigger, TriggerDetail, TriggerFire } from "../lib/types";
 
 const SECRET = "wh-secret-batch25";
@@ -31,7 +30,7 @@ const row = (overrides: Partial<Trigger> = {}): string => renderToStaticMarkup(
 const fire = (overrides: Partial<TriggerFire> = {}): TriggerFire => ({
   id: "f1", createdAt: "2026-08-16T00:00:00.000Z", source: "WEBHOOK", chainId: "c1",
   firstTask: { id: "t1", name: "Triage" },
-  progress: { chainId: "c1", done: 1, total: 3, activeStepName: "Triage", activeStatus: "doing" },
+  progress: { chainId: "c1", done: 1, total: 3, activeStepName: "Triage", activeStatus: "doing", position: 1 },
   ...overrides,
 });
 
@@ -69,12 +68,39 @@ test("the endpoint card renders the path and the header names, and no secret val
   assert.doesNotMatch(markup, /OPERATOR_TOKEN/);
 });
 
+test("the copy button yields an absolute URL an outside system can post to", () => {
+  // A relative `/api/...` is the Vite dev-proxy prefix, not a postable address.
+  assert.equal(
+    endpointUrl("/api", "/hooks/templates/tpl1", "https://agentos.example"),
+    "https://agentos.example/api/hooks/templates/tpl1",
+  );
+  // An absolute VITE_API_URL is already postable and passes through untouched.
+  assert.equal(
+    endpointUrl("https://api.example", "/hooks/templates/tpl1", "https://agentos.example"),
+    "https://api.example/hooks/templates/tpl1",
+  );
+});
+
 test("required badges only the variable with neither a mapping nor a default", () => {
   const markup = renderToStaticMarkup(
     <VariablesCard
       trigger={detail({ variables: ["mapped", "defaulted", "orphan"] })}
       mapping={{ mapped: "issue.title" }}
       defaults={{ defaulted: "unlabelled" }}
+      onChange={() => undefined}
+    />,
+  );
+  assert.equal([...markup.matchAll(/>required</g)].length, 1);
+});
+
+test("an empty-string default is badged required, matching what the fire route now does", () => {
+  // The badge promises "every fire that omits this will 400". `usableDefault`
+  // on the server rejects "" for exactly that reason, so the two agree.
+  const markup = renderToStaticMarkup(
+    <VariablesCard
+      trigger={detail({ variables: ["reporter"] })}
+      mapping={{}}
+      defaults={{ reporter: "" }}
       onChange={() => undefined}
     />,
   );
@@ -94,17 +120,26 @@ test("a fire whose chain is gone says chain deleted rather than vanishing", () =
 /* ------------------------------------------------------------ the 400 prose */
 
 test("the unresolved variable names reach the operator through the error string", () => {
-  // T2: parseError keeps only `error`, so the prose is the whole contract.
+  // T2: parseError keeps only `error`, so the prose is the whole contract. This
+  // renders the page's own notice slot rather than a hand-built ErrorNotice, so
+  // it fails if the page ever stops routing the API's string into it.
   const markup = renderToStaticMarkup(
-    <ErrorNotice message="Unresolved template variables: repoUrl, issueId" />,
+    <TriggerNotices actionError="Unresolved template variables: repoUrl, issueId" trigger={detail()} />,
   );
   assert.match(markup, /repoUrl/);
   assert.match(markup, /issueId/);
 });
 
-test("a trigger that cannot fire shows the reason inline", () => {
-  const markup = renderToStaticMarkup(
-    <ErrorNotice message={detail({ canFire: false, cannotFireReason: "This trigger has no repository configured" }).cannotFireReason!} />,
-  );
+test("a trigger that cannot fire shows its own reason inline, and a firing one shows nothing", () => {
+  const blocked = detail({ canFire: false, cannotFireReason: "This trigger has no repository configured" });
+  const markup = renderToStaticMarkup(<TriggerNotices actionError={null} trigger={blocked} />);
   assert.match(markup, /This trigger has no repository configured/);
+  assert.equal(renderToStaticMarkup(<TriggerNotices actionError={null} trigger={detail()} />), "");
+});
+
+test("a blocked trigger with no reason still says something rather than rendering an empty notice", () => {
+  const markup = renderToStaticMarkup(
+    <TriggerNotices actionError={null} trigger={detail({ canFire: false, cannotFireReason: null })} />,
+  );
+  assert.match(markup, /This trigger cannot fire/);
 });

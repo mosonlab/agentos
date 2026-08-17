@@ -6,7 +6,7 @@ import { useAction, usePoll } from "../lib/hooks";
 import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
-import { automationState, cronProse, nextRunLabel } from "../lib/schedule";
+import { automationState, cronProse, nextRunLabel, scheduleLabel } from "../lib/schedule";
 import type { RecurringFire, Task } from "../lib/types";
 import { IconBolt, IconChevron } from "../components/icons";
 import { TasksPageHead } from "../components/tasks-tabs";
@@ -107,7 +107,7 @@ export const AutomationRow = ({ task, expanded, onToggle, onPause, onDelete, onS
         </TableCell>
         <TableCell><AgentChip agent={null} {...(task.assigneeAgent ? { name: task.assigneeAgent.title } : {})} /></TableCell>
         <TableCell>
-          {cronProse(task.cron, task.timezone)}
+          {scheduleLabel(task)}
           <span className={TABLE_SUB}>{task.cron ?? "—"} · {task.timezone ?? "UTC"}</span>
         </TableCell>
         <TableCell>
@@ -150,8 +150,10 @@ export const AutomationsPage = (): ReactNode => {
   const { error: actionError, run } = useAction();
 
   // The board's own query already returns exactly this set, so the page adds no
-  // endpoint and shares one cache with it.
-  const automations = (data ?? []).filter((task) => task.scheduleKind === "CRON" && task.archivedAt === null);
+  // endpoint and shares one cache with it. No `archivedAt` predicate: `GET /tasks`
+  // defaults to `archived=false` and this path passes no override, so filtering
+  // again here would read as a guard while removing nothing.
+  const automations = (data ?? []).filter((task) => task.scheduleKind === "CRON");
 
   const togglePause = (task: Task): void => {
     const action = task.schedulePausedAt === null ? "pause" : "resume";

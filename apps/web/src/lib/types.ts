@@ -276,6 +276,12 @@ export type ChainProgress = {
   total: number;
   activeStepName: string;
   activeStatus: string;
+  /** This task's 1-based ordinal within its chain, which spec §5.2 requires the
+   *  list response to carry. Nothing on the web side renders it — the board
+   *  marker shows `done/total`, and the chain card gets its own positions from
+   *  `GET /tasks/:id/chain`. Typed rather than silently dropped so the field is
+   *  discoverable here instead of only by reading the API. */
+  position: number | null;
 };
 
 export type ChainStep = {

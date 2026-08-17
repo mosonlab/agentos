@@ -30,7 +30,7 @@ const TASK_META_ROW = "flex flex-wrap items-center gap-[8px]";
 /** `size-[13px]`, not the button base's `[&_svg]:size-4`. */
 const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-muted-foreground [&_svg]:size-[13px] [&_svg]:flex-none [&_svg]:opacity-85";
 
-const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
+export const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
   // Backlog is first: it is where work waits before it is queued, and the
   // scheduler never picks anything out of it.
   { status: "BACKLOG", label: "Backlog" },
@@ -123,6 +123,50 @@ export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
   );
 };
 
+/** One board column, extracted so its three rules — the head, the `Archive All`
+ *  presence rule and the empty-state drop invitation — can be asserted from
+ *  rendered markup rather than from the page's source text. */
+export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, cardProps }: {
+  column: { status: TaskStatus; label: string };
+  tasks: Task[];
+  loading: boolean;
+  dragOver: TaskStatus | null;
+  onDragOver: (status: TaskStatus) => void;
+  onDragLeave: (status: TaskStatus) => void;
+  onDrop: (taskId: string, status: TaskStatus) => void;
+  onArchiveDone: () => void;
+  cardProps: { onDelete: (task: Task) => void; onRetry: (task: Task) => void; onArchive: (task: Task) => void };
+}): ReactNode => (
+  <div className={COLUMN}>
+    <div className={COLUMN_HEAD}>
+      {column.label}<span className={COUNT}>{tasks.length}</span>
+      {/* Only on a non-empty Done column: a button that would archive nothing
+          is not offered (A2). */}
+      {column.status === "DONE" && tasks.length > 0 ? (
+        <>
+          <span className="flex-1" />
+          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
+            Archive All
+          </Button>
+        </>
+      ) : null}
+    </div>
+    <div
+      className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
+      onDragOver={(event) => { event.preventDefault(); onDragOver(column.status); }}
+      onDragLeave={() => onDragLeave(column.status)}
+      onDrop={(event) => {
+        event.preventDefault();
+        onDrop(event.dataTransfer.getData("text/plain"), column.status);
+      }}
+    >
+      {tasks.map((task) => <TaskCard key={task.id} task={task} {...cardProps} />)}
+      {/* Every column gets the same invitation, Backlog included (E16). */}
+      {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
+    </div>
+  </div>
+);
+
 export const TasksPage = (): ReactNode => {
   const { projectId } = useProjectScope();
   const tasksPath = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}`;
@@ -175,39 +219,20 @@ export const TasksPage = (): ReactNode => {
         {notice === null ? null : <InfoNotice message={notice} onDismiss={() => setNotice(null)} />}
 
         <div className={BOARD}>
-          {COLUMNS.map((column) => {
-            const columnTasks = tasks.filter((task) => task.status === column.status);
-            return (
-              <div className={COLUMN} key={column.status}>
-                <div className={COLUMN_HEAD}>
-                  {column.label}<span className={COUNT}>{columnTasks.length}</span>
-                  {/* Only on a non-empty Done column: a button that would
-                      archive nothing is not offered (A2). */}
-                  {column.status === "DONE" && columnTasks.length > 0 ? (
-                    <>
-                      <span className="flex-1" />
-                      <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => void archiveDone()}>
-                        Archive All
-                      </Button>
-                    </>
-                  ) : null}
-                </div>
-                <div
-                  className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
-                  onDragOver={(event) => { event.preventDefault(); setDragOver(column.status); }}
-                  onDragLeave={() => setDragOver((current) => (current === column.status ? null : current))}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    setDragOver(null);
-                    move(event.dataTransfer.getData("text/plain"), column.status);
-                  }}
-                >
-                  {columnTasks.map((task) => <TaskCard key={task.id} task={task} onDelete={remove} onRetry={retry} onArchive={archive} />)}
-                  {columnTasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
-                </div>
-              </div>
-            );
-          })}
+          {COLUMNS.map((column) => (
+            <BoardColumn
+              key={column.status}
+              column={column}
+              tasks={tasks.filter((task) => task.status === column.status)}
+              loading={loading}
+              dragOver={dragOver}
+              onDragOver={setDragOver}
+              onDragLeave={(status) => setDragOver((current) => (current === status ? null : current))}
+              onDrop={(taskId, status) => { setDragOver(null); move(taskId, status); }}
+              onArchiveDone={() => void archiveDone()}
+              cardProps={{ onDelete: remove, onRetry: retry, onArchive: archive }}
+            />
+          ))}
         </div>
       </div>
     </Page>

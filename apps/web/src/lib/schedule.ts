@@ -50,3 +50,25 @@ export const automationState = (
   if (task.runAt === null) return "quarantined";
   return "active";
 };
+
+/**
+ * The Schedule cell for one automation row.
+ *
+ * A quarantined row renders the raw expression, never prose. `cronProse` can
+ * only fall back when `cronstrue` *throws*, and `cronstrue` does not throw on
+ * everything the control plane rejects — it reinterprets. A seven-field
+ * expression is rejected by `cron-parser` as having too many fields and described by
+ * `cronstrue` as "Every 5 seconds, only on Sunday, only in 1909". Rendering that
+ * beside "Fix the cron expression" tells the operator two contradictory things
+ * about the same row, which is the failure spec [A9] exists to prevent.
+ *
+ * Quarantine is the signal `cronstrue` cannot supply: the scheduler cleared
+ * `runAt` precisely because its own parser refused the expression.
+ */
+export const scheduleLabel = (
+  task: Pick<Task, "schedulePausedAt" | "runAt" | "cron" | "timezone">,
+): string => (
+  automationState(task) === "quarantined"
+    ? task.cron ?? "—"
+    : cronProse(task.cron, task.timezone)
+);

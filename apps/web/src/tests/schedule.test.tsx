@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { automationState, cronProse, nextRunLabel } from "../lib/schedule";
+import { automationState, cronProse, nextRunLabel, scheduleLabel } from "../lib/schedule";
 
 test("a cron expression renders as English prose with its timezone", () => {
   const prose = cronProse("0 9 * * *", "Asia/Shanghai");
@@ -38,4 +38,27 @@ test("automation state reads pause first, then the quarantine marker", () => {
   // A paused definition whose runAt was cleared is paused, not quarantined:
   // pausing is what the operator did, quarantine is what the scheduler did.
   assert.equal(automationState({ schedulePausedAt: at, runAt: null }), "paused");
+});
+
+test("a quarantined row shows the raw expression, never confident prose about it", () => {
+  // The failure this pins: `cronstrue` does not throw on everything the control
+  // plane rejects — it reinterprets. A seven-field expression is rejected by
+  // `cron-parser` (too many fields) and described fluently by `cronstrue`, so
+  // the row would say "Fix the cron expression" and describe its schedule in
+  // the same breath. Quarantine is the only signal available, and it is enough.
+  const wrong = "*/5 * * * * 7 9";
+  assert.notEqual(cronProse(wrong, "UTC"), wrong);
+  assert.equal(scheduleLabel({ schedulePausedAt: null, runAt: null, cron: wrong, timezone: "UTC" }), wrong);
+  // Active and paused rows keep the prose — that is what the column is for.
+  const at = "2026-08-16T00:00:00.000Z";
+  assert.equal(
+    scheduleLabel({ schedulePausedAt: null, runAt: at, cron: "0 9 * * *", timezone: "UTC" }),
+    cronProse("0 9 * * *", "UTC"),
+  );
+  assert.equal(
+    scheduleLabel({ schedulePausedAt: at, runAt: null, cron: "0 9 * * *", timezone: "UTC" }),
+    cronProse("0 9 * * *", "UTC"),
+  );
+  // A quarantined row with no expression at all still renders something.
+  assert.equal(scheduleLabel({ schedulePausedAt: null, runAt: null, cron: null, timezone: null }), "—");
 });

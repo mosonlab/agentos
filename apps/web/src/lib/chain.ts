@@ -7,7 +7,11 @@ import type { ChainProgress } from "./types";
  * once for the whole board), and a second implementation here could disagree
  * with the numbers the board itself renders.
  */
-export const chainMarker = (progress: ChainProgress | null | undefined): string | null => {
+export const chainMarker = (
+  // The four fields it formats, not the whole payload: `position` rides along in
+  // the response and nothing here reads it.
+  progress: Pick<ChainProgress, "done" | "total" | "activeStepName" | "activeStatus"> | null | undefined,
+): string | null => {
   if (!progress) return null;
   return `${progress.done}/${progress.total} · ${progress.activeStepName} · ${progress.activeStatus}`;
 };

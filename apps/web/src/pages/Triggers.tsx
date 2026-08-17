@@ -119,18 +119,44 @@ export const TriggersPage = (): ReactNode => {
 
 /* ------------------------------------------------------------------ detail */
 
+/**
+ * Absolute URL for the endpoint card's `Copy` button.
+ *
+ * `apiBase` is `/api` unless `VITE_API_URL` is set, and `/api` is the Vite dev
+ * proxy prefix, not a control-plane path. This card exists to hand an outside
+ * system something to POST to, and a relative path is not that — so a relative
+ * base is resolved against the page origin. An absolute `VITE_API_URL` is
+ * already postable and passes through unchanged.
+ */
+export const endpointUrl = (base: string, path: string, origin: string | null): string => {
+  if (origin === null) return `${base}${path}`;
+  try {
+    return new URL(`${base}${path}`, origin).toString();
+  } catch {
+    return `${base}${path}`;
+  }
+};
+
+/** `null` where there is no DOM — the web tests render this card through
+ *  `renderToStaticMarkup`, which has no `window`. */
+const pageOrigin = (): string | null => (
+  typeof window === "undefined" ? null : window.location.origin
+);
+
 /** The endpoint card. No secret value is rendered, and none can be: no route
  *  returns one. `secret-value-input.tsx` is deliberately not reused here. */
 export const EndpointCard = ({ trigger }: { trigger: TriggerDetail }): ReactNode => {
-  const url = `POST ${apiBase}${trigger.endpointPath}`;
+  // The visible line keeps the short form; the clipboard gets the postable one.
+  const shown = `POST ${apiBase}${trigger.endpointPath}`;
+  const url = endpointUrl(apiBase, trigger.endpointPath, pageOrigin());
   return (
     <Card title="Endpoint" extra={
       <Button type="button" variant="legacy" size="legacySmall" className="shadow-none"
-        onClick={() => { void navigator.clipboard?.writeText(url.replace(/^POST /, "")); }}>
+        onClick={() => { void navigator.clipboard?.writeText(url); }}>
         Copy
       </Button>
     }>
-      <div className={CODE_BLOCK}>{url}</div>
+      <div className={CODE_BLOCK}>{shown}</div>
       <KeyValue items={[
         { k: "Secret header", v: <code>X-AgentOS-Webhook-Secret</code> },
         { k: "Secret", v: trigger.secretName ?? "—" },
@@ -211,6 +237,26 @@ export const FiresCard = ({ fires }: { fires: TriggerFire[] }): ReactNode => (
   </Card>
 );
 
+/**
+ * The detail page's two notice slots, extracted so a test can assert the
+ * *wiring* — that the API's `error` string and the trigger's own
+ * `cannotFireReason` are what reach the DOM. Constructing an `ErrorNotice` from
+ * a literal in a test only proves `ErrorNotice` renders its prop.
+ *
+ * The unresolved variable names arrive inside `actionError`: `parseError` keeps
+ * only the top-level `error` string and discards every sibling field, so the
+ * server's prose is the whole contract.
+ */
+export const TriggerNotices = ({ actionError, trigger }: {
+  actionError: string | null;
+  trigger: Pick<TriggerDetail, "canFire" | "cannotFireReason">;
+}): ReactNode => (
+  <>
+    {actionError === null ? null : <ErrorNotice message={actionError} />}
+    {trigger.canFire ? null : <ErrorNotice message={trigger.cannotFireReason ?? "This trigger cannot fire"} />}
+  </>
+);
+
 export const TriggerDetailPage = ({ templateId }: { templateId: string }): ReactNode => {
   const { data: trigger, error, reload } = usePoll<TriggerDetail>(`/triggers/${templateId}`);
   const fires = usePoll<TriggerFire[]>(`/triggers/${templateId}/fires?take=20`);
@@ -270,10 +316,7 @@ export const TriggerDetailPage = ({ templateId }: { templateId: string }): React
       </div>
 
       <div className={STACK}>
-        {/* The unresolved variable names arrive inside this string: parseError
-            keeps only `error` and discards every sibling field. */}
-        {actionError === null ? null : <ErrorNotice message={actionError} />}
-        {trigger.canFire ? null : <ErrorNotice message={trigger.cannotFireReason ?? "This trigger cannot fire"} />}
+        <TriggerNotices actionError={actionError} trigger={trigger} />
 
         <EndpointCard trigger={trigger} />
 

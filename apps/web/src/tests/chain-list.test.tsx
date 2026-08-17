@@ -85,11 +85,19 @@ test("an archived step is badged, and a Backlog step says why it is idle", () =>
 
 /* ---------------------------------------------------------------- E14 wiring */
 
-test("the task page routes its error branch through fatal, not through the old guard", () => {
-  assert.match(detailSource, /fatal\(error, task\)/);
-  assert.doesNotMatch(detailSource, /error !== null && task === null/);
+// These two are wiring assertions over the page's source, and they are labelled
+// as such rather than dressed up as render tests. `TaskDetailPage`'s state comes
+// from `usePoll`'s effects, and effects do not run under
+// `renderToStaticMarkup` — the page always renders "Loading…", so no snapshot
+// can reach the success-then-404 branch. The *behaviour* is covered where it can
+// be: `fatal` is a pure function with its own suite, including the 404-after-
+// success case this branch exists for (`poll-state.test.tsx`). What is left to
+// check is only that the page calls it, which is what these do.
+
+test("the task page routes its error branch through fatal (E14 wiring)", () => {
+  assert.match(detailSource, /if \(fatal\(error, task\)\)/);
 });
 
-test("the chain card is rendered only for a task that is in a chain", () => {
+test("the chain card is rendered only for a task that is in a chain (wiring)", () => {
   assert.match(detailSource, /chain\.data\.chainId !== null/);
 });

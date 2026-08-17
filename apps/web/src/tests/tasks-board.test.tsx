@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
-import { TaskCard, archiveDoneNotice } from "../pages/Tasks";
-import type { ChainProgress, Task } from "../lib/types";
-
-const source = readFileSync(fileURLToPath(new URL("../pages/Tasks.tsx", import.meta.url)), "utf8");
+import { BoardColumn, COLUMNS, TaskCard, archiveDoneNotice } from "../pages/Tasks";
+import type { ChainProgress, Task, TaskStatus } from "../lib/types";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "t1", projectId: "p1", assigneeAgentId: null, repoId: null, templateId: null, templateStepId: null,
@@ -29,28 +25,59 @@ const card = (overrides: Partial<Task> = {}): string => renderToStaticMarkup(
 );
 
 const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
-  chainId: "c1", done: 3, total: 9, activeStepName: "Implementation", activeStatus: "doing", ...overrides,
+  chainId: "c1", done: 3, total: 9, activeStepName: "Implementation", activeStatus: "doing",
+  position: 4, ...overrides,
 });
+
+const noop = (): void => undefined;
+const CARD_PROPS = { onDelete: noop, onRetry: noop, onArchive: noop };
+
+/** Renders one real column. Everything the board decides per column — the head,
+ *  the count, `Archive All`, the drop invitation — is decided in here, so these
+ *  assertions read markup rather than the page's source text. */
+const column = (status: TaskStatus, tasks: Task[] = [], loading = false): string => {
+  const found = COLUMNS.find((candidate) => candidate.status === status);
+  assert.ok(found, `no ${status} column`);
+  return renderToStaticMarkup(
+    <BoardColumn
+      column={found} tasks={tasks} loading={loading} dragOver={null}
+      onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} cardProps={CARD_PROPS}
+    />,
+  );
+};
 
 /* ------------------------------------------------------------- the columns */
 
-test("the board has five columns and Backlog comes first", () => {
-  const columns = source.slice(source.indexOf("const COLUMNS"), source.indexOf("// The board card"));
-  const labels = [...columns.matchAll(/label: "([A-Za-z]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(labels, ["Backlog", "Todo", "Doing", "Review", "Done"]);
-  const statuses = [...columns.matchAll(/status: "([A-Z]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(statuses, ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"]);
+test("the board has five columns, in order, with Backlog first", () => {
+  assert.deepEqual(COLUMNS.map((c) => c.label), ["Backlog", "Todo", "Doing", "Review", "Done"]);
+  assert.deepEqual(COLUMNS.map((c) => c.status), ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"]);
+  // Each label reaches the DOM with its own count, so an added column cannot
+  // pass by being present in the array and absent from the render.
+  for (const { status, label } of COLUMNS) {
+    assert.match(column(status), new RegExp(`${label}<span[^>]*>0</span>`));
+  }
+});
+
+test("a BACKLOG task lands in the first column and nowhere else", () => {
+  const parked = task({ status: "BACKLOG", name: "Parked work" });
+  assert.match(column("BACKLOG", [parked]), /Parked work/);
+  assert.doesNotMatch(column("TODO", []), /Parked work/);
 });
 
 test("an empty column still invites a drop, Backlog included (E16)", () => {
-  // The column body renders the same placeholder for every status; nothing in
-  // the board special-cases Backlog out of the drop target.
-  assert.match(source, /Drop tasks here/);
-  assert.doesNotMatch(source, /status !== "BACKLOG"/);
+  // A positive assertion per column: the previous `doesNotMatch(/status !==
+  // "BACKLOG"/)` could not fail, because it tested for a string nobody writes.
+  for (const { status } of COLUMNS) {
+    assert.match(column(status), /Drop tasks here/);
+  }
+  assert.match(column("BACKLOG", [], true), /Loading…/);
+  assert.doesNotMatch(column("BACKLOG", [task({ status: "BACKLOG" })]), /Drop tasks here/);
 });
 
 test("Archive All is offered only on a non-empty Done column", () => {
-  assert.match(source, /column\.status === "DONE" && columnTasks\.length > 0/);
+  assert.match(column("DONE", [task({ status: "DONE" })]), /Archive All/);
+  assert.doesNotMatch(column("DONE", []), /Archive All/);
+  assert.doesNotMatch(column("TODO", [task()]), /Archive All/);
 });
 
 /* ---------------------------------------------------------------- the card */
