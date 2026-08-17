@@ -1331,11 +1331,15 @@ export const resolveRunner = (preference: RunnerPreference, model: string) => {
     and a split only when the index is `> 0`. A leading-colon input (`":high"`)
     therefore returns `{ model: ":high", effort: null }` — the same as the runner.
   - Catalog entries (spec §4.6.2), covering the whole roster so no existing agent
-    renders as `Custom…`. Roster verified from `agents/roles/*.md`: `claude-opus-5`
-    (6 agents), `gpt-5.6-sol` (2), `gpt-5.6-luna` (2), `openai-codex/gpt-5.6-luna` (1).
+    renders as `Custom…`. **Supersession (2026-08-17):** Leo's final canonical
+    model decision restores Fable as a supported CLAUDE catalog model. The
+    current roster and defaults are authoritative in `agents/roles/*.md` and
+    `packages/db/prisma/agent-contract.ts`; this table records the resulting
+    catalog rather than the earlier implementation-time roster count.
 
 | id | label | runner | efforts | default |
 |---|---|---|---|---|
+| `claude-fable-5` | Claude Fable 5 | CLAUDE | low, medium, high, xhigh, max | medium |
 | `claude-opus-5` | Claude Opus 5 | CLAUDE | low, medium, high, xhigh, max | high |
 | `claude-sonnet-5` | Claude Sonnet 5 | CLAUDE | low, medium, high, xhigh, max | high |
 | `claude-haiku-4-5` | Claude Haiku 4.5 | CLAUDE | low, medium, high, xhigh, max | high |
@@ -1350,9 +1354,10 @@ export const resolveRunner = (preference: RunnerPreference, model: string) => {
     a nonsense value to see whether it errors; whatever is learned is captured into
     `spikes/cli-capabilities/samples/` and the table widened in the same commit or
     left alone with a comment saying it was checked.
-  - `claude-fable-5` is **deliberately absent** (decisions §12 retires Fable in
-    favour of `claude-opus-5:xhigh`). A named constant `INTENTIONALLY_ABSENT =
-    ["claude-fable-5"]` makes the §7.7 test assert this rather than tolerate it.
+  - The earlier Fable exclusion is superseded. `claude-fable-5` is a formal
+    catalog entry and the canonical default for Specification Writer and Planner
+    at medium effort. Catalog coverage tests must require it rather than place it
+    in an intentionally-absent list.
 - `apps/web/src/lib/tools.ts` (new):
 
 ```ts
@@ -1372,7 +1377,7 @@ export const isEnforced = (runner, key): boolean
 **Verification** — new `apps/web/src/tests/models.test.tsx`, spec §7.7-§7.9:
 
 1. Every model id in `agents/roles/*.md` (read from disk in the test — the files are
-   in the repo) is either in `MODELS` or in `INTENTIONALLY_ABSENT`.
+   in the repo) is present in `MODELS`; there is no intentionally-absent exception.
 2. Every entry's `defaultEffort` ∈ its `efforts`; no entry has empty `efforts`;
    ids are unique.
 3. `splitModel`/`joinModel` round-trip `claude-opus-5:high`, `gpt-5.6-luna:max`,
