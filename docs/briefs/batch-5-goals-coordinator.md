@@ -19,7 +19,7 @@ Leo's rulings 2026-08-16 (binding for both specs, do not re-open):
 
 You are step ① (spec). Deliver `docs/specs/batch-5a-goals-coordinator-backend.md`, push, STOP at the gate. Do not call `inbox_ask`.
 
-Chain config: ⑤ `implementation-plan-executioner`, ⑥ `code-reviewer`, ⑦ `senior-dev`. Model, runner, and reasoning tier come from each agent's current configuration; task prompts stay model-neutral.
+Chain config: ⑤ `implementation-plan-executioner`, ⑥ `review-coordinator`, ⑦ `senior-dev`. This supersedes the brief's earlier `code-reviewer` assignment. Model, runner, and reasoning tier come from each agent's current configuration; task prompts stay model-neutral.
 
 In scope:
 1. System agents: register `orchestrator-router` and `dod-generator` — `system` flag, non-dispatchable, decision-only; model/effort configured via the Agents page (initial: Luna-tier cheap). No hardcoded model names anywhere (decisions §8 standing rule).

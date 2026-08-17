@@ -1,6 +1,6 @@
 # AgentOS 决策记录
 
-> 经三轮设计审讯（grilling）与 Leo 逐项拍板形成，2026-08-15。审讯过程见 `GRILLING-STATE.md`，设计唯一信源 = `BLUEPRINT.md`（Danny Postma AgentOS gist 全文）。
+> 经三轮设计审讯（grilling）与 Leo 逐项拍板形成，2026-08-15。审讯过程见 `GRILLING-STATE.md`；`BLUEPRINT.md` 是历史上游重建稿，不再是当前唯一信源。当前实现与路由 authority 按本文件最新未被取代的裁决、`docs/governance/task-routing-v1.md`、`agents/roles/*.md` 和 `packages/db/prisma/agent-contract.ts` 合并解释，较新的 Product Owner 裁决优先。
 > 状态：待 Leo 确认共识后开建 Phase 0。
 
 | # | 决策点 | 定案 | 关键理由 |

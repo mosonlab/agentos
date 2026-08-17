@@ -9,7 +9,7 @@ You are step ① (spec) of the nine-step chain for Batch 4. Write a requirements
 
 ## Chain configuration (fixed, do not revisit)
 - ⑤ implementation and ⑦ fixes: `frontend-dev`（模型与 runner 由 agent 配置决定）。
-- ⑥ code review: **`code-reviewer`**；任务书使用 runbook 的 `REVIEW INDEPENDENCE` 规则，不写模型或厂商身份。
+- ⑥ code review: **`review-coordinator`**；任务书使用 runbook 的 `REVIEW INDEPENDENCE` 规则，不写模型或厂商身份。此行覆盖该历史 brief 的旧 `code-reviewer` 分配。
 - Runs after the frontend-convergence chain is merged; spec against the converged codebase.
 
 ## In scope (from BACKLOG-V2 Batch 4)

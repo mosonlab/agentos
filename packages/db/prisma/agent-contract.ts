@@ -20,7 +20,7 @@ export const CANONICAL_TEMPLATE_STEPS = [
   { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review" },
   { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
   { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
-  { stepIndex: 6, agentName: "code-reviewer", outputKind: "code-review" },
+  { stepIndex: 6, agentName: "review-coordinator", outputKind: "code-review" },
   { stepIndex: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
   { stepIndex: 8, agentName: "librarian", outputKind: "documentation" },
   { stepIndex: 9, agentName: null, outputKind: "approval" },
