@@ -15,6 +15,8 @@ import {
   type PrismaClient,
 } from "@prisma/client";
 
+import { sharedChainBranch } from "./chain-branch.js";
+
 type Tx = Prisma.TransactionClient;
 
 const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
@@ -89,6 +91,112 @@ export const lockTaskRow = async (
   return rows[0] ?? null;
 };
 
+/** The shape `resolveRunBranches` needs. Structural rather than a Prisma payload
+ *  type, so the five call sites can pass rows from five differently-shaped
+ *  queries — the same reason `packages/api/src/chain.ts` keeps `ChainRow` plain. */
+export type RunBranchTask = {
+  id: string;
+  projectId: string;
+  repoId: string | null;
+  chainId: string | null;
+  templateId: string | null;
+  targetBranch: string | null;
+  repo: { defaultBranch: string };
+};
+
+/**
+ * Decides a new Run's head (`branch`) and base (`targetBranch`). The only place
+ * that decision is made; `enqueueTaskRun`, `POST /tasks`, the operator retry
+ * route, the automatic retry in the completion transaction and the lost-lease
+ * requeue all call this, because five copies of the expression is how step ①
+ * ended up on a different branch from steps ②–⑨.
+ *
+ * Writes at most one TaskActivity row (see the chain branch below), so it takes
+ * the caller's transaction.
+ */
+export const resolveRunBranches = async (
+  tx: Tx,
+  task: RunBranchTask,
+  prior: { branch: string | null } | null,
+): Promise<{ branch: string | null; targetBranch: string }> => {
+  // Template chains are frozen. This early return is the whole guarantee: the
+  // expression below is the pre-existing one, byte for byte, and nothing after
+  // this point runs for a template task. `targetBranch !== defaultBranch` is
+  // what keeps a template's step ① — whose targetBranch *is* the default
+  // (templates.ts) — from trying to clone a branch that does not exist yet.
+  if (task.templateId) {
+    const chainBranch = task.targetBranch && task.targetBranch !== task.repo.defaultBranch
+      ? task.targetBranch
+      : null;
+    return {
+      branch: prior?.branch ?? chainBranch,
+      targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
+    };
+  }
+  if (!task.chainId) {
+    return {
+      branch: prior?.branch ?? null,
+      targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
+    };
+  }
+
+  const shared = sharedChainBranch({ projectId: task.projectId, chainId: task.chainId });
+  // "Has any step of this chain actually published the shared branch *on this
+  // repo*?"
+  //
+  // Read `pushedBranch` and nothing else. It is written only after `git push`
+  // returns, with the ref that was actually given to it, on both delivery paths
+  // (delivery.ts). Do not "simplify" this into `branch` + `pushStatus` +
+  // `status`: those three lie in both directions, and each direction breaks a
+  // chain in a way no retry clears.
+  //   - `branch` + `pushStatus`: a *failed* run whose WIP salvage push succeeded
+  //     records pushStatus SUCCEEDED with `branch` still set to the workspace
+  //     branch — the shared branch — while deliverFailedWorkspace actually
+  //     pushed `agentos/<taskId>/run-<n>` (delivery.ts; runner.ts spreads the
+  //     workspace result first). The next step would clone a ref nobody created.
+  //   - adding `status`/`pushStatus = SUCCEEDED` to compensate: a run that
+  //     pushed the branch and then hit any `gh` error is recorded FAILED and
+  //     non-retryable (delivery.ts's catch; runner.ts's `succeeded`) even though
+  //     the ref exists. The next step would base on the default branch, recreate
+  //     the shared name locally, and be rejected non-fast-forward. Wedged for
+  //     good — no retry clears it.
+  //
+  // Scoped by repo (spec R2: the same name on two remotes is two unrelated
+  // refs), and by (projectId, chainId) rather than chainIndex — that pair is the
+  // platform's definition of a chain, so a chainIndex-null row sharing the
+  // chainId counts, consistent with it sharing the branch.
+  const published = task.repoId
+    ? await tx.run.findFirst({
+      where: {
+        pushedBranch: shared,
+        repoId: task.repoId,
+        task: { projectId: task.projectId, chainId: task.chainId },
+      },
+      select: { id: true },
+    })
+    : null;
+  // `prior?.branch` is deliberately not consulted here. Post-change it is always
+  // `shared`, so it would give the same answer; pre-change (a chain that spans
+  // the restart) it is a per-task branch, and honouring it would quietly keep a
+  // mixed chain mixed instead of falling through to the operator's targetBranch,
+  // which the rollback runbook names as the manual repair lever.
+  const targetBranch = published
+    ? shared
+    : task.targetBranch ?? task.repo.defaultBranch;
+
+  // targetBranch stays writable for chain steps but no longer routes them.
+  // Silently ignoring an operator's value is a footgun, so say so once per run —
+  // this is how the operator learns hand-repointing is unnecessary.
+  if (task.targetBranch && task.targetBranch !== targetBranch) {
+    await tx.taskActivity.create({ data: {
+      taskId: task.id,
+      actorType: "control-plane",
+      body: `targetBranch '${task.targetBranch}' is not used for chain steps; this run is based on '${targetBranch}' and pushes to '${shared}'`,
+    } });
+  }
+  return { branch: shared, targetBranch };
+};
+
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
@@ -114,12 +222,7 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
-  // Template steps after the first one inherit the chain's shared feature branch
-  // so every step pushes to the same head and the chain lands in one PR; without
-  // this the workspace falls back to a per-run branch and each step opens its own.
-  const chainBranch = task.templateId && task.targetBranch && task.targetBranch !== task.repo.defaultBranch
-    ? task.targetBranch
-    : null;
+  const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
   return tx.run.create({ data: {
     projectId: task.projectId,
     taskId: task.id,
@@ -129,8 +232,9 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     dedupeKey: `task:${task.id}:run:${runNumber}`,
     runner: derived.runner,
     model: derived.model,
-    targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
-    branch: prior?.branch ?? chainBranch,
+    targetBranch: branches.targetBranch,
+    branch: branches.branch,
+    opensPullRequest: task.opensPullRequest,
     promptHash: derived.promptHash,
     maxDurationMin: task.maxDurationMin,
     stallTimeoutMin: task.stallTimeoutMin,
