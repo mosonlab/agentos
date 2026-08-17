@@ -1,6 +1,7 @@
-import { type DragEvent, type ReactNode, useCallback, useEffect, useRef } from "react";
+import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { COLUMNS } from "../lib/board";
+import { COLUMNS, type Edges, clampScroll, columnStep, edgeState, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { COUNT } from "./ui";
@@ -49,7 +50,7 @@ const COLUMN = "flex min-w-0 flex-col";
  * A head's height is now a property of the board, not of whether a column
  * happens to offer an action.
  */
-const COLUMN_HEAD = "sticky top-0 z-[2] flex h-[36px] flex-none items-center gap-[8px] bg-popover px-[2px] text-[12.5px] text-secondary-foreground";
+const COLUMN_HEAD = "sticky top-0 z-[2] flex h-[36px] flex-none items-center gap-[8px] bg-background px-[2px] text-[12.5px] text-secondary-foreground";
 /** The 1% tint is the faint drop region the board draws behind every column,
  *  cards or not — it is a declaration, not decoration. No `overflow` of its own:
  *  the board owns both axes, and a second scroller here is the whole defect. */
@@ -101,6 +102,71 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   </div>
 );
 
+/* --------------------------------------------------- horizontal navigation */
+
+/** Must match `gap-[12px]` in `BOARD_GRID`: a press moves one column *plus* the
+ *  gap, so the next column lands against the same edge the last one left. */
+const BOARD_GAP_PX = 12;
+/** How long after the last scroll event the position is written down. The board
+ *  emits these at frame rate under a trackpad, and `localStorage.setItem` is a
+ *  synchronous main-thread write — 60 of them a second is a long task. */
+const REMEMBER_MS = 200;
+
+const SHELL = "relative flex min-h-0 flex-1 flex-col gap-[8px]";
+/** Reserved whether or not the arrows are in it. They appear the moment the
+ *  board overflows, and a row that collapsed when it emptied would move the
+ *  whole board up by 36px at exactly that moment. */
+const NAV = "flex h-[28px] flex-none items-center justify-end gap-[6px]";
+const NAV_HINT = "mr-auto text-[12px] text-[color:var(--faint)]";
+const FRAME = "relative min-h-0 flex-1";
+/** Drawn over the board, never in the way of it: the fade is the only thing on
+ *  the page that says a column is cut off rather than absent. */
+const FADE = "pointer-events-none absolute inset-y-0 z-[3] w-[28px]";
+const FADE_LEFT = "left-0 bg-[linear-gradient(to_right,var(--background),transparent)]";
+const FADE_RIGHT = "right-0 bg-[linear-gradient(to_left,var(--background),transparent)]";
+
+const NO_EDGES: Edges = { overflowing: false, atStart: true, atEnd: true };
+
+/**
+ * The board's horizontal state, read from the element rather than tracked.
+ *
+ * Deliberately *not* React state per scroll event: a `setState` on every one of
+ * a trackpad's 60-a-second scroll events would re-render 112 cards for a fact
+ * that changes twice per board — at the two ends. `sameEdges` keeps the previous
+ * object whenever nothing crossed an edge, so React bails out of the update.
+ */
+const useEdges = (boardRef: React.RefObject<HTMLDivElement | null>): [Edges, () => void] => {
+  const [edges, setEdges] = useState<Edges>(NO_EDGES);
+  const sync = useCallback((): void => {
+    const board = boardRef.current;
+    if (!board) return;
+    const next = edgeState(board);
+    setEdges((previous) => (sameEdges(previous, next) ? previous : next));
+  }, [boardRef]);
+  return [edges, sync];
+};
+
+/** The arrows, as one control. Extracted so their disabled rule can be asserted
+ *  from markup: an arrow at its end is disabled, not silently inert. */
+export const BoardArrows = ({ edges, onStep }: { edges: Edges; onStep: (direction: -1 | 1) => void }): ReactNode => (
+  <>
+    <Button
+      type="button" variant="legacy" size="legacySmall" className="shadow-none"
+      aria-label="Scroll one column left" disabled={edges.atStart}
+      onClick={() => onStep(-1)}
+    >
+      ←
+    </Button>
+    <Button
+      type="button" variant="legacy" size="legacySmall" className="shadow-none"
+      aria-label="Scroll one column right" disabled={edges.atEnd}
+      onClick={() => onStep(1)}
+    >
+      →
+    </Button>
+  </>
+);
+
 /** How close to the board's edge a drag has to get before the board starts
  *  moving under it, and how many pixels per tick it then moves. */
 const DRAG_EDGE_PX = 76;
@@ -114,7 +180,7 @@ export const dragEdgeStep = (clientX: number, box: { left: number; right: number
     : box.right - clientX < DRAG_EDGE_PX ? DRAG_STEP_PX
       : 0);
 
-export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove, onArchiveDone, actions, boardRef }: {
+export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove, onArchiveDone, actions, boardRef, projectId }: {
   byStatus: Map<TaskStatus, BoardTask[]>;
   loading: boolean;
   dragOver: TaskStatus | null;
@@ -123,6 +189,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
   onArchiveDone: () => void;
   actions: CardActions;
   boardRef: React.RefObject<HTMLDivElement | null>;
+  projectId: string;
 }): ReactNode => {
   // Only ~2.5 of five columns fit at a 972px viewport, so a drag that starts in
   // Todo cannot reach Done without the board moving — and a drag is holding the
@@ -162,30 +229,105 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
   }, [stopEdgeScroll]);
   useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
 
+  /* ------------------------------------------------ arrows, fades, memory */
+
+  const [edges, syncEdges] = useEdges(boardRef);
+
+  // One listener for both jobs. `passive` because neither of them can cancel a
+  // scroll, and saying so keeps the scroll off the main thread's critical path.
+  useEffect(() => {
+    const board = boardRef.current;
+    if (!board) return;
+    let handle = 0;
+    const onScroll = (): void => {
+      syncEdges();
+      window.clearTimeout(handle);
+      handle = window.setTimeout(
+        () => storage.set(scrollKey(projectId), String(Math.round(board.scrollLeft))),
+        REMEMBER_MS,
+      );
+    };
+    board.addEventListener("scroll", onScroll, { passive: true });
+    // The board's own width changes with the window, and its content's width
+    // changes at 1440px where the columns stop being 250px — both cross the
+    // overflow threshold without a scroll event to notice it.
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(syncEdges) : null;
+    observer?.observe(board);
+    if (board.firstElementChild !== null) observer?.observe(board.firstElementChild);
+    return () => {
+      window.clearTimeout(handle);
+      board.removeEventListener("scroll", onScroll);
+      observer?.disconnect();
+    };
+  }, [boardRef, projectId, syncEdges]);
+
+  // Restore before paint, so a remembered position is where the board *starts*
+  // rather than somewhere it visibly jumps to. Once per project: a poll landing
+  // 24 times a minute must never pull the board back under the operator, which
+  // is why this is keyed on the project and not on the task list.
+  useLayoutEffect(() => {
+    const board = boardRef.current;
+    if (!board) return;
+    board.scrollLeft = storedScroll(storage.get(scrollKey(projectId)), board);
+    syncEdges();
+  }, [boardRef, projectId, syncEdges]);
+
+  const step = useCallback((direction: -1 | 1): void => {
+    const board = boardRef.current;
+    if (!board) return;
+    const target = clampScroll(board.scrollLeft + direction * columnStep(board, COLUMNS.length, BOARD_GAP_PX), board);
+    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    board.scrollTo({ left: target, behavior: still ? "auto" : "smooth" });
+  }, [boardRef]);
+
   return (
-    <div
-      ref={boardRef}
-      className={BOARD}
-      onDragOver={onBoardDragOver}
-      onDragLeave={onBoardDragLeave}
-      onDragEnd={stopEdgeScroll}
-      onDrop={stopEdgeScroll}
-    >
-      <div className={BOARD_GRID}>
-        {COLUMNS.map((column) => (
-          <BoardColumn
-            key={column.status}
-            column={column}
-            tasks={byStatus.get(column.status) ?? []}
-            loading={loading}
-            dragOver={dragOver}
-            onDragOver={setDragOver}
-            onDragLeave={(status) => setDragOver(dragOver === status ? null : dragOver)}
-            onDrop={(taskId, status) => { setDragOver(null); stopEdgeScroll(); onMove(taskId, status); }}
-            onArchiveDone={onArchiveDone}
-            actions={actions}
-          />
-        ))}
+    <div className={SHELL}>
+      <div className={NAV}>
+        {/* Only when there is something off screen. Two permanently disabled
+            arrows at 1440px, where all five columns are already visible, would
+            be a control that has never once had anything to do. */}
+        {edges.overflowing ? (
+          <>
+            <span className={NAV_HINT}>Scroll or drag to reach the other columns</span>
+            <BoardArrows edges={edges} onStep={step} />
+          </>
+        ) : null}
+      </div>
+
+      <div className={FRAME}>
+        <div
+          ref={boardRef}
+          className={BOARD}
+          // A scrollable region has to be reachable without a pointer; focused,
+          // it takes arrow keys natively, which is the vertical half of what the
+          // two buttons do horizontally.
+          role="region"
+          aria-label="Task board"
+          tabIndex={0}
+          onDragOver={onBoardDragOver}
+          onDragLeave={onBoardDragLeave}
+          onDragEnd={stopEdgeScroll}
+          onDrop={stopEdgeScroll}
+        >
+          <div className={BOARD_GRID}>
+            {COLUMNS.map((column) => (
+              <BoardColumn
+                key={column.status}
+                column={column}
+                tasks={byStatus.get(column.status) ?? []}
+                loading={loading}
+                dragOver={dragOver}
+                onDragOver={setDragOver}
+                onDragLeave={(status) => setDragOver(dragOver === status ? null : dragOver)}
+                onDrop={(taskId, status) => { setDragOver(null); stopEdgeScroll(); onMove(taskId, status); }}
+                onArchiveDone={onArchiveDone}
+                actions={actions}
+              />
+            ))}
+          </div>
+        </div>
+        {edges.atStart ? null : <div aria-hidden="true" className={cn(FADE, FADE_LEFT)} />}
+        {edges.atEnd ? null : <div aria-hidden="true" className={cn(FADE, FADE_RIGHT)} />}
       </div>
     </div>
   );

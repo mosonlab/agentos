@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  chainParked, clampScroll, columnStep, countByStatus, defaultTab, focusAfterMove,
-  moveTargets, parseStatus, retryable, scheduleLabel, statusLabel,
+  chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState, focusAfterMove,
+  moveTargets, parseStatus, retryable, sameEdges, scheduleLabel, statusLabel, storedScroll,
 } from "../lib/board";
 import type { BoardTask, ChainProgress } from "../lib/types";
 
@@ -168,4 +168,44 @@ test("the board's ends are exact, so an arrow at an edge cannot stay enabled", (
   assert.equal(clampScroll(999_999, board), 608);
   assert.equal(clampScroll(261.6, board), 262);
   assert.equal(clampScroll(100, { scrollWidth: 690, clientWidth: 690 }), 0);
+});
+
+test("a board with nothing off screen is at both of its ends", () => {
+  // Which is what disables both arrows and draws neither fade at 1440px, where
+  // all five columns are already visible.
+  const edges = edgeState({ scrollLeft: 0, scrollWidth: 1400, clientWidth: 1400 });
+  assert.deepEqual(edges, { overflowing: false, atStart: true, atEnd: true });
+});
+
+test("the ends tolerate the fraction of a pixel Chrome actually reports", () => {
+  // At 110% zoom `scrollWidth - clientWidth` comes back as 607.6 and scrolling
+  // to the end lands on 607.2: exact comparison would leave `>` enabled forever
+  // with nothing left to scroll to.
+  const box = { scrollWidth: 1297.6, clientWidth: 690 };
+  assert.equal(edgeState({ ...box, scrollLeft: 607.2 }).atEnd, true);
+  assert.equal(edgeState({ ...box, scrollLeft: 0.4 }).atStart, true);
+  // A whole column away from an end is not an end.
+  assert.equal(edgeState({ ...box, scrollLeft: 262 }).atStart, false);
+  assert.equal(edgeState({ ...box, scrollLeft: 262 }).atEnd, false);
+  assert.equal(edgeState({ ...box, scrollLeft: 262 }).overflowing, true);
+});
+
+test("edge state is compared by value, so a scroll that crosses nothing re-renders nothing", () => {
+  const a = edgeState({ scrollLeft: 30, scrollWidth: 1298, clientWidth: 690 });
+  const b = edgeState({ scrollLeft: 300, scrollWidth: 1298, clientWidth: 690 });
+  assert.equal(sameEdges(a, b), true, "both are mid-board");
+  assert.equal(sameEdges(a, edgeState({ scrollLeft: 0, scrollWidth: 1298, clientWidth: 690 })), false);
+});
+
+test("a remembered position is clamped to the board it is being restored into", () => {
+  const board = { scrollLeft: 0, scrollWidth: 1298, clientWidth: 690 };
+  assert.equal(storedScroll("262", board), 262);
+  // Remembered on a 901px viewport, restored on a 1440px one where there is no
+  // travel left at all.
+  assert.equal(storedScroll("608", { scrollLeft: 0, scrollWidth: 1400, clientWidth: 1400 }), 0);
+  assert.equal(storedScroll("999999", board), 608);
+  assert.equal(storedScroll(null, board), 0);
+  assert.equal(storedScroll("", board), 0);
+  assert.equal(storedScroll("left", board), 0, "whatever else is in localStorage is not a position");
+  assert.equal(storedScroll("-40", board), 0);
 });

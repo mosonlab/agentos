@@ -3,10 +3,10 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
-import { BOARD, BOARD_GRID, BoardColumn, dragEdgeStep } from "../components/desktop-board";
+import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { TaskCard } from "../components/task-card";
-import { COLUMNS, countByStatus } from "../lib/board";
+import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { BOARD_PAGE, archiveDoneNotice, stableRows } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
 
@@ -198,6 +198,32 @@ test("five columns fit at 1440px and are fixed-width below it", () => {
   assert.match(BOARD_GRID, /grid-cols-\[repeat\(5,250px\)\]/);
   assert.match(BOARD_GRID, /min-width:1440px\)\]:grid-cols-\[repeat\(5,minmax\(0,1fr\)\)\]/);
   assert.match(BOARD_PAGE, /\bmax-w-none\b/);
+});
+
+test("the arrows say which way they go, and an arrow at its end is disabled", () => {
+  // Disabled rather than absent: an operator who has scrolled to Done needs to
+  // be told the board ends there, not left pressing a control that does nothing.
+  const start = renderToStaticMarkup(
+    <BoardArrows edges={{ overflowing: true, atStart: true, atEnd: false }} onStep={() => undefined} />,
+  );
+  assert.match(start, /aria-label="Scroll one column left"[^>]*disabled/);
+  assert.doesNotMatch(start, /aria-label="Scroll one column right"[^>]*disabled/);
+  const end = renderToStaticMarkup(
+    <BoardArrows edges={{ overflowing: true, atStart: false, atEnd: true }} onStep={() => undefined} />,
+  );
+  assert.match(end, /aria-label="Scroll one column right"[^>]*disabled/);
+  assert.doesNotMatch(end, /aria-label="Scroll one column left"[^>]*disabled/);
+  // Real buttons, so they are in the tab order and take Enter and Space for
+  // free — the requirement is a keyboard-usable control, not a clickable div.
+  assert.match(start, /<button/);
+});
+
+test("a press moves the board by exactly the column width the grid declares", () => {
+  // `columnStep` is given the gap as a number; the grid declares it as a class.
+  // If the two ever disagree the board drifts by 12px per press, and nothing
+  // else in the system would notice.
+  assert.match(BOARD_GRID, /\bgap-\[12px\]/);
+  assert.equal(columnStep({ scrollWidth: 1298, clientWidth: 690 }, COLUMNS.length, 12), 262);
 });
 
 test("a drag scrolls the board only near its edges", () => {

@@ -155,3 +155,39 @@ export const columnStep = (board: { scrollWidth: number; clientWidth: number }, 
  *  cannot leave it a fraction of a pixel short of an edge and stay enabled. */
 export const clampScroll = (target: number, board: { scrollWidth: number; clientWidth: number }): number =>
   Math.max(0, Math.min(Math.round(target), Math.max(0, board.scrollWidth - board.clientWidth)));
+
+/** A pixel of slack at each end. Chrome reports `scrollWidth`/`scrollLeft`
+ *  fractionally at fractional zoom levels, and a board sitting 0.4px short of
+ *  its end with an enabled `>` button that moves nothing is a broken control. */
+const EDGE_SLACK = 1;
+
+export type ScrollBox = { scrollLeft: number; scrollWidth: number; clientWidth: number };
+export type Edges = { overflowing: boolean; atStart: boolean; atEnd: boolean };
+
+/** What the two arrows and the two edge fades are both driven by. A board that
+ *  does not overflow is at both ends at once, which is exactly the state that
+ *  disables both arrows and draws neither fade. */
+export const edgeState = (box: ScrollBox): Edges => {
+  const furthest = Math.max(0, box.scrollWidth - box.clientWidth);
+  return {
+    overflowing: furthest > EDGE_SLACK,
+    atStart: box.scrollLeft <= EDGE_SLACK,
+    atEnd: box.scrollLeft >= furthest - EDGE_SLACK,
+  };
+};
+
+export const sameEdges = (a: Edges, b: Edges): boolean =>
+  a.overflowing === b.overflowing && a.atStart === b.atStart && a.atEnd === b.atEnd;
+
+/** The remembered horizontal position, made safe to assign.
+ *
+ *  `storage` hands back whatever is in `localStorage`, which is whatever was
+ *  there before this build — and a stale position from a wider viewport, or from
+ *  a project with more columns of content, would otherwise leave the board
+ *  scrolled past its own end on arrival. */
+export const storedScroll = (raw: string | null | undefined, board: ScrollBox): number => {
+  const value = Number(raw);
+  return raw === null || raw === undefined || raw === "" || !Number.isFinite(value)
+    ? 0
+    : clampScroll(value, board);
+};

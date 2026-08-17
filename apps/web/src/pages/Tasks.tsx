@@ -258,6 +258,7 @@ export const TasksPage = (): ReactNode => {
             onArchiveDone={() => void archiveDone()}
             actions={actions}
             boardRef={boardRef}
+            projectId={projectId}
           />
         )}
       </div>
