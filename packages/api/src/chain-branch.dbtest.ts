@@ -652,6 +652,20 @@ test("T19: a PATCH does not change a run that is already queued", async () => {
 test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots", async () => {
   const seed = await seedProject("t19b");
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const waitForTaskLockWaiter = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const waiting = await db.$queryRaw<Array<{ count: bigint }>>`
+        SELECT count(*)::bigint AS count
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND query LIKE '%FROM "Task"%FOR UPDATE%'
+      `;
+      if ((waiting[0]?.count ?? 0n) > 0n) return;
+      await wait(10);
+    }
+    throw new Error("PATCH did not reach the Task row-lock wait queue");
+  };
   const holdTask = async (taskId: string) => {
     let release!: () => void;
     let locked!: () => void;
@@ -675,11 +689,10 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
   const patchAutomatic = operatorRequest(`/tasks/${automatic.body.id}`, {
     method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
   });
-  await wait(25);
+  await waitForTaskLockWaiter();
   const completeAutomatic = completeRunViaRoute(automaticClaim, {
     exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
   });
-  await wait(25);
   heldAutomatic.release();
   assert.equal((await patchAutomatic).status, 200);
   assert.equal((await completeAutomatic).status, 200);
@@ -701,9 +714,8 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
   const patchLost = operatorRequest(`/tasks/${lost.body.id}`, {
     method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
   });
-  await wait(25);
+  await waitForTaskLockWaiter();
   const reconcile = reconcileDatabaseRuns(db, new Date());
-  await wait(25);
   heldLost.release();
   assert.equal((await patchLost).status, 200);
   assert.ok(await reconcile > 0);
