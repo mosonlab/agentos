@@ -8,6 +8,12 @@ import { workspaceEnvironment } from "./workspace.js";
 export type DeliveryResult = {
   pushStatus: "SUCCEEDED" | "FAILED";
   pushRemote: string;
+  /** The ref actually handed to `git push`, reported on every path that pushed —
+   *  including the PR-failure path, where the branch is on the remote no matter
+   *  what `gh` did. The control plane treats this as the one publication
+   *  signal, so a path that pushes and forgets to report it makes a chain step
+   *  base on the wrong branch. */
+  pushedBranch?: string;
   headSha?: string;
   pushError?: string;
   pullRequestUrl?: string;
@@ -60,7 +66,17 @@ const failureClassFor = (message: string): FailureClass => /auth|credential|perm
 const manual = (branch: string, remote: string, reason: string): DeliveryResult => ({
   pushStatus: "SUCCEEDED",
   pushRemote: remote,
+  pushedBranch: branch,
   deliveryInstructions: `${reason} Branch '${branch}' was pushed. Open a pull request manually against the repository default branch.`,
+});
+
+/** The step pushed and is done: it was never meant to open a pull request, so
+ *  saying "open one manually" would be wrong advice, not just noise. */
+const noPullRequest = (branch: string, remote: string): DeliveryResult => ({
+  pushStatus: "SUCCEEDED",
+  pushRemote: remote,
+  pushedBranch: branch,
+  deliveryInstructions: `Branch '${branch}' was pushed. This step does not open a pull request.`,
 });
 
 // A chain step is named "<chain>: <step>"; the PR is the chain's, not the step's.
@@ -77,21 +93,48 @@ export const deliverWorkspace = async (
   claim: ClaimedTask,
   workspace: Workspace,
   command: CommandExecutor = executeCommand(config),
+  recordPublication: (branch: string) => Promise<void> = async () => undefined,
 ): Promise<DeliveryResult> => {
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
+  // `!== false`, not a truthiness test, and the difference is the whole point.
+  // The field is required in ClaimedTask so our own code cannot omit it; the
+  // comparison is what makes a *stale API build* that omits it from the claim
+  // payload degrade to today's behaviour (open the PR) instead of to the
+  // expensive failure (never open one again, silently). Read from `run`, not
+  // `task`: the run carries the snapshot taken when it was created, so an
+  // operator's PATCH cannot change a run that is already queued.
+  // No step name, output kind or task name is consulted here or anywhere in
+  // this package.
+  const opensPullRequest = claim.run.opensPullRequest !== false;
+  // The push is unconditional: a step that opens no PR still publishes its
+  // branch, which is what lets the *next* step of the chain clone it.
   try {
     await command("git", ["push", "--set-upstream", "origin", workspace.branch], workspace.path, env);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { pushStatus: "FAILED", pushRemote: remote, pushError: message, failureClass: failureClassFor(message) };
   }
+  // This API write intentionally sits immediately after git push and before
+  // any GitHub lookup, cleanup, or terminal completion. It closes the large
+  // post-push loss window; provisionWorkspace's remote-head check covers the
+  // irreducible crash between these two network operations. A transient ACK
+  // failure does not turn a successful push into a failed push: completion is
+  // a second persistence opportunity and remote reconciliation is the final
+  // source of truth.
+  await recordPublication(workspace.branch).catch(() => undefined);
   const repo = githubRepo(remote);
-  if (!repo) return manual(workspace.branch, remote, "Remote is not hosted on GitHub.");
+  if (!repo) {
+    return opensPullRequest
+      ? manual(workspace.branch, remote, "Remote is not hosted on GitHub.")
+      : noPullRequest(workspace.branch, remote);
+  }
   try {
     await command("gh", ["--version"], workspace.path, env);
   } catch {
-    return manual(workspace.branch, remote, "The gh CLI is unavailable.");
+    return opensPullRequest
+      ? manual(workspace.branch, remote, "The gh CLI is unavailable.")
+      : noPullRequest(workspace.branch, remote);
   }
   // Only an *open* PR on this head may be reused: a merged or closed one would
   // silently swallow the push. One open PR per head branch is a GitHub invariant,
@@ -104,24 +147,58 @@ export const deliverWorkspace = async (
     return parsed[0] ?? null;
   };
   try {
+    // The lookup runs before the flag check on purpose: a documentation step
+    // running after the implementation step still reports the chain's PR on its
+    // gate card and in GET /tasks/:id. Only *creation* is suppressed.
     const existing = await openPullRequest();
-    if (existing) return { pushStatus: "SUCCEEDED", pushRemote: remote, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
-    await command("gh", [
-      "pr", "create", "--repo", repo,
-      "--base", claim.repo.defaultBranch,
-      "--head", workspace.branch,
-      "--title", pullRequestTitle(claim.task),
-      "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
-    ], workspace.path, env);
+    if (existing) return { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
+    if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
+    try {
+      await command("gh", [
+        "pr", "create", "--repo", repo,
+      "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
+        "--head", workspace.branch,
+        "--title", pullRequestTitle(claim.task),
+        "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
+      ], workspace.path, env);
+    } catch (createError: unknown) {
+      // `list(empty) → create(already exists)` is a normal race with another
+      // runner or a human. Confirm once more before classifying it as a tool
+      // failure; if the expected head now owns an open PR, delivery is complete.
+      const raced = await openPullRequest();
+      if (raced) {
+        return {
+          pushStatus: "SUCCEEDED",
+          pushRemote: remote,
+          pushedBranch: workspace.branch,
+          pullRequestUrl: raced.url,
+          pullRequestNumber: raced.number,
+        };
+      }
+      throw createError;
+    }
     const created = await openPullRequest();
     return created
-      ? { pushStatus: "SUCCEEDED", pushRemote: remote, pullRequestUrl: created.url, pullRequestNumber: created.number }
-      : { pushStatus: "SUCCEEDED", pushRemote: remote };
+      ? { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: created.url, pullRequestNumber: created.number }
+      : { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
+    // The push above already succeeded, so the branch exists on the remote no
+    // matter what `gh` did. Report that fact (`pushedBranch`) on both paths, or
+    // the chain's next step bases on the default branch and its push of the
+    // already-published shared name is rejected non-fast-forward — a wedge no
+    // retry clears.
+    //
+    // For a step that was never meant to open a PR, a failed `gh pr list` is
+    // not a delivery failure at all: everything this step owed the chain is
+    // already on the remote. Reporting FAILED here would fail a documentation
+    // step *after* its push, and the runner marks a delivery failure with a
+    // failureClass non-retryable.
+    if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
     return {
       pushStatus: "FAILED",
       pushRemote: remote,
+      pushedBranch: workspace.branch,
       pushError: message,
       deliveryInstructions: `Branch '${workspace.branch}' was pushed, but PR creation failed. Run gh pr create manually.`,
       failureClass: failureClassFor(message),
@@ -133,6 +210,18 @@ export const deliverWorkspace = async (
  * Salvage for a failed run: commit any trackable worktree changes, then push the
  * run branch as WIP so the work survives workspace cleanup. Never opens a PR,
  * and never reports a failureClass — the run already has one from CLI evidence.
+ *
+ * The per-run branch here is deliberate and is now load-bearing: a failed run's
+ * half-finished tree must never enter the chain's shared branch, which every
+ * later step of the chain clones. Never change this to workspace.branch.
+ *
+ * Note what this function does *not* control: the completion payload still
+ * reports `Run.branch` as the workspace branch (runner.ts spreads the workspace
+ * result before this one), so a salvaged run still *looks* like a push to the
+ * shared branch in that column. `pushedBranch` is the column that tells the
+ * truth, and it is the only one @agentos/db's resolveRunBranches trusts. Keep
+ * them in sync: whatever ref is handed to `git push` is the ref reported as
+ * `pushedBranch`.
  */
 export const deliverFailedWorkspace = async (
   config: RunnerConfig,
@@ -165,6 +254,7 @@ export const deliverFailedWorkspace = async (
     return {
       pushStatus: "SUCCEEDED",
       pushRemote: remote,
+      pushedBranch: branch,
       headSha: head,
       deliveryInstructions: `Run failed; its commits were pushed to '${branch}' as work in progress. No pull request was opened.`,
     };

@@ -222,6 +222,11 @@ model Agent {
   rolePrompt         String
   runnerPreference   RunnerPreference     @default(INHERIT)
   inboxAccess        Boolean              @default(false)
+  /// Denied tools, not allowed ones: empty means "every tool the CLI offers",
+  /// which is what every agent had before this column existed. Keys are the eight
+  /// canonical names in apps/web/src/lib/tools.ts; the runner maps them per CLI in
+  /// packages/runner/src/adapters.ts.
+  disabledTools      String[]             @default([])
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   archivedAt         DateTime?
@@ -449,6 +454,7 @@ model TaskTemplateStep {
   spawnPolicy             Json?
   runner                  RunnerKind?
   outputKind              String       @default("result")
+  opensPullRequest        Boolean      @default(true)
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
   assigneeAgent           Agent?       @relation(fields: [assigneeAgentId], references: [id], onDelete: SetNull)
   tasks                   Task[]
@@ -477,6 +483,9 @@ model Task {
   recurringSourceTaskId String?
   assigneeType       AssigneeType     @default(AGENT)
   approvalGate       Boolean          @default(false)
+  /// Whether a run of this task may open a pull request. Copied onto each Run at
+  /// creation so a PATCH cannot change a run that is already queued.
+  opensPullRequest   Boolean          @default(true)
   chainId            String?
   chainIndex         Int?
   scheduleKind       ScheduleKind     @default(NOW)
@@ -646,8 +655,19 @@ model Run {
   sessionTokenRevokedAt DateTime?
   workspacePath         String?
   workspaceRetained     Boolean        @default(false)
+  /// The PR decision snapshotted when this run was created, so an operator's
+  /// PATCH of the task cannot change a run already queued. The runner reads this
+  /// and never the live task row.
+  opensPullRequest      Boolean        @default(true)
   targetBranch          String?
   branch                String?
+  /// The ref this run actually handed to `git push`, written only after the push
+  /// returned. It is not the derived chain branch — `sharedChainBranch` remains
+  /// the only thing that computes that — it is the record of what was published,
+  /// and it is the only signal `resolveRunBranches` trusts as evidence that a
+  /// chain branch exists on a remote. `branch` and `pushStatus` cannot answer
+  /// that question: see the comment in workflow.ts.
+  pushedBranch          String?
   baseSha               String?
   headSha               String?
   pushStatus            PushStatus     @default(NOT_REQUESTED)

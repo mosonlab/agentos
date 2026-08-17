@@ -1,3 +1,5 @@
+import { statfs } from "node:fs/promises";
+
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
 export type FailureClass =
@@ -31,6 +33,12 @@ export type ClaimedTask = {
     model: string;
     foundationalPrompt: string;
     rolePrompt: string;
+    /**
+     * Denied tools, read at claim time. The claim handler returns the agent row
+     * whole (packages/api/src/app.ts), so this arrives for free once the column
+     * exists — this hand-written mirror is the only thing that needed updating.
+     */
+    disabledTools: string[];
   };
   repo: {
     id: string;
@@ -41,6 +49,21 @@ export type ClaimedTask = {
   run: {
     id: string;
     runNumber: number;
+    /**
+     * Whether this run may open a pull request. Required, so a path in our own
+     * code that forgets it is a compile error rather than a silent
+     * `undefined → falsy → never open a PR`.
+     *
+     * It lives on `run` and deliberately NOT on `task`: the run carries the
+     * snapshot taken when it was created, so an operator's PATCH of the task
+     * cannot change a run that is already queued. The claim route reads the live
+     * task row, so reading it from `task` would break that contract — omitting
+     * it there makes doing so a compile error.
+     */
+    opensPullRequest: boolean;
+    /** The integration branch selected by the chain's first run. Later runs'
+     * targetBranch is the shared head and cannot recover this value. */
+    pullRequestBase: string;
     maxDurationMin: number;
     stallTimeoutMin: number;
     maxRunsPerTask: number;
@@ -87,10 +110,39 @@ const request = async (config: RunnerConfig, path: string, init: RequestInit): P
   return response;
 };
 
+type StatFs = (path: string) => Promise<{ bavail: number; bsize: number }>;
+export type RunnerTelemetryBody = {
+  daemonVersion: string;
+  pollIntervalMs: number;
+  workspaceRoot: string;
+  diskFreeBytes?: number;
+};
+
+export const runnerTelemetryBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<RunnerTelemetryBody> => {
+  const base = {
+    daemonVersion: config.daemonVersion,
+    pollIntervalMs: config.pollIntervalMs,
+    workspaceRoot: config.workspaceRoot,
+  };
+  try {
+    const stats = await readStats(config.workspaceRoot);
+    return { ...base, diskFreeBytes: stats.bavail * stats.bsize };
+  } catch {
+    // Telemetry must never stop the runner from claiming or heartbeating.
+    return base;
+  }
+};
+
+export const claimRequestBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<Record<string, unknown>> => ({
+  runnerId: config.runnerId,
+  leaseSeconds: config.leaseSeconds,
+  ...await runnerTelemetryBody(config, readStats),
+});
+
 export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | null> => {
   const response = await request(config, "/runner/tasks/claim", {
     method: "POST",
-    body: JSON.stringify({ runnerId: config.runnerId, leaseSeconds: config.leaseSeconds }),
+    body: JSON.stringify(await claimRequestBody(config)),
   });
   return response.status === 204 ? null : await response.json() as ClaimedTask;
 };
@@ -124,6 +176,25 @@ export const heartbeat = async (
       processAlive: state.processAlive,
       lastProgressEventAt: state.lastProgressEventAt?.toISOString() ?? null,
       inFlightTool: state.inFlightTool,
+      ...await runnerTelemetryBody(config),
+    }),
+  });
+};
+
+/** Durably acknowledge the exact ref immediately after git accepts the push.
+ * Terminal completion is intentionally not the first write of this fact: PR
+ * work, cleanup, or process loss may happen after publication. */
+export const recordPublishedBranch = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  pushedBranch: string,
+): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/publication`, {
+    method: "POST",
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      pushedBranch,
     }),
   });
 };
@@ -176,6 +247,11 @@ export type Completion = {
   /** The environment failed, not the agent: the attempt must not spend budget. */
   externalFailure?: boolean;
   branch?: string | null;
+  /** The ref actually handed to `git push`, which is not always `branch`: a WIP
+   *  salvage pushes a per-run branch while `branch` still reports the
+   *  workspace's. Declared here rather than left to ride along on a spread, so
+   *  the wire contract is visible where the payload is defined. */
+  pushedBranch?: string | null;
   baseSha?: string | null;
   headSha?: string | null;
   output?: string | null;

@@ -3,26 +3,53 @@ import { type MouseEvent, type ReactNode, useCallback, useEffect, useState } fro
 /** Hash routing keeps the app a static bundle: no dev-server rewrite rules and
  *  `vite preview` behaves exactly like `vite dev`. */
 
-export const currentPath = (): string => {
+/** Everything after the `#`, path and query together. */
+const currentTarget = (): string => {
   const raw = window.location.hash.replace(/^#/, "");
   return raw.length === 0 ? "/" : raw;
 };
 
-export const navigate = (path: string): void => {
-  if (currentPath() === path) return;
-  window.location.hash = path;
+export const currentPath = (): string => currentTarget().split("?")[0] ?? "/";
+
+/** The hash's own query string. The Tasks board puts its selected status here so
+ *  a phone's URL says which list is on screen, which is what makes it shareable
+ *  and what makes a reload land back where the operator was. */
+export const currentQuery = (): URLSearchParams => new URLSearchParams(currentTarget().split("?")[1] ?? "");
+
+export const navigate = (target: string): void => {
+  if (currentTarget() === target) return;
+  window.location.hash = target;
   window.scrollTo({ top: 0 });
 };
 
-export const useRoute = (): string => {
-  const [path, setPath] = useState(currentPath);
+/**
+ * Same location, no history entry, and no scroll.
+ *
+ * For state the URL should *describe* rather than be navigated to: stepping
+ * through five status tabs must not cost five presses of Back to leave the
+ * board. `replaceState` does not fire `hashchange`, so the event every listener
+ * here is already waiting on is dispatched by hand.
+ */
+export const replace = (target: string): void => {
+  if (currentTarget() === target) return;
+  window.history.replaceState(null, "", `#${target}`);
+  window.dispatchEvent(new Event("hashchange"));
+};
+
+const useHash = (): string => {
+  const [raw, setRaw] = useState(currentTarget);
   useEffect(() => {
-    const handler = (): void => setPath(currentPath());
+    const handler = (): void => setRaw(currentTarget());
     window.addEventListener("hashchange", handler);
     return () => window.removeEventListener("hashchange", handler);
   }, []);
-  return path;
+  return raw;
 };
+
+export const useRoute = (): string => useHash().split("?")[0] ?? "/";
+
+/** Re-renders on every hash change, query included. */
+export const useQuery = (): URLSearchParams => new URLSearchParams(useHash().split("?")[1] ?? "");
 
 /** Matches `/tasks/:taskId` style patterns; returns captured params or null. */
 export const matchRoute = (pattern: string, path: string): Record<string, string> | null => {

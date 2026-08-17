@@ -1,220 +1,51 @@
-import { type DragEvent, type ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { money, timeAgo } from "../lib/format";
-import { useAction, usePoll } from "../lib/hooks";
+import { COLUMNS, type Counts, countByStatus, defaultTab, focusAfterMove, parseStatus, statusLabel, tabKey } from "../lib/board";
+import { formatT } from "../lib/format";
+import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
-import { navigate } from "../lib/router";
-import type { Task, TaskStatus } from "../lib/types";
-import { IconRobot } from "../components/icons";
+import { replace, useQuery } from "../lib/router";
+import { storage } from "../lib/storage";
+import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
+import { DesktopBoard } from "../components/desktop-board";
+import { MobileTaskList } from "../components/mobile-task-list";
 import { TasksPageHead } from "../components/tasks-tabs";
-import { chainMarker } from "../lib/chain";
-import {
-  COUNT, DOT, DOT_TONE, ROW, STACK,
-  EmptyState, ErrorNotice, InfoNotice, Page, Pill, RowMenu,
-} from "../components/ui";
-import { Button } from "../components/ui/button";
+import { type CardActions } from "../components/task-card";
+import { EmptyState, ErrorNotice, InfoNotice, Page, STACK } from "../components/ui";
 
-/** The board owns the viewport instead of the document.
+export { COLUMNS } from "../lib/board";
+
+/**
+ * The page owns the viewport on a desktop and gives it back on a phone.
  *
- *  Five columns need 1306px minimum (5 x 250 + 4 x 14) and the content box is
- *  ~680px wide at a 972px viewport, so the board has always been horizontally
- *  scrollable. What made that scrollbar unusable was the board's *height*: the
- *  Done column rendered all 85 cards, so the board grew to ~20,900px and its
- *  horizontal scrollbar sat ~19,600px below the fold. Bounding the page to one
- *  viewport and giving each column its own vertical scroller bounds the board
- *  at ~1 viewport regardless of card count, which puts that scrollbar back on
- *  screen. Card pixels are unchanged; only the column body's height is.
+ * Above 900px the board is a fixed-height surface that scrolls inside itself, so
+ * its horizontal scrollbar cannot end up 19,600px below the fold. At or below
+ * 900px the page is `h-auto` and the *document* scrolls, because that is the one
+ * scroll a phone always has — and because the previous arrangement kept the
+ * desktop clipping (`max-h-[72dvh]`, `overflow-y-hidden`) while removing the
+ * scroller that made it survivable, which left ~22,000px of cards unreachable.
  *
- *  Rejected: a sticky horizontal scrollbar (a second, synthetic scroll surface
- *  that still leaves a 20,000px document to fall through); capping Done with a
- *  "show all" (hides the volume rather than handling it, and the acceptance
- *  bar is explicitly a *full* Done column); paginating Done (the same, plus a
- *  control that has no analogue in the other four columns). */
-export const BOARD_PAGE = "flex h-[100dvh] flex-col overflow-hidden pb-[16px] [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:overflow-visible [@media(max-width:900px)]:pb-[16px]";
+ * `max-w-none` is this page's one deviation from the shared 1,240px page width
+ * (K1). Five 250px columns plus their gaps need 1,306px, so under the shared cap
+ * the fifth column could never be on screen at once, at any viewport size.
+ */
+export const BOARD_PAGE = "flex h-[100dvh] max-w-none flex-col overflow-hidden pb-[16px] [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:overflow-visible [@media(max-width:900px)]:pb-[60px]";
 const BOARD_STACK = "flex min-h-0 flex-1 flex-col gap-[16px]";
-/** `overflow-y-hidden`: the board scrolls sideways only. Vertical travel
- *  belongs to the columns, so the wheel never has two candidates. */
-export const BOARD = "grid min-h-0 flex-1 grid-flow-col auto-cols-[minmax(250px,1fr)] gap-[14px] overflow-x-auto overflow-y-hidden pb-[10px] [@media(max-width:900px)]:max-h-[72dvh]";
-const COLUMN = "flex min-h-0 flex-col";
-const COLUMN_HEAD = "flex items-center gap-[8px] px-[2px] pt-0 pb-[12px] text-[12.5px] text-secondary-foreground";
-/** The 1% tint is the faint drop region the board draws behind every column,
- *  cards or not — it is a declaration, not decoration.
- *
- *  Scroll contract, stated rather than discovered: the body is the only
- *  vertical scroller on the page. `overscroll-contain` stops a wheel that has
- *  reached the column's end from being handed to an ancestor — there is no
- *  ancestor that scrolls vertically, so chaining would only ever be a surprise.
- *  `overflow-x-hidden` keeps the body from claiming horizontal wheel/trackpad
- *  gestures, which chain up to the board and move it sideways. The head sits
- *  outside the scroller, so `Archive All` and the column count never leave the
- *  screen; `RowMenu` portals out of the DOM, so a card menu is not clipped. */
-export const COLUMN_BODY = "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] content-start gap-[10px] overflow-y-auto overflow-x-hidden overscroll-contain rounded-xl border border-[color:var(--border-soft)] bg-[color-mix(in_srgb,var(--foreground)_1%,transparent)] p-[10px]";
-const COLUMN_BODY_OVER = "border-[color:var(--primary-soft)] bg-[color-mix(in_srgb,var(--primary)_4%,transparent)]";
-const COLUMN_EMPTY = "px-0 py-[26px] text-center text-[12px] text-[color:var(--faint)]";
-const TASK_CARD = "cursor-pointer rounded-xl border border-border bg-card px-[14px] py-[13px] hover:border-[color:var(--border-hover)]";
-const TASK_META = "mt-[9px] grid gap-[6px] text-[11.5px] text-muted-foreground";
-const TASK_META_ROW = "flex flex-wrap items-center gap-[8px]";
-/** `size-[13px]`, not the button base's `[&_svg]:size-4`. */
-const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-muted-foreground [&_svg]:size-[13px] [&_svg]:flex-none [&_svg]:opacity-85";
-
-export const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
-  // Backlog is first: it is where work waits before it is queued, and the
-  // scheduler never picks anything out of it.
-  { status: "BACKLOG", label: "Backlog" },
-  { status: "TODO", label: "Todo" },
-  { status: "DOING", label: "Doing" },
-  { status: "REVIEW", label: "Review" },
-  { status: "DONE", label: "Done" },
-];
-
-// The board card keeps the run line light — a status dot plus text, as in
-// kanban-tasks-board-t1560.jpg; pills are reserved for the task detail header.
-const runLabel = (task: Task): ReactNode => {
-  const run = task.runs[0];
-  if (!run) return <span className="text-[color:var(--faint)]">no runs</span>;
-  const tone = run.status === "SUCCEEDED" ? "green" : run.status === "FAILED" || run.status === "TIMED_OUT" || run.status === "LOST" ? "red" : "amber";
-  return (
-    <span className="inline-flex items-center gap-[6px] whitespace-nowrap">
-      <span className={cn(DOT, DOT_TONE[tone])} />
-      <span className="text-primary">run {run.runNumber}</span>
-      <span className="text-[color:var(--faint)]"> · {run.status.toLowerCase().replace("_", " ")}</span>
-    </span>
-  );
-};
-
-// A retry only lands once the last run is terminal; the API rejects the rest.
-export const retryable = (task: Task): boolean => {
-  const run = task.runs[0];
-  if (!run) return false;
-  if (run.status === "QUEUED" || run.status === "CLAIMED" || run.status === "PROVISIONING" || run.status === "RUNNING") return false;
-  return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
-};
 
 /** The two shapes of the Archive All result, as one string. Exported so the
  *  message is testable without driving a click through a static render. */
+/* Pure, exported and asserted directly by `tasks-board.test.tsx`, so it reads the
+ * locale through `formatT` — the WI-4 registration seam — rather than gaining a
+ * `Translate` parameter its two call sites would have to thread. */
 export const archiveDoneNotice = (result: { archived: number; skipped: number }): string =>
   (result.skipped > 0
-    ? `Archived ${result.archived}, skipped ${result.skipped} (running)`
-    : `Archived ${result.archived}`);
+    ? formatT("tasks.archiveDone.some", result)
+    : formatT("tasks.archiveDone.all", result));
 
-type CardProps = {
-  task: Task;
-  onDelete: (task: Task) => void;
-  onRetry: (task: Task) => void;
-  onArchive: (task: Task) => void;
-};
-
-const TaskCardBody = ({ task, onDelete, onRetry, onArchive }: CardProps): ReactNode => {
-  const run = task.runs[0];
-  return (
-    <article
-      className={TASK_CARD}
-      draggable
-      onDragStart={(event) => event.dataTransfer.setData("text/plain", task.id)}
-      onClick={() => navigate(`/tasks/${task.id}`)}
-    >
-      <div className={cn(ROW, "items-start")}>
-        <h3 className="flex-1 text-[13px] leading-[1.45]">{task.name}</h3>
-        <RowMenu items={[
-          ...(retryable(task) ? [{ label: "Retry", onSelect: () => onRetry(task) }] : []),
-          { label: "Archive", onSelect: () => onArchive(task) },
-          { label: "Delete", danger: true, onSelect: () => onDelete(task) },
-        ]} />
-      </div>
-      <div className={TASK_META}>
-        <div className={TASK_META_ROW}>
-          <span>{task.scheduleKind === "NOW" ? "Once" : task.scheduleKind.toLowerCase()}</span>
-          {task.approvalGate ? <Pill tone="amber">Approval</Pill> : null}
-          {task.templateId ? <Pill tone="violet">Template</Pill> : null}
-          {/* MANUAL renders nothing: most tasks are manual, and a pill on every
-              card would be noise rather than provenance ([A8]). */}
-          {task.source === "CRON" ? <Pill tone="grey">cron</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent">webhook</Pill> : null}
-        </div>
-        {/* No placeholder for a chain-less card (K4). */}
-        {task.chainProgress ? (
-          <div className={cn(TASK_META_ROW, "overflow-hidden text-ellipsis whitespace-nowrap")}>
-            {chainMarker(task.chainProgress)}
-          </div>
-        ) : null}
-        <div className={TASK_META_ROW}>{runLabel(task)}</div>
-        {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, "text-[var(--destructive-fg)]")}>{task.failureReason}</div>}
-      </div>
-      <div className={TASK_FOOT}>
-        <span className={cn(ROW, "min-w-0 gap-[6px] overflow-hidden whitespace-nowrap")}>
-          <IconRobot />
-          <span className="overflow-hidden text-ellipsis">{task.assigneeAgent?.title ?? "Unassigned"}</span>
-        </span>
-        <span className="flex-1" />
-        {run?.session?.costUsd ? <span className="whitespace-nowrap">{money(run.session.costUsd)}</span> : null}
-        <span className="whitespace-nowrap">{timeAgo(task.updatedAt)}</span>
-      </div>
-    </article>
-  );
-};
-
-/** A card re-renders only when its own row changed.
- *
- *  This is half of the fix; it is inert without the other half. `usePoll` now
- *  drops a byte-identical response, and `TasksPage` keeps the previous object
- *  for a row whose serialization did not change, so an unchanged card's `task`
- *  prop keeps its identity across a poll and this comparison short-circuits.
- *  The card props are `useCallback`-stable for the same reason. */
-export const TaskCard = memo(TaskCardBody);
-TaskCard.displayName = "TaskCard";
-
-/** One board column, extracted so its three rules — the head, the `Archive All`
- *  presence rule and the empty-state drop invitation — can be asserted from
- *  rendered markup rather than from the page's source text. */
-export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, cardProps }: {
-  column: { status: TaskStatus; label: string };
-  tasks: Task[];
-  loading: boolean;
-  dragOver: TaskStatus | null;
-  onDragOver: (status: TaskStatus) => void;
-  onDragLeave: (status: TaskStatus) => void;
-  onDrop: (taskId: string, status: TaskStatus) => void;
-  onArchiveDone: () => void;
-  cardProps: Omit<CardProps, "task">;
-}): ReactNode => (
-  <div className={COLUMN}>
-    <div className={COLUMN_HEAD}>
-      {column.label}<span className={COUNT}>{tasks.length}</span>
-      {/* Only on a non-empty Done column: a button that would archive nothing
-          is not offered (A2). */}
-      {column.status === "DONE" && tasks.length > 0 ? (
-        <>
-          <span className="flex-1" />
-          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
-            Archive All
-          </Button>
-        </>
-      ) : null}
-    </div>
-    <div
-      className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
-      onDragOver={(event) => { event.preventDefault(); onDragOver(column.status); }}
-      onDragLeave={() => onDragLeave(column.status)}
-      onDrop={(event) => {
-        event.preventDefault();
-        onDrop(event.dataTransfer.getData("text/plain"), column.status);
-      }}
-    >
-      {tasks.map((task) => <TaskCard key={task.id} task={task} {...cardProps} />)}
-      {/* Every column gets the same invitation, Backlog included (E16). */}
-      {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
-    </div>
-  </div>
-);
-
-/** How close to the board's edge a drag has to get before the board starts
- *  moving under it, and how many pixels per tick it then moves. */
-const DRAG_EDGE_PX = 76;
-const DRAG_STEP_PX = 12;
-const DRAG_TICK_MS = 16;
-
-export type HeldRows = Map<string, { key: string; row: Task }>;
+export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
 /** Keeps the previous object for every row whose serialization is unchanged.
  *
@@ -222,7 +53,7 @@ export type HeldRows = Map<string, { key: string; row: Task }>;
  *  one row moved and 111 did not. Without it a single `updatedAt` tick hands
  *  112 fresh objects to 112 memoized cards and defeats all of them. Runs once
  *  per genuinely-changed payload, not once per poll. */
-export const stableRows = (rows: readonly Task[], held: HeldRows): { rows: Task[]; held: HeldRows } => {
+export const stableRows = (rows: readonly BoardTask[], held: HeldRows): { rows: BoardTask[]; held: HeldRows } => {
   const next: HeldRows = new Map();
   return {
     rows: rows.map((row) => {
@@ -236,14 +67,7 @@ export const stableRows = (rows: readonly Task[], held: HeldRows): { rows: Task[
   };
 };
 
-/** Which way the board should travel while a drag hovers at `clientX`, in
- *  pixels per tick. Zero anywhere but within `DRAG_EDGE_PX` of an edge. */
-export const dragEdgeStep = (clientX: number, box: { left: number; right: number }): number =>
-  (clientX - box.left < DRAG_EDGE_PX ? -DRAG_STEP_PX
-    : box.right - clientX < DRAG_EDGE_PX ? DRAG_STEP_PX
-      : 0);
-
-const useStableRows = (rows: readonly Task[]): Task[] => {
+const useStableRows = (rows: readonly BoardTask[]): BoardTask[] => {
   const held = useRef<HeldRows>(new Map());
   return useMemo(() => {
     const result = stableRows(rows, held.current);
@@ -254,90 +78,151 @@ const useStableRows = (rows: readonly Task[]): Task[] => {
 
 export const TasksPage = (): ReactNode => {
   const { projectId } = useProjectScope();
-  // `enrich` stays on: the board card reads `chainProgress` (`chainMarker`), so
-  // the Projects page's `?enrich=false` opt-out is not available here. The two
-  // *other* enriched fields — `recurringLastFiredAt` / `recurringFireCount` —
-  // are dead weight for this page but ride the same flag, and splitting the
-  // flag is an API change, not a board fix.
-  const tasksPath = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}`;
-  const { data, loading, error, reload } = usePoll<Task[]>(tasksPath);
+  // `view=board` is the projection this page reads (packages/api/src/board.ts):
+  // the full row carries every Task column plus `repo`, the whole latest Run and
+  // its whole Session — 1.58 MB for 112 tasks, of which the card renders ~5%.
+  const tasksPath = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}&view=board`;
+  const { data, loading, error, reload } = usePoll<BoardTask[]>(tasksPath);
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
   const { error: actionError, run } = useAction();
+  const t = useT();
   const tasks = useStableRows(useMemo(() => data ?? [], [data]));
+
+  // One DOM or the other, never both: rendering five columns *and* a phone list
+  // would put 112 cards on the page twice and hand the poll twice the work to
+  // reconcile. The breakpoint is the same 900px the stylesheet uses.
+  const narrow = useMediaQuery("(max-width: 900px)");
+
   const byStatus = useMemo(() => {
-    const groups = new Map<TaskStatus, Task[]>(COLUMNS.map((column) => [column.status, []]));
+    const groups = new Map<TaskStatus, BoardTask[]>(COLUMNS.map((column) => [column.status, []]));
     for (const task of tasks) groups.get(task.status)?.push(task);
     return groups;
   }, [tasks]);
+  const counts: Counts = useMemo(() => countByStatus(tasks), [tasks]);
+
+  /* ------------------------------------------------------- the phone's tab */
+
+  const query = useQuery();
+  const urlTab = parseStatus(query.get("status"));
+  const [chosen, setChosen] = useState<TaskStatus | null>(null);
+  const remembered = useMemo(() => parseStatus(storage.get(tabKey(projectId))), [projectId]);
+  const resolved = urlTab ?? chosen ?? remembered;
+  const tab = resolved ?? "TODO";
+
+  const selectTab = useCallback((status: TaskStatus): void => {
+    setChosen(status);
+    storage.set(tabKey(projectId), status);
+    // `replace`, not `navigate`: the URL should *describe* which list is on
+    // screen, not cost a press of Back per tab to leave the board.
+    replace(`/tasks?status=${status.toLowerCase()}`);
+  }, [projectId]);
+
+  // Todo first, and the first non-empty unfinished status when Todo is empty.
+  // Resolved once, after the first payload — before it the counts are all zero
+  // and every answer would be a guess that then visibly corrects itself.
+  const settled = useRef(false);
+  useEffect(() => {
+    if (!narrow || settled.current || loading) return;
+    settled.current = true;
+    // Also when the tab came from memory rather than from the URL: the address
+    // bar is supposed to say which list is on screen, and a remembered Done tab
+    // under a bare `#/tasks` is a URL that describes a different page than the
+    // one being looked at.
+    if (urlTab === null) selectTab(resolved ?? defaultTab(counts));
+  }, [narrow, urlTab, resolved, loading, counts, selectTab]);
+
+  // A different project is different work: it inherits neither the tab nor the
+  // deep link that named one. Skipped on the first render, so arriving on
+  // `#/tasks?status=done` still lands on Done.
+  const seenProject = useRef(projectId);
+  useEffect(() => {
+    if (seenProject.current === projectId) return;
+    seenProject.current = projectId;
+    setChosen(null);
+    settled.current = false;
+    replace("/tasks");
+  }, [projectId]);
+
+  /* ---------------------------------------------------------- the actions */
 
   // Held in a ref so `move` does not have to re-declare itself, and the memoized
   // card callbacks below stay stable, every time a task list arrives.
   const latest = useRef(tasks);
   latest.current = tasks;
 
+  /** Which card should take the focus once the moved one lands, and the list it
+   *  was in when it left — read after the next payload, not now. */
+  const pendingFocus = useRef<{ id: string; before: string[] } | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
+
   const move = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
+    pendingFocus.current = {
+      id: taskId,
+      before: latest.current.filter((candidate) => candidate.status === task.status).map((candidate) => candidate.id),
+    };
+    // Announced rather than left to be noticed: on a phone the card leaves the
+    // list entirely, and on the desktop board it lands in a column that may be
+    // off screen.
+    setAnnouncement(t("tasks.announcement.moved", { name: task.name, status: statusLabel(status) }));
     void run(async () => { await api.patch(`/tasks/${taskId}`, { status }); reload(); });
-  }, [run, reload]);
-  const remove = useCallback((task: Task): void => {
-    if (!window.confirm(`Delete task ${task.name}?`)) return;
+  }, [run, reload, t]);
+
+  // Focus follows the card. It runs when a payload lands, which is when the move
+  // has actually taken effect — `move` itself only sends the request.
+  useEffect(() => {
+    const request = pendingFocus.current;
+    if (request === null) return;
+    pendingFocus.current = null;
+    const visible = [...document.querySelectorAll<HTMLElement>("[data-card]")]
+      .map((node) => node.dataset.card ?? "");
+    const target = focusAfterMove(visible, request.id, request.before);
+    const node = target === null
+      ? null
+      : document.querySelector<HTMLElement>(`[data-card="${target}"] [data-card-title]`);
+    if (node) node.focus(); else listRef.current?.focus();
+  }, [tasks, tab]);
+
+  const remove = useCallback((task: BoardTask): void => {
+    if (!window.confirm(t("tasks.confirm.delete", { name: task.name }))) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
-  }, [run, reload]);
-  const retry = useCallback((task: Task): void => {
+  }, [run, reload, t]);
+  const retry = useCallback((task: BoardTask): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/retry`, {}); reload(); });
   }, [run, reload]);
-  const archive = useCallback((task: Task): void => {
+  const archive = useCallback((task: BoardTask): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/archive`, {}); reload(); });
   }, [run, reload]);
-  const cardProps = useMemo(() => ({ onDelete: remove, onRetry: retry, onArchive: archive }), [remove, retry, archive]);
+  /** The whole `failureReason`, which is the half of it the card does not show.
+   *  Reported either way: a copy that silently did nothing is worse than one
+   *  that says the browser refused. */
+  const copyError = useCallback((task: BoardTask): void => {
+    const text = task.failureReason ?? "";
+    void navigator.clipboard?.writeText(text).then(
+      () => setNotice(t("tasks.notice.copiedError", { name: task.name })),
+      () => setNotice(t("tasks.notice.copyFailed")),
+    );
+  }, [t]);
 
-  // Only ~2.5 of five columns fit at a 972px viewport, so a drag that starts in
-  // Todo cannot reach Done without the board moving — and a drag is holding the
-  // pointer, so the scrollbar is not available. Holding near an edge scrolls the
-  // board under the drag.
-  //
-  // `setInterval`, not `requestAnimationFrame`: measured in Chrome, rAF is
-  // starved while a native HTML5 drag loop owns the main thread (a two-second
-  // edge hold produced a single 16px frame), and it is throttled to ~1 fps in an
-  // occluded window. A timer keeps firing in both cases. The loop is also what
-  // makes a *stationary* hold work — `dragover` is not guaranteed to keep firing
-  // when the pointer does not move.
-  const boardRef = useRef<HTMLDivElement>(null);
-  const edge = useRef(0);
-  const timer = useRef(0);
-  const stopEdgeScroll = useCallback((): void => {
-    edge.current = 0;
-    if (timer.current !== 0) { window.clearInterval(timer.current); timer.current = 0; }
-  }, []);
-  const onBoardDragOver = useCallback((event: DragEvent<HTMLDivElement>): void => {
-    const board = boardRef.current;
-    if (!board) return;
-    edge.current = dragEdgeStep(event.clientX, board.getBoundingClientRect());
-    if (edge.current === 0) { stopEdgeScroll(); return; }
-    if (timer.current === 0) {
-      timer.current = window.setInterval(() => {
-        if (boardRef.current && edge.current !== 0) boardRef.current.scrollLeft += edge.current;
-      }, DRAG_TICK_MS);
-    }
-  }, [stopEdgeScroll]);
-  // `dragleave` bubbles: crossing from a card to its column fires one at the
-  // board with `relatedTarget` still inside the board. Stopping on those would
-  // reduce the edge scroll to one tick per `dragover`.
-  const onBoardDragLeave = useCallback((event: DragEvent<HTMLDivElement>): void => {
-    const next = event.relatedTarget;
-    if (next instanceof Node && event.currentTarget.contains(next)) return;
-    stopEdgeScroll();
-  }, [stopEdgeScroll]);
-  useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
+  const actions: CardActions = useMemo(() => ({
+    onMove: (task, status) => move(task.id, status),
+    onRetry: retry,
+    onArchive: archive,
+    onDelete: remove,
+    onCopyError: copyError,
+  }), [move, retry, archive, remove, copyError]);
+
   /** `api.post` is called for its payload, which `useAction.run` discards — but
    *  the call still runs *inside* `run`, so failures land in the same
    *  `ErrorNotice` as everything else on the page. One error surface, one
    *  information surface. */
-  const archiveDone = async (): Promise<void> => {
-    const done = tasks.filter((task) => task.status === "DONE");
-    if (!window.confirm(`Archive ${done.length} done tasks?`)) return;
+  const archiveDone = useCallback(async (): Promise<void> => {
+    const done = latest.current.filter((task) => task.status === "DONE");
+    if (!window.confirm(t("tasks.confirm.archiveDone", { n: done.length }))) return;
     setNotice(null);
     let result: { archived: number; skipped: number } | null = null;
     const ok = await run(async () => {
@@ -345,9 +230,9 @@ export const TasksPage = (): ReactNode => {
       reload();
     });
     if (ok && result !== null) setNotice(archiveDoneNotice(result));
-  };
+  }, [projectId, run, reload, t]);
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className={cn("text-foreground", BOARD_PAGE)}>
@@ -358,29 +243,34 @@ export const TasksPage = (): ReactNode => {
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         {notice === null ? null : <InfoNotice message={notice} onDismiss={() => setNotice(null)} />}
 
-        <div
-          ref={boardRef}
-          className={BOARD}
-          onDragOver={onBoardDragOver}
-          onDragLeave={onBoardDragLeave}
-          onDragEnd={stopEdgeScroll}
-          onDrop={stopEdgeScroll}
-        >
-          {COLUMNS.map((column) => (
-            <BoardColumn
-              key={column.status}
-              column={column}
-              tasks={byStatus.get(column.status) ?? []}
-              loading={loading}
-              dragOver={dragOver}
-              onDragOver={setDragOver}
-              onDragLeave={(status) => setDragOver((current) => (current === status ? null : current))}
-              onDrop={(taskId, status) => { setDragOver(null); stopEdgeScroll(); move(taskId, status); }}
-              onArchiveDone={() => void archiveDone()}
-              cardProps={cardProps}
-            />
-          ))}
-        </div>
+        {/* Status changes are announced here whether they came from the menu or
+            from a drag, because neither one is visible to a screen reader. */}
+        <div aria-live="polite" className="sr-only">{announcement}</div>
+
+        {narrow ? (
+          <MobileTaskList
+            tab={tab}
+            counts={counts}
+            tasks={byStatus.get(tab) ?? []}
+            loading={loading}
+            onSelectTab={selectTab}
+            onArchiveDone={() => void archiveDone()}
+            actions={actions}
+            listRef={listRef}
+          />
+        ) : (
+          <DesktopBoard
+            byStatus={byStatus}
+            loading={loading}
+            dragOver={dragOver}
+            setDragOver={setDragOver}
+            onMove={move}
+            onArchiveDone={() => void archiveDone()}
+            actions={actions}
+            boardRef={boardRef}
+            projectId={projectId}
+          />
+        )}
       </div>
     </Page>
   );

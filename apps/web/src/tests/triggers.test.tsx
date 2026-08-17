@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { translate } from "../lib/i18n-core";
 import { EndpointCard, FiresCard, TriggerNotices, TriggerRow, VariablesCard, endpointUrl, triggerState } from "../pages/Triggers";
 import type { Trigger, TriggerDetail, TriggerFire } from "../lib/types";
+
+/* Same expected values as before batch 1, sourced from the `en` dictionary
+ * rather than from a literal in the page (spec §7.20). */
+const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
 
 const SECRET = "wh-secret-batch25";
 
@@ -39,21 +44,21 @@ const fire = (overrides: Partial<TriggerFire> = {}): TriggerFire => ({
 test("zero fires renders as 0, never as a dash", () => {
   const markup = row({ fireCount: 0 });
   assert.match(markup, /<td[^>]*>0<\/td>/);
-  assert.match(markup, /Never/);
+  assert.ok(markup.includes(en("automations.never")));
 });
 
 test("the three statuses render, and a disabled secret outranks a pause", () => {
-  assert.equal(triggerState({ paused: false, secretDisabled: false }).label, "Enabled");
-  assert.equal(triggerState({ paused: true, secretDisabled: false }).label, "Paused");
-  assert.equal(triggerState({ paused: true, secretDisabled: true }).label, "Disabled secret");
-  assert.match(row({ paused: true }), />Paused</);
+  assert.equal(triggerState({ paused: false, secretDisabled: false }).label, en("triggers.state.enabled"));
+  assert.equal(triggerState({ paused: true, secretDisabled: false }).label, en("triggers.state.paused"));
+  assert.equal(triggerState({ paused: true, secretDisabled: true }).label, en("triggers.state.disabledSecret"));
+  assert.ok(row({ paused: true }).includes(`>${en("triggers.state.paused")}<`));
 });
 
 test("a trigger with no repository says so in the target column", () => {
   const markup = row({ repo: null });
-  assert.match(markup, /no repository · 3 steps/);
+  assert.ok(markup.includes(en("triggers.target.noRepo", { n: 3 })));
   assert.match(markup, /destructive-fg/);
-  assert.match(row(), /repo · 3 steps/);
+  assert.ok(row().includes(en("triggers.target.repo", { repo: "repo", n: 3 })));
 });
 
 /* -------------------------------------------------------------- the detail */
@@ -90,7 +95,7 @@ test("required badges only the variable with neither a mapping nor a default", (
       onChange={() => undefined}
     />,
   );
-  assert.equal([...markup.matchAll(/>required</g)].length, 1);
+  assert.equal([...markup.matchAll(new RegExp(`>${en("triggers.variables.required")}<`, "g"))].length, 1);
 });
 
 test("an empty-string default is badged required, matching what the fire route now does", () => {
@@ -104,7 +109,7 @@ test("an empty-string default is badged required, matching what the fire route n
       onChange={() => undefined}
     />,
   );
-  assert.equal([...markup.matchAll(/>required</g)].length, 1);
+  assert.equal([...markup.matchAll(new RegExp(`>${en("triggers.variables.required")}<`, "g"))].length, 1);
 });
 
 test("a fire whose chain is gone says chain deleted rather than vanishing", () => {
@@ -112,9 +117,9 @@ test("a fire whose chain is gone says chain deleted rather than vanishing", () =
     <FiresCard fires={[fire(), fire({ id: "f2", source: "MANUAL", chainId: "c2", firstTask: null, progress: null })]} />,
   );
   assert.match(markup, /1\/3 · Triage · doing/);
-  assert.match(markup, />webhook</);
-  assert.match(markup, />manual</);
-  assert.match(markup, /chain deleted/);
+  assert.ok(markup.includes(`>${en("triggers.source.WEBHOOK")}<`));
+  assert.ok(markup.includes(`>${en("triggers.source.MANUAL")}<`));
+  assert.ok(markup.includes(en("triggers.fires.chainDeleted")));
 });
 
 /* ------------------------------------------------------------ the 400 prose */
@@ -141,5 +146,5 @@ test("a blocked trigger with no reason still says something rather than renderin
   const markup = renderToStaticMarkup(
     <TriggerNotices actionError={null} trigger={detail({ canFire: false, cannotFireReason: null })} />,
   );
-  assert.match(markup, /This trigger cannot fire/);
+  assert.ok(markup.includes(en("triggers.cannotFire")));
 });

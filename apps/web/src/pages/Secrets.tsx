@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 import { api } from "../lib/api";
 import { formatDate, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import type { Agent, Secret, SecretPurpose } from "../lib/types";
 import { IconPlus } from "../components/icons";
@@ -28,6 +29,7 @@ const SecretForm = ({ secret, onClose, onSaved }: {
   const [description, setDescription] = useState(secret?.description ?? "");
   const [value, setValue] = useState("");
   const { pending, error, run } = useAction();
+  const t = useT();
 
   const submit = async (): Promise<void> => {
     const ok = await run(() => (secret
@@ -37,28 +39,26 @@ const SecretForm = ({ secret, onClose, onSaved }: {
   };
 
   return (
-    <Modal title={secret ? `Edit ${secret.name}` : "New secret"} onClose={onClose} footer={
+    <Modal title={secret ? t("secrets.form.edit", { name: secret.name }) : t("secrets.form.new")} onClose={onClose} footer={
       <>
-        <Button type="button" variant="legacy" size="legacy" onClick={onClose}>Cancel</Button>
+        <Button type="button" variant="legacy" size="legacy" onClick={onClose}>{t("common.cancel")}</Button>
         <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || name.trim() === "" || (secret === null && value === "")}
-          onClick={() => void submit()}>Save</Button>
+          onClick={() => void submit()}>{t("common.save")}</Button>
       </>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
-      <Field label="Name" hint="Referenced by repos, MCP connections and agent grants.">
+      <Field label={t("secrets.field.name.label")} hint={t("secrets.field.name.hint")}>
         <Input type="text" value={name} onChange={(event) => setName(event.target.value)} placeholder="GITHUB_PAT_VIBEVILLE" />
       </Field>
-      <Field label="Purpose">
+      <Field label={t("secrets.field.purpose")}>
         <Select value={purpose} onChange={(event) => setPurpose(event.target.value as SecretPurpose)}>
           {PURPOSES.map((item) => <option key={item} value={item}>{item.toLowerCase()}</option>)}
         </Select>
       </Field>
-      <Field label="Value" hint={secret
-        ? "Leave empty to keep the stored ciphertext. Values are AES-256-GCM encrypted at rest."
-        : "Encrypted with AGENTOS_SECRET_ENCRYPTION_KEY before it reaches the database."}>
-        <SecretValueInput value={value} onChange={(event) => setValue(event.target.value)} placeholder={secret ? "unchanged" : ""} />
+      <Field label={t("secrets.field.value.label")} hint={t(secret ? "secrets.field.value.hint.edit" : "secrets.field.value.hint.new")}>
+        <SecretValueInput value={value} onChange={(event) => setValue(event.target.value)} placeholder={secret ? t("secrets.field.value.unchanged") : ""} />
       </Field>
-      <Field label="Description">
+      <Field label={t("secrets.field.description")}>
         <Input type="text" value={description} onChange={(event) => setDescription(event.target.value)} />
       </Field>
     </Modal>
@@ -72,11 +72,12 @@ export const SecretsPage = (): ReactNode => {
   const [editing, setEditing] = useState<Secret | null>(null);
   const [creating, setCreating] = useState(false);
   const { error: actionError, run } = useAction();
+  const t = useT();
   const secrets = data ?? [];
   const agentName = (id: string): string => (agents ?? []).find((agent) => agent.id === id)?.title ?? id.slice(-6);
 
   const remove = (secret: Secret): void => {
-    if (!window.confirm(`Delete secret ${secret.name}? Repos and agents referencing it lose the value.`)) return;
+    if (!window.confirm(t("secrets.confirm.delete", { name: secret.name }))) return;
     void run(async () => { await api.delete(`/secrets/${secret.id}`); reload(); });
   };
 
@@ -84,11 +85,11 @@ export const SecretsPage = (): ReactNode => {
     <Page className="text-foreground">
       <div className={PAGE_HEAD}>
         <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Secrets</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>One shared library; runners inject granted values as environment variables (DECISIONS #9)</div>
+          <h1 className={PAGE_HEAD_H1}>{t("secrets.head.title")}</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>{t("secrets.head.subtitle")}</div>
         </div>
         <div className={PAGE_ACTIONS}>
-          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />New Secret</Button>
+          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />{t("secrets.new")}</Button>
         </div>
       </div>
 
@@ -99,7 +100,7 @@ export const SecretsPage = (): ReactNode => {
         <Card flush>
           <Table>
             <TableHeader>
-              <TableRow><TableHead>Name</TableHead><TableHead>Purpose</TableHead><TableHead>Granted to</TableHead><TableHead>Rotated</TableHead><TableHead>Status</TableHead><TableHead /></TableRow>
+              <TableRow><TableHead>{t("secrets.table.name")}</TableHead><TableHead>{t("secrets.table.purpose")}</TableHead><TableHead>{t("secrets.table.grantedTo")}</TableHead><TableHead>{t("secrets.table.rotated")}</TableHead><TableHead>{t("secrets.table.status")}</TableHead><TableHead /></TableRow>
             </TableHeader>
             <TableBody>
               {secrets.map((secret) => (
@@ -120,11 +121,11 @@ export const SecretsPage = (): ReactNode => {
                       )}
                   </TableCell>
                   <TableCell>{formatDate(secret.rotatedAt)}</TableCell>
-                  <TableCell>{secret.disabledAt === null ? <Pill tone="green">Enabled</Pill> : <Pill tone="red">Disabled</Pill>}</TableCell>
+                  <TableCell>{secret.disabledAt === null ? <Pill tone="green">{t("secrets.state.enabled")}</Pill> : <Pill tone="red">{t("secrets.state.disabled")}</Pill>}</TableCell>
                   <TableCell className={TABLE_TIGHT}>
                     <RowMenu items={[
-                      { label: "Edit", onSelect: () => setEditing(secret) },
-                      { label: "Delete", danger: true, onSelect: () => remove(secret) },
+                      { label: t("common.edit"), onSelect: () => setEditing(secret) },
+                      { label: t("common.delete"), danger: true, onSelect: () => remove(secret) },
                     ]} />
                   </TableCell>
                 </TableRow>
@@ -132,7 +133,7 @@ export const SecretsPage = (): ReactNode => {
             </TableBody>
           </Table>
           {secrets.length === 0
-            ? <EmptyState>{loading ? "Loading…" : "No secrets stored."}</EmptyState>
+            ? <EmptyState>{t(loading ? "common.loading" : "secrets.empty")}</EmptyState>
             : null}
         </Card>
 

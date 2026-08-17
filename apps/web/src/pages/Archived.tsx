@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { chainMarker } from "../lib/chain";
 import { formatDateTime } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { navigate } from "../lib/router";
@@ -19,32 +20,36 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
  *  than pretending to show everything. */
 export const ARCHIVED_LIMIT = 200;
 
-export const ArchivedRow = ({ task, onUnarchive }: { task: Task; onUnarchive: (task: Task) => void }): ReactNode => (
-  <TableRow
-    className="cursor-pointer"
-    onClick={(event) => { if (!event.defaultPrevented) navigate(`/tasks/${task.id}`); }}
-  >
-    <TableCell className={TABLE_NAME}>
-      {task.name}
-      {/* The step name when the task came from a template; a raw cuid is noise,
-          so a task that has no step name gets no sub-line at all. */}
-      {task.templateStep === null ? null : <span className={TABLE_SUB}>{task.templateStep.name}</span>}
-    </TableCell>
-    <TableCell><TaskPill status={task.status} /></TableCell>
-    <TableCell><AgentChip agent={null} name={task.assigneeAgent?.title ?? "Unassigned"} /></TableCell>
-    <TableCell>{chainMarker(task.chainProgress) ?? "—"}</TableCell>
-    <TableCell>{formatDateTime(task.archivedAt)}</TableCell>
-    <TableCell className={TABLE_TIGHT}>
-      <RowMenu items={[{ label: "Unarchive", onSelect: () => onUnarchive(task) }]} />
-    </TableCell>
-  </TableRow>
-);
+export const ArchivedRow = ({ task, onUnarchive }: { task: Task; onUnarchive: (task: Task) => void }): ReactNode => {
+  const t = useT();
+  return (
+    <TableRow
+      className="cursor-pointer"
+      onClick={(event) => { if (!event.defaultPrevented) navigate(`/tasks/${task.id}`); }}
+    >
+      <TableCell className={TABLE_NAME}>
+        {task.name}
+        {/* The step name when the task came from a template; a raw cuid is noise,
+            so a task that has no step name gets no sub-line at all. */}
+        {task.templateStep === null ? null : <span className={TABLE_SUB}>{task.templateStep.name}</span>}
+      </TableCell>
+      <TableCell><TaskPill status={task.status} /></TableCell>
+      <TableCell><AgentChip agent={null} name={task.assigneeAgent?.title ?? t("ui.chip.unassigned")} /></TableCell>
+      <TableCell>{chainMarker(task.chainProgress) ?? "—"}</TableCell>
+      <TableCell>{formatDateTime(task.archivedAt)}</TableCell>
+      <TableCell className={TABLE_TIGHT}>
+        <RowMenu items={[{ label: t("archived.menu.unarchive"), onSelect: () => onUnarchive(task) }]} />
+      </TableCell>
+    </TableRow>
+  );
+};
 
 export const ArchivedPage = (): ReactNode => {
   const { projectId } = useProjectScope();
   const path = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}&archived=true`;
   const { data, loading, error, reload } = usePoll<Task[]>(path);
   const { error: actionError, run } = useAction();
+  const t = useT();
 
   const tasks = useMemo(() => [...(data ?? [])].sort(
     (left, right) => (right.archivedAt ?? "").localeCompare(left.archivedAt ?? ""),
@@ -55,7 +60,7 @@ export const ArchivedPage = (): ReactNode => {
     void run(async () => { await api.post(`/tasks/${task.id}/unarchive`, {}); reload(); });
   };
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">
@@ -67,17 +72,17 @@ export const ArchivedPage = (): ReactNode => {
         {actionError === null ? null : <ErrorNotice message={actionError} />}
 
         {shown.length === 0
-          ? <EmptyState>{loading ? "Loading…" : "Nothing archived yet."}</EmptyState>
+          ? <EmptyState>{t(loading ? "common.loading" : "archived.empty")}</EmptyState>
           : (
             <>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Agent</TableHead>
-                    <TableHead>Chain</TableHead>
-                    <TableHead>Archived</TableHead>
+                    <TableHead>{t("archived.table.name")}</TableHead>
+                    <TableHead>{t("archived.table.status")}</TableHead>
+                    <TableHead>{t("archived.table.agent")}</TableHead>
+                    <TableHead>{t("archived.table.chain")}</TableHead>
+                    <TableHead>{t("archived.table.archived")}</TableHead>
                     <TableHead className={TABLE_TIGHT} />
                   </TableRow>
                 </TableHeader>
@@ -86,7 +91,7 @@ export const ArchivedPage = (): ReactNode => {
                 </TableBody>
               </Table>
               {tasks.length > ARCHIVED_LIMIT
-                ? <div className={HINT}>Showing the {ARCHIVED_LIMIT} most recently archived.</div>
+                ? <div className={HINT}>{t("archived.window", { n: ARCHIVED_LIMIT })}</div>
                 : null}
             </>
           )}

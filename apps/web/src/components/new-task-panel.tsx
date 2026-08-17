@@ -2,6 +2,7 @@ import { type ReactNode, useState } from "react";
 
 import { api } from "../lib/api";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import type { Agent, Repo, TaskTemplate } from "../lib/types";
 import {
   CARD_TITLE, CODE_BLOCK, FIELD_ROW, ROW, STACK,
@@ -36,6 +37,7 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
   const [templateId, setTemplateId] = useState("");
   const [variables, setVariables] = useState<Record<string, string>>({});
   const { pending, error, run } = useAction();
+  const t = useT();
 
   const template = (templates.data ?? []).find((candidate) => candidate.id === templateId) ?? templates.data?.[0] ?? null;
 
@@ -66,30 +68,30 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
   };
 
   return (
-    <FullPanel title="New Task" onClose={onClose} actions={
+    <FullPanel title={t("newTask.title")} onClose={onClose} actions={
       <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || (mode === "blank" ? form.name.trim() === "" : template === null)}
         onClick={() => void (mode === "blank" ? createBlank() : createFromTemplate())}>
-        Create
+        {t("newTask.create")}
       </Button>
     }>
-      <Tabs value={mode} onChange={setMode} options={[{ value: "blank", label: "Blank task" }, { value: "template", label: "From template" }]} />
+      <Tabs value={mode} onChange={setMode} options={[{ value: "blank", label: t("newTask.tab.blank") }, { value: "template", label: t("newTask.tab.template") }]} />
       {error === null ? null : <ErrorNotice message={error} />}
 
       {mode === "blank" ? (
-        <Card title="Task">
+        <Card title={t("newTask.card.task")}>
           <div className={STACK}>
-            <Field label="Title"><Input type="text" value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Implement feat/inbox-search" /></Field>
-            <Field label="Prompt" hint="Handed to the agent verbatim together with its foundation and role prompt.">
+            <Field label={t("newTask.field.title.label")}><Input type="text" value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={t("newTask.field.title.placeholder")} /></Field>
+            <Field label={t("newTask.field.prompt.label")} hint={t("newTask.field.prompt.hint")}>
               <Textarea rows={10} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
             </Field>
             <div className={FIELD_ROW}>
-              <Field label="Assignee type">
+              <Field label={t("newTask.field.assigneeType.label")}>
                 <Select value={form.assigneeType} onChange={(event) => setForm({ ...form, assigneeType: event.target.value as "AGENT" | "HUMAN" })}>
-                  <option value="AGENT">Agent</option>
-                  <option value="HUMAN">Human</option>
+                  <option value="AGENT">{t("newTask.option.agent")}</option>
+                  <option value="HUMAN">{t("newTask.option.human")}</option>
                 </Select>
               </Field>
-              <Field label="Agent" hint="Agent tasks need an agent that already holds a grant on the repo.">
+              <Field label={t("newTask.field.agent.label")} hint={t("newTask.field.agent.hint")}>
                 {/* Same as TaskDetail's status select: no `select:disabled` rule
                     existed, and this one is disabled in the form's default state
                     (assignee HUMAN), so the primitive's dimming would be visible
@@ -101,50 +103,50 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
               </Field>
             </div>
             <div className={FIELD_ROW}>
-              <Field label="Repo">
+              <Field label={t("newTask.field.repo.label")}>
                 <Select value={form.repoId} onChange={(event) => setForm({ ...form, repoId: event.target.value })}>
-                  <option value="">No repo</option>
+                  <option value="">{t("newTask.option.noRepo")}</option>
                   {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
                 </Select>
               </Field>
-              <Field label="Target branch" hint="Empty falls back to the repo default branch.">
+              <Field label={t("newTask.field.branch.label")} hint={t("newTask.field.branch.hint")}>
                 <Input type="text" value={form.targetBranch} onChange={(event) => setForm({ ...form, targetBranch: event.target.value })} placeholder="feat/…" />
               </Field>
             </div>
             <div className={ROW}>
-              <Toggle on={form.approvalGate} onChange={(next) => setForm({ ...form, approvalGate: next })} label="Requires approval" />
+              <Toggle on={form.approvalGate} onChange={(next) => setForm({ ...form, approvalGate: next })} label={t("newTask.approval.label")} />
               <div>
-                <div>Requires approval</div>
-                <div>Template steps with a gate are decided in the Inbox — the board cannot close them.</div>
+                <div>{t("newTask.approval.label")}</div>
+                <div>{t("newTask.approval.hint")}</div>
               </div>
             </div>
             <div className={FIELD_ROW}>
-              <Field label="Wall-clock limit (minutes)" hint="The run is killed and the task moves to review after this many minutes.">
+              <Field label={t("newTask.field.wallClock.label")} hint={t("newTask.field.wallClock.hint")}>
                 <Input type="number" min={1} value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: Number(event.target.value) })} />
               </Field>
-              <Field label="Stall timeout (minutes)" hint="No new tool call for this long counts as dead.">
+              <Field label={t("newTask.field.stall.label")} hint={t("newTask.field.stall.hint")}>
                 <Input type="number" min={1} value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: Number(event.target.value) })} />
               </Field>
-              <Field label="Max runs per task" hint="Retries stop here and the Inbox gets an operator message.">
+              <Field label={t("newTask.field.maxRuns.label")} hint={t("newTask.field.maxRuns.hint")}>
                 <Input type="number" min={1} value={form.maxSessionsPerTask} onChange={(event) => setForm({ ...form, maxSessionsPerTask: Number(event.target.value) })} />
               </Field>
             </div>
           </div>
         </Card>
       ) : (
-        <Card title="From template">
+        <Card title={t("newTask.card.template")}>
           {(templates.data ?? []).length === 0
-            ? <EmptyState>No templates in this project yet.</EmptyState>
+            ? <EmptyState>{t("newTask.templates.empty")}</EmptyState>
             : (
               <div className={STACK}>
-                <Field label="Template">
+                <Field label={t("newTask.field.template.label")}>
                   <Select value={template?.id ?? ""} onChange={(event) => { setTemplateId(event.target.value); setVariables({}); }}>
                     {(templates.data ?? []).map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>{candidate.name} ({candidate.steps.length} steps)</option>
+                      <option key={candidate.id} value={candidate.id}>{t("newTask.template.option", { name: candidate.name, n: candidate.steps.length })}</option>
                     ))}
                   </Select>
                 </Field>
-                <Field label="Repo">
+                <Field label={t("newTask.field.repo.label")}>
                   <Select value={form.repoId} onChange={(event) => setForm({ ...form, repoId: event.target.value })}>
                     {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
                   </Select>
@@ -158,12 +160,12 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                 ))}
                 {template ? (
                   <div>
-                    <div className={CARD_TITLE}>Will create</div>
+                    <div className={CARD_TITLE}>{t("newTask.preview.title")}</div>
                     <div className={CODE_BLOCK}>
                       {template.steps.map((step) => [
                         `- ${step.name}`,
-                        step.assigneeAgent ? `    agent: ${step.assigneeAgent.title}` : "    agent: (human)",
-                        step.approvalGate ? "    (approval gate)" : null,
+                        `    ${t("newTask.preview.agent", { name: step.assigneeAgent?.title ?? t("newTask.preview.human") })}`,
+                        step.approvalGate ? `    ${t("newTask.preview.gate")}` : null,
                       ].filter((line) => line !== null).join("\n")).join("\n")}
                     </div>
                   </div>

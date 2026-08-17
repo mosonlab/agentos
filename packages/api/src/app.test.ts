@@ -148,7 +148,9 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       },
       inboxMessage: { updateMany: async () => { closed = true; return { count: 1 }; } },
       taskActivity: { create: async () => ({}) },
-      run: { create: async () => ({ id: "run-1" }) },
+      // findFirst answers resolveRunBranches' publication query: nothing in this
+      // chain has pushed the shared branch, so the successor bases on the default.
+      run: { create: async () => ({ id: "run-1" }), findFirst: async () => null },
     };
     const database = {
       task: { findUniqueOrThrow: async () => before },
@@ -316,16 +318,21 @@ test("an archived assignee's automatic retry is queued, audited, and does not sp
       id: "run-3", projectId: "project-1", taskId: "task-1", goalId: null, agentId: "agent-1", repoId: "repo-1",
       runNumber: 3, maxRunsPerTask: 3, runner: "CLAUDE", model: "claude", targetBranch: "main", branch: "feat/x",
       baseSha: null, promptHash: "hash", maxDurationMin: 120, stallTimeoutMin: 10,
-      task: { id: "task-1", templateId: null, templateStep: null }, session: { id: "session-1" },
+      task: {
+        id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: null, chainIndex: null,
+        templateId: null, templateStep: null, repo: null, targetBranch: "main", opensPullRequest: true,
+        status: "DOING", archivedAt: null,
+      }, session: { id: "session-1" },
     };
     const tx = {
+      $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
       run: {
         findFirst: async () => run,
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { closed = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { retry = data; return { id: "run-4", ...data }; },
       },
       session: { update: async () => ({}) },
-      task: { updateMany: async () => ({ count: 1 }) },
+      task: { updateMany: async () => ({ count: 1 }), findUniqueOrThrow: async () => run.task },
       taskActivity: { create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
@@ -387,12 +394,19 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
       create: async () => ({}),
     },
     $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+      $queryRaw: async () => [{ id: "task-2", archivedAt: null }],
       run: {
         updateMany: async ({ where }: { where: { id: string } }) => { lost.push(where.id); return { count: 1 }; },
         create: async () => ({}),
       },
       session: { updateMany: async () => ({}) },
-      task: { update: async () => ({}) },
+      // The requeue loads the task to decide whether to recompute a chain
+      // step's branches; a null row keeps the lost run's fields verbatim.
+      task: {
+        update: async () => ({}),
+        findUnique: async () => null,
+        findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
+      },
       taskActivity: { create: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
     }),
@@ -1076,7 +1090,12 @@ test("GET /runs/:runId/events pages by seq and reports hasMore without a second 
 /* --------------------------------- the usage recompute's ingest wiring */
 
 /** A CLAUDE terminal `result` line, trimmed to the fields `extractUsage` reads.
- *  Values are the captured shape from `spikes/cli-capabilities/samples/`. */
+ *  Values are the captured shape from `spikes/cli-capabilities/samples/`.
+ *
+ *  It stays trimmed ON PURPOSE, and specifically it carries no `modelUsage`:
+ *  these three tests are what keep `extractUsage`'s top-level snake_case
+ *  fallback branch covered — the branch CODEX and PI always take. The complete
+ *  captures, `modelUsage` included, live in `usage.test.ts`. */
 const finalOutputPayload = {
   type: "result",
   total_cost_usd: 0.049117,
@@ -1090,19 +1109,28 @@ const ingestDatabase = (
   updates: Array<Record<string, unknown>>,
   finalOutputRows: Array<{ payload: unknown }>,
   onUpdate?: () => never,
-): PrismaClient => ({
-  run: {
-    findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
-  },
-  sessionEvent: {
-    createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
-    findMany: async () => finalOutputRows,
-  },
-  session: {
-    findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
-    update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
-  },
-} as unknown as PrismaClient);
+): PrismaClient => {
+  const database: Record<string, unknown> = {
+    // `recomputeSessionUsage` now opens one interactive transaction and takes an
+    // advisory lock inside it. These three answer that scaffolding inertly; the
+    // lock itself is proven against a real PostgreSQL in `usage.dbtest.ts`.
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
+    $executeRawUnsafe: async () => 0,
+    $queryRaw: async () => [],
+    run: {
+      findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
+    },
+    sessionEvent: {
+      createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
+      findMany: async () => finalOutputRows,
+    },
+    session: {
+      findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
+      update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
+    },
+  };
+  return database as unknown as PrismaClient;
+};
 
 const postEvents = async (database: PrismaClient, types: string[]): Promise<Response> =>
   createApp(database).request("/runner/runs/run-1/events", {
@@ -1182,4 +1210,88 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
   assert.deepEqual(partitionArchivable([], ["b"]), { archive: [], skipped: 0 });
   // A busy id that is not a candidate cannot inflate the skipped count.
   assert.deepEqual(partitionArchivable(["a"], ["z"]), { archive: ["a"], skipped: 0 });
+});
+
+/* --------------------------------------------------- GET /tasks, projected */
+
+/** A stub with just enough of `task` for `GET /tasks` to answer: the board row
+ *  page, the chain-progress page, and the recurring groupBy the full shape adds. */
+const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
+  let call = 0;
+  return {
+    task: {
+      findMany: async () => (call++ === 0 ? rows : []),
+      groupBy: async () => [],
+    },
+  } as unknown as PrismaClient;
+};
+
+const taskRow = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: "t1", projectId: "p1", name: "Ship the thing", status: "TODO", failureReason: null,
+  scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false,
+  templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
+  updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
+  assigneeAgent: { id: "a1", title: "Senior Developer" },
+  runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: "0.42" } }],
+  ...overrides,
+});
+
+const getTasks = async (database: PrismaClient, query: string, headers: Record<string, string> = {}): Promise<Response> =>
+  await createApp(database).request(`/tasks${query}`, {
+    headers: { Authorization: "Bearer operator-unit-token", ...headers },
+  });
+
+test("GET /tasks?view=board answers with the card projection, not the whole row", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<Record<string, unknown>>;
+    assert.equal(body.length, 1);
+    // The fields the board reads survive...
+    assert.equal(body[0]!.name, "Ship the thing");
+    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: "0.42" });
+    // ...and the ones it does not are gone, which is the entire point.
+    for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
+      assert.equal(dropped in body[0]!, false, `${dropped} must not ride along`);
+    }
+  });
+});
+
+test("an unknown view is refused rather than silently served as the full shape", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([]), "?view=compact");
+    assert.equal(response.status, 400);
+  });
+});
+
+test("GET /tasks carries a validator, and an unchanged poll costs a header exchange", async () => {
+  await withTokens(async () => {
+    const first = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    const tag = first.headers.get("etag");
+    assert.ok(tag, "no ETag");
+    assert.equal(first.headers.get("cache-control"), "no-cache");
+
+    // Same rows, same bytes: 304 and an empty body instead of the payload.
+    const second = await getTasks(boardDatabase([taskRow()]), "?view=board", { "If-None-Match": tag! });
+    assert.equal(second.status, 304);
+    assert.equal(await second.text(), "");
+    assert.equal(second.headers.get("etag"), tag);
+
+    // One row moved: the validator changes and the payload comes back.
+    const third = await getTasks(boardDatabase([taskRow({ status: "DONE" })]), "?view=board", { "If-None-Match": tag! });
+    assert.equal(third.status, 200);
+    assert.notEqual(third.headers.get("etag"), tag);
+  });
+});
+
+test("the full shape is validated too, and its two shapes never share a tag", async () => {
+  await withTokens(async () => {
+    const full = await getTasks(boardDatabase([taskRow()]), "");
+    assert.equal(full.status, 200);
+    const body = await full.json() as Array<Record<string, unknown>>;
+    assert.equal("runs" in body[0]!, true, "the full shape keeps the Run rows");
+    assert.equal(body[0]!.chainProgress, null);
+    const board = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    assert.notEqual(full.headers.get("etag"), board.headers.get("etag"));
+  });
 });

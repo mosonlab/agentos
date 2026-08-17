@@ -24,6 +24,7 @@ import {
   RunnerKind,
   RunnerPreference,
   recomputeSessionUsage,
+  resolveRunBranches,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -41,9 +42,12 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
+import { boardCard, etagFor, etagMatches } from "./board.js";
+import { createRunnerRegistry } from "./runners.js";
 import {
   chainKey,
   chainProgress,
+  type ChainProgress,
   chainProgressByChain,
   positions,
   runFactsByTask,
@@ -83,6 +87,13 @@ const projectFields = {
 };
 const projectInput = z.object({ ...projectFields, yamlDocument: projectFields.yamlDocument.default("") });
 const projectPatch = z.object(projectFields).partial().refine((value) => Object.keys(value).length > 0);
+/**
+ * The eight canonical tool keys. Mirrored by apps/web/src/lib/tools.ts (labels and
+ * per-runner enforcement) and packages/runner/src/adapters.ts (CLI flag names).
+ * The three lists cross workspaces and cannot import each other; each names the
+ * other two so a change here is followed there.
+ */
+const TOOL_KEYS = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"] as const;
 const agentFields = {
   environmentId: id,
   name: z.string().trim().min(1).max(80),
@@ -92,11 +103,18 @@ const agentFields = {
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
   inboxAccess: z.boolean(),
+  // Denied set, not allowed set: omitting it keeps the column's empty default.
+  disabledTools: z.array(z.enum(TOOL_KEYS)).max(TOOL_KEYS.length),
 };
 const agentInput = z.object({
   ...agentFields,
+  foundationalPrompt: agentFields.foundationalPrompt.optional(),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
+  // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
+  // optional key would spread `undefined` into `agent.create`. The empty array is
+  // byte-identical to the column default, so omission still means "no restriction".
+  disabledTools: agentFields.disabledTools.default([]),
 });
 const agentPatch = z.object(agentFields).partial().refine((value) => Object.keys(value).length > 0);
 const repoInput = z.object({
@@ -209,6 +227,7 @@ const taskFields = {
   assigneeType: z.nativeEnum(AssigneeType),
   assigneeAgentId: id.nullable(),
   approvalGate: z.boolean(),
+  opensPullRequest: z.boolean(),
   maxDurationMin: z.number().int().min(1).max(24 * 60),
   stallTimeoutMin: z.number().int().min(1).max(24 * 60),
   maxSessionsPerTask: z.number().int().min(1).max(100),
@@ -226,6 +245,7 @@ const taskInput = z.object({
   assigneeType: taskFields.assigneeType.default(AssigneeType.AGENT),
   assigneeAgentId: taskFields.assigneeAgentId.default(null),
   approvalGate: taskFields.approvalGate.default(false),
+  opensPullRequest: taskFields.opensPullRequest.default(true),
   maxDurationMin: taskFields.maxDurationMin.default(120),
   stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
   maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
@@ -249,9 +269,20 @@ const activityInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const fencedActivityInput = activityInput.extend({ fencingToken: fence });
+const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
+  console.warn("Discarded runner telemetry", { input, issues: error.issues });
+  return undefined;
+});
+const runnerTelemetryFields = {
+  daemonVersion: telemetry(z.string().trim().max(40)),
+  diskFreeBytes: telemetry(z.number().int().nonnegative()),
+  pollIntervalMs: telemetry(z.number().int().positive().max(3_600_000)),
+  workspaceRoot: telemetry(z.string().trim().max(500)),
+};
 const claimInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   leaseSeconds: z.number().int().min(15).max(3600).default(60),
+  ...runnerTelemetryFields,
 });
 const heartbeatInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -260,6 +291,12 @@ const heartbeatInput = z.object({
   processAlive: z.boolean(),
   lastProgressEventAt: z.coerce.date().nullable().optional(),
   inFlightTool: z.record(z.string(), z.unknown()).nullable().optional(),
+  ...runnerTelemetryFields,
+});
+const publicationInput = z.object({
+  runnerId: z.string().trim().min(1).max(120),
+  fencingToken: fence,
+  pushedBranch: z.string().trim().min(1).max(255),
 });
 const startInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -286,6 +323,11 @@ const completionInput = z.object({
   retryable: z.boolean().optional(),
   externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
+  // The ref the runner actually handed to `git push`, which is not always
+  // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
+  // the workspace's. It is the only publication evidence resolveRunBranches
+  // trusts, so it must survive the trip verbatim.
+  pushedBranch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   headSha: z.string().nullable().optional(),
   output: z.string().max(500_000).nullable().optional(),
@@ -353,6 +395,20 @@ const webhookConfigPatch = z.object({
   // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
+const templateStepPatch = z.object({ opensPullRequest: z.boolean() });
+const templateStepInput = z.object({
+  stepIndex: z.number().int().min(0),
+  name: z.string().trim().min(1).max(200),
+  assigneeType: z.nativeEnum(AssigneeType),
+  assigneeAgentId: id.nullable().default(null),
+  prompt: z.string().min(1).max(100_000),
+  approvalGate: z.boolean().default(false),
+  attachmentsFromPrevious: z.boolean().default(false),
+  spawnPolicy: z.record(z.string(), z.unknown()).nullable().default(null),
+  runner: z.nativeEnum(RunnerKind).nullable().default(null),
+  outputKind: z.string().trim().min(1).max(80).default("result"),
+  opensPullRequest: z.boolean().default(true),
+});
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -370,6 +426,41 @@ const inboxReplyInput = z.object({
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
+
+/** The `chainProgress` shape as `GET /tasks` serialises it — the chain module's
+ *  progress plus the position spec §5.2 requires the list response to carry. */
+type ChainProgressWire = ChainProgress & { position: number | null };
+/** The columns `chainProgressLookup` reads, which both `GET /tasks` response
+ *  shapes select. Structural, so neither Prisma payload type leaks into it. */
+type ChainSubject = {
+  id: string;
+  projectId: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  status: TaskStatus;
+  name: string;
+  templateStep: { name: string } | null;
+};
+
+/**
+ * A JSON response carrying a validator, so a poll that changed nothing costs a
+ * header exchange instead of a payload.
+ *
+ * `GET /tasks` is polled every 2.5s by an open board and answers with the same
+ * bytes almost every time; at 1.58 MB that was ~38 MB/min of unchanged data.
+ * The body is serialised here rather than by `context.json` because the ETag has
+ * to be a hash of the exact bytes that would be sent.
+ *
+ * `Cache-Control: no-cache` — store it, but never reuse it without asking. A
+ * bare ETag with no cache directive lets a shared cache serve a stale board.
+ */
+const validated = (context: Context, payload: unknown): Response => {
+  const body = JSON.stringify(payload);
+  const tag = etagFor(body);
+  const headers = { ETag: tag, "Cache-Control": "no-cache" };
+  if (etagMatches(context.req.header("if-none-match"), tag)) return context.body(null, 304, headers);
+  return context.body(body, 200, { ...headers, "Content-Type": "application/json; charset=UTF-8" });
+};
 
 const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
 class PayloadTooLargeError extends Error {}
@@ -537,6 +628,7 @@ const goalInclude = {
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
+  const runners = createRunnerRegistry();
 
   app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret", "X-AgentOS-Delivery-Id"] }));
   app.use("*", async (context, next) => {
@@ -561,6 +653,42 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       console.error("Health check failed", error);
       return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
     }
+  });
+  app.get("/runners", async (context) => {
+    const now = new Date();
+    const daemons = runners.snapshot(now);
+    const knownIds = daemons.map((daemon) => daemon.runnerId);
+    const [storedBackends, activeGroups] = await Promise.all([
+      db.runnerBackendState.findMany(),
+      knownIds.length === 0 ? [] : db.run.groupBy({
+        by: ["runnerId"],
+        where: { status: { in: activeRunStatuses }, runnerId: { in: knownIds } },
+        _count: { _all: true },
+      }),
+    ]);
+    const activeByRunner = new Map(activeGroups.map((group) => [group.runnerId, group._count._all]));
+    const backendsByRunner = new Map(storedBackends.map((backend) => [backend.runner, backend]));
+    return context.json({
+      checkedAt: now.toISOString(),
+      online: daemons.filter((daemon) => daemon.online).length,
+      total: daemons.length,
+      daemons: daemons.map((daemon) => {
+        const activeRuns = activeByRunner.get(daemon.runnerId) ?? 0;
+        return { ...daemon, lastSeenAt: daemon.lastSeenAt.toISOString(), busy: activeRuns > 0, activeRuns };
+      }),
+      backends: Object.values(RunnerKind).map((runner) => {
+        const backend = backendsByRunner.get(runner);
+        return {
+          runner,
+          cliVersion: backend?.cliVersion ?? null,
+          authMode: backend?.authMode ?? null,
+          lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
+          lastPreflightOk: backend?.lastPreflightOk ?? null,
+          circuitOpen: backend?.circuitOpen ?? null,
+          circuitReason: backend?.circuitReason ?? null,
+        };
+      }),
+    });
   });
 
   app.use("/hooks/templates/:templateId", bodyLimit({
@@ -782,7 +910,15 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const body = await readJson(context.req.raw, agentInput);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
-    return context.json(await db.agent.create({ data: { ...body, projectId } }), 201);
+    const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: "asc" },
+      select: { foundationalPrompt: true },
+    }))?.foundationalPrompt;
+    if (foundationalPrompt === undefined) {
+      return context.json({ error: "This project has no foundation yet. Run npm run db:seed." }, 400);
+    }
+    return context.json(await db.agent.create({ data: { ...body, foundationalPrompt, projectId } }), 201);
   });
   app.get("/agents/:agentId", async (context) => {
     const agent = await db.agent.findUnique({
@@ -1280,6 +1416,72 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
   });
+  app.post("/task-templates/:templateId/steps", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, templateStepInput);
+    const template = await db.taskTemplate.findUnique({
+      where: { id: templateId },
+      select: { id: true, projectId: true, webhookRepoId: true },
+    });
+    if (!template) return context.json({ error: "Template not found" }, 404);
+    if (body.assigneeType === AssigneeType.AGENT && !body.assigneeAgentId) {
+      return context.json({ error: "Agent template steps require an assignee" }, 400);
+    }
+    if (body.assigneeType === AssigneeType.HUMAN && body.assigneeAgentId) {
+      return context.json({ error: "Human template steps cannot have an agent assignee" }, 400);
+    }
+    const agent = body.assigneeAgentId
+      ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: template.projectId } })
+      : null;
+    if (body.assigneeAgentId && !agent) {
+      return context.json({ error: "Assignee does not belong to this template's project" }, 400);
+    }
+    if (agent?.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
+    if (agent && template.webhookRepoId) {
+      const access = await db.agentRepoAccess.findFirst({
+        where: { projectId: template.projectId, agentId: agent.id, repoId: template.webhookRepoId },
+        select: { agentId: true },
+      });
+      if (!access) return context.json({ error: "Assignee has no grant for this template's Repo" }, 400);
+    }
+    const duplicate = await db.taskTemplateStep.findFirst({
+      where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
+      select: { id: true },
+    });
+    if (duplicate) return context.json({ error: "Template step index already exists" }, 409);
+    return context.json(await db.taskTemplateStep.create({ data: {
+      taskTemplateId: template.id,
+      stepIndex: body.stepIndex,
+      name: body.name,
+      assigneeType: body.assigneeType,
+      assigneeAgentId: body.assigneeAgentId,
+      prompt: body.prompt,
+      approvalGate: body.approvalGate,
+      attachmentsFromPrevious: body.attachmentsFromPrevious,
+      spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
+      runner: body.runner,
+      outputKind: body.outputKind,
+      opensPullRequest: body.opensPullRequest,
+    } }), 201);
+  });
+  // Bounded on purpose: `opensPullRequest` only. A general template-step editor
+  // is a whole authoring surface (stepIndex, name, assigneeType, prompt,
+  // outputKind, approvalGate, attachmentsFromPrevious, runner, spawnPolicy,
+  // agent) that this batch's spec does not describe and no caller wants yet.
+  // Widening this route is a separate decision, not a follow-on edit.
+  app.patch("/task-templates/:templateId/steps/:stepId", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const stepId = id.parse(context.req.param("stepId"));
+    const body = await readJson(context.req.raw, templateStepPatch);
+    // Ownership is checked, not assumed: the step id alone would let a caller
+    // patch another template's step through any templateId that happens to exist.
+    const step = await db.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
+    if (!step) return context.json({ error: "Template step not found" }, 404);
+    return context.json(await db.taskTemplateStep.update({
+      where: { id: stepId },
+      data: { opensPullRequest: body.opensPullRequest },
+    }));
+  });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
     const body = await readJson(context.req.raw, webhookConfigPatch);
@@ -1542,22 +1744,22 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     if (archived !== "false" && archived !== "true" && archived !== "all") {
       return context.json({ error: "archived must be false, true, or all" }, 400);
     }
+    // `view=board` is the Tasks board saying which fields it will actually
+    // render (packages/api/src/board.ts). It is a projection of this same list,
+    // not a second endpoint, so the two shapes cannot drift apart.
+    const view = context.req.query("view") ?? "full";
+    if (view !== "full" && view !== "board") {
+      return context.json({ error: "view must be full or board" }, 400);
+    }
+    const board = view === "board";
     // Archived tasks are finished work; a board and a per-project count that
     // keep growing after Archive All are the bug, not the fix. `all` is the
     // escape hatch for anyone who needs the old, archived-inclusive numbers.
     const archivedFilter = archived === "false" ? { archivedAt: null }
       : archived === "true" ? { archivedAt: { not: null } }
       : {};
-    const tasks = await db.task.findMany({
-      where: { ...(projectId ? { projectId } : {}), ...archivedFilter },
-      include: {
-        assigneeAgent: true,
-        repo: true,
-        templateStep: { select: { name: true } },
-        runs: { orderBy: { runNumber: "desc" }, take: 1, include: { session: true } },
-      },
-      orderBy: { createdAt: "asc" },
-    });
+    const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
+    const orderBy = { createdAt: "asc" as const };
 
     // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
     // queries over the whole task table, and `Projects.tsx` polls this endpoint
@@ -1569,39 +1771,103 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // projects sharing a chainId never read each other's progress), and silently
     // dropping the fields from every global response would delete that
     // guarantee's only coverage along with the cost.
-    const enrich = (context.req.query("enrich") ?? "true") !== "false";
-
-    // Progress must count *all* the chain's rows, including archived ones, so it
-    // cannot be computed from the rows above. One extra scoped query, grouped in
-    // memory — two queries per request regardless of how many tasks come back.
     //
-    // `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
-    // null-index row as its own one-row chain. Without it a single broken row
-    // inflates `total` and shifts `position` for every real sibling on the board
-    // while its own detail page still reads `1/1` — the same rows, two answers.
-    const chainIds = !enrich ? [] : [...new Set(tasks
-      .filter((task) => task.chainIndex !== null)
-      .map((task) => task.chainId)
-      .filter((value): value is string => value !== null))];
-    const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
-      where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
-      select: {
-        id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-        name: true, archivedAt: true, templateStep: { select: { name: true } },
-      },
-      orderBy: { chainIndex: "asc" },
-    });
-    const progressByChain = chainProgressByChain(chainRows);
-    const positionsByChain = new Map<string, Map<string, number>>();
-    for (const row of chainRows) {
-      if (!row.chainId) continue;
-      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
-      const group = positionsByChain.get(key);
-      if (group) continue;
-      positionsByChain.set(key, positions(chainRows.filter((candidate) => (
-        candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
-      ))));
+    // `view=board` is not subject to it: the board card renders `chainProgress`,
+    // so a board response without it would be a projection that dropped a field
+    // its only caller reads.
+    const enrich = board || (context.req.query("enrich") ?? "true") !== "false";
+
+    /**
+     * A `task -> chainProgress` lookup for one page of rows.
+     *
+     * Progress must count *all* the chain's rows, including archived ones, so it
+     * cannot be computed from the rows handed in. One extra scoped query,
+     * grouped in memory — two queries per request regardless of how many tasks
+     * come back. Shared by both response shapes, so the board card and the full
+     * row can never report different numbers for the same task.
+     *
+     * `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
+     * null-index row as its own one-row chain. Without it a single broken row
+     * inflates `total` and shifts `position` for every real sibling on the board
+     * while its own detail page still reads `1/1` — the same rows, two answers.
+     */
+    const chainProgressLookup = async (rows: ChainSubject[]): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
+      const chainIds = !enrich ? [] : [...new Set(rows
+        .filter((task) => task.chainIndex !== null)
+        .map((task) => task.chainId)
+        .filter((value): value is string => value !== null))];
+      const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
+        where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
+        select: {
+          id: true, projectId: true, chainId: true, chainIndex: true, status: true,
+          name: true, archivedAt: true, templateStep: { select: { name: true } },
+        },
+        orderBy: { chainIndex: "asc" },
+      });
+      const progressByChain = chainProgressByChain(chainRows);
+      const positionsByChain = new Map<string, Map<string, number>>();
+      for (const row of chainRows) {
+        if (!row.chainId) continue;
+        const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+        if (positionsByChain.has(key)) continue;
+        positionsByChain.set(key, positions(chainRows.filter((candidate) => (
+          candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
+        ))));
+      }
+      return (task) => {
+        if (!enrich || !task.chainId) return null;
+        // The same one-row-chain rule the detail route applies (E1), so a broken
+        // row reports `n/1` in both places instead of `null` here and `1/1` there.
+        if (task.chainIndex === null) {
+          return {
+            chainId: task.chainId,
+            done: task.status === TaskStatus.DONE ? 1 : 0,
+            total: 1,
+            activeStepName: task.templateStep?.name ?? task.name,
+            activeStatus: task.status.toLowerCase(),
+            position: 1,
+          };
+        }
+        const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
+        const progress = progressByChain.get(key) ?? null;
+        return progress ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null } : null;
+      };
+    };
+
+    if (board) {
+      // The projection narrows the *query* too, not only the response: the full
+      // shape drags every Run and Session column out of the database only to
+      // throw 95% of them away in the serializer.
+      const rows = await db.task.findMany({
+        where,
+        orderBy,
+        select: {
+          id: true, projectId: true, name: true, status: true, failureReason: true,
+          scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
+          templateId: true, source: true, chainId: true, chainIndex: true, updatedAt: true,
+          assigneeAgent: { select: { id: true, title: true } },
+          templateStep: { select: { name: true } },
+          runs: {
+            orderBy: { runNumber: "desc" }, take: 1,
+            select: { id: true, runNumber: true, status: true, session: { select: { costUsd: true } } },
+          },
+        },
+      });
+      const progressFor = await chainProgressLookup(rows);
+      return validated(context, rows.map((row) => boardCard(row, progressFor(row))));
     }
+
+    const tasks = await db.task.findMany({
+      where,
+      orderBy,
+      include: {
+        assigneeAgent: true,
+        repo: true,
+        templateStep: { select: { name: true } },
+        runs: { orderBy: { runNumber: "desc" }, take: 1, include: { session: true } },
+      },
+    });
+    const progressFor = await chainProgressLookup(tasks);
 
     // The Automations page needs `Last run` on a *collapsed* row, and a poll
     // that only mounts while a row is expanded can never supply it. Skipped
@@ -1615,39 +1881,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
 
-    return context.json(tasks.map((task) => {
-      const fired = firedByDefinition.get(task.id);
-      const recurring = {
-        recurringLastFiredAt: fired?._max.createdAt ?? null,
-        recurringFireCount: fired?._count._all ?? 0,
-      };
-      if (!enrich || !task.chainId) return { ...task, chainProgress: null, ...recurring };
-      // The same one-row-chain rule the detail route applies (E1), so a broken
-      // row reports `n/1` in both places instead of `null` here and `1/1` there.
-      if (task.chainIndex === null) {
-        return {
-          ...task,
-          chainProgress: {
-            chainId: task.chainId,
-            done: task.status === TaskStatus.DONE ? 1 : 0,
-            total: 1,
-            activeStepName: task.templateStep?.name ?? task.name,
-            activeStatus: task.status.toLowerCase(),
-            position: 1,
-          },
-          ...recurring,
-        };
-      }
-      const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
-      const progress = progressByChain.get(key) ?? null;
-      return {
-        ...task,
-        chainProgress: progress
-          ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null }
-          : null,
-        ...recurring,
-      };
-    }));
+    return validated(context, tasks.map((task) => ({
+      ...task,
+      chainProgress: progressFor(task),
+      recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
+      recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
+    })));
   });
   app.post("/projects/:projectId/tasks", async (context) => {
     const body = await readJson(context.req.raw, taskInput);
@@ -1677,8 +1916,19 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
       });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
-      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW) {
+      // API-created chains arrive one task at a time. Only index 0 may receive
+      // an eager run; later indexed steps stay parked until
+      // activateChainSuccessor observes their predecessor's durable success.
+      // Without this guard every POST snapshots the fallback base before step
+      // 0 can publish, and all runners race the same new shared head.
+      const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
+      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
+        // This run is built inline rather than through enqueueTaskRun, so it is
+        // one of the paths a chain fix can miss. Missing it puts step ① on a
+        // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
+        // silently absent from the tree every later step reviews.
+        const branches = await resolveRunBranches(tx, { ...created, repo }, null);
         await tx.run.create({
           data: {
             projectId,
@@ -1689,7 +1939,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             dedupeKey: makeDedupeKey(created.id, 1),
             runner,
             model: agent.model,
-            targetBranch: body.targetBranch ?? repo.defaultBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: created.opensPullRequest,
             promptHash: hashPrompt([agent.foundationalPrompt, agent.rolePrompt, created.name, created.description]),
             maxDurationMin: body.maxDurationMin,
             stallTimeoutMin: body.stallTimeoutMin,
@@ -1864,6 +2116,18 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       if ("error" in written) return context.json({ error: written.error }, written.code);
       return context.json(written.task);
     }
+    if (body.opensPullRequest !== undefined) {
+      // The flag defines the next Run snapshot. PATCH must therefore share the
+      // same Task-row serialization point as completion retries and lost-lease
+      // requeues; otherwise a request that commits first can still be missed by
+      // a creator holding a stale task relation.
+      const updated = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return null;
+        return tx.task.update({ where: { id: taskId }, data: updateData });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      return updated ? context.json(updated) : context.json({ error: "Task not found" }, 404);
+    }
     return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
   });
   app.delete("/tasks/:taskId", async (context) => {
@@ -1884,6 +2148,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         include: {
           assigneeAgent: true,
           templateStep: true,
+          repo: true,
           runs: { orderBy: { runNumber: "desc" }, take: 1 },
         },
       });
@@ -1901,6 +2166,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
       }
       const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
+      // A task with no repo cannot be a chain step with a branch, and this route
+      // already tolerates a null repoId — so it keeps inheriting run-1's fields.
+      const branches = task.repo
+        ? await resolveRunBranches(tx, { ...task, repo: task.repo }, last)
+        : null;
       const run = await tx.run.create({
         data: {
           projectId: last.projectId,
@@ -1912,8 +2182,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
           runner: derived.runner,
           model: derived.model,
-          targetBranch: last.targetBranch,
-          branch: last.branch,
+          targetBranch: branches ? branches.targetBranch : last.targetBranch,
+          branch: branches ? branches.branch : last.branch,
+          opensPullRequest: task.opensPullRequest,
           promptHash: derived.promptHash,
           maxDurationMin: last.maxDurationMin,
           stallTimeoutMin: last.stallTimeoutMin,
@@ -2270,6 +2541,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.post("/runner/tasks/claim", async (context) => {
     const body = await readJson(context.req.raw, claimInput);
     const now = new Date();
+    runners.note(body.runnerId, body, now);
     await reconcileDatabaseRuns(db, now);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
@@ -2379,6 +2651,20 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           secrets[envVar] = decryptSecret(secret.encryptedValue, secret.ciphertextVersion);
         }
         const run = await tx.run.findUniqueOrThrow({ where: { id: candidate.id } });
+        const chainFirstRun = candidate.task.chainId && candidate.task.chainIndex !== null
+          ? await tx.run.findFirst({
+            where: {
+              repoId: candidate.repo.id,
+              task: {
+                projectId: candidate.task.projectId,
+                chainId: candidate.task.chainId,
+                chainIndex: { not: null },
+              },
+            },
+            select: { targetBranch: true },
+            orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
+          })
+          : null;
         const priorOutputsRaw = candidate.task.chainId && candidate.task.chainIndex !== null
           ? await tx.taskStepOutput.findMany({
             where: { task: { chainId: candidate.task.chainId, chainIndex: { lt: candidate.task.chainIndex } } },
@@ -2394,7 +2680,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           task: candidate.task,
           agent: candidate.agent,
           repo: candidate.repo,
-          run,
+          // A later chain run targets the shared head, so its own targetBranch
+          // cannot tell delivery which integration line the chain started
+          // from. Carry the first run's durable base separately for PR create.
+          run: { ...run, pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch },
           session,
           runner: candidate.runner,
           fencingToken,
@@ -2452,6 +2741,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, heartbeatInput);
     const now = new Date();
+    runners.note(body.runnerId, body, now);
     const updated = await db.run.updateMany({
       where: {
         id: runId,
@@ -2474,6 +2764,27 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
     return waiting
       ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+      : context.json({ error: "Stale fencing token" }, 409);
+  });
+
+  // Publication is a separate durable fact from terminal completion. Persist
+  // it immediately after git push, before GitHub work and cleanup, so a lost
+  // runner does not make the reconciler forget a branch that already exists.
+  app.post("/runner/runs/:runId/publication", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const body = await readJson(context.req.raw, publicationInput);
+    const updated = await db.run.updateMany({
+      where: {
+        id: runId,
+        runnerId: body.runnerId,
+        fencingToken: body.fencingToken,
+        leaseExpiresAt: { gt: new Date() },
+        status: { in: activeRunStatuses },
+      },
+      data: { pushedBranch: body.pushedBranch },
+    });
+    return updated.count === 1
+      ? context.json({ ok: true })
       : context.json({ error: "Stale fencing token" }, 409);
   });
 
@@ -2514,6 +2825,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // runner's outer catch would record a successful run as failed and delete
     // its workspace unpushed. These columns are a derived cache that the next
     // FINAL_OUTPUT or `db:backfill-session-usage` repairs (db/src/usage.ts).
+    // `recomputeSessionUsage` now waits on a per-session advisory lock, so a
+    // lock-wait timeout is one more throw this catch absorbs — same repair path.
     if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
       try {
         await recomputeSessionUsage(db, run.session.id);
@@ -2724,7 +3037,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const result = await db.$transaction(async (tx) => {
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
-        include: { task: { include: { templateStep: true } }, session: true },
+        include: {
+          task: { include: { templateStep: true, repo: { select: { defaultBranch: true } } } },
+          session: true,
+        },
       });
       if (!run?.session) return null;
       const succeeded = completionSucceeded({
@@ -2742,6 +3058,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       // An external failure buys the task one more attempt rather than spending one.
       const external = externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
       const budgetCeiling = run.maxRunsPerTask + (external ? 1 : 0);
+      // Join the Task-row exclusion protocol only when this completion can
+      // create a retry. PATCH then retry creation are ordered by this lock, and
+      // the fresh read below snapshots exactly the value current at creation.
+      if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
+        await lockTask(tx, run.task.id);
+      }
       const terminalStatus = succeeded
         ? RunStatus.SUCCEEDED
         : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
@@ -2760,6 +3082,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           retryAt,
           terminationReason: body.terminationReason ?? null,
           branch: body.branch ?? run.branch,
+          // Completion is a second publication write, never an eraser of the
+          // immediate post-push ACK recorded on this run.
+          pushedBranch: body.pushedBranch ?? run.pushedBranch,
           baseSha: body.baseSha ?? run.baseSha,
           headSha: body.headSha ?? null,
           pushStatus: body.pushStatus,
@@ -2790,6 +3115,25 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       let retryCreated = false;
       if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
+        const currentTask = await tx.task.findUniqueOrThrow({
+          where: { id: run.task.id },
+          include: { templateStep: true, repo: { select: { defaultBranch: true } } },
+        });
+        // The fifth run-creating path. It copies `targetBranch` and has never
+        // carried `branch` forward, so before this change an automatic retry of
+        // a chain step silently dropped off the chain branch onto
+        // `agentos/<taskId>/run-<n>` (workspace.ts's fallback) — the same defect
+        // this batch exists to fix, one route further along. Only chain steps
+        // are rerouted; template and non-chain retries keep today's fields
+        // exactly, including carrying no `branch` at all (unlike the operator
+        // retry route — that asymmetry is preserved, not tidied).
+        //
+        // This runs *after* the updateMany that writes the completing run's
+        // `pushedBranch`, so a chain step whose run-1 published the branch and
+        // then failed gives its own retry correct evidence in this transaction.
+        const branches = currentTask.chainId && currentTask.chainIndex !== null && !currentTask.templateId && currentTask.repo
+          ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, null)
+          : { branch: null, targetBranch: run.targetBranch };
         await tx.run.create({
           data: {
             projectId: run.projectId,
@@ -2801,7 +3145,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             dedupeKey: makeDedupeKey(run.task.id, run.runNumber + 1),
             runner: run.runner,
             model: run.model,
-            targetBranch: run.targetBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: currentTask.opensPullRequest,
             promptHash: run.promptHash,
             maxDurationMin: run.maxDurationMin,
             stallTimeoutMin: run.stallTimeoutMin,

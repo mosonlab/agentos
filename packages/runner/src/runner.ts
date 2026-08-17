@@ -16,6 +16,7 @@ import {
   claimTask,
   completeRun,
   heartbeat as sendHeartbeat,
+  recordPublishedBranch,
   reportPreflight,
   startRun,
   type ClaimedTask,
@@ -229,7 +230,13 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     try { gitResult = await captureWorkspaceResult(config, workspace); } catch (error: unknown) {
       await appendActivity(config, claim, `Unable to snapshot git result: ${errorMessage(error)}`, { stream: "runner" });
     }
-    if (executionSucceeded) delivery = await deliverWorkspace(config, claim, { ...workspace, branch: gitResult.branch });
+    if (executionSucceeded) delivery = await deliverWorkspace(
+      config,
+      claim,
+      { ...workspace, branch: gitResult.branch },
+      undefined,
+      (branch) => recordPublishedBranch(config, claim, branch),
+    );
     else {
       // The workspace is about to be destroyed; commit and salvage its trackable changes.
       const salvage = await deliverFailedWorkspace(config, claim, { ...workspace, branch: gitResult.branch })

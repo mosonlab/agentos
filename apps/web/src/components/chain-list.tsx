@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 
+import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import type { Chain, ChainStep } from "../lib/types";
 import { IconLock } from "./icons";
@@ -15,8 +16,10 @@ const STEP_ROW = "flex flex-wrap items-center gap-[10px] border-l-2 border-trans
 const STEP_ROW_HERE = "border-l-[color:var(--primary)] bg-accent";
 const STEP_POSITION = "w-[18px] shrink-0 text-[11.5px] text-[color:var(--faint)]";
 
-/** The gate's meaning, spelled out rather than implied by a glyph. */
-export const GATE_TITLE = "requires approval before unblocking dependents";
+/** The gate's meaning, spelled out rather than implied by a glyph. Exported as the
+ *  key rather than the sentence so the tooltip and the test that asserts it read
+ *  the same dictionary entry. */
+export const GATE_TITLE_KEY = "chain.gate";
 
 export const ChainRow = ({ step, here, pending, onStart }: {
   step: ChainStep;
@@ -24,26 +27,27 @@ export const ChainRow = ({ step, here, pending, onStart }: {
   pending: boolean;
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
-  const note = step.status === "BACKLOG" ? "Parked in Backlog" : step.failureReason;
+  const t = useT();
+  const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
   return (
     <div className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
       <span className={STEP_POSITION}>{step.position}</span>
       <span className="min-w-0 flex-1">
         <Link to={`/tasks/${step.taskId}`}>{step.stepName}</Link>
-        {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">You are here</span> : null}
+        {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.here")}</span> : null}
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
       </span>
       {/* `AgentChip` renders its Unassigned state when it has no label at all,
           which is exactly the case for an agent step with no agent. */}
       {step.assigneeType === "HUMAN"
-        ? <AgentChip agent={null} name="Human" />
+        ? <AgentChip agent={null} name={t("chain.human")} />
         : <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />}
-      {step.approvalGate ? <span title={GATE_TITLE} className="text-muted-foreground"><IconLock /></span> : null}
+      {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
       <TaskPill status={step.status} />
-      {step.archivedAt === null ? null : <Pill tone="grey">archived</Pill>}
+      {step.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
       {step.startable ? (
         <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => onStart(step)}>
-          Start now
+          {t("chain.startNow")}
         </Button>
       ) : null}
     </div>
@@ -64,16 +68,17 @@ export const ChainList = ({ chain, taskId, pending, onStart }: {
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const [all, setAll] = useState(false);
+  const t = useT();
   const shown = all ? chain.steps : chain.steps.slice(0, CHAIN_PAGE);
   return (
-    <Card title="Chain" extra={<span className={COUNT}>{chain.done}/{chain.total}</span>} flush>
+    <Card title={t("chain.title")} extra={<span className={COUNT}>{chain.done}/{chain.total}</span>} flush>
       {shown.map((step) => (
         <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} onStart={onStart} />
       ))}
       {all || chain.steps.length <= CHAIN_PAGE ? null : (
         <div className={cn(ROW, "px-[20px] py-[11px]")}>
           <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setAll(true)}>
-            Show all {chain.steps.length} steps
+            {t("chain.showAll", { n: chain.steps.length })}
           </Button>
         </div>
       )}

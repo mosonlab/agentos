@@ -5,8 +5,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ARCHIVED_LIMIT, ArchivedRow } from "../pages/Archived";
 import { TasksPageHead, type TasksTab } from "../components/tasks-tabs";
 import { NewTask } from "../components/new-task-panel";
+import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import type { ChainProgress, Task } from "../lib/types";
+
+/* Same expected values as before batch 1; they now come from the `en`
+ * dictionary rather than from a literal in the component (spec §7.20). */
+const en = (key: string): string => translate("en", key);
 
 /** The head reads the project scope. `renderToStaticMarkup` runs no effects, so
  *  the provider's poll never fires and the scope stays at its empty default —
@@ -39,7 +44,8 @@ const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
 test("the head renders exactly four tabs, in order, with My Tasks dropped", () => {
   const markup = head("tasks");
   const labels = [...markup.matchAll(/>([A-Za-z ]+)<\/button>/g)].map((match) => match[1]);
-  assert.deepEqual(labels.filter((label) => ["Tasks", "Automations", "Triggers", "Archived", "My Tasks"].includes(label!)), [
+  const wanted = [en("tasks.tab.tasks"), en("tasks.tab.automations"), en("tasks.tab.triggers"), en("tasks.tab.archived"), "My Tasks"];
+  assert.deepEqual(labels.filter((label) => wanted.includes(label!)), [
     "Tasks", "Automations", "Triggers", "Archived",
   ]);
 });
@@ -48,7 +54,7 @@ test("the active tab is the one carrying the selected background", () => {
   for (const active of ["tasks", "automations", "triggers", "archived"] as TasksTab[]) {
     const markup = head(active);
     const selected = [...markup.matchAll(/<button[^>]*bg-accent[^>]*>([^<]*)<\/button>/g)].map((match) => match[1]);
-    const expected = { tasks: "Tasks", automations: "Automations", triggers: "Triggers", archived: "Archived" }[active];
+    const expected = en(`tasks.tab.${active}`);
     assert.deepEqual(selected, [expected], active);
   }
 });
@@ -57,7 +63,7 @@ test("Create Task is present on every one of the four tabs", () => {
   // The regression this exists for: the button used to live in Tasks.tsx, so
   // three of the four tabs the spec puts it on would have shipped without it.
   for (const active of ["tasks", "automations", "triggers", "archived"] as TasksTab[]) {
-    assert.match(head(active), /Create Task/, active);
+    assert.match(head(active), new RegExp(en("tasks.create")), active);
   }
 });
 
@@ -68,8 +74,8 @@ test("the panel the head owns renders its first field", () => {
   const markup = renderToStaticMarkup(
     <NewTask projectId="p1" agents={[]} repos={[]} onClose={() => undefined} onCreated={() => undefined} />,
   );
-  assert.match(markup, /New Task/);
-  assert.match(markup, /Title/);
+  assert.match(markup, new RegExp(en("newTask.title")));
+  assert.match(markup, new RegExp(en("newTask.field.title.label")));
   assert.match(markup, /Implement feat\/inbox-search/);
 });
 

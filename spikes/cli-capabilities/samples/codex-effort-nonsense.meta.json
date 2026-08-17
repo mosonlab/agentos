@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "codex",
+    "exec",
+    "--skip-git-repo-check",
+    "--json",
+    "-c",
+    "model_reasoning_effort=nonsense",
+    "Reply with exactly NO_NETWORK_EXPECTED if this configuration is accepted."
+  ],
+  "cwd": "/private/tmp/agentos-codex-effort.E6XWdg",
+  "started_at_epoch": 1786943869.316766,
+  "duration_seconds": 30.105,
+  "timeout_seconds": 30.0,
+  "timed_out": true,
+  "timeout_signal": "SIGTERM",
+  "returncode": 0
+}
