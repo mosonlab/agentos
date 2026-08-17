@@ -94,6 +94,7 @@ export const instantiateTemplate = async (
             assigneeType: step.assigneeType,
             assigneeAgentId: step.assigneeAgentId,
             approvalGate: step.approvalGate,
+            opensPullRequest: step.opensPullRequest,
             chainId,
             chainIndex: step.stepIndex,
             status: TaskStatus.TODO,
