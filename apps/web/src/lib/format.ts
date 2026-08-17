@@ -32,37 +32,51 @@ export const formatLocale = (): Locale => activeLocale;
  *  parameter-free. */
 export const formatT: FormatTranslate = (key, vars) => activeTranslate(key, vars);
 
-// The formatters below still pin `en-US` in this commit. The seam above is stored
-// and unused: WI-4 is the change that makes the formatters read it. Splitting the
-// two keeps this commit's rendered output byte-identical to the previous one.
-const DATE_TIME = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-const DATE = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
+const INTL_TAGS: Record<Locale, string> = { en: "en-US", zh: "zh-CN" };
+
+/** Memoised per locale and style: switching the language must not rebuild an
+ *  `Intl.DateTimeFormat` on every render. `en-US` and its options are unchanged
+ *  from before this batch, so English output is byte-identical. */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+const intl = (style: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat => {
+  const key = `${style}:${activeLocale}`;
+  const held = formatters.get(key);
+  if (held) return held;
+  const made = new Intl.DateTimeFormat(INTL_TAGS[activeLocale], options);
+  formatters.set(key, made);
+  return made;
+};
+
+const DATE_TIME = (): Intl.DateTimeFormat =>
+  intl("dateTime", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const DATE = (): Intl.DateTimeFormat =>
+  intl("date", { month: "short", day: "numeric", year: "numeric" });
 
 export const formatDateTime = (value: string | null | undefined): string =>
-  value ? DATE_TIME.format(new Date(value)) : "—";
+  value ? DATE_TIME().format(new Date(value)) : "—";
 
 export const formatDate = (value: string | null | undefined): string =>
-  value ? DATE.format(new Date(value)) : "—";
+  value ? DATE().format(new Date(value)) : "—";
 
 export const timeAgo = (value: string | null | undefined): string => {
   if (!value) return "—";
   const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000);
-  if (seconds < 45) return "just now";
+  if (seconds < 45) return formatT("format.justNow");
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return formatT("format.minutesAgo", { n: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return formatT("format.hoursAgo", { n: hours });
   const days = Math.round(hours / 24);
-  return days < 30 ? `${days}d ago` : formatDate(value);
+  return days < 30 ? formatT("format.daysAgo", { n: days }) : formatDate(value);
 };
 
 export const duration = (from: string | null | undefined, to: string | null | undefined): string => {
   if (!from) return "—";
   const end = to ? new Date(to).getTime() : Date.now();
   const seconds = Math.max(0, Math.round((end - new Date(from).getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return formatT("format.seconds", { n: seconds });
   const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${seconds % 60}s`;
+  return formatT("format.minutesSeconds", { m: minutes, s: seconds % 60 });
 };
 
 /** Decimal columns arrive as strings; `null` means the runner never reported cost. */

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { formatDateTime } from "../lib/format";
+import { formatDateTime, setFormatLocale } from "../lib/format";
 import { type Dictionary, DICTIONARIES, interpolate, isLocale, LOCALE_KEY, type Locale, translate } from "../lib/i18n-core";
 import { LocaleProvider, useLocale, useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
@@ -119,16 +119,21 @@ test("initialLocale overrides storage, which is what the Chinese tests use", () 
 /**
  * The assertion that would have caught the revision-0 ordering bug: the provider
  * must hand `setFormatLocale` a TWO-argument callback. `translate` is
- * `(locale, key, vars)`, so passing it bare is a type error — and rendering under
- * `initialLocale="zh"` here also proves the registration happens during render.
- *
- * `formatDateTime` still answers in `en-US` at this commit: WI-3 registers the
- * locale, WI-4 is what makes the formatters read it.
+ * `(locale, key, vars)`, so passing it bare is a type error, and the registration
+ * has to happen during render rather than in an effect — `renderToStaticMarkup`
+ * runs no effects, so a registration in `useEffect` would leave the module in
+ * English here.
  */
-test("the provider registers a two-argument translator without changing today's output", () => {
+test("the provider registers a two-argument translator during render", () => {
   const instant = "2026-03-04T09:05:00.000Z";
-  const before = formatDateTime(instant);
-  renderToStaticMarkup(<LocaleProvider initialLocale="zh"><Probe /></LocaleProvider>);
-  assert.equal(formatDateTime(instant), before);
-  assert.match(before, /^[A-Z][a-z]{2} \d/);
+  try {
+    renderToStaticMarkup(<LocaleProvider initialLocale="en"><Probe /></LocaleProvider>);
+    const english = formatDateTime(instant);
+    assert.match(english, /^[A-Z][a-z]{2} \d/);
+
+    renderToStaticMarkup(<LocaleProvider initialLocale="zh"><Probe /></LocaleProvider>);
+    assert.notEqual(formatDateTime(instant), english);
+  } finally {
+    setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
 });

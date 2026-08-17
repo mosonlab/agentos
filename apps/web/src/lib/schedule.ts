@@ -1,21 +1,33 @@
-import cronstrue from "cronstrue";
+import cronstrue from "cronstrue/i18n";
 
-import { formatDateTime, timeAgo } from "./format";
+import { formatDateTime, formatLocale, formatT, timeAgo } from "./format";
 import type { Task } from "./types";
 
+/** cronstrue's own locale ids, not BCP 47. Verified against the installed
+ *  `cronstrue@3.24.0`: `node_modules/cronstrue/dist/i18n/locales/zh_CN` exists and
+ *  `toString("0 9 * * 1", { locale: "zh_CN" })` returns `在上午 09:00, 仅星期一`.
+ *  The id matters: an unknown one makes cronstrue throw, and every schedule cell
+ *  would silently fall back to the raw expression. */
+const CRONSTRUE_LOCALES: Record<string, string> = { en: "en", zh: "zh_CN" };
+
 /**
- * A cron expression as English prose, falling back to the expression itself.
+ * A cron expression as prose in the active locale, falling back to the expression
+ * itself.
  *
  * `cronstrue` throws on anything it cannot parse, and the server accepts
  * expressions it has never seen. Rendering the exception string would put
  * `Error: ...` in the Schedule column, so an unparseable expression renders
- * verbatim — which is still exactly what the operator typed.
+ * verbatim — which is still exactly what the operator typed. That fallback is
+ * locale-independent by construction: the `catch` returns the input.
  */
 export const cronProse = (expression: string | null, timezone: string | null): string => {
   if (!expression) return "—";
   let prose: string;
   try {
-    prose = cronstrue.toString(expression, { throwExceptionOnParseError: true });
+    prose = cronstrue.toString(expression, {
+      throwExceptionOnParseError: true,
+      locale: CRONSTRUE_LOCALES[formatLocale()] ?? "en",
+    });
   } catch {
     return expression;
   }
@@ -29,10 +41,10 @@ export const nextRunLabel = (runAt: string | null): string => {
   const delta = new Date(runAt).getTime() - Date.now();
   if (delta < 0) return timeAgo(runAt);
   const minutes = Math.round(delta / 60_000);
-  if (minutes < 1) return "in under a minute";
-  if (minutes < 60) return `in ${minutes}m`;
+  if (minutes < 1) return formatT("format.inUnderAMinute");
+  if (minutes < 60) return formatT("format.inMinutes", { n: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `in ${hours}h`;
+  if (hours < 24) return formatT("format.inHours", { n: hours });
   return formatDateTime(runAt);
 };
 
