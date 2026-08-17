@@ -796,6 +796,7 @@ test("template instantiate route maps an archived step agent to a named 400", as
 
 test("claim query filters archived agents before take so active work cannot starve", async () => {
   await withTokens(async () => {
+    const completePriorOutput = `schema-start\n${"x".repeat(50_000)}\nstate-machine-end`;
     const candidate = (id: string, archivedAt: Date | null, offset: number) => ({
       id,
       projectId: "project-1",
@@ -811,7 +812,11 @@ test("claim query filters archived agents before take so active work cannot star
       readyAt: new Date(Date.now() + offset),
       createdAt: new Date(Date.now() + offset),
       session: null,
-      task: { id: `task-${id}`, status: "TODO", chainId: null, chainIndex: null, templateStep: null },
+      task: {
+        id: `task-${id}`, status: "TODO",
+        chainId: archivedAt ? null : "chain-1", chainIndex: archivedAt ? null : 1,
+        templateStep: null,
+      },
       repo: { id: "repo-1" },
       agent: {
         id: archivedAt ? "agent-archived" : "agent-active",
@@ -838,6 +843,7 @@ test("claim query filters archived agents before take so active work cannot star
           return filtered.slice(0, take);
         },
         updateMany: async ({ where }: { where: { id: string } }) => { claimedId = where.id; return { count: 1 }; },
+        findFirst: async () => null,
         findUniqueOrThrow: async ({ where }: { where: { id: string } }) => ({ id: where.id, status: RunStatus.CLAIMED }),
       },
       runnerBackendState: { findUnique: async () => null },
@@ -845,7 +851,10 @@ test("claim query filters archived agents before take so active work cannot star
       sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
       task: { update: async () => ({}) },
       taskActivity: { create: async () => ({}) },
-      taskStepOutput: { findMany: async () => [] },
+      taskStepOutput: { findMany: async () => [{
+        kind: "spec", body: completePriorOutput,
+        task: { name: "Approved specification", chainIndex: 0 },
+      }] },
     };
     const database = {
       run: { findMany: async () => [] },
@@ -858,8 +867,10 @@ test("claim query filters archived agents before take so active work cannot star
       body: JSON.stringify({ runnerId: "runner-1", leaseSeconds: 60 }),
     });
     assert.equal(response.status, 200);
+    const claim = await response.json() as { priorOutputs: Array<{ body: string }> };
     assert.deepEqual(claimWhere?.agent, { archivedAt: null });
     assert.equal(claimedId, "active");
+    assert.equal(claim.priorOutputs[0]?.body, completePriorOutput);
   });
 });
 

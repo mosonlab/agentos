@@ -24,6 +24,11 @@ collaborators: []         # AgentCollaboration rows, by agent name
 
 Exact canonical model and runner defaults live in the role frontmatter and `packages/db/prisma/agent-contract.ts`; task-chain routing is governed by `docs/governance/task-routing-v1.md`. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `implementation-plan-executioner`).
 
+Approval is task metadata, not an Agent personality. Roles read the current
+task's `approvalGate`; they do not hard-code a pause or send a second Inbox
+question to simulate one. The Full Assurance template's gate placement and
+shorter-route rules live only in the routing contract.
+
 Provider-specific or temporary roles are not canonical defaults. Keep them out of `roles/`; create them as explicit local overlays and archive them when no longer needed so a seed cannot silently turn a local experiment into a release default.
 
 `review-coordinator` is the single canonical reviewer for specifications,

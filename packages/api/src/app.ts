@@ -2803,10 +2803,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             orderBy: { task: { chainIndex: "asc" } },
           })
           : [];
-        const priorOutputs = priorOutputsRaw.map((output) => ({
-          ...output,
-          body: output.body.length > 10_000 ? output.body.slice(-10_000) : output.body,
-        }));
+        // Persisted outputs are chain authority, not activity previews. A
+        // silent tail slice can remove schemas, state machines, and approval
+        // assumptions while still presenting the remainder as complete. The
+        // write endpoint already caps each artifact at 500k; pass the durable
+        // body verbatim until artifact references replace prompt embedding.
+        const priorOutputs = priorOutputsRaw;
         return {
           task: candidate.task,
           agent: candidate.agent,

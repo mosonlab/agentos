@@ -22,7 +22,7 @@ test("instantiating the feature template creates a nine-task chain and queues on
     assigneeType: offset === 8 ? AssigneeType.HUMAN : AssigneeType.AGENT,
     assigneeAgentId: offset === 8 ? null : agent.id,
     assigneeAgent: offset === 8 ? null : agent,
-    approvalGate: [0, 1, 8].includes(offset),
+    approvalGate: [0, 3, 8].includes(offset),
     runner: offset < 2 ? RunnerKind.CLAUDE : RunnerKind.CODEX,
   }));
   const tx = {
@@ -58,6 +58,7 @@ test("instantiating the feature template creates a nine-task chain and queues on
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
   assert.equal(created[0]!.followUpTaskId, "task-2");
   assert.equal(created[8]!.assigneeType, AssigneeType.HUMAN);
+  assert.deepEqual(created.map((task) => task.approvalGate), [true, false, false, true, false, false, false, false, true]);
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runner, RunnerKind.CLAUDE);
   assert.equal(runs[0]!.branch, "feature/nine-steps");
