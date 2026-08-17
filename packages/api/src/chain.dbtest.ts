@@ -277,6 +277,110 @@ test("operator DONE closes the gate card and a later approval is a duplicate no-
   assert.equal(result.duplicate, true);
 });
 
+test("template gate PATCH and Inbox approval have one winner and queue the successor at most once", async () => {
+  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
+  const template = await db.taskTemplate.create({ data: {
+    projectId: project.id, name: "Race template", description: "race", variables: [],
+  } });
+  await db.task.update({
+    where: { id: predecessor.id },
+    data: { status: "REVIEW", templateId: template.id, approvalGate: false },
+  });
+  const run = await db.run.create({ data: {
+    projectId: project.id, taskId: predecessor.id, agentId: agent.id, repoId: repo.id,
+    runNumber: 1, dedupeKey: `task:${predecessor.id}:race-approve`, runner: "CLAUDE",
+    model: agent.model, promptHash: "hash", status: "SUCCEEDED",
+  } });
+  const session = await db.session.create({ data: {
+    runId: run.id, projectId: project.id, agentId: agent.id, taskId: predecessor.id, runner: "CLAUDE",
+  } });
+  const gate = await db.inboxMessage.create({ data: {
+    from: "AGENT", agentId: agent.id, sessionId: session.id, taskId: predecessor.id,
+    gateTaskId: predecessor.id, kind: "MULTIPLE_CHOICE", body: "approve",
+    choices: [{ id: "approve", label: "Approve" }], dedupeKey: `gate:race-approve:${predecessor.id}`,
+  } });
+  const priorToken = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-db-token";
+  try {
+    const [patch, decision] = await Promise.all([
+      createApp(db).request(`/tasks/${predecessor.id}`, {
+        method: "PATCH", headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "DONE" }),
+      }),
+      db.$transaction((tx) => applyInboxDecisionTx(tx, {
+        inboxMessageId: gate.id, externalEventId: `race-approve-${Date.now()}`, decision: "approve",
+      }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }),
+    ]);
+    assert.equal(patch.status, 200);
+    assert.equal(decision.duplicate || decision.gateAction === "approved", true);
+  } finally {
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
+  }
+
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+  const winnerActivities = await db.taskActivity.count({ where: {
+    taskId: predecessor.id,
+    body: { in: ["Approval gate approved", "Status changed: REVIEW → DONE"] },
+  } });
+  assert.equal(winnerActivities, 1);
+  assert.ok(["ANSWERED", "CLOSED"].includes(
+    (await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status,
+  ));
+
+  // Both channel replays remain side-effect free after the race settles.
+  const replay = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: gate.id, externalEventId: `race-approve-replay-${Date.now()}`, decision: "approve",
+  }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  assert.equal(replay.duplicate, true);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+});
+
+test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () => {
+  const { predecessor, successor, gate } = await completeIntoHumanGate();
+  const priorToken = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-db-token";
+  let decision: Awaited<ReturnType<typeof applyInboxDecisionTx>>;
+  try {
+    const results = await Promise.all([
+      createApp(db).request(`/tasks/${successor.id}`, {
+        method: "PATCH", headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "DONE" }),
+      }),
+      db.$transaction((tx) => applyInboxDecisionTx(tx, {
+        inboxMessageId: gate.id, externalEventId: `race-reject-${Date.now()}`, decision: "reject",
+      }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }),
+    ]);
+    assert.equal(results[0].status, 200);
+    decision = results[1];
+  } finally {
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
+  }
+
+  const settledGate = await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } });
+  const settledPredecessor = await db.task.findUniqueOrThrow({ where: { id: predecessor.id } });
+  const settledSuccessor = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  if (settledGate.status === "CLOSED") {
+    assert.equal(decision!.duplicate, true);
+    assert.equal(settledPredecessor.status, "DONE");
+    assert.equal(settledSuccessor.status, "DONE");
+    assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 1);
+  } else {
+    assert.equal(settledGate.status, "ANSWERED");
+    assert.equal(decision!.gateAction, "rejected");
+    assert.equal(settledPredecessor.status, "TODO");
+    assert.equal(settledSuccessor.status, "TODO");
+    assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 2);
+  }
+  const winnerActivities = await db.taskActivity.count({ where: {
+    OR: [
+      { taskId: successor.id, body: "Status changed: REVIEW → DONE" },
+      { taskId: predecessor.id, body: "Approval gate rejected; step queued again" },
+    ],
+  } });
+  assert.equal(winnerActivities, 1);
+});
+
 // A parked successor used to hang: the CAS matches TODO/DOING/REVIEW, so a
 // BACKLOG or archived row makes updateMany match zero rows while the re-read
 // returns the same row forever — inside the caller's transaction.

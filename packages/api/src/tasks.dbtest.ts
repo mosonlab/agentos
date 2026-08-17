@@ -169,6 +169,47 @@ test("archive refuses a REVIEW task with an open approval gate", async () => {
   assert.equal(body.error, "Decide the approval gate in the Inbox first");
 });
 
+test("HUMAN final DONE closes only exact OPEN gate messages even when approvalGate is false", async () => {
+  const chainId = `human-final-${Date.now()}`;
+  const target = await seedTask("human-final", {
+    status: "REVIEW", assigneeType: "HUMAN", assigneeAgentId: null, repoId: null,
+    approvalGate: false, chainId, chainIndex: 0,
+  });
+  const unrelated = await seedTask("human-final-unrelated", { status: "REVIEW" });
+  const exactOpen = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: target.task.id, gateTaskId: target.task.id,
+    kind: "MULTIPLE_CHOICE", body: "exact open", status: "OPEN",
+    choices: [{ id: "approve", label: "Approve" }], dedupeKey: `gate:exact:${target.task.id}`,
+  } });
+  const exactClosed = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: target.task.id, gateTaskId: target.task.id,
+    kind: "MULTIPLE_CHOICE", body: "exact closed", status: "CLOSED",
+    choices: [{ id: "approve", label: "Approve" }], dedupeKey: `gate:closed:${target.task.id}`,
+  } });
+  const ordinaryOpen = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: target.task.id, kind: "TEXT", body: "ordinary open",
+    status: "OPEN", dedupeKey: `ordinary:${target.task.id}`,
+  } });
+  const unrelatedOpen = await db.inboxMessage.create({ data: {
+    from: "AGENT", taskId: unrelated.task.id, gateTaskId: unrelated.task.id,
+    kind: "MULTIPLE_CHOICE", body: "unrelated open", status: "OPEN",
+    choices: [{ id: "approve", label: "Approve" }], dedupeKey: `gate:unrelated:${unrelated.task.id}`,
+  } });
+
+  assert.equal((await call("PATCH", `/tasks/${target.task.id}`, { status: "DONE" })).status, 200);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: target.task.id } })).status, "DONE");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: exactOpen.id } })).status, "CLOSED");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: exactClosed.id } })).status, "CLOSED");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: ordinaryOpen.id } })).status, "OPEN");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: unrelatedOpen.id } })).status, "OPEN");
+
+  // A replay is a no-op, including its activity and chain activation side effects.
+  assert.equal((await call("PATCH", `/tasks/${target.task.id}`, { status: "DONE" })).status, 200);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: target.task.id, body: { startsWith: "Status changed:" } },
+  }), 1);
+});
+
 test("archive-done archives every finished task and reports the ones it skipped", async () => {
   const context = await seedTask("archive-done", { status: "DONE" });
   const extra = await Promise.all([1, 2, 3, 4, 5].map((index) => db.task.create({ data: {

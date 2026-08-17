@@ -2022,9 +2022,6 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskPatch);
     const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
-    if (body.status === TaskStatus.DONE && before.templateId && before.approvalGate) {
-      return context.json({ error: "Template approval gates must be decided through Inbox" }, 409);
-    }
     const changesStatus = body.status !== undefined && body.status !== before.status;
     const movingToBacklog = body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG;
     if (body.assigneeAgentId) {
@@ -2068,9 +2065,6 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       ...withoutUndefined(body),
       ...(scheduleTouched ? schedule : {}),
     } as Prisma.TaskUncheckedUpdateInput;
-    const advances = before.status !== TaskStatus.DONE
-      && body.status === TaskStatus.DONE
-      && Boolean(before.chainId || before.followUpTaskId);
     // A status write joins the Task-row mutex, like start / retry / archive /
     // the scheduler's claims. Two reasons, both proven by regression tests:
     //
@@ -2088,7 +2082,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // unarchived, whether or not the transition also advances a chain. Splitting
     // that by `advances` would let an archived chained task be marked DONE while
     // an archived standalone one could not.
-    if (changesStatus) {
+    if (changesStatus || body.status === TaskStatus.DONE) {
       const written = await db.$transaction(async (tx) => {
         const locked = await lockTask(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
@@ -2098,17 +2092,34 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         if (movingToBacklog && await hasActiveRun(tx, taskId)) {
           return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
         }
-        const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
-        await tx.taskActivity.create({ data: {
-          taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}`,
-        } });
-        if (advances) {
-          if (!before.templateId && before.approvalGate) {
-            await tx.inboxMessage.updateMany({
-              where: { gateTaskId: before.id, status: "OPEN" },
-              data: { status: "CLOSED" },
-            });
+        if (body.status === TaskStatus.DONE) {
+          // This OPEN row is the gate-decision CAS. It deliberately depends on
+          // neither templateId nor approvalGate: gate creation records the
+          // relationship in gateTaskId, and that is the only authority here.
+          const closed = await tx.inboxMessage.updateMany({
+            where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+            data: { status: InboxStatus.CLOSED },
+          });
+          if (closed.count === 0) {
+            // A gate exists but none is OPEN only after another channel won or
+            // this request is a replay. Do not overwrite a concurrent reject
+            // or activate the successor a second time.
+            const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
+            if (decidedGate > 0) {
+              return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
+            }
           }
+        }
+        const statusChanged = body.status !== undefined && body.status !== locked.status;
+        const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
+        if (statusChanged) {
+          await tx.taskActivity.create({ data: {
+            taskId, actorType: "operator", body: `Status changed: ${locked.status} → ${body.status}`,
+          } });
+        }
+        if (locked.status !== TaskStatus.DONE
+          && body.status === TaskStatus.DONE
+          && Boolean(updated.chainId || updated.followUpTaskId)) {
           await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
         }
         return { task: updated };

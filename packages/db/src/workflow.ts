@@ -585,6 +585,12 @@ export const applyInboxDecisionTx = async (
   if (!gateDecision && question.session.run.status !== RunStatus.WAITING_INBOX) {
     throw new Error("No matching waiting Inbox question");
   }
+  // PATCH DONE takes the Task mutex before closing the OPEN gate. Take the same
+  // mutex before this path's OPEN claim so the two channels have one lock order
+  // and one winner instead of deadlocking or both advancing the successor.
+  const lockedGateTask = gateDecision && question.gateTask
+    ? await lockTaskRow(tx, question.gateTask.id)
+    : null;
   const claimed = await tx.inboxMessage.updateMany({
     where: { id: question.id, status: InboxStatus.OPEN },
     data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
@@ -649,7 +655,9 @@ export const applyInboxDecisionTx = async (
     // transaction back, which leaves the decision OPEN — the human unarchives
     // the step and decides again, instead of the gate silently closing onto a
     // run the runner will never claim.
-    const lockedRedo = await lockTaskRow(tx, redo.id);
+    const lockedRedo = redo.id === question.gateTask.id
+      ? lockedGateTask
+      : await lockTaskRow(tx, redo.id);
     if (lockedRedo?.archivedAt) {
       throw new ArchivedTaskError(redo.id, redo.name);
     }

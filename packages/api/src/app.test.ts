@@ -99,6 +99,7 @@ test("task status patch does not apply create defaults to other fields", async (
         findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null }),
         update: async ({ data }: { data: unknown }) => { updateData = data; return { id: "task-1", status: "DONE" }; },
       },
+      inboxMessage: { updateMany: async () => ({ count: 0 }), count: async () => 0 },
       taskActivity: { create: async () => ({ id: "activity-1" }) },
     };
     const database = {
@@ -146,7 +147,10 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
         updateMany: async () => ({ count: 1 }),
         findUniqueOrThrow: async () => successor,
       },
-      inboxMessage: { updateMany: async () => { closed = true; return { count: 1 }; } },
+      inboxMessage: {
+        updateMany: async () => { closed = true; return { count: 1 }; },
+        count: async () => 1,
+      },
       taskActivity: { create: async () => ({}) },
       // findFirst answers resolveRunBranches' publication query: nothing in this
       // chain has pushed the shared branch, so the successor bases on the default.
@@ -167,15 +171,38 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
   });
 });
 
-test("template approval gate still rejects operator DONE", async () => {
+test("a template HUMAN final step closes its exact OPEN gate even when approvalGate is false", async () => {
   await withTokens(async () => {
-    const database = { task: { findUniqueOrThrow: async () => ({ templateId: "template-1", approvalGate: true }) } } as unknown as PrismaClient;
+    let closedWhere: unknown;
+    const before = {
+      id: "task-1", projectId: "project-1", name: "Human final", status: "REVIEW", templateId: "template-1",
+      approvalGate: false, chainId: "chain-1", chainIndex: 2, followUpTaskId: null,
+      assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
+    };
+    const tx = {
+      $queryRaw: async () => [{ id: before.id }],
+      task: {
+        findUniqueOrThrow: async () => before,
+        update: async () => ({ ...before, status: "DONE" }),
+        findFirst: async () => null,
+      },
+      inboxMessage: {
+        updateMany: async ({ where }: { where: unknown }) => { closedWhere = where; return { count: 1 }; },
+        count: async () => 1,
+      },
+      taskActivity: { create: async () => ({}) },
+    };
+    const database = {
+      task: { findUniqueOrThrow: async () => before },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
     const response = await createApp(database).request("/tasks/task-1", {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({ status: "DONE" }),
     });
-    assert.equal(response.status, 409);
+    assert.equal(response.status, 200);
+    assert.deepEqual(closedWhere, { gateTaskId: before.id, status: "OPEN" });
   });
 });
 
