@@ -5,6 +5,7 @@
   "include": [
     { "glob": ".env.example", "purpose": "safe configuration template" },
     { "glob": ".gitignore", "purpose": "source hygiene" },
+    { "glob": "AGENTS.md", "purpose": "repository agent instructions" },
     { "glob": "LICENSE", "purpose": "license grant" },
     { "glob": "README.md", "purpose": "project documentation" },
     { "glob": "agents/*.md", "purpose": "reviewed agent documentation" },
@@ -21,6 +22,7 @@
     { "glob": "apps/web/tsconfig.node.json", "purpose": "web tooling TypeScript configuration" },
     { "glob": "apps/web/vite.config.ts", "purpose": "web build configuration" },
     { "glob": "docker-compose.yml", "purpose": "local development services" },
+    { "glob": "docs/governance/task-routing-v1.md", "purpose": "task routing governance" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
     { "glob": "package.json", "purpose": "workspace definition" },
