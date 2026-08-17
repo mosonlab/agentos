@@ -8,6 +8,8 @@ Routing Contract: v1.0, Planned Critical, future implementation role `senior-dev
 
 Plan source: approved `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md`
 
+Revision source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md` (7 must-fix and 2 should-fix findings; disposition ledger below)
+
 Audited planning base: `188d21e279b8feae816b4f9580a961f5c9ee0cbc` (2026-08-17)
 
 ## Outcome and approach
@@ -94,10 +96,12 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 2. Add `Goal.goalGeneration @default(1)`, `Goal.nextGoalIteration @default(1)`, Task/event relations, all exact Task lineage/idempotency/decision/predecessor fields and declared unique/indexes, all exact Run generation/iteration/retry-parent fields and indexes, and `GoalExecutionEvent` exactly as §6.2–§6.5 requires. Preserve existing project-scoped relations; use composite Prisma relations where needed to enforce same-project ownership without renaming persisted columns.
 3. Add named SQL checks for: Task all-null/all-non-null lineage and dispatch state; dispatch key/hash presence; decision quartet by state; generation/iteration ranges and generation-0 restriction; predecessor shape; Run all-null/all-non-null lineage and Goal-linked `taskId`; and runtime Goal Task shape. The runtime-shape check applies to generation ≥1 and requires NOW/AGENT, no schedule, recurrence, chain, template, follow-up, approval gate, or archive identity; `MIGRATED_CLOSED` generation-0 history is exempt.
 4. Add the exact partial unique index `Task_one_open_goal_dispatch_key`, Task composite identity FK target, Run composite lineage FK, `retryOfRunId` unique self-FK, decision Run FK, predecessor FK, and `RESTRICT` lineage/event FKs in dependency-safe order. Preserve unique `(taskId, runNumber)`, `dedupeKey`, lease/fencing fields, and manual all-null lineage.
-5. In the same forward migration, backfill only unambiguous closed history: order each Goal's inferred Tasks by `(createdAt,id)`, assign generation 0 and 1-based iterations, deterministic `migration:<taskId>` key and built-in PostgreSQL SHA-256 hash, mark `MIGRATED_CLOSED`, and copy the tuple to Runs. Existing Goals remain generation 1 / next iteration 1. Do not create events or open dispatches for history.
-6. Add catalog assertions in `migration.dbtest.ts` for enum labels, nullability/defaults, all named checks/FKs/unique indexes, exact partial-index predicate, event table/indexes, and delete actions.
+5. In the same forward migration, backfill only unambiguous closed history: order each Goal's inferred Tasks by `(createdAt,id)`, assign generation 0 and 1-based iterations, deterministic `migration:<taskId>` key and `pgcrypto`-backed PostgreSQL SHA-256 hash, mark `MIGRATED_CLOSED`, and copy the tuple to Runs. Existing Goals remain generation 1 / next iteration 1. Do not create events or open dispatches for history.
+6. Use PostgreSQL 16 `pgcrypto` explicitly for the backfill hash: the migration installs `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public` and computes `encode(public.digest(('migration:' || "Task"."id")::text, 'sha256'), 'hex')`. The preflight first verifies either that `pgcrypto` already exists in schema `public`, or that it is absent and the migration role has database `CREATE` plus `CREATE` on `public`; an extension installed in another schema or insufficient privilege aborts before schema or data mutation. Record whether Goal 5a0 installed the extension. Rollback leaves a pre-existing/shared extension in place and may drop a Goal-5a0-installed extension only after an explicit `pg_depend` query proves no non-extension dependents.
+7. Strengthen audit identity without adding new domain fields: add a composite unique target on Task `(id, goalId, goalGeneration)` and a composite predecessor FK `(goalPredecessorTaskId, goalId, goalGeneration)` so a predecessor cannot cross Goal or generation. Add/retain composite unique targets on Task and Run `(id, goalId, goalGeneration, goalIteration)`, then add composite event FKs for present identities—`(taskId, goalId, goalGeneration, goalIteration)` to Task and `(runId, goalId, goalGeneration, goalIteration)` to Run—plus checks that optional identity components are absent/present together for event types that carry them. Keep the spec's ID FKs as the delete-restriction relations. Exact predecessor iteration continuity and per-event-type identity shapes remain verifier assertions because a static FK cannot express `predecessor.goalIteration = successor.goalIteration - 1`.
+8. Add catalog assertions in `migration.dbtest.ts` for enum labels, nullability/defaults, all named checks/FKs/unique indexes, exact partial-index predicate, event table/indexes, `pgcrypto` function resolution, and delete actions.
 
-**Verification:** `npm run db:generate`, `npm run db:validate`, the focused `migration.dbtest.ts`, and raw negative inserts prove: a second open Task is rejected; partially-null Task/Run lineage is rejected; a Run tuple mismatching its Task is rejected; a second retry child is rejected; and manual all-null Task/Run fixtures still insert.
+**Verification:** `npm run db:generate`, `npm run db:validate`, the focused `migration.dbtest.ts`, and raw negative inserts prove: a second open Task is rejected; partially-null Task/Run lineage is rejected; a Run tuple mismatching its Task is rejected; a second retry child is rejected; cross-Goal/cross-generation predecessor and event identities are rejected; and manual all-null Task/Run fixtures still insert. The fixture with `Task.id = 'task-1'` must persist the exact 64-hex hash `ae09d8434c29001c3151708be633fe60ca2a9837de8f169d003e6539be35bb94`, and the insufficient-extension-privilege fixture must fail before any schema/data checksum changes.
 
 ### 3. Build fail-closed migration, invariant, and archival tooling
 
@@ -112,13 +116,13 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 
 **Work:**
 
-1. Implement `db:preflight-goal-execution` to print IDs/counts only and exit non-zero for every §12.1 condition. Require the recorded current-master and Control-plane A SHAs as arguments/environment and fail if evidence is absent or ancestry/current-HEAD checks fail.
-2. Implement idempotent `db:verify-goal-execution` queries for zero partial/mismatched tuples, duplicate iteration tuples, duplicate retry parents, open dispatches without Task/Run, and more than one open dispatch. Include the exact health query from §14.
+1. Implement `db:preflight-goal-execution` to print IDs/counts only and exit non-zero for every §12.1 condition plus the review-identified ambiguity cases. In particular, fail when one Task has both null and non-null `Run.goalId`; when its Runs do not all carry the same non-null Goal ID; or when any Session's `goalId`, `taskId`, or `projectId` is distinct from its owning Run. A passing backfill may copy identity only when every Run is non-null with the same Goal and every Session agrees; it must never fill a formerly null Run from a sibling. Require the recorded current-master and Control-plane A SHAs as arguments/environment and fail if evidence is absent or ancestry/current-HEAD checks fail.
+2. Implement idempotent `db:verify-goal-execution` queries for zero partial/mismatched tuples, Session-versus-Run identity mismatches, duplicate iteration tuples, duplicate retry parents, open dispatches without Task/Run, more than one open dispatch, predecessor Goal/generation/previous-iteration discontinuity, and GoalExecutionEvent-to-Task/Run Goal/generation/iteration mismatches or illegal per-type identity shapes. Include the exact health query from §14.
 3. Implement `db:export-goal-lineage` as a read-only, deterministic JSONL export of Goal, Task, Run, Session summary, and GoalExecutionEvent rows. Include original enum/status values and checksums; exclude prompts, outputs, fencing/session tokens, credentials, and secrets. Require an explicit output path and never mutate the database.
 4. Add root passthrough scripts for all three commands. Make all scripts accept an injected database URL and operate on the URL's schema, never an implicit `public` schema.
-5. Add fixtures for no history, multiple closed iterations, inconsistent Goal IDs, active linked Runs, project disagreement, and orphaned lineage. Prove preflight aborts before migration in the last four cases and succeeds with zero/count output in valid cases.
+5. Add fixtures for no history, multiple closed iterations, all-null manual lineage, mixed null/non-null Runs on one Task, inconsistent non-null Goal IDs, Session-versus-Run Goal/task/project disagreement, active linked Runs, project disagreement, and orphaned lineage. Prove every ambiguous/corrupt/active case aborts before migration with unchanged schema/data checksums and only the unambiguous fixtures pass.
 
-**Verification:** Run the three focused commands against disposable fixtures. Assert non-zero exits and unchanged row checksums on blocked cases, zero invariant violations on valid migrated fixtures, deterministic repeat exports, and absence of forbidden payload/token fields.
+**Verification:** Run the three focused commands against disposable fixtures. Assert non-zero exits and unchanged schema/data checksums on blocked cases, zero invariant violations—including predecessor/event/Session identity queries—on valid migrated fixtures, deterministic repeat exports, and absence of forbidden payload/token fields. Direct-corruption tests must show the composite predecessor/event FKs reject cross-Goal or cross-generation links and the verifier catches same-generation wrong-iteration predecessor/event-type mismatches that cannot be expressed by those FKs.
 
 ### 4. Add the shared Goal safety-kernel module and typed outcomes
 
@@ -136,9 +140,9 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 3. Implement `lockGoalRow`, then Task and Run lock helpers with raw `FOR UPDATE`; all Goal-linked mutators use the same Goal → Task → Run order. Reads used only to discover IDs are re-read and fenced after locks.
 4. Centralize Goal-linked Task/Run data construction, existing assignee/repo-grant validation, `deriveRunConfig`, `resolveRunBranches`, limits, ordinary NOW Task fields, copied lineage tuple, Run number/dedupe fields, retry ancestry, and deterministic event creation. `enqueueTaskRun` rejects Goal-linked Tasks so no caller can bypass the kernel.
 5. Implement `createInitialGoalDispatch`, `applyGoalDecision`, `retryGoalTaskRun`, pause/resume, cancel, and restart exactly as spec §7. Each public operation runs in one Serializable transaction with bounded retry only for PostgreSQL serialization/deadlock failures; logical 409s are not retried.
-6. Replay lookup occurs before current-state validation while holding the Goal lock. Same-key replay returns stored IDs/result; different-key stale work conflicts. Every successful non-no-op transition writes exactly one durable event in its transaction; replay/no-op does not duplicate events.
+6. Replay lookup occurs before current-state validation while holding the Goal lock. Same-key replay returns stored IDs/result; different-key stale work conflicts. Event cardinality is explicit: every successful non-no-op transition writes exactly one durable event except restart, which is one compound operation that atomically writes exactly two events—`GOAL_RESTARTED` and `DISPATCH_CREATED`—for the same new Goal/Task/Run tuple. This restart-specific rule in spec §7.7 governs the generic singular wording in I10/§14; it does not add an event type or broaden scope. Replay/no-op writes zero events. The one post-commit operation log records `eventCount` (`2` for restart, `1` for other transitions, `0` for replay/no-op).
 
-**Verification:** Unit tests cover canonical hashing/default equivalence, every conflict mapping, event dedupe keys, lock order, manual-vs-Goal construction, replay-before-state behavior, no prompt/token leakage, and transaction rollback on an injected failure between each logical write.
+**Verification:** Unit tests cover canonical hashing/default equivalence, every conflict mapping, event dedupe keys, lock order, manual-vs-Goal construction, replay-before-state behavior, no prompt/token leakage, exact per-operation event cardinality (including two for restart), and transaction rollback on an injected failure between each logical write/event.
 
 ### 5. Register the Goal execution HTTP contract and read models
 
@@ -179,8 +183,9 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 3. On retryable failure below the ceiling, re-read active Goal under lock and create exactly one child via the shared source-based retry primitive, keeping the Goal tuple/Task and setting `retryOfRunId`. A paused or disabled kernel follows the awaiting-decision branch. A uniqueness collision reads the child as replay rather than returning 500.
 4. Add `POST /tasks/:taskId/runs/:sourceRunId/retry`. Preserve manual `POST /tasks/:taskId/retry`; for Goal Tasks it resolves the latest terminal source and delegates, returning an existing active child as replay.
 5. Ensure a stale/terminal/cancelled/fenced completion returns the established 409 and changes no Goal/Task/Run/Session/event state.
+6. Split inherited Inbox side effects before entering the Goal branch. Manual Tasks retain the existing run-budget-exhausted and per-completion authentication messages. Goal-linked completion/retry/exhaustion/authentication paths create no Inbox row: budget/lifecycle messages are deferred to Goal 5a1, and a Goal failure must not acquire Inbox integration indirectly. The existing runner-backend preflight/circuit-open operational alert remains unchanged and system-wide; it is the only applicable alert because it is emitted from backend health state, not Goal lifecycle. Existing human-authored Inbox questions already attached to a `WAITING_INBOX` Run remain readable; Goal 5a0 only fences them on cancel and emits no replacement message.
 
-**Verification:** Real-DB tests cover success, terminal failure, automatic retry, attempt exhaustion, paused/disabled no-retry, exact manual replay, simultaneous automatic/operator retries, stale fencing, and rollback. Existing manual Task completion/retry, chain successor, output, delivery, lease, and fencing tests pass unchanged except for additive assertions.
+**Verification:** Real-DB tests cover success, terminal failure, automatic retry, attempt exhaustion, paused/disabled no-retry, exact manual replay, simultaneous automatic/operator retries, stale fencing, rollback, and zero new Inbox rows for Goal-linked budget exhaustion, authentication-circuit failure, terminal failure, retry, pause, cancel, decision, and reconciliation. Regression tests prove manual Task budget/authentication messages and the system-wide runner-backend preflight/circuit alert still behave as before. Existing manual Task completion/retry, chain successor, output, delivery, lease, and fencing tests pass unchanged except for additive assertions.
 
 ### 7. Make reconciliation restart-safe and lineage-aware
 
@@ -214,12 +219,13 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 **Work:**
 
 1. Pause/resume are Goal-row-locked, idempotent state transitions with one event on a real transition and no event on a same-state replay. Pause leaves a claimed Run's fence valid but blocks claims, retries, and decisions.
-2. Extend claim eligibility: manual Runs retain current predicates; Goal Runs additionally require Goal `ACTIVE`, Task `EXECUTING`, matching Task/Run tuples, and a non-cancelled current generation. The claim CAS remains the winner selector.
-3. Cancel serializes against completion/decision, fills deterministic decision fields on the open Task, terminalizes Goal/open Task/active Run/Session, clears lease authority/revokes tokens, and writes one `GOAL_CANCELLED` event. Repeated cancel returns state without a second event.
-4. Restart is one transaction and allowed only from the specified terminal non-completed statuses. Same key replays; a new key/generation conflict returns 409. It increments generation once, preserves old rows, creates iteration-1 Task/Run, sets next iteration 2, and writes `GOAL_RESTARTED` plus `DISPATCH_CREATED` atomically.
-5. Old-generation completion and decisions fail both Run and Goal fences without changing new-generation counts/state.
+2. Extend claim eligibility without reversing the global lock order. Candidate discovery remains non-locking. A manual candidate retains the current claim transaction. For a Goal-linked candidate, begin a fresh Serializable attempt, set the bounded lock timeout, lock/re-read Goal `FOR UPDATE`, then Task `FOR UPDATE`, then Run `FOR UPDATE`; only then re-evaluate Goal `ACTIVE`, Task `EXECUTING`, exact Goal/Task/Run tuple, current generation, queued status, lease generation, readiness, agent/repo eligibility, and dependency state. Update the locked Run lease/fence, Session, then Task without acquiring any later Goal/Task lock. The Run CAS remains defense in depth/winner selection, but a pre-lock candidate row never authorizes the write.
+3. Retry the entire Goal-linked claim transaction at most three times for PostgreSQL `40P01` deadlock or `40001` serialization failures, with the same candidate identity and bounded per-attempt timeout; after exhaustion return the existing retryable service failure and no claim mutation. Logical ineligibility/CAS loss is not retried. Add structured attempt/outcome evidence so the concurrency suite distinguishes a valid losing claim from an unclassified database error.
+4. Cancel serializes against claim/completion/decision through the same Goal → Task → Run locks, fills deterministic decision fields on the open Task, terminalizes Goal/open Task/active Run/Session, clears lease authority/revokes tokens, and writes one `GOAL_CANCELLED` event. Repeated cancel returns state without a second event.
+5. Restart is one transaction and allowed only from the specified terminal non-completed statuses. Same key replays; a new key/generation conflict returns 409. It increments generation once, preserves old rows, creates iteration-1 Task/Run, sets next iteration 2, and writes exactly two events—`GOAL_RESTARTED` plus `DISPATCH_CREATED`—atomically.
+6. Old-generation completion and decisions fail both Run and Goal fences without changing new-generation counts/state.
 
-**Verification:** Controlled real-DB races prove both valid pause/claim orders, pause/automatic-retry outcome, both cancel/completion and cancel/decision orders, same/different-key restart races, and stale old-generation rejection. Assert final exact states/events/counts, not “success or arbitrary error.”
+**Verification:** Controlled real-DB races prove both valid pause/claim and cancel/claim orders, pause/automatic-retry outcome, both cancel/completion and cancel/decision orders, same/different-key restart races, and stale old-generation rejection. In cancel-versus-claim, cancel-first leaves the Run unclaimed; claim-first may return credentials but cancel revokes them before any accepted runner write. Both orders finish without deadlock, contain one original Run and no successor, and end with the Goal/Task/Run cancelled. Assert exact states, event cardinality (restart two; cancel one), retry-attempt classifications, and row counts—not “success or arbitrary error.”
 
 ### 9. Fence generic Task, scheduler, template, chain, and delete writers
 
@@ -240,7 +246,7 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 1. Reject generic schedule, status, archive, hard-delete, start, chain/follow-up activation, template, recurring-copy, CRON/AT, approval-gate, or direct Run enqueue operations when Task lineage is non-null. Only the Goal kernel changes governed Task status/dispatch state or creates its Runs.
 2. Public Task creation and patch schemas never accept Goal lineage fields. Internal scheduler/template/chain constructors explicitly set none and are defended by database checks.
 3. Preserve every manual/chain/template/CRON/AT code path and current lock/CAS behavior. Do not merge Goal succession with chain successor authority.
-4. Preserve workspace retention, branch routing, delivery, Task output, Session usage, and Inbox waiting behavior except cancellation may terminalize an existing `WAITING_INBOX` Goal Run; do not add Inbox integration.
+4. Preserve workspace retention, branch routing, delivery, Task output, Session usage, and existing human Inbox waiting records except cancellation may terminalize an existing `WAITING_INBOX` Goal Run. Enforce Step 6's side-effect split: generic/manual Task messages and the system-wide runner-backend preflight/circuit alert remain; Goal-linked completion/retry/control/reconciliation creates no Inbox record in Goal 5a0.
 
 **Verification:** Negative tests cover every forbidden generic operation on a Goal Task. Existing manual start/retry, API chain successor, template, webhook, CRON, AT, claim, fencing, completion, and archive suites remain green. Direct manual all-null Task/Run creation still works.
 
@@ -252,17 +258,27 @@ Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLET
 - `packages/api/src/goal-execution.ts`
 - `packages/api/src/app.ts`
 - `packages/api/src/index.ts`
+- `packages/db/src/usage.ts`
 - `packages/api/src/goal-execution.test.ts`
 - `packages/api/src/goal-execution.dbtest.ts`
+- `packages/api/src/usage.test.ts`
+- `packages/api/src/usage.dbtest.ts`
 
 **Work:**
 
-1. Compute `spendEvidence` from terminal Sessions linked to persisted Goal lineage: Decimal sum of non-null provider costs, priced/unpriced counts, and `complete|partial` coverage. Zero terminal sessions produces known cost zero, counts zero, and complete coverage; any null-cost terminal Session makes coverage partial. Never infer dollars from tokens.
-2. Preserve `Goal.spendUsd` as the known-provider subtotal for compatibility; all new API/log wording calls it known provider cost/subtotal when coverage is incomplete.
-3. Emit one structured JSON operation log after every committed transition with `goalId`, generation, iteration, Task/Run IDs, operation, outcome, and latency. Rejected/stale attempts log but create no durable event. Metadata never includes prompts, outputs, access/fencing/session tokens, or credentials.
-4. Because the repository has no metrics library, emit aggregation-stable records for `goal_dispatch_total`, `goal_decision_total`, `goal_retry_total`, `goal_stale_operation_total`, and `goal_spend_sessions`; emit health snapshots for `goal_open_dispatches` and `goal_lineage_invariant_violations` at startup and after Goal transitions. Keep exact metric names/labels from spec §14.
+1. Add one read helper that computes `spendEvidence` from terminal Sessions joined through persisted Run/Task Goal lineage in one Repeatable Read snapshot: PostgreSQL `numeric` sum of non-null `Session.costUsd`, priced/unpriced counts, and `complete|partial` coverage. Zero terminal sessions produces numeric zero, counts zero, and complete coverage; any null-cost terminal Session makes coverage partial. Never infer dollars from tokens.
+2. Make terminal Session rows the only spend source of truth. Do not increment `Goal.spendUsd` during ingestion. Goal list/detail serializers override the legacy `spendUsd` response field with the same computed numeric value returned as `spendEvidence.knownProviderCostUsd`; both serialize to exactly four fractional digits, use PostgreSQL numeric/Prisma Decimal only (never binary float), and therefore compare numerically equal. The derived response is not constrained by the legacy column's `Decimal(12,2)` storage width; if PostgreSQL cannot represent/serialize the arbitrary-precision sum, fail the read with a typed evidence error rather than clamp, wrap, or claim a smaller total. The stored legacy column is non-authoritative and is not used for spend-cap enforcement, which remains out of scope.
+3. Keep `recomputeSessionUsage`'s per-Session advisory lock/absolute FINAL_OUTPUT recompute in `packages/db/src/usage.ts`; after late or concurrent recomputes commit, the next Goal read takes a new database snapshot and derives from the repaired Session columns. Do not add a cross-Session accumulator that can lose updates. Tests coordinate two FINAL_OUTPUT recomputes with the existing usage lock barriers, then read through a separately constructed client and prove `spendUsd == knownProviderCostUsd`, exact four-decimal rounding, and correct priced/unpriced coverage.
+4. Add a single stdout JSON adapter in `goal-observability.ts`; do not introduce a metrics dependency. Every record has `recordType: "agentos.goal.operation" | "agentos.goal.metric"`, `schemaVersion: 1`, ISO `emittedAt`, and non-secret Goal context. Operation records additionally have `operation`, `outcome`, integer `latencyMs`, `eventCount`, and nullable `goalId`, `goalGeneration`, `goalIteration`, `taskId`, `runId`; emit one after commit, and one with `eventCount: 0` for replay/rejected/stale attempts. Durable events remain transaction-authoritative.
+5. Metric records have `metric`, `metricType: "counter_delta" | "gauge_snapshot"`, numeric `value`, and a stable `labels` object. Emit value `1` counter deltas for `goal_dispatch_total{outcome}`, `goal_decision_total{action,outcome}`, `goal_retry_total{source,outcome}`, and `goal_stale_operation_total{operation}`. Emit `goal_spend_sessions{coverage=priced|unpriced}` as per-Goal gauge snapshots whose two values are the current terminal Session counts. Emit global `goal_open_dispatches` and `goal_lineage_invariant_violations` gauge snapshots at startup and after each Goal transition, using the database queries from Steps 3/14. Gauges are queried as the latest record by `(metric, labels, goalId)`; counters are summed over the evidence window.
+6. The operational sink contract is newline-delimited JSON on the existing service stdout/stderr collector. Goal 5a0 assumes only that the implementation evidence window can export those lines; it makes no retention/SLA promise and adds no Goal 5a1 alert. Put these exact queries in the runbook/evidence document (with `goal-metrics.jsonl` as the captured evidence file), and capture both raw JSONL and query output:
 
-**Verification:** Capture logs in tests and assert exactly one successful-transition record, stale-without-event behavior, exact metric dimensions, latency/non-secret fields, and gauge query values. Spend tests cover complete, partial with a null-cost Session, no-priced-session, and zero-terminal-session cases and assert no “total spend” wording.
+   ```sh
+   jq -s '[.[] | select(.recordType == "agentos.goal.metric" and .schemaVersion == 1 and .metricType == "counter_delta")] | group_by([.metric, (.labels | tojson)]) | map({metric: .[0].metric, labels: .[0].labels, value: (map(.value) | add)})' goal-metrics.jsonl
+   jq -s '[.[] | select(.recordType == "agentos.goal.metric" and .schemaVersion == 1 and .metricType == "gauge_snapshot")] | sort_by(.metric, (.labels | tojson), (.goalId // ""), .emittedAt) | group_by([.metric, (.labels | tojson), (.goalId // "")]) | map(last | {metric, labels, goalId, value, emittedAt})' goal-metrics.jsonl
+   ```
+
+**Verification:** Capture JSONL in tests and run the documented `jq` queries; assert one operation record per committed operation (restart `eventCount: 2`), stale/replay records with no new durable event, exact schema/version/metric dimensions, integer latency/value fields, no secrets, counter sums, and latest-snapshot gauge values. Real-DB spend tests cover late and concurrent FINAL_OUTPUT recomputes plus complete, partial with a null-cost Session, no-priced-session, zero-terminal-session, four-decimal values, and a synthetic sum wider than the legacy column; each asserts computed `spendUsd == knownProviderCostUsd` and no “total spend” wording.
 
 ### 11. Make the existing Goal UI truthful about new statuses and spend evidence
 
@@ -304,19 +320,22 @@ Use the real PostgreSQL harness, two separately constructed `PrismaClient` insta
 6. `two retries: one source child` — exact next run number and same tuple.
 7. `automatic/operator/reconcile retry races` — each pair/interleaving has at most one child.
 8. `two reconciliation passes: one LOST and child`.
-9. `restart same and different keys` — generation increments once; replay or 409 as specified.
+9. `restart same and different keys` — generation increments once; replay or 409 as specified; the winning operation writes exactly one `GOAL_RESTARTED` and one `DISPATCH_CREATED` event for the same tuple, while replay writes neither.
 10. `old generation completion and decision are stale` — new generation unchanged.
 11. `pause versus claim` — assert both serialized outcomes and no duplicate Run.
-12. `pause versus automatic retry` — paused, awaiting decision, no child.
-13. `cancel versus completion/decision` — one terminalized outcome, final cancelled, no successor.
-14. `direct open-dispatch inserts hit partial unique index`.
-15. `composite lineage and all-null checks reject corruption`.
-16. `manual/scheduler/chain/claim/fencing/completion regressions remain green`.
-17. `spend evidence stays evidence scoped` — complete, partial, none priced, zero terminal.
+12. `cancel versus claim follows Goal-Task-Run locks` — exercise cancel-first and claim-first barriers; no deadlock/unclassified error, one original Run, no successor, final cancelled/fenced state.
+13. `pause versus automatic retry` — paused, awaiting decision, no child.
+14. `cancel versus completion/decision` — one terminalized outcome, final cancelled, no successor.
+15. `direct open-dispatch inserts hit partial unique index`.
+16. `composite lineage and all-null checks reject corruption`.
+17. `predecessor and event identity reject/catch corruption` — composite FKs reject cross-Goal/cross-generation identities; verifier catches wrong previous iteration and illegal event shapes.
+18. `Goal paths emit no Inbox lifecycle rows` — budget, auth failure, terminal failure, retry/control/reconcile remain zero while manual/system-wide alert regressions stay green.
+19. `manual/scheduler/chain/claim/fencing/completion regressions remain green`.
+20. `spend evidence stays evidence scoped and current` — complete, partial, none priced, zero terminal, late/concurrent FINAL_OUTPUT recomputes, equality of computed `spendUsd`/known subtotal, and wide sums.
 
 Each race records barrier arrival/release, exact HTTP/service result, row/event counts, tuples, and the final invariant query. Include a mutation note explaining which lock/unique/fence removal makes each proof fail.
 
-**Verification:** Focused file passes twice without changing the rendezvous, then aggregate `npm run test:db` passes. Every independent client disconnects in `finally`; timeouts are bounded and report the contended lock/CAS rather than masking hangs.
+**Verification:** Focused file passes twice without changing the rendezvous, then aggregate `npm run test:db` passes. Every independent client disconnects in `finally`; timeouts are bounded and report the contended Goal/Task/Run lock or CAS rather than masking hangs. The test artifact records restart's two-event oracle and shows the cancel/claim race produced no `40P01`, exhausted `40001`, or forbidden Inbox row.
 
 ### 13. Rehearse the migration and rollback paths on disposable schemas
 
@@ -330,12 +349,12 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 
 **Work:**
 
-1. Rehearse no history, multiple closed iterations, null manual lineage, inconsistent Goal IDs, active Goal-linked Run, and project mismatch. Invalid fixtures must stop in preflight with schema/data unchanged.
-2. For valid fixtures, deploy the full migration chain into a private non-`public` schema, verify deterministic generation-0 backfill and all invariants, run `prisma migrate deploy` again and prove no-op, then run drift check.
-3. Exercise rollback first by disabling the flag and retaining schema/lineage. Separately rehearse the destructive archival path on disposable data only: export; verify checksum/readability; drain/fence; require explicit approval tokens for `FAILED → STOPPED_STUCK` and `CANCELLED → PAUSED`; drop FKs/index/checks/event table/columns/enums in dependency order; verify old-client compatibility and Prisma drift.
+1. Rehearse no history, multiple closed iterations, all-null manual lineage, mixed null/non-null Runs, inconsistent non-null Goal IDs, Session-versus-Run Goal/task/project mismatch, active Goal-linked Run, project mismatch, and orphaned lineage. Every ambiguous/corrupt/active fixture must stop in preflight with schema/data checksums unchanged.
+2. Rehearse both `pgcrypto` states: already installed in `public`, and absent with sufficient creation privilege. Also prove an extension in the wrong schema and a role without required privileges fail before mutation. For valid fixtures, deploy the full migration chain into a private non-`public` application schema, verify deterministic generation-0 backfill including the exact `task-1` hash `ae09d8434c29001c3151708be633fe60ca2a9837de8f169d003e6539be35bb94` and all invariants, run `prisma migrate deploy` again and prove no-op, then run drift check.
+3. Exercise rollback first by disabling the flag and retaining schema/lineage. Separately rehearse the destructive archival path from Step 14 on disposable data only: export; verify checksum/readability; drain/fence; require explicit approval tokens for `FAILED → STOPPED_STUCK` and `CANCELLED → PAUSED`; remove lineage objects and rebuild the PostgreSQL 16 `GoalStatus` type in the exact documented transaction; conditionally retain/drop `pgcrypto`; verify old-client compatibility and Prisma drift.
 4. Never silently relabel Goal lineage as manual. Record whether roll-forward-off or destructive archival rollback was selected and whether export is the only remaining lineage copy.
 
-**Verification:** Save commands, schema names, first/second deploy output, row counts, invariant output, export checksum, enum translation approvals, object-removal order, and final drift result in the implementation evidence packet. Production URLs are forbidden in the rehearsal.
+**Verification:** Save commands, schema names, first/second deploy output, `pgcrypto` owner/schema/privilege/dependency evidence, exact hash, row counts, all identity/invariant output, export checksum, enum translation approvals, object-removal/type-rebuild order, old-client query results, and final drift result in the implementation evidence packet. Production URLs are forbidden in the rehearsal.
 
 ### 14. Write the operational rollout/rollback runbook without executing production changes
 
@@ -349,10 +368,14 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 
 1. Document the default-off flag and the exact staged sequence: Control-plane A evidence; final-master revalidation; ordered gates; private rehearsal; additive schema/client deploy disabled; read-only production preflight; approved migration window with no active Goal-linked Run; seeded non-production/canary Goal; review; then ordinary enablement.
 2. Canary checks cover dispatch, same-key replay after process reconstruction, retry replay, pause/resume, terminal decision, lineage JSON, event ledger, and partial spend evidence. This task records steps only; it does not execute production migration, restart, enablement, or public release.
-3. Document defect response and both rollback branches exactly as specification §13.2: disable; drain/fence; export; approved enum translation; archive lineage; dependency-ordered removal; drift; old code. Make roll-forward-off the required choice when live lineage must remain queryable.
+3. Document defect response and both rollback branches exactly as specification §13.2. Roll-forward-off is mandatory when live lineage must remain queryable. The destructive branch is disposable rehearsal unless separately authorized and must use these named PostgreSQL 16 phases:
+   1. **Pre-transaction abort gate:** flag disabled; no active Goal-linked Run; deterministic export checksum/read test complete; explicit approver identities/tokens recorded for status translation and lineage removal; query `pg_depend`, defaults, checks, indexes, views, functions, and casts that depend on `GoalStatus`, `GoalDispatchState`, or new lineage objects. Any unexpected dependency aborts.
+   2. **Single destructive transaction:** `LOCK TABLE "Goal", "Task", "Run", "Session", "GoalExecutionEvent" IN ACCESS EXCLUSIVE MODE`; translate `failed → stopped-stuck` and `cancelled → paused`; assert zero rows retain either new label; drop the `Goal.status` default and every known dependent check/view/function identified by the runbook; drop event/lineage FKs, partial/composite/unique indexes, `GoalExecutionEvent`, and added Task/Run/Goal columns in dependency order; then drop `GoalDispatchState` after its last column/dependency is gone.
+   3. **Exact GoalStatus rebuild:** execute `CREATE TYPE "GoalStatus_goal5a0_rollback" AS ENUM ('active','paused','completed','stopped-spend','stopped-time','stopped-stuck')`; cast with `ALTER TABLE "Goal" ALTER COLUMN "status" TYPE "GoalStatus_goal5a0_rollback" USING ("status"::text::"GoalStatus_goal5a0_rollback")`; execute `DROP TYPE "GoalStatus"`; rename with `ALTER TYPE "GoalStatus_goal5a0_rollback" RENAME TO "GoalStatus"`; restore the exact old default with `ALTER TABLE "Goal" ALTER COLUMN "status" SET DEFAULT 'paused'::"GoalStatus"`; recreate only old-schema indexes/checks/views/functions recorded from the baseline; validate label order, default expression, row counts/status counts, and zero unexpected dependencies before commit. Any failed assertion rolls back the whole phase.
+   4. **Post-commit gate:** retain `pgcrypto` unless the evidence says Goal 5a0 installed it and `pg_depend` proves no non-extension user; only then may the operator drop it. Start an old-client build against the disposable rolled-back schema, run Goal CRUD/list plus manual Task/Run scheduler smoke tests, run old-schema Prisma drift validation, and compare the archive checksum/readability again before old code is considered deployable.
 4. Include operator stop points and explicit evidence fields for who approved destructive translation/removal. Alerts and lifecycle notifications are named as Goal 5a1, not added here.
 
-**Verification:** Execute the runbook only against the disposable rehearsal from Step 13. A reviewer can trace every command to an artifact, target schema, expected result, abort condition, and recovery action.
+**Verification:** Execute the runbook only against the disposable rehearsal from Step 13. A reviewer can trace every command to an artifact, target schema, expected result, transaction boundary, abort/rollback condition, dependency query, approval identity, and recovery action. Evidence includes the temporary/final enum names, cast/default SQL, pre/post enum labels and counts, old-client smoke output, Prisma drift result, and `pgcrypto` retention decision.
 
 ### 15. Run the ordered gates and assemble review evidence
 
@@ -377,7 +400,7 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
    ```
 
 2. Also run the preflight, disposable migration rehearsal, invariant verifier, rollback rehearsal, and focused concurrency suite. Record the first result of each command; explain and disposition every failure before a rerun.
-3. Assemble the ten-part reviewer packet required by spec §15.3: current-master/Control-plane A evidence; schema/raw SQL; preflight/backfill/rehearsal counts; all command/test output; controlled interleavings; zero invariant results; canary Goal→generation→Task→Run/retry JSON; partial-cost Session evidence; feature-flag/rollout/rollback state; and complete finding disposition table.
+3. Assemble the ten-part reviewer packet required by spec §15.3: current-master/Control-plane A evidence; schema/raw SQL including `pgcrypto` and composite audit FKs; preflight/backfill/rehearsal counts; all command/test output; controlled interleavings including cancel/claim; zero invariant results including predecessor/event/Session identity; canary Goal→generation→Task→Run/retry JSON with restart's exact two events; partial/late/concurrent Session cost evidence; feature-flag/rollout/exact enum-rebuild rollback state; and complete finding disposition table. Attach raw observability JSONL plus executable aggregation output and the Goal-path Inbox negative-test evidence.
 4. The disposition ledger has one row per finding with source/ID, severity, accepted/rejected/deferred, rationale, exact contract/code/doc change, and verification. Findings are append-only across revisions; a rejected or deferred finding remains visible. Any must-fix stays open until verified; every should-fix is adopted or explicitly declined with one-line reasoning.
 5. Obtain an independent review against the reviewer checklist in spec §16. With an approval gate, move the implementation task to review rather than done; the human decides.
 
@@ -393,19 +416,36 @@ Each race records barrier arrival/release, exact HTTP/service result, row/event 
 | Stale completion/decision fencing and lock order | 4, 6, 7, 8, 12 |
 | Pause/resume/cancel/failure semantics | 4, 6, 8 |
 | Current scheduler/manual/chain/CRON/AT compatibility | 6, 7, 8, 9, 12 |
-| Migration/backfill/preflight/invariant checks | 1, 2, 3, 13 |
+| Migration/backfill/preflight/invariant checks, executable SHA-256, ambiguous-history rejection | 1, 2, 3, 13 |
 | Default-off rollout, canary, rollback/export | 5, 13, 14 |
-| Durable events, queryable signals, no Goal 5a1 alerts | 4, 7, 10 |
+| Restart event cardinality and atomic event evidence | 4, 8, 12, 15 |
+| Durable events and versioned, queryable signals; no Goal 5a1 alerts | 4, 7, 10, 15 |
 | Evidence-scoped provider dollar claims | 5, 10, 11, 12 |
+| Goal response spend subtotal stays synchronized with Session evidence | 5, 10, 12 |
+| Predecessor/event/Session audit identity continuity | 2, 3, 12, 13 |
 | Executable two-client PostgreSQL concurrency proofs | 12 |
+| Goal claim/cancel global lock order and bounded retries | 8, 12 |
+| PostgreSQL 16 enum-removal rollback rehearsal | 13, 14, 15 |
 | Ordered static/DB gates and reviewer packet | 15 |
 | Every review finding disposition | 15 |
 | No implementation before Control-plane A/current-master revalidation | 1 and all gates |
-| No Inbox/waiver/notification/public-release/production execution scope creep | 9, 11, 14 |
+| No Inbox/waiver/notification/public-release/production execution scope creep | 6, 9, 11, 12, 14 |
 
-## Planning-pass finding disposition
+## Consolidated review finding disposition
 
-No consolidated review findings were supplied to this first-pass Plan step, so there are no must-fix or should-fix dispositions yet. The final implementation/revise-plan process must use the append-only ledger defined in Step 15; no later finding may disappear.
+Source: `docs/reviews/2026-08-17-goal-5a0-plan-review.md`. All findings are retained below; no should-fix was declined.
+
+| Finding | Severity | Decision | One-line rationale | Exact plan change | Required verification |
+| --- | --- | --- | --- | --- | --- |
+| MF-1 | Must-fix | Accepted | Claim mutates Goal lineage authority and must share the global lock order with pause/cancel. | Step 8 requires non-locking discovery followed by Serializable Goal → Task → Run locks, full predicate re-read, three bounded `40P01`/`40001` retries, and an exact cancel/claim oracle. | Step 8 controlled race and Step 12 test 12 prove both orders, no deadlock/unclassified error, one Run, no successor, final cancellation/fence. |
+| MF-2 | Must-fix | Accepted | PostgreSQL 16 has no built-in `sha256()` on this baseline. | Steps 2/3/13 use `pgcrypto` `public.digest`, preflight schema/privileges, conditional rollback ownership, and a hard-coded expected digest. | Migration tests persist `ae09d8434c29001c3151708be633fe60ca2a9837de8f169d003e6539be35bb94`; wrong-schema/no-privilege fixtures fail unchanged. |
+| MF-3 | Must-fix | Accepted | Filling null Run identity from a sibling would invent historical lineage. | Steps 3/13 reject mixed null/non-null Runs and any Session-versus-Run Goal/task/project mismatch before mutation; backfill accepts only all-non-null, one-Goal history. | Preflight fixtures exit non-zero with identical schema/data checksums; migrated valid fixtures have zero mismatch rows. |
+| MF-4 | Must-fix | Accepted | Restart needs one deterministic event-count oracle. | Steps 4/8 define restart as one compound transaction with exactly two events, while every other transition has one and replay/no-op has zero; logs carry `eventCount`. | Unit/DB tests inject failures between both events, assert rollback, then assert exactly one `GOAL_RESTARTED` plus one `DISPATCH_CREATED` and zero on replay. |
+| MF-5 | Must-fix | Accepted | A stored zero that no usage path updates cannot be presented as the known subtotal. | Step 10 makes terminal Sessions authoritative and derives both response `spendUsd` and `knownProviderCostUsd` in one snapshot at four decimals; it names usage files, late/concurrent strategy, and overflow behavior. | Real-DB usage/Goal tests race late/concurrent FINAL_OUTPUT recomputes and prove numeric equality, coverage, rounding, and wide-sum behavior. |
+| MF-6 | Must-fix | Accepted | Goal 5a0 must not inherit lifecycle Inbox writes assigned to Goal 5a1. | Steps 6/9 split manual/system-wide alerts from Goal paths: Goal budget/auth/failure/retry/control/reconcile creates no Inbox row; the backend-health alert and existing human questions remain. | Step 6 negatives and Step 12 test 18 assert zero Goal-path rows and unchanged manual/backend alert behavior. |
+| MF-7 | Must-fix | Accepted | PostgreSQL 16 removes enum labels only by rebuilding the type, not `DROP VALUE`. | Steps 13/14 name the abort gate, locks, translations, dependency removal, temporary type, cast, old-type drop/rename, default restore, validations, and old-client rehearsal. | Disposable rollback records SQL/approvals/counts/dependencies, old-client CRUD/scheduler smoke results, archive checksum, and clean old-schema drift. |
+| SF-1 | Should-fix | Accepted | Cheap database backstops plus verifier queries materially improve audit-chain integrity. | Steps 2/3 add composite predecessor/event FKs where expressible and verifier queries for previous-iteration and per-event identity continuity. | Direct corruption tests reject cross-Goal/generation writes and detect wrong-iteration/event-shape corruption. |
+| SF-2 | Should-fix | Accepted | Queryability requires a versioned record and reproducible aggregation, not metric names alone. | Step 10 defines the stdout JSONL schema, discriminator/version/value/type/labels, counter/gauge semantics, sink assumption, and exact `jq` queries without alerts. | Captured JSONL passes schema/non-secret assertions and the documented queries return expected counter sums/latest gauges. |
 
 ## Completion boundary
 
