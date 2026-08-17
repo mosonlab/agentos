@@ -41,6 +41,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
+import { createRunnerRegistry } from "./runners.js";
 import {
   chainKey,
   chainProgress,
@@ -262,9 +263,20 @@ const activityInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const fencedActivityInput = activityInput.extend({ fencingToken: fence });
+const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
+  console.warn("Discarded runner telemetry", { input, issues: error.issues });
+  return undefined;
+});
+const runnerTelemetryFields = {
+  daemonVersion: telemetry(z.string().trim().max(40)),
+  diskFreeBytes: telemetry(z.number().int().nonnegative()),
+  pollIntervalMs: telemetry(z.number().int().positive().max(3_600_000)),
+  workspaceRoot: telemetry(z.string().trim().max(500)),
+};
 const claimInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   leaseSeconds: z.number().int().min(15).max(3600).default(60),
+  ...runnerTelemetryFields,
 });
 const heartbeatInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -273,6 +285,7 @@ const heartbeatInput = z.object({
   processAlive: z.boolean(),
   lastProgressEventAt: z.coerce.date().nullable().optional(),
   inFlightTool: z.record(z.string(), z.unknown()).nullable().optional(),
+  ...runnerTelemetryFields,
 });
 const startInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -550,6 +563,7 @@ const goalInclude = {
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
+  const runners = createRunnerRegistry();
 
   app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret", "X-AgentOS-Delivery-Id"] }));
   app.use("*", async (context, next) => {
@@ -574,6 +588,42 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       console.error("Health check failed", error);
       return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
     }
+  });
+  app.get("/runners", async (context) => {
+    const now = new Date();
+    const daemons = runners.snapshot(now);
+    const knownIds = daemons.map((daemon) => daemon.runnerId);
+    const [storedBackends, activeGroups] = await Promise.all([
+      db.runnerBackendState.findMany(),
+      knownIds.length === 0 ? [] : db.run.groupBy({
+        by: ["runnerId"],
+        where: { status: { in: activeRunStatuses }, runnerId: { in: knownIds } },
+        _count: { _all: true },
+      }),
+    ]);
+    const activeByRunner = new Map(activeGroups.map((group) => [group.runnerId, group._count._all]));
+    const backendsByRunner = new Map(storedBackends.map((backend) => [backend.runner, backend]));
+    return context.json({
+      checkedAt: now.toISOString(),
+      online: daemons.filter((daemon) => daemon.online).length,
+      total: daemons.length,
+      daemons: daemons.map((daemon) => {
+        const activeRuns = activeByRunner.get(daemon.runnerId) ?? 0;
+        return { ...daemon, lastSeenAt: daemon.lastSeenAt.toISOString(), busy: activeRuns > 0, activeRuns };
+      }),
+      backends: Object.values(RunnerKind).map((runner) => {
+        const backend = backendsByRunner.get(runner);
+        return {
+          runner,
+          cliVersion: backend?.cliVersion ?? null,
+          authMode: backend?.authMode ?? null,
+          lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
+          lastPreflightOk: backend?.lastPreflightOk ?? null,
+          circuitOpen: backend?.circuitOpen ?? null,
+          circuitReason: backend?.circuitReason ?? null,
+        };
+      }),
+    });
   });
 
   app.use("/hooks/templates/:templateId", bodyLimit({
@@ -2283,6 +2333,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.post("/runner/tasks/claim", async (context) => {
     const body = await readJson(context.req.raw, claimInput);
     const now = new Date();
+    runners.note(body.runnerId, body, now);
     await reconcileDatabaseRuns(db, now);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
@@ -2465,6 +2516,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, heartbeatInput);
     const now = new Date();
+    runners.note(body.runnerId, body, now);
     const updated = await db.run.updateMany({
       where: {
         id: runId,
