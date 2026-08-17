@@ -74,7 +74,10 @@ four columns and the applied migration in place** — folder committed,
 `_prisma_migrations` row untouched. The old code ignores every one of them.
 This is the supported state and needs no database work at all.
 
-**Physical rollback (only if the columns must actually go).**
+**Physical rollback (only if the columns must actually go).** Do not run the
+SQL below ad hoc. Ship it as a new forward migration, for example
+`<timestamp>_remove_chain_branch_and_pr`, after the rollback build no longer
+reads the columns:
 
 ```sql
 ALTER TABLE "Task"             DROP COLUMN "opensPullRequest";
@@ -82,32 +85,43 @@ ALTER TABLE "TaskTemplateStep" DROP COLUMN "opensPullRequest";
 ALTER TABLE "Run"              DROP COLUMN "opensPullRequest", DROP COLUMN "pushedBranch";
 ```
 
-```bash
-cd packages/db && npx prisma migrate resolve --rolled-back 20260817020000_chain_branch_and_pr
-```
+Apply that new migration with `prisma migrate deploy` and keep **both** the
+original additive migration and the compensating migration recorded as
+successful. `prisma migrate resolve --rolled-back` is invalid here: Prisma
+rejects it with P3012 because the original migration succeeded; that command is
+only for failed migrations.
 
-Then prove the way back: `npx prisma migrate deploy` and `npm run db:drift-check`
-exits 0. The `DROP COLUMN`s are safe in either order; nothing references them
-and there is no foreign key.
+To roll forward again after physical removal, ship another forward migration
+that restores the same four columns and defaults, regenerate the client,
+deploy, then require `npm run db:drift-check` to exit 0. The `DROP COLUMN`s are
+safe in either order; nothing references them and there is no foreign key. Test
+both forward migrations on a scratch schema before the production deploy.
 
 **Hand-deleting a `_prisma_migrations` row is not a rollback procedure.** It
 produces a database that tells the next `migrate deploy` the migration is
 unapplied, so `deploy` re-runs `ADD COLUMN` against columns that already exist
-and fails — and it bypasses the tool's own history checks. If the folder is gone
-and the columns are wanted gone too, drop the columns and use `migrate resolve`
-as above.
+and fails — and it bypasses the tool's own history checks. Never delete the
+original migration folder or mark its successful row rolled back. Physical
+removal and later restoration are new forward migrations.
 
 ## 4. The mixed-chain trap, in both directions
 
 The change takes effect at **run-creation time**, so a chain whose steps were
 queued on either side of the restart is mixed.
 
-**Forward (after the restart).** Runs already created keep their per-task
-branches; runs created afterwards get the shared branch. Such a chain is
-**finished by hand — this batch is only correct for chains created after the
-restart.** `Task.targetBranch` survives as the base fallback precisely so the
-existing manual repair lever keeps working: set each remaining step's
-`targetBranch` to the real predecessor branch and close the stray PRs.
+**Forward (after the restart), before any shared publication.** Runs already
+created keep their per-task branches; runs created afterwards get the shared
+branch. Park the remaining steps, point the first not-yet-created shared run's
+`Task.targetBranch` at the real predecessor branch, then start that step. This
+works only while no run in that repo/chain has published the shared head.
+
+**Forward, after the first shared publication.** `Task.targetBranch` is now
+intentionally ignored because the resolver has durable shared-head evidence.
+Changing later tasks cannot restore work omitted from the first shared tree.
+Park the chain, fetch both refs in a recovery checkout, merge or cherry-pick the
+missing predecessor commits **into the shared branch**, push it without force,
+and only then resume later steps. Close stray per-step PRs only after verifying
+their commits are reachable from the shared head.
 
 **Backward (after a code-only rollback).** A chain mid-flight on a shared branch
 reverts to per-task branches for its remaining steps, so **step N+1 will not
@@ -129,7 +143,15 @@ SELECT t."chainId", t."projectId", t."chainIndex", t.name, r.branch, r."pushStat
 ```
 
 The lowercase status literals are correct: `TaskStatus` is `@map`-ed to
-lowercase in `schema.prisma`.
+lowercase in `schema.prisma`. For each returned chain, query publication state
+by repository before choosing the pre- or post-publication procedure:
+
+```sql
+SELECT r."repoId", r."pushedBranch", r.status, r."runNumber", t."chainIndex"
+  FROM "Run" r JOIN "Task" t ON t.id = r."taskId"
+ WHERE t."projectId" = '<project id>' AND t."chainId" = '<chain id>'
+ ORDER BY r."repoId", t."chainIndex", r."runNumber";
+```
 
 ## 6. Manual pull-request recovery
 
@@ -151,10 +173,10 @@ reads, and the two degrade differently:
 - **`opensPullRequest`**: the runner compares `!== false`, so an omitted field
   reads as "open the PR" — today's behaviour. Noisy (a PR per step again), not
   lossy.
-- **`pushedBranch`**: an old runner never sends it, so no run registers as
-  publication evidence and every chain step bases on its `Task.targetBranch` or
-  the repo default. The visible symptom is an activity row on every step saying
-  the `targetBranch` was not used. Degraded but safe.
+- **`pushedBranch`**: an old runner never sends the immediate publication ACK.
+  Provisioning now checks whether the intended head already exists remotely, so
+  an ACK-loss retry still adopts that head; nevertheless mixed old/new runners
+  should be drained rather than treated as a supported steady state.
 
 The fix for both is to rebuild the runner, not to edit branches by hand.
 
@@ -170,21 +192,23 @@ SELECT id, "runNumber", "branch", "pushedBranch", "pushStatus", status, "targetB
   FROM "Run" WHERE "taskId" = '<task id>' ORDER BY "runNumber";
 ```
 
-- `pushedBranch` NULL on every run of the chain ⇒ nothing was published, so the
-  base in use is the task's `targetBranch` (or the repo default). Set
-  `Task.targetBranch` to a ref that actually exists.
+- `pushedBranch` NULL is **ambiguous**: a push may have succeeded immediately
+  before the runner died and before its fenced ACK. Check the remote with
+  `git ls-remote --heads <remote> 'refs/heads/agentos/chain/<slug>-<fp>'`.
+  Only an absent remote head means the task/default fallback is authoritative.
 - `pushedBranch` set but the remote lacks the ref ⇒ the push went to a different
   remote. The evidence is scoped by `repoId`, because the same branch name on
   two remotes is two unrelated refs; check the step's repo.
-- A push rejected non-fast-forward on the shared ref ⇒ two steps of the chain
-  ran concurrently. Chains are sequential by design; a chain-creation script
-  that posts every step with `scheduleKind = NOW` produces this, and the fix is
-  in the script, not here.
+- A push rejected non-fast-forward on the shared ref ⇒ legacy concurrent
+  admission or an external writer moved the head. Current API admission queues
+  only `chainIndex = 0`; later indexed steps remain parked until predecessor
+  activation. Fetch and reconcile the remote tree; never force-push.
 
-`pushedBranch` is the only column that answers "does this ref exist on this
-remote". `branch` and `pushStatus` each lie in one direction — a salvaged
-failure records `pushStatus = SUCCEEDED` against a branch it never pushed, and a
-run that published the branch and then hit a `gh` error is recorded FAILED.
+`pushedBranch` is the durable local publication fact; the remote itself resolves
+the narrow pre-ACK ambiguity. `branch` and `pushStatus` each lie in one
+direction — a salvaged failure records `pushStatus = SUCCEEDED` against a branch
+it never pushed, and a run that published the branch and then hit a `gh` error
+is recorded FAILED.
 
 ## 9. Computing a chain's branch by hand
 

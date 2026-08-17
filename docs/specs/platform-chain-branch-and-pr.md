@@ -167,8 +167,9 @@ function in `@agentos/db` (name suggestion: `sharedChainBranch({projectId,
 chainId})`) so the API, the enqueue path and the tests all agree by construction.
 
 **R4.** A task with `chainId != null` **and `chainIndex == null`** is its own
-1/1 chain (E1). It still gets the shared branch from R1 — which for a 1/1 chain
-is simply a stable branch name for that one task. No special case.
+isolated 1/1 malformed chain (E1). It uses ordinary per-run branch routing and
+must neither consume nor contribute publication evidence for indexed siblings
+that happen to carry the same `chainId`.
 
 **R5.** A task with `chainId == null` is unaffected: `Run.branch` stays null at
 enqueue and the runner keeps using `agentos/<taskId>/run-<n>`.
@@ -184,15 +185,21 @@ enqueue and the runner keeps using `agentos/<taskId>/run-<n>`.
 | **First run of an API-created task** | `POST /tasks`, `packages/api/src/app.ts:1675-1700` | **builds the Run inline and never sets `branch`** |
 | Operator retry | `POST /tasks/:id/retry`, `app.ts:1904` | `branch: last.branch` — inherits, correct once the first run is right |
 | Lost-lease requeue | `reconcileDatabaseRuns`, `packages/api/src/reconcile.ts:159` | copies `targetBranch` but **not** `branch` |
+| Automatic retry after completion | `POST /runner/runs/:id/complete` | copied `targetBranch` without recomputing publication evidence |
 
 The `POST /tasks` and reconcile paths are the reason a partial fix would be
 worse than none: fixing only `workflow.ts` leaves step ① of an API chain on
 `agentos/<taskId>/run-1` while ②–⑨ share the chain branch, i.e. step ①'s work is
-silently absent from the chain's tree. **All four paths are in scope.**
+silently absent from the chain's tree. **All five paths are in scope.**
 
-The plan step should prefer collapsing these onto one helper over four copies of
+The plan step should prefer collapsing these onto one helper over five copies of
 the same expression; the spec requires only that the resulting `Run.branch` is
-identical on all four.
+identical on all five.
+
+For API-created indexed chains, only `chainIndex = 0` receives the inline NOW
+run. Later indices are created parked without a run and are queued only by
+`activateChainSuccessor`; otherwise every POST freezes the fallback base before
+step 0 publishes and races the same new shared head.
 
 **R7.** `deliverFailedWorkspace` (`delivery.ts:137`) keeps pushing salvage
 commits to `agentos/<taskId>/run-<n>`, **not** to the shared branch. A failed
@@ -204,16 +211,13 @@ behaviour and is now load-bearing; state it in a code comment.
 **R8.** For a run being created for task T (chain step, `templateId == null`),
 `Run.targetBranch` is the first of these that applies:
 
-1. the previous run's `branch` for the same task, if any — retry semantics,
-   unchanged from today (`prior?.branch`);
-2. `sharedChainBranch(T)` — **if** the shared branch is known to exist on the
-   remote, defined as: some `Run` whose task is in the same chain
-   (`projectId` + `chainId`) has `branch = sharedChainBranch(T)` and
-   `pushStatus = SUCCEEDED`;
-3. `T.targetBranch`, if set;
-4. `T.repo.defaultBranch`.
+1. `sharedChainBranch(T)` — **if** the shared branch is known to exist on this
+   repository, defined as an indexed task in the same `(projectId, chainId)`
+   with `Run.repoId = T.repoId` and `Run.pushedBranch = sharedChainBranch(T)`;
+2. `T.targetBranch`, if set;
+3. `T.repo.defaultBranch`.
 
-**Why rule 2 is conditional on a successful push.** `provisionWorkspace` runs
+**Why rule 1 is conditional on a successful push.** `provisionWorkspace` runs
 `git clone --branch <base> --single-branch`, which **fails** if the ref does not
 exist. The first step of a chain must therefore clone the repo default (or the
 operator's `targetBranch`) and create the shared branch locally
@@ -221,11 +225,16 @@ operator's `targetBranch`) and create the shared branch locally
 `git push --set-upstream origin <branch>` then creates the remote ref — this
 works even when the branch has no commits ahead of its base, so a documentation
 step that writes one file, and even a step that writes nothing, still publishes
-the branch. Every later step then satisfies rule 2 and clones the shared branch
+the branch. Every later step then satisfies rule 1 and clones the shared branch
 directly; `branch === target`, the `switch -c` is skipped, and the step commits
 straight onto the chain's head.
 
-**Why rule 3 survives.** It is what keeps a chain that was started before this
+The runner records `pushedBranch` through a fenced endpoint immediately after
+`git push`, before PR work and cleanup. The irreducible crash between the remote
+accepting the push and that ACK is resolved by provisioning: if the intended
+head already exists remotely it is cloned instead of the stale fallback base.
+
+**Why rule 2 survives.** It is what keeps a chain that was started before this
 change from getting worse (§8.2) and it preserves the template contract (§5.7).
 
 **R9.** Consequence to be stated in the code and in the runbook: step ⑥ is now
@@ -238,24 +247,19 @@ under the new behaviour.
 ### 5.4 Retries
 
 **R10.** A retried step (`run-2`, `run-3`, …) pushes to the same shared branch.
-Rule R8.1 already gives the retry the previous run's branch as its base, and
-`Run.branch` is inherited from the previous run (`retry`) or recomputed
-identically (`enqueueTaskRun`, `reconcile`) — all three yield the shared branch.
+The shared resolver recomputes the same head on operator, automatic, enqueue
+and lost-lease paths; durable publication evidence selects it as the base.
 Batch 2.5's step ⑤ succeeded on its third run; this is not hypothetical.
 
-**R11.** A retry whose predecessor never pushed (`pushStatus != SUCCEEDED`)
-must not be left cloning a ref that does not exist. If R8.1's branch is the
-shared branch and no successful push to it exists, fall through to R8.3/R8.4 —
-i.e. rule 1 applies only when the branch it names is known to exist by the same
-test as rule 2, or is a per-run branch that a salvage push created. Practical
-statement: **`Run.targetBranch` must never name a ref the implementation cannot
-show evidence of.** When no evidence exists, base on the repo default and let
-the push either fast-forward or fail loudly.
+**R11.** A retry with no `pushedBranch` evidence falls through to R8.2/R8.3.
+Because ACK loss is possible after a real remote push, provisioning also probes
+the intended remote head and adopts it when present. A salvage push is to a
+per-run WIP ref and never counts as shared publication.
 
 ### 5.5 What `targetBranch` means afterwards
 
 **R12.** For chain steps, `Task.targetBranch` stops being the routing knob. It
-becomes *the base for the chain's first push only* (R8.3) and is ignored
+becomes *the base for the chain's first push only* (R8.2) and is ignored
 thereafter. It stays **writable** through `POST /tasks` and `PATCH /tasks/:id`:
 the field is meaningful for non-chain tasks, and rejecting it for chain steps
 would break the operator's existing chain-creation script for no benefit.
@@ -444,9 +448,8 @@ then R8.2 wins, the run bases on the shared branch, and one `TaskActivity` row
 **S10 — A 1/1 chain row (`chainIndex = null`).**
 Given a task with `chainId` set and `chainIndex` null (E1);
 when it runs;
-then it uses the derived branch for its own `(projectId, chainId)` and its
-`opensPullRequest` default (`true`) makes it behave exactly like an ordinary
-task, except for the branch name.
+then it behaves exactly like an ordinary task with a per-run branch and cannot
+join or contaminate indexed siblings sharing that `chainId`.
 
 ---
 
@@ -454,7 +457,7 @@ task, except for the branch name.
 
 ### 7.1 Schema (`packages/db/prisma/schema.prisma`)
 
-Additive only, two columns, both defaulted, no backfill:
+Additive only, four columns, three defaulted and one nullable, no backfill:
 
 ```prisma
 model Task {
@@ -466,27 +469,34 @@ model TaskTemplateStep {
   // …
   opensPullRequest        Boolean      @default(true)
 }
+
+model Run {
+  // …
+  opensPullRequest Boolean @default(true)
+  pushedBranch     String?
+}
 ```
 
-Migration name: `2026081700xxxx_chain_opens_pull_request` (timestamp per the
-directory's convention, e.g. `20260816180100_tasks_visibility`). Two
-`ALTER TABLE … ADD COLUMN "opensPullRequest" BOOLEAN NOT NULL DEFAULT true`
-statements. Both tables are small; a defaulted non-null add is metadata-only on
-PostgreSQL 11+ and takes no table rewrite. Reversible by `DROP COLUMN` (§9).
+Migration name: `20260817020000_chain_branch_and_pr`. The three booleans are
+`NOT NULL DEFAULT true`; `Run.pushedBranch` is nullable publication history.
+The defaulted adds are metadata-only on PostgreSQL 11+ and take no table
+rewrite. Reversible by a new forward compensating migration (§9).
 
-**No new column stores the branch name.** It is derived (R3). A stored column
-would be a second source of truth that can disagree with the function.
+No column stores or computes the derived branch name. `Run.pushedBranch`
+records the historical ref actually accepted by `git push`; it is not a second
+source for naming and is the fact the resolver cannot recompute.
 
 ### 7.2 API
 
 | Surface | Change |
 |---|---|
 | `POST /tasks` | accepts `opensPullRequest?: boolean` (default `true`); the inline first-run creation sets `branch` for chain tasks per R6 |
-| `PATCH /tasks/:id` | accepts `opensPullRequest`; it takes effect on the *next* run created, not on a run already queued |
+| `PATCH /tasks/:id` | accepts `opensPullRequest`; a Task-row lock orders it with retry creation, so it affects the next run created but not one already queued |
 | `GET /tasks/:id`, `GET /tasks` | the field is part of the task row and rides along; no shape change needed beyond it appearing |
 | `POST /templates/:id/instantiate`, `POST /hooks/templates/:id` | copy `TaskTemplateStep.opensPullRequest` onto each created Task |
 | Template step create/patch routes | accept `opensPullRequest` (default `true`) |
-| `POST /runner/tasks/claim` | payload gains `task.opensPullRequest` implicitly (the whole task row is returned today) |
+| `POST /runner/tasks/claim` | payload gains `run.opensPullRequest` and `run.pullRequestBase`; both are run/chain snapshots, not live task routing |
+| `POST /runner/runs/:id/publication` | fenced write of the exact pushed ref immediately after `git push` |
 | `GET /session/runs/:runId/status` | unchanged; the agent does not need this field |
 
 No breaking change to any existing field. Clients that do not send
@@ -494,19 +504,21 @@ No breaking change to any existing field. Clients that do not send
 
 ### 7.3 Runner
 
-- `ClaimedTask["task"]` (`packages/runner/src/api.ts:17`) gains
-  `opensPullRequest: boolean`. It must be **required** in the type, so a missing
+- `ClaimedTask["run"]` gains required `opensPullRequest: boolean` and
+  `pullRequestBase: string`. They must be **required** in the type, so a missing
   field is a compile error rather than a silent `undefined` → falsy → "never
   open a PR", which would be the expensive failure (§11).
-- `deliverWorkspace` reads `claim.task.opensPullRequest` (R16). Its signature
-  otherwise unchanged; `deliverFailedWorkspace` unchanged (R7).
-- `runner.ts:232` call site unchanged.
+- `deliverWorkspace` reads `claim.run.opensPullRequest`, acknowledges
+  publication before PR work, and creates the PR against
+  `claim.run.pullRequestBase`. `deliverFailedWorkspace` stays on WIP refs (R7).
+- `provisionWorkspace` probes an existing intended remote head to close the
+  push-success/ACK-loss crash gap.
 
 ### 7.4 `@agentos/db`
 
 - New exported pure function `sharedChainBranch({ projectId, chainId })` (R1/R3).
 - `enqueueTaskRun` computes `branch`/`targetBranch` per R8/R11.
-- One shared helper used by `POST /tasks`, retry and reconcile (R6).
+- One shared helper used by all five run creators (R6).
 
 ### 7.5 Web
 
@@ -540,16 +552,17 @@ Concretely, for a chain whose steps ①–⑤ already ran:
 - ①–⑤'s work sits on `agentos/<taskId>/run-<n>` branches, with up to five PRs
   already open.
 - ⑥ is enqueued after the restart. No run in that chain has
-  `branch = <shared>` with `pushStatus = SUCCEEDED`, so R8.2 does not apply and
-  the base falls through to R8.3 — the operator's hand-set `targetBranch` — or
-  R8.4, `master`. Its head is the shared branch.
+  `pushedBranch = <shared>`, so R8.1 does not apply and the base falls through
+  to R8.2 — the operator's hand-set `targetBranch` — or R8.3, `master`. Its head
+  is the shared branch.
 - So ⑥ bases on whatever `targetBranch` says (the operator's existing manual
   repair still works, and is still required) and pushes to a *new* shared
   branch, which opens a *new* PR if ⑥ has `opensPullRequest = true`.
 
 **The honest statement: a chain that spans the restart is finished by hand, and
 this batch is only correct for chains created after it.** The graceful part is
-that R8.3 keeps the operator's existing repair lever working; the ungraceful
+that R8.2 keeps the operator's existing repair lever working before the first
+shared publication; the ungraceful
 part is that the chain still ends with more than one PR. This is stated here so
 it is not discovered.
 
@@ -570,10 +583,12 @@ The runbook (§9) must carry:
    ORDER BY t."chainId", t."chainIndex";
   ```
 
-- **Manual completion**: for a mixed chain, the operator merges the per-step
-  branches as they do today, or re-bases the remaining steps by setting each
-  remaining task's `targetBranch` to the real predecessor branch (R8.3 honours
-  it) and closes the stray PRs.
+- **Manual completion before shared publication**: set the first remaining
+  task's `targetBranch` to the real predecessor branch, then start it.
+- **Manual completion after shared publication**: later target overrides are
+  ignored by design. Park the chain, merge or cherry-pick the missing
+  predecessor commits into the shared head, push without force, verify
+  reachability, and only then resume/close stray PRs.
 
 **Existing tasks are not rewritten.** No backfill sets `opensPullRequest = false`
 on historical documentation steps: they are done, and rewriting completed rows
@@ -639,7 +654,7 @@ code-only rollback → schema rollback in reverse → what is lost). It must nam
 
 | # | Situation | Required behaviour |
 |---|---|---|
-| E1 | Shared branch does not exist on the remote and a run bases on it | Must not happen: R8.2/R11 require evidence of a successful push. If it happens anyway, `git clone --branch` fails, the run fails during provisioning with the existing failure class, and the retry re-derives the base. |
+| E1 | Database ACK is absent but the shared head exists remotely | Provisioning probes and adopts the intended remote head; it never recreates the shared name from a stale fallback. |
 | E2 | Step ① pushed successfully but with zero commits ahead of `master` | Fine. `git push -u origin <branch>` creates the remote ref regardless; later steps clone it. |
 | E3 | Step N's push is rejected (non-fast-forward, e.g. someone pushed to the shared branch by hand) | `deliverWorkspace` already returns `pushStatus: FAILED` with the git message and a `failureClass`. No force push, ever. |
 | E4 | `gh` unavailable / remote not GitHub | Existing `manual()` path; with `opensPullRequest = false` the message must still be the "no PR by design" wording of R17, not "open a PR manually". |
@@ -649,7 +664,7 @@ code-only rollback → schema rollback in reverse → what is lost). It must nam
 | E8 | `chainId` contains only characters that slug to nothing (e.g. `"…"`) | `slug = "chain"`, fingerprint still distinguishes. Branch is legal. |
 | E9 | Two chains whose `chainId`s slug identically (e.g. `"a/b"` and `"a-b"`) | Different `sha256(key)` → different fingerprints → different branches. |
 | E10 | `opensPullRequest` missing from an old runner build's claim payload handling | Prevented by the required (non-optional) field in `ClaimedTask` (§7.3). A stale runner binary against a new API is an operator concern, called out in the runbook. |
-| E11 | Reconciler requeue after a lost lease | R6: the new run gets the shared branch, same as a retry. |
+| E11 | Reconciler requeue after a lost lease | R6: the new run gets the shared branch; an immediate publication ACK selects it as base, and the remote probe covers ACK loss. |
 | E12 | Non-chain task | Nothing changes: no `chainId`, no shared branch, `opensPullRequest` defaults `true`. |
 
 ---
@@ -669,7 +684,7 @@ All tests must be **assertions on the branch and PR actually produced**, never
    has **exactly one row**, and that it equals `agentos/chain/<slug>-<fp>`.
 2. **dbtest, base branch**: in the same chain, assert step ①'s
    `Run.targetBranch = repo.defaultBranch` and step ②'s and ③'s
-   `Run.targetBranch = <shared>` once a prior run has `pushStatus = SUCCEEDED`
+   `Run.targetBranch = <shared>` once a prior run has `pushedBranch = <shared>`
    — and that step ②'s base falls back when it does not (S6).
 3. **dbtest, retry**: fail step ②'s run, retry via the route, assert `run-2`'s
    `branch` is the shared branch and its `targetBranch` is not a per-run branch.
@@ -715,7 +730,7 @@ batch 4 fixes chain are in flight; see §13).
   `provisionWorkspace`'s fallback and in `deliverFailedWorkspace` (R7).
 - No step-name, output-kind or task-name string matching in
   `packages/runner/src` decides PR creation (R15).
-- The derived branch function is used, not re-implemented, in all four
+- The derived branch function is used, not re-implemented, in all five
   run-creating paths (R6).
 - The rollback runbook exists, names the exact revert and the migration, and
   carries the mixed-chain warning and the manual `gh pr create` line.
