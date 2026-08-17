@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { Shell } from "./components/Shell";
+import { RunnersProvider } from "./components/runner-status";
 import { ErrorNotice, NOTICE, Page } from "./components/ui";
 import { apiBase } from "./lib/api";
 import { useTNodes } from "./lib/i18n";
@@ -94,9 +95,11 @@ const Routed = (): ReactNode => {
 
 export const App = (): ReactNode => (
   <ProjectProvider>
-    <Shell>
-      <ConnectionBanner />
-      <Routed />
-    </Shell>
+    <RunnersProvider>
+      <Shell>
+        <ConnectionBanner />
+        <Routed />
+      </Shell>
+    </RunnersProvider>
   </ProjectProvider>
 );

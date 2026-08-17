@@ -6,13 +6,14 @@ import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
-import type { Health, InboxMessage } from "../lib/types";
+import type { InboxMessage } from "../lib/types";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import { cn } from "../lib/utils";
 import {
-  BADGE_COUNT, CHEVRON, CONTENT, COUNT, DOT, DOT_TONE, NAV_COUNT, NAV_ITEM, NAV_ITEM_ACTIVE,
-  PROJECT_MARK, PROJECT_NAME, PROJECT_SWITCHER, RUNNER_ROW, RUNNER_STATE, SHELL, SIDEBAR, SIDEBAR_FOOT,
+  BADGE_COUNT, CHEVRON, CONTENT, COUNT, NAV_COUNT, NAV_ITEM, NAV_ITEM_ACTIVE,
+  PROJECT_MARK, PROJECT_NAME, PROJECT_SWITCHER, SHELL, SIDEBAR, SIDEBAR_FOOT,
 } from "./ui";
+import { RunnerRow } from "./runner-status";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
   IconActivity, IconAgents, IconChevron, IconConnections, IconGoals, IconInbox,
@@ -60,7 +61,6 @@ const ProjectSwitcher = (): ReactNode => {
 
 export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   const path = useRoute();
-  const { data: health } = usePoll<Health>("/health", 10_000);
   // GET /inbox/messages is global: the control plane has no project filter on it.
   const { data: inbox } = usePoll<InboxMessage[]>("/inbox/messages", 5_000);
   const openCount = (inbox ?? []).filter((message) => message.status === "OPEN").length;
@@ -94,11 +94,7 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
           ))}
         </nav>
         <div className={SIDEBAR_FOOT}>
-          <div className={RUNNER_ROW}>
-            <span className={cn(DOT, health?.status === "ok" ? DOT_TONE.on : health ? DOT_TONE.off : undefined)} />
-            {t("sidebar.controlPlane")}
-            <span className={RUNNER_STATE}>{t(health ? (health.status === "ok" ? "sidebar.health.online" : "sidebar.health.degraded") : "sidebar.health.offline")}</span>
-          </div>
+          <RunnerRow />
           <Link to="/secrets" className={NAV_ITEM}><IconActivity />{t("sidebar.settings")}</Link>
           <button type="button" className={cn(NAV_ITEM, "w-full border-0 bg-transparent text-left")} aria-label={t("sidebar.theme.aria", { mode: modeWord(mode), next: modeWord(nextMode[mode]) })} onClick={() => setMode(nextMode[mode])}>
             <ThemeIcon size={15} strokeWidth={1.7} aria-hidden="true" />{t("sidebar.theme.label", { mode: modeWord(mode) })}

@@ -12,6 +12,7 @@ export type Poll<T> = {
   loading: boolean;
   /** True when the endpoint itself is absent, so the page can degrade. */
   missing: boolean;
+  lastSuccessAt: string | null;
   reload: () => void;
 };
 
@@ -20,6 +21,7 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(path !== null);
+  const [lastSuccessAt, setLastSuccessAt] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const alive = useRef(true);
 
@@ -33,6 +35,7 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
       setData(null);
       setError(null);
       setLoading(false);
+      setLastSuccessAt(null);
       return;
     }
     let cancelled = false;
@@ -44,6 +47,7 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
         if (cancelled || !alive.current) return;
         setData(result);
         setError(null);
+        setLastSuccessAt(new Date().toISOString());
       } catch (reason: unknown) {
         if (cancelled || !alive.current) return;
         setError(reason instanceof ApiError ? reason : new ApiError(0, path, String(reason)));
@@ -60,7 +64,7 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
   }, [path, intervalMs, nonce]);
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
-  return { data, error, loading, missing: error?.missingEndpoint ?? false, reload };
+  return { data, error, loading, missing: error?.missingEndpoint ?? false, lastSuccessAt, reload };
 };
 
 /** Wraps a write call with pending/error state and a caller-supplied refresh. */
