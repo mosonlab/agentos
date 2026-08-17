@@ -68,6 +68,30 @@ test("UT-OWN-INTEGRITY canonicalizes symlink and lexical aliases to one physical
   assert.equal(alias.inode, physical.inode);
 });
 
+test("UT-OWN-INTEGRITY refuses direct, nested, parent, and symlink-alias Files/state overlap", async (t) => {
+  for (const shape of ["direct", "nested", "parent", "symlink-alias"] as const) {
+    await t.test(shape, async () => {
+      const paths = await fixture();
+      t.after(() => rm(paths.container, { recursive: true, force: true }));
+      let filesRoot = paths.state;
+      if (shape === "nested") filesRoot = join(paths.state, "files");
+      if (shape === "parent") filesRoot = paths.container;
+      if (shape === "symlink-alias") {
+        const alias = join(paths.container, "state-alias");
+        await symlink(paths.state, alias);
+        filesRoot = alias;
+      }
+      await assert.rejects(acquireControlPlaneOwnership({
+        workspaceRoot: paths.workspace,
+        filesRoot,
+        stateDir: paths.state,
+        filesystemTypeProbe: allowedFilesystem,
+        markerWriter: () => undefined,
+      }), /control-state-overlaps-files-root/u);
+    });
+  }
+});
+
 test("UT-OWN-STATE-MATRIX preserves stable identity across clean release and reacquire", async (t) => {
   const paths = await fixture();
   t.after(() => rm(paths.container, { recursive: true, force: true }));
@@ -190,6 +214,45 @@ test("RP-OWN-REPLACE poisons lock replacement and root retarget without rewritin
   await symlink(join(paths.container, "other-root"), fresh.workspace);
   await assert.rejects(held.ownership.assertHeld(), /workspace-root-retargeted/u);
   await held.ownership.release();
+
+  const filesAlias = await fixture();
+  t.after(() => rm(filesAlias.container, { recursive: true, force: true }));
+  const originalFiles = join(filesAlias.container, "original-files");
+  await mkdir(originalFiles);
+  await rm(filesAlias.files, { recursive: true });
+  await symlink(originalFiles, filesAlias.files);
+  const filesHeld = await acquire(filesAlias);
+  await unlink(filesAlias.files);
+  await symlink(filesAlias.state, filesAlias.files);
+  await assert.rejects(filesHeld.ownership.assertHeld(), /files-root-retargeted/u);
+  await filesHeld.ownership.release();
+});
+
+test("RP-OWN-FILES-ALIAS production entrypoint refuses Files/state alias before database import", async (t) => {
+  const paths = await fixture();
+  t.after(() => rm(paths.container, { recursive: true, force: true }));
+  await rm(paths.files, { recursive: true });
+  await symlink(paths.state, paths.files);
+  const child = spawn(process.execPath, ["--import", "tsx", "index.ts"], {
+    cwd: dirname(new URL(import.meta.url).pathname),
+    env: {
+      ...process.env,
+      RUNNER_WORKSPACE_ROOT: paths.workspace,
+      FILES_ROOT: paths.files,
+      CONTROL_PLANE_STATE_DIR: paths.state,
+      DATABASE_URL: "postgresql://invalid:invalid@127.0.0.1:1/never-contact",
+      API_HOST: "127.0.0.1",
+      API_PORT: "0",
+      SCHEDULER_POLL_INTERVAL_MS: "0",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  assert.equal((await waitForExit(child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
+  assert.match(output, /CONTROL_PLANE_OWNERSHIP_REFUSED.*control-state-overlaps-files-root/u);
+  assert.doesNotMatch(output, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening|PrismaClient/u);
 });
 
 const waitForLine = (child: ChildProcess, pattern: RegExp, timeoutMs = 10_000): Promise<string> => new Promise((resolve, reject) => {

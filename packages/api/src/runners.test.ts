@@ -112,7 +112,7 @@ test("GET /runners is operator-only, includes all backends, and ages a 204 claim
   });
 });
 
-test("RP-RUNNERS-TWO keeps two runner daemons on one API workspace root without runner ownership", async () => {
+test("two runner observations can share one reported API workspace root", async () => {
   await withTokens(async () => {
     const app = createApp(makeDatabase());
     const workspaceRoot = "/isolated/shared-runner-root";

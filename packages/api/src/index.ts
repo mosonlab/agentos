@@ -22,6 +22,9 @@ let prisma: (typeof import("@agentos/db"))["prisma"] | undefined;
 let cleanupPromise: Promise<void> | undefined;
 let requestedSignal: NodeJS.Signals | undefined;
 let startupBusy = false;
+let finalExitCode = 0;
+
+class StartupCancelledBySignalError extends Error {}
 
 const closeServer = async (): Promise<void> => {
   if (!server) return;
@@ -38,22 +41,26 @@ const closeServer = async (): Promise<void> => {
 };
 
 const cleanup = (exitCode: number): Promise<void> => {
-  if (cleanupPromise) return cleanupPromise;
-  cleanupPromise = (async () => {
+  finalExitCode = Math.max(finalExitCode, exitCode);
+  cleanupPromise ??= (async () => {
+    const failures: unknown[] = [];
     if (schedulerTimer) clearInterval(schedulerTimer);
     schedulerTimer = null;
-    await closeServer();
-    if (prisma) await prisma.$disconnect();
-    if (ownership) await ownership.release();
-    process.exitCode = exitCode;
+    await closeServer().catch((error: unknown) => failures.push(error));
+    if (prisma) await prisma.$disconnect().catch((error: unknown) => failures.push(error));
+    if (ownership) await ownership.release().catch((error: unknown) => failures.push(error));
+    if (failures.length > 0) {
+      finalExitCode = 1;
+      throw new AggregateError(failures, "AgentOS API cleanup failed");
+    }
   })();
-  return cleanupPromise;
+  return cleanupPromise.finally(() => { process.exitCode = finalExitCode; });
 };
 
 const ensureStartupActive = async (): Promise<void> => {
   if (!requestedSignal) return;
   await cleanup(0);
-  throw new Error(`startup-cancelled-by-${requestedSignal}`);
+  throw new StartupCancelledBySignalError(`startup-cancelled-by-${requestedSignal}`);
 };
 
 const onSignal = (signal: NodeJS.Signals): void => {
@@ -95,6 +102,7 @@ const main = async (): Promise<void> => {
   const filesRoot = files.resolveFilesRoot();
   await files.warnIfICloudPath(filesRoot);
   await files.assertFilesRootIsolated(filesRoot, ownership.canonicalWorkspaceRoot);
+  await files.getFileStore();
   files.warnIfRunnerSharesPrincipal(filesRoot);
 
   startupBusy = true;
@@ -141,7 +149,9 @@ try {
   startupBusy = false;
   if (error instanceof ControlPlaneOwnershipStartupError) {
     process.exitCode = error.exitCode;
-  } else if (!requestedSignal) {
+  } else if (error instanceof StartupCancelledBySignalError) {
+    await cleanup(0).catch((cleanupError: unknown) => console.error("AgentOS API cleanup failed", cleanupError));
+  } else {
     console.error("AgentOS API startup failed", error);
     await cleanup(1).catch((cleanupError: unknown) => console.error("AgentOS API cleanup failed", cleanupError));
   }

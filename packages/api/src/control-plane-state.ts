@@ -81,9 +81,25 @@ export interface PreparedControlPlaneState {
   mode: number;
 }
 
+export interface CanonicalFilesRoot {
+  configuredPath: string;
+  canonicalPath: string;
+  device: bigint;
+  inode: bigint;
+}
+
+export const canonicalizeFilesRoot = async (configured: string): Promise<CanonicalFilesRoot> => {
+  const configuredPath = resolve(configured);
+  await mkdir(configuredPath, { recursive: true, mode: 0o750 });
+  const canonicalPath = await realpath(configuredPath);
+  const identity = await lstat(canonicalPath, { bigint: true });
+  if (!identity.isDirectory()) throw new Error(`FILES_ROOT is not a directory: ${configuredPath}`);
+  return { configuredPath, canonicalPath, device: identity.dev, inode: identity.ino };
+};
+
 export interface PrepareControlPlaneStateOptions {
   canonicalWorkspaceRoot: string;
-  filesRoot?: string;
+  canonicalFilesRoot?: string;
   configuredStateDir?: string;
   filesystemTypeProbe?: (path: string) => Promise<bigint | number>;
 }
@@ -99,7 +115,9 @@ export const prepareControlPlaneState = async (
   await assertProtectedDirectory(basePath);
   const resolvedWorkspace = resolve(options.canonicalWorkspaceRoot);
   if (pathsOverlap(basePath, resolvedWorkspace)) throw new Error("control-state-overlaps-workspace-root");
-  if (options.filesRoot && pathsOverlap(basePath, resolve(options.filesRoot))) throw new Error("control-state-overlaps-files-root");
+  if (options.canonicalFilesRoot && pathsOverlap(basePath, options.canonicalFilesRoot)) {
+    throw new Error("control-state-overlaps-files-root");
+  }
 
   const rawType = options.filesystemTypeProbe
     ? await options.filesystemTypeProbe(basePath)

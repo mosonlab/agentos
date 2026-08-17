@@ -8,6 +8,7 @@ import { constants as fsExtConstants, fcntlSync, flock } from "fs-ext";
 import { z } from "zod";
 
 import {
+  canonicalizeFilesRoot,
   controlPlaneIdFilename,
   controlPlaneLockFilename,
   controlPlaneOwnerFilename,
@@ -203,10 +204,11 @@ export const acquireControlPlaneOwnership = async (
 
   try {
     workspace = await canonicalizeWorkspaceRoot(options.workspaceRoot);
+    const filesRoot = options.filesRoot ? await canonicalizeFilesRoot(options.filesRoot) : undefined;
     const state = await prepareControlPlaneState({
       canonicalWorkspaceRoot: workspace.canonicalPath,
       ...(options.stateDir ? { configuredStateDir: options.stateDir } : {}),
-      ...(options.filesRoot ? { filesRoot: options.filesRoot } : {}),
+      ...(filesRoot ? { canonicalFilesRoot: filesRoot.canonicalPath } : {}),
       ...(options.filesystemTypeProbe ? { filesystemTypeProbe: options.filesystemTypeProbe } : {}),
     });
     lock = await openPersistentLockFile(state.entryPath);
@@ -330,16 +332,22 @@ export const acquireControlPlaneOwnership = async (
       if (released) throw new Error("control-plane-ownership-released");
       if (poisonedReason) throw new Error(`control-plane-ownership-poisoned:${poisonedReason}`);
       try {
-        const [descriptor, authoritative, configuredCanonical, rootIdentity] = await Promise.all([
+        const [descriptor, authoritative, configuredCanonical, rootIdentity, configuredFilesCanonical, filesIdentity] = await Promise.all([
           lock!.handle.stat({ bigint: true }),
           lstat(lock!.path, { bigint: true }),
           realpath(workspace!.configuredPath),
           lstat(workspace!.canonicalPath, { bigint: true }),
+          filesRoot ? realpath(filesRoot.configuredPath) : Promise.resolve(undefined),
+          filesRoot ? lstat(filesRoot.canonicalPath, { bigint: true }) : Promise.resolve(undefined),
         ]);
         if (descriptor.dev !== authoritative.dev || descriptor.ino !== authoritative.ino) throw new Error("lock-path-identity-drift");
         if (descriptor.dev !== lock!.device || descriptor.ino !== lock!.inode) throw new Error("lock-descriptor-identity-drift");
         if (configuredCanonical !== workspace!.canonicalPath) throw new Error("workspace-root-retargeted");
         if (rootIdentity.dev !== workspace!.device || rootIdentity.ino !== workspace!.inode) throw new Error("workspace-root-identity-drift");
+        if (filesRoot && configuredFilesCanonical !== filesRoot.canonicalPath) throw new Error("files-root-retargeted");
+        if (filesRoot && filesIdentity && (filesIdentity.dev !== filesRoot.device || filesIdentity.ino !== filesRoot.inode)) {
+          throw new Error("files-root-identity-drift");
+        }
       } catch (error: unknown) {
         poisonedReason = (error as Error).message;
         throw new Error(`control-plane-ownership-poisoned:${poisonedReason}`);

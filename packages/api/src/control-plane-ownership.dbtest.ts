@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@agentos/db";
 
 import { CONTROL_PLANE_OWNERSHIP_EXIT_CODE } from "./control-plane-ownership.js";
+import { controlPlaneOwnerFilename } from "./control-plane-state.js";
 import { ScratchDatabaseManager } from "./testdb.js";
 
 const safeEnvironmentPresent = process.env.AGENTOS_ALLOW_SCRATCH_DATABASES === "1"
@@ -37,15 +38,17 @@ const exited = (child: ChildProcess): Promise<{ code: number | null; signal: Nod
   child.once("exit", (code, signal) => resolvePromise({ code, signal }));
 });
 
-const waitForDatabaseLockWaiter = async (db: PrismaClient): Promise<void> => {
+const waitForDatabaseLockWaiter = async (db: PrismaClient): Promise<number> => {
   for (let attempt = 0; attempt < 500; attempt += 1) {
-    const waiting = await db.$queryRaw<Array<{ count: bigint }>>`
-      SELECT count(*)::bigint AS count
+    const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+      SELECT pid::int AS pid
       FROM pg_stat_activity
       WHERE datname = current_database()
         AND wait_event_type = 'Lock'
+      ORDER BY query_start DESC
+      LIMIT 1
     `;
-    if ((waiting[0]?.count ?? 0n) > 0n) return;
+    if (waiting[0]) return waiting[0].pid;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error("API did not reach the startup reconciliation database-lock wait queue");
@@ -104,12 +107,35 @@ const insertExpiredRunSentinel = async (
 
 const spawnApi = (environment: NodeJS.ProcessEnv): { child: ChildProcess; output: { value: string } } => {
   const output = { value: "" };
-  const child = spawn(process.execPath, [fileURLToPath(new URL("../dist/index.js", import.meta.url))], {
+  const entrypoint = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+  const args = environment.AGENTOS_TEST_SPAWN_OWNERSHIP_DESCENDANT === "1"
+    ? ["--import", fileURLToPath(new URL("../dist/control-plane-production-fixture.js", import.meta.url)), entrypoint]
+    : [entrypoint];
+  const child = spawn(process.execPath, args, {
     cwd: fileURLToPath(new URL("../", import.meta.url)),
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
   return { child, output };
+};
+
+const markerFields = (output: string, marker: string): Record<string, unknown> => {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const encoded = output.match(new RegExp(`${escaped} (\\{[^\\n]+\\})`, "u"))?.[1];
+  assert.ok(encoded, `${marker} marker was not found in output`);
+  return JSON.parse(encoded) as Record<string, unknown>;
+};
+
+const durableStateSnapshot = async (stateRoot: string): Promise<{ entry: string; files: Array<{ name: string; bytes: Buffer; device: bigint; inode: bigint }> }> => {
+  const entries = (await readdir(stateRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+  assert.equal(entries.length, 1);
+  const entry = join(stateRoot, entries[0]!.name);
+  const files = await Promise.all((await readdir(entry)).sort().map(async (name) => {
+    const path = join(entry, name);
+    const identity = await lstat(path, { bigint: true });
+    return { name, bytes: await readFile(path), device: identity.dev, inode: identity.ino };
+  }));
+  return { entry, files };
 };
 
 test("workspace-root ownership real-process database acceptance", { skip: !safeEnvironmentPresent && "explicit safe scratch database environment is required" }, async (t) => {
@@ -158,6 +184,39 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   const canonicalRoot = (JSON.parse(ready.match(/CONTROL_PLANE_OWNERSHIP_ACQUIRED (\{[^\n]+\})/u)?.[1] ?? "{}") as { canonicalWorkspaceRoot?: string }).canonicalWorkspaceRoot;
   assert.equal(canonicalRoot, workspace);
 
+  const listenPort = Number(ready.match(/AgentOS API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
+  assert.ok(listenPort > 0);
+  const apiBase = `http://127.0.0.1:${listenPort}`;
+  const ownershipBeforeFilesAndRunners = await durableStateSnapshot(state);
+  const runnerPoll = (runnerId: string): Promise<Response> => fetch(`${apiBase}/runner/tasks/claim`, {
+    method: "POST",
+    headers: { Authorization: "Bearer isolated-runner-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId, leaseSeconds: 60, workspaceRoot: workspace }),
+  });
+  assert.equal((await runnerPoll("runner-a")).status, 204);
+  assert.equal((await runnerPoll("runner-b")).status, 204);
+  const runnersResponse = await fetch(`${apiBase}/runners`, {
+    headers: { Authorization: "Bearer isolated-operator-token" },
+  });
+  assert.equal(runnersResponse.status, 200);
+  const runnersBody = await runnersResponse.json() as { total: number; daemons: Array<{ runnerId: string; workspaceRoot: string | null }> };
+  assert.equal(runnersBody.total, 2);
+  assert.deepEqual(runnersBody.daemons.map(({ runnerId, workspaceRoot }) => ({ runnerId, workspaceRoot })), [
+    { runnerId: "runner-a", workspaceRoot: workspace },
+    { runnerId: "runner-b", workspaceRoot: workspace },
+  ]);
+
+  const stateEntryName = ownershipBeforeFilesAndRunners.entry.slice(state.length + 1);
+  const filesTraversal = await fetch(`${apiBase}/files/content?${new URLSearchParams({ path: `../state/${stateEntryName}/ownership.lock` })}`, {
+    method: "PUT",
+    headers: { Authorization: "Bearer isolated-operator-token" },
+    body: "replacement",
+  });
+  assert.equal(filesTraversal.status, 400);
+  assert.deepEqual(await durableStateSnapshot(state), ownershipBeforeFilesAndRunners);
+  t.diagnostic("RP-RUNNERS-TWO production owned API passed");
+  t.diagnostic("RP-OWN-FILES-WRITER traversal refused and ownership state unchanged");
+
   const orphan = join(workspace, "orphan-sentinel");
   await mkdir(orphan);
   const sourceDb = new PrismaClient({ datasources: { db: { url: source.url } } });
@@ -199,8 +258,6 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   t.diagnostic("RP-OWN-SAME-ALIAS passed");
   t.diagnostic("RP-OWN-COPY passed");
 
-  const listenPort = Number(ready.match(/AgentOS API listening on http:\/\/127\.0\.0\.1:(\d+)/u)?.[1]);
-  assert.ok(listenPort > 0);
   const secondRoot = join(container, "lifecycle-root");
   const secondState = join(container, "lifecycle-state");
   await Promise.all([mkdir(secondRoot), mkdir(secondState, { mode: 0o700 })]);
@@ -257,6 +314,110 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   assert.match(signaledDuringReconciliation.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Received SIGTERM[\s\S]*Startup reconciliation:[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
   assert.doesNotMatch(signaledDuringReconciliation.output.value, /AgentOS API listening/u);
   t.diagnostic("RP-OWN-LIFECYCLE signal-during-reconciliation cleanup passed");
+
+  const failingSignalRoot = join(container, "signal-failure-root");
+  const failingSignalState = join(container, "signal-failure-state");
+  await Promise.all([mkdir(failingSignalRoot), mkdir(failingSignalState, { mode: 0o700 })]);
+  await chmod(failingSignalState, 0o700);
+  const failureBlocker = new PrismaClient({ datasources: { db: { url: copy.url } } });
+  const failureObserver = new PrismaClient({ datasources: { db: { url: copy.url } } });
+  let releaseFailureLock!: () => void;
+  let reportFailureLock!: () => void;
+  const failureLockReleased = new Promise<void>((resolvePromise) => { releaseFailureLock = resolvePromise; });
+  const failureLockHeld = new Promise<void>((resolvePromise) => { reportFailureLock = resolvePromise; });
+  const failureBlockingTransaction = failureBlocker.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('LOCK TABLE "Run" IN ACCESS EXCLUSIVE MODE');
+    reportFailureLock();
+    await failureLockReleased;
+  }, { maxWait: 5_000, timeout: 30_000 });
+  await failureLockHeld;
+  const signalThenFailure = spawnApi({
+    ...common,
+    DATABASE_URL: copy.url,
+    RUNNER_WORKSPACE_ROOT: failingSignalRoot,
+    CONTROL_PLANE_STATE_DIR: failingSignalState,
+  });
+  children.add(signalThenFailure.child);
+  try {
+    await waitFor(signalThenFailure.child, /CONTROL_PLANE_OWNERSHIP_ACQUIRED/u, signalThenFailure.output);
+    const waitingPid = await waitForDatabaseLockWaiter(failureObserver);
+    signalThenFailure.child.kill("SIGTERM");
+    await waitFor(signalThenFailure.child, /Received SIGTERM/u, signalThenFailure.output);
+    const terminated = await failureObserver.$queryRawUnsafe<Array<{ terminated: boolean }>>(
+      "SELECT pg_terminate_backend($1) AS terminated",
+      waitingPid,
+    );
+    assert.equal(terminated[0]?.terminated, true);
+  } finally {
+    releaseFailureLock();
+    await failureBlockingTransaction;
+    await Promise.all([failureBlocker.$disconnect(), failureObserver.$disconnect()]);
+  }
+  await waitFor(signalThenFailure.child, /CONTROL_PLANE_OWNERSHIP_RELEASED/u, signalThenFailure.output);
+  assert.equal((await exited(signalThenFailure.child)).code, 1);
+  assert.match(signalThenFailure.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Received SIGTERM[\s\S]*AgentOS API startup failed[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
+  assert.doesNotMatch(signalThenFailure.output.value, /AgentOS API listening/u);
+  const failedSignalState = await durableStateSnapshot(failingSignalState);
+  const failedSignalOwner = JSON.parse(failedSignalState.files.find(({ name }) => name === controlPlaneOwnerFilename)?.bytes.toString("utf8") ?? "{}") as { state?: string; releasedAt?: string };
+  assert.equal(failedSignalOwner.state, "released");
+  assert.ok(failedSignalOwner.releasedAt);
+  t.diagnostic("RP-OWN-LIFECYCLE signal plus reconciliation failure exits nonzero and releases passed");
+
+  const recoveryRoot = join(container, "recovery-root");
+  const recoveryFiles = join(container, "recovery-files");
+  const recoveryState = join(container, "recovery-state");
+  await Promise.all([mkdir(recoveryRoot), mkdir(recoveryFiles), mkdir(recoveryState, { mode: 0o700 })]);
+  await chmod(recoveryState, 0o700);
+  const recoveryOwner = spawnApi({
+    ...common,
+    DATABASE_URL: copy.url,
+    RUNNER_WORKSPACE_ROOT: recoveryRoot,
+    FILES_ROOT: recoveryFiles,
+    CONTROL_PLANE_STATE_DIR: recoveryState,
+    AGENTOS_TEST_SPAWN_OWNERSHIP_DESCENDANT: "1",
+  });
+  children.add(recoveryOwner.child);
+  const recoveryOwnerReady = await waitFor(recoveryOwner.child, /AgentOS API listening/u, recoveryOwner.output);
+  const descendantPid = Number(recoveryOwnerReady.match(/OWNERSHIP_PRODUCTION_DESCENDANT_PID (\d+)/u)?.[1]);
+  assert.ok(descendantPid > 0);
+  let descendantAlive = true;
+  t.after(() => {
+    if (!descendantAlive) return;
+    try { process.kill(descendantPid, "SIGTERM"); } catch { /* already gone */ }
+  });
+  const priorAcquired = markerFields(recoveryOwnerReady, "CONTROL_PLANE_OWNERSHIP_ACQUIRED");
+  recoveryOwner.child.kill("SIGKILL");
+  assert.equal((await exited(recoveryOwner.child)).signal, "SIGKILL");
+  assert.doesNotThrow(() => process.kill(descendantPid, 0));
+  const crashedState = await durableStateSnapshot(recoveryState);
+  const crashedOwner = JSON.parse(crashedState.files.find(({ name }) => name === controlPlaneOwnerFilename)?.bytes.toString("utf8") ?? "{}") as { state?: string; controlPlaneId?: string; incarnationId?: string };
+  assert.equal(crashedOwner.state, "owned");
+  assert.equal(crashedOwner.controlPlaneId, priorAcquired.controlPlaneId);
+  assert.equal(crashedOwner.incarnationId, priorAcquired.incarnationId);
+
+  const recoverySuccessor = spawnApi({
+    ...common,
+    DATABASE_URL: copy.url,
+    RUNNER_WORKSPACE_ROOT: recoveryRoot,
+    FILES_ROOT: recoveryFiles,
+    CONTROL_PLANE_STATE_DIR: recoveryState,
+  });
+  children.add(recoverySuccessor.child);
+  const recoveredReady = await waitFor(recoverySuccessor.child, /AgentOS API listening/u, recoverySuccessor.output);
+  const recovered = markerFields(recoveredReady, "CONTROL_PLANE_OWNERSHIP_RECOVERED");
+  const successorAcquired = markerFields(recoveredReady, "CONTROL_PLANE_OWNERSHIP_ACQUIRED");
+  assert.equal(successorAcquired.controlPlaneId, priorAcquired.controlPlaneId);
+  assert.notEqual(successorAcquired.incarnationId, priorAcquired.incarnationId);
+  assert.equal(recovered.priorIncarnationId, priorAcquired.incarnationId);
+  assert.equal(recovered.incarnationId, successorAcquired.incarnationId);
+  assert.equal(recovered.priorPid, recoveryOwner.child.pid);
+  assert.match(recoveredReady, /CONTROL_PLANE_OWNERSHIP_RECOVERED[\s\S]*CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*AgentOS API listening/u);
+  recoverySuccessor.child.kill("SIGTERM");
+  assert.equal((await exited(recoverySuccessor.child)).code, 0);
+  assert.match(recoverySuccessor.output.value, /CONTROL_PLANE_OWNERSHIP_RELEASED/u);
+  process.kill(descendantPid, "SIGTERM");
+  descendantAlive = false;
+  t.diagnostic("RP-OWN-RECOVERY-DESCENDANT production stable identity, new incarnation, reconcile, and listen passed");
 
   owner.child.kill("SIGTERM");
   assert.equal((await exited(owner.child)).code, 0);
