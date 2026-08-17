@@ -1,5 +1,9 @@
 # Batch 2.5 SPEC — Tasks visibility: chain view, triggers & automations UI, kanban completeness
 
+> **Superseded chain-control semantics:** TC-UX v1.0 replaces this document's
+> intentional ordinary out-of-order start behavior with dependency-safe
+> sequential execution. See [`tc-ux-v1-errata.md`](./tc-ux-v1-errata.md).
+
 Status: spec (step ① of the nine-step chain)
 Author: spec agent, 2026-08-16
 Scope authority: `docs/BACKLOG-V2.md` 批次 2.5 · `docs/reference/danny-agentos-video/detail-gaps.md` §2/§4/§5/§6 · `docs/reference/danny-agentos-video/decisions.md` §12 · the task brief's binding UI rulings (Leo, 2026-08-16)

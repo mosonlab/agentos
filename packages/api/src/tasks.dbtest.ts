@@ -70,8 +70,108 @@ test("start queues exactly one run and records the operator activity", async () 
   assert.equal(body.runNumber, 1);
   assert.equal(await db.run.count({ where: { taskId: context.task.id, status: "QUEUED" } }), 1);
   assert.equal(await db.taskActivity.count({
-    where: { taskId: context.task.id, body: "Started manually from the chain view" },
+    where: { taskId: context.task.id, body: "Started task manually" },
   }), 1);
+});
+
+test("unfinished chain predecessor blocks every future start with zero side effects", async () => {
+  const chainId = `safe-chain-${Date.now()}`;
+  const context = await seedTask("chain-block", { chainId, chainIndex: 0, name: "Step 1", status: "DONE" });
+  const createStep = (chainIndex: number, name: string, status: "DONE" | "DOING" | "TODO") => db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    chainId,
+    chainIndex,
+    name,
+    description: "work",
+    status,
+  } });
+  await createStep(1, "Step 2", "DONE");
+  await createStep(2, "Step 3", "DONE");
+  const blocker = await createStep(3, "Step 4", "DOING");
+  const fifth = await createStep(4, "Step 5", "TODO");
+  const sixth = await createStep(5, "Step 6", "TODO");
+  const before = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" }, select: { id: true, status: true, updatedAt: true } });
+  for (const target of [fifth, sixth]) {
+    const response = await call("POST", `/tasks/${target.id}/start`);
+    assert.equal(response.status, 409);
+    assert.match(response.body.error, new RegExp(`predecessor ${blocker.name} is not done`));
+  }
+  assert.deepEqual(await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" }, select: { id: true, status: true, updatedAt: true } }), before);
+  assert.equal(await db.run.count({ where: { taskId: { in: [fifth.id, sixth.id] } } }), 0);
+  assert.equal(await db.taskActivity.count({ where: { taskId: { in: [fifth.id, sixth.id] } } }), 0);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: { in: [fifth.id, sixth.id] } } }), 0);
+});
+
+test("the dependency-safe next chain step starts or recovers exactly once", async () => {
+  for (const status of ["TODO", "BACKLOG"] as const) {
+    const chainId = `next-${status}-${Date.now()}-${Math.random()}`;
+    const context = await seedTask(`next-${status}`, { chainId, chainIndex: 0, name: "Done predecessor", status: "DONE" });
+    const target = await db.task.create({ data: {
+      projectId: context.project.id,
+      assigneeAgentId: context.agent.id,
+      repoId: context.repo.id,
+      chainId,
+      chainIndex: 1,
+      name: `${status} target`,
+      description: "work",
+      status,
+    } });
+    assert.equal((await call("POST", `/tasks/${target.id}/start`)).status, 201);
+    assert.equal((await call("POST", `/tasks/${target.id}/start`)).status, 409);
+    assert.equal(await db.run.count({ where: { taskId: target.id } }), 1);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: target.id } })).status, "TODO");
+    assert.equal(await db.taskActivity.count({ where: {
+      taskId: target.id,
+      body: status === "BACKLOG" ? "Recovered parked chain step manually" : "Started next chain step manually",
+    } }), 1);
+  }
+});
+
+test("ordinary PATCH cannot rewrite chain gates, skip predecessors, or complete an active task", async () => {
+  const chainId = `patch-guard-${Date.now()}`;
+  const context = await seedTask("patch-guard", { chainId, chainIndex: 0, name: "Blocking predecessor", status: "DOING", approvalGate: true });
+  const future = await db.task.create({ data: {
+    projectId: context.project.id,
+    assigneeAgentId: context.agent.id,
+    repoId: context.repo.id,
+    chainId,
+    chainIndex: 1,
+    name: "Future step",
+    description: "work",
+    status: "TODO",
+  } });
+  const gateChange = await call("PATCH", `/tasks/${context.task.id}`, { approvalGate: false });
+  assert.equal(gateChange.status, 409);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).approvalGate, true);
+  const futureDone = await call("PATCH", `/tasks/${future.id}`, { status: "DONE" });
+  assert.equal(futureDone.status, 409);
+  assert.match(futureDone.body.error, /predecessor Blocking predecessor is not done/);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: future.id } })).status, "TODO");
+
+  await seedRun(context, 1, "WAITING_INBOX");
+  const activeDone = await call("PATCH", `/tasks/${context.task.id}`, { status: "DONE" });
+  assert.equal(activeDone.status, 409);
+  assert.match(activeDone.body.error, /active run/);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).status, "DOING");
+  assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id, body: { startsWith: "Status changed:" } } }), 0);
+});
+
+test("repo-grant revocation and manual start serialize without an unclaimable Run", { timeout: 20_000 }, async () => {
+  const context = await seedTask("grant-start-race");
+  const app = createApp(db);
+  const responses = await asOperator(() => synchronised([
+    async (release, gate) => { release(); await gate; return app.request(`/tasks/${context.task.id}/start`, { method: "POST", headers: { Authorization: `Bearer ${OPERATOR}` } }); },
+    async (release, gate) => { release(); await gate; return app.request(`/agents/${context.agent.id}/repos/${context.repo.id}/access`, { method: "DELETE", headers: { Authorization: `Bearer ${OPERATOR}` } }); },
+  ]));
+  const [start, revoke] = responses;
+  assert.ok(start!.status === 201 && revoke!.status === 409 || start!.status === 400 && revoke!.status === 204,
+    `start=${start!.status} revoke=${revoke!.status}`);
+  const runs = await db.run.count({ where: { taskId: context.task.id } });
+  const grants = await db.agentRepoAccess.count({ where: { agentId: context.agent.id, repoId: context.repo.id } });
+  assert.equal(runs, start!.status === 201 ? 1 : 0);
+  assert.equal(grants, runs === 1 ? 1 : 0, `runs=${runs} grants=${grants}`);
 });
 
 test("a second start press is 409, not a second run", async () => {

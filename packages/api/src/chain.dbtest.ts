@@ -67,24 +67,10 @@ const withRunnerToken = async <T>(operation: () => T | Promise<T>): Promise<T> =
 test("concurrent chain advance creates exactly one successor run with no client-visible conflict", async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const otherDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  let arrived = 0;
-  let release!: () => void;
-  const bothAtClaim = new Promise<void>((resolve) => { release = resolve; });
-  const call = (client: PrismaClient) => client.$transaction(async (tx) => {
-    const task = new Proxy(tx.task, { get(target, property, receiver) {
-      if (property !== "updateMany") return Reflect.get(target, property, receiver);
-      return async (args: Parameters<typeof tx.task.updateMany>[0]) => {
-        arrived += 1;
-        if (arrived === 2) release();
-        await bothAtClaim;
-        return tx.task.updateMany(args);
-      };
-    } });
-    const instrumentedTx = new Proxy(tx, { get(target, property, receiver) {
-      return property === "task" ? task : Reflect.get(target, property, receiver);
-    } });
-    return activateChainSuccessor(instrumentedTx as any, predecessor, {}, new Date());
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  const call = (client: PrismaClient) => client.$transaction(
+    (tx) => activateChainSuccessor(tx, predecessor, {}, new Date()),
+    { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+  );
   try {
     await assert.doesNotReject(Promise.all([call(db), call(otherDb)]));
   } finally {
@@ -93,20 +79,153 @@ test("concurrent chain advance creates exactly one successor run with no client-
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
 });
 
-test("an unrelated successor patch between read and claim retries and still queues", async () => {
+test("runner completion and manual successor start serialize to one run without duplicate evidence", { timeout: 20_000 }, async () => {
+  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING" } });
+  const running = await seedRunningRun(predecessor.id, project.id, agent.id, repo.id);
+  const completionClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const startClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let completionLocked!: () => void;
+  let startAttempted!: () => void;
+  let releaseCompletion!: () => void;
+  const completionHasLock = new Promise<void>((resolve) => { completionLocked = resolve; });
+  const startReachedLock = new Promise<void>((resolve) => { startAttempted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+  let completionIntercepted = false;
+  let startIntercepted = false;
+  const instrumentTransactions = (
+    client: PrismaClient,
+    onQuery: (pending: Promise<unknown>) => Promise<unknown>,
+  ): PrismaClient => new Proxy(client, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return (...args: unknown[]) => onQuery(Reflect.apply(txTarget.$queryRaw, txTarget, args));
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+  const completionDb = instrumentTransactions(completionClient, async (pending) => {
+    const result = await pending;
+    if (!completionIntercepted) {
+      completionIntercepted = true;
+      completionLocked();
+      await release;
+    }
+    return result;
+  });
+  const startDb = instrumentTransactions(startClient, async (pending) => {
+    if (!startIntercepted) {
+      startIntercepted = true;
+      startAttempted();
+    }
+    return pending;
+  });
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-db-token";
+  try {
+    await withRunnerToken(async () => {
+      const completion = createApp(completionDb).request(`/runner/runs/${running.run.id}/complete`, {
+        method: "POST", headers: { Authorization: "Bearer runner-db-token", "Content-Type": "application/json" },
+        body: JSON.stringify(completionBody(running.runnerId, running.fencingToken, "race artifact")),
+      });
+      await completionHasLock;
+      const manualStart = createApp(startDb).request(`/tasks/${successor.id}/start`, {
+        method: "POST", headers: { Authorization: "Bearer operator-db-token" },
+      });
+      await startReachedLock;
+      releaseCompletion();
+      const [completed, started] = await Promise.all([completion, manualStart]);
+      assert.equal(completed.status, 200);
+      assert.equal(started.status, 409);
+      assert.equal((await started.json() as { error: string }).error, "Task already has an active run");
+    });
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorOperator;
+    await Promise.all([completionClient.$disconnect(), startClient.$disconnect()]);
+  }
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.taskActivity.count({ where: { taskId: successor.id } }), 1);
+  assert.equal(await db.taskActivity.count({ where: { taskId: predecessor.id, actorType: "runner" } }), 1);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: predecessor.id, body: "race artifact" } }), 1);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: successor.id } }), 0);
+});
+
+test("automatic advancement skips a legacy DONE gap and queues the later TODO", async () => {
+  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: successor.id }, data: { status: "DONE" } });
+  const later = await db.task.create({ data: {
+    projectId: project.id,
+    assigneeAgentId: agent.id,
+    repoId: repo.id,
+    chainId: predecessor.chainId,
+    chainIndex: 2,
+    name: "Third",
+    description: "third",
+  } });
+  await db.$transaction((tx) => activateChainSuccessor(tx, predecessor, {}, new Date()));
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
+});
+
+test("automatic advancement reselects after the observed successor is deleted", async () => {
+  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
+  const later = await db.task.create({ data: {
+    projectId: project.id,
+    assigneeAgentId: agent.id,
+    repoId: repo.id,
+    chainId: predecessor.chainId,
+    chainIndex: 2,
+    name: "Third",
+    description: "third",
+  } });
+  const deleteDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let deleted = false;
+  try {
+    await db.$transaction(async (tx) => {
+      const task = new Proxy(tx.task, { get(target, property, receiver) {
+        if (property !== "findFirst") return Reflect.get(target, property, receiver);
+        return async (args: any) => {
+          const candidate = await tx.task.findFirst(args);
+          if (!deleted) {
+            deleted = true;
+            await deleteDb.task.delete({ where: { id: successor.id } });
+          }
+          return candidate;
+        };
+      } });
+      const instrumented = new Proxy(tx, { get(target, property, receiver) {
+        return property === "task" ? task : Reflect.get(target, property, receiver);
+      } });
+      await activateChainSuccessor(instrumented as any, predecessor, {}, new Date());
+    });
+  } finally {
+    await deleteDb.$disconnect();
+  }
+  assert.equal(deleted, true);
+  assert.equal(await db.task.count({ where: { id: successor.id } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
+});
+
+test("an unrelated successor patch between observation and lock is re-read and still queues", async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const patchDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   let patched = false;
   try {
     await db.$transaction(async (tx) => {
       const task = new Proxy(tx.task, { get(target, property, receiver) {
-        if (property !== "updateMany") return Reflect.get(target, property, receiver);
-        return async (args: Parameters<typeof tx.task.updateMany>[0]) => {
+        if (property !== "findFirst") return Reflect.get(target, property, receiver);
+        return async (args: any) => {
+          const candidate = await tx.task.findFirst(args as any);
           if (!patched) {
             patched = true;
             await patchDb.task.update({ where: { id: successor.id }, data: { description: "harmless operator edit" } });
           }
-          return tx.task.updateMany(args);
+          return candidate;
         };
       } });
       const instrumentedTx = new Proxy(tx, { get(target, property, receiver) {
@@ -482,7 +601,10 @@ test("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock 
         if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
         return async (...args: any[]) => {
           const result = await (tx.$queryRaw as any)(...args);
-          if (!patchPaused && args[1] === predecessor.id) {
+          if (!patchPaused
+            && args[1] === predecessor.projectId
+            && args[2] === predecessor.chainId
+            && args[3] === predecessor.chainIndex) {
             patchPaused = true;
             patchHasPredecessor();
             await patchMayContinue;
@@ -589,23 +711,22 @@ test("an archived successor is parked, not spun on", { timeout: 20_000 }, async 
   assert.match(await latestActivity(successor.id), /is archived and was not queued/);
 });
 
-test("a successor parked between the read and the claim is caught by the re-read guard", { timeout: 20_000 }, async () => {
+test("a successor parked between observation and lock is caught by the locked re-read", { timeout: 20_000 }, async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const parkDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   const hangDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   let parked = false;
   try {
     await hangDb.$transaction(async (tx) => {
-      // Park the successor on the first CAS attempt, so the claim loses on
-      // updatedAt, the loop re-reads, and only the re-read guard can stop it.
       const task = new Proxy(tx.task, { get(target, property, receiver) {
-        if (property !== "updateMany") return Reflect.get(target, property, receiver);
-        return async (args: Parameters<typeof tx.task.updateMany>[0]) => {
+        if (property !== "findFirst") return Reflect.get(target, property, receiver);
+        return async (args: any) => {
+          const candidate = await tx.task.findFirst(args as any);
           if (!parked) {
             parked = true;
             await parkDb.task.update({ where: { id: successor.id }, data: { status: "BACKLOG" } });
           }
-          return tx.task.updateMany(args);
+          return candidate;
         };
       } });
       const instrumentedTx = new Proxy(tx, { get(target, property, receiver) {
@@ -684,12 +805,21 @@ test("GET /tasks/:id/chain returns every step in order with startable and gate f
   assert.equal(last.approvalGate, true);
   assert.equal(last.startable, false, "a human gate step is never startable");
 
-  // Step 1 already holds the run instantiateTemplate queued, so it is busy;
-  // step 2 is an idle agent step and is the one the operator may start.
+  // Step 1 already holds the run instantiateTemplate queued, so it is the
+  // current execution and every successor is dependency-blocked.
   assert.equal(body.steps[0].startable, false);
+  assert.equal(body.steps[0].startAction, null);
+  assert.equal(body.steps[0].currentExecution, true);
   assert.equal(body.steps[0].latestRun.status, "QUEUED");
-  assert.equal(body.steps[1].startable, true);
+  assert.equal(body.steps[1].startable, false);
+  assert.equal(body.steps[1].startAction, null);
   assert.equal(body.steps[1].latestRun, null);
+
+  await db.run.updateMany({ where: { taskId: chain.tasks[0]!.id }, data: { status: "SUCCEEDED" } });
+  await db.task.update({ where: { id: chain.tasks[0]!.id }, data: { status: "DONE" } });
+  const advanced = await operatorGet(`/tasks/${chain.tasks[3]!.id}/chain`);
+  assert.equal(advanced.body.steps[1].startable, true);
+  assert.equal(advanced.body.steps[1].startAction, "start");
 });
 
 test("GET /tasks/:id/chain returns an empty envelope for a task with no chain", async () => {

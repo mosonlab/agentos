@@ -91,6 +91,58 @@ export const lockTaskRow = async (
   return rows[0] ?? null;
 };
 
+/** Locks an indexed chain prefix in the one global order used by manual start,
+ * manual completion, and automatic advancement. Raw SQL returns ids only;
+ * callers perform typed Prisma reads after this serialization point. */
+export const lockChainPrefixRows = async (
+  tx: Tx,
+  input: { projectId: string; chainId: string; targetChainIndex: number },
+): Promise<string[]> => {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task"
+    WHERE "projectId" = ${input.projectId}
+      AND "chainId" = ${input.chainId}
+      AND "chainIndex" IS NOT NULL
+      AND "chainIndex" <= ${input.targetChainIndex}
+    ORDER BY "chainIndex", "id" FOR UPDATE
+  `;
+  return rows.map((row) => row.id);
+};
+
+/** Serializes Run creation with revocation of the exact agent/repository grant.
+ * Task locks are always acquired first by chain writers; revocation takes only
+ * this grant lock, so the order cannot form a cycle. */
+export const lockAgentRepoGrant = async (
+  tx: Tx,
+  input: { projectId: string; agentId: string; repoId: string },
+): Promise<boolean> => {
+  const rows = await tx.$queryRaw<Array<{ agentId: string; repoId: string }>>`
+    SELECT "agentId", "repoId" FROM "AgentRepoAccess"
+    WHERE "projectId" = ${input.projectId}
+      AND "agentId" = ${input.agentId}
+      AND "repoId" = ${input.repoId}
+    FOR KEY SHARE
+  `;
+  if (rows.length === 0) return false;
+  return (await tx.agentRepoAccess.count({ where: input })) === 1;
+};
+
+/** Exclusive companion for grant revocation. It intentionally takes no Task
+ * lock: start owns Task-prefix then grant, while revoke owns only grant. */
+export const lockAgentRepoGrantForRevocation = async (
+  tx: Tx,
+  input: { projectId: string; agentId: string; repoId: string },
+): Promise<boolean> => {
+  const rows = await tx.$queryRaw<Array<{ agentId: string; repoId: string }>>`
+    SELECT "agentId", "repoId" FROM "AgentRepoAccess"
+    WHERE "projectId" = ${input.projectId}
+      AND "agentId" = ${input.agentId}
+      AND "repoId" = ${input.repoId}
+    FOR UPDATE
+  `;
+  return rows.length === 1;
+};
+
 /** The shape `resolveRunBranches` needs. Structural rather than a Prisma payload
  *  type, so the five call sites can pass rows from five differently-shaped
  *  queries — the same reason `packages/api/src/chain.ts` keeps `ChainRow` plain. */
@@ -347,11 +399,30 @@ export const activateChainSuccessor = async (
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
   let successor: ChainSuccessor | null = null;
   if (task.chainId && task.chainIndex !== null) {
-    successor = await tx.task.findFirst({
-      where: { projectId: task.projectId, chainId: task.chainId, chainIndex: { gt: task.chainIndex } },
-      orderBy: { chainIndex: "asc" },
-      include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
-    });
+    // Resolve, lock, and re-read until the first surviving non-DONE row is
+    // stable. A concurrent DELETE can win before the lock, and historical
+    // out-of-order execution can leave DONE gaps; neither may stall the chain.
+    for (;;) {
+      const candidate = await tx.task.findFirst({
+        where: {
+          projectId: task.projectId,
+          chainId: task.chainId,
+          chainIndex: { gt: task.chainIndex },
+          status: { not: TaskStatus.DONE },
+        },
+        orderBy: [{ chainIndex: "asc" }, { id: "asc" }],
+        select: { id: true },
+      });
+      if (!candidate) break;
+      if (!await lockTaskRow(tx, candidate.id)) continue;
+      const current: ChainSuccessor | null = await tx.task.findUnique({
+        where: { id: candidate.id },
+        include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
+      });
+      if (!current || current.status === TaskStatus.DONE) continue;
+      successor = current;
+      break;
+    }
   } else {
     if (task.chainId) {
       await tx.taskActivity.create({ data: {
@@ -361,10 +432,12 @@ export const activateChainSuccessor = async (
       } });
     }
     if (task.followUpTaskId) {
-      successor = await tx.task.findUnique({
-        where: { id: task.followUpTaskId },
-        include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
-      });
+      if (await lockTaskRow(tx, task.followUpTaskId)) {
+        successor = await tx.task.findUnique({
+          where: { id: task.followUpTaskId },
+          include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
+        });
+      }
     }
   }
 
@@ -417,6 +490,11 @@ export const activateChainSuccessor = async (
       include: { runs: { orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
     });
     if (!current || current.status === TaskStatus.DONE) {
+      // A chain row that disappeared or became DONE is no longer the candidate.
+      // Re-entering the function resolves the next surviving non-DONE row.
+      if (task.chainId && task.chainIndex !== null) {
+        return activateChainSuccessor(tx, task, options, now);
+      }
       return { nextTaskId: current?.id ?? null, gated: false };
     }
     if (current.runs.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {

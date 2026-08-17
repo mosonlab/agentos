@@ -14,6 +14,9 @@ import {
   InboxStatus,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  lockAgentRepoGrant,
+  lockAgentRepoGrantForRevocation,
+  lockChainPrefixRows,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -46,9 +49,11 @@ import { createRunnerRegistry } from "./runners.js";
 import {
   chainKey,
   chainProgress,
+  chainStartDecisions,
   type ChainProgress,
   chainProgressByChain,
   positions,
+  blockingPredecessor,
   runFactsByTask,
   startable,
   stepName,
@@ -1244,10 +1249,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }), 201);
   });
   app.delete("/agents/:agentId/repos/:repoId/access", async (context) => {
-    const deleted = await db.agentRepoAccess.deleteMany({ where: {
-      agentId: id.parse(context.req.param("agentId")), repoId: id.parse(context.req.param("repoId")),
-    } });
-    return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Repo access not found" }, 404);
+    const agentId = id.parse(context.req.param("agentId"));
+    const repoId = id.parse(context.req.param("repoId"));
+    const grant = await db.agentRepoAccess.findUnique({
+      where: { agentId_repoId: { agentId, repoId } }, select: { projectId: true },
+    });
+    if (!grant) return context.json({ error: "Repo access not found" }, 404);
+    const result = await db.$transaction(async (tx) => {
+      if (!await lockAgentRepoGrantForRevocation(tx, { projectId: grant.projectId, agentId, repoId })) {
+        return { error: "Repo access not found", code: 404 as const };
+      }
+      const active = await tx.run.count({ where: { agentId, repoId, status: { in: ACTIVE_RUN_STATUSES } } });
+      if (active > 0) return { error: "Cannot revoke repo access while the agent has an active run on this Repo", code: 409 as const };
+      await tx.agentRepoAccess.delete({ where: { agentId_repoId: { agentId, repoId } } });
+      return { ok: true as const };
+    });
+    return "error" in result ? context.json({ error: result.error }, result.code) : context.body(null, 204);
   });
 
   app.get("/projects/:projectId/goals", async (context) => context.json(await db.goal.findMany({
@@ -1974,7 +1991,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (!subject.chainId) return context.json({ chainId: null, total: 0, done: 0, steps: [] });
 
     const chainInclude = {
-      assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
+      assigneeAgent: { select: {
+        id: true,
+        title: true,
+        archivedAt: true,
+        repoAccess: { where: { projectId: subject.projectId }, select: { repoId: true } },
+      } },
       templateStep: { select: { name: true } },
       runs: { orderBy: { runNumber: "desc" as const }, take: 1 },
     };
@@ -1998,6 +2020,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
     const ordinals = positions(rows);
     const progress = chainProgress(rows);
+    const decisions = chainStartDecisions(rows.map((row) => ({
+      ...row,
+      hasRepoGrant: Boolean(row.repoId && row.assigneeAgent?.repoAccess.some((grant) => grant.repoId === row.repoId)),
+    })), facts);
 
     return context.json({
       chainId: subject.chainId,
@@ -2018,7 +2044,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         latestRun: row.runs[0]
           ? { id: row.runs[0].id, status: row.runs[0].status, runNumber: row.runs[0].runNumber }
           : null,
-        startable: startable(row, facts.get(row.id) ?? { total: 0, active: false }, row.maxSessionsPerTask),
+        startable: decisions.get(row.id)?.startable ?? false,
+        startAction: decisions.get(row.id)?.startAction ?? null,
+        currentExecution: decisions.get(row.id)?.currentExecution ?? false,
       })),
     });
   });
@@ -2026,6 +2054,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskPatch);
     const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
+    if (before.chainId !== null && body.approvalGate !== undefined && body.approvalGate !== before.approvalGate) {
+      return context.json({ error: "Approval gates on dispatched chain tasks are controlled by the chain" }, 409);
+    }
     const changesStatus = body.status !== undefined && body.status !== before.status;
     const movingToBacklog = body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG;
     if (body.assigneeAgentId) {
@@ -2088,7 +2119,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // an archived standalone one could not.
     if (changesStatus || body.status === TaskStatus.DONE) {
       const written = await db.$transaction(async (tx) => {
-        const locked = await lockTask(tx, taskId);
+        let locked: LockedTask | null;
+        if (body.status === TaskStatus.DONE && before.chainId && before.chainIndex !== null) {
+          await lockChainPrefixRows(tx, {
+            projectId: before.projectId,
+            chainId: before.chainId,
+            targetChainIndex: before.chainIndex,
+          });
+          locked = await tx.task.findUnique({
+            where: { id: taskId }, select: { id: true, status: true, archivedAt: true },
+          });
+        } else {
+          locked = await lockTask(tx, taskId);
+        }
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
@@ -2097,6 +2140,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
         }
         if (body.status === TaskStatus.DONE) {
+          if (await hasActiveRun(tx, taskId)) {
+            return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
+          }
+          if (before.chainId && before.chainIndex !== null) {
+            const prefix = await tx.task.findMany({
+              where: {
+                projectId: before.projectId,
+                chainId: before.chainId,
+                chainIndex: { not: null, lte: before.chainIndex },
+              },
+              orderBy: [{ chainIndex: "asc" }, { id: "asc" }],
+              select: { id: true, name: true, status: true, chainIndex: true },
+            });
+            const blocker = blockingPredecessor(prefix.map((row) => ({
+              ...row,
+              projectId: before.projectId,
+              chainId: before.chainId,
+              archivedAt: null,
+              templateStep: null,
+            })), taskId);
+            if (blocker) {
+              return {
+                error: `Cannot complete ${before.name}; predecessor ${blocker.name} is not done`,
+                code: 409 as const,
+              };
+            }
+          }
           // This OPEN row is the gate-decision CAS. It deliberately depends on
           // neither templateId nor approvalGate: gate creation records the
           // relationship in gateTaskId, and that is the only authority here.
@@ -2216,16 +2286,45 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/start", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
+    const identity = await db.task.findUnique({
+      where: { id: taskId }, select: { projectId: true, chainId: true, chainIndex: true },
+    });
+    if (!identity) return context.json({ error: "Task not found" }, 404);
     try {
       const result = await db.$transaction(async (tx) => {
-        const locked = await lockTask(tx, taskId);
-        if (!locked) return { error: "Task not found", code: 404 as const };
-        if (locked.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
-        if (locked.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
+        if (identity.chainId && identity.chainIndex !== null) {
+          await lockChainPrefixRows(tx, {
+            projectId: identity.projectId,
+            chainId: identity.chainId,
+            targetChainIndex: identity.chainIndex,
+          });
+        } else if (!await lockTask(tx, taskId)) {
+          return { error: "Task not found", code: 404 as const };
+        }
         const task = await tx.task.findUniqueOrThrow({
           where: { id: taskId },
           include: { assigneeAgent: { select: { archivedAt: true } } },
         });
+        if (identity.chainId && identity.chainIndex !== null) {
+          const prefix = await tx.task.findMany({
+            where: {
+              projectId: identity.projectId,
+              chainId: identity.chainId,
+              chainIndex: { not: null, lte: identity.chainIndex },
+            },
+            orderBy: [{ chainIndex: "asc" }, { id: "asc" }],
+            select: { id: true, name: true, status: true, chainIndex: true },
+          });
+          const blocker = blockingPredecessor(prefix.map((row) => ({ ...row, projectId: identity.projectId, chainId: identity.chainId, archivedAt: null, templateStep: null })), taskId);
+          if (blocker) {
+            return {
+              error: `Cannot start ${task.name}; predecessor ${blocker.name} is not done`,
+              code: 409 as const,
+            };
+          }
+        }
+        if (task.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
+        if (task.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
         if (task.assigneeType !== AssigneeType.AGENT) {
           return { error: "Human steps cannot be started", code: 409 as const };
         }
@@ -2250,7 +2349,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (!task.repoId) {
           return { error: "This task has no repository", code: 400 as const };
         }
-        if (!startable({ ...task, archivedAt: locked.archivedAt }, { total, active: false }, task.maxSessionsPerTask)) {
+        if (!task.assigneeAgentId) {
+          return { error: "This task has no assignee", code: 400 as const };
+        }
+        const hasRepoGrant = await lockAgentRepoGrant(tx, {
+          projectId: task.projectId,
+          agentId: task.assigneeAgentId,
+          repoId: task.repoId,
+        });
+        if (!hasRepoGrant) {
+          return { error: "Assignee has no grant for this Repo", code: 400 as const };
+        }
+        if (!startable({ ...task, hasRepoGrant }, { total, active: false }, task.maxSessionsPerTask)) {
           // The one remaining `startable` condition with no message of its own
           // is the archived assignee, and `enqueueTaskRun` already throws an
           // error that names the agent — a better sentence than anything this
@@ -2260,11 +2370,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
         }
         const run = await enqueueTaskRun(tx, taskId);
-        if (locked.status === TaskStatus.BACKLOG) {
+        const recovering = task.status === TaskStatus.BACKLOG;
+        if (recovering) {
           await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO } });
         }
         await tx.taskActivity.create({ data: {
-          taskId, actorType: "operator", body: "Started manually from the chain view",
+          taskId,
+          actorType: "operator",
+          body: task.chainId
+            ? recovering ? "Recovered parked chain step manually" : "Started next chain step manually"
+            : "Started task manually",
         } });
         return { run };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
@@ -3074,6 +3189,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // An external failure buys the task one more attempt rather than spending one.
       const external = externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
       const budgetCeiling = run.maxRunsPerTask + (external ? 1 : 0);
+      if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
+        await lockTask(tx, run.task.id);
+      }
       // Join the Task-row exclusion protocol only when this completion can
       // create a retry. PATCH then retry creation are ordered by this lock, and
       // the fresh read below snapshots exactly the value current at creation.

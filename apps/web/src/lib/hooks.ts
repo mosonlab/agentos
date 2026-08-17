@@ -34,13 +34,25 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(path !== null);
   const [lastSuccessAt, setLastSuccessAt] = useState<string | null>(null);
+  const [resourcePath, setResourcePath] = useState<string | null>(path);
   const [nonce, setNonce] = useState(0);
   const alive = useRef(true);
+  const generation = useRef(0);
+  const renderedPath = useRef(path);
+  const heldPath = useRef(path);
   /** The serialization of whatever `data` currently holds, or `null` when the
    *  held value cannot be trusted to match the path being polled. */
   const held = useRef<string | null>(null);
   /** The validator that came with `held`, sent back as `If-None-Match`. */
   const tag = useRef<string | null>(null);
+
+  // Effects run after paint. Advance the generation during render so the first
+  // destination frame cannot expose source state and an old response resolving
+  // before cleanup still cannot commit.
+  if (renderedPath.current !== path) {
+    renderedPath.current = path;
+    generation.current += 1;
+  }
 
   useEffect(() => {
     alive.current = true;
@@ -48,6 +60,10 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
   }, []);
 
   useEffect(() => {
+    const requestGeneration = generation.current;
+    const pathChanged = heldPath.current !== path;
+    heldPath.current = path;
+    setResourcePath(path);
     if (path === null) {
       held.current = null;
       tag.current = null;
@@ -56,6 +72,11 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
       setLoading(false);
       setLastSuccessAt(null);
       return;
+    }
+    if (pathChanged) {
+      setData(null);
+      setError(null);
+      setLastSuccessAt(null);
     }
     // A new path — or a `reload()` — invalidates the held payload: the next
     // response must land even if it happens to serialize the same. The validator
@@ -68,7 +89,7 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
       if (document.hidden) return;
       try {
         const polled = await api.poll(path, tag.current);
-        if (cancelled || !alive.current) return;
+        if (cancelled || !alive.current || generation.current !== requestGeneration) return;
         tag.current = polled.etag;
         if (polled.changed && polled.body !== held.current) {
           held.current = polled.body;
@@ -77,10 +98,10 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
         setError(null);
         setLastSuccessAt(new Date().toISOString());
       } catch (reason: unknown) {
-        if (cancelled || !alive.current) return;
+        if (cancelled || !alive.current || generation.current !== requestGeneration) return;
         setError(reason instanceof ApiError ? reason : new ApiError(0, path, String(reason)));
       } finally {
-        if (!cancelled && alive.current) setLoading(false);
+        if (!cancelled && alive.current && generation.current === requestGeneration) setLoading(false);
       }
     };
     void load();
@@ -91,7 +112,20 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
     };
   }, [path, intervalMs, nonce]);
 
-  const reload = useCallback(() => setNonce((value) => value + 1), []);
+  const reload = useCallback(() => {
+    generation.current += 1;
+    setNonce((value) => value + 1);
+  }, []);
+  if (resourcePath !== path) {
+    return {
+      data: null,
+      error: null,
+      loading: path !== null,
+      missing: false,
+      lastSuccessAt: null,
+      reload,
+    };
+  }
   return { data, error, loading, missing: error?.missingEndpoint ?? false, lastSuccessAt, reload };
 };
 

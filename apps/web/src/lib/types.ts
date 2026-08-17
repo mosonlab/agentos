@@ -334,6 +334,8 @@ export type ChainStep = {
   /** The API's own answer, not a second derivation: the button's enabled state
    *  and the route's guard must not be able to disagree. */
   startable: boolean;
+  startAction: "start" | "recover" | null;
+  currentExecution: boolean;
 };
 
 export type Chain = {

@@ -6,6 +6,7 @@ import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
+import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
@@ -13,7 +14,7 @@ import { ChainList } from "../components/chain-list";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, SHOW_MORE_BUTTON, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, ShowMore, TaskPill, Toggle, isLongText,
+  Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, TaskPill, Toggle, isLongText,
 } from "../components/ui";
 import { retryable } from "../lib/board";
 import { Button } from "../components/ui/button";
@@ -106,8 +107,9 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
   );
 };
 
-const Activity = ({ taskId }: { taskId: string }): ReactNode => {
-  const { data, reload } = usePoll<TaskActivity[]>(`/tasks/${taskId}/activity`);
+export const Activity = ({ taskId }: { taskId: string }): ReactNode => {
+  const poll = usePoll<TaskActivity[]>(`/tasks/${taskId}/activity`);
+  const { data, error: pollError, loading, reload } = poll;
   const [comment, setComment] = useState("");
   const { pending, error, run } = useAction();
   const t = useT();
@@ -122,7 +124,9 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
   return (
     <Card title={t("taskDetail.activity.title")} extra={<span className={COUNT}>{items.length}</span>}>
       <div className={STACK}>
-        {items.length === 0 ? <EmptyState>{t("taskDetail.activity.empty")}</EmptyState> : (
+        {loading && data === null ? <EmptyState>{t("taskDetail.activity.loading")}</EmptyState>
+          : pollError && data === null ? <ErrorNotice message={pollError.message} onRetry={reload} />
+            : items.length === 0 ? <EmptyState>{t("taskDetail.activity.empty")}</EmptyState> : (
           <div className="[&>*+*]:mt-[12px]">
             {items.map((item) => (
               <div className={MSG_CARD} key={item.id}>
@@ -136,6 +140,7 @@ const Activity = ({ taskId }: { taskId: string }): ReactNode => {
             ))}
           </div>
         )}
+        {pollError === null || data === null ? null : <ErrorNotice message={pollError.message} onRetry={reload} />}
         {error === null ? null : <ErrorNotice message={error} />}
         <div className={ROW}>
           <Input type="text" value={comment} placeholder={t("taskDetail.activity.placeholder")} onChange={(event) => setComment(event.target.value)}
@@ -177,10 +182,51 @@ export const StepOutput = ({ output }: { output: TaskStepOutput }): ReactNode =>
   );
 };
 
+export const TaskOutput = ({ poll }: { poll: ReturnType<typeof usePoll<TaskStepOutput>> }): ReactNode => {
+  const t = useT();
+  // A 404 is authoritative absence for this resource, even after a prior 200.
+  // Keep last-good data for transient failures and version-skew responses such
+  // as 405/501, but never let a deleted output remain visible as truth.
+  if (poll.error?.status === 404) {
+    return <Card title={t("taskDetail.output.title")}><EmptyState>{t("taskDetail.output.empty")}</EmptyState></Card>;
+  }
+  if (poll.data) {
+    return <><StepOutput output={poll.data} />{poll.error ? <ErrorNotice message={poll.error.message} onRetry={poll.reload} /> : null}</>;
+  }
+  return (
+    <Card title={t("taskDetail.output.title")}>
+      {poll.loading ? <EmptyState>{t("taskDetail.output.loading")}</EmptyState>
+        : poll.error ? <ErrorNotice message={poll.error.message} onRetry={poll.reload} />
+            : <EmptyState>{t("taskDetail.output.empty")}</EmptyState>}
+    </Card>
+  );
+};
+
+export const TaskPrompt = ({ description }: { description: string }): ReactNode => {
+  const t = useT();
+  const parts = partitionTaskPrompt(description);
+  return (
+    <Card title={t("taskDetail.prompt.title")}>
+      <div className={STACK}>
+        {parts.responsibility.length === 0
+          ? <EmptyState>{t("taskDetail.prompt.empty")}</EmptyState>
+          : <Markdown text={parts.responsibility} />}
+        {parts.productContract === null ? null : (
+          <details>
+            <summary className="cursor-pointer text-muted-foreground">{t("taskDetail.prompt.productContract")}</summary>
+            <div className="mt-2.5"><Markdown text={parts.productContract} /></div>
+          </details>
+        )}
+        <p className="text-[11.5px] text-muted-foreground">{t("taskDetail.prompt.effective")}</p>
+      </div>
+    </Card>
+  );
+};
+
 // BACKLOG first, so the header select can park a task as well as move it on.
 const STATUSES: TaskStatus[] = ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"];
 
-export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
+const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<Task>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
   // No new cadence: the chain rides the page's default poll.
@@ -196,7 +242,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
   if (fatal(error, task)) {
     return <Page><ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /></Page>;
   }
-  if (!task) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
+  if (!task) return <Page data-task-id={taskId}><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const patch = (body: Record<string, unknown>): void => {
     void run(async () => { await api.patch(`/tasks/${taskId}`, body); reload(); });
@@ -239,9 +285,11 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
             `select:disabled` rule at all, so this control rendered at full opacity
             with the UA cursor while a patch was in flight. The primitive dims to
             50% and shows `not-allowed` (ui/select.tsx:21). */}
-        <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
-          {STATUSES.map((status) => <option key={status} value={status}>{t(`status.task.${status}`)}</option>)}
-        </Select>
+        {task.chainId === null ? (
+          <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
+            {STATUSES.map((status) => <option key={status} value={status}>{t(`status.task.${status}`)}</option>)}
+          </Select>
+        ) : <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.chainStatusReadonly")}</span>}
         {retryable(task, task.runs[0]) ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
         ) : null}
@@ -253,6 +301,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
 
       <div className={STACK}>
         {actionError === null ? null : <ErrorNotice message={actionError} />}
+        {error === null ? null : <ErrorNotice message={error.message} onRetry={reload} />}
         {task.failureReason === null ? null : <ErrorNotice message={task.failureReason} />}
 
         <div className={STAT_PILLS}>
@@ -285,28 +334,26 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
             { k: t("taskDetail.details.workingDirectory"), v: task.workingDirectory ?? "—" },
             {
               k: t("taskDetail.details.approval"),
-              v: (
+              v: task.chainId === null ? (
                 <span className={ROW}>
                   <Toggle on={task.approvalGate} onChange={(next) => patch({ approvalGate: next })} label={t("taskDetail.details.approval")} />
                   <span className="text-[11.5px] text-muted-foreground">{t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff")}</span>
                 </span>
-              ),
+              ) : t(task.approvalGate ? "taskDetail.details.approvalOn" : "taskDetail.details.approvalOff"),
             },
             { k: t("taskDetail.details.created"), v: formatDateTime(task.createdAt) },
           ]} />
         </Card>
 
-        {chain.data && chain.data.chainId !== null
-          ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
-          : null}
+        {task.chainId === null ? null
+          : chain.data && chain.data.chainId !== null
+            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
+            : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
+              : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
-        <Card title={t("taskDetail.prompt.title")}>
-          {task.description.trim().length === 0
-            ? <EmptyState>{t("taskDetail.prompt.empty")}</EmptyState>
-            : <ShowMore text={task.description} lines={8} />}
-        </Card>
+        <TaskPrompt description={task.description} />
 
-        {output.data ? <StepOutput output={output.data} /> : null}
+        <TaskOutput poll={output} />
 
         <Card title={t("taskDetail.runs.title")} extra={<span className={COUNT}>{runs.length}</span>} flush>
           <Table>
@@ -332,3 +379,8 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
     </Page>
   );
 };
+
+/** Keying here protects direct mounts as well as App's route boundary. */
+export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => (
+  <TaskDetailResource key={taskId} taskId={taskId} />
+);

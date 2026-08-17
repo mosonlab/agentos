@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { StepOutput, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
+import { StepOutput, TaskPrompt, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
+import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { TaskStepOutput } from "../lib/types";
+import prompts from "./fixtures/tc-ux-v1-prompts.json";
+import provenance from "./fixtures/tc-ux-v1-prompts.provenance.json";
 
 const source = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx", import.meta.url)), "utf8");
 
@@ -31,6 +35,36 @@ test("the pull-request label is the number, falling back to the whole URL", () =
   assert.equal(pullRequestLabel("https://github.com/o/r/pull/39/"), "#39");
   assert.equal(pullRequestLabel("https://github.com/o/r/pull/39/files"), "https://github.com/o/r/pull/39/files");
   assert.equal(pullRequestLabel("https://example.com/mr/7"), "https://example.com/mr/7");
+});
+
+test("structured task prompts lead with responsibility and collapse the common contract", () => {
+  const artifact = readFileSync(fileURLToPath(new URL("./fixtures/tc-ux-v1-prompts.json", import.meta.url)));
+  assert.equal(artifact.byteLength, provenance.artifactBytes);
+  assert.equal(createHash("sha256").update(artifact).digest("hex"), provenance.artifactSha256);
+  const responsibilities = new Set<string>();
+  for (const [index, fixture] of prompts.entries()) {
+    assert.equal(fixture.chainIndex, index);
+    assert.equal(Buffer.byteLength(fixture.prompt, "utf8"), fixture.promptBytes);
+    assert.equal(createHash("sha256").update(fixture.prompt, "utf8").digest("hex"), fixture.promptSha256);
+    const parts = partitionTaskPrompt(fixture.prompt);
+    assert.ok(parts.productContract?.startsWith("Product Contract: TC-UX v1.0"), fixture.name);
+    assert.ok(parts.responsibility.length > 20, fixture.name);
+    responsibilities.add(parts.responsibility);
+    const markup = renderToStaticMarkup(<TaskPrompt description={fixture.prompt} />);
+    assert.ok(markup.indexOf(parts.responsibility.slice(0, 40)) < markup.indexOf("Product Contract"), fixture.name);
+    assert.match(markup, /<details>/);
+    assert.doesNotMatch(markup, /<details open/);
+    assert.match(markup, /foundational prompt.*role prompt.*tool manifest.*prior outputs/i);
+    assert.match(markup, /Task prompt/);
+  }
+  assert.equal(responsibilities.size, 7, "all seven authoritative responsibilities must differ");
+});
+
+test("unstructured task prompts remain the responsibility verbatim", () => {
+  assert.deepEqual(partitionTaskPrompt("  Free-form responsibility  "), {
+    responsibility: "Free-form responsibility",
+    productContract: null,
+  });
 });
 
 /* --------------------------------------------------------- step output card */
