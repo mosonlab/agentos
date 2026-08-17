@@ -4,7 +4,8 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 
-import type { Chain, Task, TaskStepOutput } from "../lib/types";
+import { ApiError } from "../lib/api";
+import type { Chain, Run, Task, TaskStepOutput } from "../lib/types";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
@@ -24,6 +25,16 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
 const output = (taskId: string, body: string): TaskStepOutput => ({
   id: `output-${taskId}`, taskId, runId: `run-${taskId}`, kind: "revised-plan", body,
   createdAt: now, updatedAt: now,
+});
+
+const sourceRun = (taskId: string): Run => ({
+  id: `run-${taskId}`, projectId: "project-1", taskId, goalId: null, agentId: "agent-1", repoId: "repo-1",
+  runNumber: 1, status: "SUCCEEDED", runner: "CLAUDE", runnerId: "runner-source", model: "claude",
+  leaseGeneration: 1, workspacePath: "/source-only-workspace", workspaceRetained: true,
+  targetBranch: "main", branch: "source-branch", baseSha: "1111111111111111", headSha: "2222222222222222",
+  pushStatus: "SUCCEEDED", pullRequestUrl: null, maxDurationMin: 120, stallTimeoutMin: 10,
+  maxRunsPerTask: 3, failureClass: null, failureReason: null, retryable: null, retryAt: null,
+  terminationReason: null, queuedAt: now, claimedAt: now, startedAt: now, endedAt: now, session: null,
 });
 
 const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, steps: [] });
@@ -63,7 +74,7 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     MouseEvent: dom.window.MouseEvent,
     IS_REACT_ACT_ENVIRONMENT: true,
   })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-  const [{ createRoot }, { TaskDetailPage }] = await Promise.all([
+  const [{ createRoot }, { TaskDetailPage, TaskOutput }] = await Promise.all([
     import("react-dom/client"),
     import("../pages/TaskDetail"),
   ]);
@@ -74,6 +85,7 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
   let firstB = true;
   let firstAActivity = true;
   const tasks = { a: task("a", "Source A", 0), b: task("b", "Destination B", 1), c: task("c", "Destination C", 2, "chain-c") };
+  tasks.a.runs = [sourceRun("a")];
   globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input).replace(/^.*\/api/, "");
     const method = init.method ?? "GET";
@@ -113,10 +125,22 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     assert.match(container.textContent ?? "", /Source A/);
     assert.match(container.textContent ?? "", /revised-plan source artifact/);
 
+    const sourceInput = container.querySelector("input[placeholder='Add a comment...']") as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(sourceInput, "unsent source draft");
+      sourceInput.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "unsent source draft" }));
+    });
+    const sourceRunRow = [...container.querySelectorAll("tr")].find((row) => row.textContent?.includes("#1"))!;
+    await act(async () => { sourceRunRow.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+    assert.match(container.textContent ?? "", /source-only-workspace/);
+    assert.equal(sourceInput.value, "unsent source draft");
+
     act(() => root.render(<TaskDetailPage taskId="b" />));
     assert.match(container.textContent ?? "", /Loading/);
-    assert.doesNotMatch(container.textContent ?? "", /Source A|revised-plan source artifact/);
+    assert.doesNotMatch(container.textContent ?? "", /Source A|revised-plan source artifact|unsent source draft|source-only-workspace/);
     assert.equal(container.querySelector("button"), null, "destination shell exposes no source action");
+    assert.equal(container.querySelector("input"), null, "destination shell exposes no source draft field");
 
     resolveB!(new Response(JSON.stringify(tasks.b), { status: 200 }));
     await settle();
@@ -124,12 +148,16 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     assert.match(container.textContent ?? "", /No output recorded/);
     assert.match(container.textContent ?? "", /independently review the persisted plan/);
     assert.doesNotMatch(container.textContent ?? "", /revised-plan source artifact/);
+    const destinationInput = container.querySelector("input[placeholder='Add a comment...']") as HTMLInputElement;
+    assert.equal(destinationInput.value, "", "the unsent source draft must not cross task identity");
     resolveAActivity!(new Response(JSON.stringify([{
       id: "late-a", taskId: "a", actorType: "operator", actorId: null,
       body: "late source activity", metadata: null, createdAt: now,
     }]), { status: 200 }));
     await settle();
     assert.doesNotMatch(container.textContent ?? "", /late source activity/);
+    assert.equal(destinationInput.value, "", "a late source response must not restore the source draft");
+    assert.doesNotMatch(container.textContent ?? "", /source-only-workspace/);
 
     const select = container.querySelector("select")!;
     await act(async () => {
@@ -140,16 +168,15 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     const archive = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Archive"))!;
     await act(async () => { archive.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
     await settle();
-    const input = container.querySelector("input[placeholder='Add a comment...']") as HTMLInputElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!;
-      setter.call(input, "destination comment");
-      input.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "destination comment" }));
-      input.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+      setter.call(destinationInput, "destination comment");
+      destinationInput.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "destination comment" }));
+      destinationInput.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
     });
     await settle();
     const send = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Send"))!;
-    assert.equal(send.disabled, false, `comment=${input.value}`);
+    assert.equal(send.disabled, false, `comment=${destinationInput.value}`);
     await act(async () => { send.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
     await settle();
 
@@ -165,6 +192,25 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     assert.ok(mutations.some((item) => item.url === "/tasks/b/activity" && item.body.includes("destination comment")), JSON.stringify(mutations));
     assert.ok(mutations.some((item) => item.url === "/tasks/c/start" && item.method === "POST"));
     assert.equal(mutations.some((item) => item.url.includes("/tasks/a")), false);
+
+    const heldOutput = {
+      data: output("b", "same-resource artifact"), error: null, loading: false, missing: false,
+      lastSuccessAt: now, reload: () => undefined,
+    };
+    act(() => root.render(<TaskOutput poll={heldOutput} />));
+    assert.match(container.textContent ?? "", /same-resource artifact/);
+    act(() => root.render(<TaskOutput poll={{
+      ...heldOutput, error: new ApiError(404, "/tasks/b/output", "Output not found"), missing: true,
+    }} />));
+    assert.match(container.textContent ?? "", /No output recorded/);
+    assert.doesNotMatch(container.textContent ?? "", /same-resource artifact|Output not found/);
+    for (const status of [405, 501]) {
+      act(() => root.render(<TaskOutput poll={{
+        ...heldOutput, data: null, error: new ApiError(status, "/tasks/b/output", `HTTP ${status}`), missing: true,
+      }} />));
+      assert.match(container.textContent ?? "", new RegExp(`HTTP ${status}`));
+      assert.doesNotMatch(container.textContent ?? "", /No output recorded/);
+    }
   } finally {
     act(() => root.unmount());
     globalThis.fetch = previous.fetch;

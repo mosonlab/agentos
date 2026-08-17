@@ -184,14 +184,19 @@ export const StepOutput = ({ output }: { output: TaskStepOutput }): ReactNode =>
 
 export const TaskOutput = ({ poll }: { poll: ReturnType<typeof usePoll<TaskStepOutput>> }): ReactNode => {
   const t = useT();
+  // A 404 is authoritative absence for this resource, even after a prior 200.
+  // Keep last-good data for transient failures and version-skew responses such
+  // as 405/501, but never let a deleted output remain visible as truth.
+  if (poll.error?.status === 404) {
+    return <Card title={t("taskDetail.output.title")}><EmptyState>{t("taskDetail.output.empty")}</EmptyState></Card>;
+  }
   if (poll.data) {
     return <><StepOutput output={poll.data} />{poll.error ? <ErrorNotice message={poll.error.message} onRetry={poll.reload} /> : null}</>;
   }
   return (
     <Card title={t("taskDetail.output.title")}>
       {poll.loading ? <EmptyState>{t("taskDetail.output.loading")}</EmptyState>
-        : poll.missing ? <EmptyState>{t("taskDetail.output.empty")}</EmptyState>
-          : poll.error ? <ErrorNotice message={poll.error.message} onRetry={poll.reload} />
+        : poll.error ? <ErrorNotice message={poll.error.message} onRetry={poll.reload} />
             : <EmptyState>{t("taskDetail.output.empty")}</EmptyState>}
     </Card>
   );

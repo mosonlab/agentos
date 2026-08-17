@@ -79,6 +79,82 @@ test("concurrent chain advance creates exactly one successor run with no client-
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
 });
 
+test("runner completion and manual successor start serialize to one run without duplicate evidence", { timeout: 20_000 }, async () => {
+  const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING" } });
+  const running = await seedRunningRun(predecessor.id, project.id, agent.id, repo.id);
+  const completionClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const startClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let completionLocked!: () => void;
+  let startAttempted!: () => void;
+  let releaseCompletion!: () => void;
+  const completionHasLock = new Promise<void>((resolve) => { completionLocked = resolve; });
+  const startReachedLock = new Promise<void>((resolve) => { startAttempted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+  let completionIntercepted = false;
+  let startIntercepted = false;
+  const instrumentTransactions = (
+    client: PrismaClient,
+    onQuery: (pending: Promise<unknown>) => Promise<unknown>,
+  ): PrismaClient => new Proxy(client, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return (...args: unknown[]) => onQuery(Reflect.apply(txTarget.$queryRaw, txTarget, args));
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+  const completionDb = instrumentTransactions(completionClient, async (pending) => {
+    const result = await pending;
+    if (!completionIntercepted) {
+      completionIntercepted = true;
+      completionLocked();
+      await release;
+    }
+    return result;
+  });
+  const startDb = instrumentTransactions(startClient, async (pending) => {
+    if (!startIntercepted) {
+      startIntercepted = true;
+      startAttempted();
+    }
+    return pending;
+  });
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-db-token";
+  try {
+    await withRunnerToken(async () => {
+      const completion = createApp(completionDb).request(`/runner/runs/${running.run.id}/complete`, {
+        method: "POST", headers: { Authorization: "Bearer runner-db-token", "Content-Type": "application/json" },
+        body: JSON.stringify(completionBody(running.runnerId, running.fencingToken, "race artifact")),
+      });
+      await completionHasLock;
+      const manualStart = createApp(startDb).request(`/tasks/${successor.id}/start`, {
+        method: "POST", headers: { Authorization: "Bearer operator-db-token" },
+      });
+      await startReachedLock;
+      releaseCompletion();
+      const [completed, started] = await Promise.all([completion, manualStart]);
+      assert.equal(completed.status, 200);
+      assert.equal(started.status, 409);
+      assert.equal((await started.json() as { error: string }).error, "Task already has an active run");
+    });
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorOperator;
+    await Promise.all([completionClient.$disconnect(), startClient.$disconnect()]);
+  }
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.taskActivity.count({ where: { taskId: successor.id } }), 1);
+  assert.equal(await db.taskActivity.count({ where: { taskId: predecessor.id, actorType: "runner" } }), 1);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: predecessor.id, body: "race artifact" } }), 1);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: successor.id } }), 0);
+});
+
 test("automatic advancement skips a legacy DONE gap and queues the later TODO", async () => {
   const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
   await db.task.update({ where: { id: successor.id }, data: { status: "DONE" } });
