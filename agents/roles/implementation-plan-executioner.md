@@ -1,7 +1,7 @@
 ---
 name: implementation-plan-executioner
 title: Implementation Plan Executioner
-model: gpt-5.6-sol:medium
+model: gpt-5.6-sol:high
 runner: codex
 inboxAccess: true
 skills: []
