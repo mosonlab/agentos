@@ -245,12 +245,21 @@ export const BindingToggle = ({ on, label, add, remove, onDone }: {
 
 const toolSet = (raw: string[] | undefined): Set<ToolKey> => new Set((raw ?? []).filter((key): key is ToolKey => (TOOL_KEYS as readonly string[]).includes(key)));
 const toolArray = (set: Set<ToolKey>): ToolKey[] => TOOL_KEYS.filter((key) => set.has(key));
+const applyToolIntent = (set: Set<ToolKey>, key: ToolKey, enabled: boolean): Set<ToolKey> => {
+  const next = new Set(set);
+  if (enabled) next.delete(key);
+  else next.add(key);
+  return next;
+};
 
 export const AgentToolsCard = ({ agent, onSaved }: { agent: Agent; onSaved: () => void }): ReactNode => {
   const incoming = toolArray(toolSet(agent.disabledTools)).join(",");
   const lastSeed = useRef(incoming);
   const [denied, setDenied] = useState<Set<ToolKey>>(() => toolSet(agent.disabledTools));
   const deniedRef = useRef(denied);
+  const confirmedRef = useRef(toolSet(agent.disabledTools));
+  const intents = useRef<Array<{ id: number; key: ToolKey; enabled: boolean }>>([]);
+  const nextIntentId = useRef(0);
   const chain = useRef<Promise<unknown>>(Promise.resolve());
   const queued = useRef(0);
   const [pendingWrites, setPendingWrites] = useState(0);
@@ -263,25 +272,38 @@ export const AgentToolsCard = ({ agent, onSaved }: { agent: Agent; onSaved: () =
     if (pendingWrites !== 0 || incoming === lastSeed.current) return;
     const next = toolSet(agent.disabledTools);
     lastSeed.current = incoming;
+    confirmedRef.current = next;
     deniedRef.current = next;
     setDenied(next);
   }, [agent.disabledTools, incoming, pendingWrites]);
 
   const change = (key: ToolKey, enabled: boolean): void => {
-    const next = new Set(deniedRef.current);
-    if (enabled) next.delete(key);
-    else next.add(key);
+    const next = applyToolIntent(deniedRef.current, key, enabled);
     deniedRef.current = next;
     setDenied(next);
     setWriteError(null);
-    const body = toolArray(next);
+    nextIntentId.current += 1;
+    const intent = { id: nextIntentId.current, key, enabled };
+    intents.current.push(intent);
     queued.current += 1;
     setPendingWrites(queued.current);
-    const request = chain.current.then(() => api.patch(`/agents/${agent.id}`, { disabledTools: body }));
+    const request = chain.current.then(async () => {
+      const confirmed = applyToolIntent(confirmedRef.current, intent.key, intent.enabled);
+      const body = toolArray(confirmed);
+      await api.patch(`/agents/${agent.id}`, { disabledTools: body });
+      confirmedRef.current = confirmed;
+    });
     chain.current = request.catch(() => undefined);
     void request.catch((reason: unknown) => {
       setWriteError(reason instanceof Error ? reason.message : String(reason));
     }).finally(() => {
+      intents.current = intents.current.filter((queuedIntent) => queuedIntent.id !== intent.id);
+      const optimistic = intents.current.reduce(
+        (current, queuedIntent) => applyToolIntent(current, queuedIntent.key, queuedIntent.enabled),
+        confirmedRef.current,
+      );
+      deniedRef.current = optimistic;
+      setDenied(optimistic);
       queued.current -= 1;
       setPendingWrites(queued.current);
       if (queued.current === 0) onSaved();
