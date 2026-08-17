@@ -1,3 +1,40 @@
+import { type Locale, translate } from "./i18n-core";
+
+/**
+ * The registration seam. `format.ts` keeps every signature — 41 call sites in 17
+ * files, two of them in the non-React module `lib/schedule.ts` — so the locale
+ * reaches the formatters by registration rather than by a hook and a parameter
+ * ripple.
+ *
+ * `LocaleProvider` calls this in its render body, an idempotent assignment rather
+ * than an effect, so the very paint that switches the language already formats in
+ * it. The callback is `(key, vars)`, not `translate` itself, which is
+ * `(locale, key, vars)`: the provider passes a locale-bound closure.
+ *
+ * Provider-free, the module answers in English through the same dictionaries, so
+ * `format.ts` holds no English fragments of its own.
+ */
+export type FormatTranslate = (key: string, vars?: Record<string, string | number>) => string;
+
+let activeLocale: Locale = "en";
+let activeTranslate: FormatTranslate = (key, vars) => translate("en", key, vars);
+
+export const setFormatLocale = (locale: Locale, translateFor: FormatTranslate): void => {
+  activeLocale = locale;
+  activeTranslate = translateFor;
+};
+
+/** The active locale, for the one consumer that needs the tag itself rather than
+ *  a translated string: `schedule.ts` passes it to `cronstrue`. */
+export const formatLocale = (): Locale => activeLocale;
+
+/** The module-level translator, so pure modules downstream of `format.ts` stay
+ *  parameter-free. */
+export const formatT: FormatTranslate = (key, vars) => activeTranslate(key, vars);
+
+// The formatters below still pin `en-US` in this commit. The seam above is stored
+// and unused: WI-4 is the change that makes the formatters read it. Splitting the
+// two keeps this commit's rendered output byte-identical to the previous one.
 const DATE_TIME = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 const DATE = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
 
