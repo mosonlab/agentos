@@ -93,6 +93,22 @@
 - [ ] `db:files-precheck` 未在根 `package.json` 暴露，只能 `npm run db:files-precheck -w @agentos/db`；破坏性迁移的预检应和 `db:migrate` 一样是根级命令，最好由 `db:migrate` 自己前置调用（2026-08-16 上线迁移时发现）
 - [ ] **第二个 control plane 指向"活库的副本"会把真实在跑的 run 工作区当孤儿清掉（含 `.git`）**。2026-08-16 批次 4 ⑤ 实测：agent 为做浏览器验证把线上 `agentos` 库克隆成 scratch 库、在 :3101 起了第二个 API；副本里这条 run 仍是 `RUNNING`、`runtimeHandle` 不属于第二个 API，于是它的 reconcile 把"孤儿"扫了，删掉 `~/.agentos/runs/<runId>/` 整个目录**包括 `.git`**，当时还没 push。根因：reconcile 的孤儿判定只看 runtimeHandle 归属，**不校验这个 API 实例是不是该 run 的主人**（无 instance id / lease）。修法上应给 run 记录归属实例并让 reconcile 只清自己的；在那之前，**任何时候都不要让第二个 control plane 连活库的副本**。agent 自救成功（按 `73d613a` 重新 clone、从会话记录重放全部后端改动、闸全绿后 push），但这是运气不是设计
 - [ ] **交付步失败会把"其实已经成功并 push 了"的 run 标成 FAILED，且 `TOOL_FAILED` 不可重试 → 整条链静默卡死**。同一次事故的第二个缺陷：agent 已把 8 个提交推到 `agentos/<taskId>/run-1`、产物也 `task_output` 持久化了，但 runner 收尾在被删的工作区里跑 `git` 拿到 `fatal: not a git repository`，run 记 `TOOL_FAILED`，任务停在 `REVIEW`，`activateChainSuccessor` 不触发，⑥ 永远不启动。**成功的判据应该是 agent 的完成信号 + 远端分支是否存在，而不是收尾 git 命令的退出码**；至少收尾失败要能识别"远端已有该分支"并降级为告警。人工解法：核对远端分支后把 ⑤ 手动置 DONE，⑥ 会正常激活（本次即如此）
+
+  **2026-08-16 升级为高价值：一晚复发 4 次，且证明触发条件只需要一次网络抖动，与那次工作区事故无关。** 四次实例：
+
+  | 任务 | 失败点 | 分类 | 工作是否幸存 |
+  |---|---|---|---|
+  | 批次 4 ⑤ | 被毁工作区里跑 `git` | `TOOL_FAILED` | 是（已 push） |
+  | 批次 1 ① | 交付期 `git` 撞 GitHub SSL | `TOOL_FAILED` | **是**（分支 `9c49e60` 已推、产出已持久化） |
+  | Board ① | **clone 阶段**撞 SSL | `TASK_FAILED` | 否（什么都没做） |
+  | Batch4Fix ② | `gh` 建 PR 时 `graphql: EOF` | `TOOL_FAILED` | **是**（1863 行已推） |
+
+  两个独立的修法，别混为一谈：
+
+  1. **网络瞬断必须进重试白名单。** 现在白名单是 `RATE_LIMITED` / `TRANSIENT_PROVIDER` / `PROTOCOL_ERROR`（`packages/api/src/execution.ts:30-36`），`SSL_ERROR_SYSCALL`、`graphql: EOF`、`unable to access` 这类全被归进不可重试的 `TOOL_FAILED`/`TASK_FAILED`。**Board ① 是纯粹的白重试案例**——clone 就失败，什么都没做，重试零风险零成本，却要人工介入。
+  2. **push 之后的交付失败根本不该把 run 标失败。** 后三次里有两次工作完整且已在远端，只是 `gh` 或收尾 `git` 赶上了网络窗口。判据应是「agent 完成信号 + 远端分支存在」，PR 没开成降级为告警并让下一步照常激活。
+
+  **代价是可量化的**：这一晚我为此做了 4 次「核远端分支 → 手动置 DONE → 写说明」，每次约 5 分钟，且每次都要人在场——**它直接摧毁无人值守运行的可行性**
 - [ ] **Agents「Capabilities」面板整体下移 3.00 CSS px**（前端收敛批次 `3c1f186` 合并后实测，未记入偏差台账）。用批次自带的截图夹具重拍 20 帧与基线逐像素比对：8 个整页最大偏差 0.232%、Connections 明暗两态**恰好为 0**、20 帧尺寸全等（无重排）；唯独 3× 开关特写帧差 5.0–5.4%，做垂直互相关后**最佳位移恰为 9px@3× = 3.00 CSS px**，对齐后残差从 306,302 掉到 52,008。开关本体（旋钮尺寸、行程、配色）与基线一致，**G2 无回归**；整页帧最佳位移均为 0，说明漂移只在 Capabilities 面板内部。3px 这个整数值指向某处 padding/border 的令牌换算，非随机渲染差。属小活，随批次 1 顺手查（那批要动 Agents 页的每工具开关）
 - [ ] **闸门消息永远关不掉：开闸和关闸用了两套判据**。2026-08-16 批次 4 实测：⑨ HUMAN PR REVIEW 早已 `DONE`（PR 五小时前就合进 master `2737113`），Inbox 里那条「审批闸门」仍是 `OPEN`、徽章长期显示 1 条待办。**开闸**在 `packages/db/src/workflow.ts:254-258`：后继步骤只要 `assigneeType !== AGENT`（人类步骤）就置 REVIEW 并 `gateQuestion(...)` 开消息，**完全不看 `approvalGate`**；**关闸**在 `packages/api/src/app.ts:1335`：`if (!before.templateId && before.approvalGate)` 才去 `updateMany({ gateTaskId, status: OPEN } → CLOSED)`。⑨ 的 `approvalGate = false`，于是关闸分支根本不进，消息永久 OPEN。**修法：关闸只认「有没有 `gateTaskId` 指向本任务的 OPEN 消息」，`approvalGate` 与 `templateId` 两个前提都该去掉**（`gateTaskId` 本身就是闸门存在的充要证据）。触发面很广——凡是不走 Inbox 按钮而用 PATCH 置 DONE、或直接在 GitHub 合 PR 收尾的路径都会漏一条，**自动委派模式下每条链必漏**，Inbox 徽章持续说谎。人工解法：对那条消息 `POST /inbox/messages/:id/decision {"decision":"approve"}`（末步无后继，`activateChainSuccessor` 是空操作，安全）
 - [ ] **`instantiateTemplate` 的 Serializable 重试预算不够，高并发 webhook 会返回 503**。批次 2.5 的 ⑦ 在一次高负载并行跑中刻画到：`concurrent webhook fires retry serialization conflicts` 返回 503，`instantiateTemplate` 耗尽了它的 5 次 Serializable 重试。**不属于批次 2.5 的改动**（所有串行干净跑均通过），⑦ 明确建议单独处理、不要塞进那批。修法方向：重试预算按冲突类型分级、或把模板实例化的写集收窄到不必 Serializable 的程度（2026-08-16 挂账）
