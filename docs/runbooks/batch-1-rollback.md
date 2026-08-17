@@ -99,15 +99,17 @@ in memory, and Foundation revisions are computed from existing prompt content.
 The implementation took the successful-enforcement branch, not the storage-only
 fallback. The real captured session under `--dangerously-skip-permissions` is in:
 
-- `spikes/cli-capabilities/samples/claude-disallowed-bash.command.txt`
+- `spikes/cli-capabilities/samples/claude-disallowed-bash.meta.json` (captured argv and working directory)
 - `spikes/cli-capabilities/samples/claude-disallowed-bash.stdout`
 - `spikes/cli-capabilities/samples/claude-disallowed-bash.stderr`
 
-`Bash` was absent from the initial tool set, ToolSearch found no replacement, and
-the shell marker was not created. Therefore the UI truthfully claims enforcement
-for all eight Claude mappings. PI enforces `BASH`, `READ`, `WRITE` and `EDIT`;
-CODEX exposes no per-tool restriction and the UI labels all eight choices as not
-enforced there.
+`Bash` was absent from the initial tool set and ToolSearch found no replacement.
+The prompt asked Claude to run `printf AGENTOS_DENY_CHECK`; it did not redirect to
+a sentinel file, so this capture makes no file-absence claim. The captured tool
+inventory and failed lookup are the evidence that the deny flag binds. Therefore
+the UI truthfully claims enforcement for all eight Claude mappings. PI enforces
+`BASH`, `READ`, `WRITE` and `EDIT`; CODEX exposes no per-tool restriction and the
+UI labels all eight choices as not enforced there.
 
 ### Chinese cron prose
 
