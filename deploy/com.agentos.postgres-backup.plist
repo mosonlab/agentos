@@ -11,7 +11,8 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>DATABASE_URL</key><string>postgresql://agentos:CHANGE_ME@localhost:5432/agentos?schema=public</string>
+    <key>PGSERVICE</key><string>agentos-backup</string>
+    <key>PGSERVICEFILE</key><string>/ABSOLUTE/PATH/TO/pg_service.conf</string>
     <key>AGENTOS_BACKUP_DIR</key><string>/Users/Shared/agentos-backups</string>
   </dict>
   <key>StartCalendarInterval</key>
