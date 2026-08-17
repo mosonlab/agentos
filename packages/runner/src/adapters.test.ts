@@ -19,7 +19,7 @@ const claim: ClaimedTask = {
     stallTimeoutMin: 10,
     maxSessionsPerTask: 3,
   },
-  agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement" },
+  agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement", disabledTools: [] },
   repo: { id: "repo-1", remoteUrl: "/repo", defaultBranch: "main", mountPath: "repo" },
   run: {
     id: "run-1",

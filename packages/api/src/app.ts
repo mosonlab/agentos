@@ -83,6 +83,13 @@ const projectFields = {
 };
 const projectInput = z.object({ ...projectFields, yamlDocument: projectFields.yamlDocument.default("") });
 const projectPatch = z.object(projectFields).partial().refine((value) => Object.keys(value).length > 0);
+/**
+ * The eight canonical tool keys. Mirrored by apps/web/src/lib/tools.ts (labels and
+ * per-runner enforcement) and packages/runner/src/adapters.ts (CLI flag names).
+ * The three lists cross workspaces and cannot import each other; each names the
+ * other two so a change here is followed there.
+ */
+const TOOL_KEYS = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"] as const;
 const agentFields = {
   environmentId: id,
   name: z.string().trim().min(1).max(80),
@@ -92,11 +99,17 @@ const agentFields = {
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
   inboxAccess: z.boolean(),
+  // Denied set, not allowed set: omitting it keeps the column's empty default.
+  disabledTools: z.array(z.enum(TOOL_KEYS)).max(TOOL_KEYS.length),
 };
 const agentInput = z.object({
   ...agentFields,
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
+  // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
+  // optional key would spread `undefined` into `agent.create`. The empty array is
+  // byte-identical to the column default, so omission still means "no restriction".
+  disabledTools: agentFields.disabledTools.default([]),
 });
 const agentPatch = z.object(agentFields).partial().refine((value) => Object.keys(value).length > 0);
 const repoInput = z.object({

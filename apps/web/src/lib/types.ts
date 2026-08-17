@@ -48,6 +48,8 @@ export type Agent = {
   rolePrompt: string;
   runnerPreference: RunnerPreference;
   inboxAccess: boolean;
+  /** Denied tools, not allowed ones. Empty is the default and means "no restriction". */
+  disabledTools: string[];
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;

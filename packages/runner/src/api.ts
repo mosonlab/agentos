@@ -31,6 +31,12 @@ export type ClaimedTask = {
     model: string;
     foundationalPrompt: string;
     rolePrompt: string;
+    /**
+     * Denied tools, read at claim time. The claim handler returns the agent row
+     * whole (packages/api/src/app.ts), so this arrives for free once the column
+     * exists — this hand-written mirror is the only thing that needed updating.
+     */
+    disabledTools: string[];
   };
   repo: {
     id: string;
