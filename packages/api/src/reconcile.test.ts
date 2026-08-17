@@ -312,7 +312,9 @@ test("lease-loss requeue for an archived agent becomes visible through the sweep
         create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
       },
       session: { updateMany: async () => ({ count: 1 }) },
-      task: { update: async () => ({}) },
+      // The requeue loads the task to decide whether to recompute a chain
+      // step's branches; a null row keeps the lost run's fields verbatim.
+      task: { update: async () => ({}), findUnique: async () => null },
       taskActivity: { create: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
     }),

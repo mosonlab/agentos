@@ -148,7 +148,9 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       },
       inboxMessage: { updateMany: async () => { closed = true; return { count: 1 }; } },
       taskActivity: { create: async () => ({}) },
-      run: { create: async () => ({ id: "run-1" }) },
+      // findFirst answers resolveRunBranches' publication query: nothing in this
+      // chain has pushed the shared branch, so the successor bases on the default.
+      run: { create: async () => ({ id: "run-1" }), findFirst: async () => null },
     };
     const database = {
       task: { findUniqueOrThrow: async () => before },
@@ -392,7 +394,9 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
         create: async () => ({}),
       },
       session: { updateMany: async () => ({}) },
-      task: { update: async () => ({}) },
+      // The requeue loads the task to decide whether to recompute a chain
+      // step's branches; a null row keeps the lost run's fields verbatim.
+      task: { update: async () => ({}), findUnique: async () => null },
       taskActivity: { create: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
     }),
