@@ -21,7 +21,6 @@ export const I18N_ALLOWLIST: I18nAllowlistEntry[] = [
   { file: "pages/Connections.tsx", text: "POST /agents/:agentId/repos/:repoId/access", why: "HTTP endpoint identifier" },
   { file: "pages/Goals.tsx", text: "/path/to/shared/folder", why: "Filesystem path example" },
   { file: "pages/Inbox.tsx", text: "GET /inbox/messages", why: "HTTP endpoint identifier" },
-  { file: "pages/Projects.tsx", text: "MMO Game", why: "Project name example" },
   { file: "pages/Projects.tsx", text: "mmo-game", why: "Project slug example" },
   { file: "pages/Secrets.tsx", text: "GITHUB_PAT_VIBEVILLE", why: "Environment variable example" },
   { file: "pages/TaskDetail.tsx", text: "base → head", why: "Git comparison notation" },
@@ -29,4 +28,10 @@ export const I18N_ALLOWLIST: I18nAllowlistEntry[] = [
   { file: "pages/Triggers.tsx", text: "X-AgentOS-Delivery-Id", why: "HTTP header identifier" },
   { file: "pages/Triggers.tsx", text: "issue.title", why: "Payload path example" },
   { file: "components/new-task-panel.tsx", text: "feat/…", why: "Git branch example" },
+  { file: "lib/models.ts", text: "Claude Opus 5", why: "Model product name" },
+  { file: "lib/models.ts", text: "Claude Sonnet 5", why: "Model product name" },
+  { file: "lib/models.ts", text: "Claude Haiku 4.5", why: "Model product name" },
+  { file: "lib/models.ts", text: "GPT-5.6 Sol (codex)", why: "Model product name" },
+  { file: "lib/models.ts", text: "GPT-5.6 Luna (codex)", why: "Model product name" },
+  { file: "lib/models.ts", text: "GPT-5.6 Luna (pi)", why: "Model product name" },
 ];

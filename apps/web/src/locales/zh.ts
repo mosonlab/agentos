@@ -302,6 +302,7 @@ export const zh = {
   "projects.details.wallClock": "总时长上限",
   "projects.empty": "还没有项目。创建一个来划定 agent 与任务的范围。",
   "projects.field.name": "名称",
+  "projects.field.name.placeholder": "MMO 游戏",
   "projects.field.slug.hint": "小写、短横线分隔。CLI 与 YAML 同步会用到。",
   "projects.field.slug.label": "Slug",
   "projects.head.subtitle": "划定 agent、仓库、任务与运行范围的工作区",

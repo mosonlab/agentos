@@ -63,7 +63,7 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
             `min-h-[60px]`), only three carried a `placeholder`, and only two
             selects carry `disabled`. The full audit is in
             docs/plans/selector-destinations.md §15 row 5. */}
-        <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
+        <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder={t("projects.field.name.placeholder")} />
       </Field>
       <Field label={t("projects.field.slug.label")} hint={t("projects.field.slug.hint")}>
         <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={effectiveSlug} onChange={(event) => setSlug(slugify(event.target.value))} placeholder="mmo-game" />

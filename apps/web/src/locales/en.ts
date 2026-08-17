@@ -305,6 +305,7 @@ export const en = {
   "projects.details.wallClock": "Wall-clock limit",
   "projects.empty": "No projects yet. Create one to scope agents and tasks.",
   "projects.field.name": "Name",
+  "projects.field.name.placeholder": "MMO Game",
   "projects.field.slug.hint": "Lower-case, dash separated. Used by the CLI and YAML sync.",
   "projects.field.slug.label": "Slug",
   "projects.head.subtitle": "Workspaces that scope agents, repos, tasks and runs",
