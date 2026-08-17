@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { RunStatus, RunnerKind, type PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 import { createRunnerRegistry, RUNNER_MAX_ENTRIES } from "./runners.js";
 
 test("runner online windows use the 30s floor and three poll intervals", () => {
@@ -109,6 +109,22 @@ test("GET /runners is operator-only, includes all backends, and ages a 204 claim
     assert.deepEqual(body.backends.map((backend) => backend.runner).sort(), Object.values(RunnerKind).sort());
     assert.equal(body.backends.find((backend) => backend.runner === RunnerKind.CLAUDE)?.cliVersion, "1.2.3");
     assert.equal(body.backends.find((backend) => backend.runner === RunnerKind.CODEX)?.cliVersion, null);
+  });
+});
+
+test("RP-RUNNERS-TWO keeps two runner daemons on one API workspace root without runner ownership", async () => {
+  await withTokens(async () => {
+    const app = createApp(makeDatabase());
+    const workspaceRoot = "/isolated/shared-runner-root";
+    assert.equal((await runnerRequest(app, { runnerId: "runner-a", workspaceRoot })).status, 204);
+    assert.equal((await runnerRequest(app, { runnerId: "runner-b", workspaceRoot })).status, 204);
+    const response = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
+    const body = await response.json() as { total: number; daemons: Array<{ runnerId: string; workspaceRoot: string | null }> };
+    assert.equal(body.total, 2);
+    assert.deepEqual(body.daemons.map(({ runnerId, workspaceRoot: root }) => ({ runnerId, root })), [
+      { runnerId: "runner-a", root: workspaceRoot },
+      { runnerId: "runner-b", root: workspaceRoot },
+    ]);
   });
 });
 
