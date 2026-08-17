@@ -2514,6 +2514,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // runner's outer catch would record a successful run as failed and delete
     // its workspace unpushed. These columns are a derived cache that the next
     // FINAL_OUTPUT or `db:backfill-session-usage` repairs (db/src/usage.ts).
+    // `recomputeSessionUsage` now waits on a per-session advisory lock, so a
+    // lock-wait timeout is one more throw this catch absorbs — same repair path.
     if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
       try {
         await recomputeSessionUsage(db, run.session.id);

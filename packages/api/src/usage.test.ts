@@ -42,6 +42,13 @@ const emptyColumns = (): SessionColumns =>
 const stubDatabase = (payloads: unknown[], columns: SessionColumns) => {
   const updates: SessionColumns[] = [];
   const database = {
+    // `recomputeSessionUsage` runs inside one interactive transaction that takes
+    // an advisory lock. The stub runs the callback against itself and answers
+    // the two raw statements inertly: a unit test proves the derivation, and
+    // `usage.dbtest.ts` proves the lock against a real PostgreSQL.
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
+    $executeRawUnsafe: async () => 0,
+    $queryRaw: async () => [],
     sessionEvent: { findMany: async () => payloads.map((payload) => ({ payload })) },
     session: {
       findUnique: async () => columns,
@@ -166,7 +173,10 @@ test("recomputeSessionUsage repairs a session whose second attempt's write was l
 });
 
 test("recomputeSessionUsage does nothing when the session row is gone", async () => {
-  const database = {
+  const database: PrismaClient = {
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
+    $executeRawUnsafe: async () => 0,
+    $queryRaw: async () => [],
     sessionEvent: { findMany: async () => [{ payload: CLAUDE_RESULT }] },
     session: { findUnique: async () => null, update: async () => assert.fail("must not write") },
   } as unknown as PrismaClient;

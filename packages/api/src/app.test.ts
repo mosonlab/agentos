@@ -1090,19 +1090,28 @@ const ingestDatabase = (
   updates: Array<Record<string, unknown>>,
   finalOutputRows: Array<{ payload: unknown }>,
   onUpdate?: () => never,
-): PrismaClient => ({
-  run: {
-    findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
-  },
-  sessionEvent: {
-    createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
-    findMany: async () => finalOutputRows,
-  },
-  session: {
-    findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
-    update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
-  },
-} as unknown as PrismaClient);
+): PrismaClient => {
+  const database: Record<string, unknown> = {
+    // `recomputeSessionUsage` now opens one interactive transaction and takes an
+    // advisory lock inside it. These three answer that scaffolding inertly; the
+    // lock itself is proven against a real PostgreSQL in `usage.dbtest.ts`.
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
+    $executeRawUnsafe: async () => 0,
+    $queryRaw: async () => [],
+    run: {
+      findFirst: async () => ({ id: "run-1", session: { id: "ses-1", providerConversationId: "conv-1" } }),
+    },
+    sessionEvent: {
+      createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }),
+      findMany: async () => finalOutputRows,
+    },
+    session: {
+      findUnique: async () => ({ inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null, costUsd: null }),
+      update: async (args: Record<string, unknown>) => { onUpdate?.(); updates.push(args); return {}; },
+    },
+  };
+  return database as unknown as PrismaClient;
+};
 
 const postEvents = async (database: PrismaClient, types: string[]): Promise<Response> =>
   createApp(database).request("/runner/runs/run-1/events", {

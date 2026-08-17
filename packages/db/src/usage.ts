@@ -254,6 +254,34 @@ const sameColumns = (
     : derived.costUsd !== null && current.costUsd.equals(derived.costUsd));
 
 /**
+ * Advisory-lock class reserved for session usage recomputes. Registry of the
+ * classes used anywhere in this repo — keep this list, pick a fresh number, do
+ * not reuse:
+ *   20260816 — session usage recompute (this module).
+ * Batch 2.5's task exclusion uses a `SELECT … FOR UPDATE` on the Task row
+ * (`workflow.ts:82`), not an advisory lock, so the two schemes cannot collide.
+ */
+export const SESSION_USAGE_LOCK_CLASS = 20260816;
+
+/**
+ * Deterministic 32-bit FNV-1a of a session id, in signed int4 range so it can be
+ * the second argument of `pg_advisory_xact_lock(int4, int4)`. Hashed here rather
+ * than by PostgreSQL's `hashtext()`, which is undocumented, is not promised
+ * stable across major versions, and could not be unit-tested.
+ *
+ * Collisions are harmless: two unrelated sessions serialise against each other
+ * for the length of one recompute. Correctness is unaffected; only concurrency
+ * is, and the contended population is tiny — one runner per session.
+ */
+export const sessionUsageLockKey = (sessionId: string): number => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < sessionId.length; index += 1) {
+    hash = Math.imul(hash ^ sessionId.charCodeAt(index), 0x01000193);
+  }
+  return hash | 0;
+};
+
+/**
  * Recompute a session's derived usage columns from its stored `FINAL_OUTPUT`
  * events and write absolute values. Returns true when it actually wrote.
  *
@@ -264,22 +292,46 @@ const sameColumns = (
  * between `createMany` and here is repaired by the next ingest or by the
  * backfill, and no NULL column is ever used in arithmetic.
  *
- * Concurrency: a session has exactly one runner process posting events
- * sequentially, so this is single-writer in practice; two concurrent callers
- * would still converge because both compute from the same table.
+ * Concurrency: concurrent callers are serialised by a transaction-scoped
+ * advisory lock keyed by session id. They do NOT converge on their own — that
+ * claim, which this comment used to make, is false. Each caller writes an
+ * ABSOLUTE value computed from the snapshot it read, so a caller that read at
+ * T1 can commit after a caller that read at T2 > T1 and leave the older total
+ * stored; `sameColumns` then sees a self-consistent row and suppresses every
+ * later repair, making the stale value permanent. Serialising the read, the
+ * compare and the write is a correctness requirement, not a performance note.
  */
-export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string): Promise<boolean> => {
-  const rows = await db.sessionEvent.findMany({
-    where: { sessionId, type: "FINAL_OUTPUT" },
-    orderBy: { seq: "asc" },
-    select: { payload: true },
+export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string): Promise<boolean> =>
+  db.$transaction(async (tx) => {
+    // The timeout must be installed BEFORE the wait it is meant to bound.
+    await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '3s'");
+    // The `::text AS locked` cast is LOAD-BEARING, not style. pg_advisory_xact_lock
+    // returns `void`, and Prisma cannot deserialize a void column: the bare form
+    // fails with P2010 "Failed to deserialize column of type 'void'" on EVERY call,
+    // and the ingest path swallows that throw, so nothing would ever be cached.
+    // Do not "simplify" it away — usage.dbtest.ts test 0 is what catches it.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}::int, ${sessionUsageLockKey(sessionId)}::int)::text AS locked`;
+
+    const rows = await tx.sessionEvent.findMany({
+      where: { sessionId, type: "FINAL_OUTPUT" },
+      orderBy: { seq: "asc" },
+      select: { payload: true },
+    });
+    const derived = deriveUsageColumns(sumUsage(rows.map((row) => extractUsage(row.payload))));
+    const current = await tx.session.findUnique({
+      where: { id: sessionId },
+      select: { inputTokens: true, outputTokens: true, cachedInputTokens: true, totalTokens: true, costUsd: true },
+    });
+    if (!current || sameColumns(current, derived)) return false;
+    await tx.session.update({ where: { id: sessionId }, data: derived });
+    return true;
+  }, {
+    // Load-bearing, not decoration. Under RepeatableRead the snapshot is taken by
+    // the first data-reading statement — which is the SELECT that ACQUIRES the
+    // lock, i.e. before it is granted. A queued caller would then read the
+    // pre-lock snapshot and write a stale absolute value with the lock held: the
+    // fix defeated by its own lock.
+    isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    timeout: 15_000,   // backstop above lock_timeout + the work, so a contended
+    maxWait: 5_000,    // caller fails as 55P03 rather than as an opaque P2028
   });
-  const derived = deriveUsageColumns(sumUsage(rows.map((row) => extractUsage(row.payload))));
-  const current = await db.session.findUnique({
-    where: { id: sessionId },
-    select: { inputTokens: true, outputTokens: true, cachedInputTokens: true, totalTokens: true, costUsd: true },
-  });
-  if (!current || sameColumns(current, derived)) return false;
-  await db.session.update({ where: { id: sessionId }, data: derived });
-  return true;
-};
