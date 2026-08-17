@@ -60,6 +60,16 @@ export const runnerSummary = (payload: RunnersResponse | null, now: Date): Runne
 const diskLabel = (bytes: number | null): string => bytes === null ? "—" : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 const runnerDot = (tone: RunnerSummary["tone"]): string | undefined => tone === "green" ? DOT_TONE.on : tone === "amber" ? DOT_TONE.amber : undefined;
 
+export const RunnerStateIndicator = ({ state, tone }: { state: RunnerSummary["state"]; tone: RunnerSummary["tone"] }): ReactNode => {
+  const t = useT();
+  return (
+    <span data-runner-state={state} className="inline-flex items-center gap-[7px]">
+      <span className={cn(DOT, runnerDot(tone))} />
+      <span>{t(`runner.state.${state}`)}</span>
+    </span>
+  );
+};
+
 export const RunnerStatusDetails = ({ payload, healthProblem = false, runnersProblem = false }: {
   payload: RunnersResponse | null;
   healthProblem?: boolean;

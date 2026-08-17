@@ -24,6 +24,15 @@ const renderSettings = (health: Poll<Health> = idle<Health>()): string => render
   <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>()} health={health} /></LocaleProvider></ThemeProvider>,
 );
 
+const runnerPayload = (diskFreeBytes = 1024 ** 3): RunnersResponse => ({
+  checkedAt: new Date().toISOString(), online: 1, total: 1,
+  daemons: [{
+    runnerId: "runner-a", lastSeenAt: new Date().toISOString(), online: true, busy: true, activeRuns: 1,
+    daemonVersion: "0.0.0", diskFreeBytes, pollIntervalMs: 5_000, workspaceRoot: "/tmp/runs",
+  }],
+  backends: [],
+});
+
 test("settings and secrets resolve to distinct pages", () => {
   const settings = ROUTES.find((route) => route.pattern === "/settings");
   const secrets = ROUTES.find((route) => route.pattern === "/secrets");
@@ -52,6 +61,20 @@ test("a failed health poll keeps and renders its earlier success time", () => {
   }));
   assert.match(markup, /unreachable/);
   assert.match(markup, /Last successful poll[\s\S]*>(?:just )?now</);
+});
+
+test("the Settings runner card emphasizes online, Busy, and low disk independently", () => {
+  const low = renderToStaticMarkup(
+    <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>({ data: runnerPayload() })} health={idle<Health>()} /></LocaleProvider></ThemeProvider>,
+  );
+  assert.match(low, /data-runner-state="running"[\s\S]*?bg-\[color:var\(--status-green-fg\)\][\s\S]*?>Running</u);
+  assert.match(low, /data-runner-busy=""[\s\S]*?>Busy</u);
+  assert.match(low, /data-low-disk="" class="text-destructive">1\.0 GB/u);
+
+  const high = renderToStaticMarkup(
+    <ThemeProvider><LocaleProvider initialLocale="en"><SettingsContent runners={idle<RunnersResponse>({ data: runnerPayload(8 * 1024 ** 3) })} health={idle<Health>()} /></LocaleProvider></ThemeProvider>,
+  );
+  assert.doesNotMatch(high, /data-low-disk=""/u);
 });
 
 test("appearance controls share locale and theme stores with the sidebar", async () => {

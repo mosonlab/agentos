@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import { useRunners } from "../components/runner-status";
+import { runnerSummary, RunnerStateIndicator, useRunners } from "../components/runner-status";
 import {
   Card, Field, HINT, KeyValue, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, Page, Segmented,
 } from "../components/ui";
@@ -10,23 +10,29 @@ import type { Poll } from "../lib/hooks";
 import { useLocale, useT } from "../lib/i18n";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import type { BackendStatus, DaemonStatus, Health, RunnerKind, RunnersResponse } from "../lib/types";
+import { cn } from "../lib/utils";
 
 const RUNNERS: RunnerKind[] = ["CLAUDE", "CODEX", "PI"];
 const none = (value: string | null | undefined): string => value && value.length > 0 ? value : "—";
 const disk = (value: number | null): string => value === null ? "—" : `${(value / 1024 ** 3).toFixed(1)} GB`;
 
-const DaemonDetails = ({ daemon }: { daemon: DaemonStatus | null }): ReactNode => {
+const DaemonDetails = ({ daemon, stale }: { daemon: DaemonStatus | null; stale: boolean }): ReactNode => {
   const t = useT();
-  const state = daemon === null ? "—" : t(daemon.online ? (daemon.busy ? "runner.state.busy" : "runner.state.running") : "runner.state.offline");
+  const state = stale ? "unknown" : daemon?.online ? "running" : "offline";
+  const tone = state === "running" ? "green" : "grey";
+  const lowDisk = daemon?.diskFreeBytes !== null && daemon?.diskFreeBytes !== undefined && daemon.diskFreeBytes < 2 * 1024 ** 3;
   return (
     <div className="grid gap-[10px] border-t border-border pt-[12px] first:border-0 first:pt-0">
-      <div className="font-bold">{daemon?.runnerId ?? t("settings.runner.daemon")}</div>
+      <div className="flex items-center gap-[7px] font-bold">
+        <span>{daemon?.runnerId ?? t("settings.runner.daemon")}</span>
+        {!stale && daemon?.online && daemon.busy ? <span data-runner-busy="" className="rounded-md bg-accent px-[5px] py-[1px] text-[10px] font-normal">{t("runner.state.busy")}</span> : null}
+      </div>
       <KeyValue columns={3} items={[
-        { k: t("settings.runner.state"), v: state },
+        { k: t("settings.runner.state"), v: daemon === null ? "—" : <RunnerStateIndicator state={state} tone={tone} /> },
         { k: t("settings.runner.lastSeen"), v: daemon ? timeAgo(daemon.lastSeenAt) : "—" },
         { k: t("settings.runner.activeRuns"), v: daemon ? daemon.activeRuns : "—" },
         { k: t("settings.runner.version"), v: none(daemon?.daemonVersion) },
-        { k: t("settings.runner.disk"), v: daemon ? disk(daemon.diskFreeBytes) : "—" },
+        { k: t("settings.runner.disk"), v: daemon ? <span data-low-disk={lowDisk ? "" : undefined} className={cn(lowDisk && "text-destructive")}>{disk(daemon.diskFreeBytes)}</span> : "—" },
         { k: t("settings.runner.poll"), v: daemon?.pollIntervalMs ? `${daemon.pollIntervalMs} ms` : "—" },
         { k: t("settings.runner.workspace"), v: none(daemon?.workspaceRoot) },
       ]} />
@@ -51,11 +57,13 @@ const BackendDetails = ({ backend, runner }: { backend: BackendStatus | null; ru
   );
 };
 
-export const SettingsContent = ({ runners, health }: { runners: Poll<RunnersResponse>; health: Poll<Health> }): ReactNode => {
+export const SettingsContent = ({ runners, health, freshnessNow = Date.now() }: { runners: Poll<RunnersResponse>; health: Poll<Health>; freshnessNow?: number }): ReactNode => {
   const t = useT();
   const { locale, setLocale } = useLocale();
   const { mode, setMode } = useTheme();
   const daemons = [...(runners.data?.daemons ?? [])].sort((left, right) => left.runnerId.localeCompare(right.runnerId));
+  const summary = runners.error ? { state: "unknown" } as const : runnerSummary(runners.data, new Date(freshnessNow));
+  const stale = summary.state === "unknown";
   const healthState = health.error ? t("settings.control.unreachable") : health.data ? t(health.data.status === "ok" ? "settings.control.ok" : "settings.control.degraded") : "—";
   return (
     <Page>
@@ -88,7 +96,7 @@ export const SettingsContent = ({ runners, health }: { runners: Poll<RunnersResp
             <div className={HINT}>{t("settings.runner.seedWarning")}</div>
             <div className={HINT}>{t("settings.runner.restartWarning")}</div>
             <div className="grid gap-[14px]">
-              {daemons.length > 0 ? daemons.map((daemon) => <DaemonDetails key={daemon.runnerId} daemon={daemon} />) : <DaemonDetails daemon={null} />}
+              {daemons.length > 0 ? daemons.map((daemon) => <DaemonDetails key={daemon.runnerId} daemon={daemon} stale={stale} />) : <DaemonDetails daemon={null} stale={stale} />}
             </div>
             <div className="grid gap-[14px] border-t border-border pt-[14px]">
               {RUNNERS.map((runner) => <BackendDetails key={runner} runner={runner} backend={runners.data?.backends.find((item) => item.runner === runner) ?? null} />)}
@@ -108,6 +116,6 @@ export const SettingsContent = ({ runners, health }: { runners: Poll<RunnersResp
 };
 
 export const SettingsPage = (): ReactNode => {
-  const { runners, health } = useRunners();
-  return <SettingsContent runners={runners} health={health} />;
+  const { runners, health, freshnessNow } = useRunners();
+  return <SettingsContent runners={runners} health={health} freshnessNow={freshnessNow} />;
 };
