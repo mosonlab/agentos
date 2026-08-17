@@ -48,7 +48,13 @@ const parseError = async (response: Response, path: string): Promise<ApiError> =
   return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`);
 };
 
-const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+/** The response body as text, before anyone decides to parse it.
+ *
+ *  `usePoll` compares this against the body it already holds: `GET /tasks` on a
+ *  full board is ~1.3 MB, and a poll that returns the identical bytes should
+ *  cost a string comparison rather than a `JSON.parse` of 1.3 MB followed by a
+ *  re-render of everything the parse produced. */
+const requestText = async (path: string, init?: RequestInit): Promise<string> => {
   let response: Response;
   try {
     response = await fetch(`${apiBase}${path}`, {
@@ -63,13 +69,18 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
     throw new ApiError(0, path, reason instanceof Error ? reason.message : "Network error");
   }
   if (!response.ok) throw await parseError(response, path);
-  if (response.status === 204) return undefined as T;
-  const text = await response.text();
+  if (response.status === 204) return "";
+  return response.text();
+};
+
+const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  const text = await requestText(path, init);
   return (text.length > 0 ? (JSON.parse(text) as T) : (undefined as T));
 };
 
 export const api = {
   get: <T>(path: string): Promise<T> => request<T>(path),
+  getText: (path: string): Promise<string> => requestText(path),
   post: <T>(path: string, body?: unknown): Promise<T> =>
     request<T>(path, { method: "POST", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
   patch: <T>(path: string, body: unknown): Promise<T> => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
