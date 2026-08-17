@@ -91,5 +91,8 @@ test("the editor holds the raw expression and timezone, and previews without val
   const bad = renderToStaticMarkup(<CronEditor task={task({ cron: "nope" })} onSaved={() => undefined} />);
   assert.match(bad, /value="nope"/);
   assert.doesNotMatch(bad, /Error/);
-  assert.doesNotMatch(bad, /invalid/i);
+  // Text nodes only. Since batch 1 the Input carries shadcn v4's `aria-invalid:*`
+  // classes, so scanning the whole markup for "invalid" would match styling
+  // rather than the copy this assertion is about.
+  assert.doesNotMatch(bad.replace(/<[^>]*>/g, " "), /invalid/i);
 });
