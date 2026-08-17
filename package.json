@@ -13,6 +13,8 @@
     "build": "npm run build -w @agentos/db && npm run build -w @agentos/api && npm run build -w @agentos/runner && npm run build -w @agentos/inbox && npm run build -w @agentos/cli && npm run build -w @agentos/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "snapshot:scan": "node scripts/public-snapshot-scan.mjs",
+    "test:snapshot-scan": "node --test scripts/public-snapshot-scan.test.mjs",
     "test:db": "npm run test:db -w @agentos/api",
     "dev:api": "npm run dev -w @agentos/api",
     "dev:web": "npm run dev -w @agentos/web",

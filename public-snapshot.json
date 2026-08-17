@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 2,
+  "source": "git-tracked-files",
+  "defaultDisposition": "blocker",
+  "include": [
+    { "glob": ".env.example", "purpose": "safe configuration template" },
+    { "glob": ".gitignore", "purpose": "source hygiene" },
+    { "glob": "AGENTS.md", "purpose": "repository agent instructions" },
+    { "glob": "LICENSE", "purpose": "license grant" },
+    { "glob": "README.md", "purpose": "project documentation" },
+    { "glob": "agents/*.md", "purpose": "reviewed agent documentation" },
+    { "glob": "agents/roles/*.md", "purpose": "reviewed agent role definitions" },
+    { "glob": "agents/skills/*.md", "purpose": "reviewed agent skill definitions" },
+    { "glob": "apps/web/components.json", "purpose": "web component configuration" },
+    { "glob": "apps/web/index.html", "purpose": "web application entry document" },
+    { "glob": "apps/web/package.json", "purpose": "web package definition" },
+    { "glob": "apps/web/src/**/*.css", "purpose": "web styles" },
+    { "glob": "apps/web/src/**/*.ts", "purpose": "web TypeScript source and tests" },
+    { "glob": "apps/web/src/**/*.tsx", "purpose": "web TSX source and tests" },
+    { "glob": "apps/web/tsconfig.app.json", "purpose": "web TypeScript configuration" },
+    { "glob": "apps/web/tsconfig.json", "purpose": "web TypeScript configuration" },
+    { "glob": "apps/web/tsconfig.node.json", "purpose": "web tooling TypeScript configuration" },
+    { "glob": "apps/web/vite.config.ts", "purpose": "web build configuration" },
+    { "glob": "docker-compose.yml", "purpose": "local development services" },
+    { "glob": "docs/governance/task-routing-v1.md", "purpose": "task routing governance" },
+    { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
+    { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
+    { "glob": "package.json", "purpose": "workspace definition" },
+    { "glob": "packages/api/package.json", "purpose": "API package definition" },
+    { "glob": "packages/api/src/**/*.ts", "purpose": "API TypeScript source and tests" },
+    { "glob": "packages/api/tsconfig.json", "purpose": "API TypeScript configuration" },
+    { "glob": "packages/cli/package.json", "purpose": "CLI package definition" },
+    { "glob": "packages/cli/src/**/*.ts", "purpose": "CLI TypeScript source" },
+    { "glob": "packages/cli/tsconfig.json", "purpose": "CLI TypeScript configuration" },
+    { "glob": "packages/db/package.json", "purpose": "database package definition" },
+    { "glob": "packages/db/prisma/**/*.sql", "purpose": "reviewed database migrations" },
+    { "glob": "packages/db/prisma/**/*.toml", "purpose": "Prisma migration configuration" },
+    { "glob": "packages/db/prisma/**/*.ts", "purpose": "database maintenance source" },
+    { "glob": "packages/db/prisma/schema.prisma", "purpose": "database schema" },
+    { "glob": "packages/db/scripts/**/*.mjs", "purpose": "database verification scripts" },
+    { "glob": "packages/db/src/**/*.ts", "purpose": "database TypeScript source" },
+    { "glob": "packages/db/tsconfig.json", "purpose": "database TypeScript configuration" },
+    { "glob": "packages/inbox/package.json", "purpose": "Inbox package definition" },
+    { "glob": "packages/inbox/src/**/*.ts", "purpose": "Inbox TypeScript source and tests" },
+    { "glob": "packages/inbox/tsconfig.json", "purpose": "Inbox TypeScript configuration" },
+    { "glob": "packages/runner/assets/**/*.ts", "purpose": "runner extension source" },
+    { "glob": "packages/runner/package.json", "purpose": "runner package definition" },
+    { "glob": "packages/runner/src/**/*.ts", "purpose": "runner TypeScript source and tests" },
+    { "glob": "packages/runner/tsconfig.json", "purpose": "runner TypeScript configuration" },
+    { "glob": "public-snapshot.json", "purpose": "closed snapshot scope" },
+    { "glob": "scripts/public-snapshot-scan.mjs", "purpose": "redacted safety scan" },
+    { "glob": "scripts/public-snapshot-scan.test.mjs", "purpose": "scanner regression tests" },
+    { "glob": "tsconfig.base.json", "purpose": "shared TypeScript configuration" }
+  ],
+  "deny": [
+    { "glob": "**/private/**", "category": "internal-only-artifact", "reason": "private path classes are closed by default repository-wide" },
+    { "glob": "**/.private/**", "category": "internal-only-artifact", "reason": "private path classes are closed by default repository-wide" },
+    { "glob": "**/generated/**", "category": "generated-runtime-data", "reason": "generated path classes are closed by default repository-wide" },
+    { "glob": "**/coverage/**", "category": "generated-runtime-data", "reason": "coverage output is generated data and closed by default repository-wide" },
+    { "glob": "**/dump/**", "category": "generated-runtime-data", "reason": "dump output is runtime data and closed by default repository-wide" },
+    { "glob": "**/dumps/**", "category": "generated-runtime-data", "reason": "dump output is runtime data and closed by default repository-wide" },
+    { "glob": "**/capture/**", "category": "generated-runtime-data", "reason": "captured output is runtime data and closed by default repository-wide" },
+    { "glob": "**/captures/**", "category": "generated-runtime-data", "reason": "captured output is runtime data and closed by default repository-wide" },
+    { "glob": "**/runtime/**", "category": "generated-runtime-data", "reason": "runtime path classes are closed by default repository-wide" },
+    { "glob": "**/artifacts/**", "category": "generated-runtime-data", "reason": "generated artifacts are closed by default repository-wide" },
+    { "glob": "**/dist/**", "category": "generated-runtime-data", "reason": "generated build output is closed by default repository-wide" },
+    { "glob": "**/build/**", "category": "generated-runtime-data", "reason": "generated build output is closed by default repository-wide" },
+    { "glob": "**/node_modules/**", "category": "generated-runtime-data", "reason": "installed dependencies are closed by default repository-wide" },
+    { "glob": "**/.cache/**", "category": "generated-runtime-data", "reason": "generated cache data is closed by default repository-wide" },
+    { "glob": "**/*.dump", "category": "generated-runtime-data", "reason": "dump output is runtime data and closed by default repository-wide" },
+    { "glob": "**/*.log", "category": "generated-runtime-data", "reason": "runtime logs are closed by default repository-wide" },
+    { "glob": "**/*.pid", "category": "generated-runtime-data", "reason": "runtime process data is closed by default repository-wide" },
+    { "glob": "**/*.stderr", "category": "generated-runtime-data", "reason": "captured stderr is runtime data and closed by default repository-wide" },
+    { "glob": "**/*.stdout", "category": "generated-runtime-data", "reason": "captured stdout is runtime data and closed by default repository-wide" }
+  ],
+  "exclude": [
+    {
+      "glob": "BLUEPRINT.md",
+      "disposition": "later-release-follow-up",
+      "reason": "private upstream product requirements require a separate publication decision"
+    },
+    {
+      "glob": "DECISIONS.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal decision history requires a separate publication decision"
+    },
+    {
+      "glob": "GRILLING-STATE.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal planning state is not needed to build or run the product"
+    },
+    {
+      "glob": "deploy/**",
+      "disposition": "later-release-follow-up",
+      "reason": "host-specific deployment material requires environment and path review"
+    },
+    {
+      "glob": "design-reference/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal design references and image provenance require separate review"
+    },
+    {
+      "glob": "docs/BACKLOG*.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal backlog material is outside the first clean snapshot"
+    },
+    {
+      "glob": "docs/briefs/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal implementation briefs require separate publication review"
+    },
+    {
+      "glob": "docs/merge-notes/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal merge records are not needed to build or run the product"
+    },
+    {
+      "glob": "docs/phase1-verify.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal phase verification material requires separate publication review"
+    },
+    {
+      "glob": "docs/plans/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal plans and generated baseline images require separate review"
+    },
+    {
+      "glob": "docs/reference/**",
+      "disposition": "later-release-follow-up",
+      "reason": "third-party research records and provenance require separate review"
+    },
+    {
+      "glob": "docs/reviews/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal review records require a separate publication decision"
+    },
+    {
+      "glob": "docs/runbooks/**",
+      "disposition": "later-release-follow-up",
+      "reason": "production and operator runbooks require environment review"
+    },
+    {
+      "glob": "docs/specs/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal product specifications require a separate publication decision"
+    },
+    {
+      "glob": "docs/wiki/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal implementation wiki material requires separate publication review"
+    },
+    {
+      "glob": "scripts/watch-chains.py",
+      "disposition": "later-release-follow-up",
+      "reason": "private operations helper is outside the product runtime"
+    },
+    {
+      "glob": "spikes/**",
+      "disposition": "later-release-follow-up",
+      "reason": "experiments and captured CLI runtime output are not release source"
+    }
+  ],
+  "approvedFindings": [
+    {
+      "category": "credential-placeholder",
+      "glob": ".env.example",
+      "reason": "documented empty or non-secret development placeholders"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": ".env.example",
+      "reason": "documented agentrunner service-account path, not a private user identity"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": "apps/web/src/tests/sessions.test.tsx",
+      "reason": "synthetic file-path fixtures used by rendering tests"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/testdb.ts",
+      "reason": "localhost-only test database connection fixture"
+    }
+  ],
+  "generatedRuntimePatterns": [
+    "docs/plans/baseline-screenshots/**",
+    "spikes/**/events/**",
+    "spikes/**/*.meta.json",
+    "spikes/**/*.stderr",
+    "spikes/**/*.stdout"
+  ]
+}
