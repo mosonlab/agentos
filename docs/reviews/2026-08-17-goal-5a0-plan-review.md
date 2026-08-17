@@ -72,3 +72,77 @@ None in round 2. Nothing to adopt or decline.
 ### Consequential edits beyond the two findings
 
 Only what the fixes forced: Step 1's files/verification grew to cover the exclusion-protocol symbol map, the Inbox overlap inventory, and the merged migration-tail proof; Step 4's items were renumbered 3–8 after the lock-order expansion split one item into four; Step 5.5, Step 8.4, Step 12's file list and closing verification, Step 14.5, and Step 15.3 gained the matching evidence sentences; the requirement-to-step coverage table gained four rows; the disposition ledger was split into an append-only round 1 and round 2.
+
+## Round-3 disposition
+
+Round 3. This section is appended, not a rewrite: rounds 1 and 2 stay verbatim above with their original dispositions. Where round 3 contradicts round 2, round 3 governs and the round-2 text remains visible as history.
+
+**Review task:** `cmsxqafkk01szmpmx7wj9ozrq` (final independent review).
+
+**Review base:** `a4a4ba36c116c775d5d1c28ed55b17600869d904` (merge of PR #105, Review/Approval Convergence — `master` at review time).
+
+**Review head:** `4d2a4be5f5a859dd7a92a41be13825c435bfc421` (`docs: converge Goal 5a0 plan with current master`, PR #94 branch `agentos/chain/w2-2026-08-17-goal-5a0-p-06fa0ea4`).
+
+**Peer head:** `4a35da5c428241c43de5b91158cfb6b2d61bc8b7` (`docs: order Inbox 3a implementation behind merged Goal 5a0`, Inbox 3a docs PR #95).
+
+**Verdict reviewed:** FAIL — 4 must-fix, 0 should-fix.
+
+**Revision scope:** docs-only. `docs/plans/goal-5a0-idempotent-execution-kernel-plan.md` and this file. The approved specification `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md` was again left unmodified, and no Product Contract version was required: all four closures fit inside its existing boundaries — §7.1 step 4 ("validate the assignee, repo grant, and Task configuration exactly as current Task creation does"), §8 ("Validation/project/assignee/repo-grant failures retain current 400/404 behavior"), I9 (Goal → Task → Run lock prefix), §7.6 (cancel closes `WAITING_INBOX` Runs), and §11 ("Goal 5a0 adds no Inbox behavior; cancel may terminalize such a Run"). Planned Critical classification, the `senior-dev`/high-effort route, the named 409 set, gate placement, the #97-first/#98-dependency-held decision, and the accepted contract are unchanged. The peer PR #95 was read but **not modified**; correcting its lock-order wording is assigned to #98's post-merge write-surface review.
+
+### R3-MF-1 — the Agent-before-grant order was wrong and no order was derived from current master
+
+**Status: closed.**
+
+Round 2 recorded `Goal → Task → Run → Agent → AgentRepoAccess`. Current master takes the exact grant **first**: `POST /tasks/:taskId/start` calls `lockAgentRepoGrant` at `app.ts:2514-2521`, then `enqueueTaskRun` at `:2531`, whose `lockAgentRow` is at `workflow.ts:326`. It is the only current writer that takes both rows, and no current writer takes `Agent` before the grant. A Goal mutator following round 2's order would therefore deadlock against the unmodified manual start writer. Closed by:
+
+- The audited-conflicts section now records, by file:line: the grant-before-`Agent` fact and the both-row-writer enumeration; the absence of any explicit `Run` row lock on current master (`FOR UPDATE`/`FOR KEY SHARE` appear only for Task, Agent, and `AgentRepoAccess`); the claim transaction's Serializable, lock-free Run→Session→Task write order (`app.ts:2899`, `:2920`, `:2941`); the completion route's conditional Task lock and its automatic retry Run insert under neither the Agent nor the grant row (`:3373`, `:3379`, `:3451`); the retry route's Task→`Agent` order and its own 409 sentence (`:2382`, `:2408-2411`); and the create/PATCH routes' unlocked grant reads with locked `Agent` row and 400 sentences.
+- Step 1.5 now **rebuilds** that writer table from the then-current tree — rows, order, mode, and file:line per acquisition for thirteen named writers — and stops if any writer takes `Agent` before the grant or if the both-row-writer set is no longer `{POST /tasks/:taskId/start}`. The plan derives the order; it does not assert it.
+- Step 4.3 replaces the table with the derived current-master writer table plus the canonical rows: Goal `FOR UPDATE` → existing Task rows `FOR UPDATE` ascending `id` → existing Run rows `FOR UPDATE` ascending `id` → exact `AgentRepoAccess` `FOR KEY SHARE` → `Agent` `FOR UPDATE` → inserts. It states why direct create, archive, and revocation cannot cycle: archive holds only the `Agent` row and revocation only the grant row, and a transaction that holds one row while requesting no other cannot be a member of a wait cycle; create/PATCH share only the Task→`Agent` edge, in the same direction.
+- Step 4.4 replaces "both dispatch paths" with an explicit per-operation row assignment covering initial dispatch, successor dispatch, terminal decision, restart, source-based retry, completion with and without retry, reconciliation with and without a child, pause/resume/cancel, the Goal-linked claim, and the Inbox resume seam. New-Task paths lock nothing at rows 2-3 for a row that does not exist yet.
+- Step 4.9 records the canonical order as the named handoff artifact, and states that #95's two conflicting wordings — `Goal → Task → Agent → exact AgentRepoAccess → Run/lineage` and `Goal → Task prefix → grant → Run → Session → Question` — must both be replaced by it, re-derived from the merged tree, by #98's write-surface review.
+- Gate 6, Steps 6.1/6.3/6.4, 7.1/7.5, 8.2/8.4, the Step 4 verification, the ownership table, and the coverage table all follow the corrected order. Step 12 test 22 now uses the spec's `action=dispatch` (`docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md:488`); there is no `continue` action.
+- New Step 12 tests 28-30 add the cross-protocol two-client real-PostgreSQL races the finding required: manual start versus Goal initial dispatch, versus successor dispatch, and versus existing-Task retry, all on one agent and one exact grant, in both barrier orders. Each asserts both operations complete, the exact row/event counts and lineage nullity of each side, no `40P01`, no exhausted `40001`, and the observed row-acquisition sequence of both transactions. Test 30 adds the archive interleaving with the retry route's route-specific 409 and zero mutation. The mutation notes state that swapping rows 4 and 5 back into round 2's order is what makes these interleavings deadlock.
+
+### R3-MF-2 — the post-cancel record-only reply was not implementable
+
+**Status: closed.**
+
+`applyInboxDecisionTx` cannot record a reply after cancellation. A non-gate decision whose Run has left `WAITING_INBOX` **throws** at `workflow.ts:769-771`, before any write; a decision whose card is no longer `OPEN` loses the `updateMany` CAS at `:806-810` and returns `{ duplicate: true, resumed: false }`, before the reply message at `:821` and the `InboxDecision` row at `:838`. Cancel does both — closes the card and terminalizes the Run — so a later delivery has lost the only mutex the current schema has and writes nothing. Closed by:
+
+- Step 9.5 records both source facts, deletes the round-2 promise that the answer is "still recorded" and the card "still closed", and states the minimal in-scope linearizable contract instead. Cancel-first: the later delivery returns duplicate/non-resuming with zero new reply and zero new `InboxDecision`, replacing the `:769-771` throw on the Goal path only, because an exception would misreport a resolved duplicate to the connector as retryable. Answer-first: the answer commits exactly as today, and a later cancellation fences the queued Run without erasing the immutable reply or decision row. Paused or stale generation with the card still `OPEN` and nothing consumed: write nothing, leave the card `OPEN`, return non-resuming — and the resume-window policy that decides what *should* happen there is named as #98's.
+- This matches the peer's own linearization at `4a35da5c` — spec §7.3 "an answer and expiry/cancel race use the same Question-row CAS; exactly one wins" and S11 "cancellation/expiry wins the state CAS before an answer … a later answer is harmless" — with the current `InboxMessage.status = OPEN` card standing in for the not-yet-existing Question row.
+- Step 9.5 ends with an explicit both-order final-state table (card, reply count, `InboxDecision` count, Run state, Goal event count, return value) across four interleavings, including double delivery on each side of the cancel.
+- Step 8.4 names cancel's card close as the deciding CAS and fixes its exact shape to the existing idempotent `updateMany({ where: { id, status: OPEN }, data: { status: CLOSED } })` at `reconcile.ts:242-247`, creating no Inbox row and sending no notification, so it stays inside §11.
+- Step 9.6 renames the seam to `goalRunResumeAuthority(tx, runId): "resume" | "no-resume"`; `record-only` is retired because it described a write the path cannot perform. The ownership table, the "Cancellation fence and non-scope" section, its non-scope list, Step 14.5's operator sentence, and Step 12 tests 24-25 all state the reachable outcome.
+- No Inbox 3a internals were designed: the only named handoff is the predicate, its Goal lock, and the paused-card policy assigned to #98.
+
+### R3-MF-3 — the migration-tail proof was invalid
+
+**Status: closed.**
+
+`ls packages/db/prisma/migrations | sort | tail -1` returns `migration_lock.toml`, not a migration: `m` sorts after `2`, and that file is Prisma's provider lock. Verified on the current tree — 15 entries, 14 directories, the one non-directory being `migration_lock.toml`. Closed by:
+
+- Step 1.6 replaces the tail command with directory-only enumeration — `find packages/db/prisma/migrations -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort` — validates every returned name against `^[0-9]{14}_[a-z0-9_]+$`, and asserts three things: the reserved folder `20260818000000_goal_execution_safety_kernel` is **absent**; the reserved name sorts strictly after **every** directory in the list rather than after a computed tail; and no Inbox 3a migration has landed. Any failure stops implementation.
+- Step 1.3 and the Step 1 verification command block use the same procedure; the bare `ls … | tail -5` evidence command is gone.
+- The "Migration ordering" handoff section gives #98 the identical procedure, the same three assertions, and the explicit statement that the `ls … | tail -1` form is not a valid tail proof for either work stream.
+- Step 13.2 records the applied migration set from the same enumeration and cross-checks it against `_prisma_migrations`. `migration_lock.toml` is never treated as a migration, never compared, and never reported as the tail.
+
+### R3-MF-4 — route-specific typed behavior had been flattened into one 409
+
+**Status: closed.**
+
+Round 2 mapped every archived-assignee refusal to `ArchivedAssigneeError` 409. Spec §7.1 step 4 requires create-like validation "exactly as current Task creation does" and §8 requires that assignee/repo-grant failures "retain current 400/404 behavior". Current Task creation returns `400 "Assignee <name> is archived"` (`app.ts:2023`, `:2044` via `assignmentBlocked`) and `400 "Assignee has no grant for this Repo"` (`:2031`); `ArchivedAssigneeError` 409 belongs to paths that actually reach `enqueueTaskRun`, which the kernel bypasses; and the retry route has its own 409 sentence (`:2410`). Closed by:
+
+- Step 4.5 replaces the single mapping with a per-operation classification table derived from source: initial dispatch, successor dispatch, and restart return the create-shaped 400s; the source-based retry and the delegating manual retry return `409 "Assignee <name> is archived; unarchive it to retry"` plus the 400 for a missing grant; and the runner completion route gains no new status — an archived assignee or revoked grant found under rows 4-5 makes it take the awaiting-decision branch instead, because the runner's completion must not begin failing. Every refusal consumes no iteration, generation, dispatch key, decision key, or event, and leaves the predecessor `AWAITING_DECISION`.
+- Step 5.5 maps the same classification at the HTTP layer and states plainly that no uniform 409 is introduced, because the Product Contract does not authorize one.
+- Step 5's verification adds HTTP route-classification tests for already-archived and missing-grant cases on initial dispatch, successor dispatch, restart, and source-based retry, each asserting exact status and body plus zero mutation: no Task, no Run, no `GoalExecutionEvent`, unchanged `nextGoalIteration`/`goalGeneration`, no dispatch/decision key row, predecessor still awaiting decision.
+- Step 12 tests 21-23 now assert the create-shaped 400 on archive-wins and revocation-wins, and test 30 asserts the retry route's 409 on archive-wins. Step 4's verification adds a route-classification unit test pinned to the sentences Step 1 re-reads.
+- Steps 6.3, 6.4, and 7.1 carry the matching internal-path behaviour so no path is left to inference.
+
+### Should-fix
+
+None in round 3. Nothing to adopt or decline.
+
+### Consequential edits beyond the four findings
+
+Only what the fixes forced. The audited-conflicts section gained nine current-master evidence bullets (grant-before-`Agent`, no explicit `Run` lock, claim, completion, retry, create/PATCH, `applyInboxDecisionTx`'s two write-free refusals, `reconcile.ts`'s idempotent card close, and the `migration_lock.toml` tail defect) because all four findings are grounded in them. Step 4 gained items 9 and a rewritten verification paragraph after 4.3 was split into a derivation table plus a canonical table, 4.4 into a per-operation assignment, and 4.5 into a route-classification table. Steps 6.1/6.3/6.4, 6's verification, 7.1, 7.5, 8.2, 8.4, 12's tests 21-25, 13.2, 14.5, and 15.3 gained the matching evidence sentences. Step 12 gained tests 28-30 and a rewritten mutation-note and verification paragraph. The requirement-to-step coverage table gained three rows and rewrote one. The ownership table gained one row and rewrote two. The revision-source header and the disposition ledger gained round 3, with an explicit note recording which round-2 statements round 3 supersedes.
