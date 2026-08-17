@@ -25,6 +25,7 @@
 | 18 | 权限界面细粒度 | v1 = 绑定级（Repo/Skill/MCP/Secret/文件夹读写删勾选，与后端一一对应）；工具级开关等 v2 Docker 有真强制力再上 | 裸跑下「禁 bash」挡不住，假开关比没有更糟 |
 | 19 | Agent 提示词管线 | writing-for-agents 起草全部 10 个 → 3 承重角色（senior-dev/implementation-plan-executioner/review-coordinator）互盲双写、其余 7 个单轮 codex 交叉评审 → 试点失败案例驱动迭代；签认=批量过目抽查 | 提示词的真正考官是试点运行，上游磨合只保证起点 |
 | 20 | agentrunner 时点 | 裁定#4 保留，执行时点=开始无人值守跑真实仓库之前；v2 Docker 落地后退役 | 过渡方案按过渡成本衡量 |
+| 21 | Agent 模型与提示词解耦（Leo 2026-08-17 改裁） | 当前运行中的 Opus run 跑完；后续 agent 默认改用 Sol/Luna。角色标题与任务提示词不得写模型或厂商名，模型、runner、推理档位只在 agent 配置中选择；review prompt 统一使用 `REVIEW INDEPENDENCE` 证据规则 | 额度变化不应迫使重写任务语义；把厂商写进 prompt 会在切模后产生事实错误并污染评审判断 |
 
 ## 概念口径（已向 Leo 讲清）
 

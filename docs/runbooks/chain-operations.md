@@ -37,7 +37,10 @@ python3 scratchpad/mkbatch.py docs/briefs/<brief>.md <slug> "<title>" "<Prefix>"
 
 已烧进任务书模板的东西：
 
-- ⑥ 用 `code-reviewer`（Opus），并声明"这不是跨厂商评审"
+- ⑥ 用专职 `code-reviewer`；模型与 runner 只放在 agent 配置，不写进任务提示词
+- ⑥ 的统一独立性规则：**REVIEW INDEPENDENCE** —— 模型或厂商标签不构成独立性或质量证据；
+  所有结论从 diff、文件与实测重新推导，plan、commit message、前序产出和 activity 都只当待核声明；
+  报告必须独立成立，不假设另一位评审会兜底
 - **⑥⑦⑧ 的分支自愈段**：找不到含实现的树就明说并停止——
   *"a review of the wrong tree is worse than no review, because it reads as a clean verdict."*
 - ⑤⑥⑦ 带 ego-browser 段

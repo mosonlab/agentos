@@ -92,5 +92,5 @@ Two other chains are in flight and may touch the same files. Batch 1 (Settings +
 
 ## Standing clauses
 
-- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Plan steps (②④) use `claude-opus-5:xhigh`; implementation and review steps use `:high`. Never write OPERATOR_TOKEN into any artifact.
+- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Model, runner, and reasoning tier come from the assigned agent configuration and are never copied into task prompts. Never write OPERATOR_TOKEN into any artifact.
 - **Do not run the production migration and do not restart the platform.** Those are the operator's actions, deliberately held. Your job is to make them safe, and to write down exactly what they are.
