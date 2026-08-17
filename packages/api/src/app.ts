@@ -1498,25 +1498,38 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (!access) return context.json({ error: "Assignee has no grant for this template's Repo" }, 400);
     }
-    const duplicate = await db.taskTemplateStep.findFirst({
-      where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
-      select: { id: true },
-    });
-    if (duplicate) return context.json({ error: "Template step index already exists" }, 409);
-    return context.json(await db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id,
-      stepIndex: body.stepIndex,
-      name: body.name,
-      assigneeType: body.assigneeType,
-      assigneeAgentId: body.assigneeAgentId,
-      prompt: body.prompt,
-      approvalGate: body.approvalGate,
-      attachmentsFromPrevious: body.attachmentsFromPrevious,
-      spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
-      runner: body.runner,
-      outputKind: body.outputKind,
-      opensPullRequest: body.opensPullRequest,
-    } }), 201);
+    // A template step is a standing assignment: every future instantiation and
+    // every webhook fire turns this row into a task and a run for this agent. So
+    // it joins the same Agent-row exclusion protocol as the task writers — the
+    // checks above answered from unlocked reads, and only this re-read under
+    // `lockAgentRow` decides. Duplicate detection and the create move inside the
+    // same transaction, because a step written after the lock was released is
+    // exactly the archived assignment this protocol exists to prevent.
+    const result = await db.$transaction(async (tx) => {
+      const blocked = await assignmentBlocked(tx, agent);
+      if (blocked) return { error: blocked, code: 400 as const };
+      const duplicate = await tx.taskTemplateStep.findFirst({
+        where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
+        select: { id: true },
+      });
+      if (duplicate) return { error: "Template step index already exists", code: 409 as const };
+      return { step: await tx.taskTemplateStep.create({ data: {
+        taskTemplateId: template.id,
+        stepIndex: body.stepIndex,
+        name: body.name,
+        assigneeType: body.assigneeType,
+        assigneeAgentId: body.assigneeAgentId,
+        prompt: body.prompt,
+        approvalGate: body.approvalGate,
+        attachmentsFromPrevious: body.attachmentsFromPrevious,
+        spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
+        runner: body.runner,
+        outputKind: body.outputKind,
+        opensPullRequest: body.opensPullRequest,
+      } }) };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.step, 201);
   });
   // Bounded on purpose: `opensPullRequest` only. A general template-step editor
   // is a whole authoring surface (stepIndex, name, assigneeType, prompt,

@@ -670,7 +670,10 @@ const seedTemplate = async (context: Awaited<ReturnType<typeof seedTask>>) => {
 };
 
 test("archive and direct task creation released together never strand a queued run", async () => {
-  const context = await seedTask("race-archive-create");
+  // The seeded task is DONE so this test is about the run the creation makes:
+  // archive fails closed on any live task, and a TODO seed would refuse the
+  // archive before the race under test could decide anything.
+  const context = await seedTask("race-archive-create", { status: "DONE" });
   const app = createApp(db);
   const [archive, create] = await asOperator(() => synchronised([
     async (release, gate) => {
@@ -709,7 +712,8 @@ test("archive and direct task creation released together never strand a queued r
 });
 
 test("archive and template instantiation released together never strand a queued run", async () => {
-  const context = await seedTask("race-archive-instantiate");
+  // DONE for the same reason as the creation race above.
+  const context = await seedTask("race-archive-instantiate", { status: "DONE" });
   const template = await seedTemplate(context);
   const app = createApp(db);
   const [archive, instantiate] = await asOperator(() => synchronised([
@@ -837,4 +841,157 @@ test("an Agent row held by a foreign transaction makes assignment and archive wa
   assert.equal(archived.result.status, 409);
   assert.match(archived.result.body.error, /Cannot archive an agent with a QUEUED run/);
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } })).archivedAt, null);
+});
+
+test("archive fails closed on every live task status and stays open on the parked ones", async () => {
+  // A run is not the only live reference. TODO holds a scheduled definition and
+  // every chain step waiting for its predecessor; REVIEW holds a step whose gate
+  // can still be rejected, which queues the producing step again. Neither has a
+  // run yet, so the run half of the blocker cannot see them at all. DONE is
+  // history and BACKLOG is where an operator parks work on purpose — archiving
+  // over those must stay a one-click operation.
+  const cases = [
+    { status: "TODO" as const, blocked: true },
+    { status: "DOING" as const, blocked: true },
+    { status: "REVIEW" as const, blocked: true },
+    { status: "DONE" as const, blocked: false },
+    { status: "BACKLOG" as const, blocked: false },
+  ];
+  for (const { status, blocked } of cases) {
+    const context = await seedTask(`archive-${status.toLowerCase()}`, { status, name: `${status} work` });
+    assert.equal(await agentRunCount(context.agent.id), 0, "the matrix is about task references, not runs");
+    const response = await call("POST", `/agents/${context.agent.id}/archive`);
+    const stored = await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } });
+    if (blocked) {
+      assert.equal(response.status, 409, `${status}: ${JSON.stringify(response.body)}`);
+      assert.equal(
+        response.body.error,
+        `Cannot archive an agent assigned to ${status} task ${status} work; finish, park, archive, or reassign that task first`,
+      );
+      assert.equal(stored.archivedAt, null, `${status} must leave the agent unarchived`);
+      // Each of the four exits the message offers actually unblocks the archive.
+      await db.task.update({ where: { id: context.task.id }, data: { status: "BACKLOG" } });
+      assert.equal((await call("POST", `/agents/${context.agent.id}/archive`)).status, 200);
+    } else {
+      assert.equal(response.status, 200, `${status}: ${JSON.stringify(response.body)}`);
+      assert.notEqual(stored.archivedAt, null, `${status} must not hold the agent open`);
+    }
+  }
+});
+
+test("an already-archived task never holds its assignee open", async () => {
+  // `archivedAt: null` is half the filter and is easy to lose: an archived TODO
+  // task is not a reference to anything, and the operator who archived it has
+  // already said so.
+  const context = await seedTask("archive-archived-task", { status: "TODO", archivedAt: new Date() });
+  assert.equal((await call("POST", `/agents/${context.agent.id}/archive`)).status, 200);
+});
+
+test("archive and a scheduled task creation released together never strand a runless task", async () => {
+  // The gap this closes, as a real race: a scheduled task is created with no
+  // run at all, so the run half of the blocker sees nothing. If archive commits
+  // beside it, the scheduler later tries to enqueue for an archived agent and
+  // the definition never fires again.
+  const context = await seedTask("race-archive-scheduled", { status: "DONE" });
+  const app = createApp(db);
+  const runAt = new Date(Date.now() + 3_600_000).toISOString();
+  const [archive, create] = await asOperator(() => synchronised([
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/agents/${context.agent.id}/archive`, {
+        method: "POST", headers: { Authorization: `Bearer ${OPERATOR}` },
+      });
+    },
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/projects/${context.project.id}/tasks`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Scheduled sweep", description: "work",
+          assigneeType: "AGENT", assigneeAgentId: context.agent.id, repoId: context.repo.id,
+          scheduleKind: "AT", runAt,
+        }),
+      });
+    },
+  ]));
+  const archived = (await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } })).archivedAt !== null;
+  const scheduled = await db.task.count({ where: { name: "Scheduled sweep" } });
+  assert.equal(await agentRunCount(context.agent.id), 0, "an AT task queues no run yet");
+  assert.equal(archived !== (scheduled > 0), true, `archived=${archived}, scheduled=${scheduled}`);
+  if (archived) {
+    assert.equal(archive!.status, 200);
+    assert.equal(create!.status, 400);
+    assert.match((await create!.json() as any).error, /is archived/);
+  } else {
+    assert.equal(create!.status, 201);
+    assert.equal(archive!.status, 409);
+    assert.match((await archive!.json() as any).error, /Cannot archive an agent assigned to TODO task Scheduled sweep/);
+  }
+});
+
+test("an archive committing under the lock is seen by template step creation", { timeout: 30_000 }, async () => {
+  // A template step is a standing assignment: every later instantiation and
+  // webhook fire turns it into a task and a run. The route's unlocked assignee
+  // check passed before this archive committed, so only the re-read under the
+  // Agent-row mutex can refuse it — and it must, or the template carries a step
+  // no instantiation will ever be able to run.
+  const context = await seedTask("locked-archive-template-step", { status: "DONE" });
+  const template = await seedTemplate(context);
+  const created = await archiveUnderHeldLock(context.agent.id, () => call("POST", `/task-templates/${template.id}/steps`, {
+    stepIndex: 2,
+    name: "Loses the race",
+    assigneeType: "AGENT",
+    assigneeAgentId: context.agent.id,
+    prompt: "do the work",
+    outputKind: "result",
+  }));
+  assert.equal(created.status, 400, JSON.stringify(created.body));
+  assert.equal(created.body.error, "Assignee agent is archived");
+  assert.equal(await db.taskTemplateStep.count({ where: { taskTemplateId: template.id } }), 2);
+  assert.equal(await db.taskTemplateStep.count({ where: { name: "Loses the race" } }), 0);
+});
+
+test("template step creation waits for the Agent row and keeps its duplicate and ownership answers", { timeout: 30_000 }, async () => {
+  // The lock is real (the request cannot answer while another transaction holds
+  // the row), and joining the protocol changed none of the route's other
+  // semantics — the duplicate 409 and the project-ownership 400 still come from
+  // the same request path, now inside the transaction.
+  const context = await seedTask("template-step-lock", { status: "DONE" });
+  const template = await seedTemplate(context);
+  const step = (stepIndex: number, assigneeAgentId: string) => ({
+    stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT", assigneeAgentId,
+    prompt: "do the work", outputKind: "result",
+  });
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let released = false;
+  let acquired!: () => void;
+  const lockHeld = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const held = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${context.agent.id} FOR UPDATE`;
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      released = true;
+    }, { timeout: 10_000 });
+    await lockHeld;
+    let waited = true;
+    const pending = call("POST", `/task-templates/${template.id}/steps`, step(2, context.agent.id))
+      .then((value) => { waited = released; return value; });
+    const [, created] = await Promise.all([held, pending]);
+    assert.equal(waited, true, "template step creation must wait for the Agent row");
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+  } finally {
+    await holder.$disconnect();
+  }
+  const duplicate = await call("POST", `/task-templates/${template.id}/steps`, step(2, context.agent.id));
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.error, "Template step index already exists");
+  const foreign = await seedTask("template-step-foreign", { status: "DONE" });
+  const crossed = await call("POST", `/task-templates/${template.id}/steps`, step(3, foreign.agent.id));
+  assert.equal(crossed.status, 400);
+  assert.equal(crossed.body.error, "Assignee does not belong to this template's project");
+  assert.equal(await db.taskTemplateStep.count({ where: { taskTemplateId: template.id } }), 3);
 });

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   activateChainSuccessor,
   advanceTemplateTask,
+  agentArchiveBlocker,
   applyInboxDecisionTx,
   ArchivedAssigneeError,
   AssigneeType,
@@ -13,10 +14,12 @@ import {
   InboxKind,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  LIVE_TASK_STATUSES,
   RunStatus,
   runnerFor,
   RunnerKind,
   RunnerPreference,
+  TaskStatus,
   type PrismaClient,
 } from "@agentos/db";
 
@@ -339,6 +342,45 @@ test("a multiple-choice Inbox decision accepts an option id and persists the hum
   await assert.rejects(() => applyInboxDecisionTx(tx, {
     inboxMessageId: "question-1", externalEventId: "web:unknown", decision: "unknown",
   }), /must match an Inbox choice id/);
+});
+
+test("agentArchiveBlocker asks the database for exactly the live task statuses", async () => {
+  // The status set is the contract, and a mocked findFirst cannot demonstrate a
+  // filter it never applies — so the query itself is asserted. DONE is terminal
+  // history and BACKLOG is explicitly parked; both must stay archivable, and an
+  // already-archived task is not a reference to anything.
+  let where: Record<string, unknown> | undefined;
+  const tx = {
+    run: { findFirst: async () => null },
+    task: {
+      findFirst: async (args: { where: Record<string, unknown> }) => { where = args.where; return null; },
+    },
+  } as any;
+  assert.equal(await agentArchiveBlocker(tx, "agent-1"), null);
+  assert.deepEqual(where, {
+    assigneeAgentId: "agent-1",
+    archivedAt: null,
+    status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
+  });
+  assert.deepEqual(LIVE_TASK_STATUSES, [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW]);
+});
+
+test("agentArchiveBlocker reports the live run before the live task and names both precisely", async () => {
+  const blockerFor = (run: unknown, task: unknown) => agentArchiveBlocker({
+    run: { findFirst: async () => run },
+    task: { findFirst: async () => task },
+  } as any, "agent-1");
+  // A queued run and a REVIEW task are the same stranding one step apart; the
+  // run is reported first because cancelling it is the narrower operator action.
+  assert.equal(
+    await blockerFor({ runNumber: 3, status: RunStatus.QUEUED, task: { name: "Ship it" } }, { name: "Ship it", status: TaskStatus.REVIEW }),
+    "Cannot archive an agent with a QUEUED run on Ship it; finish or cancel run 3 first",
+  );
+  assert.equal(
+    await blockerFor(null, { name: "Awaiting the gate", status: TaskStatus.REVIEW }),
+    "Cannot archive an agent assigned to REVIEW task Awaiting the gate; finish, park, archive, or reassign that task first",
+  );
+  assert.equal(await blockerFor(null, null), null);
 });
 
 test("enqueueTaskRun rejects archived agents with a name-recognisable typed error", async () => {

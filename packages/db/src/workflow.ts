@@ -423,16 +423,34 @@ export const ACTIVE_RUN_STATUSES: RunStatus[] = [
 ];
 
 /**
+ * "This task is a live reference to its assignee." Every status here is one the
+ * control plane can still turn into a run without an operator reassigning the
+ * task: TODO covers a queued step, a scheduled definition and a parked future
+ * chain step; DOING covers the step currently executing; REVIEW covers a step
+ * whose approval gate can still be rejected, which queues the producing step
+ * again. DONE is terminal history and BACKLOG is where an operator explicitly
+ * parks work, so neither blocks.
+ */
+export const LIVE_TASK_STATUSES: TaskStatus[] = [
+  TaskStatus.TODO,
+  TaskStatus.DOING,
+  TaskStatus.REVIEW,
+];
+
+/**
  * Why this agent may not be archived right now, or null.
  *
  * Read under `lockAgentRow`, so it is the fail-closed half of the protocol: a
  * writer that already created a live reference holds the lock until it commits,
  * and archive then sees that reference instead of stranding it. Runs come first
  * because a queued run for an archived agent is exactly the row nothing ever
- * claims; an in-flight task is the same stall one step earlier.
+ * claims; a live task is the same stall one step earlier — nothing has enqueued
+ * its run yet, so no run exists to be found, and archiving now strands the task
+ * the moment anything tries to.
  *
- * Archived history is untouched — DONE tasks and terminal runs never block, so
- * retiring an agent that has finished work stays a one-click operation.
+ * Archived history is untouched — DONE tasks, BACKLOG tasks and terminal runs
+ * never block, so retiring an agent whose work is finished or explicitly parked
+ * stays a one-click operation.
  */
 export const agentArchiveBlocker = async (tx: Tx, agentId: string): Promise<string | null> => {
   const run = await tx.run.findFirst({
@@ -445,11 +463,17 @@ export const agentArchiveBlocker = async (tx: Tx, agentId: string): Promise<stri
     return `Cannot archive an agent with a ${run.status} run${where}; finish or cancel run ${run.runNumber} first`;
   }
   const task = await tx.task.findFirst({
-    where: { assigneeAgentId: agentId, archivedAt: null, status: TaskStatus.DOING },
-    orderBy: { createdAt: "asc" },
-    select: { name: true },
+    where: { assigneeAgentId: agentId, archivedAt: null, status: { in: LIVE_TASK_STATUSES } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { name: true, status: true },
   });
-  if (task) return `Cannot archive an agent that is still executing ${task.name}; finish or park that task first`;
+  // The status is named because the four exits differ by it, and the operator
+  // has to pick one: an executing task is finished or cancelled, a queued one is
+  // parked in Backlog or archived, a reviewed one is decided, and any of them
+  // can instead be handed to another agent.
+  if (task) {
+    return `Cannot archive an agent assigned to ${task.status} task ${task.name}; finish, park, archive, or reassign that task first`;
+  }
   return null;
 };
 

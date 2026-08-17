@@ -685,11 +685,14 @@ test("agent archive and unarchive are idempotent and preserve the original archi
   });
 });
 
-test("archiving an agent fails closed on a live run or an in-flight task", async () => {
+test("archiving an agent fails closed on a live run or any live task", async () => {
   await withTokens(async () => {
     // Both references are the same defect one step apart: a run queued for an
     // archived agent is filtered out of every claim, so it never runs and its
     // task never completes. Refusing the archive keeps the operator's options.
+    // A task reference does not need a run to be live — TODO and REVIEW rows
+    // are exactly the ones no run exists for yet, and archiving under them is
+    // what strands the step that would have created it.
     const cases = [
       {
         run: { runNumber: 2, status: "QUEUED", task: { name: "Ship it" } },
@@ -698,8 +701,18 @@ test("archiving an agent fails closed on a live run or an in-flight task", async
       },
       {
         run: null,
-        task: { name: "Ship it" },
-        expected: "Cannot archive an agent that is still executing Ship it; finish or park that task first",
+        task: { name: "Ship it", status: "DOING" },
+        expected: "Cannot archive an agent assigned to DOING task Ship it; finish, park, archive, or reassign that task first",
+      },
+      {
+        run: null,
+        task: { name: "Tomorrow's sweep", status: "TODO" },
+        expected: "Cannot archive an agent assigned to TODO task Tomorrow's sweep; finish, park, archive, or reassign that task first",
+      },
+      {
+        run: null,
+        task: { name: "Awaiting the gate", status: "REVIEW" },
+        expected: "Cannot archive an agent assigned to REVIEW task Awaiting the gate; finish, park, archive, or reassign that task first",
       },
     ];
     for (const { run, task, expected } of cases) {
