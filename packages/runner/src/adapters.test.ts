@@ -212,3 +212,22 @@ test("source text cannot misclassify a provider failure as a missing binary", ()
 
   assert.equal(adapters.CODEX.classifyError(evidence).failureClass, "TASK_FAILED");
 });
+
+test("workspace TLS failures remain retryable after command retries are exhausted", () => {
+  const evidence: ExitEvidence = {
+    exitCode: 1,
+    signal: null,
+    terminalEventSeen: false,
+    terminalSuccess: false,
+    terminationReason: null,
+    finalOutput: null,
+    providerError: null,
+    stdout: "",
+    stderr: "git failed (128): LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443",
+  };
+
+  assert.deepEqual(adapters.CODEX.classifyError(evidence), {
+    failureClass: "TRANSIENT_PROVIDER",
+    retryable: true,
+  });
+});
