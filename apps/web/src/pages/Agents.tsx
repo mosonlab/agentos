@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { formatDate, formatDateTime, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
@@ -36,6 +37,7 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
     rolePrompt: "",
   });
   const { pending, error, run } = useAction();
+  const t = useT();
 
   useEffect(() => {
     const first = environments.data?.[0];
@@ -48,34 +50,34 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
   };
 
   return (
-    <FullPanel title="New Agent" onClose={onClose} actions={
+    <FullPanel title={t("agents.new.title")} onClose={onClose} actions={
       <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === ""}
-        onClick={() => void submit()}>Create</Button>
+        onClick={() => void submit()}>{t("agents.new.create")}</Button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
-      <Card title="Setup">
+      <Card title={t("agents.tab.setup")}>
         <div className={STACK}>
           <div className={FIELD_ROW}>
-            <Field label="Name" hint="Unique inside the project; used by YAML and the CLI.">
+            <Field label={t("agents.field.name.label")} hint={t("agents.field.name.hint")}>
               <Input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
             </Field>
-            <Field label="Title">
-              <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="Senior Developer" />
+            <Field label={t("agents.field.title")}>
+              <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("agents.field.title.placeholder")} />
             </Field>
           </div>
           <div className={FIELD_ROW}>
-            <Field label="Model">
+            <Field label={t("agents.field.model")}>
               <Input type="text" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
             </Field>
-            <Field label="Runner" hint="INHERIT falls back to the model heuristic in execution.ts.">
+            <Field label={t("agents.field.runner")} hint={t("agents.field.runner.hint")}>
               <Select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>
                 {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
               </Select>
             </Field>
           </div>
-          <Field label="Environment ID" hint={environments.missing
-            ? "无环境列表端点，请粘贴 Environment ID（POST /projects/:id/agents 必填）。"
-            : "Sandbox and env-var scope for this agent."}>
+          <Field label={t("agents.field.environment.label")} hint={t(environments.missing
+            ? "agents.field.environment.hint.missing"
+            : "agents.field.environment.hint")}>
             {environments.data && environments.data.length > 0
               ? (
                 <Select value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })}>
@@ -85,22 +87,22 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
               : <Input type="text" value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
           </Field>
           <div className={ROW}>
-            <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label="Inbox access" />
+            <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label={t("agents.inbox.label")} />
             <div>
-              <div>Inbox access</div>
-              <div>Lets the agent ask questions and post updates through the Inbox MCP.</div>
+              <div>{t("agents.inbox.label")}</div>
+              <div>{t("agents.inbox.hint.new")}</div>
             </div>
           </div>
         </div>
       </Card>
-      <Card title="Prompt">
+      <Card title={t("agents.tab.prompt")}>
         <div className={STACK}>
-          <Field label="AgentOS foundation" hint="Prepended above the role prompt for every run.">
+          <Field label={t("agents.field.foundation.label")} hint={t("agents.field.foundation.hint")}>
             <Textarea rows={4} value={form.foundationalPrompt} onChange={(event) => setForm({ ...form, foundationalPrompt: event.target.value })} />
           </Field>
-          <Field label="Your agent instructions">
+          <Field label={t("agents.field.rolePrompt")}>
             <Textarea rows={10} value={form.rolePrompt} onChange={(event) => setForm({ ...form, rolePrompt: event.target.value })}
-              placeholder="You are Senior Dev — a senior engineer with strong taste…" />
+              placeholder={t("agents.field.rolePrompt.placeholder")} />
           </Field>
         </div>
       </Card>
@@ -113,10 +115,11 @@ export const AgentsPage = (): ReactNode => {
   const { data, loading, error, reload } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 5_000);
   const [creating, setCreating] = useState(false);
   const { error: actionError, run } = useAction();
+  const t = useT();
   const agents = data ?? [];
 
   const remove = (agent: Agent): void => {
-    if (!window.confirm(`Delete agent ${agent.name}?`)) return;
+    if (!window.confirm(t("agents.confirm.delete", { name: agent.name }))) return;
     void run(async () => { await api.delete(`/agents/${agent.id}`); reload(); });
   };
   const toggleArchived = (agent: Agent): void => {
@@ -124,48 +127,48 @@ export const AgentsPage = (): ReactNode => {
     void run(async () => { await api.post(`/agents/${agent.id}/${action}`); reload(); });
   };
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">
       <div className={PAGE_HEAD}>
         <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Agents</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>Roles, prompts and permission boundaries in {project?.name ?? "this project"}</div>
+          <h1 className={PAGE_HEAD_H1}>{t("agents.head.title")}</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>{t("agents.head.subtitle", { project: project?.name ?? t("agents.head.thisProject") })}</div>
         </div>
         <div className={PAGE_ACTIONS}>
-          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />Create Agent</Button>
+          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />{t("agents.create")}</Button>
         </div>
       </div>
 
-      <Segmented options={[{ value: "yours", label: "Your Agents" }]} value="yours" onChange={() => undefined} />
+      <Segmented options={[{ value: "yours", label: t("agents.segmented.yours") }]} value="yours" onChange={() => undefined} />
 
       <div className={cn(STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         <Card flush>
           <Table>
-            <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Model</TableHead><TableHead>Runner</TableHead><TableHead>Inbox</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>{t("agents.table.name")}</TableHead><TableHead>{t("agents.field.model")}</TableHead><TableHead>{t("agents.field.runner")}</TableHead><TableHead>{t("agents.table.inbox")}</TableHead><TableHead>{t("common.updated")}</TableHead><TableHead /></TableRow></TableHeader>
             <TableBody>
               {agents.map((agent) => (
                 <TableRow key={agent.id} className="cursor-pointer" onClick={() => navigate(`/agents/${agent.id}`)}>
                   <TableCell className={TABLE_NAME}>
-                    <span className={ROW}>{agent.title}{agent.archivedAt ? <Pill tone="grey">Archived</Pill> : null}</span>
+                    <span className={ROW}>{agent.title}{agent.archivedAt ? <Pill tone="grey">{t("tasks.tab.archived")}</Pill> : null}</span>
                     <span className={TABLE_SUB}>{agent.name}</span>
                   </TableCell>
                   <TableCell>{agent.model}</TableCell>
                   <TableCell>{agent.runnerPreference.toLowerCase()}</TableCell>
-                  <TableCell>{agent.inboxAccess ? <Pill tone="green">Enabled</Pill> : <Pill tone="grey">Off</Pill>}</TableCell>
+                  <TableCell>{agent.inboxAccess ? <Pill tone="green">{t("agents.inbox.on")}</Pill> : <Pill tone="grey">{t("agents.inbox.off")}</Pill>}</TableCell>
                   <TableCell>{formatDate(agent.updatedAt)}</TableCell>
                   <TableCell className={TABLE_TIGHT}><RowMenu items={[
-                    { label: agent.archivedAt ? "Unarchive" : "Archive", onSelect: () => toggleArchived(agent) },
-                    { label: "Delete", danger: true, onSelect: () => remove(agent) },
+                    { label: t(agent.archivedAt ? "archived.menu.unarchive" : "tasks.menu.archive"), onSelect: () => toggleArchived(agent) },
+                    { label: t("common.delete"), danger: true, onSelect: () => remove(agent) },
                   ]} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-          {agents.length === 0 ? <EmptyState>{loading ? "Loading…" : "No agents in this project yet."}</EmptyState> : null}
+          {agents.length === 0 ? <EmptyState>{t(loading ? "common.loading" : "agents.empty")}</EmptyState> : null}
         </Card>
       </div>
 
@@ -185,6 +188,7 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
   const [permissions, setPermissions] = useState<RepoPermission>(granted?.permissions ?? "GIT_WRITE");
   const [mountPath, setMountPath] = useState(granted?.mountPath ?? repo.mountPath);
   const { pending, error, run } = useAction();
+  const t = useT();
   const grant = (): void => {
     void run(async () => {
       await api.post(`/agents/${agent.id}/repos/${repo.id}/access`, { permissions, mountPath });
@@ -196,23 +200,23 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
       <div className={ROW}>
         <div className="min-w-0 flex-1">
           <div className="text-foreground">{repo.name}</div>
-          <div>{repo.remoteUrl} · default {repo.defaultBranch}</div>
+          <div>{t("agents.repo.default", { remote: repo.remoteUrl, branch: repo.defaultBranch })}</div>
         </div>
-        {granted ? <Pill tone="green">granted</Pill> : null}
+        {granted ? <Pill tone="green">{t("agents.repo.granted")}</Pill> : null}
       </div>
       <div className={FIELD_ROW}>
-        <Field label="Permission">
+        <Field label={t("agents.repo.permission")}>
           <Select value={permissions} onChange={(event) => setPermissions(event.target.value as RepoPermission)}>
             <option value="GIT_READ">git-read</option>
             <option value="GIT_WRITE">git-write</option>
           </Select>
         </Field>
-        <Field label="Mount path">
+        <Field label={t("agents.repo.mountPath")}>
           <Input type="text" value={mountPath} onChange={(event) => setMountPath(event.target.value)} />
         </Field>
         <div className={FIELD}>
           <label className={FIELD_LABEL}>&nbsp;</label>
-          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={grant}>Grant / update access</Button>
+          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={grant}>{t("agents.repo.grant")}</Button>
         </div>
       </div>
       {error === null ? null : <ErrorNotice message={error} />}
@@ -248,6 +252,7 @@ const BindingToggle = ({ on, label, add, remove, onDone }: {
 
 const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant: FilesystemGrant; onDone: () => void }): ReactNode => {
   const { pending, error, run } = useAction();
+  const t = useT();
   const patch = (key: "canRead" | "canWrite" | "canDelete", value: boolean): void => {
     void run(async () => {
       await api.patch(`/agents/${agentId}/filesystem-grants/${grant.id}`, {
@@ -265,10 +270,10 @@ const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant
   return (
     <TableRow>
       <TableCell className={TABLE_NAME}>{grant.folderPath}{error === null ? null : <span className={TABLE_SUB}>{error}</span>}</TableCell>
-      <TableCell><Check on={grant.canRead} onChange={(value) => patch("canRead", value)} disabled={pending} label={`Read ${grant.folderPath}`} /></TableCell>
-      <TableCell><Check on={grant.canWrite} onChange={(value) => patch("canWrite", value)} disabled={pending} label={`Write ${grant.folderPath}`} /></TableCell>
-      <TableCell><Check on={grant.canDelete} onChange={(value) => patch("canDelete", value)} disabled={pending} label={`Delete in ${grant.folderPath}`} /></TableCell>
-      <TableCell className={TABLE_TIGHT}><RowMenu items={[{ label: "Remove", danger: true, onSelect: remove }]} /></TableCell>
+      <TableCell><Check on={grant.canRead} onChange={(value) => patch("canRead", value)} disabled={pending} label={t("agents.fs.read", { path: grant.folderPath })} /></TableCell>
+      <TableCell><Check on={grant.canWrite} onChange={(value) => patch("canWrite", value)} disabled={pending} label={t("agents.fs.write", { path: grant.folderPath })} /></TableCell>
+      <TableCell><Check on={grant.canDelete} onChange={(value) => patch("canDelete", value)} disabled={pending} label={t("agents.fs.delete", { path: grant.folderPath })} /></TableCell>
+      <TableCell className={TABLE_TIGHT}><RowMenu items={[{ label: t("agents.fs.remove"), danger: true, onSelect: remove }]} /></TableCell>
     </TableRow>
   );
 };
@@ -277,6 +282,7 @@ const NewFilesystemGrant = ({ agentId, onDone }: { agentId: string; onDone: () =
   const [folderPath, setFolderPath] = useState("");
   const [permissions, setPermissions] = useState({ canRead: true, canWrite: false, canDelete: false });
   const { pending, error, run } = useAction();
+  const t = useT();
   const submit = async (): Promise<void> => {
     const ok = await run(() => api.post(`/agents/${agentId}/filesystem-grants`, { folderPath, ...permissions }));
     if (ok) { setFolderPath(""); setPermissions({ canRead: true, canWrite: false, canDelete: false }); onDone(); }
@@ -286,15 +292,15 @@ const NewFilesystemGrant = ({ agentId, onDone }: { agentId: string; onDone: () =
     <div className={cn(STACK, "mb-3.5")}>
       {error === null ? null : <ErrorNotice message={error} />}
       <div className={FIELD_ROW}>
-        <Field label="Folder path"><Input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
-        <Field label="Permissions">
+        <Field label={t("agents.fs.folderPath")}><Input type="text" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/absolute/path" /></Field>
+        <Field label={t("agents.fs.permissions")}>
           <div className={cn(ROW, "min-h-[34px]")}>
             {(["canRead", "canWrite", "canDelete"] as const).map((key) => (
-              <span className={ROW} key={key}><Check on={permissions[key]} onChange={(value) => setPermissions({ ...permissions, [key]: value })} label={key} />{key.slice(3)}</span>
+              <span className={ROW} key={key}><Check on={permissions[key]} onChange={(value) => setPermissions({ ...permissions, [key]: value })} label={t(`agents.fs.${key}`)} />{t(`agents.fs.${key}`)}</span>
             ))}
           </div>
         </Field>
-        <div className={FIELD}><label className={FIELD_LABEL}>&nbsp;</label><Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>Grant access</Button></div>
+        <div className={FIELD}><label className={FIELD_LABEL}>&nbsp;</label><Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || folderPath.trim() === "" || !any} onClick={() => void submit()}>{t("agents.fs.grant")}</Button></div>
       </div>
     </div>
   );
@@ -305,21 +311,22 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
   const skills = usePoll<Skill[]>(`/projects/${projectId}/skills`, 30_000);
   const connections = usePoll<MCPConnection[]>(`/projects/${projectId}/mcp-connections`, 30_000);
   const grantedRepos = agent.repoAccess ?? null;
+  const t = useT();
 
   return (
     <div className={STACK}>
-      <Card title="Repositories" extra={<span className={COUNT}>{(repos.data ?? []).length}</span>}>
+      <Card title={t("agents.cap.repos")} extra={<span className={COUNT}>{(repos.data ?? []).length}</span>}>
         {(repos.data ?? []).length === 0
-          ? <EmptyState>No repos in this project.</EmptyState>
+          ? <EmptyState>{t("connections.repos.empty")}</EmptyState>
           : (repos.data ?? []).map((repo) => (
             <RepoAccessRow key={repo.id} agent={agent} repo={repo} onDone={onSaved}
               granted={grantedRepos?.find((access) => access.repoId === repo.id) ?? null} />
           ))}
       </Card>
 
-      <Card title="Skills" extra={<span className={COUNT}>{(skills.data ?? []).length}</span>}>
+      <Card title={t("agents.cap.skills")} extra={<span className={COUNT}>{(skills.data ?? []).length}</span>}>
         {(skills.data ?? []).length === 0
-          ? <EmptyState>No skills defined in this project.</EmptyState>
+          ? <EmptyState>{t("agents.cap.skills.empty")}</EmptyState>
           : (skills.data ?? []).map((skill) => {
             const mounted = (agent.skills ?? []).some((entry) => entry.skillId === skill.id);
             return (
@@ -328,7 +335,7 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
                   <div className="text-foreground">{skill.name}</div>
                   <div>{skill.kind.toLowerCase()} · {skill.slug}</div>
                 </div>
-                <BindingToggle on={mounted} label={`Mount ${skill.name}`}
+                <BindingToggle on={mounted} label={t("agents.cap.mount", { name: skill.name })}
                   add={() => api.post(`/agents/${agent.id}/skills`, { skillId: skill.id })}
                   remove={() => api.delete(`/agents/${agent.id}/skills/${skill.id}`)} onDone={onSaved} />
               </div>
@@ -336,8 +343,8 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
           })}
       </Card>
 
-      <Card title="MCP Connections" extra={<span className={COUNT}>{(connections.data ?? []).length}</span>}>
-        {(connections.data ?? []).length === 0 ? <EmptyState>No MCP connections in this project.</EmptyState> : (connections.data ?? []).map((connection) => {
+      <Card title={t("connections.mcp.title")} extra={<span className={COUNT}>{(connections.data ?? []).length}</span>}>
+        {(connections.data ?? []).length === 0 ? <EmptyState>{t("agents.cap.mcp.empty")}</EmptyState> : (connections.data ?? []).map((connection) => {
           const bound = (agent.mcpConnections ?? []).some((entry) => entry.mcpConnectionId === connection.id);
           return (
             <div key={connection.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
@@ -345,7 +352,7 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
                 <div className="text-foreground">{connection.name}</div>
                 <div>{connection.transport}</div>
               </div>
-              <BindingToggle on={bound} label={`Bind ${connection.name}`}
+              <BindingToggle on={bound} label={t("agents.cap.bind", { name: connection.name })}
                 add={() => api.post(`/agents/${agent.id}/mcp-connections`, { mcpConnectionId: connection.id })}
                 remove={() => api.delete(`/agents/${agent.id}/mcp-connections/${connection.id}`)} onDone={onSaved} />
             </div>
@@ -353,9 +360,9 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
         })}
       </Card>
 
-      <Card title="Secrets" extra={<span className={COUNT}>{(agent.secretGrants ?? []).length}</span>}>
+      <Card title={t("secrets.head.title")} extra={<span className={COUNT}>{(agent.secretGrants ?? []).length}</span>}>
         {(agent.secretGrants ?? []).length === 0
-          ? <EmptyState>No secrets granted to this agent.</EmptyState>
+          ? <EmptyState>{t("agents.cap.secrets.empty")}</EmptyState>
           : (agent.secretGrants ?? []).map((grant) => (
             <div key={`${grant.secretId}:${grant.envVar}`} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
               <div className="flex-1"><div className="text-foreground">{grant.secret?.name ?? grant.secretId}</div><div>{grant.envVar}</div></div>
@@ -363,17 +370,17 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
           ))}
       </Card>
 
-      <Card title="Filesystem grants" extra={<span className={COUNT}>{(agent.filesystemGrants ?? []).length}</span>}>
+      <Card title={t("agents.cap.filesystem")} extra={<span className={COUNT}>{(agent.filesystemGrants ?? []).length}</span>}>
         <NewFilesystemGrant agentId={agent.id} onDone={onSaved} />
         <Table>
-          <TableHeader><TableRow><TableHead>Folder</TableHead><TableHead>Read</TableHead><TableHead>Write</TableHead><TableHead>Delete</TableHead><TableHead /></TableRow></TableHeader>
+          <TableHeader><TableRow><TableHead>{t("agents.fs.folder")}</TableHead><TableHead>{t("agents.fs.canRead")}</TableHead><TableHead>{t("agents.fs.canWrite")}</TableHead><TableHead>{t("agents.fs.canDelete")}</TableHead><TableHead /></TableRow></TableHeader>
           <TableBody>
             {(agent.filesystemGrants ?? []).map((grant) => (
               <FilesystemGrantRow key={grant.id} agentId={agent.id} grant={grant} onDone={onSaved} />
             ))}
           </TableBody>
         </Table>
-        {(agent.filesystemGrants ?? []).length === 0 ? <EmptyState>No filesystem grants.</EmptyState> : null}
+        {(agent.filesystemGrants ?? []).length === 0 ? <EmptyState>{t("agents.cap.filesystem.empty")}</EmptyState> : null}
       </Card>
     </div>
   );
@@ -384,13 +391,14 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   const [tab, setTab] = useState<AgentTab>("setup");
   const [draft, setDraft] = useState<Agent | null>(null);
   const { pending, error: actionError, run } = useAction();
+  const t = useT();
   const projectId = agent?.projectId ?? "";
   const { data: siblings } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
 
   if (error !== null && agent === null) {
     return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
   }
-  if (!agent) return <Page><EmptyState>Loading…</EmptyState></Page>;
+  if (!agent) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const view = draft ?? agent;
   const patch = (changes: Partial<Agent>): void => setDraft({ ...view, ...changes });
@@ -411,14 +419,14 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         <span className="text-[var(--status-violet-fg)]"><IconRobot /></span>
         <h1 className={DETAIL_HEAD_H1}>{view.title}</h1>
         <Pill tone="grey">{view.model}</Pill>
-        <Pill tone="violet">runner {view.runnerPreference.toLowerCase()}</Pill>
+        <Pill tone="violet">{t("agents.runnerPill", { runner: view.runnerPreference.toLowerCase() })}</Pill>
         <span className="flex-1" />
         {draft === null
-          ? <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(agent)}>Edit</Button>
+          ? <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(agent)}>{t("common.edit")}</Button>
           : (
             <>
-              <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(null)}>Cancel</Button>
-              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={() => void save()}>Save</Button>
+              <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(null)}>{t("common.cancel")}</Button>
+              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={() => void save()}>{t("common.save")}</Button>
             </>
           )}
       </div>
@@ -427,10 +435,10 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         value={tab}
         onChange={setTab}
         options={[
-          { value: "setup", label: "Setup" },
-          { value: "prompt", label: "Prompt" },
-          { value: "capabilities", label: "Capabilities" },
-          { value: "collaborators", label: "Collaborators" },
+          { value: "setup", label: t("agents.tab.setup") },
+          { value: "prompt", label: t("agents.tab.prompt") },
+          { value: "capabilities", label: t("agents.tab.capabilities") },
+          { value: "collaborators", label: t("agents.tab.collaborators") },
         ]}
       />
 
@@ -438,37 +446,37 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         {actionError === null ? null : <ErrorNotice message={actionError} />}
 
         {tab === "setup" ? (
-          <Card title="Details">
+          <Card title={t("projects.details.title")}>
             {draft === null ? (
               <KeyValue items={[
-                { k: "Name", v: view.name },
-                { k: "Title", v: view.title },
-                { k: "Model", v: view.model },
-                { k: "Runner preference", v: view.runnerPreference.toLowerCase() },
-                { k: "Environment", v: <span className="text-[11.5px]">{view.environmentId}</span> },
-                { k: "Inbox access", v: view.inboxAccess ? "Enabled" : "Off" },
-                { k: "Created", v: formatDateTime(view.createdAt) },
-                { k: "Updated", v: formatDateTime(view.updatedAt) },
+                { k: t("agents.field.name.label"), v: view.name },
+                { k: t("agents.field.title"), v: view.title },
+                { k: t("agents.field.model"), v: view.model },
+                { k: t("agents.field.runnerPreference"), v: view.runnerPreference.toLowerCase() },
+                { k: t("agents.field.environment"), v: <span className="text-[11.5px]">{view.environmentId}</span> },
+                { k: t("agents.inbox.label"), v: t(view.inboxAccess ? "agents.inbox.on" : "agents.inbox.off") },
+                { k: t("common.created"), v: formatDateTime(view.createdAt) },
+                { k: t("common.updated"), v: formatDateTime(view.updatedAt) },
               ]} />
             ) : (
               <div className={STACK}>
                 <div className={FIELD_ROW}>
-                  <Field label="Name"><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
-                  <Field label="Title"><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
+                  <Field label={t("agents.field.name.label")}><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
+                  <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
                 <div className={FIELD_ROW}>
-                  <Field label="Model"><Input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
-                  <Field label="Runner preference" hint="INHERIT 时按 execution.ts 的模型名启发式选 runner。">
+                  <Field label={t("agents.field.model")}><Input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
+                  <Field label={t("agents.field.runnerPreference")} hint={t("agents.field.runner.hint")}>
                     <Select value={view.runnerPreference} onChange={(event) => patch({ runnerPreference: event.target.value as RunnerPreference })}>
                       {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
                     </Select>
                   </Field>
                 </div>
                 <div className={ROW}>
-                  <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label="Inbox access" />
+                  <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label={t("agents.inbox.label")} />
                   <div>
-                    <div>Inbox access</div>
-                    <div>Lets this agent ask questions and post updates through the Inbox.</div>
+                    <div>{t("agents.inbox.label")}</div>
+                    <div>{t("agents.inbox.hint.detail")}</div>
                   </div>
                 </div>
               </div>
@@ -478,13 +486,13 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
 
         {tab === "prompt" ? (
           <>
-            <Card title="AgentOS Foundation" extra={<Pill tone="grey">prepended</Pill>}>
+            <Card title={t("agents.foundation.title")} extra={<Pill tone="grey">{t("agents.foundation.pill")}</Pill>}>
               {draft === null
                 ? <div className={CODE_BLOCK}>{view.foundationalPrompt}</div>
                 : <Textarea rows={6} value={view.foundationalPrompt} onChange={(event) => patch({ foundationalPrompt: event.target.value })} />}
-              <div className="mt-2.5">This text is placed above the agent instructions for every run.</div>
+              <div className="mt-2.5">{t("agents.foundation.hint")}</div>
             </Card>
-            <Card title="Your agent instructions">
+            <Card title={t("agents.field.rolePrompt")}>
               {draft === null
                 ? <div className={CODE_BLOCK}>{view.rolePrompt}</div>
                 : <Textarea rows={18} value={view.rolePrompt} onChange={(event) => patch({ rolePrompt: event.target.value })} />}
@@ -495,10 +503,8 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         {tab === "capabilities" ? <CapabilitiesTab agent={agent} projectId={projectId} onSaved={reload} /> : null}
 
         {tab === "collaborators" ? (
-          <Card title="Collaborators">
-            <div className="mb-3">
-              Agents this agent may spawn for subtasks. Bindings live in AgentCollaboration.
-            </div>
+          <Card title={t("agents.tab.collaborators")}>
+            <div className="mb-3">{t("agents.collaborators.hint")}</div>
             <div className="mt-3">
               {(siblings ?? []).filter((candidate) => candidate.id !== agent.id).map((candidate) => (
                 <div key={candidate.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
@@ -506,7 +512,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                     <div className="text-foreground">{candidate.title}</div>
                     <div>{titleCase(candidate.name)} · {candidate.model}</div>
                   </div>
-                  <BindingToggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={`Allow ${candidate.name}`}
+                  <BindingToggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={t("agents.collaborators.allow", { name: candidate.name })}
                     add={() => api.post(`/agents/${agent.id}/collaborators`, { allowedAgentId: candidate.id })}
                     remove={() => api.delete(`/agents/${agent.id}/collaborators/${candidate.id}`)} onDone={reload} />
                 </div>

@@ -1,8 +1,9 @@
 import { type ReactNode, useState } from "react";
 
 import { api } from "../lib/api";
-import { firstLine, formatDateTime, restLines, timeAgo } from "../lib/format";
+import { firstLine, formatDateTime, formatT, restLines, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT, useTNodes } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { cn } from "../lib/utils";
@@ -35,22 +36,28 @@ const useAgentNames = (): Map<string, string> => {
   return new Map((data ?? []).map((agent) => [agent.id, agent.title]));
 };
 
+/* Pure and called from two components, so it reads the locale through `formatT`
+ * — the WI-4 seam — rather than taking a `Translate` parameter (same rule as
+ * WI-6's helpers). The agent's own title is API data and stays untranslated. */
 const senderName = (message: InboxMessage, names: Map<string, string>): string =>
   // Unmatched inbound Feishu text lands here as a HUMAN message with no agent.
-  message.from === "HUMAN" ? "You" : message.agentId === null ? "System" : names.get(message.agentId) ?? "Agent";
+  message.from === "HUMAN" ? formatT("inbox.sender.you")
+    : message.agentId === null ? formatT("inbox.sender.system")
+      : names.get(message.agentId) ?? formatT("inbox.sender.agent");
 
 export const InboxPage = (): ReactNode => {
   const { data, loading, error, reload } = usePoll<InboxMessage[]>("/inbox/messages");
   const names = useAgentNames();
   const [filter, setFilter] = useState<"active" | "answered">("active");
+  const t = useT();
   const messages = (data ?? []).filter((message) => (filter === "active" ? message.status === "OPEN" : message.status !== "OPEN"));
 
   return (
     <Page>
       <div className={PAGE_HEAD}>
         <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Inbox</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>Messages and updates from your agents</div>
+          <h1 className={PAGE_HEAD_H1}>{t("inbox.head.title")}</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>{t("inbox.head.subtitle")}</div>
         </div>
       </div>
 
@@ -61,7 +68,7 @@ export const InboxPage = (): ReactNode => {
           accent
           value={filter}
           onChange={setFilter}
-          options={[{ value: "active", label: "Active" }, { value: "answered", label: "Answered" }]}
+          options={[{ value: "active", label: t("inbox.filter.active") }, { value: "answered", label: t("inbox.filter.answered") }]}
         />
       </div>
 
@@ -75,7 +82,7 @@ export const InboxPage = (): ReactNode => {
                   {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
                   {senderName(message, names)}
                   {message.status === "OPEN" ? <InboxPill status={message.status} /> : null}
-                  {message.gateTaskId === null ? null : <Pill tone="violet">Approval gate</Pill>}
+                  {message.gateTaskId === null ? null : <Pill tone="violet">{t("inbox.approvalGate")}</Pill>}
                 </div>
                 <div className="mt-[5px] flex items-center gap-[8px] text-[13px] text-foreground">
                   {message.status === "OPEN" ? <span className="size-[7px] flex-none rounded-full bg-primary" /> : null}
@@ -91,7 +98,7 @@ export const InboxPage = (): ReactNode => {
           ))}
         </div>
         {messages.length === 0
-          ? <EmptyState>{loading ? "Loading…" : filter === "active" ? "Nothing waiting on you." : "No answered messages yet."}</EmptyState>
+          ? <EmptyState>{t(loading ? "common.loading" : filter === "active" ? "inbox.empty.active" : "inbox.empty.answered")}</EmptyState>
           : null}
       </div>
     </Page>
@@ -103,6 +110,8 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   const names = useAgentNames();
   const [reply, setReply] = useState("");
   const { pending, error: actionError, run } = useAction();
+  const t = useT();
+  const tn = useTNodes();
 
   if (error !== null && data === null) {
     return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
@@ -111,8 +120,8 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   if (!message) {
     return (
       <Page>
-        <div className={DETAIL_HEAD}><Link to="/inbox" className={BACK_LINK}><IconArrowLeft />Back to Inbox</Link></div>
-        <EmptyState>Message not found. The control plane only exposes agent-authored messages via <code>GET /inbox/messages</code>.</EmptyState>
+        <div className={DETAIL_HEAD}><Link to="/inbox" className={BACK_LINK}><IconArrowLeft />{t("inbox.back")}</Link></div>
+        <EmptyState>{tn("inbox.notFound", { route: <code>GET /inbox/messages</code> })}</EmptyState>
       </Page>
     );
   }
@@ -142,26 +151,26 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   return (
     <Page>
       <div className={DETAIL_HEAD}>
-        <Link to="/inbox" className={BACK_LINK}><IconArrowLeft />Back to Inbox</Link>
+        <Link to="/inbox" className={BACK_LINK}><IconArrowLeft />{t("inbox.back")}</Link>
         <span className="flex-1" />
-        <span className="text-[11.5px] text-muted-foreground">updated {timeAgo(message.answeredAt ?? message.createdAt)}</span>
+        <span className="text-[11.5px] text-muted-foreground">{t("inbox.updated", { when: timeAgo(message.answeredAt ?? message.createdAt) })}</span>
       </div>
 
       <div className={STACK}>
         <div className={ROW}>
           <h1 className="text-[18px]">{firstLine(message.body)}</h1>
           <InboxPill status={message.status} />
-          {message.gateTaskId === null ? null : <Pill tone="violet">Approval gate</Pill>}
+          {message.gateTaskId === null ? null : <Pill tone="violet">{t("inbox.approvalGate")}</Pill>}
         </div>
 
         <div className={ROW_WRAP}>
-          {message.taskId === null ? null : <Link to={`/tasks/${message.taskId}`} className={STAT_PILL}>Task {message.taskId.slice(-6)}</Link>}
-          {message.goalId === null ? null : <Link to={`/goals/${message.goalId}`} className={STAT_PILL}>Goal {message.goalId.slice(-6)}</Link>}
+          {message.taskId === null ? null : <Link to={`/tasks/${message.taskId}`} className={STAT_PILL}>{t("inbox.stat.task", { id: message.taskId.slice(-6) })}</Link>}
+          {message.goalId === null ? null : <Link to={`/goals/${message.goalId}`} className={STAT_PILL}>{t("inbox.stat.goal", { id: message.goalId.slice(-6) })}</Link>}
           <span className={STAT_PILL}>{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</span>
-          {message.deliveryAttempts > 0 ? <span className={STAT_PILL}>{message.deliveryAttempts} delivery attempts</span> : null}
+          {message.deliveryAttempts > 0 ? <span className={STAT_PILL}>{t("inbox.stat.attempts", { n: message.deliveryAttempts })}</span> : null}
         </div>
 
-        {message.lastDeliveryError === null ? null : <ErrorNotice message={`Delivery error: ${message.lastDeliveryError}`} />}
+        {message.lastDeliveryError === null ? null : <ErrorNotice message={t("inbox.deliveryError", { error: message.lastDeliveryError })} />}
 
         <div className={MSG_LIST}>
           <div className={MSG_CARD}>
@@ -177,7 +186,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
             <div className={cn(MSG_CARD, "ml-[40px] bg-secondary")} key={replyMessage.id}>
               <div className={MSG_HEAD}>
                 <IconUser />
-                <span className="text-foreground">You (web)</span>
+                <span className="text-foreground">{t("inbox.sender.youWeb")}</span>
                 <span className={MSG_TIME}>{formatDateTime(replyMessage.createdAt)}</span>
               </div>
               <Markdown text={replyMessage.body} />
@@ -187,7 +196,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
             <div className={cn(MSG_CARD, "ml-[40px] bg-secondary")} key={decision.id}>
               <div className={MSG_HEAD}>
                 <IconUser />
-                <span className="text-foreground">{decision.actorOpenId === "web-operator" ? "You (web)" : decision.actorOpenId ?? "Operator"}</span>
+                <span className="text-foreground">{decision.actorOpenId === "web-operator" ? t("inbox.sender.youWeb") : decision.actorOpenId ?? t("inbox.sender.operator")}</span>
                 <span className={MSG_TIME}>{formatDateTime(decision.createdAt)}</span>
               </div>
               <div className={LONG_TEXT}>{decision.decision}</div>
@@ -200,7 +209,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
         {open ? (
           <Card>
             <div className={STACK}>
-              <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />The agent is waiting for your reply before continuing.</div>
+              <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />{t("inbox.waiting")}</div>
               {choices.length > 0 ? (
                 <div className={LIST}>
                   {choices.map((option) => (
@@ -212,8 +221,8 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
                 </div>
               ) : message.gateTaskId !== null ? (
                 <div className={ROW}>
-                  <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>Approve</Button>
-                  <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>Reject</Button>
+                  <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("approve")}>{t("inbox.approve")}</Button>
+                  <Button type="button" variant="legacyDanger" size="legacy" className="shadow-none" disabled={pending} onClick={() => decide("reject")}>{t("inbox.reject")}</Button>
                 </div>
               ) : (
                 <>
@@ -222,8 +231,8 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
                       batch, so it carried no shadow and took Tailwind preflight's
                       `currentColor` at 50% for the placeholder, not the primitive's
                       pinned `text-muted-foreground`. */}
-                  <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Write a reply…" />
-                  <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || reply.trim() === ""} onClick={sendReply}>Reply</Button></div>
+                  <Textarea rows={5} className="shadow-none placeholder:text-foreground/50" value={reply} onChange={(event) => setReply(event.target.value)} placeholder={t("inbox.reply.placeholder")} />
+                  <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || reply.trim() === ""} onClick={sendReply}>{t("inbox.reply.send")}</Button></div>
                 </>
               )}
             </div>
@@ -231,8 +240,8 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
         ) : (
           <Card>
             <div className="text-muted-foreground">
-              Answered {timeAgo(message.answeredAt)}
-              {message.selectedChoiceId === null ? "" : ` · selected “${message.selectedChoiceId}”`}
+              {t("inbox.answered", { when: timeAgo(message.answeredAt) })}
+              {message.selectedChoiceId === null ? "" : t("inbox.selectedChoice", { id: message.selectedChoiceId })}
             </div>
           </Card>
         )}
