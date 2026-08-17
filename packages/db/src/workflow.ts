@@ -59,6 +59,36 @@ export class ArchivedAssigneeError extends Error {
 export const isArchivedAssigneeError = (error: unknown): error is ArchivedAssigneeError =>
   error instanceof Error && error.name === "ArchivedAssigneeError";
 
+/** An archived Task must not gain a run. Thrown from `enqueueTaskRun` itself
+ *  rather than from each caller: this function is the single place a Run comes
+ *  into existence, so guarding here closes the class instead of one path. */
+export class ArchivedTaskError extends Error {
+  constructor(readonly taskId: string, readonly taskName: string) {
+    super(`Task ${taskName} is archived; unarchive it before queueing a run`);
+    this.name = "ArchivedTaskError";
+  }
+}
+
+export const isArchivedTaskError = (error: unknown): error is ArchivedTaskError =>
+  error instanceof Error && error.name === "ArchivedTaskError";
+
+/**
+ * Takes the Task-row mutex the archive/start/retry/cron writers all take.
+ *
+ * `SELECT … FOR UPDATE` and not a plain read: under ReadCommitted a read of one
+ * table is not re-evaluated when another transaction commits, so "no active run"
+ * observed without the lock can be stale by the time the run is inserted.
+ */
+export const lockTaskRow = async (
+  tx: Tx,
+  taskId: string,
+): Promise<{ id: string; archivedAt: Date | null } | null> => {
+  const rows = await tx.$queryRaw<Array<{ id: string; archivedAt: Date | null }>>`
+    SELECT "id", "archivedAt" FROM "Task" WHERE "id" = ${taskId} FOR UPDATE
+  `;
+  return rows[0] ?? null;
+};
+
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
@@ -71,6 +101,12 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   });
   if (task.assigneeType !== AssigneeType.AGENT || !task.assigneeAgent || !task.repo) {
     throw new Error(`Task ${task.id} cannot be queued without an agent and repo`);
+  }
+  // Checked before the assignee, because an archived task is archived whoever
+  // it is assigned to. The runner claims only `TODO|DOING` and unarchived tasks,
+  // so a run queued here would never be claimed and never complete.
+  if (task.archivedAt) {
+    throw new ArchivedTaskError(task.id, task.name);
   }
   if (task.assigneeAgent.archivedAt) {
     throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
@@ -498,6 +534,16 @@ export const applyInboxDecisionTx = async (
       });
     }
     if (!redo) throw new Error("Approval gate has no executable previous task to reject to");
+    // Rejection is the one gate path that queues work on a task the operator
+    // never named, so it joins the Task-row mutex here rather than trusting the
+    // row loaded with the Inbox message. Refusing by throwing rolls the whole
+    // transaction back, which leaves the decision OPEN — the human unarchives
+    // the step and decides again, instead of the gate silently closing onto a
+    // run the runner will never claim.
+    const lockedRedo = await lockTaskRow(tx, redo.id);
+    if (lockedRedo?.archivedAt) {
+      throw new ArchivedTaskError(redo.id, redo.name);
+    }
     await tx.task.update({ where: { id: redo.id }, data: { status: TaskStatus.TODO, failureReason: null } });
     if (redo.id !== question.gateTask.id) {
       await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.TODO } });

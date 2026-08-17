@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { backfillTaskSource, type PrismaClient } from "@agentos/db";
+import { backfillTaskSource, backfilledFireId, PrismaClient } from "@agentos/db";
 
 import { fireCronTask } from "./scheduler.js";
-import { resetTestDb, setupTestDb, testDatabaseSchema } from "./testdb.js";
+import { resetTestDb, setupTestDb, testDatabaseSchema, testDatabaseUrl } from "./testdb.js";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -218,4 +218,41 @@ test("the backfill skips fires whose template is gone", async () => {
   assert.equal(result.sourceWebhook, 1);
   assert.equal(result.firesCreated, 0);
   assert.equal(await db.triggerFire.count(), 0);
+});
+
+test("two backfills running at once produce one ledger row, not two (SOL-REVIEW S1)", async () => {
+  // Sequential re-runnability is not concurrency-idempotency: an unlocked
+  // findFirst followed by a create lets two operators both observe "no row" and
+  // both create one, doubling the fire counts. The deterministic primary key is
+  // the lock — the second writer collides inside the database and skips.
+  const { project } = await seedExecutor("concurrent-backfill");
+  const template = await db.taskTemplate.create({
+    data: { projectId: project.id, name: "template", description: "t", variables: [] },
+  });
+  const firedAt = "2026-08-15T11:00:00.000Z";
+  const task = await db.task.create({ data: {
+    projectId: project.id, name: "Step", description: "s", chainId: "chain-concurrent-backfill", chainIndex: 0,
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "webhook",
+    body: "Template instantiated",
+    metadata: { templateId: template.id, webhookTemplateId: template.id, firedAt },
+  } });
+
+  const other = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  try {
+    const results = await Promise.all([backfillTaskSource(db), backfillTaskSource(other)]);
+    // Exactly one invocation may report the row as created.
+    assert.equal(results.reduce((total, result) => total + result.firesCreated, 0), 1);
+  } finally {
+    await other.$disconnect();
+  }
+  assert.equal(await db.triggerFire.count({ where: { templateId: template.id } }), 1);
+
+  // The id carries the provenance the rollback runbook deletes on, so undoing
+  // the backfill cannot take live webhook history with it.
+  const fire = await db.triggerFire.findFirstOrThrow({ where: { templateId: template.id } });
+  assert.equal(fire.id, backfilledFireId(template.id, new Date(firedAt)));
+  assert.match(fire.id, /^backfill:/);
 });

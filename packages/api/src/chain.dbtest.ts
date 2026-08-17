@@ -546,3 +546,70 @@ test("M2 at the ceiling: a step whose runs are all spent is not startable", asyn
   const rendered = body.steps.find((candidate: any) => candidate.taskId === step.id);
   assert.equal(rendered.startable, false, "two terminal runs against a ceiling of two is spent");
 });
+
+// --- review fixes: gate rejection joins the mutex (SOL-REVIEW M2) ------------
+
+test("rejecting a gate onto an archived predecessor refuses and leaves the decision open", async () => {
+  // `enqueueTaskRun` never checked the *task's* archive state and the runner
+  // claims only unarchived TODO/DOING tasks, so the old behaviour queued a run
+  // nothing would ever claim, on a task the operator had put away — and closed
+  // the gate on the way past. Throwing rolls the whole transaction back.
+  const { predecessor, successor, gate } = await completeIntoHumanGate();
+  await db.task.update({ where: { id: predecessor.id }, data: { archivedAt: new Date() } });
+  const runsBefore = await db.run.count({ where: { taskId: predecessor.id } });
+
+  await assert.rejects(
+    () => db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: gate.id, externalEventId: `reject-archived-${Date.now()}`, decision: "reject",
+    }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }),
+    /archived/,
+  );
+
+  // Nothing moved: no run, no status change, and the gate is still the human's
+  // to decide once they unarchive the step.
+  assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), runsBefore);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "OPEN");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 0);
+  assert.notEqual((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).archivedAt, null);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "REVIEW");
+
+  // Unarchive and the same decision goes through.
+  await db.task.update({ where: { id: predecessor.id }, data: { archivedAt: null } });
+  const decision = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: gate.id, externalEventId: `reject-ok-${Date.now()}`, decision: "reject",
+  }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  assert.equal(decision.gateAction, "rejected");
+  assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), runsBefore + 1);
+});
+
+test("the runner claim never hands out a run whose task is archived", async () => {
+  // Defense in depth for the same class: `enqueueTaskRun` refuses archived
+  // tasks and archive refuses tasks with active runs, so this state should be
+  // unreachable. Written directly, it must still not be claimable.
+  const { project, agent, repo, predecessor } = await seedExecutableChain();
+  await db.run.create({ data: {
+    projectId: project.id, taskId: predecessor.id, agentId: agent.id, repoId: repo.id, runNumber: 1,
+    dedupeKey: `task:${predecessor.id}:run:1`, runner: "CLAUDE", model: "claude", promptHash: "hash",
+    status: "QUEUED", readyAt: new Date(),
+  } });
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "TODO", archivedAt: new Date() } });
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "runner-db-token";
+  const claim = () => createApp(db).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: "Bearer runner-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "runner-1" }),
+  });
+  try {
+    // 204 is the control plane's "nothing to claim".
+    assert.equal((await claim()).status, 204);
+    // Positive control, so this test can actually fail: the only thing keeping
+    // the run back is the archive flag, and clearing it makes it claimable.
+    await db.task.update({ where: { id: predecessor.id }, data: { archivedAt: null } });
+    const response = await claim();
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).run.taskId, predecessor.id);
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = prior;
+  }
+});

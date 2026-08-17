@@ -10,14 +10,24 @@ export type BackfillTaskSourceResult = {
 type SchedulerActivityRow = { taskId: string; recurringTaskId: string };
 type WebhookActivityRow = { taskId: string; chainId: string | null; templateId: string; firedAt: string };
 
+/** The primary key a backfilled fire gets, derived from the pair that identifies
+ *  it. Two purposes in one string: it makes concurrent backfills collide in the
+ *  database instead of double-counting, and it is the durable marker the rollback
+ *  runbook deletes on — live webhook fires keep their cuid and survive. */
+export const BACKFILLED_FIRE_ID_PREFIX = "backfill:";
+
+export const backfilledFireId = (templateId: string, firedAt: Date): string =>
+  `${BACKFILLED_FIRE_ID_PREFIX}${templateId}:${firedAt.toISOString()}`;
+
 /**
  * Attributes historical Tasks to the trigger that created them, and rebuilds the
  * webhook half of the fire ledger from the activity rows that were the only
  * record of a fire before this batch.
  *
- * Idempotent by construction: the source updates only touch rows still at
- * `manual`, and a fire is skipped when one with the same (templateId, createdAt)
- * already exists. A second call reports all zeros.
+ * Idempotent by construction, and idempotent *concurrently*: the source updates
+ * only touch rows still at `manual`, and each fire is written under a
+ * deterministic primary key with `skipDuplicates`, so two simultaneous
+ * invocations produce one row rather than two. A second call reports all zeros.
  *
  * This is a script rather than migration SQL because the dbtest harness migrates
  * once against an empty schema — a backfill embedded in a migration would have
@@ -97,25 +107,27 @@ export const backfillTaskSource = async (db: PrismaClient): Promise<BackfillTask
     if (!templateExists.has(row.templateId)) continue;
     const createdAt = new Date(row.firedAt);
     if (Number.isNaN(createdAt.getTime())) continue;
-    const key = `${row.templateId}:${createdAt.toISOString()}`;
+    const key = backfilledFireId(row.templateId, createdAt);
     if (!fires.has(key)) fires.set(key, { templateId: row.templateId, chainId: row.chainId, createdAt });
   }
 
-  let firesCreated = 0;
-  for (const fire of fires.values()) {
-    const existing = await db.triggerFire.findFirst({
-      where: { templateId: fire.templateId, createdAt: fire.createdAt },
-      select: { id: true },
-    });
-    if (existing) continue;
-    await db.triggerFire.create({ data: {
+  // A read-then-create pair is idempotent only *sequentially*: two operators
+  // running the backfill at once both see no row and both create one. The
+  // primary key is the lock — a deterministic id per (template, firedAt) plus
+  // `skipDuplicates` makes the second writer a no-op inside the database, which
+  // no amount of application-side checking can achieve. It also gives the
+  // backfilled rows durable provenance, which is what lets the runbook undo
+  // them without touching live webhook history.
+  const created = await db.triggerFire.createMany({
+    data: [...fires].map(([id, fire]) => ({
+      id,
       templateId: fire.templateId,
       chainId: fire.chainId,
       source: TriggerFireSource.WEBHOOK,
       createdAt: fire.createdAt,
-    } });
-    firesCreated += 1;
-  }
+    })),
+    skipDuplicates: true,
+  });
 
-  return { sourceCron, sourceWebhook, recurringLinked, firesCreated };
+  return { sourceCron, sourceWebhook, recurringLinked, firesCreated: created.count };
 };

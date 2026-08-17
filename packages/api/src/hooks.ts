@@ -10,6 +10,21 @@ const scalar = (value: unknown): value is string | number | boolean => (
   typeof value === "string" || typeof value === "number" || typeof value === "boolean"
 );
 
+/**
+ * Whether a configured default actually resolves a variable.
+ *
+ * An empty string does not. The Triggers UI badges a variable `required` when it
+ * has neither a payload path nor a default, and that badge is a promise: every
+ * fire that does not carry the variable will 400. Accepting `""` as a value
+ * would break the promise — the badge would be red on a trigger that fires
+ * fine — and an empty prompt variable is almost never what the operator meant.
+ * The rule lives here so the webhook path and `POST /task-templates/:id/fire`
+ * cannot drift apart.
+ */
+export const usableDefault = (value: unknown): value is string | number | boolean => (
+  scalar(value) && String(value) !== ""
+);
+
 const atPath = (payload: Record<string, unknown>, path: string): unknown => {
   let value: unknown = payload;
   for (const segment of path.split(".")) {
@@ -32,7 +47,7 @@ export const resolvePayloadVariables = (
     const path = typeof mapping.map?.[name] === "string" ? mapping.map[name] : undefined;
     const resolved = path ? atPath(payload, path) : undefined;
     const fallback = mapping.defaults?.[name];
-    const value = scalar(resolved) ? resolved : scalar(fallback) ? fallback : undefined;
+    const value = scalar(resolved) ? resolved : usableDefault(fallback) ? fallback : undefined;
     if (value === undefined) unresolved.push(name);
     else variables[name] = String(value);
   }

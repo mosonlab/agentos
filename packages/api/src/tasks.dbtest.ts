@@ -324,3 +324,180 @@ test("a lock held by a foreign transaction makes start wait rather than double-r
     await holder.$disconnect();
   }
 });
+
+// --- review fixes: the startable contract (CODE-REVIEW M1) -------------------
+
+test("start refuses a REVIEW step whose approval gate is still open, and creates no run", async () => {
+  // The defect: the route re-derived its own guard set instead of calling
+  // `startable`, so it accepted a step no human had approved. A run enqueued
+  // here has an agent working ahead of the gate, and its completion can open a
+  // second gate card for the same task.
+  const context = await seedTask("start-gated-review", { status: "REVIEW", approvalGate: true });
+  const run = await seedRun(context, 1, "SUCCEEDED");
+  const session = await db.session.create({ data: {
+    runId: run.id, projectId: context.project.id, agentId: context.agent.id, taskId: context.task.id, runner: "CLAUDE",
+  } });
+  await db.inboxMessage.create({ data: {
+    from: "AGENT", agentId: context.agent.id, sessionId: session.id, taskId: context.task.id,
+    gateTaskId: context.task.id, kind: "MULTIPLE_CHOICE", body: "Approve?", status: "OPEN",
+    choices: [{ id: "approve", label: "Approve" }], dedupeKey: `gate:${context.task.id}`,
+  } });
+  const { status, body } = await call("POST", `/tasks/${context.task.id}/start`);
+  assert.equal(status, 409);
+  assert.equal(body.error, "Only Todo and Backlog steps can be started");
+  assert.equal(await db.run.count({ where: { taskId: context.task.id } }), 1, "no second run");
+  // The gate is untouched: refusing to start must not decide it.
+  assert.equal(await db.inboxMessage.count({ where: { gateTaskId: context.task.id, status: "OPEN" } }), 1);
+});
+
+test("start refuses a DOING step — that is Retry's territory", async () => {
+  const context = await seedTask("start-doing", { status: "DOING" });
+  await seedRun(context, 1, "FAILED");
+  const { status, body } = await call("POST", `/tasks/${context.task.id}/start`);
+  assert.equal(status, 409);
+  assert.equal(body.error, "Only Todo and Backlog steps can be started");
+  assert.equal(await db.run.count({ where: { taskId: context.task.id } }), 1);
+});
+
+test("start on a task with no repository is 400, never a 500", async () => {
+  // `enqueueTaskRun` throws a plain Error for a missing repo and the route's
+  // catch maps only ArchivedAssigneeError and P2002, so this used to be a 500
+  // on a documented endpoint.
+  const context = await seedTask("start-no-repo");
+  await db.task.update({ where: { id: context.task.id }, data: { repoId: null } });
+  const { status, body } = await call("POST", `/tasks/${context.task.id}/start`);
+  assert.equal(status, 400);
+  assert.equal(body.error, "This task has no repository");
+  assert.equal(await db.run.count({ where: { taskId: context.task.id } }), 0);
+});
+
+// --- review fixes: the Backlog PATCH joins the mutex (SOL-REVIEW M1) ---------
+
+test("start and a Backlog PATCH released together never strand a queued run in Backlog", async () => {
+  // The runner claims only unarchived TODO/DOING tasks, so a QUEUED run left on
+  // a BACKLOG task is never claimed and never completes — the race does not
+  // "resolve on completion" as the old comment claimed.
+  const context = await seedTask("race-start-backlog");
+  const app = createApp(db);
+  const post = (path: string, body?: unknown) => app.request(path, {
+    method: body === undefined ? "POST" : "PATCH",
+    headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  await asOperator(() => synchronised([
+    async (release, gate) => { release(); await gate; return post(`/tasks/${context.task.id}/start`); },
+    async (release, gate) => { release(); await gate; return post(`/tasks/${context.task.id}`, { status: "BACKLOG" }); },
+  ]));
+  const task = await db.task.findUniqueOrThrow({ where: { id: context.task.id } });
+  const queued = await db.run.count({ where: { taskId: context.task.id, status: "QUEUED" } });
+  // Either the park won (no run) or the start won (not parked). Never both.
+  assert.equal(
+    (task.status === "BACKLOG") !== (queued > 0),
+    true,
+    `status=${task.status}, queuedRuns=${queued}`,
+  );
+});
+
+test("a Backlog PATCH is refused outright while a run is active", async () => {
+  const context = await seedTask("backlog-active-run");
+  await seedRun(context, 1, "WAITING_INBOX");
+  const { status, body } = await call("PATCH", `/tasks/${context.task.id}`, { status: "BACKLOG" });
+  assert.equal(status, 409);
+  assert.equal(body.error, "Cannot move a task with an active run to Backlog");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).status, "TODO");
+});
+
+test("a successful Backlog PATCH still records the status-change activity", async () => {
+  const context = await seedTask("backlog-activity");
+  assert.equal((await call("PATCH", `/tasks/${context.task.id}`, { status: "BACKLOG" })).status, 200);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: context.task.id, body: "Status changed: TODO → BACKLOG" },
+  }), 1);
+});
+
+// --- review fixes: archive-done re-checks status under the lock (SOL M3) -----
+
+test("archive-done does not archive a task dragged out of Done between selection and lock", async () => {
+  // `SELECT … FOR UPDATE` re-applies its own WHERE to the row version it waited
+  // for, so restating `status = 'done'` in the locking query is what makes the
+  // re-check atomic. Without it the operator's move back to the board is
+  // silently undone.
+  const context = await seedTask("archive-done-moved", { status: "DONE" });
+  const app = createApp(db);
+  const responses = await asOperator(() => synchronised([
+    async (release, gate) => { release(); await gate; return app.request(`/projects/${context.project.id}/tasks/archive-done`, { method: "POST", headers: { Authorization: `Bearer ${OPERATOR}` } }); },
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/tasks/${context.task.id}`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "TODO" }),
+      });
+    },
+  ]));
+  // archive-done always answers 200; the PATCH is either 200 (it got there
+  // first, and the locking query then skipped the row) or 409 (archive-done
+  // committed first, and the status write refuses to move an archived task).
+  assert.equal(responses[0]!.status, 200);
+  assert.ok([200, 409].includes(responses[1]!.status), `patch=${responses[1]!.status}`);
+  const task = await db.task.findUniqueOrThrow({ where: { id: context.task.id } });
+  // Whichever order won, the invariant holds: an archived task is a DONE task.
+  // The failure this pins is `status=TODO, archivedAt=<set>` — work the operator
+  // explicitly pulled back onto the board, silently hidden again.
+  assert.equal(
+    task.archivedAt === null || task.status === "DONE",
+    true,
+    `status=${task.status}, archivedAt=${task.archivedAt}`,
+  );
+});
+
+test("an archived task's status cannot be changed until it is unarchived", async () => {
+  const context = await seedTask("archived-status-write", { status: "DONE" });
+  assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+  const { status, body } = await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" });
+  assert.equal(status, 409);
+  assert.match(body.error, /unarchive it first/);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).status, "DONE");
+  // Unarchive, and the same write is accepted.
+  assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
+  assert.equal((await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" })).status, 200);
+});
+
+test("archive-done never reaches across projects, even for ids handed to it", async () => {
+  const mine = await seedTask("archive-done-scope-a", { status: "DONE" });
+  const theirs = await seedTask("archive-done-scope-b", { status: "DONE" });
+  const { status, body } = await call("POST", `/projects/${mine.project.id}/tasks/archive-done`);
+  assert.equal(status, 200);
+  assert.deepEqual(body, { archived: 1, skipped: 0 });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: theirs.task.id } })).archivedAt, null);
+});
+
+// --- review fixes: E1 consistency between list and detail (SOL SS3) ---------
+
+test("E1: a null-chainIndex row reads as its own one-row chain on the board too", async () => {
+  const context = await seedTask("e1-list", { chainId: "chain-e1", chainIndex: 0 });
+  const broken = await db.task.create({ data: {
+    projectId: context.project.id, name: "Broken row", description: "d",
+    chainId: "chain-e1", chainIndex: null,
+  } });
+  const { body } = await call("GET", `/tasks?projectId=${context.project.id}`);
+  const real = body.find((task: any) => task.id === context.task.id);
+  const orphan = body.find((task: any) => task.id === broken.id);
+  // The broken row must not inflate its siblings' totals...
+  assert.equal(real.chainProgress.total, 1);
+  // ...and must report the same 1/1 the detail route reports for it.
+  assert.equal(orphan.chainProgress.total, 1);
+  assert.equal(orphan.chainProgress.done, 0);
+  const detail = await call("GET", `/tasks/${broken.id}/chain`);
+  assert.equal(detail.body.total, orphan.chainProgress.total);
+});
+
+test("enrich=false drops the extra fields and keeps the rows", async () => {
+  const context = await seedTask("enrich-off", { chainId: "chain-enrich", chainIndex: 0 });
+  const { body } = await call("GET", `/tasks?projectId=${context.project.id}&enrich=false`);
+  assert.equal(body.length, 1);
+  assert.equal(body[0].id, context.task.id);
+  assert.equal(body[0].chainProgress, null);
+  assert.equal(body[0].recurringFireCount, 0);
+});

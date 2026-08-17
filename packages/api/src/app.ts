@@ -13,6 +13,7 @@ import {
   enqueueTaskRun,
   InboxStatus,
   isArchivedAssigneeError,
+  isArchivedTaskError,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -65,7 +66,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
-import { authenticateWebhook, resolvePayloadVariables } from "./hooks.js";
+import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
 import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
 import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
@@ -476,12 +477,25 @@ const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<L
 
 /** Locks a whole candidate set in one statement. `ORDER BY "id"` is not
  *  decoration: it is what stops two concurrent Archive All presses from
- *  deadlocking against each other. */
-const lockTasks = async (tx: Prisma.TransactionClient, taskIds: string[]): Promise<string[]> => {
+ *  deadlocking against each other.
+ *
+ *  The scope predicates are re-stated here rather than trusted from the
+ *  unlocked selection above: `FOR UPDATE` re-evaluates its own `WHERE` against
+ *  the row version it waited for, so a task dragged back out of `Done` between
+ *  selection and lock drops out of the result instead of being archived out
+ *  from under the operator who moved it. */
+const lockDoneTasks = async (
+  tx: Prisma.TransactionClient,
+  projectId: string,
+  taskIds: string[],
+): Promise<string[]> => {
   if (taskIds.length === 0) return [];
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id" FROM "Task"
-    WHERE "id" = ANY(${taskIds}) AND "archivedAt" IS NULL
+    WHERE "id" = ANY(${taskIds})
+      AND "archivedAt" IS NULL
+      AND "projectId" = ${projectId}
+      AND "status" = 'done'::"TaskStatus"
     ORDER BY "id" FOR UPDATE
   `;
   return rows.map((row) => row.id);
@@ -1415,6 +1429,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.get("/triggers/:templateId/fires", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
     const take = Math.min(Math.max(Number(context.req.query("take") ?? 20) || 20, 1), 100);
+    const template = await db.taskTemplate.findUnique({ where: { id: templateId }, select: { projectId: true } });
+    if (!template) return context.json({ error: "Template not found" }, 404);
     const fires = await db.triggerFire.findMany({
       where: { templateId },
       orderBy: { createdAt: "desc" },
@@ -1424,26 +1440,30 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const chainIds = [...new Set(fires.map((fire) => fire.chainId).filter((chainId): chainId is string => chainId !== null))];
     // One query for every referenced chain, then the shared assembler — a fire
     // whose chain has since been deleted keeps its row and reports nothing.
+    // Scoped to the trigger's own project because `chainId` is unique per
+    // project only by convention: without this predicate a colliding chainId in
+    // another project supplies this trigger's `firstTask` and progress.
     const rows = chainIds.length === 0 ? [] : await db.task.findMany({
-      where: { chainId: { in: chainIds } },
+      where: { chainId: { in: chainIds }, projectId: template.projectId },
       select: { id: true, projectId: true, chainId: true, chainIndex: true, name: true, status: true, archivedAt: true, templateStep: { select: { name: true } } },
     });
     const progress = chainProgressByChain(rows);
+    // Keyed by `chainKey`, not `chainId`, for the same reason — the query above
+    // makes the two equivalent today, and this keeps them equivalent if it changes.
     const firstByChain = new Map<string, { id: string; name: string }>();
     for (const row of [...rows].sort((left, right) => (left.chainIndex ?? 0) - (right.chainIndex ?? 0))) {
-      if (row.chainId && !firstByChain.has(row.chainId)) firstByChain.set(row.chainId, { id: row.id, name: row.name });
+      if (!row.chainId) continue;
+      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+      if (!firstByChain.has(key)) firstByChain.set(key, { id: row.id, name: row.name });
     }
-    const progressOf = (chainId: string) => {
-      const owner = rows.find((row) => row.chainId === chainId);
-      return owner ? progress.get(chainKey({ projectId: owner.projectId, chainId })) ?? null : null;
-    };
+    const keyOf = (chainId: string) => chainKey({ projectId: template.projectId, chainId });
     return context.json(fires.map((fire) => ({
       id: fire.id,
       createdAt: fire.createdAt,
       source: fire.source,
       chainId: fire.chainId,
-      firstTask: fire.chainId ? firstByChain.get(fire.chainId) ?? null : null,
-      progress: fire.chainId ? progressOf(fire.chainId) : null,
+      firstTask: fire.chainId ? firstByChain.get(keyOf(fire.chainId)) ?? null : null,
+      progress: fire.chainId ? progress.get(keyOf(fire.chainId)) ?? null : null,
     })));
   });
 
@@ -1460,9 +1480,17 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.post("/task-templates/:templateId/fire", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
     // `Fire now` on a fully-defaulted trigger sends no body at all, and
-    // `request.json()` throws on an empty one.
+    // `request.json()` throws on an empty one — hence the hand-rolled parse
+    // instead of `readJson`. It still has to answer a malformed body the way
+    // every other route does: a client error is a 400, not a 500.
     const raw = await context.req.text();
-    const body = manualFireInput.parse(raw.trim() === "" ? {} : JSON.parse(raw));
+    let parsed: unknown;
+    try {
+      parsed = raw.trim() === "" ? {} : JSON.parse(raw);
+    } catch {
+      return context.json({ error: "Invalid JSON payload" }, 400);
+    }
+    const body = manualFireInput.parse(parsed);
     const trigger = await db.taskTemplate.findUnique({ where: { id: templateId }, select: triggerSelect });
     if (!trigger) return context.json({ error: "Template not found" }, 404);
     // The repository is the template's own webhook repo — the same one the hook
@@ -1477,8 +1505,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     for (const name of trigger.variables) {
       const supplied = body.variables?.[name];
       const fallback = mapping.defaults[name];
+      // Same `usableDefault` the webhook path uses, so an empty-string default
+      // does not resolve here while the UI badges the variable `required`.
       const value = supplied !== undefined ? supplied
-        : typeof fallback === "string" || typeof fallback === "number" || typeof fallback === "boolean" ? String(fallback)
+        : usableDefault(fallback) ? String(fallback)
         : undefined;
       if (value === undefined) unresolved.push(name); else variables[name] = value;
     }
@@ -1529,12 +1559,32 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       orderBy: { createdAt: "asc" },
     });
 
+    // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
+    // queries over the whole task table, and `Projects.tsx` polls this endpoint
+    // globally every 2.5 s purely to count tasks per project — it renders none
+    // of them. `?enrich=false` lets that caller stop paying for it.
+    //
+    // Opt-out rather than "only when projectId is present": the global call is
+    // still *correct* (grouping is keyed by `(projectId, chainId)`, so two
+    // projects sharing a chainId never read each other's progress), and silently
+    // dropping the fields from every global response would delete that
+    // guarantee's only coverage along with the cost.
+    const enrich = (context.req.query("enrich") ?? "true") !== "false";
+
     // Progress must count *all* the chain's rows, including archived ones, so it
     // cannot be computed from the rows above. One extra scoped query, grouped in
     // memory — two queries per request regardless of how many tasks come back.
-    const chainIds = [...new Set(tasks.map((task) => task.chainId).filter((value): value is string => value !== null))];
+    //
+    // `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
+    // null-index row as its own one-row chain. Without it a single broken row
+    // inflates `total` and shifts `position` for every real sibling on the board
+    // while its own detail page still reads `1/1` — the same rows, two answers.
+    const chainIds = !enrich ? [] : [...new Set(tasks
+      .filter((task) => task.chainIndex !== null)
+      .map((task) => task.chainId)
+      .filter((value): value is string => value !== null))];
     const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
-      where: { chainId: { in: chainIds }, ...(projectId ? { projectId } : {}) },
+      where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
       select: {
         id: true, projectId: true, chainId: true, chainIndex: true, status: true,
         name: true, archivedAt: true, templateStep: { select: { name: true } },
@@ -1556,7 +1606,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // The Automations page needs `Last run` on a *collapsed* row, and a poll
     // that only mounts while a row is expanded can never supply it. Skipped
     // entirely on a board with no automations.
-    const cronIds = tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
+    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
     const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
       by: ["recurringSourceTaskId"],
       where: { recurringSourceTaskId: { in: cronIds } },
@@ -1566,16 +1616,36 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
 
     return context.json(tasks.map((task) => {
-      const key = task.chainId ? chainKey({ projectId: task.projectId, chainId: task.chainId }) : null;
-      const progress = key ? progressByChain.get(key) ?? null : null;
       const fired = firedByDefinition.get(task.id);
+      const recurring = {
+        recurringLastFiredAt: fired?._max.createdAt ?? null,
+        recurringFireCount: fired?._count._all ?? 0,
+      };
+      if (!enrich || !task.chainId) return { ...task, chainProgress: null, ...recurring };
+      // The same one-row-chain rule the detail route applies (E1), so a broken
+      // row reports `n/1` in both places instead of `null` here and `1/1` there.
+      if (task.chainIndex === null) {
+        return {
+          ...task,
+          chainProgress: {
+            chainId: task.chainId,
+            done: task.status === TaskStatus.DONE ? 1 : 0,
+            total: 1,
+            activeStepName: task.templateStep?.name ?? task.name,
+            activeStatus: task.status.toLowerCase(),
+            position: 1,
+          },
+          ...recurring,
+        };
+      }
+      const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
+      const progress = progressByChain.get(key) ?? null;
       return {
         ...task,
         chainProgress: progress
-          ? { ...progress, position: key ? positionsByChain.get(key)?.get(task.id) ?? null : null }
+          ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null }
           : null,
-        recurringLastFiredAt: fired?._max.createdAt ?? null,
-        recurringFireCount: fired?._count._all ?? 0,
+        ...recurring,
       };
     }));
   });
@@ -1703,14 +1773,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     if (body.status === TaskStatus.DONE && before.templateId && before.approvalGate) {
       return context.json({ error: "Template approval gates must be decided through Inbox" }, 409);
     }
-    // Read outside a transaction, like the gate guard above it. Losing this race
-    // parks a task in Backlog with a live run, which the chain advancer's parked
-    // guard already handles and the next run completion resolves — not worth
-    // making the whole PATCH handler transactional.
-    if (body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG) {
-      const active = await db.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } });
-      if (active > 0) return context.json({ error: "Cannot move a task with an active run to Backlog" }, 409);
-    }
+    const changesStatus = body.status !== undefined && body.status !== before.status;
+    const movingToBacklog = body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG;
     if (body.assigneeAgentId) {
       const agent = await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } });
       if (!agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
@@ -1755,23 +1819,52 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const advances = before.status !== TaskStatus.DONE
       && body.status === TaskStatus.DONE
       && Boolean(before.chainId || before.followUpTaskId);
-    const task = advances ? await db.$transaction(async (tx) => {
-      const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
-      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
-      if (!before.templateId && before.approvalGate) {
-        await tx.inboxMessage.updateMany({
-          where: { gateTaskId: before.id, status: "OPEN" },
-          data: { status: "CLOSED" },
-        });
-      }
-      await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
-      return updated;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted })
-      : await db.task.update({ where: { id: taskId }, data: updateData });
-    if (!advances && body.status && body.status !== before.status) {
-      await db.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
+    // A status write joins the Task-row mutex, like start / retry / archive /
+    // the scheduler's claims. Two reasons, both proven by regression tests:
+    //
+    //  - Parking in Backlog must be atomic with `Start now`. Counting active
+    //    runs outside a transaction and writing later loses the race, and the
+    //    loss does not "resolve on completion": the runner claims only
+    //    `TODO|DOING`, so a QUEUED run left on a BACKLOG task is never claimed
+    //    and never completes.
+    //  - Without the lock a status write can land *after* `archive-done`
+    //    committed and drag an archived task back onto a board that does not
+    //    show it — a guard set in which one writer ignores `archivedAt`
+    //    excludes nothing.
+    //
+    // One rule, no exceptions: an archived task's status is frozen until it is
+    // unarchived, whether or not the transition also advances a chain. Splitting
+    // that by `advances` would let an archived chained task be marked DONE while
+    // an archived standalone one could not.
+    if (changesStatus) {
+      const written = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return { error: "Task not found", code: 404 as const };
+        if (locked.archivedAt !== null) {
+          return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
+        }
+        if (movingToBacklog && await hasActiveRun(tx, taskId)) {
+          return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
+        }
+        const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
+        await tx.taskActivity.create({ data: {
+          taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}`,
+        } });
+        if (advances) {
+          if (!before.templateId && before.approvalGate) {
+            await tx.inboxMessage.updateMany({
+              where: { gateTaskId: before.id, status: "OPEN" },
+              data: { status: "CLOSED" },
+            });
+          }
+          await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
+        }
+        return { task: updated };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      if ("error" in written) return context.json({ error: written.error }, written.code);
+      return context.json(written.task);
     }
-    return context.json(task);
+    return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
   });
   app.delete("/tasks/:taskId", async (context) => {
     await db.task.delete({ where: { id: id.parse(context.req.param("taskId")) } });
@@ -1843,7 +1936,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
         if (locked.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
-        const task = await tx.task.findUniqueOrThrow({ where: { id: taskId } });
+        const task = await tx.task.findUniqueOrThrow({
+          where: { id: taskId },
+          include: { assigneeAgent: { select: { archivedAt: true } } },
+        });
         if (task.assigneeType !== AssigneeType.AGENT) {
           return { error: "Human steps cannot be started", code: 409 as const };
         }
@@ -1852,8 +1948,30 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         }
         // A count, not the latest run number: Run is one-to-many and a task at
         // its ceiling whose last run failed must not look startable.
-        if (await tx.run.count({ where: { taskId } }) >= task.maxSessionsPerTask) {
+        const total = await tx.run.count({ where: { taskId } });
+        if (total >= task.maxSessionsPerTask) {
           return { error: "Run budget exhausted", code: 409 as const };
+        }
+        // The specific messages above and below are a reason ladder in front of
+        // the shared predicate, so the operator gets the sentence that names
+        // their problem. `startable` itself is the authority: spec §4.3 defines
+        // the button's enabled state and this guard as one thing, and the route
+        // re-deriving them by hand was how it came to accept gated REVIEW steps
+        // and DOING steps and to answer 500 on a task with no repo.
+        if (task.status !== TaskStatus.TODO && task.status !== TaskStatus.BACKLOG) {
+          return { error: "Only Todo and Backlog steps can be started", code: 409 as const };
+        }
+        if (!task.repoId) {
+          return { error: "This task has no repository", code: 400 as const };
+        }
+        if (!startable({ ...task, archivedAt: locked.archivedAt }, { total, active: false }, task.maxSessionsPerTask)) {
+          // The one remaining `startable` condition with no message of its own
+          // is the archived assignee, and `enqueueTaskRun` already throws an
+          // error that names the agent — a better sentence than anything this
+          // branch could write. Fall through to it; the catch maps it to 409.
+          if (!task.assigneeAgent?.archivedAt) {
+            return { error: "This step cannot be started", code: 409 as const };
+          }
         }
         const run = await enqueueTaskRun(tx, taskId);
         if (locked.status === TaskStatus.BACKLOG) {
@@ -1867,7 +1985,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       if ("error" in result) return context.json({ error: result.error }, result.code);
       return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
       // Unreachable under the lock, because the loser sees the winner's run and
       // returns the 409 above. Mapped anyway: a 500 on a double-click is exactly
       // the failure the guard exists to prevent.
@@ -1917,9 +2035,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         select: { id: true },
       });
       // Lock before reading runs, so a retry cannot slip a run in between the
-      // selection and the write. Ids that vanished in between simply do not come
-      // back from the lock and count as neither archived nor skipped.
-      const lockedIds = await lockTasks(tx, candidates.map((task) => task.id));
+      // selection and the write. Ids that vanished, moved out of `Done` or were
+      // archived in between simply do not come back from the lock and count as
+      // neither archived nor skipped.
+      const lockedIds = await lockDoneTasks(tx, projectId, candidates.map((task) => task.id));
       const busy = lockedIds.length === 0 ? [] : await tx.run.findMany({
         where: { taskId: { in: lockedIds }, status: { in: ACTIVE_RUN_STATUSES } },
         select: { taskId: true },
@@ -2067,7 +2186,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -2089,7 +2208,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -2159,7 +2278,15 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           status: RunStatus.QUEUED,
           readyAt: { lte: now },
           agent: { archivedAt: null },
-          task: { status: { in: [TaskStatus.TODO, TaskStatus.DOING] }, assigneeType: AssigneeType.AGENT },
+          // `archivedAt: null` is defense in depth: `enqueueTaskRun` already
+          // refuses an archived task, and archive already refuses a task with an
+          // active run, so a queued run on an archived task should be
+          // unreachable. If one ever exists it must not be handed to a runner.
+          task: {
+            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+            assigneeType: AssigneeType.AGENT,
+            archivedAt: null,
+          },
           OR: [{ blockedByRunId: null }, { blockedBy: { status: RunStatus.SUCCEEDED } }],
         },
         include: {

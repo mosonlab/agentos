@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { isArchivedAssigneeError, prisma } from "@agentos/db";
+import { isArchivedAssigneeError, isArchivedTaskError, prisma } from "@agentos/db";
 import { config as loadEnvironment } from "dotenv";
 
 import { deliverPending, type FeishuMessageClient } from "./delivery.js";
@@ -41,7 +41,7 @@ dispatcher.register({
       const result = await processFeishuEvent(prisma, envelopeFor(event));
       return { toast: { type: "success", content: result.duplicate ? "该决策已处理" : "决策已收到，任务将继续" } };
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error)) return { toast: { type: "error", content: error.message } };
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return { toast: { type: "error", content: error.message } };
       throw error;
     }
   },

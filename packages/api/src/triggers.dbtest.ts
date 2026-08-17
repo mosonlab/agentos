@@ -272,3 +272,68 @@ test("a manual fire and a webhook delivery released together produce two indepen
   const sources = (await db.triggerFire.findMany({ where: { templateId: template.id } })).map((fire) => fire.source).sort();
   assert.deepEqual(sources, ["MANUAL", "WEBHOOK"]);
 });
+
+// --- review fixes: the fires ledger is project-scoped (SOL-REVIEW M4) --------
+
+test("a colliding chainId in another project never supplies this trigger's fire history", async () => {
+  // `chainId` is unique per project only by convention — no constraint enforces
+  // it, and `chain.ts` says so explicitly: chain identity is (projectId,
+  // chainId). The fires route used to query and key by chainId alone, so a
+  // collision handed a foreign project's task back as `firstTask`.
+  const mine = await seedTrigger("fires-scope-mine", { steps: 2 });
+  const theirs = await seedTrigger("fires-scope-theirs", { steps: 2 });
+  const fired = await call("POST", `/task-templates/${mine.template.id}/fire`);
+  const chainId = fired.body.chainId as string;
+
+  // A disjoint index range in the other project, so a chainId-only query would
+  // sort the foreign rows first and pick one as `firstTask`.
+  const foreign = await db.task.create({ data: {
+    projectId: theirs.project.id, name: "FOREIGN PROJECT TASK", description: "d",
+    chainId, chainIndex: -5, status: "DONE",
+  } });
+
+  const { status, body } = await call("GET", `/triggers/${mine.template.id}/fires?take=20`);
+  assert.equal(status, 200);
+  const fire = body.find((row: any) => row.chainId === chainId);
+  assert.notEqual(fire.firstTask, null);
+  assert.notEqual(fire.firstTask.id, foreign.id);
+  assert.equal(fire.firstTask.name.includes("FOREIGN"), false, fire.firstTask.name);
+  // Two steps in my project, not three across both, and none of them done.
+  assert.equal(fire.progress.total, 2);
+  assert.equal(fire.progress.done, 0);
+  assert.equal(fire.progress.activeStepName, "Step 1");
+});
+
+test("the fires route 404s for a template that does not exist", async () => {
+  const { status } = await call("GET", "/triggers/nope-not-a-template/fires");
+  assert.equal(status, 404);
+});
+
+// --- review fixes: an empty-string default does not resolve (CODE-REVIEW S7) -
+
+test("an empty-string default is treated as absent, matching the required badge", async () => {
+  // The badge promises "every fire that omits this will 400". Accepting "" as a
+  // resolved value broke that promise on a trigger that fires fine.
+  const { template } = await seedTrigger("fire-empty-default", {
+    template: { webhookPayloadMapping: { map: {}, defaults: { ticket: "" } } },
+  });
+  const { status, body } = await call("POST", `/task-templates/${template.id}/fire`);
+  assert.equal(status, 400);
+  assert.match(body.error, /Unresolved template variables: ticket/);
+  assert.equal(await db.triggerFire.count({ where: { templateId: template.id } }), 0);
+});
+
+// --- review fixes: a malformed body is a client error (CODE-REVIEW S3) -------
+
+test("a malformed JSON body on fire is 400, not 500", async () => {
+  const { template } = await seedTrigger("fire-bad-json");
+  const response = await asOperator(() => createApp(db).request(`/task-templates/${template.id}/fire`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+    body: "{not json",
+  }));
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as any).error, "Invalid JSON payload");
+  // An empty body is still the `Fire now` happy path and must keep working.
+  assert.equal((await call("POST", `/task-templates/${template.id}/fire`)).status, 201);
+});
