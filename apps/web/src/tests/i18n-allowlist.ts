@@ -28,6 +28,7 @@ export const I18N_ALLOWLIST: I18nAllowlistEntry[] = [
   { file: "pages/Triggers.tsx", text: "X-AgentOS-Delivery-Id", why: "HTTP header identifier" },
   { file: "pages/Triggers.tsx", text: "issue.title", why: "Payload path example" },
   { file: "components/new-task-panel.tsx", text: "feat/…", why: "Git branch example" },
+  { file: "lib/models.ts", text: "Claude Fable 5", why: "Model product name" },
   { file: "lib/models.ts", text: "Claude Opus 5", why: "Model product name" },
   { file: "lib/models.ts", text: "Claude Sonnet 5", why: "Model product name" },
   { file: "lib/models.ts", text: "Claude Haiku 4.5", why: "Model product name" },

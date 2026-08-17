@@ -92,15 +92,15 @@
 - 用 AgentOS 开发 AgentOS：批次任务写成 spec 投喂系统，spec→plan→执行链走现有 Tasks/闸门；批次 2 前链式推进手动放行，批次 5 后 Goal 全自动。
 - **自举隔离**（无需另行克隆）：平台实例跑 master 工作副本；agent 在 runner 工作区的独立克隆里开发并提 PR，互不冲突。合并后空闲时重启平台吃进新版（含 migration）；批次 0 这类大改动选无 run 在跑时合并。
 - **单链定义**（2026-08-16 终版：废除轻/重链之分，一条链照抄原版九步；落地为一个种子 TaskTemplate，小任务由模板跳步解决，编排归模板不归阵容）：
-  ① spec(fable:medium)＋闸门 → ② plan(fable:medium)＋闸门 → ③ 计划评审 review-coordinator(sol:high/CODEX，单会话三镜片：可行性/范围/一致性＋一次重点复查，跨厂商天然成立) → ④ plan 新会话按评审修订 → ⑤ 实现 executioner(sol:medium) → ⑥ 代码评审 review-coordinator → ⑦ senior-dev(sol:high) 修复 → ⑧ librarian(luna:xhigh/CODEX) 更新 wiki → ⑨ 人审 PR 合并。
+  ① spec(fable:medium/CLAUDE)＋闸门 → ② plan(fable:medium/CLAUDE)＋闸门 → ③ 计划评审 review-coordinator(sol:high/CODEX，单会话三镜片：可行性/范围/一致性＋一次重点复查，跨厂商天然成立) → ④ plan-reviser(opus-5:high/CLAUDE) 按评审修订并承担 implementation authorization gate → ⑤ 路由选择实现（Critical = senior-dev opus-5:high/CLAUDE；Planned Standard = executioner opus-5:high/CLAUDE）→ ⑥ review-coordinator(sol:high/CODEX) 代码评审 → ⑦ senior-dev(opus-5:high/CLAUDE) 修复 → ⑧ librarian(luna:high/CODEX) 更新 wiki → ⑨ delegated exact-head human-role authorization。
   - **卡点只有两处＋终审**（2026-08-16 对照原版视频修正）：闸门仅在 ① spec 与 ② plan（与原版 Approval 徽章 1:1）；③–⑧ 全自动流转不再请示，人最后在 ⑨ 用 PR 审查兜底。修订步原多设的一道闸已删。
-  - **阵容收敛至 7**（与原版视频执行者 1:1）：default/spec/plan/review-coordinator/executioner/senior-dev/librarian。plan-reviser、scope-guardian、coherence 已删除；feasibility 因有任务历史外键暂不可删，退役搁置（催生"agent 归档/下线"需求）。三个评审镜片并入 review-coordinator 提示词（`agents/roles/review-coordinator.md` 已重写，不再散子代理，因此可跑 Sol/CODEX）。
+- **阵容裁决更新（2026-08-17，覆盖早期“收敛至 7”）**：`plan-reviser` 保留为第 ④ 步的 canonical agent；`scope-guardian` 与 `coherence` 已删除。`feasibility` 与 `code-reviewer` 在 live/queued reference 清零前仅保留历史兼容，之后按归档流程退役。三个评审镜片并入 `review-coordinator` 提示词（`agents/roles/review-coordinator.md` 已重写，不再散子代理，因此可跑 Sol/CODEX）。
   - 实战依据：2026-08-16 首单 Sol 单会话评审（批次 0 SPEC）未散子代理即产出 6 条带代码证据的 must-fix，证明单审质量足够，多代理评审矩阵为过度设计。
-- **模型额度策略**：Fable 只用于 plan 步（全链质量杠杆最大处）；spec 与 review-coordinator 降 opus-5:high；实现层 Sol（Luna 待验证能力后再回归）；批次间可按代码冲突面并行（前端批次等批次 0，后端批次可即行）。
-- 每个 agent 所用模型在批次 1 的下拉做好后由 Leo 统一复核调整。
-- 模型路由备忘：Luna(gpt-5.6-luna) 机械批量、**一律显式 max**；Sol(gpt-5.6-sol) 语义校验 high+；升级链 Luna→Sonnet→Opus；spawn 必显式指定 model（钩子强制）。
-- **前端链评审例外**（2026-08-16 Leo 裁决，frontend-convergence 链 plan 闸门时定）：**前端批次的 ⑥ 代码评审用 `code-reviewer`（claude-opus-5:high / CLAUDE），不用 `review-coordinator`（Sol）。** 跨厂商对写规则在前端批次让位——主题是 CSS 层叠层级、Tailwind v4 任意值、视觉一致性，Opus 侧读得更准。代价是 ⑤ 与 ⑥ 同厂商，独立性只剩"不同 agent 不同提示词"这一层，因此**评审任务书里必须写明这是同厂商评审**，并要求评审员不把计划、实现者的提交信息与活动日志当依据，一切从 diff 和文件本身重新推导、实现者声称通过的检查一律自己重跑。③ 计划评审仍用 Sol（审的是文档不是 CSS，跨厂商在那里仍然划算）。**新建前端链时必须手动指定 ⑥ 的 assignee，不能沿用默认。** `code-reviewer` 已补 `GIT_WRITE`（评审步要提交推送评审文档）。
-- **推理等级校准**（同上裁决）：`frontend-dev` 由 `claude-opus-5:xhigh` 降为 `:high`。原 xhigh 来自 Fable 配额耗尽后的"原用 Fable 处一律换 opus-5:xhigh"替换规则，是产物不是校准结果；前端实现绝大部分是照计划对照表做机械替换，难的判断在 ② plan 已经做完。**xhigh 保留给 ④ plan 修订**（要把评审发现与闸门裁决揉回长计划、还要判断驳回哪些，是链上判断密度最高且只跑一次的一步）。
+- **模型默认最终裁决（2026-08-17 Leo 夜间改裁）**：Specification Writer 与 Planner 使用 `claude-fable-5:medium / CLAUDE`；其中 Specification Writer 从 canonical high 下调到 medium 是 Leo 的明确 safeguard 例外批准。Plan Reviser、Implementation Plan Executioner、Frontend Developer、Senior Developer 使用 `claude-opus-5:high / CLAUDE`。Review Coordinator 保持 `gpt-5.6-sol:high / CODEX`，Librarian 保持 `gpt-5.6-luna:high / CODEX`。配置只影响后续新建 Run；既有 Run 的 runner/model 快照不可变；角色 prompt 继续与 provider/model 解耦。
+- 每个 agent 所用模型已由 Leo 在 2026-08-17 夜间统一复核，当前默认以 `agents/roles/*.md` 与 `packages/db/prisma/agent-contract.ts` 为准。
+- 模型路由备忘：Librarian 的 canonical Luna 默认是 `gpt-5.6-luna:high`；模型目录仍可为其他 Luna 工作提供更高 effort，但旧的“一律显式 max”规则已被本角色默认裁决覆盖。Sol(gpt-5.6-sol) 语义校验 high+；升级链 Luna→Sonnet→Opus；spawn 必显式指定 model（钩子强制）。
+- **前端链评审例外（2026-08-16，已被 2026-08-17 canonical routing 取代）**：旧 frontend-convergence 链曾让第 ⑥ 步使用 `code-reviewer`/Opus；新的完整 Full Assurance 链第 ⑥ 步统一使用 `review-coordinator`/Sol High。`frontend-dev`/Opus High 只用于符合 Direct Standard 的 bounded frontend-only 路由，不强塞进九步链。旧链保留历史证据，不作为新任务默认。
+- **推理等级校准**（被 2026-08-17 最终模型裁决补充）：`frontend-dev` 保持 `claude-opus-5:high`；`plan-reviser` 最终也使用 `claude-opus-5:high`，不再保留旧 xhigh 例外。Specification Writer 的 medium 下调另有 Leo 明确批准。
 - **配置生效时机**（`packages/db/src/workflow.ts:41-43`）：run 的 `model`、`runner`、`promptHash`（含 `task.description`）是在**前一步完成、`activateChainSuccessor` 创建下一步 run 的那一刻**才从 agent 记录与任务行读取的，不是建链时定死。因此链跑到一半仍可改尚未起 run 的步骤的 assignee/模型/任务书，改动会生效；已在跑或已完成的步骤不受影响。
 
 ## 13. 权限与可观测性裁决（2026-08-16 二轮查漏定案）

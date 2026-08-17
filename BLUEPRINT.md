@@ -1,5 +1,13 @@
 # AgentOS — Product Spec & Implementation Blueprint
 
+> **Historical source, superseded as implementation authority (2026-08-17).**
+> This reconstruction remains intact as product-history and upstream-comparison
+> evidence. Do not treat “Build exactly this system,” the roster below, or its
+> review fan-out as current task-routing or seed instructions. Current authority
+> is the latest Product Owner decision, `docs/governance/task-routing-v1.md`,
+> `DECISIONS.md` #22, `agents/roles/*.md`, and
+> `packages/db/prisma/agent-contract.ts`.
+
 Reconstructed from Danny Postma's talk *How I Built My Own AgentOS on Claude's Agent SDK (So You Can Too)* (2026). This document is both a product spec for a human and an implementation prompt for an AI coding agent. Build exactly this system. Do not invent features that are not specified here.
 
 **Role contracts and prompts in this file are reconstructed from the talk, not his verbatim files.** Mark every reconstructed prompt in code comments and docs as such.

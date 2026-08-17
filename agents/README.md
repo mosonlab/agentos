@@ -15,8 +15,8 @@ All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from 
 ```yaml
 name: plan                # Agent.name (unique per project)
 title: Planner            # Agent.title
-model: gpt-5.6-sol:high    # Agent.model, including its default reasoning effort
-runner: codex              # Agent.runnerPreference (claude | codex | pi)
+model: claude-fable-5:medium # Agent.model, including its default reasoning effort
+runner: claude               # Agent.runnerPreference (claude | codex | pi)
 inboxAccess: true         # Agent.inboxAccess
 skills: [plan-mode]       # AgentSkill rows, by skill slug
 collaborators: []         # AgentCollaboration rows, by agent name

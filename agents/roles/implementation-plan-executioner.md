@@ -1,8 +1,8 @@
 ---
 name: implementation-plan-executioner
 title: Implementation Plan Executioner
-model: gpt-5.6-sol:medium
-runner: codex
+model: claude-opus-5:high
+runner: claude
 inboxAccess: true
 skills: []
 collaborators: []

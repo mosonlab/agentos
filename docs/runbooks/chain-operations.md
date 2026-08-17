@@ -48,7 +48,7 @@ python3 scratchpad/mkbatch.py docs/briefs/<brief>.md <slug> "<title>" "<Prefix>"
 
 已烧进任务书模板的东西：
 
-- ⑥ 用专职 `code-reviewer`；模型与 runner 只放在 agent 配置，不写进任务提示词
+- ⑥ 与 ③ 都用 `review-coordinator`；模型与 runner 只放在 agent 配置，不写进任务提示词。`code-reviewer` 仅为历史兼容角色，不进入新建 canonical 模板
 - ⑥ 的统一独立性规则：**REVIEW INDEPENDENCE** —— 模型或厂商标签不构成独立性或质量证据；
   所有结论从 diff、文件与实测重新推导，plan、commit message、前序产出和 activity 都只当待核声明；
   报告必须独立成立，不假设另一位评审会兜底
@@ -69,14 +69,18 @@ python3 scratchpad/mkbatch.py docs/briefs/<brief>.md <slug> "<title>" "<Prefix>"
 
 ---
 
-## 链外并行评审（只对含后端/迁移的批次）
+## 历史链外并行评审（已被 Review Coordinator convergence 取代）
+
+下段保存 2026-08-16 的事故证据，不是新链调度指令。新 Full Assurance 链由
+⑥ `review-coordinator` 在单会话内完成独立证据评审；只有明确 Product Contract
+另行授权时才创建链外评审，不能从本历史段自动推导 fan-out。
 
 ⑤ 一完成就另建链外评审任务，targetBranch 指实现分支，与 ⑥ 并行；
 ⑦ 的 description 写上该任务 id 让它主动拉取，并要求写冲突台账。**纯前端批次不配。**
 
 两次实战结果：
 
-| 批次 | 主评审（Opus ⑥） | 链外评审 | 净贡献 |
+| 历史批次 | 当时主评审 | 当时链外评审 | 净贡献 |
 |---|---|---|---|
 | 2.5 | PASS，1 必修 | **FAIL，6 必修** | 6/6 逐条 `git show` 核实为真代码，零虚构 |
 | 4 | 原 PASS，1 必修 | **FAIL，3 必修 1 应修** | **拦下了一次即将执行的生产迁移** |

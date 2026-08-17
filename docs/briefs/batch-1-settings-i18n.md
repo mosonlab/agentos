@@ -9,7 +9,7 @@ You are step ① (spec) of the nine-step chain for Batch 1. Write a requirements
 
 ## Chain configuration (fixed, do not revisit)
 - ⑤ implementation and ⑦ fixes: `frontend-dev`（模型与 runner 由 agent 配置决定）。
-- ⑥ code review: **`code-reviewer`**；任务书使用 runbook 的 `REVIEW INDEPENDENCE` 规则，不写模型或厂商身份。
+- ⑥ code review: **`review-coordinator`**；任务书使用 runbook 的 `REVIEW INDEPENDENCE` 规则，不写模型或厂商身份。此行覆盖该历史 brief 的旧 `code-reviewer` 分配。
 - This batch runs only after the frontend-convergence chain (legacy styles.css removal) is merged; spec against the converged codebase.
 - **派发顺序：批次 4 → 批次 2.5 → 本批。** 本批必须最后跑：i18n 要抽 ~548 处字符串，若在新页面建完之前跑就要抽三遍。
 

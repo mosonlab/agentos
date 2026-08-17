@@ -123,7 +123,9 @@ const sourceFiles = (directory: string): string[] => readdirSync(directory).flat
 });
 
 test("the translated UI source has no unapproved user-facing English literals", () => {
-  assert.ok(I18N_ALLOWLIST.length <= 25, `i18n allowlist has ${I18N_ALLOWLIST.length} entries (maximum 25)`);
+  // The 26th reviewed entry is Claude Fable 5, a product name in the canonical
+  // model catalog rather than translatable interface copy.
+  assert.ok(I18N_ALLOWLIST.length <= 26, `i18n allowlist has ${I18N_ALLOWLIST.length} entries (maximum 26)`);
   const files = ["pages", "components", "lib"].flatMap((name) => sourceFiles(resolve(sourceRoot, name)));
   const all = files.flatMap((path) => scanSource(relative(sourceRoot, path), readFileSync(path, "utf8")));
   const remaining = all.filter((finding) => !I18N_ALLOWLIST.some((entry) => entry.file === finding.file && entry.text === finding.text));

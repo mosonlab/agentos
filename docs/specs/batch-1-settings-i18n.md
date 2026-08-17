@@ -63,10 +63,10 @@ The task brief says "fields exist, pure UI". Verified: there is exactly one fiel
   - `claude-help.stdout:72-73` — `--effort <level>`: `low, medium, high, xhigh, max`
   - `pi-help.stdout:40` — `--thinking <level>`: `off, minimal, low, medium, high, xhigh, max`
   - `codex-exec-help.stdout` documents `-c key=value` overrides generally but does **not** enumerate `model_reasoning_effort` values.
-- Models actually in use, from `agents/roles/*.md` frontmatter: `claude-opus-5:high` (default, plan, spec, coherence, feasibility, scope-guardian), `gpt-5.6-sol:high` (review-coordinator, plan-reviser), `gpt-5.6-luna:max` (implementation-plan-executioner), `gpt-5.6-luna:xhigh` (senior-dev), `openai-codex/gpt-5.6-luna:xhigh` on runner `pi` (librarian). The last one matters: it is a provider-prefixed PI model whose id contains the substring `codex`.
+- **Current canonical matrix (superseding the implementation-time roster):** Specification Writer and Planner use `claude-fable-5:medium` / CLAUDE; Plan Reviser, Implementation Plan Executioner, Frontend Developer, and Senior Developer use `claude-opus-5:high` / CLAUDE; Review Coordinator uses `gpt-5.6-sol:high` / CODEX; Librarian uses `gpt-5.6-luna:high` / CODEX. `openai-codex/gpt-5.6-luna` remains a generic PI catalog and substring-regression case, not a current Librarian assignment.
 - `Run.model` is copied from `Agent.model` at the moment the next step's run is created, not at chain-build time (`packages/db/src/workflow.ts:32-50`, `:116`; decisions §12 "配置生效时机").
 - The runner heuristic that turns a model into a runner when the preference is `INHERIT` / `AUTO` (`workflow.ts:22-30`):
-  explicit `CLAUDE`/`CODEX`/`PI` wins; otherwise `codex` in the id → CODEX, `deepseek` or a `pi` token → PI, else CLAUDE. **This heuristic sends the librarian's `openai-codex/…` model to CODEX**, which is wrong; it works today only because that agent pins `runnerPreference: PI`.
+  explicit `CLAUDE`/`CODEX`/`PI` wins; otherwise `codex` in the id → CODEX, `deepseek` or a `pi` token → PI, else CLAUDE. A generic `openai-codex/…` PI catalog selection would be misrouted by substring if the concrete catalog runner were not persisted, so it remains the regression fixture.
 - `npm run db:seed` **upserts and overwrites** `model`, `runnerPreference` and `foundationalPrompt` on every role agent from `agents/roles/*.md` (`packages/db/prisma/seed.ts:121-144`).
 
 ### 2.4 Runner liveness: what exists and what does not
@@ -108,7 +108,7 @@ pi's own tool names are lowercase and partly pi-specific: the help text names `r
 3. **"heartbeat exists" — not for the daemon.** See §2.4. The existing heartbeat is per-run. Item 7's seven fields require a new read endpoint and new telemetry on the existing claim call.
 4. **Item 8 cannot be delivered with zero schema changes.** There is no `tools` field on `Agent`. This batch adds exactly one additive column; see §5.1. The brief's "expected: none" is hereby answered explicitly rather than silently.
 5. **Item 8's enforcement is real on CLAUDE and PI, and impossible on CODEX.** See §2.5. The UI must say so rather than imply uniform enforcement.
-6. **The auto-link rule "gpt-family → CODEX" is wrong for one model in the roster.** `openai-codex/gpt-5.6-luna` runs on PI (`agents/roles/librarian.md`). The linkage table must key on the catalog entry, not on a substring match; see §4.6.
+6. **The auto-link rule "gpt-family → CODEX" is wrong for a supported catalog model.** `openai-codex/gpt-5.6-luna` is a PI model even though its id contains `codex`. It is retained as a generic regression fixture, not the Librarian default. The linkage table must key on the catalog entry, not on a substring match; see §4.6.
 
 ---
 
@@ -223,7 +223,7 @@ Requirements:
 
 ### 4.6 Model, reasoning effort, and the runner they imply
 
-**Scenario A.** Leo edits `senior-dev`. `Model` is a dropdown showing `GPT-5.6 Luna (codex)`; `Reasoning effort` is a dropdown showing `xhigh`; `Runner` shows `codex` and is read-only with the hint `Set by the model`. He picks `Claude Opus 5`. The runner flips to `claude` in the same interaction, and the effort dropdown re-populates with the claude vocabulary (`low, medium, high, xhigh, max`), keeping `xhigh` because it exists in both. He saves; `Agent.model` becomes `claude-opus-5:xhigh` and `runnerPreference` becomes `CLAUDE`.
+**Scenario A.** Leo edits `senior-dev`. `Model` is a dropdown showing `Claude Opus 5`; `Reasoning effort` shows `high`; `Runner` shows `claude` and is read-only with the hint `Set by the model`, matching the canonical default. Selecting another catalog model changes the runner in the same interaction; cancelling leaves the stored canonical pair unchanged.
 
 **Scenario B.** Leo picks the effort `max` for a claude model, then switches to a model whose vocabulary lacks it. The effort falls back to that model's default rather than silently sending an invalid flag.
 
@@ -232,10 +232,10 @@ Requirements:
 Requirements:
 
 1. **Catalog module** `src/lib/models.ts`, config only (decisions §6.4: "模型 ID 只准出现在配置"): entries of `{ id, label, runner: "CLAUDE" | "CODEX" | "PI", efforts: string[], defaultEffort: string }`.
-2. The catalog must contain every model the current roster uses, so that no existing agent renders as `Custom` after this batch: `claude-opus-5`, `gpt-5.6-sol`, `gpt-5.6-luna`, `openai-codex/gpt-5.6-luna` (runner PI — the case that breaks substring matching). It should also carry the other current Claude models (`claude-sonnet-5`, `claude-haiku-4-5`) so downgrading an agent is a two-click operation. `claude-fable-5` is deliberately absent: decisions §12's standing clause retires Fable in favour of `claude-opus-5:xhigh`.
+2. The catalog must contain every model the current roster uses, so that no existing agent renders as `Custom` after this batch: `claude-fable-5`, `claude-opus-5`, `gpt-5.6-sol`, `gpt-5.6-luna`, `openai-codex/gpt-5.6-luna` (runner PI — the case that breaks substring matching). It should also carry the other current Claude models (`claude-sonnet-5`, `claude-haiku-4-5`) so changing an agent remains a two-click operation. **Supersession (2026-08-17):** Leo restored Fable as the canonical medium-effort model for Specification Writer and Planner; this replaces the earlier Fable-retirement clause.
 3. **Effort vocabularies come from the CLI, not from taste**: CLAUDE `low, medium, high, xhigh, max` (`claude-help.stdout:72-73`); PI `off, minimal, low, medium, high, xhigh, max` (`pi-help.stdout:40`). CODEX's `model_reasoning_effort` values are not documented in the captured help; the implementation step must verify them against the installed `codex` before widening beyond the values already in production use (`high`, `xhigh`, `max`). Offering an effort the CLI rejects would trade a model mismatch for an effort mismatch.
 4. **Encode / decode in one place.** A single pair of helpers splits `"<model>[:<effort>]"` on the last colon and recomposes it, matching `adapters.ts:329-331` exactly — including the `> 0` index rule and provider-prefixed ids like `openai-codex/gpt-5.6-luna:xhigh`. An agent whose stored model carries no effort suffix shows the model's default effort in the dropdown but **is not rewritten on load**; only an explicit save writes a suffix.
-5. **Linkage (item 6).** Selecting a catalog model sets `runnerPreference` to that entry's `runner` — a concrete kind, never `INHERIT`, so the `workflow.ts:22-30` heuristic is bypassed and the librarian's `openai-codex/…` model can never be routed to CODEX.
+5. **Linkage (item 6).** Selecting a catalog model sets `runnerPreference` to that entry's `runner` — a concrete kind, never `INHERIT`, so the `workflow.ts:22-30` heuristic is bypassed and a provider-prefixed PI catalog model such as `openai-codex/…` cannot be routed to CODEX.
 6. **Mismatch is unsaveable.** With a catalog model selected, the `Runner` control is read-only and displays the derived value. If the loaded agent has a contradictory stored pair (possible: it was written by seed or by an earlier build), the form shows an inline notice naming both values and the save writes the corrected pair. Save is disabled while any inline validation error is present.
 7. **`Custom…` keeps the escape hatch.** Free-text model id, free choice of runner (including `INHERIT` / `AUTO`), and a visible warning line. Losing the ability to type a model id would make the app unable to run a model released after the last catalog edit.
 8. Both the create form and the detail edit form use the same control, with the same rules.
@@ -424,7 +424,7 @@ Every item below is a `node --test` file under the existing harness (`apps/web` 
 
 **Models, effort, runner linkage**
 
-7. Catalog integrity: every model id in `agents/roles/*.md` is either in the catalog or explicitly listed as intentionally absent; every entry's `defaultEffort` is in its `efforts`; no entry has an empty `efforts`.
+7. Catalog integrity: every model id in `agents/roles/*.md` is present in the catalog with no intentionally-absent exception; every entry's `defaultEffort` is in its `efforts`; no entry has an empty `efforts`.
 8. Split/join round-trips for `claude-opus-5:high`, `gpt-5.6-luna:max`, `openai-codex/gpt-5.6-luna:xhigh`, and a bare `claude-opus-5` — and matches `adapters.ts`'s rule on a leading-colon input.
 9. `runnerForModel` returns `PI` for `openai-codex/gpt-5.6-luna` — the case the `workflow.ts:22-30` substring heuristic gets wrong.
 10. Form behaviour: choosing a gpt catalog model sets `CODEX`; choosing a claude model sets `CLAUDE`; the runner control is read-only for catalog models and editable for `Custom…`; a contradictory loaded pair renders the notice; save is blocked while a validation error is present; switching to a model without the current effort falls back to that model's default.
@@ -470,9 +470,9 @@ With the API, the web app and the runner daemon running against the real databas
 5. **Theme.** Toggle from the sidebar and from Settings; both stay in sync; `system` follows the OS appearance; reload preserves the choice.
 6. **Runner popover.** Hover the runner row: seven fields present with real values. `Tab` to the row: the same popover opens; `Escape` closes it. Stop the daemon (`launchctl` is off-limits for the agent steps of this chain — the reviewer does this by hand): within ~30 s the dot goes grey and the state reads `Offline`. Start it: green again within ~30 s. Start a run: `Busy` appears.
 7. **Disk and CLI facts are real, not hardcoded.** Compare `Disk free` against `df -h` on the workspace volume and `Claude CLI` against `claude --version`.
-8. **Model dropdown.** Open `senior-dev`: model shows a labelled dropdown, effort shows `xhigh`, runner shows `codex` read-only. Switch to `Claude Opus 5` → runner flips to `claude` in the same interaction. Save, then confirm in the database that `Agent.model = 'claude-opus-5:<effort>'` and `runnerPreference = 'CLAUDE'`. Switch it back.
+8. **Model dropdown.** Open `senior-dev`: model shows `Claude Opus 5`, effort shows `high`, and runner shows `claude` read-only. Confirm the database already has `Agent.model = 'claude-opus-5:high'` and `runnerPreference = 'CLAUDE'`. A temporary unsaved catalog change updates the displayed runner in the same interaction; cancel it without changing the canonical pair.
 9. **Mismatch is unreachable.** Try to produce a `gpt-*` model on the CLAUDE runner through the UI: impossible with a catalog model; possible only under `Custom…`, where the warning is visible.
-10. **The librarian case.** Open `librarian` (`openai-codex/gpt-5.6-luna:xhigh`): the runner shows `pi`, not `codex`. This is the regression this item exists to prevent.
+10. **Canonical Librarian and generic PI regression.** Open `librarian`: it shows `gpt-5.6-luna:high` on `codex`. Separately select the generic `openai-codex/gpt-5.6-luna` catalog entry in an unsaved form and confirm its derived runner is `pi`, not `codex`; cancel without mutating the Librarian default.
 11. **Tools.** Turn Bash off on a CLAUDE agent, dispatch a trivial task that requires a shell command, and read the session events: the tool call is refused by the CLI. Then check `spikes/cli-capabilities/samples/` for the captured evidence the implementation step was required to produce (§4.7.5). On a CODEX agent, confirm the "not enforced" notice is present.
 12. **Foundation.** Prompt tab shows the revision tag, `Read-only`, and `Sits above your instructions`; the text cannot be edited; the card names `agents/foundational.md` + `npm run db:seed`.
 13. **Component generation.** `grep -rn "forwardRef" apps/web/src/components/ui/` returns nothing; spot-check two components for `data-slot`; confirm no `tw-animate-css` import and no `animate-in` class anywhere.
