@@ -94,7 +94,8 @@ python3 scratchpad/mkbatch.py docs/briefs/<brief>.md <slug> "<title>" "<Prefix>"
 
 ### 已确认的交付可靠性要求
 
-Leo 已确认：这类瞬时网络错误应自动重试，而不是直接把任务判失败。实现时至少满足：
+Leo 已确认：这类瞬时网络错误应自动重试，而不是直接把任务判失败。runner 的共享策略位于
+`packages/runner/src/network-retry.ts`，交付与 workspace 路径满足：
 
 1. clone / fetch / push 与 `gh pr list` / `gh pr create` 共尝试 3 次（首次 + 2 次重试），采用短退避；
 2. 只重试明确的瞬时错误，例如 `SSL_ERROR_SYSCALL`、连接 EOF、`ECONNRESET`、`ETIMEDOUT` 与 HTTP 5xx；
@@ -102,8 +103,8 @@ Leo 已确认：这类瞬时网络错误应自动重试，而不是直接把任�
 3. `gh pr create` 返回不确定结果时，必须先按 head branch 查询 open PR，再决定是否重试创建，避免重复 PR；
 4. branch 已成功 push 而 PR 创建最终失败时，保留 pushed branch/head 作为成功交付证据并给出补 PR 指引，
    不得把已完成的 agent 工作整体判成失败；
-5. 测试必须覆盖“前两次瞬断、第三次成功”、确定性错误不重试、PR 实际已创建但响应 EOF、push 成功但 PR
-   最终失败四条路径。
+5. 测试覆盖“前两次瞬断、第三次成功”、确定性错误不重试、PR 实际已创建但响应 EOF、push 成功但 PR
+   最终失败四条路径，并单独锁定 clone 与 fetch 使用同一策略。
 
 该修复涉及 runner 交付代码；部署中的 runner 需要在发布窗口重启后才会加载新逻辑。
 

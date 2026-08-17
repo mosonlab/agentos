@@ -118,6 +118,76 @@ test("a pull request created between list and create is confirmed and reused", a
   assert.equal(result.pullRequestNumber, 7);
 });
 
+test("transient push failures succeed on the third attempt", async () => {
+  let pushes = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "push") {
+      pushes += 1;
+      if (pushes < 3) throw new Error("LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443");
+    }
+    if (executable === "gh" && args[1] === "list") {
+      return JSON.stringify([{ url: "https://github.com/acme/app/pull/11", number: 11 }]);
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
+  assert.equal(pushes, 3);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+});
+
+test("deterministic authentication failures are not retried", async () => {
+  let pushes = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "push") {
+      pushes += 1;
+      throw new Error("remote: HTTP 403 Forbidden: permission denied");
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
+  assert.equal(pushes, 1);
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failureClass, "AUTH_REQUIRED");
+});
+
+test("an EOF after PR creation is resolved by head lookup without duplicate creation", async () => {
+  let listCalls = 0;
+  let createCalls = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") {
+      listCalls += 1;
+      return listCalls === 1 ? "[]" : JSON.stringify([{ url: "https://github.com/acme/app/pull/12", number: 12 }]);
+    }
+    if (executable === "gh" && args[1] === "create") {
+      createCalls += 1;
+      throw new Error("Post https://api.github.com/graphql: unexpected EOF");
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
+  assert.equal(createCalls, 1);
+  assert.equal(result.pullRequestNumber, 12);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+});
+
+test("a pushed branch remains a successful delivery after PR retries are exhausted", async () => {
+  let createCalls = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") return "[]";
+    if (executable === "gh" && args[1] === "create") {
+      createCalls += 1;
+      throw new Error("HTTP 503 Service Unavailable");
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake, async () => undefined, { wait: async () => undefined });
+  assert.equal(createCalls, 3);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pushedBranch, workspace.branch);
+  assert.equal(result.failureClass, undefined);
+  assert.match(result.deliveryInstructions ?? "", /PR creation failed/);
+});
+
 test("a failed run commits uncommitted changes, pushes them as WIP, and opens no pull request", async () => {
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {
@@ -253,7 +323,7 @@ test("the ref that was actually pushed is recorded on every path that pushed", a
     return "";
   };
   const failed = await deliverWorkspace(config, claim, workspace, prFails);
-  assert.equal(failed.pushStatus, "FAILED");
+  assert.equal(failed.pushStatus, "SUCCEEDED");
   assert.equal(failed.pushedBranch, "feature/test");
 
   const pushFails: CommandExecutor = async (executable, args) => {
