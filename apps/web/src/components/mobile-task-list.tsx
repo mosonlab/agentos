@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 
 import { COLUMNS, type Counts } from "../lib/board";
+import { useT } from "../lib/i18n";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { COUNT } from "./ui";
@@ -37,11 +38,12 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
   onArchiveDone: () => void;
   actions: CardActions;
   listRef: React.RefObject<HTMLDivElement | null>;
-}): ReactNode => (
-  <>
+}): ReactNode => {
+  const t = useT();
+  return <>
     {/* A tablist, not five buttons: it is the page's primary navigation and the
         arrow keys are what a screen reader user reaches for. */}
-    <div className={TABS} role="tablist" aria-label="Task status">
+    <div className={TABS} role="tablist" aria-label={t("tasks.mobile.statusTabs")}>
       {COLUMNS.map((column) => (
         <button
           key={column.status}
@@ -63,7 +65,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
             document.getElementById(`tab-${next.status}`)?.focus();
           }}
         >
-          {column.label}<span className={COUNT}>{counts[column.status]}</span>
+          {t(column.labelKey)}<span className={COUNT}>{counts[column.status]}</span>
         </button>
       ))}
     </div>
@@ -73,7 +75,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
     {tab === "DONE" && tasks.length > 0 ? (
       <div className={LIST_TOOLBAR}>
         <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
-          Archive All
+          {t("tasks.archiveAll")}
         </Button>
       </div>
     ) : null}
@@ -89,7 +91,7 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
       {/* No `draggable`: HTML5 drag does not fire on touch, and a card that
           looks draggable and is not is worse than one that does not (K15). */}
       {tasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} />)}
-      {tasks.length === 0 ? <div className={LIST_EMPTY}>{loading ? "Loading…" : "Nothing here"}</div> : null}
+      {tasks.length === 0 ? <div className={LIST_EMPTY}>{t(loading ? "common.loading" : "tasks.column.nothing")}</div> : null}
     </div>
-  </>
-);
+  </>;
+};

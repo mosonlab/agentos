@@ -222,6 +222,11 @@ model Agent {
   rolePrompt         String
   runnerPreference   RunnerPreference     @default(INHERIT)
   inboxAccess        Boolean              @default(false)
+  /// Denied tools, not allowed ones: empty means "every tool the CLI offers",
+  /// which is what every agent had before this column existed. Keys are the eight
+  /// canonical names in apps/web/src/lib/tools.ts; the runner maps them per CLI in
+  /// packages/runner/src/adapters.ts.
+  disabledTools      String[]             @default([])
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   archivedAt         DateTime?

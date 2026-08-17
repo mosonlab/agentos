@@ -43,6 +43,7 @@ import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
 import { boardCard, etagFor, etagMatches } from "./board.js";
+import { createRunnerRegistry } from "./runners.js";
 import {
   chainKey,
   chainProgress,
@@ -86,6 +87,13 @@ const projectFields = {
 };
 const projectInput = z.object({ ...projectFields, yamlDocument: projectFields.yamlDocument.default("") });
 const projectPatch = z.object(projectFields).partial().refine((value) => Object.keys(value).length > 0);
+/**
+ * The eight canonical tool keys. Mirrored by apps/web/src/lib/tools.ts (labels and
+ * per-runner enforcement) and packages/runner/src/adapters.ts (CLI flag names).
+ * The three lists cross workspaces and cannot import each other; each names the
+ * other two so a change here is followed there.
+ */
+const TOOL_KEYS = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"] as const;
 const agentFields = {
   environmentId: id,
   name: z.string().trim().min(1).max(80),
@@ -95,11 +103,18 @@ const agentFields = {
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
   inboxAccess: z.boolean(),
+  // Denied set, not allowed set: omitting it keeps the column's empty default.
+  disabledTools: z.array(z.enum(TOOL_KEYS)).max(TOOL_KEYS.length),
 };
 const agentInput = z.object({
   ...agentFields,
+  foundationalPrompt: agentFields.foundationalPrompt.optional(),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
+  // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
+  // optional key would spread `undefined` into `agent.create`. The empty array is
+  // byte-identical to the column default, so omission still means "no restriction".
+  disabledTools: agentFields.disabledTools.default([]),
 });
 const agentPatch = z.object(agentFields).partial().refine((value) => Object.keys(value).length > 0);
 const repoInput = z.object({
@@ -254,9 +269,20 @@ const activityInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const fencedActivityInput = activityInput.extend({ fencingToken: fence });
+const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
+  console.warn("Discarded runner telemetry", { input, issues: error.issues });
+  return undefined;
+});
+const runnerTelemetryFields = {
+  daemonVersion: telemetry(z.string().trim().max(40)),
+  diskFreeBytes: telemetry(z.number().int().nonnegative()),
+  pollIntervalMs: telemetry(z.number().int().positive().max(3_600_000)),
+  workspaceRoot: telemetry(z.string().trim().max(500)),
+};
 const claimInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   leaseSeconds: z.number().int().min(15).max(3600).default(60),
+  ...runnerTelemetryFields,
 });
 const heartbeatInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -265,6 +291,7 @@ const heartbeatInput = z.object({
   processAlive: z.boolean(),
   lastProgressEventAt: z.coerce.date().nullable().optional(),
   inFlightTool: z.record(z.string(), z.unknown()).nullable().optional(),
+  ...runnerTelemetryFields,
 });
 const publicationInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -601,6 +628,7 @@ const goalInclude = {
 export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
+  const runners = createRunnerRegistry();
 
   app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret", "X-AgentOS-Delivery-Id"] }));
   app.use("*", async (context, next) => {
@@ -625,6 +653,42 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       console.error("Health check failed", error);
       return context.json({ status: "error", database: "disconnected", checkedAt: new Date().toISOString() }, 503);
     }
+  });
+  app.get("/runners", async (context) => {
+    const now = new Date();
+    const daemons = runners.snapshot(now);
+    const knownIds = daemons.map((daemon) => daemon.runnerId);
+    const [storedBackends, activeGroups] = await Promise.all([
+      db.runnerBackendState.findMany(),
+      knownIds.length === 0 ? [] : db.run.groupBy({
+        by: ["runnerId"],
+        where: { status: { in: activeRunStatuses }, runnerId: { in: knownIds } },
+        _count: { _all: true },
+      }),
+    ]);
+    const activeByRunner = new Map(activeGroups.map((group) => [group.runnerId, group._count._all]));
+    const backendsByRunner = new Map(storedBackends.map((backend) => [backend.runner, backend]));
+    return context.json({
+      checkedAt: now.toISOString(),
+      online: daemons.filter((daemon) => daemon.online).length,
+      total: daemons.length,
+      daemons: daemons.map((daemon) => {
+        const activeRuns = activeByRunner.get(daemon.runnerId) ?? 0;
+        return { ...daemon, lastSeenAt: daemon.lastSeenAt.toISOString(), busy: activeRuns > 0, activeRuns };
+      }),
+      backends: Object.values(RunnerKind).map((runner) => {
+        const backend = backendsByRunner.get(runner);
+        return {
+          runner,
+          cliVersion: backend?.cliVersion ?? null,
+          authMode: backend?.authMode ?? null,
+          lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
+          lastPreflightOk: backend?.lastPreflightOk ?? null,
+          circuitOpen: backend?.circuitOpen ?? null,
+          circuitReason: backend?.circuitReason ?? null,
+        };
+      }),
+    });
   });
 
   app.use("/hooks/templates/:templateId", bodyLimit({
@@ -846,7 +910,15 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const body = await readJson(context.req.raw, agentInput);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
-    return context.json(await db.agent.create({ data: { ...body, projectId } }), 201);
+    const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: "asc" },
+      select: { foundationalPrompt: true },
+    }))?.foundationalPrompt;
+    if (foundationalPrompt === undefined) {
+      return context.json({ error: "This project has no foundation yet. Run npm run db:seed." }, 400);
+    }
+    return context.json(await db.agent.create({ data: { ...body, foundationalPrompt, projectId } }), 201);
   });
   app.get("/agents/:agentId", async (context) => {
     const agent = await db.agent.findUnique({
@@ -2469,6 +2541,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.post("/runner/tasks/claim", async (context) => {
     const body = await readJson(context.req.raw, claimInput);
     const now = new Date();
+    runners.note(body.runnerId, body, now);
     await reconcileDatabaseRuns(db, now);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
@@ -2668,6 +2741,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, heartbeatInput);
     const now = new Date();
+    runners.note(body.runnerId, body, now);
     const updated = await db.run.updateMany({
       where: {
         id: runId,

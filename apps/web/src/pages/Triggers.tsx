@@ -2,8 +2,9 @@ import { type ReactNode, useState } from "react";
 
 import { api, apiBase } from "../lib/api";
 import { chainMarker } from "../lib/chain";
-import { timeAgo } from "../lib/format";
+import { formatT, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
@@ -23,9 +24,9 @@ import { cn } from "../lib/utils";
 /** §4.5's Status column. A disabled secret outranks a pause: the trigger cannot
  *  authenticate at all, so saying "Paused" would understate it. */
 export const triggerState = (trigger: { paused: boolean; secretDisabled: boolean }): { tone: "green" | "amber" | "red"; label: string } => {
-  if (trigger.secretDisabled) return { tone: "red", label: "Disabled secret" };
-  if (trigger.paused) return { tone: "amber", label: "Paused" };
-  return { tone: "green", label: "Enabled" };
+  if (trigger.secretDisabled) return { tone: "red", label: formatT("triggers.state.disabledSecret") };
+  if (trigger.paused) return { tone: "amber", label: formatT("triggers.state.paused") };
+  return { tone: "green", label: formatT("triggers.state.enabled") };
 };
 
 /* -------------------------------------------------------------------- list */
@@ -36,6 +37,7 @@ export const TriggerRow = ({ trigger, onFire, onTogglePause }: {
   onTogglePause: (trigger: Trigger) => void;
 }): ReactNode => {
   const state = triggerState(trigger);
+  const t = useT();
   return (
     <TableRow className="cursor-pointer" onClick={(event) => { if (!event.defaultPrevented) navigate(`/triggers/${trigger.id}`); }}>
       <TableCell className={TABLE_NAME}>
@@ -46,18 +48,18 @@ export const TriggerRow = ({ trigger, onFire, onTogglePause }: {
         {/* A trigger without a repository cannot fire. Hiding the row would hide
             the reason, so it is spelled out in the destructive colour instead. */}
         {trigger.repo === null
-          ? <span className="text-[color:var(--destructive-fg)]">no repository · {trigger.stepCount} steps</span>
-          : <span>{trigger.repo.name} · {trigger.stepCount} steps</span>}
+          ? <span className="text-[color:var(--destructive-fg)]">{t("triggers.target.noRepo", { n: trigger.stepCount })}</span>
+          : <span>{t("triggers.target.repo", { repo: trigger.repo.name, n: trigger.stepCount })}</span>}
       </TableCell>
       <TableCell><Pill tone={state.tone}>{state.label}</Pill></TableCell>
-      <TableCell>{trigger.lastFiredAt === null ? "Never" : timeAgo(trigger.lastFiredAt)}</TableCell>
+      <TableCell>{trigger.lastFiredAt === null ? t("automations.never") : timeAgo(trigger.lastFiredAt)}</TableCell>
       {/* `0` is a fact, not a gap: `—` would read as "unknown". */}
       <TableCell>{trigger.fireCount}</TableCell>
       <TableCell className={TABLE_TIGHT}>
         <RowMenu items={[
-          { label: "Fire now", onSelect: () => onFire(trigger) },
-          { label: trigger.paused ? "Enable" : "Pause", onSelect: () => onTogglePause(trigger) },
-          { label: "Open", onSelect: () => navigate(`/triggers/${trigger.id}`) },
+          { label: t("triggers.fireNow"), onSelect: () => onFire(trigger) },
+          { label: t(trigger.paused ? "triggers.enable" : "triggers.pause"), onSelect: () => onTogglePause(trigger) },
+          { label: t("triggers.menu.open"), onSelect: () => navigate(`/triggers/${trigger.id}`) },
         ]} />
       </TableCell>
     </TableRow>
@@ -69,6 +71,7 @@ export const TriggersPage = (): ReactNode => {
   const path = projectId === "" ? null : `/projects/${projectId}/triggers`;
   const { data, loading, error, reload } = usePoll<Trigger[]>(path);
   const { error: actionError, run } = useAction();
+  const t = useT();
   const triggers = data ?? [];
 
   const fire = (trigger: Trigger): void => {
@@ -78,7 +81,7 @@ export const TriggersPage = (): ReactNode => {
     void run(async () => { await api.post(`/triggers/${trigger.id}/${trigger.paused ? "enable" : "pause"}`, {}); reload(); });
   };
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">
@@ -90,18 +93,18 @@ export const TriggersPage = (): ReactNode => {
         {triggers.length === 0 ? (
           <EmptyState>
             <span className="mb-[10px] inline-flex text-[color:var(--faint)]"><IconBolt size={22} /></span>
-            <div>{loading ? "Loading…" : "No triggers yet"}</div>
-            <div className={cn(HINT, "mt-[6px]")}>A task template with a webhook secret becomes a trigger: an outside system can fire a chain by posting to its endpoint.</div>
+            <div>{t(loading ? "common.loading" : "triggers.empty.title")}</div>
+            <div className={cn(HINT, "mt-[6px]")}>{t("triggers.empty.hint")}</div>
           </EmptyState>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Target</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last fired</TableHead>
-                <TableHead>Fires</TableHead>
+                <TableHead>{t("triggers.table.name")}</TableHead>
+                <TableHead>{t("triggers.table.target")}</TableHead>
+                <TableHead>{t("triggers.table.status")}</TableHead>
+                <TableHead>{t("triggers.table.lastFired")}</TableHead>
+                <TableHead>{t("triggers.table.fires")}</TableHead>
                 <TableHead className={TABLE_TIGHT} />
               </TableRow>
             </TableHeader>
@@ -149,18 +152,19 @@ export const EndpointCard = ({ trigger }: { trigger: TriggerDetail }): ReactNode
   // The visible line keeps the short form; the clipboard gets the postable one.
   const shown = `POST ${apiBase}${trigger.endpointPath}`;
   const url = endpointUrl(apiBase, trigger.endpointPath, pageOrigin());
+  const t = useT();
   return (
-    <Card title="Endpoint" extra={
+    <Card title={t("triggers.endpoint.title")} extra={
       <Button type="button" variant="legacy" size="legacySmall" className="shadow-none"
         onClick={() => { void navigator.clipboard?.writeText(url); }}>
-        Copy
+        {t("triggers.endpoint.copy")}
       </Button>
     }>
       <div className={CODE_BLOCK}>{shown}</div>
       <KeyValue items={[
-        { k: "Secret header", v: <code>X-AgentOS-Webhook-Secret</code> },
-        { k: "Secret", v: trigger.secretName ?? "—" },
-        { k: "Delivery id header", v: <code>X-AgentOS-Delivery-Id</code> },
+        { k: t("triggers.endpoint.secretHeader"), v: <code>X-AgentOS-Webhook-Secret</code> },
+        { k: t("triggers.endpoint.secret"), v: trigger.secretName ?? "—" },
+        { k: t("triggers.endpoint.deliveryHeader"), v: <code>X-AgentOS-Delivery-Id</code> },
       ]} />
     </Card>
   );
@@ -171,71 +175,77 @@ export const VariablesCard = ({ trigger, mapping, defaults, onChange }: {
   mapping: Record<string, string>;
   defaults: Record<string, string>;
   onChange: (next: { mapping: Record<string, string>; defaults: Record<string, string> }) => void;
-}): ReactNode => (
-  <Card title="Default variables">
-    {trigger.variables.length === 0
-      ? <EmptyState>This template takes no variables.</EmptyState>
-      : (
-        <div className={STACK}>
-          {trigger.variables.map((name) => {
-            const path = mapping[name] ?? "";
-            const fallback = defaults[name] ?? "";
-            return (
-              <div className={FIELD_ROW} key={name}>
-                {/* The badge rides the variable's own label rather than a third
-                    grid cell: `auto-fit` would otherwise give the badged rows one
-                    more column than the rest, so no two rows would line up — and
-                    a `1fr` cell stretches the pill into a bar. */}
-                <div className={FIELD}>
-                  <label className="flex items-center gap-[8px]">
-                    <span className={FIELD_LABEL}>{name}</span>
-                    {/* A variable with neither a payload path nor a default is
-                        the one that makes a delivery fail with 400. */}
-                    {path === "" && fallback === "" ? <Pill tone="red">required</Pill> : null}
-                  </label>
-                  <Input type="text" value={path} placeholder="issue.title"
-                    onChange={(event) => onChange({ mapping: { ...mapping, [name]: event.target.value }, defaults })} />
-                  <div className={HINT}>Dotted path into the delivery payload.</div>
+}): ReactNode => {
+  const t = useT();
+  return (
+    <Card title={t("triggers.variables.title")}>
+      {trigger.variables.length === 0
+        ? <EmptyState>{t("triggers.variables.empty")}</EmptyState>
+        : (
+          <div className={STACK}>
+            {trigger.variables.map((name) => {
+              const path = mapping[name] ?? "";
+              const fallback = defaults[name] ?? "";
+              return (
+                <div className={FIELD_ROW} key={name}>
+                  {/* The badge rides the variable's own label rather than a third
+                      grid cell: `auto-fit` would otherwise give the badged rows one
+                      more column than the rest, so no two rows would line up — and
+                      a `1fr` cell stretches the pill into a bar. */}
+                  <div className={FIELD}>
+                    <label className="flex items-center gap-[8px]">
+                      <span className={FIELD_LABEL}>{name}</span>
+                      {/* A variable with neither a payload path nor a default is
+                          the one that makes a delivery fail with 400. */}
+                      {path === "" && fallback === "" ? <Pill tone="red">{t("triggers.variables.required")}</Pill> : null}
+                    </label>
+                    <Input type="text" value={path} placeholder="issue.title"
+                      onChange={(event) => onChange({ mapping: { ...mapping, [name]: event.target.value }, defaults })} />
+                    <div className={HINT}>{t("triggers.variables.pathHint")}</div>
+                  </div>
+                  <Field label={t("triggers.variables.default")}>
+                    <Input type="text" value={fallback} placeholder="—"
+                      onChange={(event) => onChange({ mapping, defaults: { ...defaults, [name]: event.target.value } })} />
+                  </Field>
                 </div>
-                <Field label="Default">
-                  <Input type="text" value={fallback} placeholder="—"
-                    onChange={(event) => onChange({ mapping, defaults: { ...defaults, [name]: event.target.value } })} />
-                </Field>
-              </div>
-            );
-          })}
-        </div>
-      )}
-  </Card>
-);
+              );
+            })}
+          </div>
+        )}
+    </Card>
+  );
+};
 
-export const FiresCard = ({ fires }: { fires: TriggerFire[] }): ReactNode => (
-  <Card title="Recent fires" flush>
-    {fires.length === 0 ? <EmptyState>No fires yet.</EmptyState> : (
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>When</TableHead><TableHead>Source</TableHead><TableHead>Chain</TableHead><TableHead>Progress</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {fires.map((fire) => (
-            <TableRow key={fire.id}>
-              <TableCell>{timeAgo(fire.createdAt)}</TableCell>
-              <TableCell><Pill tone={fire.source === "WEBHOOK" ? "accent" : "grey"}>{fire.source.toLowerCase()}</Pill></TableCell>
-              <TableCell>
-                {fire.firstTask === null
-                  ? <span className="text-muted-foreground">chain deleted</span>
-                  : <Link to={`/tasks/${fire.firstTask.id}`}>{fire.firstTask.name}</Link>}
-              </TableCell>
-              <TableCell>{chainMarker(fire.progress) ?? "—"}</TableCell>
+export const FiresCard = ({ fires }: { fires: TriggerFire[] }): ReactNode => {
+  const t = useT();
+  return (
+    <Card title={t("triggers.fires.title")} flush>
+      {fires.length === 0 ? <EmptyState>{t("triggers.fires.empty")}</EmptyState> : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>{t("triggers.fires.when")}</TableHead><TableHead>{t("triggers.fires.source")}</TableHead><TableHead>{t("triggers.fires.chain")}</TableHead><TableHead>{t("triggers.fires.progress")}</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    )}
-  </Card>
-);
+          </TableHeader>
+          <TableBody>
+            {fires.map((fire) => (
+              <TableRow key={fire.id}>
+                <TableCell>{timeAgo(fire.createdAt)}</TableCell>
+                <TableCell><Pill tone={fire.source === "WEBHOOK" ? "accent" : "grey"}>{t(`triggers.source.${fire.source}`)}</Pill></TableCell>
+                <TableCell>
+                  {fire.firstTask === null
+                    ? <span className="text-muted-foreground">{t("triggers.fires.chainDeleted")}</span>
+                    : <Link to={`/tasks/${fire.firstTask.id}`}>{fire.firstTask.name}</Link>}
+                </TableCell>
+                <TableCell>{chainMarker(fire.progress) ?? "—"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </Card>
+  );
+};
 
 /**
  * The detail page's two notice slots, extracted so a test can assert the
@@ -250,23 +260,27 @@ export const FiresCard = ({ fires }: { fires: TriggerFire[] }): ReactNode => (
 export const TriggerNotices = ({ actionError, trigger }: {
   actionError: string | null;
   trigger: Pick<TriggerDetail, "canFire" | "cannotFireReason">;
-}): ReactNode => (
-  <>
-    {actionError === null ? null : <ErrorNotice message={actionError} />}
-    {trigger.canFire ? null : <ErrorNotice message={trigger.cannotFireReason ?? "This trigger cannot fire"} />}
-  </>
-);
+}): ReactNode => {
+  const t = useT();
+  return (
+    <>
+      {actionError === null ? null : <ErrorNotice message={actionError} />}
+      {trigger.canFire ? null : <ErrorNotice message={trigger.cannotFireReason ?? t("triggers.cannotFire")} />}
+    </>
+  );
+};
 
 export const TriggerDetailPage = ({ templateId }: { templateId: string }): ReactNode => {
   const { data: trigger, error, reload } = usePoll<TriggerDetail>(`/triggers/${templateId}`);
   const fires = usePoll<TriggerFire[]>(`/triggers/${templateId}/fires?take=20`);
   const { pending, error: actionError, run } = useAction();
+  const t = useT();
   const [edits, setEdits] = useState<{ mapping: Record<string, string>; defaults: Record<string, string>; window: string } | null>(null);
 
   if (fatal(error, trigger)) {
     return <Page><ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /></Page>;
   }
-  if (!trigger) return <Page><EmptyState>Loading…</EmptyState></Page>;
+  if (!trigger) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   // Edits start from the server's copy and stay local until Save changes.
   const draft = edits ?? {
@@ -302,16 +316,16 @@ export const TriggerDetailPage = ({ templateId }: { templateId: string }): React
       <div className={DETAIL_HEAD}>
         <Link to="/triggers" className={BACK_LINK}><IconArrowLeft /></Link>
         <h1 className={DETAIL_HEAD_H1}>{trigger.name}</h1>
-        <Pill tone="violet">Template</Pill>
+        <Pill tone="violet">{t("tasks.pill.template")}</Pill>
         <Pill tone={state.tone}>{state.label}</Pill>
         <span className="flex-1" />
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={togglePause}>
-          {trigger.paused ? "Enable" : "Pause"}
+          {t(trigger.paused ? "triggers.enable" : "triggers.pause")}
         </Button>
         {/* Still enabled while paused ([A5]): a pause stops the outside world,
             not the operator standing at the console. */}
         <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || !trigger.canFire} onClick={fire}>
-          <IconBolt />Fire now
+          <IconBolt />{t("triggers.fireNow")}
         </Button>
       </div>
 
@@ -323,15 +337,15 @@ export const TriggerDetailPage = ({ templateId }: { templateId: string }): React
         <VariablesCard trigger={trigger} mapping={draft.mapping} defaults={draft.defaults}
           onChange={(next) => setEdits({ ...draft, ...next })} />
 
-        <Card title="Delivery">
-          <Field label="Replay window (seconds)" hint="A redelivery with the same X-AgentOS-Delivery-Id — or the same body — inside this window is answered 200 and creates nothing. Empty or 0 disables it.">
+        <Card title={t("triggers.delivery.title")}>
+          <Field label={t("triggers.delivery.label")} hint={t("triggers.delivery.hint")}>
             <Input type="number" min={0} max={86400} value={draft.window}
               onChange={(event) => setEdits({ ...draft, window: event.target.value })} />
           </Field>
         </Card>
 
         <div>
-          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={save}>Save changes</Button>
+          <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={save}>{t("triggers.saveChanges")}</Button>
         </div>
 
         <FiresCard fires={fires.data ?? []} />

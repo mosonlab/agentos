@@ -3,6 +3,7 @@ import { type DragEvent, type MouseEvent, type ReactNode, memo, useState } from 
 import { chainMarker } from "../lib/chain";
 import { money, timeAgo } from "../lib/format";
 import { moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
+import { type Translate, useT } from "../lib/i18n";
 import { navigate } from "../lib/router";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -44,15 +45,15 @@ const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-mut
 
 // The board card keeps the run line light — a status dot plus text, as in
 // kanban-tasks-board-t1560.jpg; pills are reserved for the task detail header.
-const runLabel = (task: BoardTask): ReactNode => {
+const runLabel = (task: BoardTask, t: Translate): ReactNode => {
   const run = task.latestRun;
-  if (!run) return <span className="text-[color:var(--faint)]">no runs</span>;
+  if (!run) return <span className="text-[color:var(--faint)]">{t("tasks.card.noRuns")}</span>;
   const tone = run.status === "SUCCEEDED" ? "green" : run.status === "FAILED" || run.status === "TIMED_OUT" || run.status === "LOST" ? "red" : "amber";
   return (
     <span className="inline-flex items-center gap-[6px] whitespace-nowrap">
       <span className={cn(DOT, DOT_TONE[tone])} />
-      <span className="text-primary">run {run.runNumber}</span>
-      <span className="text-[color:var(--faint)]"> · {run.status.toLowerCase().replace("_", " ")}</span>
+      <span className="text-primary">{t("tasks.card.run", { n: run.runNumber })}</span>
+      <span className="text-[color:var(--faint)]"> · {t(`status.run.${run.status}`)}</span>
     </span>
   );
 };
@@ -65,14 +66,14 @@ const runLabel = (task: BoardTask): ReactNode => {
  * all on a touch screen or from the keyboard. A button is the honest element:
  * it is what says "there is more here, and you can ask for it".
  */
-const Assignee = ({ name }: { name: string }): ReactNode => {
+const Assignee = ({ name, label }: { name: string; label: string }): ReactNode => {
   const [open, setOpen] = useState(false);
   return (
     <button
       type="button"
       title={name}
       aria-expanded={open}
-      aria-label={`Assignee ${name}`}
+      aria-label={label}
       className={cn(
         "min-w-0 rounded-sm border-0 bg-transparent p-0 text-left text-inherit hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]",
         open ? "[overflow-wrap:anywhere] whitespace-normal" : "overflow-hidden text-ellipsis whitespace-nowrap",
@@ -115,23 +116,25 @@ const opensTask = (event: MouseEvent<HTMLElement>): boolean => {
   return (window.getSelection()?.toString() ?? "") === "";
 };
 
-const menu = (task: BoardTask, actions: CardActions): RowMenuEntry[] => [
-  ...(retryable(task, task.latestRun) ? [{ label: "Retry", onSelect: () => actions.onRetry(task) }] : []),
+const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => [
+  ...(retryable(task, task.latestRun) ? [{ label: t("common.retry"), onSelect: () => actions.onRetry(task) }] : []),
   // Only where there is an error to copy, and it copies the whole of it — the
   // card shows three lines and hover-to-expand a 2KB log is not an answer.
-  ...(task.failureReason === null ? [] : [{ label: "Copy error", onSelect: () => actions.onCopyError(task) }]),
-  { label: "Archive", onSelect: () => actions.onArchive(task) },
-  { label: "Delete", danger: true, onSelect: () => actions.onDelete(task) },
+  ...(task.failureReason === null ? [] : [{ label: t("tasks.menu.copyError"), onSelect: () => actions.onCopyError(task) }]),
+  { label: t("tasks.menu.archive"), onSelect: () => actions.onArchive(task) },
+  { label: t("common.delete"), danger: true, onSelect: () => actions.onDelete(task) },
   // The keyboard's and touch's replacement for the drag (K15/K16).
-  { kind: "heading" as const, label: "Move to" },
+  { kind: "heading" as const, label: t("tasks.menu.moveTo") },
   ...moveTargets(task.status).map((status) => ({
     label: statusLabel(status),
     onSelect: () => actions.onMove(task, status),
   })),
 ];
 
-const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => (
-  <article
+const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
+  const t = useT();
+  const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  return <article
     data-card={task.id}
     className={TASK_CARD}
     draggable={draggable}
@@ -145,7 +148,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
         <a data-card-title="" href={`#/tasks/${task.id}`} className={TASK_TITLE}>{task.name}</a>
       </h3>
-      <RowMenu items={menu(task, actions)} label={`Actions for ${task.name}`} />
+      <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
     <div className={TASK_META}>
       <div className={TASK_META_ROW}>
@@ -155,11 +158,11 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
             answer to "what starts this task" — an answer cut off two characters
             from the end is not a shorter answer, it is no answer. */}
         <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{scheduleLabel(task)}</span>
-        {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>Approval</Pill> : null}
-        {task.templateId ? <Pill tone="violet" className={TASK_PILL}>Template</Pill> : null}
+        {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.approval")}</Pill> : null}
+        {task.templateId ? <Pill tone="violet" className={TASK_PILL}>{t("tasks.pill.template")}</Pill> : null}
         {/* MANUAL renders nothing: most tasks are manual, and a pill on every
             card would be noise rather than provenance ([A8]). */}
-        {task.source === "CRON" ? <Pill tone="grey" className={TASK_PILL}>cron</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent" className={TASK_PILL}>webhook</Pill> : null}
+        {task.source === "CRON" ? <Pill tone="grey" className={TASK_PILL}>{t("tasks.pill.cron")}</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent" className={TASK_PILL}>{t("tasks.pill.webhook")}</Pill> : null}
       </div>
       {/* No placeholder for a chain-less card (K4). */}
       {task.chainProgress ? (
@@ -167,20 +170,20 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           {chainMarker(task.chainProgress)}
         </div>
       ) : null}
-      <div className={TASK_META_ROW}>{runLabel(task)}</div>
+      <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
       {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, TASK_FAILURE)}>{task.failureReason}</div>}
     </div>
     <div className={TASK_FOOT}>
       <span className={cn(ROW, "min-w-0 gap-[6px]")}>
         <IconRobot />
-        <Assignee name={task.assigneeAgent?.title ?? "Unassigned"} />
+        <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
       </span>
       <span className="flex-1" />
       {task.latestRun?.costUsd ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span> : null}
       <span className="whitespace-nowrap">{timeAgo(task.updatedAt)}</span>
     </div>
-  </article>
-);
+  </article>;
+};
 
 /** A card re-renders only when its own row changed.
  *

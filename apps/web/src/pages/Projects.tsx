@@ -3,6 +3,7 @@ import { type ReactNode, useState } from "react";
 import { api } from "../lib/api";
 import { formatDate, formatDateTime } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { cn } from "../lib/utils";
@@ -31,21 +32,22 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const { pending, error, run } = useAction();
+  const t = useT();
   const effectiveSlug = slug.length > 0 ? slug : slugify(name);
   const submit = async (): Promise<void> => {
     const ok = await run(() => api.post<Project>("/projects", { name, slug: effectiveSlug, yamlDocument: "" }));
     if (ok) { onCreated(); onClose(); }
   };
   return (
-    <Modal title="New Project" onClose={onClose} footer={
+    <Modal title={t("projects.new.title")} onClose={onClose} footer={
       <>
-        <Button type="button" variant="legacy" size="legacy" className="shadow-none" onClick={onClose}>Cancel</Button>
+        <Button type="button" variant="legacy" size="legacy" className="shadow-none" onClick={onClose}>{t("common.cancel")}</Button>
         <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending || name.trim().length === 0 || effectiveSlug.length === 0}
-          onClick={() => void submit()}>Create project</Button>
+          onClick={() => void submit()}>{t("projects.new.create")}</Button>
       </>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
-      <Field label="Name">
+      <Field label={t("projects.field.name")}>
         {/* `h-auto` for the same reason the pair carries `shadow-none`: this form
             rendered raw `<input>` elements before the batch, so it got the retired
             sheet's `padding: 9px 11px` with no `h-9` to compete with it and stood at
@@ -61,9 +63,9 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
             `min-h-[60px]`), only three carried a `placeholder`, and only two
             selects carry `disabled`. The full audit is in
             docs/plans/selector-destinations.md §15 row 5. */}
-        <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder="MMO Game" />
+        <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={name} autoFocus onChange={(event) => setName(event.target.value)} placeholder={t("projects.field.name.placeholder")} />
       </Field>
-      <Field label="Slug" hint="Lower-case, dash separated. Used by the CLI and YAML sync.">
+      <Field label={t("projects.field.slug.label")} hint={t("projects.field.slug.hint")}>
         <Input type="text" className="h-auto shadow-none placeholder:text-foreground/50" value={effectiveSlug} onChange={(event) => setSlug(slugify(event.target.value))} placeholder="mmo-game" />
       </Field>
     </Modal>
@@ -79,11 +81,12 @@ export const ProjectsPage = (): ReactNode => {
   const { data: tasks } = usePoll<Task[]>("/tasks?enrich=false");
   const [creating, setCreating] = useState(false);
   const { error: actionError, run } = useAction();
+  const t = useT();
 
   const taskCount = (projectId: string): number => (tasks ?? []).filter((task) => task.projectId === projectId).length;
 
   const remove = (project: Project): void => {
-    if (!window.confirm(`Delete project ${project.name}? Agents, tasks and runs cascade.`)) return;
+    if (!window.confirm(t("projects.confirm.delete", { name: project.name }))) return;
     void run(async () => { await api.delete(`/projects/${project.id}`); reload(); });
   };
 
@@ -91,11 +94,11 @@ export const ProjectsPage = (): ReactNode => {
     <Page>
       <div className={PAGE_HEAD}>
         <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Projects</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>Workspaces that scope agents, repos, tasks and runs</div>
+          <h1 className={PAGE_HEAD_H1}>{t("projects.head.title")}</h1>
+          <div className={PAGE_HEAD_SUBTITLE}>{t("projects.head.subtitle")}</div>
         </div>
         <div className={PAGE_ACTIONS}>
-          <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" onClick={() => setCreating(true)}><IconPlus />New Project</Button>
+          <Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" onClick={() => setCreating(true)}><IconPlus />{t("projects.new.button")}</Button>
         </div>
       </div>
 
@@ -106,7 +109,7 @@ export const ProjectsPage = (): ReactNode => {
           <Table className="leading-normal">
             <TableHeader>
               <TableRow>
-                <TableHead>Name</TableHead><TableHead>Tasks</TableHead><TableHead>Session budget</TableHead><TableHead>Created</TableHead><TableHead>Updated</TableHead><TableHead />
+                <TableHead>{t("projects.table.name")}</TableHead><TableHead>{t("projects.table.tasks")}</TableHead><TableHead>{t("projects.table.budget")}</TableHead><TableHead>{t("common.created")}</TableHead><TableHead>{t("common.updated")}</TableHead><TableHead />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -114,15 +117,15 @@ export const ProjectsPage = (): ReactNode => {
                 <TableRow key={project.id} className="cursor-pointer" onClick={() => { select(project.id); navigate(`/projects/${project.id}`); }}>
                   <TableCell className={TABLE_NAME}>{project.name}<span className={TABLE_SUB}>{project.slug}</span></TableCell>
                   <TableCell>{taskCount(project.id)}</TableCell>
-                  <TableCell>{project.maxDurationMin}m wall · {project.stallTimeoutMin}m stall · {project.maxSessionsPerTask} runs</TableCell>
+                  <TableCell>{t("projects.budget", { wall: project.maxDurationMin, stall: project.stallTimeoutMin, runs: project.maxSessionsPerTask })}</TableCell>
                   <TableCell>{formatDate(project.createdAt)}</TableCell>
                   <TableCell>{formatDate(project.updatedAt)}</TableCell>
-                  <TableCell className={TABLE_TIGHT}><RowMenu items={[{ label: "Delete", danger: true, onSelect: () => remove(project) }]} /></TableCell>
+                  <TableCell className={TABLE_TIGHT}><RowMenu items={[{ label: t("common.delete"), danger: true, onSelect: () => remove(project) }]} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-          {projects.length === 0 ? <EmptyState>{loading ? "Loading…" : "No projects yet. Create one to scope agents and tasks."}</EmptyState> : null}
+          {projects.length === 0 ? <EmptyState>{t(loading ? "common.loading" : "projects.empty")}</EmptyState> : null}
         </Card>
       </div>
 
@@ -140,11 +143,12 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
   const { data: tasks } = usePoll<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}&enrich=false`);
   const [editingYaml, setEditingYaml] = useState<string | null>(null);
   const { pending, error: actionError, run } = useAction();
+  const t = useT();
 
   if (error !== null && project === null) {
     return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
   }
-  if (!project) return <Page><EmptyState>Loading…</EmptyState></Page>;
+  if (!project) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const scoped = tasks ?? [];
   const byStatus = (status: string): number => scoped.filter((task) => task.status === status).length;
@@ -161,37 +165,37 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
         <h1 className={DETAIL_HEAD_H1}>{project.name}</h1>
         <Pill tone="grey">{project.slug}</Pill>
         <span className="flex-1" />
-        <Link to="/tasks" className={LINK_BUTTON}>Tasks</Link>
-        <Link to="/agents" className={LINK_BUTTON}>Agents</Link>
-        <Link to="/goals" className={LINK_BUTTON}>Goals</Link>
+        <Link to="/tasks" className={LINK_BUTTON}>{t("sidebar.nav.tasks")}</Link>
+        <Link to="/agents" className={LINK_BUTTON}>{t("sidebar.nav.agents")}</Link>
+        <Link to="/goals" className={LINK_BUTTON}>{t("sidebar.nav.goals")}</Link>
       </div>
 
       <div className={STACK}>
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         <div className={METRICS}>
-          <Metric label="Tasks" value={`${scoped.length}`} />
-          <Metric label="Doing · Review" value={`${byStatus("DOING")} · ${byStatus("REVIEW")}`} />
-          <Metric label="Agents" value={`${(agents ?? []).length}`} />
-          <Metric label="Repos" value={`${(repos ?? []).length}`} />
+          <Metric label={t("projects.metric.tasks")} value={`${scoped.length}`} />
+          <Metric label={t("projects.metric.doingReview")} value={`${byStatus("DOING")} · ${byStatus("REVIEW")}`} />
+          <Metric label={t("projects.metric.agents")} value={`${(agents ?? []).length}`} />
+          <Metric label={t("projects.metric.repos")} value={`${(repos ?? []).length}`} />
         </div>
 
-        <Card title="Details">
+        <Card title={t("projects.details.title")}>
           <KeyValue items={[
-            { k: "Slug", v: project.slug },
-            { k: "Project ID", v: <span className="text-[11.5px]">{project.id}</span> },
-            { k: "Created", v: formatDateTime(project.createdAt) },
-            { k: "Updated", v: formatDateTime(project.updatedAt) },
-            { k: "Wall-clock limit", v: `${project.maxDurationMin} min` },
-            { k: "Stall timeout", v: `${project.stallTimeoutMin} min` },
-            { k: "Max runs per task", v: `${project.maxSessionsPerTask}` },
-            { k: "Spend cap", v: project.spendCap === null ? "— (subscription runners, DECISIONS #12)" : `$${project.spendCap}` },
+            { k: t("projects.details.slug"), v: project.slug },
+            { k: t("projects.details.id"), v: <span className="text-[11.5px]">{project.id}</span> },
+            { k: t("common.created"), v: formatDateTime(project.createdAt) },
+            { k: t("common.updated"), v: formatDateTime(project.updatedAt) },
+            { k: t("projects.details.wallClock"), v: t("projects.details.minutes", { n: project.maxDurationMin }) },
+            { k: t("projects.details.stall"), v: t("projects.details.minutes", { n: project.stallTimeoutMin }) },
+            { k: t("projects.details.maxRuns"), v: `${project.maxSessionsPerTask}` },
+            { k: t("projects.details.spendCap"), v: project.spendCap === null ? t("projects.details.noSpendCap") : `$${project.spendCap}` },
           ]} />
         </Card>
 
-        <Card title="Repos" extra={<span className={COUNT}>{(repos ?? []).length}</span>}>
-          {(repos ?? []).length === 0 ? <EmptyState>No repos. Agent tasks require a repo grant.</EmptyState> : (
+        <Card title={t("projects.repos.title")} extra={<span className={COUNT}>{(repos ?? []).length}</span>}>
+          {(repos ?? []).length === 0 ? <EmptyState>{t("projects.repos.empty")}</EmptyState> : (
             <Table className="leading-normal">
-              <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Remote</TableHead><TableHead>Default branch</TableHead><TableHead>Mount</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>{t("connections.repos.table.name")}</TableHead><TableHead>{t("connections.repos.table.remote")}</TableHead><TableHead>{t("connections.repos.table.defaultBranch")}</TableHead><TableHead>{t("projects.repos.mount")}</TableHead></TableRow></TableHeader>
               <TableBody>
                 {(repos ?? []).map((repo) => (
                   <TableRow key={repo.id}>
@@ -206,19 +210,19 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
           )}
         </Card>
 
-        <Card title="YAML document" extra={
+        <Card title={t("projects.yaml.title")} extra={
           editingYaml === null
-            ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setEditingYaml(project.yamlDocument)}>Edit</Button>
+            ? <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setEditingYaml(project.yamlDocument)}>{t("common.edit")}</Button>
             : (
               <>
-                <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setEditingYaml(null)}>Cancel</Button>
-                <Button type="button" variant="legacyPrimary" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => void saveYaml()}>Save</Button>
+                <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={() => setEditingYaml(null)}>{t("common.cancel")}</Button>
+                <Button type="button" variant="legacyPrimary" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => void saveYaml()}>{t("common.save")}</Button>
               </>
             )
         }>
           {editingYaml === null
             ? (project.yamlDocument.trim().length === 0
-              ? <EmptyState>No YAML document. CLI sync arrives in v2 (DECISIONS #10).</EmptyState>
+              ? <EmptyState>{t("projects.yaml.empty")}</EmptyState>
               : <ShowMore text={project.yamlDocument} lines={10} />)
             : <Textarea rows={14} className="shadow-none" value={editingYaml} onChange={(event) => setEditingYaml(event.target.value)} />}
         </Card>

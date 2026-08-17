@@ -1,6 +1,7 @@
 import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { COLUMNS, type Edges, clampScroll, columnStep, edgeState, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
 import type { BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -62,7 +63,7 @@ const COLUMN_EMPTY = "px-0 py-[26px] text-center text-[12px] text-[color:var(--f
  *  presence rule and the empty-state drop invitation — can be asserted from
  *  rendered markup rather than from the page's source text. */
 export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, actions }: {
-  column: { status: TaskStatus; label: string };
+  column: { status: TaskStatus; labelKey: string };
   tasks: BoardTask[];
   loading: boolean;
   dragOver: TaskStatus | null;
@@ -71,17 +72,18 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   onDrop: (taskId: string, status: TaskStatus) => void;
   onArchiveDone: () => void;
   actions: CardActions;
-}): ReactNode => (
-  <div className={COLUMN}>
+}): ReactNode => {
+  const t = useT();
+  return <div className={COLUMN}>
     <div className={COLUMN_HEAD}>
-      {column.label}<span className={COUNT}>{tasks.length}</span>
+      {t(column.labelKey)}<span className={COUNT}>{tasks.length}</span>
       {/* Only on a non-empty Done column: a button that would archive nothing
           is not offered (A2). */}
       {column.status === "DONE" && tasks.length > 0 ? (
         <>
           <span className="flex-1" />
           <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
-            Archive All
+            {t("tasks.archiveAll")}
           </Button>
         </>
       ) : null}
@@ -97,10 +99,10 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
     >
       {tasks.map((task) => <TaskCard key={task.id} task={task} actions={actions} draggable />)}
       {/* Every column gets the same invitation, Backlog included (E16). */}
-      {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
+      {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{t(loading ? "common.loading" : "tasks.column.drop")}</div> : null}
     </div>
-  </div>
-);
+  </div>;
+};
 
 /* --------------------------------------------------- horizontal navigation */
 
@@ -153,24 +155,25 @@ const useEdges = (boardRef: React.RefObject<HTMLDivElement | null>): [Edges, () 
 
 /** The arrows, as one control. Extracted so their disabled rule can be asserted
  *  from markup: an arrow at its end is disabled, not silently inert. */
-export const BoardArrows = ({ edges, onStep }: { edges: Edges; onStep: (direction: -1 | 1) => void }): ReactNode => (
-  <>
+export const BoardArrows = ({ edges, onStep }: { edges: Edges; onStep: (direction: -1 | 1) => void }): ReactNode => {
+  const t = useT();
+  return <>
     <Button
       type="button" variant="legacy" size="legacySmall" className="shadow-none"
-      aria-label="Scroll one column left" disabled={edges.atStart}
+      aria-label={t("tasks.board.scrollLeft")} disabled={edges.atStart}
       onClick={() => onStep(-1)}
     >
       ←
     </Button>
     <Button
       type="button" variant="legacy" size="legacySmall" className="shadow-none"
-      aria-label="Scroll one column right" disabled={edges.atEnd}
+      aria-label={t("tasks.board.scrollRight")} disabled={edges.atEnd}
       onClick={() => onStep(1)}
     >
       →
     </Button>
-  </>
-);
+  </>;
+};
 
 /** How close to the board's edge a drag has to get before the board starts
  *  moving under it, and how many pixels per tick it then moves. */
@@ -196,6 +199,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
   boardRef: React.RefObject<HTMLDivElement | null>;
   projectId: string;
 }): ReactNode => {
+  const t = useT();
   // Only ~2.5 of five columns fit at a 972px viewport, so a drag that starts in
   // Todo cannot reach Done without the board moving — and a drag is holding the
   // pointer, so the scrollbar is not available. Holding near an edge scrolls the
@@ -299,7 +303,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
             be a control that has never once had anything to do. */}
         {edges.overflowing ? (
           <>
-            <span className={NAV_HINT}>Scroll or drag to reach the other columns</span>
+            <span className={NAV_HINT}>{t("tasks.board.scrollHint")}</span>
             <BoardArrows edges={edges} onStep={step} />
           </>
         ) : null}
@@ -313,7 +317,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
           // it takes arrow keys natively, which is the vertical half of what the
           // two buttons do horizontally.
           role="region"
-          aria-label="Task board"
+          aria-label={t("tasks.board.label")}
           tabIndex={0}
           onDragOver={onBoardDragOver}
           onDragLeave={onBoardDragLeave}

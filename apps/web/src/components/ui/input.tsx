@@ -15,22 +15,25 @@ import { cn } from "@/lib/utils"
  *
  *  `shadow-sm` stays: nothing unlayered sets `box-shadow`, so it is live on every
  *  Input host today and dropping it would be a visible regression (plan §2.5).
- *  `md:text-sm` is gone, because it would re-win over the pinned size at ≥768px. */
-const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
-  ({ className, type = "text", ...props }, ref) => {
-    return (
-      <input
-        type={type}
-        className={cn(
-          "flex h-9 w-full rounded-lg border border-border bg-[color:var(--surface-input)] px-[11px] py-[9px] text-[12.5px] text-foreground outline-0 shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-          className
-        )}
-        ref={ref}
-        {...props}
-      />
-    )
-  }
-)
-Input.displayName = "Input"
+ *  `md:text-sm` is gone, because it would re-win over the pinned size at ≥768px.
+ *
+ *  v4 generation, one deviation: the stock string carries
+ *  `focus-visible:border-ring`, which this file does not take. `focus:border-primary`
+ *  below is the repo's own reproduction of the retired `input:focus` rule, and the
+ *  repo string wins over the v4 base (batch 1 plan C1). Only the ring changes: the
+ *  1px `ring-ring` becomes the sanctioned 3px `ring-ring/50`. */
+function Input({ className, type = "text", ...props }: React.ComponentProps<"input">) {
+  return (
+    <input
+      type={type}
+      data-slot="input"
+      className={cn(
+        "flex h-9 w-full rounded-lg border border-border bg-[color:var(--surface-input)] px-[11px] py-[9px] text-[12.5px] text-foreground outline-0 shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus:border-primary focus-visible:outline-hidden focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive disabled:cursor-not-allowed disabled:opacity-50",
+        className
+      )}
+      {...props}
+    />
+  )
+}
 
 export { Input }

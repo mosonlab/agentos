@@ -7,8 +7,11 @@ import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, FRAME, dragEdgeStep } from
 import { MobileTaskList } from "../components/mobile-task-list";
 import { TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
+import { translate } from "../lib/i18n-core";
 import { BOARD_PAGE, archiveDoneNotice, stableRows } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
+
+const en = (key: string): string => translate("en", key);
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", status: "TODO", failureReason: null,
@@ -54,12 +57,12 @@ const mobile = (tab: TaskStatus, tasks: BoardTask[] = [], all: BoardTask[] = tas
 /* ------------------------------------------------------------- the columns */
 
 test("the board has five columns, in order, with Backlog first", () => {
-  assert.deepEqual(COLUMNS.map((c) => c.label), ["Backlog", "Todo", "Doing", "Review", "Done"]);
+  assert.deepEqual(COLUMNS.map((c) => en(c.labelKey)), ["Backlog", "Todo", "Doing", "Review", "Done"]);
   assert.deepEqual(COLUMNS.map((c) => c.status), ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"]);
   // Each label reaches the DOM with its own count, so an added column cannot
   // pass by being present in the array and absent from the render.
-  for (const { status, label } of COLUMNS) {
-    assert.match(column(status), new RegExp(`${label}<span[^>]*>0</span>`));
+  for (const { status, labelKey } of COLUMNS) {
+    assert.match(column(status), new RegExp(`${en(labelKey)}<span[^>]*>0</span>`));
   }
 });
 
@@ -71,16 +74,16 @@ test("a BACKLOG task lands in the first column and nowhere else", () => {
 
 test("an empty column still invites a drop, Backlog included (E16)", () => {
   for (const { status } of COLUMNS) {
-    assert.match(column(status), /Drop tasks here/);
+    assert.match(column(status), new RegExp(en("tasks.column.drop")));
   }
-  assert.match(column("BACKLOG", [], true), /Loading…/);
-  assert.doesNotMatch(column("BACKLOG", [task({ status: "BACKLOG" })]), /Drop tasks here/);
+  assert.match(column("BACKLOG", [], true), new RegExp(en("common.loading")));
+  assert.doesNotMatch(column("BACKLOG", [task({ status: "BACKLOG" })]), new RegExp(en("tasks.column.drop")));
 });
 
 test("Archive All is offered only on a non-empty Done column", () => {
-  assert.match(column("DONE", [task({ status: "DONE" })]), /Archive All/);
-  assert.doesNotMatch(column("DONE", []), /Archive All/);
-  assert.doesNotMatch(column("TODO", [task()]), /Archive All/);
+  assert.match(column("DONE", [task({ status: "DONE" })]), new RegExp(en("tasks.archiveAll")));
+  assert.doesNotMatch(column("DONE", []), new RegExp(en("tasks.archiveAll")));
+  assert.doesNotMatch(column("TODO", [task()]), new RegExp(en("tasks.archiveAll")));
 });
 
 test("every column head is the same height, whatever it offers", () => {
@@ -337,5 +340,5 @@ test("both notice shapes render through InfoNotice", () => {
 test("InfoNotice borrows neither the amber nor the destructive palette", () => {
   const markup = renderToStaticMarkup(<InfoNotice message="Archived 6" onDismiss={() => undefined} />);
   assert.doesNotMatch(markup, /status-amber|destructive/);
-  assert.match(markup, /Dismiss/);
+  assert.match(markup, new RegExp(en("common.dismiss")));
 });

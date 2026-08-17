@@ -11,6 +11,7 @@ import {
 } from "./ui/dropdown-menu";
 import { Switch } from "./ui/switch";
 import { titleCase } from "../lib/format";
+import { useT, useTNodes } from "../lib/i18n";
 import { cn } from "../lib/utils";
 import type { Agent, GoalStatus, InboxStatus, RunStatus, TaskStatus } from "../lib/types";
 import { IconChevron, IconDots, IconRobot, IconUser } from "./icons";
@@ -128,25 +129,40 @@ const goalTones: Record<GoalStatus, PillTone> = {
 };
 const inboxTones: Record<InboxStatus, PillTone> = { OPEN: "amber", ANSWERED: "green", CLOSED: "grey" };
 
-export const TaskPill = ({ status }: { status: TaskStatus }): ReactNode =>
-  <Pill tone={taskTones[status]}>{status.toLowerCase()}</Pill>;
+/* One dictionary key per enum value, rather than lower-casing the identifier
+ * (spec §4.3.7): `WAITING_INBOX` has no Chinese that a string transform can
+ * reach, and the two special cases the pills already carried — a goal's `ACTIVE`
+ * reading `running`, an inbox message's `OPEN` reading `Awaiting reply` — stop
+ * being exceptions in the code and become two ordinary entries in the table. */
 
-export const RunPill = ({ status }: { status: RunStatus }): ReactNode =>
-  <Pill tone={runTones[status]}>{status.toLowerCase().replace("_", " ")}</Pill>;
+export const TaskPill = ({ status }: { status: TaskStatus }): ReactNode => {
+  const t = useT();
+  return <Pill tone={taskTones[status]}>{t(`status.task.${status}`)}</Pill>;
+};
 
-export const GoalPill = ({ status }: { status: GoalStatus }): ReactNode =>
-  <Pill tone={goalTones[status]}>{status === "ACTIVE" ? "running" : status.toLowerCase().replace("_", " ")}</Pill>;
+export const RunPill = ({ status }: { status: RunStatus }): ReactNode => {
+  const t = useT();
+  return <Pill tone={runTones[status]}>{t(`status.run.${status}`)}</Pill>;
+};
 
-export const InboxPill = ({ status }: { status: InboxStatus }): ReactNode =>
-  <Pill tone={inboxTones[status]}>{status === "OPEN" ? "Awaiting reply" : status.toLowerCase()}</Pill>;
+export const GoalPill = ({ status }: { status: GoalStatus }): ReactNode => {
+  const t = useT();
+  return <Pill tone={goalTones[status]}>{t(`status.goal.${status}`)}</Pill>;
+};
+
+export const InboxPill = ({ status }: { status: InboxStatus }): ReactNode => {
+  const t = useT();
+  return <Pill tone={inboxTones[status]}>{t(`status.inbox.${status}`)}</Pill>;
+};
 
 const CHIP = "inline-flex items-center gap-[6px] rounded-full border px-[9px] py-[2px] text-[11.5px] leading-[19px]";
 
 /** Agents are first-class everywhere: same violet chip + robot glyph (ui-notes §"要点提炼" 3). */
 export const AgentChip = ({ agent, name }: { agent?: Agent | null; name?: string }): ReactNode => {
+  const t = useT();
   const label = agent?.title ?? agent?.name ?? name;
   if (!label) {
-    return <span className={cn(CHIP, "border-border bg-secondary text-secondary-foreground")}><IconUser />Unassigned</span>;
+    return <span className={cn(CHIP, "border-border bg-secondary text-secondary-foreground")}><IconUser />{t("ui.chip.unassigned")}</span>;
   }
   return (
     <span className={cn(CHIP, "border-[color:var(--status-violet-line)] bg-[color:var(--status-violet-bg)] text-[color:var(--status-violet-fg)]")}>
@@ -323,13 +339,16 @@ const NOTICE_ERROR = "border-[color:var(--destructive-line)] bg-[color:var(--des
 
 /** Rendered whenever the control plane has no endpoint for a v1 surface. The
  *  page still renders so the gap is visible instead of silently missing. */
-export const GapNotice = ({ endpoint, what }: { endpoint: string; what: string }): ReactNode => (
-  <div className={cn(NOTICE, NOTICE_GAP)}>
-    <span>
-      控制面尚无 <code>{endpoint}</code>，{what}暂无数据来源。页面按真实空响应渲染，端点上线后自动生效。
-    </span>
-  </div>
-);
+export const GapNotice = ({ endpoint, what }: { endpoint: string; what: string }): ReactNode => {
+  const tn = useTNodes();
+  // `endpoint` is a route, so it keeps its <code>; `what` is copy the caller
+  // already translated, so it interpolates as plain text.
+  return (
+    <div className={cn(NOTICE, NOTICE_GAP)}>
+      <span>{tn("notice.gap", { endpoint: <code>{endpoint}</code>, what })}</span>
+    </div>
+  );
+};
 
 /** `NOTICE` is a flex row, so the wrapper decides the layout: each element child
  *  and each contiguous text run of a bare fragment is its own flex item with a
@@ -338,34 +357,40 @@ export const GapNotice = ({ endpoint, what }: { endpoint: string; what: string }
  *  `ReactNode` so App.tsx's rich banner could route through it, and that banner
  *  laid out 9 flex items unwrapped at 3f712b5. Both shapes are preserved by
  *  wrapping only what was a string. */
-export const ErrorNotice = ({ message, onRetry }: { message: ReactNode; onRetry?: () => void }): ReactNode => (
-  <div className={cn(NOTICE, NOTICE_ERROR)}>
-    {typeof message === "string" ? <span>{message}</span> : message}
-    {onRetry ? (
-      <>
-        <span className="flex-1" />
-        {/* `shadow-none`: `.btn small` on a bare <button> never picked up the
-            primitive's shadow, and R-1 keeps the appearance identical. */}
-        <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onRetry}>Retry</Button>
-      </>
-    ) : null}
-  </div>
-);
+export const ErrorNotice = ({ message, onRetry }: { message: ReactNode; onRetry?: () => void }): ReactNode => {
+  const t = useT();
+  return (
+    <div className={cn(NOTICE, NOTICE_ERROR)}>
+      {typeof message === "string" ? <span>{message}</span> : message}
+      {onRetry ? (
+        <>
+          <span className="flex-1" />
+          {/* `shadow-none`: `.btn small` on a bare <button> never picked up the
+              primitive's shadow, and R-1 keeps the appearance identical. */}
+          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onRetry}>{t("common.retry")}</Button>
+        </>
+      ) : null}
+    </div>
+  );
+};
 
 /** The only surface in the app that can say something *succeeded*. Built from
  *  the same `NOTICE` base as `GapNotice`, with no tone override, so a neutral
  *  result never borrows the amber or destructive palette. */
-export const InfoNotice = ({ message, onDismiss }: { message: ReactNode; onDismiss?: () => void }): ReactNode => (
-  <div className={cn(NOTICE)}>
-    {typeof message === "string" ? <span>{message}</span> : message}
-    {onDismiss ? (
-      <>
-        <span className="flex-1" />
-        <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onDismiss}>Dismiss</Button>
-      </>
-    ) : null}
-  </div>
-);
+export const InfoNotice = ({ message, onDismiss }: { message: ReactNode; onDismiss?: () => void }): ReactNode => {
+  const t = useT();
+  return (
+    <div className={cn(NOTICE)}>
+      {typeof message === "string" ? <span>{message}</span> : message}
+      {onDismiss ? (
+        <>
+          <span className="flex-1" />
+          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onDismiss}>{t("common.dismiss")}</Button>
+        </>
+      ) : null}
+    </div>
+  );
+};
 
 /** The message card is shared by the Inbox thread and the Goals progress log.
  *  `.msgCard + .msgCard`'s 12px is applied per call site, because in the progress
@@ -384,6 +409,7 @@ export const isLongText = (text: string, lines: number): boolean =>
 
 export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }): ReactNode => {
   const [open, setOpen] = useState(false);
+  const t = useT();
   const long = isLongText(text, lines);
   return (
     <div>
@@ -401,7 +427,7 @@ export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }):
           className={SHOW_MORE_BUTTON}
           onClick={() => setOpen(!open)}
         >
-          <IconChevron open={open} />{open ? "Show less" : "Show more"}
+          <IconChevron open={open} />{t(open ? "ui.showMore.less" : "ui.showMore.more")}
         </button>
       ) : null}
     </div>
@@ -418,11 +444,12 @@ export type RowMenuEntry =
   | { kind: "heading"; label: string };
 
 export const RowMenu = ({ items, label }: { items: RowMenuEntry[]; label?: string }): ReactNode => {
+  const t = useT();
   return (
     <DropdownMenu>
       <span className="relative" onClick={(event) => event.stopPropagation()}>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="icon" size="legacyIcon" aria-label={label ?? "More actions"}><IconDots /></Button>
+          <Button type="button" variant="icon" size="legacyIcon" aria-label={label ?? t("ui.rowMenu.more")}><IconDots /></Button>
         </DropdownMenuTrigger>
       </span>
       <DropdownMenuContent align="end" className="min-w-32 border-border bg-popover font-mono text-popover-foreground" onClick={(event) => event.stopPropagation()}>
@@ -566,17 +593,20 @@ export const FullPanel = ({ title, onClose, actions, children }: {
   onClose: () => void;
   actions?: ReactNode;
   children: ReactNode;
-}): ReactNode => (
-  <div className="fixed inset-y-0 right-0 left-[214px] z-40 overflow-y-auto bg-popover [@media(max-width:900px)]:left-0">
-    <div className="sticky top-0 z-[1] flex items-center gap-[12px] border-b border-[color:var(--border-soft)] bg-popover px-[34px] py-[16px] [@media(max-width:900px)]:px-[16px]">
-      <h1 className="text-[16px]">{title}</h1>
-      <span className="flex-1" />
-      <Button type="button" variant="legacy" size="legacy" className="shadow-none" onClick={onClose}>Cancel</Button>
-      {actions}
+}): ReactNode => {
+  const t = useT();
+  return (
+    <div className="fixed inset-y-0 right-0 left-[214px] z-40 overflow-y-auto bg-popover [@media(max-width:900px)]:left-0">
+      <div className="sticky top-0 z-[1] flex items-center gap-[12px] border-b border-[color:var(--border-soft)] bg-popover px-[34px] py-[16px] [@media(max-width:900px)]:px-[16px]">
+        <h1 className="text-[16px]">{title}</h1>
+        <span className="flex-1" />
+        <Button type="button" variant="legacy" size="legacy" className="shadow-none" onClick={onClose}>{t("common.cancel")}</Button>
+        {actions}
+      </div>
+      <div className={cn(STACK, "max-w-[1020px] px-[34px] pt-[24px] pb-[80px] [@media(max-width:900px)]:px-[16px]")}>{children}</div>
     </div>
-    <div className={cn(STACK, "max-w-[1020px] px-[34px] pt-[24px] pb-[80px] [@media(max-width:900px)]:px-[16px]")}>{children}</div>
-  </div>
-);
+  );
+};
 
 export const Field = ({ label, hint, children }: { label: string; hint?: string; children: ReactNode }): ReactNode => (
   <div className={FIELD}>

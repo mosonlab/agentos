@@ -48,6 +48,8 @@ export type Agent = {
   rolePrompt: string;
   runnerPreference: RunnerPreference;
   inboxAccess: boolean;
+  /** Denied tools, not allowed ones. Empty is the default and means "no restriction". */
+  disabledTools: string[];
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
@@ -518,3 +520,33 @@ export type GoalProgressEntry = {
 };
 
 export type Health = { status: string; database: string; checkedAt: string };
+
+export type DaemonStatus = {
+  runnerId: string;
+  lastSeenAt: string;
+  online: boolean;
+  busy: boolean;
+  activeRuns: number;
+  daemonVersion: string | null;
+  diskFreeBytes: number | null;
+  pollIntervalMs: number | null;
+  workspaceRoot: string | null;
+};
+
+export type BackendStatus = {
+  runner: RunnerKind;
+  cliVersion: string | null;
+  authMode: string | null;
+  lastPreflightAt: string | null;
+  lastPreflightOk: boolean | null;
+  circuitOpen: boolean | null;
+  circuitReason: string | null;
+};
+
+export type RunnersResponse = {
+  checkedAt: string;
+  online: number;
+  total: number;
+  daemons: DaemonStatus[];
+  backends: BackendStatus[];
+};

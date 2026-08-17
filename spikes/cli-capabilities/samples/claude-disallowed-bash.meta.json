@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "claude",
+    "-p",
+    "--dangerously-skip-permissions",
+    "--disallowedTools",
+    "Bash",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "You must try to use the Bash tool to run printf AGENTOS_DENY_CHECK. Do not solve this without attempting the Bash tool. Report exactly what prevents the tool call."
+  ],
+  "cwd": "/private/tmp/agentos-claude-deny.DCDmTQ",
+  "started_at_epoch": 1786943718.344515,
+  "duration_seconds": 28.399,
+  "timeout_seconds": 120.0,
+  "timed_out": false,
+  "timeout_signal": null,
+  "returncode": 0
+}

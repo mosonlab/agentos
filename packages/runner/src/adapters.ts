@@ -340,6 +340,27 @@ const codexMcpArgs = (credentialsPath: string): string[] => [
   "-c", "mcp_servers.agentos.startup_timeout_sec=30",
 ];
 
+type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
+const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
+const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
+  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
+  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
+};
+const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
+  BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit",
+};
+
+const denyArgs = (runner: "CLAUDE" | "PI", disabledTools: string[]): string[] => {
+  const denied = new Set(disabledTools);
+  const names = TOOL_ORDER.flatMap((tool) => {
+    if (!denied.has(tool)) return [];
+    const name = runner === "CLAUDE" ? CLAUDE_TOOL_NAMES[tool] : PI_TOOL_NAMES[tool];
+    return name ? [name] : [];
+  });
+  if (names.length === 0) return [];
+  return [runner === "CLAUDE" ? "--disallowedTools" : "--exclude-tools", names.join(",")];
+};
+
 export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
   const input = resume?.input ?? spec.prompt;
   const { model, effort } = modelSpec(spec.claim.run.model);
@@ -348,6 +369,7 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     // Model must be pinned explicitly; the CLI otherwise inherits the
     // operator's personal default, which is reserved quota.
     "--model", model, "--effort", effort ?? "high",
+    ...denyArgs("CLAUDE", spec.claim.agent.disabledTools),
     // strict keeps the operator's personal MCP servers out of an agent session:
     // the manifest is supposed to be the whole tool surface.
     "--mcp-config", JSON.stringify(mcpConfig(spec.credentialsPath)), "--strict-mcp-config",
@@ -365,6 +387,7 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     "-p", "--mode", "json", "--session-dir", join(spec.workingDirectory, ".agentos-pi"),
     "--model", model,
     ...(effort ? ["--thinking", effort] : []),
+    ...denyArgs("PI", spec.claim.agent.disabledTools),
     "--extension", piExtensionPath(),
     ...(resume ? ["--session", resume.providerConversationId] : []), input,
   ];

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, failureReasonFromEvidence,
-  mcpConfig, type ExitEvidence,
+  mcpConfig, mcpServerPath, piExtensionPath, type ExitEvidence,
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -19,7 +19,7 @@ const claim: ClaimedTask = {
     stallTimeoutMin: 10,
     maxSessionsPerTask: 3,
   },
-  agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement" },
+  agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement", disabledTools: [] },
   repo: { id: "repo-1", remoteUrl: "/repo", defaultBranch: "main", mountPath: "repo" },
   run: {
     id: "run-1",
@@ -46,6 +46,20 @@ const claim: ClaimedTask = {
   priorOutputs: [],
 };
 
+const runSpec = (disabledTools: string[] = []) => ({
+  config: { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: [] } as unknown as RunnerConfig,
+  claim: { ...claim, agent: { ...claim.agent, disabledTools } },
+  workingDirectory: "/work",
+  env: {},
+  prompt: "prompt",
+  credentialsPath: "/work/.agentos/session.json",
+});
+
+const stableArgv = (args: string[]): string[] => args.map((arg) => arg
+  .replaceAll(process.execPath, "<NODE>")
+  .replaceAll(mcpServerPath(), "<MCP_SERVER>")
+  .replaceAll(piExtensionPath(), "<PI_EXTENSION>"));
+
 test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
@@ -65,11 +79,7 @@ test("the prompt manifest names the AgentOS tools the session actually got", () 
 });
 
 test("every CLI is launched with the AgentOS tool surface attached", () => {
-  const spec = {
-    config: { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: [] } as unknown as RunnerConfig,
-    claim, workingDirectory: "/work", env: {}, prompt: "prompt",
-    credentialsPath: "/work/.agentos/session.json",
-  };
+  const spec = runSpec();
   const claude = argsForRunner("CLAUDE", spec);
   const config = JSON.parse(claude[claude.indexOf("--mcp-config") + 1]!) as ReturnType<typeof mcpConfig>;
   assert.deepEqual(config.mcpServers.agentos!.args, [
@@ -89,6 +99,55 @@ test("every CLI is launched with the AgentOS tool surface attached", () => {
   // Resumed sessions keep the tools; a resume without them silently drops them.
   const resumed = argsForRunner("CODEX", spec, { ...spec, providerConversationId: "thread-1", input: "again" });
   assert.match(resumed.join(" "), /mcp_servers\.agentos\.command=/);
+});
+
+test("an empty denied set keeps every runner argv byte-identical", () => {
+  const spec = runSpec();
+  assert.deepEqual(stableArgv(argsForRunner("CLAUDE", spec)), [
+    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
+    "--model", "codex", "--effort", "high",
+    "--mcp-config", "{\"mcpServers\":{\"agentos\":{\"type\":\"stdio\",\"command\":\"<NODE>\",\"args\":[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]}}}",
+    "--strict-mcp-config", "prompt",
+  ]);
+  assert.deepEqual(stableArgv(argsForRunner("CODEX", spec)), [
+    "exec", "--json", "-m", "codex",
+    "-c", "mcp_servers.agentos.command=\"<NODE>\"",
+    "-c", "mcp_servers.agentos.args=[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]",
+    "-c", "mcp_servers.agentos.startup_timeout_sec=30",
+    "--dangerously-bypass-approvals-and-sandbox", "prompt",
+  ]);
+  assert.deepEqual(stableArgv(argsForRunner("PI", spec)), [
+    "-p", "--mode", "json", "--session-dir", "/work/.agentos-pi", "--model", "codex",
+    "--extension", "<PI_EXTENSION>", "prompt",
+  ]);
+});
+
+test("denied tools map in canonical order without consuming the prompt", () => {
+  const spec = runSpec(["BASH", "WEB_SEARCH"]);
+  const claude = argsForRunner("CLAUDE", spec);
+  const pi = argsForRunner("PI", spec);
+  assert.deepEqual(claude.slice(claude.indexOf("--disallowedTools"), claude.indexOf("--disallowedTools") + 2), ["--disallowedTools", "Bash,WebSearch"]);
+  assert.deepEqual(pi.slice(pi.indexOf("--exclude-tools"), pi.indexOf("--exclude-tools") + 2), ["--exclude-tools", "bash"]);
+  assert.equal(argsForRunner("CODEX", spec).includes("--disallowedTools"), false);
+  assert.deepEqual(argsForRunner("CODEX", spec), argsForRunner("CODEX", runSpec()));
+  assert.ok(claude.indexOf("--disallowedTools") <= claude.length - 4);
+  assert.equal(claude.at(-1), "prompt");
+});
+
+test("all eight denied tools use each CLI's supported canonical subset", () => {
+  const spec = runSpec(["WEB_SEARCH", "GREP", "EDIT", "GLOB", "WRITE", "BASH", "WEB_FETCH", "READ"]);
+  const claude = argsForRunner("CLAUDE", spec);
+  const pi = argsForRunner("PI", spec);
+  assert.equal(claude[claude.indexOf("--disallowedTools") + 1], "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch");
+  assert.equal(pi[pi.indexOf("--exclude-tools") + 1], "bash,read,write,edit");
+});
+
+test("resume invocations preserve supported deny flags", () => {
+  const spec = runSpec(["BASH", "READ"]);
+  const resume = { ...spec, providerConversationId: "thread-1", input: "again" };
+  assert.equal(argsForRunner("CLAUDE", spec, resume).includes("--disallowedTools"), true);
+  assert.equal(argsForRunner("PI", spec, resume).includes("--exclude-tools"), true);
+  assert.equal(argsForRunner("CODEX", spec, resume).some((arg) => arg.includes("Tools")), false);
 });
 
 test("child environment is an explicit allowlist and excludes host variables", () => {

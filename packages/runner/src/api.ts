@@ -1,3 +1,5 @@
+import { statfs } from "node:fs/promises";
+
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
 export type FailureClass =
@@ -31,6 +33,12 @@ export type ClaimedTask = {
     model: string;
     foundationalPrompt: string;
     rolePrompt: string;
+    /**
+     * Denied tools, read at claim time. The claim handler returns the agent row
+     * whole (packages/api/src/app.ts), so this arrives for free once the column
+     * exists — this hand-written mirror is the only thing that needed updating.
+     */
+    disabledTools: string[];
   };
   repo: {
     id: string;
@@ -102,10 +110,39 @@ const request = async (config: RunnerConfig, path: string, init: RequestInit): P
   return response;
 };
 
+type StatFs = (path: string) => Promise<{ bavail: number; bsize: number }>;
+export type RunnerTelemetryBody = {
+  daemonVersion: string;
+  pollIntervalMs: number;
+  workspaceRoot: string;
+  diskFreeBytes?: number;
+};
+
+export const runnerTelemetryBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<RunnerTelemetryBody> => {
+  const base = {
+    daemonVersion: config.daemonVersion,
+    pollIntervalMs: config.pollIntervalMs,
+    workspaceRoot: config.workspaceRoot,
+  };
+  try {
+    const stats = await readStats(config.workspaceRoot);
+    return { ...base, diskFreeBytes: stats.bavail * stats.bsize };
+  } catch {
+    // Telemetry must never stop the runner from claiming or heartbeating.
+    return base;
+  }
+};
+
+export const claimRequestBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<Record<string, unknown>> => ({
+  runnerId: config.runnerId,
+  leaseSeconds: config.leaseSeconds,
+  ...await runnerTelemetryBody(config, readStats),
+});
+
 export const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | null> => {
   const response = await request(config, "/runner/tasks/claim", {
     method: "POST",
-    body: JSON.stringify({ runnerId: config.runnerId, leaseSeconds: config.leaseSeconds }),
+    body: JSON.stringify(await claimRequestBody(config)),
   });
   return response.status === 204 ? null : await response.json() as ClaimedTask;
 };
@@ -139,6 +176,7 @@ export const heartbeat = async (
       processAlive: state.processAlive,
       lastProgressEventAt: state.lastProgressEventAt?.toISOString() ?? null,
       inFlightTool: state.inFlightTool,
+      ...await runnerTelemetryBody(config),
     }),
   });
 };

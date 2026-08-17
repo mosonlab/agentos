@@ -1,31 +1,82 @@
-const DATE_TIME = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-const DATE = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
+import { type Locale, translate } from "./i18n-core";
+
+/**
+ * The registration seam. `format.ts` keeps every signature — 41 call sites in 17
+ * files, two of them in the non-React module `lib/schedule.ts` — so the locale
+ * reaches the formatters by registration rather than by a hook and a parameter
+ * ripple.
+ *
+ * `LocaleProvider` calls this in its render body, an idempotent assignment rather
+ * than an effect, so the very paint that switches the language already formats in
+ * it. The callback is `(key, vars)`, not `translate` itself, which is
+ * `(locale, key, vars)`: the provider passes a locale-bound closure.
+ *
+ * Provider-free, the module answers in English through the same dictionaries, so
+ * `format.ts` holds no English fragments of its own.
+ */
+export type FormatTranslate = (key: string, vars?: Record<string, string | number>) => string;
+
+let activeLocale: Locale = "en";
+let activeTranslate: FormatTranslate = (key, vars) => translate("en", key, vars);
+
+export const setFormatLocale = (locale: Locale, translateFor: FormatTranslate): void => {
+  activeLocale = locale;
+  activeTranslate = translateFor;
+};
+
+/** The active locale, for the one consumer that needs the tag itself rather than
+ *  a translated string: `schedule.ts` passes it to `cronstrue`. */
+export const formatLocale = (): Locale => activeLocale;
+
+/** The module-level translator, so pure modules downstream of `format.ts` stay
+ *  parameter-free. */
+export const formatT: FormatTranslate = (key, vars) => activeTranslate(key, vars);
+
+const INTL_TAGS: Record<Locale, string> = { en: "en-US", zh: "zh-CN" };
+
+/** Memoised per locale and style: switching the language must not rebuild an
+ *  `Intl.DateTimeFormat` on every render. `en-US` and its options are unchanged
+ *  from before this batch, so English output is byte-identical. */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+const intl = (style: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat => {
+  const key = `${style}:${activeLocale}`;
+  const held = formatters.get(key);
+  if (held) return held;
+  const made = new Intl.DateTimeFormat(INTL_TAGS[activeLocale], options);
+  formatters.set(key, made);
+  return made;
+};
+
+const DATE_TIME = (): Intl.DateTimeFormat =>
+  intl("dateTime", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const DATE = (): Intl.DateTimeFormat =>
+  intl("date", { month: "short", day: "numeric", year: "numeric" });
 
 export const formatDateTime = (value: string | null | undefined): string =>
-  value ? DATE_TIME.format(new Date(value)) : "—";
+  value ? DATE_TIME().format(new Date(value)) : "—";
 
 export const formatDate = (value: string | null | undefined): string =>
-  value ? DATE.format(new Date(value)) : "—";
+  value ? DATE().format(new Date(value)) : "—";
 
 export const timeAgo = (value: string | null | undefined): string => {
   if (!value) return "—";
   const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000);
-  if (seconds < 45) return "just now";
+  if (seconds < 45) return formatT("format.justNow");
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return formatT("format.minutesAgo", { n: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return formatT("format.hoursAgo", { n: hours });
   const days = Math.round(hours / 24);
-  return days < 30 ? `${days}d ago` : formatDate(value);
+  return days < 30 ? formatT("format.daysAgo", { n: days }) : formatDate(value);
 };
 
 export const duration = (from: string | null | undefined, to: string | null | undefined): string => {
   if (!from) return "—";
   const end = to ? new Date(to).getTime() : Date.now();
   const seconds = Math.max(0, Math.round((end - new Date(from).getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return formatT("format.seconds", { n: seconds });
   const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${seconds % 60}s`;
+  return formatT("format.minutesSeconds", { m: minutes, s: seconds % 60 });
 };
 
 /** Decimal columns arrive as strings; `null` means the runner never reported cost. */
@@ -33,6 +84,16 @@ export const money = (value: string | number | null | undefined): string =>
   value === null || value === undefined ? "—" : `$${Number(value).toFixed(2)}`;
 
 export const sha = (value: string | null | undefined): string => (value ? value.slice(0, 7) : "—");
+
+/** Stable synchronous content identity for the Foundation card. This is a
+ * revision fingerprint, not a semantic version or a security hash. */
+export const contentRevision = (value: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 7);
+};
 
 export const titleCase = (value: string): string =>
   value.toLowerCase().replace(/[_-]/g, " ").replace(/(^|\s)\S/g, (match) => match.toUpperCase());

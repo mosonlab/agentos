@@ -2,7 +2,9 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { api } from "../lib/api";
 import { COLUMNS, type Counts, countByStatus, defaultTab, focusAfterMove, parseStatus, statusLabel, tabKey } from "../lib/board";
+import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
+import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { replace, useQuery } from "../lib/router";
 import { storage } from "../lib/storage";
@@ -35,10 +37,13 @@ const BOARD_STACK = "flex min-h-0 flex-1 flex-col gap-[16px]";
 
 /** The two shapes of the Archive All result, as one string. Exported so the
  *  message is testable without driving a click through a static render. */
+/* Pure, exported and asserted directly by `tasks-board.test.tsx`, so it reads the
+ * locale through `formatT` — the WI-4 registration seam — rather than gaining a
+ * `Translate` parameter its two call sites would have to thread. */
 export const archiveDoneNotice = (result: { archived: number; skipped: number }): string =>
   (result.skipped > 0
-    ? `Archived ${result.archived}, skipped ${result.skipped} (running)`
-    : `Archived ${result.archived}`);
+    ? formatT("tasks.archiveDone.some", result)
+    : formatT("tasks.archiveDone.all", result));
 
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
@@ -82,6 +87,7 @@ export const TasksPage = (): ReactNode => {
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const { error: actionError, run } = useAction();
+  const t = useT();
   const tasks = useStableRows(useMemo(() => data ?? [], [data]));
 
   // One DOM or the other, never both: rendering five columns *and* a phone list
@@ -162,9 +168,9 @@ export const TasksPage = (): ReactNode => {
     // Announced rather than left to be noticed: on a phone the card leaves the
     // list entirely, and on the desktop board it lands in a column that may be
     // off screen.
-    setAnnouncement(`Moved ${task.name} to ${statusLabel(status)}`);
+    setAnnouncement(t("tasks.announcement.moved", { name: task.name, status: statusLabel(status) }));
     void run(async () => { await api.patch(`/tasks/${taskId}`, { status }); reload(); });
-  }, [run, reload]);
+  }, [run, reload, t]);
 
   // Focus follows the card. It runs when a payload lands, which is when the move
   // has actually taken effect — `move` itself only sends the request.
@@ -182,9 +188,9 @@ export const TasksPage = (): ReactNode => {
   }, [tasks, tab]);
 
   const remove = useCallback((task: BoardTask): void => {
-    if (!window.confirm(`Delete task ${task.name}?`)) return;
+    if (!window.confirm(t("tasks.confirm.delete", { name: task.name }))) return;
     void run(async () => { await api.delete(`/tasks/${task.id}`); reload(); });
-  }, [run, reload]);
+  }, [run, reload, t]);
   const retry = useCallback((task: BoardTask): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/retry`, {}); reload(); });
   }, [run, reload]);
@@ -197,10 +203,10 @@ export const TasksPage = (): ReactNode => {
   const copyError = useCallback((task: BoardTask): void => {
     const text = task.failureReason ?? "";
     void navigator.clipboard?.writeText(text).then(
-      () => setNotice(`Copied the error from ${task.name}`),
-      () => setNotice("The browser refused clipboard access; open the task to read the error"),
+      () => setNotice(t("tasks.notice.copiedError", { name: task.name })),
+      () => setNotice(t("tasks.notice.copyFailed")),
     );
-  }, []);
+  }, [t]);
 
   const actions: CardActions = useMemo(() => ({
     onMove: (task, status) => move(task.id, status),
@@ -216,7 +222,7 @@ export const TasksPage = (): ReactNode => {
    *  information surface. */
   const archiveDone = useCallback(async (): Promise<void> => {
     const done = latest.current.filter((task) => task.status === "DONE");
-    if (!window.confirm(`Archive ${done.length} done tasks?`)) return;
+    if (!window.confirm(t("tasks.confirm.archiveDone", { n: done.length }))) return;
     setNotice(null);
     let result: { archived: number; skipped: number } | null = null;
     const ok = await run(async () => {
@@ -224,9 +230,9 @@ export const TasksPage = (): ReactNode => {
       reload();
     });
     if (ok && result !== null) setNotice(archiveDoneNotice(result));
-  }, [projectId, run, reload]);
+  }, [projectId, run, reload, t]);
 
-  if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
+  if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
   return (
     <Page className={cn("text-foreground", BOARD_PAGE)}>

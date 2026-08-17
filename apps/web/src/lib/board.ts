@@ -1,22 +1,22 @@
-import { formatDateTime } from "./format";
+import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
 import type { BoardTask, RunStatus, TaskStatus } from "./types";
 
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
  *  out of it. */
-export const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
-  { status: "BACKLOG", label: "Backlog" },
-  { status: "TODO", label: "Todo" },
-  { status: "DOING", label: "Doing" },
-  { status: "REVIEW", label: "Review" },
-  { status: "DONE", label: "Done" },
+export const COLUMNS: Array<{ status: TaskStatus; labelKey: string }> = [
+  { status: "BACKLOG", labelKey: "tasks.column.BACKLOG" },
+  { status: "TODO", labelKey: "tasks.column.TODO" },
+  { status: "DOING", labelKey: "tasks.column.DOING" },
+  { status: "REVIEW", labelKey: "tasks.column.REVIEW" },
+  { status: "DONE", labelKey: "tasks.column.DONE" },
 ];
 
 export const STATUSES: TaskStatus[] = COLUMNS.map((column) => column.status);
 
 export const statusLabel = (status: TaskStatus): string =>
-  COLUMNS.find((column) => column.status === status)?.label ?? status;
+  formatT(COLUMNS.find((column) => column.status === status)?.labelKey ?? `status.task.${status}`);
 
 /** A `?status=` value the board is willing to act on, or null. */
 export const parseStatus = (raw: string | null | undefined): TaskStatus | null => {
@@ -82,16 +82,18 @@ export const chainParked = (task: ScheduleSubject): boolean =>
  * decode.
  */
 export const scheduleLabel = (task: ScheduleSubject): string => {
-  if (task.scheduleKind === "NOW") return "Once";
+  if (task.scheduleKind === "NOW") return formatT("tasks.schedule.NOW");
   if (task.scheduleKind === "CRON") return cronProse(task.cron, task.timezone);
   if (chainParked(task)) {
     // The same fact from two sides: a step that has not started is waiting, and
     // one that has is no longer waiting for anything.
     return task.status === "TODO" || task.status === "BACKLOG"
-      ? "Waiting for previous step"
-      : "Started by chain";
+      ? formatT("tasks.schedule.waitingForPrevious")
+      : formatT("tasks.schedule.startedByChain");
   }
-  return task.runAt === null ? "Not scheduled" : `At ${formatDateTime(task.runAt)}`;
+  return task.runAt === null
+    ? formatT("tasks.schedule.notScheduled")
+    : formatT("tasks.schedule.atTime", { time: formatDateTime(task.runAt) });
 };
 
 /* -------------------------------------------------------------- the actions */
