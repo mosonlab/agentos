@@ -1,5 +1,9 @@
+import { createRequire } from "node:module";
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
+
+const require = createRequire(import.meta.url);
+const packageMetadata = require("../package.json") as { version: string };
 
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 
@@ -7,6 +11,7 @@ export type RunnerConfig = {
   apiUrl: string;
   runnerToken: string;
   runnerId: string;
+  daemonVersion: string;
   pollIntervalMs: number;
   leaseSeconds: number;
   heartbeatIntervalMs: number;
@@ -27,6 +32,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     apiUrl: process.env.RUNNER_API_URL ?? "http://localhost:3000",
     runnerToken: process.env.RUNNER_TOKEN ?? "",
     runnerId: process.env.RUNNER_ID ?? `${hostname()}-${process.pid}`,
+    daemonVersion: packageMetadata.version,
     pollIntervalMs: Number.parseInt(process.env.RUNNER_POLL_INTERVAL_MS ?? "5000", 10),
     leaseSeconds,
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
