@@ -126,7 +126,11 @@ export const instantiateTemplate = async (
         return { chainId, branchName, tasks, fireId: fire?.id ?? null };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error: unknown) {
-      if (!retryableTransactionConflict(error) || attempt >= 5) throw error;
+      // Six simultaneous webhook fires can form a longer serialization queue
+      // than five attempts, even with per-attempt jitter. Twelve bounded tries
+      // make the accepted burst deterministic while still surfacing persistent
+      // conflicts instead of looping forever.
+      if (!retryableTransactionConflict(error) || attempt >= 12) throw error;
       await retryDelay(attempt);
     }
   }

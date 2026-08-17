@@ -53,6 +53,9 @@ export type ClaimedTask = {
      * it there makes doing so a compile error.
      */
     opensPullRequest: boolean;
+    /** The integration branch selected by the chain's first run. Later runs'
+     * targetBranch is the shared head and cannot recover this value. */
+    pullRequestBase: string;
     maxDurationMin: number;
     stallTimeoutMin: number;
     maxRunsPerTask: number;
@@ -136,6 +139,24 @@ export const heartbeat = async (
       processAlive: state.processAlive,
       lastProgressEventAt: state.lastProgressEventAt?.toISOString() ?? null,
       inFlightTool: state.inFlightTool,
+    }),
+  });
+};
+
+/** Durably acknowledge the exact ref immediately after git accepts the push.
+ * Terminal completion is intentionally not the first write of this fact: PR
+ * work, cleanup, or process loss may happen after publication. */
+export const recordPublishedBranch = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  pushedBranch: string,
+): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/publication`, {
+    method: "POST",
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      pushedBranch,
     }),
   });
 };

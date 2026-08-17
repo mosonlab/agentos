@@ -25,6 +25,7 @@ const claim: ClaimedTask = {
     id: "run-1",
     runNumber: 1,
     opensPullRequest: true,
+    pullRequestBase: "main",
     maxDurationMin: 120,
     stallTimeoutMin: 10,
     maxRunsPerTask: 3,

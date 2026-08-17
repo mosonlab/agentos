@@ -93,6 +93,7 @@ export const deliverWorkspace = async (
   claim: ClaimedTask,
   workspace: Workspace,
   command: CommandExecutor = executeCommand(config),
+  recordPublication: (branch: string) => Promise<void> = async () => undefined,
 ): Promise<DeliveryResult> => {
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
@@ -114,6 +115,14 @@ export const deliverWorkspace = async (
     const message = error instanceof Error ? error.message : String(error);
     return { pushStatus: "FAILED", pushRemote: remote, pushError: message, failureClass: failureClassFor(message) };
   }
+  // This API write intentionally sits immediately after git push and before
+  // any GitHub lookup, cleanup, or terminal completion. It closes the large
+  // post-push loss window; provisionWorkspace's remote-head check covers the
+  // irreducible crash between these two network operations. A transient ACK
+  // failure does not turn a successful push into a failed push: completion is
+  // a second persistence opportunity and remote reconciliation is the final
+  // source of truth.
+  await recordPublication(workspace.branch).catch(() => undefined);
   const repo = githubRepo(remote);
   if (!repo) {
     return opensPullRequest
@@ -144,13 +153,30 @@ export const deliverWorkspace = async (
     const existing = await openPullRequest();
     if (existing) return { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
     if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
-    await command("gh", [
-      "pr", "create", "--repo", repo,
-      "--base", claim.repo.defaultBranch,
-      "--head", workspace.branch,
-      "--title", pullRequestTitle(claim.task),
-      "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
-    ], workspace.path, env);
+    try {
+      await command("gh", [
+        "pr", "create", "--repo", repo,
+      "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
+        "--head", workspace.branch,
+        "--title", pullRequestTitle(claim.task),
+        "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
+      ], workspace.path, env);
+    } catch (createError: unknown) {
+      // `list(empty) → create(already exists)` is a normal race with another
+      // runner or a human. Confirm once more before classifying it as a tool
+      // failure; if the expected head now owns an open PR, delivery is complete.
+      const raced = await openPullRequest();
+      if (raced) {
+        return {
+          pushStatus: "SUCCEEDED",
+          pushRemote: remote,
+          pushedBranch: workspace.branch,
+          pullRequestUrl: raced.url,
+          pullRequestNumber: raced.number,
+        };
+      }
+      throw createError;
+    }
     const created = await openPullRequest();
     return created
       ? { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: created.url, pullRequestNumber: created.number }

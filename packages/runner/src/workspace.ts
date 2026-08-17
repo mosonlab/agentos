@@ -63,10 +63,24 @@ export const provisionWorkspace = async (config: RunnerConfig, claim: ClaimedTas
   }
   try {
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
-    await command(config, "git", ["clone", "--no-local", "--branch", target, "--single-branch", claim.repo.remoteUrl, workspace], root, env);
-    const baseSha = await command(config, "git", ["rev-parse", "HEAD"], workspace, env);
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
-    if (branch !== target) await command(config, "git", ["switch", "-c", branch], workspace, env);
+    // The publication ACK is fenced and immediate, but no database protocol can
+    // eliminate a crash between the remote accepting git push and that ACK.
+    // When the run's intended head already exists remotely, clone that durable
+    // truth instead of the stale fallback base. Derived chain heads are unique
+    // per project+chain, so this cannot accidentally adopt another chain.
+    let cloneTarget = target;
+    if (branch !== target) {
+      try {
+        await command(config, "git", ["ls-remote", "--exit-code", "--heads", claim.repo.remoteUrl, `refs/heads/${branch}`], root, env);
+        cloneTarget = branch;
+      } catch {
+        // Exit 2 means the head is absent; clone the resolver-selected fallback.
+      }
+    }
+    await command(config, "git", ["clone", "--no-local", "--branch", cloneTarget, "--single-branch", claim.repo.remoteUrl, workspace], root, env);
+    const baseSha = await command(config, "git", ["rev-parse", "HEAD"], workspace, env);
+    if (branch !== cloneTarget) await command(config, "git", ["switch", "-c", branch], workspace, env);
     return { path: workspace, branch, baseSha };
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);

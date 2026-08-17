@@ -70,6 +70,54 @@ test("delivery opens one pull request titled after the chain, not the step", asy
   assert.ok(calls.some((call) => call.includes("--title lines subcommand")));
 });
 
+test("a custom chain base is preserved in gh pr create", async () => {
+  const calls: string[] = [];
+  let created = false;
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "create") created = true;
+    if (executable === "gh" && args[1] === "list") {
+      return created ? JSON.stringify([{ url: "https://github.com/acme/app/pull/10", number: 10 }]) : "[]";
+    }
+    return "";
+  };
+  const custom = { ...claim, run: { ...claim.run, pullRequestBase: "release/1.x" } } as ClaimedTask;
+  const result = await deliverWorkspace(config, custom, workspace, fake);
+  assert.equal(result.pullRequestNumber, 10);
+  assert.ok(calls.some((call) => call.includes("--base release/1.x")));
+});
+
+test("publication is acknowledged immediately after push and before GitHub work", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    return "";
+  };
+  await deliverWorkspace(config, claim, workspace, fake, async (branch) => { calls.push(`ack ${branch}`); });
+  assert.deepEqual(calls.slice(0, 3), [
+    "git push --set-upstream origin feature/test",
+    "ack feature/test",
+    "gh --version",
+  ]);
+});
+
+test("a pull request created between list and create is confirmed and reused", async () => {
+  let listCalls = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") {
+      listCalls += 1;
+      return listCalls === 1 ? "[]" : JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    }
+    if (executable === "gh" && args[1] === "create") throw new Error("a pull request already exists for head");
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake);
+  assert.equal(listCalls, 2);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pullRequestNumber, 7);
+});
+
 test("a failed run commits uncommitted changes, pushes them as WIP, and opens no pull request", async () => {
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {

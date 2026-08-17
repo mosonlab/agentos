@@ -6,6 +6,7 @@ import {
   CleanupStatus,
   FailureClass,
   InboxStatus,
+  lockTaskRow,
   resolveRunBranches,
   RunStatus,
   SessionExecutionStatus,
@@ -132,6 +133,9 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
   if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
   await db.$transaction(async (tx) => {
     for (const run of orphans) {
+      // Order PATCH and retry creation through the same Task-row mutex. The
+      // task is re-read after this lock before opensPullRequest is snapshotted.
+      if (run.taskId) await lockTaskRow(tx, run.taskId);
       // Losing a lease is an external failure: it buys an attempt, never spends one.
       const budgetCeiling = run.maxRunsPerTask + 1;
       const lost = await tx.run.updateMany({
@@ -165,14 +169,14 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
         const task = await tx.task.findUnique({
           where: { id: run.taskId },
           select: {
-            id: true, projectId: true, repoId: true, chainId: true, templateId: true,
+            id: true, projectId: true, repoId: true, chainId: true, chainIndex: true, templateId: true,
             targetBranch: true, opensPullRequest: true,
             repo: { select: { defaultBranch: true } },
           },
         });
         // `prior` is null deliberately: for chain steps the resolver ignores it,
         // and passing the lost run would be misleading.
-        const branches = task?.chainId && !task.templateId && task.repo
+        const branches = task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
           ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
           : { branch: run.branch, targetBranch: run.targetBranch };
         await tx.run.create({

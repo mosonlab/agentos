@@ -99,6 +99,7 @@ export type RunBranchTask = {
   projectId: string;
   repoId: string | null;
   chainId: string | null;
+  chainIndex: number | null;
   templateId: string | null;
   targetBranch: string | null;
   repo: { defaultBranch: string };
@@ -133,7 +134,11 @@ export const resolveRunBranches = async (
       targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
     };
   }
-  if (!task.chainId) {
+  // A chainId with no index is a malformed one-row "chain" in the public API
+  // and UI. It must remain isolated from indexed siblings that happen to carry
+  // the same chainId (chain.dbtest.ts E1); treating it as an indexed chain here
+  // would let it clone and publish those siblings' shared tree.
+  if (!task.chainId || task.chainIndex === null) {
     return {
       branch: prior?.branch ?? null,
       targetBranch: prior?.branch ?? task.targetBranch ?? task.repo.defaultBranch,
@@ -162,15 +167,15 @@ export const resolveRunBranches = async (
   //     good — no retry clears it.
   //
   // Scoped by repo (spec R2: the same name on two remotes is two unrelated
-  // refs), and by (projectId, chainId) rather than chainIndex — that pair is the
-  // platform's definition of a chain, so a chainIndex-null row sharing the
-  // chainId counts, consistent with it sharing the branch.
+  // refs) and restricted to indexed tasks. A chainIndex-null row is the API's
+  // isolated 1/1 malformed-chain case and must neither contribute nor consume
+  // publication evidence for an indexed chain with the same chainId.
   const published = task.repoId
     ? await tx.run.findFirst({
       where: {
         pushedBranch: shared,
         repoId: task.repoId,
-        task: { projectId: task.projectId, chainId: task.chainId },
+        task: { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } },
       },
       select: { id: true },
     })
