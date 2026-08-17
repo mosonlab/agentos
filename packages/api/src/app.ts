@@ -41,9 +41,11 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
+import { boardCard, etagFor, etagMatches } from "./board.js";
 import {
   chainKey,
   chainProgress,
+  type ChainProgress,
   chainProgressByChain,
   positions,
   runFactsByTask,
@@ -370,6 +372,41 @@ const inboxReplyInput = z.object({
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
+
+/** The `chainProgress` shape as `GET /tasks` serialises it — the chain module's
+ *  progress plus the position spec §5.2 requires the list response to carry. */
+type ChainProgressWire = ChainProgress & { position: number | null };
+/** The columns `chainProgressLookup` reads, which both `GET /tasks` response
+ *  shapes select. Structural, so neither Prisma payload type leaks into it. */
+type ChainSubject = {
+  id: string;
+  projectId: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  status: TaskStatus;
+  name: string;
+  templateStep: { name: string } | null;
+};
+
+/**
+ * A JSON response carrying a validator, so a poll that changed nothing costs a
+ * header exchange instead of a payload.
+ *
+ * `GET /tasks` is polled every 2.5s by an open board and answers with the same
+ * bytes almost every time; at 1.58 MB that was ~38 MB/min of unchanged data.
+ * The body is serialised here rather than by `context.json` because the ETag has
+ * to be a hash of the exact bytes that would be sent.
+ *
+ * `Cache-Control: no-cache` — store it, but never reuse it without asking. A
+ * bare ETag with no cache directive lets a shared cache serve a stale board.
+ */
+const validated = (context: Context, payload: unknown): Response => {
+  const body = JSON.stringify(payload);
+  const tag = etagFor(body);
+  const headers = { ETag: tag, "Cache-Control": "no-cache" };
+  if (etagMatches(context.req.header("if-none-match"), tag)) return context.body(null, 304, headers);
+  return context.body(body, 200, { ...headers, "Content-Type": "application/json; charset=UTF-8" });
+};
 
 const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
 class PayloadTooLargeError extends Error {}
@@ -1542,22 +1579,22 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     if (archived !== "false" && archived !== "true" && archived !== "all") {
       return context.json({ error: "archived must be false, true, or all" }, 400);
     }
+    // `view=board` is the Tasks board saying which fields it will actually
+    // render (packages/api/src/board.ts). It is a projection of this same list,
+    // not a second endpoint, so the two shapes cannot drift apart.
+    const view = context.req.query("view") ?? "full";
+    if (view !== "full" && view !== "board") {
+      return context.json({ error: "view must be full or board" }, 400);
+    }
+    const board = view === "board";
     // Archived tasks are finished work; a board and a per-project count that
     // keep growing after Archive All are the bug, not the fix. `all` is the
     // escape hatch for anyone who needs the old, archived-inclusive numbers.
     const archivedFilter = archived === "false" ? { archivedAt: null }
       : archived === "true" ? { archivedAt: { not: null } }
       : {};
-    const tasks = await db.task.findMany({
-      where: { ...(projectId ? { projectId } : {}), ...archivedFilter },
-      include: {
-        assigneeAgent: true,
-        repo: true,
-        templateStep: { select: { name: true } },
-        runs: { orderBy: { runNumber: "desc" }, take: 1, include: { session: true } },
-      },
-      orderBy: { createdAt: "asc" },
-    });
+    const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
+    const orderBy = { createdAt: "asc" as const };
 
     // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
     // queries over the whole task table, and `Projects.tsx` polls this endpoint
@@ -1569,39 +1606,103 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     // projects sharing a chainId never read each other's progress), and silently
     // dropping the fields from every global response would delete that
     // guarantee's only coverage along with the cost.
-    const enrich = (context.req.query("enrich") ?? "true") !== "false";
-
-    // Progress must count *all* the chain's rows, including archived ones, so it
-    // cannot be computed from the rows above. One extra scoped query, grouped in
-    // memory — two queries per request regardless of how many tasks come back.
     //
-    // `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
-    // null-index row as its own one-row chain. Without it a single broken row
-    // inflates `total` and shifts `position` for every real sibling on the board
-    // while its own detail page still reads `1/1` — the same rows, two answers.
-    const chainIds = !enrich ? [] : [...new Set(tasks
-      .filter((task) => task.chainIndex !== null)
-      .map((task) => task.chainId)
-      .filter((value): value is string => value !== null))];
-    const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
-      where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
-      select: {
-        id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-        name: true, archivedAt: true, templateStep: { select: { name: true } },
-      },
-      orderBy: { chainIndex: "asc" },
-    });
-    const progressByChain = chainProgressByChain(chainRows);
-    const positionsByChain = new Map<string, Map<string, number>>();
-    for (const row of chainRows) {
-      if (!row.chainId) continue;
-      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
-      const group = positionsByChain.get(key);
-      if (group) continue;
-      positionsByChain.set(key, positions(chainRows.filter((candidate) => (
-        candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
-      ))));
+    // `view=board` is not subject to it: the board card renders `chainProgress`,
+    // so a board response without it would be a projection that dropped a field
+    // its only caller reads.
+    const enrich = board || (context.req.query("enrich") ?? "true") !== "false";
+
+    /**
+     * A `task -> chainProgress` lookup for one page of rows.
+     *
+     * Progress must count *all* the chain's rows, including archived ones, so it
+     * cannot be computed from the rows handed in. One extra scoped query,
+     * grouped in memory — two queries per request regardless of how many tasks
+     * come back. Shared by both response shapes, so the board card and the full
+     * row can never report different numbers for the same task.
+     *
+     * `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
+     * null-index row as its own one-row chain. Without it a single broken row
+     * inflates `total` and shifts `position` for every real sibling on the board
+     * while its own detail page still reads `1/1` — the same rows, two answers.
+     */
+    const chainProgressLookup = async (rows: ChainSubject[]): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
+      const chainIds = !enrich ? [] : [...new Set(rows
+        .filter((task) => task.chainIndex !== null)
+        .map((task) => task.chainId)
+        .filter((value): value is string => value !== null))];
+      const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
+        where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
+        select: {
+          id: true, projectId: true, chainId: true, chainIndex: true, status: true,
+          name: true, archivedAt: true, templateStep: { select: { name: true } },
+        },
+        orderBy: { chainIndex: "asc" },
+      });
+      const progressByChain = chainProgressByChain(chainRows);
+      const positionsByChain = new Map<string, Map<string, number>>();
+      for (const row of chainRows) {
+        if (!row.chainId) continue;
+        const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+        if (positionsByChain.has(key)) continue;
+        positionsByChain.set(key, positions(chainRows.filter((candidate) => (
+          candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
+        ))));
+      }
+      return (task) => {
+        if (!enrich || !task.chainId) return null;
+        // The same one-row-chain rule the detail route applies (E1), so a broken
+        // row reports `n/1` in both places instead of `null` here and `1/1` there.
+        if (task.chainIndex === null) {
+          return {
+            chainId: task.chainId,
+            done: task.status === TaskStatus.DONE ? 1 : 0,
+            total: 1,
+            activeStepName: task.templateStep?.name ?? task.name,
+            activeStatus: task.status.toLowerCase(),
+            position: 1,
+          };
+        }
+        const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
+        const progress = progressByChain.get(key) ?? null;
+        return progress ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null } : null;
+      };
+    };
+
+    if (board) {
+      // The projection narrows the *query* too, not only the response: the full
+      // shape drags every Run and Session column out of the database only to
+      // throw 95% of them away in the serializer.
+      const rows = await db.task.findMany({
+        where,
+        orderBy,
+        select: {
+          id: true, projectId: true, name: true, status: true, failureReason: true,
+          scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
+          templateId: true, source: true, chainId: true, chainIndex: true, updatedAt: true,
+          assigneeAgent: { select: { id: true, title: true } },
+          templateStep: { select: { name: true } },
+          runs: {
+            orderBy: { runNumber: "desc" }, take: 1,
+            select: { id: true, runNumber: true, status: true, session: { select: { costUsd: true } } },
+          },
+        },
+      });
+      const progressFor = await chainProgressLookup(rows);
+      return validated(context, rows.map((row) => boardCard(row, progressFor(row))));
     }
+
+    const tasks = await db.task.findMany({
+      where,
+      orderBy,
+      include: {
+        assigneeAgent: true,
+        repo: true,
+        templateStep: { select: { name: true } },
+        runs: { orderBy: { runNumber: "desc" }, take: 1, include: { session: true } },
+      },
+    });
+    const progressFor = await chainProgressLookup(tasks);
 
     // The Automations page needs `Last run` on a *collapsed* row, and a poll
     // that only mounts while a row is expanded can never supply it. Skipped
@@ -1615,39 +1716,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
 
-    return context.json(tasks.map((task) => {
-      const fired = firedByDefinition.get(task.id);
-      const recurring = {
-        recurringLastFiredAt: fired?._max.createdAt ?? null,
-        recurringFireCount: fired?._count._all ?? 0,
-      };
-      if (!enrich || !task.chainId) return { ...task, chainProgress: null, ...recurring };
-      // The same one-row-chain rule the detail route applies (E1), so a broken
-      // row reports `n/1` in both places instead of `null` here and `1/1` there.
-      if (task.chainIndex === null) {
-        return {
-          ...task,
-          chainProgress: {
-            chainId: task.chainId,
-            done: task.status === TaskStatus.DONE ? 1 : 0,
-            total: 1,
-            activeStepName: task.templateStep?.name ?? task.name,
-            activeStatus: task.status.toLowerCase(),
-            position: 1,
-          },
-          ...recurring,
-        };
-      }
-      const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
-      const progress = progressByChain.get(key) ?? null;
-      return {
-        ...task,
-        chainProgress: progress
-          ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null }
-          : null,
-        ...recurring,
-      };
-    }));
+    return validated(context, tasks.map((task) => ({
+      ...task,
+      chainProgress: progressFor(task),
+      recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
+      recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
+    })));
   });
   app.post("/projects/:projectId/tasks", async (context) => {
     const body = await readJson(context.req.raw, taskInput);

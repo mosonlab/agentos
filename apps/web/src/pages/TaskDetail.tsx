@@ -14,7 +14,7 @@ import {
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, Page, Pill, RunPill, ShowMore, TaskPill, Toggle, isLongText,
 } from "../components/ui";
-import { retryable } from "./Tasks";
+import { retryable } from "../lib/board";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
@@ -233,7 +233,7 @@ export const TaskDetailPage = ({ taskId }: { taskId: string }): ReactNode => {
         <Select className="w-[130px] disabled:opacity-100 disabled:cursor-default" value={task.status} disabled={pending} onChange={(event) => patch({ status: event.target.value })}>
           {STATUSES.map((status) => <option key={status} value={status}>{status.toLowerCase()}</option>)}
         </Select>
-        {retryable(task) ? (
+        {retryable(task, task.runs[0]) ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />Retry</Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>

@@ -1183,3 +1183,87 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
   // A busy id that is not a candidate cannot inflate the skipped count.
   assert.deepEqual(partitionArchivable(["a"], ["z"]), { archive: ["a"], skipped: 0 });
 });
+
+/* --------------------------------------------------- GET /tasks, projected */
+
+/** A stub with just enough of `task` for `GET /tasks` to answer: the board row
+ *  page, the chain-progress page, and the recurring groupBy the full shape adds. */
+const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
+  let call = 0;
+  return {
+    task: {
+      findMany: async () => (call++ === 0 ? rows : []),
+      groupBy: async () => [],
+    },
+  } as unknown as PrismaClient;
+};
+
+const taskRow = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: "t1", projectId: "p1", name: "Ship the thing", status: "TODO", failureReason: null,
+  scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false,
+  templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
+  updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
+  assigneeAgent: { id: "a1", title: "Senior Developer" },
+  runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: "0.42" } }],
+  ...overrides,
+});
+
+const getTasks = async (database: PrismaClient, query: string, headers: Record<string, string> = {}): Promise<Response> =>
+  await createApp(database).request(`/tasks${query}`, {
+    headers: { Authorization: "Bearer operator-unit-token", ...headers },
+  });
+
+test("GET /tasks?view=board answers with the card projection, not the whole row", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<Record<string, unknown>>;
+    assert.equal(body.length, 1);
+    // The fields the board reads survive...
+    assert.equal(body[0]!.name, "Ship the thing");
+    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: "0.42" });
+    // ...and the ones it does not are gone, which is the entire point.
+    for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
+      assert.equal(dropped in body[0]!, false, `${dropped} must not ride along`);
+    }
+  });
+});
+
+test("an unknown view is refused rather than silently served as the full shape", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([]), "?view=compact");
+    assert.equal(response.status, 400);
+  });
+});
+
+test("GET /tasks carries a validator, and an unchanged poll costs a header exchange", async () => {
+  await withTokens(async () => {
+    const first = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    const tag = first.headers.get("etag");
+    assert.ok(tag, "no ETag");
+    assert.equal(first.headers.get("cache-control"), "no-cache");
+
+    // Same rows, same bytes: 304 and an empty body instead of the payload.
+    const second = await getTasks(boardDatabase([taskRow()]), "?view=board", { "If-None-Match": tag! });
+    assert.equal(second.status, 304);
+    assert.equal(await second.text(), "");
+    assert.equal(second.headers.get("etag"), tag);
+
+    // One row moved: the validator changes and the payload comes back.
+    const third = await getTasks(boardDatabase([taskRow({ status: "DONE" })]), "?view=board", { "If-None-Match": tag! });
+    assert.equal(third.status, 200);
+    assert.notEqual(third.headers.get("etag"), tag);
+  });
+});
+
+test("the full shape is validated too, and its two shapes never share a tag", async () => {
+  await withTokens(async () => {
+    const full = await getTasks(boardDatabase([taskRow()]), "");
+    assert.equal(full.status, 200);
+    const body = await full.json() as Array<Record<string, unknown>>;
+    assert.equal("runs" in body[0]!, true, "the full shape keeps the Run rows");
+    assert.equal(body[0]!.chainProgress, null);
+    const board = await getTasks(boardDatabase([taskRow()]), "?view=board");
+    assert.notEqual(full.headers.get("etag"), board.headers.get("etag"));
+  });
+});

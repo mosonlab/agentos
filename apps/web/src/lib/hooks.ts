@@ -17,16 +17,17 @@ export type Poll<T> = {
 
 /** Polls a GET endpoint. Pass `null` to stay idle (e.g. no project selected).
  *
- *  The poll is change-aware: a response byte-identical to the one already held
- *  is dropped rather than stored. Most polls on a mostly-idle board return the
- *  same payload, and `setData` with a *new* array of *new* objects re-renders
- *  every consumer — 112 task cards, four times a minute, for no new
- *  information. Keeping the previous reference lets React bail out of the
- *  update entirely, and lets `React.memo` downstream mean something.
+ *  The poll is change-aware at two levels. The outer one is the HTTP validator:
+ *  the held `ETag` rides out as `If-None-Match`, and a 304 ends the poll before
+ *  a single byte of payload crosses the wire. The inner one is the body text,
+ *  which still catches a control plane that mints no validator.
  *
- *  The comparison is on the raw response *text*, so an unchanged poll also
- *  skips the `JSON.parse` — on a full board that is 1.3 MB of parsing saved
- *  per poll, which was itself a long task. */
+ *  Both exist to protect the same thing. Most polls on a mostly-idle board
+ *  return the same payload, and `setData` with a *new* array of *new* objects
+ *  re-renders every consumer — 112 task cards, 24 times a minute, for no new
+ *  information. Keeping the previous reference lets React bail out of the update
+ *  entirely, and lets `React.memo` downstream mean something. Comparing the raw
+ *  *text* also skips the `JSON.parse`, which was itself a long task. */
 export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> => {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -36,6 +37,8 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
   /** The serialization of whatever `data` currently holds, or `null` when the
    *  held value cannot be trusted to match the path being polled. */
   const held = useRef<string | null>(null);
+  /** The validator that came with `held`, sent back as `If-None-Match`. */
+  const tag = useRef<string | null>(null);
 
   useEffect(() => {
     alive.current = true;
@@ -45,24 +48,28 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
   useEffect(() => {
     if (path === null) {
       held.current = null;
+      tag.current = null;
       setData(null);
       setError(null);
       setLoading(false);
       return;
     }
     // A new path — or a `reload()` — invalidates the held payload: the next
-    // response must land even if it happens to serialize the same.
+    // response must land even if it happens to serialize the same. The validator
+    // goes with it, or the server would answer 304 to a caller holding nothing.
     held.current = null;
+    tag.current = null;
     let cancelled = false;
     setLoading(true);
     const load = async (): Promise<void> => {
       if (document.hidden) return;
       try {
-        const body = await api.getText(path);
+        const polled = await api.poll(path, tag.current);
         if (cancelled || !alive.current) return;
-        if (body !== held.current) {
-          held.current = body;
-          setData(body.length > 0 ? (JSON.parse(body) as T) : null);
+        tag.current = polled.etag;
+        if (polled.changed && polled.body !== held.current) {
+          held.current = polled.body;
+          setData(polled.body.length > 0 ? (JSON.parse(polled.body) as T) : null);
         }
         setError(null);
       } catch (reason: unknown) {
@@ -116,6 +123,31 @@ export const useLocalStorage = (key: string, fallback: string): [string, (value:
     setValue(next);
   }, [key]);
   return [value, update];
+};
+
+/**
+ * A media query as state, so a page can render one layout instead of both.
+ *
+ * The Tasks board is the caller: its desktop and phone shells are different DOM,
+ * not one DOM with different CSS, and rendering both would put every card on the
+ * page twice. Defaults to `false` where there is no `window` — the tests render
+ * to static markup, and the desktop board is the shape they assert.
+ */
+export const useMediaQuery = (query: string): boolean => {
+  const [matches, setMatches] = useState(() => (
+    typeof window === "undefined" || typeof window.matchMedia !== "function"
+      ? false
+      : window.matchMedia(query).matches
+  ));
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const list = window.matchMedia(query);
+    const handler = (): void => setMatches(list.matches);
+    handler();
+    list.addEventListener("change", handler);
+    return () => list.removeEventListener("change", handler);
+  }, [query]);
+  return matches;
 };
 
 /** Closes menus/popovers on outside click. */

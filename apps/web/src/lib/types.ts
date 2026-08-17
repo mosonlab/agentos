@@ -270,6 +270,38 @@ export type Task = {
   recurringFireCount: number;
 };
 
+/**
+ * One Tasks board card, as `GET /tasks?view=board` serialises it
+ * (packages/api/src/board.ts).
+ *
+ * A projection of `Task`, not a subset type of it: the board reads one run and
+ * two agent fields, so the wire shape says exactly that rather than shipping the
+ * whole `Run`, its `Session` and the `Repo` for every card. Measured on the live
+ * board, the full shape is 1,581,550 bytes for 112 tasks and this one is 76,947.
+ *
+ * `failureReason` is *not* truncated here: the card clamps it to three lines,
+ * and the card menu's `Copy error` hands over the whole thing.
+ */
+export type BoardTask = {
+  id: string;
+  name: string;
+  status: TaskStatus;
+  failureReason: string | null;
+  scheduleKind: "NOW" | "AT" | "CRON";
+  runAt: string | null;
+  cron: string | null;
+  timezone: string | null;
+  approvalGate: boolean;
+  templateId: string | null;
+  source: TaskSource;
+  chainId: string | null;
+  chainIndex: number | null;
+  updatedAt: string;
+  assigneeAgent: { id: string; title: string } | null;
+  chainProgress: ChainProgress | null;
+  latestRun: { id: string; runNumber: number; status: RunStatus; costUsd: string | null } | null;
+};
+
 export type ChainProgress = {
   chainId: string;
   done: number;

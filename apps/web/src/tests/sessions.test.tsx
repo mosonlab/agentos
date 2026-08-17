@@ -255,7 +255,7 @@ test("Load more keeps page one and dedupes it against the live head", async () =
       const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }]
         : path.includes("before=") ? older
           : headRows;
-      return { ok: true, status: 200, text: async () => JSON.stringify(payload) } as unknown as Response;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
     },
   });
 
@@ -320,7 +320,7 @@ test("the detail page does not call the initial drain `N new`", async () => {
           ? { events: events.slice(6), nextAfterSeq: 12, hasMore: false, total: 12 }
           : { events: events.slice(0, 6), nextAfterSeq: 6, hasMore: true, total: 12 }
         : detail;
-      return { ok: true, status: 200, text: async () => JSON.stringify(payload) } as unknown as Response;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
     },
   });
 
@@ -354,13 +354,13 @@ test("a failed Load more tells the operator instead of vanishing into the consol
     value: async (input: string) => {
       const path = String(input);
       if (path.includes("/projects")) {
-        return { ok: true, status: 200, text: async () => JSON.stringify([{ id: "p1", name: "Demo" }]) } as unknown as Response;
+        return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify([{ id: "p1", name: "Demo" }]) } as unknown as Response;
       }
       // Only the older page fails, so the live head stays on screen.
       if (path.includes("before=")) {
-        return { ok: false, status: 503, text: async () => JSON.stringify({ error: "Service unavailable" }) } as unknown as Response;
+        return { ok: false, status: 503, headers: new Headers(), text: async () => JSON.stringify({ error: "Service unavailable" }) } as unknown as Response;
       }
-      return { ok: true, status: 200, text: async () => JSON.stringify(headRows) } as unknown as Response;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(headRows) } as unknown as Response;
     },
   });
 

@@ -72,7 +72,7 @@ const withHook = async (
       requests.push(path);
       const result = respond(path);
       if (result instanceof Error) throw result;
-      return { ok: true, status: 200, text: async () => JSON.stringify(result) } as unknown as Response;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(result) } as unknown as Response;
     },
   });
 
