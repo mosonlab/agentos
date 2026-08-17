@@ -254,9 +254,13 @@ test("T3: a failed run's WIP salvage push is not evidence that the shared branch
   assert.equal(closed.branch, shared, "the misleading column is still written; the test is about not trusting it");
   assert.equal(closed.pushStatus, "SUCCEEDED");
 
-  // The chain did not advance (step ① failed), so drive step ② by hand.
-  await db.task.update({ where: { id: second.id }, data: { status: "TODO" } });
-  const secondRun = await startStep(second.id);
+  // A failed predecessor can no longer be bypassed. Record the authorized
+  // operator completion and let normal advancement queue step ②.
+  const completed = await operatorRequest(`/tasks/${first.body.id}`, {
+    method: "PATCH", body: JSON.stringify({ status: "DONE" }),
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const secondRun = await db.run.findFirstOrThrow({ where: { taskId: second.id, status: "QUEUED" } });
   assert.equal(secondRun.targetBranch, seed.repo.defaultBranch);
   assert.notEqual(secondRun.targetBranch, shared);
   assert.equal(secondRun.branch, shared, "it still pushes to the chain's branch — it just cannot base on it yet");
@@ -303,6 +307,7 @@ test("T5: two projects sharing one chainId get two branches", async () => {
 
   // …and neither project's evidence query may see the other's publication.
   await runStep(first.body.id, { pushedBranch: branchOne });
+  await runStep(other.body.id);
   const second = await seedChainStep(two, chainId, 12);
   const secondRun = await startStep(second.id);
   assert.equal(secondRun.targetBranch, two.repo.defaultBranch, "project 1's push is not project 2's evidence");
@@ -459,6 +464,11 @@ test("T16: a pull-request failure after a successful push still counts as public
   });
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: firstRun.id } })).status, "FAILED");
 
+  const completed = await operatorRequest(`/tasks/${first.body.id}`, {
+    method: "PATCH", body: JSON.stringify({ status: "DONE" }),
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+
   const second = await seedChainStep(seed, chainId, 1);
   assert.equal((await startStep(second.id)).targetBranch, shared, "the branch is on the remote whatever gh did");
 });
@@ -566,6 +576,8 @@ test("T13: an automatic retry of a chain step stays on the shared branch", async
   assert.equal(retry.targetBranch, seed.repo.defaultBranch, "nothing published yet");
 
   // …and once a step of the chain has published, the automatic retry bases on it.
+  await db.run.update({ where: { id: retry.id }, data: { readyAt: new Date(0) } });
+  await runStep(first.body.id);
   const second = await seedChainStep(seed, chainId, 1);
   await startStep(second.id);
   await runStep(second.id, {
@@ -652,19 +664,21 @@ test("T19: a PATCH does not change a run that is already queued", async () => {
 test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots", async () => {
   const seed = await seedProject("t19b");
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-  const waitForTaskLockWaiter = async (): Promise<void> => {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      const waiting = await db.$queryRaw<Array<{ count: bigint }>>`
-        SELECT count(*)::bigint AS count
-        FROM pg_stat_activity
-        WHERE datname = current_database()
-          AND wait_event_type = 'Lock'
-          AND query LIKE '%FROM "Task"%FOR UPDATE%'
-      `;
-      if ((waiting[0]?.count ?? 0n) > 0n) return;
+  const blockedLockCount = async (): Promise<number> => {
+    const [row] = await db.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS "count"
+      FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock'
+    `;
+    return row?.count ?? 0;
+  };
+  const waitForBlockedLocks = async (minimum: number): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (await blockedLockCount() >= minimum) return;
       await wait(10);
     }
-    throw new Error("PATCH did not reach the Task row-lock wait queue");
+    assert.fail(`timed out waiting for ${minimum} blocked database lock(s)`);
   };
   const holdTask = async (taskId: string) => {
     let release!: () => void;
@@ -686,13 +700,15 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
   const automaticRun = await db.run.findFirstOrThrow({ where: { taskId: automatic.body.id } });
   const automaticClaim = await claimRun(automaticRun.id);
   const heldAutomatic = await holdTask(automatic.body.id);
+  const automaticBaseline = await blockedLockCount();
   const patchAutomatic = operatorRequest(`/tasks/${automatic.body.id}`, {
     method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
   });
-  await waitForTaskLockWaiter();
+  await waitForBlockedLocks(automaticBaseline + 1);
   const completeAutomatic = completeRunViaRoute(automaticClaim, {
     exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
   });
+  await waitForBlockedLocks(automaticBaseline + 2);
   heldAutomatic.release();
   assert.equal((await patchAutomatic).status, 200);
   assert.equal((await completeAutomatic).status, 200);
@@ -711,11 +727,13 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
     runner: "CLAUDE", executionStatus: "RUNNING",
   } });
   const heldLost = await holdTask(lost.body.id);
+  const lostBaseline = await blockedLockCount();
   const patchLost = operatorRequest(`/tasks/${lost.body.id}`, {
     method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
   });
-  await waitForTaskLockWaiter();
+  await waitForBlockedLocks(lostBaseline + 1);
   const reconcile = reconcileDatabaseRuns(db, new Date());
+  await waitForBlockedLocks(lostBaseline + 2);
   heldLost.release();
   assert.equal((await patchLost).status, 200);
   assert.ok(await reconcile > 0);
