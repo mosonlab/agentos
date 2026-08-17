@@ -1,0 +1,412 @@
+# Goal 5a0 implementation plan — idempotent execution kernel
+
+Status: implementation-ready plan; implementation is not authorized by this document
+
+Product Contract: Goal 5a0 v1.0
+
+Routing Contract: v1.0, Planned Critical, future implementation role `senior-dev` at high effort
+
+Plan source: approved `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md`
+
+Audited planning base: `188d21e279b8feae816b4f9580a961f5c9ee0cbc` (2026-08-17)
+
+## Outcome and approach
+
+Implement one PostgreSQL-authoritative Goal execution kernel. Goal-linked Task and Run creation goes through one module; all mutating paths take locks in the global Goal → Task → Run order; unique/check/foreign-key constraints remain the final backstop. Existing NOW Task queueing, runner claiming, lease generation, fencing, delivery, Session accounting, CRON/AT scheduling, templates, chains, and manual Task behavior are reused rather than replaced.
+
+The work is ordered so no route can expose a transition before its durable schema, lock, idempotency, and event semantics exist. The feature flag is default-off. Production migration, enablement, public release, and service restart are not authorized by Goal 5a0.
+
+## Non-negotiable gates
+
+1. **Dependency fuse.** Before any code, schema, or migration edit, Control-plane A must be merged. Rebase on then-current `master`; record its SHA and the Control-plane A merge SHA; rerun the baseline audit in Step 1. If it changes the objective, scope, acceptance, evidence, authority, risk boundary, or Planned Critical route, stop for a new Product Contract version and product-owner approval.
+2. **Route.** The implementation task uses `senior-dev` at high effort. It must not be downshifted without Product Contract approval under `docs/governance/task-routing-v1.md`.
+3. **Migration fuse.** Preflight must fail closed on ambiguous or active historical Goal lineage. Goal 5a0 may build and rehearse against disposable/private PostgreSQL schemas, but may not run a production migration or restart.
+4. **Evidence fuse.** A rerun is not a green gate until the first failure is explained and dispositioned. Every reviewer finding remains in the final disposition ledger.
+5. **Rollback default.** Disable `GOAL_SAFETY_KERNEL_ENABLED` first. Prefer roll-forward with the flag off whenever live lineage must be retained; destructive down-migration requires an approved export and explicit operator approvals described in Step 14.
+
+## Audited current-tree conflicts that implementation must resolve
+
+- `packages/api/src/app.ts` DoD approval/item routes directly set `Goal.status` to `COMPLETED` or reopen it as `ACTIVE`; governed Goals must instead reach terminal state only through the atomic Goal decision transaction.
+- `packages/api/src/app.ts`, `packages/api/src/reconcile.ts`, and `packages/db/src/workflow.ts` create Runs through several paths. Goal-linked creation must be redirected to the kernel while manual/chain/template/CRON/AT behavior remains unchanged.
+- Goal-linked completion/retry/reconciliation currently locks Task, not Goal first, and has neither retry-parent uniqueness nor generation/iteration fencing.
+- The claim query does not join Goal status/Task dispatch state.
+- `apps/web/src/pages/Goals.tsx` labels the nullable-cost subtotal as “Spend”; it must expose known provider cost and coverage instead of implying a total.
+- No metrics library is present. Goal 5a0 will use one stable structured-JSON logging adapter whose fields can be aggregated into the required counters/gauges; alerts remain Goal 5a1.
+
+## Exact implementation surface
+
+The persisted schema surface is fixed: `Goal.goalGeneration`, `Goal.nextGoalIteration`; Task fields `goalId`, `goalGeneration`, `goalIteration`, `goalDispatchKey`, `goalDispatchRequestHash`, `goalDispatchState`, `goalDecisionKey`, `goalDecisionRequestHash`, `goalDecisionRunId`, `goalDecisionAt`, and `goalPredecessorTaskId`; Run fields `goalGeneration`, `goalIteration`, and `retryOfRunId`; enum `GoalDispatchState`; and model `GoalExecutionEvent`. The migration must install the exact partial index `Task_one_open_goal_dispatch_key`, composite Task/Run lineage FK, retry self-FK/uniqueness, decision/predecessor FKs, all checks in spec §6.3–§6.4, and the event indexes. P2002 classification explicitly recognizes `Task_one_open_goal_dispatch_key`, `Task_goalId_goalDispatchKey_key`, `Task_goalId_goalDecisionKey_key`, `Task_goalId_goalGeneration_goalIteration_key`, and `Run_retryOfRunId_key`.
+
+The exact operator API surface is:
+
+| Method and path | Success contract |
+| --- | --- |
+| `POST /goals/:goalId/dispatches` | 201 create; 200 exact replay |
+| `POST /goals/:goalId/iterations/:goalIteration/decision` | 201 successor; 200 complete/fail/replay |
+| `POST /goals/:goalId/pause` | 200 transition or same-state replay; preserve existing project-scoped alias |
+| `POST /goals/:goalId/resume` | 200 transition or same-state replay |
+| `POST /goals/:goalId/cancel` | 200 terminal state or replay |
+| `POST /goals/:goalId/restart` | 201 new generation; 200 exact replay |
+| `POST /tasks/:taskId/runs/:sourceRunId/retry` | 201 child; 200 exact replay |
+| `POST /tasks/:taskId/retry` | unchanged for manual Tasks; delegates for Goal Tasks |
+| `GET /goals/:goalId/lineage` | persisted generations/iterations/Tasks/Runs |
+| `GET /goals/:goalId/execution-events?after=<eventId>&limit=<1..500>` | `(createdAt,id)` ordered event page |
+
+Expected logical conflicts are 409 with `GOAL_NOT_ACTIVE`, `GOAL_ALREADY_COMPLETED`, `GOAL_DISPATCH_IN_FLIGHT`, `STALE_GOAL_GENERATION`, `STALE_GOAL_ITERATION`, `STALE_GOAL_DECISION`, `RUN_NOT_RETRYABLE`, `RUN_RETRY_IN_FLIGHT`, or `IDEMPOTENCY_KEY_REUSED`. Required durable event types are `DISPATCH_CREATED`, `RUN_RETRY_CREATED`, `RUN_AWAITING_DECISION`, `ITERATION_ADVANCED`, `GOAL_COMPLETED`, `GOAL_FAILED`, `GOAL_PAUSED`, `GOAL_RESUMED`, `GOAL_CANCELLED`, and `GOAL_RESTARTED`.
+
+## Numbered implementation plan
+
+### 1. Revalidate authority and the then-current integration surface
+
+**Files:**
+
+- `docs/reviews/goal-5a0-current-master-revalidation.md` (new)
+- `docs/specs/goal-5a0-single-flight-lineage-safety-kernel.md` (read-only unless a new Product Contract is approved)
+- `docs/governance/task-routing-v1.md` (read-only)
+- `packages/db/prisma/schema.prisma`
+- `packages/db/src/workflow.ts`
+- `packages/api/src/app.ts`
+- `packages/api/src/reconcile.ts`
+- `packages/api/src/scheduler.ts`
+- `packages/api/src/index.ts`
+- `packages/api/src/testdb.ts`
+
+**Work:**
+
+1. On then-current `master`, record `git rev-parse HEAD`, the Control-plane A merge commit, and proof that the latter is an ancestor of the former.
+2. Refresh every audited fact in specification §3: exact models/columns/relations; all Task/Run creation sites; Goal/Task/runner routes; completion, claim, lease-loss, startup, CRON/AT, chain, template, and delete/status writers; PostgreSQL/Prisma versions; feature-flag and logging mechanisms.
+3. Record schema/API/migration name conflicts, especially any migration newer than this plan's reserved folder. The implementation migration is `packages/db/prisma/migrations/20260818000000_goal_execution_safety_kernel/migration.sql`; if that name no longer sorts after every Control-plane A migration or already exists, stop and revise the plan artifact before editing schema.
+4. Carry forward the approved spec's assumptions A1–A8 unchanged and revalidate only the tree-dependent facts behind them. If current-master evidence would force a different assumption, stop for Product Contract revision rather than silently reinterpret it.
+
+**Verification:** The revalidation document contains the two SHAs, `merge-base --is-ancestor` result, refreshed file/function map, current migration tail, explicit A1–A8 dispositions, and a “no contract boundary changed” conclusion. Any contrary result stops implementation.
+
+### 2. Add the exact schema and one additive forward migration
+
+**Files:**
+
+- `packages/db/prisma/schema.prisma`
+- `packages/db/prisma/migrations/20260818000000_goal_execution_safety_kernel/migration.sql` (new, subject to Step 1's ordering fuse)
+- `packages/api/src/migration.dbtest.ts`
+
+**Work:**
+
+1. Add `FAILED`/`CANCELLED` to `GoalStatus` and add `GoalDispatchState` with the exact mapped values in spec §6.1.
+2. Add `Goal.goalGeneration @default(1)`, `Goal.nextGoalIteration @default(1)`, Task/event relations, all exact Task lineage/idempotency/decision/predecessor fields and declared unique/indexes, all exact Run generation/iteration/retry-parent fields and indexes, and `GoalExecutionEvent` exactly as §6.2–§6.5 requires. Preserve existing project-scoped relations; use composite Prisma relations where needed to enforce same-project ownership without renaming persisted columns.
+3. Add named SQL checks for: Task all-null/all-non-null lineage and dispatch state; dispatch key/hash presence; decision quartet by state; generation/iteration ranges and generation-0 restriction; predecessor shape; Run all-null/all-non-null lineage and Goal-linked `taskId`; and runtime Goal Task shape. The runtime-shape check applies to generation ≥1 and requires NOW/AGENT, no schedule, recurrence, chain, template, follow-up, approval gate, or archive identity; `MIGRATED_CLOSED` generation-0 history is exempt.
+4. Add the exact partial unique index `Task_one_open_goal_dispatch_key`, Task composite identity FK target, Run composite lineage FK, `retryOfRunId` unique self-FK, decision Run FK, predecessor FK, and `RESTRICT` lineage/event FKs in dependency-safe order. Preserve unique `(taskId, runNumber)`, `dedupeKey`, lease/fencing fields, and manual all-null lineage.
+5. In the same forward migration, backfill only unambiguous closed history: order each Goal's inferred Tasks by `(createdAt,id)`, assign generation 0 and 1-based iterations, deterministic `migration:<taskId>` key and built-in PostgreSQL SHA-256 hash, mark `MIGRATED_CLOSED`, and copy the tuple to Runs. Existing Goals remain generation 1 / next iteration 1. Do not create events or open dispatches for history.
+6. Add catalog assertions in `migration.dbtest.ts` for enum labels, nullability/defaults, all named checks/FKs/unique indexes, exact partial-index predicate, event table/indexes, and delete actions.
+
+**Verification:** `npm run db:generate`, `npm run db:validate`, the focused `migration.dbtest.ts`, and raw negative inserts prove: a second open Task is rejected; partially-null Task/Run lineage is rejected; a Run tuple mismatching its Task is rejected; a second retry child is rejected; and manual all-null Task/Run fixtures still insert.
+
+### 3. Build fail-closed migration, invariant, and archival tooling
+
+**Files:**
+
+- `packages/db/prisma/preflight-goal-execution.ts` (new)
+- `packages/db/prisma/verify-goal-execution.ts` (new)
+- `packages/db/prisma/export-goal-lineage.ts` (new)
+- `packages/db/package.json`
+- `package.json`
+- `packages/api/src/migration.dbtest.ts`
+
+**Work:**
+
+1. Implement `db:preflight-goal-execution` to print IDs/counts only and exit non-zero for every §12.1 condition. Require the recorded current-master and Control-plane A SHAs as arguments/environment and fail if evidence is absent or ancestry/current-HEAD checks fail.
+2. Implement idempotent `db:verify-goal-execution` queries for zero partial/mismatched tuples, duplicate iteration tuples, duplicate retry parents, open dispatches without Task/Run, and more than one open dispatch. Include the exact health query from §14.
+3. Implement `db:export-goal-lineage` as a read-only, deterministic JSONL export of Goal, Task, Run, Session summary, and GoalExecutionEvent rows. Include original enum/status values and checksums; exclude prompts, outputs, fencing/session tokens, credentials, and secrets. Require an explicit output path and never mutate the database.
+4. Add root passthrough scripts for all three commands. Make all scripts accept an injected database URL and operate on the URL's schema, never an implicit `public` schema.
+5. Add fixtures for no history, multiple closed iterations, inconsistent Goal IDs, active linked Runs, project disagreement, and orphaned lineage. Prove preflight aborts before migration in the last four cases and succeeds with zero/count output in valid cases.
+
+**Verification:** Run the three focused commands against disposable fixtures. Assert non-zero exits and unchanged row checksums on blocked cases, zero invariant violations on valid migrated fixtures, deterministic repeat exports, and absence of forbidden payload/token fields.
+
+### 4. Add the shared Goal safety-kernel module and typed outcomes
+
+**Files:**
+
+- `packages/db/src/goal-execution.ts` (new)
+- `packages/db/src/index.ts`
+- `packages/db/src/workflow.ts`
+- `packages/api/src/goal-execution.test.ts` (new)
+
+**Work:**
+
+1. Define exported typed inputs/results/conflicts for initial dispatch, decision, retry, pause/resume, cancel, and restart. Preserve the required 409 codes and distinguish created/replayed/conflict/error outcomes.
+2. Implement canonical JSON serialization after validation/defaulting, sorted object keys, and SHA-256 request hashes. Equivalent absent/defaulted inputs hash identically; reused keys with different bodies produce `IDEMPOTENCY_KEY_REUSED` without echoing bodies.
+3. Implement `lockGoalRow`, then Task and Run lock helpers with raw `FOR UPDATE`; all Goal-linked mutators use the same Goal → Task → Run order. Reads used only to discover IDs are re-read and fenced after locks.
+4. Centralize Goal-linked Task/Run data construction, existing assignee/repo-grant validation, `deriveRunConfig`, `resolveRunBranches`, limits, ordinary NOW Task fields, copied lineage tuple, Run number/dedupe fields, retry ancestry, and deterministic event creation. `enqueueTaskRun` rejects Goal-linked Tasks so no caller can bypass the kernel.
+5. Implement `createInitialGoalDispatch`, `applyGoalDecision`, `retryGoalTaskRun`, pause/resume, cancel, and restart exactly as spec §7. Each public operation runs in one Serializable transaction with bounded retry only for PostgreSQL serialization/deadlock failures; logical 409s are not retried.
+6. Replay lookup occurs before current-state validation while holding the Goal lock. Same-key replay returns stored IDs/result; different-key stale work conflicts. Every successful non-no-op transition writes exactly one durable event in its transaction; replay/no-op does not duplicate events.
+
+**Verification:** Unit tests cover canonical hashing/default equivalence, every conflict mapping, event dedupe keys, lock order, manual-vs-Goal construction, replay-before-state behavior, no prompt/token leakage, and transaction rollback on an injected failure between each logical write.
+
+### 5. Register the Goal execution HTTP contract and read models
+
+**Files:**
+
+- `packages/api/src/goal-execution.ts` (new)
+- `packages/api/src/app.ts`
+- `packages/api/src/goals.test.ts`
+- `packages/api/src/goal-execution.test.ts`
+- `.env.example`
+
+**Work:**
+
+1. Put Zod schemas, defaulting, route registration, feature-flag evaluation, response serialization, and typed error mapping in `goal-execution.ts`; keep the database transitions in `@agentos/db`.
+2. Register the exact routes/payloads/statuses from spec §8: initial dispatch; iteration decision; resume/cancel/restart; source-based retry; lineage; and cursor/limit execution events. Keep operator authentication and reject Goal control fencing tokens.
+3. Make `GOAL_SAFETY_KERNEL_ENABLED` default false. Disabled state rejects creation of initial/successor dispatch, retry, and restart without mutation; completion of already-running Goal work may record terminal evidence but may not create a retry/successor. Pause/cancel remain safety controls.
+4. Add generation, next iteration, open dispatch summary, and computed `spendEvidence` to Goal list/detail. Build lineage from persisted tuple fields—not event timestamps—and order generations/iterations/runs deterministically. Page events by the located `after` event's `(createdAt,id)` tuple with a limit of 1–500.
+5. Classify named P2002 constraints into replay or the required 409 response; unexpected database errors remain errors. Conflict payloads include only current identity/state, never stored request bodies.
+6. Change Goal DoD routes so approval/item edits only maintain DoD facts. They no longer directly complete or reopen a governed Goal; `applyGoalDecision(action=complete)` is the sole completion writer and revalidates approved/non-empty/all-satisfied DoD under lock. Preserve explicitly revalidated legacy empty-Goal behavior only if Step 1 proves it is still required and record that branch.
+7. Guard Goal deletion: empty Goals retain current behavior; any Task/Run/event lineage returns 409.
+
+**Verification:** HTTP tests assert request validation, authentication, 201/200 replay contracts, every named 409 code/current shape, disabled-flag behavior, DoD completion ownership, delete restriction, stable lineage ordering, event cursor behavior, and no body/fencing-token leakage.
+
+### 6. Integrate Goal-aware completion and all retry sources atomically
+
+**Files:**
+
+- `packages/api/src/app.ts`
+- `packages/db/src/goal-execution.ts`
+- `packages/api/src/goal-execution.dbtest.ts` (new)
+- `packages/api/src/app.test.ts`
+- `packages/api/src/tasks.dbtest.ts`
+
+**Work:**
+
+1. Preserve the existing lease/fencing predicate. For a Goal-linked completion, discover identity, then lock/re-read Goal → Task → Run before terminal mutation.
+2. On success or non-retried failure, atomically terminalize Run/Session, set Task `REVIEW` plus `AWAITING_DECISION`, and append `RUN_AWAITING_DECISION`. Do not invoke template/chain/follow-up advancement for a Goal Task.
+3. On retryable failure below the ceiling, re-read active Goal under lock and create exactly one child via the shared source-based retry primitive, keeping the Goal tuple/Task and setting `retryOfRunId`. A paused or disabled kernel follows the awaiting-decision branch. A uniqueness collision reads the child as replay rather than returning 500.
+4. Add `POST /tasks/:taskId/runs/:sourceRunId/retry`. Preserve manual `POST /tasks/:taskId/retry`; for Goal Tasks it resolves the latest terminal source and delegates, returning an existing active child as replay.
+5. Ensure a stale/terminal/cancelled/fenced completion returns the established 409 and changes no Goal/Task/Run/Session/event state.
+
+**Verification:** Real-DB tests cover success, terminal failure, automatic retry, attempt exhaustion, paused/disabled no-retry, exact manual replay, simultaneous automatic/operator retries, stale fencing, and rollback. Existing manual Task completion/retry, chain successor, output, delivery, lease, and fencing tests pass unchanged except for additive assertions.
+
+### 7. Make reconciliation restart-safe and lineage-aware
+
+**Files:**
+
+- `packages/api/src/reconcile.ts`
+- `packages/api/src/index.ts`
+- `packages/db/src/goal-execution.ts`
+- `packages/api/src/reconcile.test.ts`
+- `packages/api/src/goal-execution.dbtest.ts`
+
+**Work:**
+
+1. For a Goal-linked orphan, lock Goal → Task → Run, CAS the source to LOST, terminalize Session, then use the same retry-parent primitive. Reconciliation never increments iteration or guesses a successor.
+2. If Goal is paused/cancelled/stale or the kernel is disabled, preserve the terminal LOST evidence, move the open Task to `AWAITING_DECISION` where applicable, and create no child.
+3. Two startup/reconciliation callers read the one existing child on retry-parent conflict; a replayed pass creates neither a second LOST transition nor event.
+4. Add startup invariant reporting after database reconciliation. Impossible lineage, missing Task/Run for an open dispatch, or multiple open dispatches prevents kernel enablement and emits queryable structured evidence; startup does not auto-repair it.
+
+**Verification:** Two independent clients and a pre-lock rendezvous prove one LOST transition/event and at most one child. Repeat after constructing new clients to prove restart safety. Unit tests prove impossible-state reporting and no guessed successor.
+
+### 8. Enforce pause, claim, decision, cancel, and restart race semantics
+
+**Files:**
+
+- `packages/db/src/goal-execution.ts`
+- `packages/api/src/goal-execution.ts`
+- `packages/api/src/app.ts`
+- `packages/api/src/goal-execution.dbtest.ts`
+- `packages/api/src/goals.test.ts`
+
+**Work:**
+
+1. Pause/resume are Goal-row-locked, idempotent state transitions with one event on a real transition and no event on a same-state replay. Pause leaves a claimed Run's fence valid but blocks claims, retries, and decisions.
+2. Extend claim eligibility: manual Runs retain current predicates; Goal Runs additionally require Goal `ACTIVE`, Task `EXECUTING`, matching Task/Run tuples, and a non-cancelled current generation. The claim CAS remains the winner selector.
+3. Cancel serializes against completion/decision, fills deterministic decision fields on the open Task, terminalizes Goal/open Task/active Run/Session, clears lease authority/revokes tokens, and writes one `GOAL_CANCELLED` event. Repeated cancel returns state without a second event.
+4. Restart is one transaction and allowed only from the specified terminal non-completed statuses. Same key replays; a new key/generation conflict returns 409. It increments generation once, preserves old rows, creates iteration-1 Task/Run, sets next iteration 2, and writes `GOAL_RESTARTED` plus `DISPATCH_CREATED` atomically.
+5. Old-generation completion and decisions fail both Run and Goal fences without changing new-generation counts/state.
+
+**Verification:** Controlled real-DB races prove both valid pause/claim orders, pause/automatic-retry outcome, both cancel/completion and cancel/decision orders, same/different-key restart races, and stale old-generation rejection. Assert final exact states/events/counts, not “success or arbitrary error.”
+
+### 9. Fence generic Task, scheduler, template, chain, and delete writers
+
+**Files:**
+
+- `packages/api/src/app.ts`
+- `packages/api/src/scheduler.ts`
+- `packages/api/src/templates.ts`
+- `packages/db/src/workflow.ts`
+- `packages/api/src/tasks.dbtest.ts`
+- `packages/api/src/scheduler.dbtest.ts`
+- `packages/api/src/chain.dbtest.ts`
+- `packages/api/src/triggers.dbtest.ts`
+- `packages/api/src/workflow.test.ts`
+
+**Work:**
+
+1. Reject generic schedule, status, archive, hard-delete, start, chain/follow-up activation, template, recurring-copy, CRON/AT, approval-gate, or direct Run enqueue operations when Task lineage is non-null. Only the Goal kernel changes governed Task status/dispatch state or creates its Runs.
+2. Public Task creation and patch schemas never accept Goal lineage fields. Internal scheduler/template/chain constructors explicitly set none and are defended by database checks.
+3. Preserve every manual/chain/template/CRON/AT code path and current lock/CAS behavior. Do not merge Goal succession with chain successor authority.
+4. Preserve workspace retention, branch routing, delivery, Task output, Session usage, and Inbox waiting behavior except cancellation may terminalize an existing `WAITING_INBOX` Goal Run; do not add Inbox integration.
+
+**Verification:** Negative tests cover every forbidden generic operation on a Goal Task. Existing manual start/retry, API chain successor, template, webhook, CRON, AT, claim, fencing, completion, and archive suites remain green. Direct manual all-null Task/Run creation still works.
+
+### 10. Add evidence-scoped spend reads and structured observability
+
+**Files:**
+
+- `packages/api/src/goal-observability.ts` (new)
+- `packages/api/src/goal-execution.ts`
+- `packages/api/src/app.ts`
+- `packages/api/src/index.ts`
+- `packages/api/src/goal-execution.test.ts`
+- `packages/api/src/goal-execution.dbtest.ts`
+
+**Work:**
+
+1. Compute `spendEvidence` from terminal Sessions linked to persisted Goal lineage: Decimal sum of non-null provider costs, priced/unpriced counts, and `complete|partial` coverage. Zero terminal sessions produces known cost zero, counts zero, and complete coverage; any null-cost terminal Session makes coverage partial. Never infer dollars from tokens.
+2. Preserve `Goal.spendUsd` as the known-provider subtotal for compatibility; all new API/log wording calls it known provider cost/subtotal when coverage is incomplete.
+3. Emit one structured JSON operation log after every committed transition with `goalId`, generation, iteration, Task/Run IDs, operation, outcome, and latency. Rejected/stale attempts log but create no durable event. Metadata never includes prompts, outputs, access/fencing/session tokens, or credentials.
+4. Because the repository has no metrics library, emit aggregation-stable records for `goal_dispatch_total`, `goal_decision_total`, `goal_retry_total`, `goal_stale_operation_total`, and `goal_spend_sessions`; emit health snapshots for `goal_open_dispatches` and `goal_lineage_invariant_violations` at startup and after Goal transitions. Keep exact metric names/labels from spec §14.
+
+**Verification:** Capture logs in tests and assert exactly one successful-transition record, stale-without-event behavior, exact metric dimensions, latency/non-secret fields, and gauge query values. Spend tests cover complete, partial with a null-cost Session, no-priced-session, and zero-terminal-session cases and assert no “total spend” wording.
+
+### 11. Make the existing Goal UI truthful about new statuses and spend evidence
+
+**Files:**
+
+- `apps/web/src/lib/types.ts`
+- `apps/web/src/components/ui.tsx`
+- `apps/web/src/pages/Goals.tsx`
+- `apps/web/src/locales/en.ts`
+- `apps/web/src/locales/zh.ts`
+- `apps/web/src/tests/goals.test.tsx` (new)
+
+**Work:**
+
+1. Add `FAILED`/`CANCELLED`, generation/iteration/open-dispatch, lineage/event, and `spendEvidence` response types. Add exhaustive pill tones and translations for new statuses.
+2. Replace the list/detail “Spend” presentation with known provider cost/subtotal plus priced/unpriced coverage. When coverage is partial, visibly qualify it; do not calculate dollars from tokens.
+3. Display persisted lineage identity in Goal detail only to the extent supported by the new read response. Do not add Inbox integration, waiver UX, lifecycle notifications, or a public release surface.
+
+**Verification:** Static-render tests cover both new statuses and complete/partial/no-priced/zero-session wording in English and Chinese. Existing i18n allowlist, UI unit tests, build, and typecheck pass.
+
+### 12. Build the executable real-PostgreSQL concurrency proof suite
+
+**Files:**
+
+- `packages/api/src/goal-execution.dbtest.ts` (new)
+- `packages/api/src/testdb.ts`
+- `packages/api/src/migration.dbtest.ts`
+- `packages/api/package.json` (only if a focused script is needed; aggregate `test:db` remains authoritative)
+
+**Work and required named tests:**
+
+Use the real PostgreSQL harness, two separately constructed `PrismaClient` instances, and reusable pre-lock/CAS rendezvous instrumentation based on the proven `scheduler.dbtest.ts` pattern. No mock, sequential call, sleep-only race, or arbitrary-success/error assertion qualifies.
+
+1. `dispatch different keys: 201/409 and one lineage` — one Task, Run, open dispatch, and event.
+2. `dispatch same key: create plus exact replay` — identical IDs and one row set.
+3. `dispatch replay after client restart` — reconstruct app/client and return identical IDs.
+4. `two dispatch decisions: one successor` — one iteration N+1 Task/Run/event.
+5. `decision replay after client restart` — return original successor.
+6. `two retries: one source child` — exact next run number and same tuple.
+7. `automatic/operator/reconcile retry races` — each pair/interleaving has at most one child.
+8. `two reconciliation passes: one LOST and child`.
+9. `restart same and different keys` — generation increments once; replay or 409 as specified.
+10. `old generation completion and decision are stale` — new generation unchanged.
+11. `pause versus claim` — assert both serialized outcomes and no duplicate Run.
+12. `pause versus automatic retry` — paused, awaiting decision, no child.
+13. `cancel versus completion/decision` — one terminalized outcome, final cancelled, no successor.
+14. `direct open-dispatch inserts hit partial unique index`.
+15. `composite lineage and all-null checks reject corruption`.
+16. `manual/scheduler/chain/claim/fencing/completion regressions remain green`.
+17. `spend evidence stays evidence scoped` — complete, partial, none priced, zero terminal.
+
+Each race records barrier arrival/release, exact HTTP/service result, row/event counts, tuples, and the final invariant query. Include a mutation note explaining which lock/unique/fence removal makes each proof fail.
+
+**Verification:** Focused file passes twice without changing the rendezvous, then aggregate `npm run test:db` passes. Every independent client disconnects in `finally`; timeouts are bounded and report the contended lock/CAS rather than masking hangs.
+
+### 13. Rehearse the migration and rollback paths on disposable schemas
+
+**Files:**
+
+- `packages/api/src/migration.dbtest.ts`
+- `docs/runbooks/goal-5a0-safety-kernel-rollout-and-rollback.md` (new)
+- `packages/db/prisma/preflight-goal-execution.ts`
+- `packages/db/prisma/verify-goal-execution.ts`
+- `packages/db/prisma/export-goal-lineage.ts`
+
+**Work:**
+
+1. Rehearse no history, multiple closed iterations, null manual lineage, inconsistent Goal IDs, active Goal-linked Run, and project mismatch. Invalid fixtures must stop in preflight with schema/data unchanged.
+2. For valid fixtures, deploy the full migration chain into a private non-`public` schema, verify deterministic generation-0 backfill and all invariants, run `prisma migrate deploy` again and prove no-op, then run drift check.
+3. Exercise rollback first by disabling the flag and retaining schema/lineage. Separately rehearse the destructive archival path on disposable data only: export; verify checksum/readability; drain/fence; require explicit approval tokens for `FAILED → STOPPED_STUCK` and `CANCELLED → PAUSED`; drop FKs/index/checks/event table/columns/enums in dependency order; verify old-client compatibility and Prisma drift.
+4. Never silently relabel Goal lineage as manual. Record whether roll-forward-off or destructive archival rollback was selected and whether export is the only remaining lineage copy.
+
+**Verification:** Save commands, schema names, first/second deploy output, row counts, invariant output, export checksum, enum translation approvals, object-removal order, and final drift result in the implementation evidence packet. Production URLs are forbidden in the rehearsal.
+
+### 14. Write the operational rollout/rollback runbook without executing production changes
+
+**Files:**
+
+- `docs/runbooks/goal-5a0-safety-kernel-rollout-and-rollback.md` (new)
+- `.env.example`
+- `docs/reviews/goal-5a0-implementation-evidence.md` (new)
+
+**Work:**
+
+1. Document the default-off flag and the exact staged sequence: Control-plane A evidence; final-master revalidation; ordered gates; private rehearsal; additive schema/client deploy disabled; read-only production preflight; approved migration window with no active Goal-linked Run; seeded non-production/canary Goal; review; then ordinary enablement.
+2. Canary checks cover dispatch, same-key replay after process reconstruction, retry replay, pause/resume, terminal decision, lineage JSON, event ledger, and partial spend evidence. This task records steps only; it does not execute production migration, restart, enablement, or public release.
+3. Document defect response and both rollback branches exactly as specification §13.2: disable; drain/fence; export; approved enum translation; archive lineage; dependency-ordered removal; drift; old code. Make roll-forward-off the required choice when live lineage must remain queryable.
+4. Include operator stop points and explicit evidence fields for who approved destructive translation/removal. Alerts and lifecycle notifications are named as Goal 5a1, not added here.
+
+**Verification:** Execute the runbook only against the disposable rehearsal from Step 13. A reviewer can trace every command to an artifact, target schema, expected result, abort condition, and recovery action.
+
+### 15. Run the ordered gates and assemble review evidence
+
+**Files:**
+
+- `docs/reviews/goal-5a0-implementation-evidence.md` (new)
+- `docs/reviews/goal-5a0-review-disposition.md` (new)
+- all files changed by Steps 1–14
+
+**Work:**
+
+1. On the final implementation tree, run in order:
+
+   ```text
+   npm run db:generate
+   npm run db:validate
+   npm run db:drift-check
+   npm run build
+   npm run typecheck
+   npm test
+   npm run test:db
+   ```
+
+2. Also run the preflight, disposable migration rehearsal, invariant verifier, rollback rehearsal, and focused concurrency suite. Record the first result of each command; explain and disposition every failure before a rerun.
+3. Assemble the ten-part reviewer packet required by spec §15.3: current-master/Control-plane A evidence; schema/raw SQL; preflight/backfill/rehearsal counts; all command/test output; controlled interleavings; zero invariant results; canary Goal→generation→Task→Run/retry JSON; partial-cost Session evidence; feature-flag/rollout/rollback state; and complete finding disposition table.
+4. The disposition ledger has one row per finding with source/ID, severity, accepted/rejected/deferred, rationale, exact contract/code/doc change, and verification. Findings are append-only across revisions; a rejected or deferred finding remains visible. Any must-fix stays open until verified; every should-fix is adopted or explicitly declined with one-line reasoning.
+5. Obtain an independent review against the reviewer checklist in spec §16. With an approval gate, move the implementation task to review rather than done; the human decides.
+
+**Verification:** Every reviewer checklist answer is backed by a file/command/test/result in the evidence document. The final invariant query returns zero rows. `git diff --check` is clean, the reviewed SHA matches the evidence SHA, and the disposition ledger contains every finding from every review round.
+
+## Requirement-to-step coverage
+
+| Contract requirement | Plan steps |
+| --- | --- |
+| One open dispatch; atomic dispatch/decision | 2, 4, 5, 12 |
+| Retry/restart and process-restart idempotency | 2, 4, 6, 7, 8, 12 |
+| Durable Goal → Task → Run lineage; generation/iteration/retry parent | 2, 3, 4, 5 |
+| Stale completion/decision fencing and lock order | 4, 6, 7, 8, 12 |
+| Pause/resume/cancel/failure semantics | 4, 6, 8 |
+| Current scheduler/manual/chain/CRON/AT compatibility | 6, 7, 8, 9, 12 |
+| Migration/backfill/preflight/invariant checks | 1, 2, 3, 13 |
+| Default-off rollout, canary, rollback/export | 5, 13, 14 |
+| Durable events, queryable signals, no Goal 5a1 alerts | 4, 7, 10 |
+| Evidence-scoped provider dollar claims | 5, 10, 11, 12 |
+| Executable two-client PostgreSQL concurrency proofs | 12 |
+| Ordered static/DB gates and reviewer packet | 15 |
+| Every review finding disposition | 15 |
+| No implementation before Control-plane A/current-master revalidation | 1 and all gates |
+| No Inbox/waiver/notification/public-release/production execution scope creep | 9, 11, 14 |
+
+## Planning-pass finding disposition
+
+No consolidated review findings were supplied to this first-pass Plan step, so there are no must-fix or should-fix dispositions yet. The final implementation/revise-plan process must use the append-only ledger defined in Step 15; no later finding may disappear.
+
+## Completion boundary
+
+This plan is complete when persisted for review. It does not authorize implementation. The future implementation task must stop at Step 1 unless Control-plane A is merged and the then-current `master` revalidation passes; production migration, restart, flag enablement, public release, Inbox integration, waiver UX, and Goal 5a1 notification behavior remain outside this contract.
