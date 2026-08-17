@@ -70,6 +70,54 @@ test("delivery opens one pull request titled after the chain, not the step", asy
   assert.ok(calls.some((call) => call.includes("--title lines subcommand")));
 });
 
+test("a custom chain base is preserved in gh pr create", async () => {
+  const calls: string[] = [];
+  let created = false;
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "create") created = true;
+    if (executable === "gh" && args[1] === "list") {
+      return created ? JSON.stringify([{ url: "https://github.com/acme/app/pull/10", number: 10 }]) : "[]";
+    }
+    return "";
+  };
+  const custom = { ...claim, run: { ...claim.run, pullRequestBase: "release/1.x" } } as ClaimedTask;
+  const result = await deliverWorkspace(config, custom, workspace, fake);
+  assert.equal(result.pullRequestNumber, 10);
+  assert.ok(calls.some((call) => call.includes("--base release/1.x")));
+});
+
+test("publication is acknowledged immediately after push and before GitHub work", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    return "";
+  };
+  await deliverWorkspace(config, claim, workspace, fake, async (branch) => { calls.push(`ack ${branch}`); });
+  assert.deepEqual(calls.slice(0, 3), [
+    "git push --set-upstream origin feature/test",
+    "ack feature/test",
+    "gh --version",
+  ]);
+});
+
+test("a pull request created between list and create is confirmed and reused", async () => {
+  let listCalls = 0;
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") {
+      listCalls += 1;
+      return listCalls === 1 ? "[]" : JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    }
+    if (executable === "gh" && args[1] === "create") throw new Error("a pull request already exists for head");
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, fake);
+  assert.equal(listCalls, 2);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pullRequestNumber, 7);
+});
+
 test("a failed run commits uncommitted changes, pushes them as WIP, and opens no pull request", async () => {
   const calls: string[] = [];
   const fake: CommandExecutor = async (executable, args) => {
@@ -113,4 +161,112 @@ test("a failed run still pushes commits the agent made before crashing", async (
   assert.equal(result?.headSha, "agent-commit-sha");
   assert.equal(calls.some((call) => call.includes(" commit ")), false);
   assert.equal(calls.at(-1), "git push origin HEAD:refs/heads/agentos/task-1/run-2");
+});
+
+// --- one branch and one PR per chain -----------------------------------------
+//
+// The six tests above stay unmodified on purpose, and their passing is itself a
+// regression pin: the `claim` fixture omits `opensPullRequest` entirely, so they
+// prove that a claim payload from a *stale API build* still opens a pull request
+// rather than silently never opening one again.
+
+const noPrClaim = { ...claim, run: { ...claim.run, opensPullRequest: false } } as ClaimedTask;
+
+test("a step that does not open pull requests still pushes its branch", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "list") return "[]";
+    return "";
+  };
+  const result = await deliverWorkspace(config, noPrClaim, workspace, fake);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  // The push is what the *next* step of the chain clones, so it is unconditional.
+  assert.ok(calls.includes("git push --set-upstream origin feature/test"));
+  assert.ok(calls.some((call) => call.startsWith("gh pr list")));
+  assert.equal(calls.some((call) => call.startsWith("gh pr create")), false);
+});
+
+test("a step that does not open pull requests says so instead of failing", async () => {
+  const fake: CommandExecutor = async (executable, args) => (executable === "gh" && args[1] === "list" ? "[]" : "");
+  const result = await deliverWorkspace(config, noPrClaim, workspace, fake);
+  assert.equal(result.pullRequestUrl, undefined);
+  assert.match(result.deliveryInstructions ?? "", /Branch 'feature\/test' was pushed/);
+  assert.match(result.deliveryInstructions ?? "", /does not open a pull request/);
+});
+
+test("a late documentation step reports the chain's existing pull request", async () => {
+  const calls: string[] = [];
+  const fake: CommandExecutor = async (executable, args) => {
+    calls.push(`${executable} ${args.join(" ")}`);
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/7", number: 7 }]);
+    return "";
+  };
+  const result = await deliverWorkspace(config, noPrClaim, workspace, fake);
+  // The lookup is deliberately kept ahead of the flag check: a documentation
+  // step running after the implementation step still shows the chain's PR.
+  assert.equal(result.pullRequestNumber, 7);
+  assert.equal(calls.some((call) => call.startsWith("gh pr create")), false);
+});
+
+test("no gh and no pull request by design reads as design, not as a degraded path", async () => {
+  const fake: CommandExecutor = async (executable) => { if (executable === "gh") throw new Error("ENOENT"); return ""; };
+  const result = await deliverWorkspace(config, noPrClaim, workspace, fake);
+  assert.match(result.deliveryInstructions ?? "", /does not open a pull request/);
+  assert.doesNotMatch(result.deliveryInstructions ?? "", /manually/);
+});
+
+test("a failed pull-request lookup does not fail a step that opens no pull request", async () => {
+  // Everything this step owed the chain is already on the remote, so a `gh pr
+  // list` error is not a delivery failure. Reporting FAILED here would fail a
+  // documentation step *after* its push, and a delivery failure carrying a
+  // failureClass is marked non-retryable — one rate-limited lookup would wedge
+  // the step permanently.
+  const fake: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") throw new Error("gh: API rate limit exceeded");
+    return "";
+  };
+  const result = await deliverWorkspace(config, noPrClaim, workspace, fake);
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.failureClass, undefined);
+  assert.match(result.deliveryInstructions ?? "", /does not open a pull request/);
+});
+
+test("the ref that was actually pushed is recorded on every path that pushed", async () => {
+  // `pushedBranch` is the only publication evidence the control plane trusts,
+  // because `branch` and `pushStatus` each lie in one direction:
+  //   (b) below is the direction where the branch IS published but the run is
+  //       recorded FAILED — the next chain step would base on the default branch
+  //       and be rejected non-fast-forward;
+  //   (d) below is the direction where a salvage push SUCCEEDED against a
+  //       per-run branch while `branch` still reads the shared one — the next
+  //       chain step would clone a ref nobody created.
+  const created: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/9", number: 9 }]);
+    return "";
+  };
+  assert.equal((await deliverWorkspace(config, claim, workspace, created)).pushedBranch, "feature/test");
+
+  const prFails: CommandExecutor = async (executable, args) => {
+    if (executable === "gh" && args[1] === "list") return "[]";
+    if (executable === "gh" && args[1] === "create") throw new Error("gh: API rate limit exceeded");
+    return "";
+  };
+  const failed = await deliverWorkspace(config, claim, workspace, prFails);
+  assert.equal(failed.pushStatus, "FAILED");
+  assert.equal(failed.pushedBranch, "feature/test");
+
+  const pushFails: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "push") throw new Error("remote rejected");
+    return "";
+  };
+  assert.equal((await deliverWorkspace(config, claim, workspace, pushFails)).pushedBranch, undefined);
+
+  const salvage: CommandExecutor = async (executable, args) => {
+    if (executable === "git" && args[0] === "status") return "M tracked.ts";
+    return executable === "git" && args[0] === "rev-parse" ? "salvage-sha" : "";
+  };
+  const salvaged = await deliverFailedWorkspace(config, claim, workspace, salvage);
+  assert.equal(salvaged?.pushedBranch, "agentos/task-1/run-2");
+  assert.notEqual(salvaged?.pushedBranch, workspace.branch);
 });

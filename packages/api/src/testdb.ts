@@ -1,10 +1,19 @@
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { PrismaClient } from "@agentos/db";
 
-export const testDatabaseUrl = process.env.TEST_DATABASE_URL
-  ?? "postgresql://agentos:agentos@localhost:5432/agentos?schema=agentos_test";
+const defaultTestDatabaseUrl = new URL("postgresql://agentos:agentos@localhost:5432/agentos?schema=agentos_test");
+// Every AgentOS workspace used to drop the same host-wide schema. The package's
+// concurrency=1 flag serializes files only inside one workspace, so a sibling
+// test process could still drop our tables mid-suite. Derive a stable,
+// PostgreSQL-safe private schema unless the caller explicitly supplies one.
+defaultTestDatabaseUrl.searchParams.set(
+  "schema",
+  `agentos_test_${createHash("sha256").update(process.cwd()).digest("hex").slice(0, 16)}`,
+);
+export const testDatabaseUrl = process.env.TEST_DATABASE_URL ?? defaultTestDatabaseUrl.toString();
 
 const parsedTestDatabaseUrl = new URL(testDatabaseUrl);
 export const testDatabaseSchema = parsedTestDatabaseUrl.searchParams.get("schema") ?? "public";

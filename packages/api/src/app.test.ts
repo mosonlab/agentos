@@ -148,7 +148,9 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       },
       inboxMessage: { updateMany: async () => { closed = true; return { count: 1 }; } },
       taskActivity: { create: async () => ({}) },
-      run: { create: async () => ({ id: "run-1" }) },
+      // findFirst answers resolveRunBranches' publication query: nothing in this
+      // chain has pushed the shared branch, so the successor bases on the default.
+      run: { create: async () => ({ id: "run-1" }), findFirst: async () => null },
     };
     const database = {
       task: { findUniqueOrThrow: async () => before },
@@ -316,16 +318,21 @@ test("an archived assignee's automatic retry is queued, audited, and does not sp
       id: "run-3", projectId: "project-1", taskId: "task-1", goalId: null, agentId: "agent-1", repoId: "repo-1",
       runNumber: 3, maxRunsPerTask: 3, runner: "CLAUDE", model: "claude", targetBranch: "main", branch: "feat/x",
       baseSha: null, promptHash: "hash", maxDurationMin: 120, stallTimeoutMin: 10,
-      task: { id: "task-1", templateId: null, templateStep: null }, session: { id: "session-1" },
+      task: {
+        id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: null, chainIndex: null,
+        templateId: null, templateStep: null, repo: null, targetBranch: "main", opensPullRequest: true,
+        status: "DOING", archivedAt: null,
+      }, session: { id: "session-1" },
     };
     const tx = {
+      $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
       run: {
         findFirst: async () => run,
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { closed = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { retry = data; return { id: "run-4", ...data }; },
       },
       session: { update: async () => ({}) },
-      task: { updateMany: async () => ({ count: 1 }) },
+      task: { updateMany: async () => ({ count: 1 }), findUniqueOrThrow: async () => run.task },
       taskActivity: { create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
@@ -387,12 +394,19 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
       create: async () => ({}),
     },
     $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+      $queryRaw: async () => [{ id: "task-2", archivedAt: null }],
       run: {
         updateMany: async ({ where }: { where: { id: string } }) => { lost.push(where.id); return { count: 1 }; },
         create: async () => ({}),
       },
       session: { updateMany: async () => ({}) },
-      task: { update: async () => ({}) },
+      // The requeue loads the task to decide whether to recompute a chain
+      // step's branches; a null row keeps the lost run's fields verbatim.
+      task: {
+        update: async () => ({}),
+        findUnique: async () => null,
+        findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
+      },
       taskActivity: { create: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
     }),

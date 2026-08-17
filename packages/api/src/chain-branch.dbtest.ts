@@ -1,0 +1,808 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { after, before, beforeEach, test } from "node:test";
+
+import { PrismaClient } from "@agentos/db";
+
+import { createApp } from "./app.js";
+import { reconcileDatabaseRuns } from "./reconcile.js";
+import { instantiateTemplate } from "./templates.js";
+import { resetTestDb, setupTestDb } from "./testdb.js";
+
+const OPERATOR = "operator-db-token";
+const RUNNER = "runner-db-token";
+let db: PrismaClient;
+const isolatedRoot = "/private/tmp/agentos-api-dbtest-workspaces";
+const priorEnvironment = {
+  operator: process.env.OPERATOR_TOKEN,
+  runner: process.env.RUNNER_TOKEN,
+  root: process.env.RUNNER_WORKSPACE_ROOT,
+};
+before(() => {
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  process.env.RUNNER_TOKEN = RUNNER;
+  process.env.RUNNER_WORKSPACE_ROOT = isolatedRoot;
+  db = setupTestDb();
+});
+beforeEach(async () => { await resetTestDb(db); });
+after(async () => {
+  await db.$disconnect();
+  for (const [key, value] of [["OPERATOR_TOKEN", priorEnvironment.operator], ["RUNNER_TOKEN", priorEnvironment.runner], ["RUNNER_WORKSPACE_ROOT", priorEnvironment.root]] as const) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+});
+
+/** The branch the tests expect, recomputed from first principles rather than by
+ *  calling `sharedChainBranch` — a function compared against itself proves
+ *  nothing about the name the platform actually writes. */
+const expectedBranch = (projectId: string, chainId: string): string => {
+  const fingerprint = createHash("sha256").update(`${projectId}:${chainId}`).digest("hex").slice(0, 8);
+  const slug = chainId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24).replace(/-+$/, "");
+  return `agentos/chain/${slug || "chain"}-${fingerprint}`;
+};
+
+const withTokens = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+  mkdirSync(isolatedRoot, { recursive: true });
+  return operation();
+};
+
+type Response = { status: number; body: any };
+
+const operatorRequest = async (path: string, init: RequestInit = {}): Promise<Response> => withTokens(async () => {
+  const response = await createApp(db).request(path, {
+    ...init,
+    headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json", ...init.headers },
+  });
+  return { status: response.status, body: response.status === 204 ? null : await response.json() };
+});
+
+const postTask = async (projectId: string, body: Record<string, unknown>): Promise<Response> =>
+  operatorRequest(`/projects/${projectId}/tasks`, { method: "POST", body: JSON.stringify(body) });
+
+/** Claims whatever run the control plane hands out, asserting it is the one the
+ *  test expects. Going through the real route matters: the claim payload is
+ *  assembled from live rows, which is where a queued run's snapshot could leak. */
+const claimRun = async (expectedRunId?: string): Promise<any> => withTokens(async () => {
+  const response = await createApp(db).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "runner-1" }),
+  });
+  assert.equal(response.status, 200, "expected a claimable run");
+  const claim = await response.json() as any;
+  if (expectedRunId) assert.equal(claim.run.id, expectedRunId);
+  return claim;
+});
+
+/**
+ * Drives a run to completion through the real `POST /runner/runs/:runId/complete`
+ * so `activateChainSuccessor` and the automatic-retry path run exactly as they do
+ * in production. Hand-writing terminal Run rows would advance the chain around
+ * the routes this batch changes.
+ */
+const completeRunViaRoute = async (claim: any, overrides: Record<string, unknown> = {}): Promise<Response> => withTokens(async () => {
+  const response = await createApp(db).request(`/runner/runs/${claim.run.id}/complete`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "runner-1",
+      fencingToken: claim.fencingToken,
+      exitCode: 0,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      cleanupStatus: "SUCCEEDED",
+      ...overrides,
+    }),
+  });
+  return { status: response.status, body: response.status === 204 ? null : await response.json() };
+});
+
+const publishViaRoute = async (claim: any, pushedBranch: string): Promise<Response> => withTokens(async () => {
+  const response = await createApp(db).request(`/runner/runs/${claim.run.id}/publication`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "runner-1", fencingToken: claim.fencingToken, pushedBranch }),
+  });
+  return { status: response.status, body: await response.json() };
+});
+
+/** Claim the queued run of `taskId` and finish it, optionally publishing a ref. */
+const runStep = async (taskId: string, overrides: Record<string, unknown> = {}): Promise<void> => {
+  const queued = await db.run.findFirstOrThrow({ where: { taskId, status: "QUEUED" }, orderBy: { runNumber: "desc" } });
+  const claim = await claimRun(queued.id);
+  const result = await completeRunViaRoute(claim, overrides);
+  assert.equal(result.status, 200);
+};
+
+const seedProject = async (label: string) => {
+  const project = await db.project.create({ data: { name: label, slug: `${label}-${Date.now()}-${Math.floor(Math.random() * 1e6)}` } });
+  const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
+  const agent = await db.agent.create({ data: {
+    projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
+    foundationalPrompt: "foundation", rolePrompt: "role",
+  } });
+  const repo = await db.repo.create({ data: {
+    projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo",
+  } });
+  await db.agentRepoAccess.create({ data: {
+    projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",
+  } });
+  return { project, agent, repo };
+};
+
+/** Direct insertion remains useful for malformed-row and retry edge cases. The
+ * central chain test below deliberately creates every normal step through the
+ * public API so it cannot evade admission behavior. */
+const seedChainStep = async (
+  seed: { project: { id: string }; agent: { id: string }; repo: { id: string } },
+  chainId: string,
+  chainIndex: number,
+  data: Record<string, unknown> = {},
+) => db.task.create({ data: {
+  projectId: seed.project.id, assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  name: `Step ${chainIndex}`, description: `step ${chainIndex}`, chainId, chainIndex, ...data,
+} });
+
+/** `POST /tasks/:id/start` answers `{ runId, runNumber }`, so the row itself has
+ *  to be read back — and reading the row is the point: every assertion in this
+ *  file is on what the control plane wrote, never on what a helper returned. */
+const startStep = async (taskId: string) => {
+  const started = await operatorRequest(`/tasks/${taskId}/start`, { method: "POST" });
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+  return db.run.findUniqueOrThrow({ where: { id: started.body.runId } });
+};
+
+const linkFollowUps = async (taskIds: string[]): Promise<void> => {
+  for (let index = 0; index < taskIds.length - 1; index += 1) {
+    await db.task.update({ where: { id: taskIds[index]! }, data: { followUpTaskId: taskIds[index + 1]! } });
+  }
+};
+
+// --- WI-3: one branch per chain ---------------------------------------------
+
+test("T1: every run of every step of an API-created chain sits on one branch", async () => {
+  // Exactly one PR per chain is proven by composition, not by a test — no test
+  // in this repo may call GitHub. One branch per chain (this test) ×
+  // `deliverWorkspace` reuses any open PR on that head ("a chain step reuses the
+  // open pull request on its shared head branch", delivery.test.ts) × a step
+  // with opensPullRequest=false never calls `gh pr create` (delivery.test.ts)
+  // ⇒ at most one `gh pr create` per chain, and one open PR per head branch is
+  // a GitHub invariant.
+  const seed = await seedProject("t1");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "step 0", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  assert.equal(first.status, 201);
+  const second = await postTask(seed.project.id, {
+    name: "Step 1", description: "step 1", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 1,
+  });
+  const third = await postTask(seed.project.id, {
+    name: "Step 2", description: "step 2", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 2,
+  });
+  assert.equal(second.status, 201);
+  assert.equal(third.status, 201);
+  assert.equal(await db.run.count({ where: { task: { chainId } } }), 1, "only the head step is admitted initially");
+  await linkFollowUps([first.body.id, second.body.id, third.body.id]);
+
+  await runStep(first.body.id, { pushedBranch: shared });
+  await runStep(second.body.id, { pushedBranch: shared });
+  await runStep(third.body.id, { pushedBranch: shared });
+
+  const runs = await db.run.findMany({ where: { taskId: { in: [first.body.id, second.body.id, third.body.id] } } });
+  assert.equal(runs.length, 3, "each step ran exactly once");
+  assert.deepEqual([...new Set(runs.map((run) => run.branch))], [shared]);
+});
+
+test("T2: the base branch follows the chain, not the task", async () => {
+  const seed = await seedProject("t2");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "step 0", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  const second = await seedChainStep(seed, chainId, 1);
+  const third = await seedChainStep(seed, chainId, 2);
+  await linkFollowUps([first.body.id, second.id, third.id]);
+
+  // Step ① creates the branch, so it must base on something that exists.
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
+  assert.equal(firstRun.targetBranch, seed.repo.defaultBranch);
+  assert.equal(firstRun.branch, shared);
+
+  await runStep(first.body.id, { pushedBranch: shared });
+  const secondRun = await db.run.findFirstOrThrow({ where: { taskId: second.id } });
+  assert.equal(secondRun.targetBranch, shared, "step ② reviews step ①'s tree without anyone repointing it");
+
+  await runStep(second.id, { pushedBranch: shared });
+  const thirdRun = await db.run.findFirstOrThrow({ where: { taskId: third.id } });
+  assert.equal(thirdRun.targetBranch, shared);
+});
+
+test("T3: a failed run's WIP salvage push is not evidence that the shared branch exists", async () => {
+  // The payload below is exactly what the runner emits after a WIP salvage:
+  // `branch` is the workspace branch (the shared one), `pushStatus` is SUCCEEDED
+  // — and `deliverFailedWorkspace` pushed `agentos/<taskId>/run-<n>` instead.
+  // Inferring publication from `branch` + `pushStatus` would send step ② to
+  // clone a ref nobody ever created, and the chain would die in provisioning
+  // with nothing but "clone failed" to go on. That is why `pushedBranch` exists.
+  const seed = await seedProject("t3");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "step 0", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  const second = await seedChainStep(seed, chainId, 1);
+  await linkFollowUps([first.body.id, second.id]);
+
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
+  await runStep(first.body.id, {
+    exitCode: 1,
+    terminalSuccess: false,
+    failureClass: "TASK_FAILED",
+    retryable: false,
+    branch: shared,
+    pushStatus: "SUCCEEDED",
+    pushedBranch: `agentos/${first.body.id}/run-1`,
+  });
+  const closed = await db.run.findUniqueOrThrow({ where: { id: firstRun.id } });
+  assert.equal(closed.branch, shared, "the misleading column is still written; the test is about not trusting it");
+  assert.equal(closed.pushStatus, "SUCCEEDED");
+
+  // The chain did not advance (step ① failed), so drive step ② by hand.
+  await db.task.update({ where: { id: second.id }, data: { status: "TODO" } });
+  const secondRun = await startStep(second.id);
+  assert.equal(secondRun.targetBranch, seed.repo.defaultBranch);
+  assert.notEqual(secondRun.targetBranch, shared);
+  assert.equal(secondRun.branch, shared, "it still pushes to the chain's branch — it just cannot base on it yet");
+});
+
+test("T4: the first step of a chain that has published nothing bases on the default branch", async () => {
+  const seed = await seedProject("t4");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "step 0", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+
+  await runStep(first.body.id, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false, pushStatus: "FAILED",
+  });
+  const retried = await operatorRequest(`/tasks/${first.body.id}/retry`, { method: "POST" });
+  assert.equal(retried.status, 201);
+  assert.equal(retried.body.targetBranch, seed.repo.defaultBranch);
+  assert.equal(retried.body.branch, shared);
+});
+
+test("T5: two projects sharing one chainId get two branches", async () => {
+  // @@unique([chainId, chainIndex]) is global rather than per-project, so the
+  // collision can only be written at disjoint indices — which is exactly the
+  // case the (projectId, chainId) key exists for.
+  const one = await seedProject("t5a");
+  const two = await seedProject("t5b");
+  const chainId = `shared-${Date.now()}`;
+  const branchOne = expectedBranch(one.project.id, chainId);
+  const branchTwo = expectedBranch(two.project.id, chainId);
+  assert.notEqual(branchOne, branchTwo);
+
+  const first = await postTask(one.project.id, {
+    name: "P1 S0", description: "d", assigneeAgentId: one.agent.id, repoId: one.repo.id, chainId, chainIndex: 0,
+  });
+  const other = await postTask(two.project.id, {
+    name: "P2 S0", description: "d", assigneeAgentId: two.agent.id, repoId: two.repo.id, chainId, chainIndex: 11,
+  });
+  const runOne = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
+  const runTwo = await startStep(other.body.id);
+  assert.equal(runOne.branch, branchOne);
+  assert.equal(runTwo.branch, branchTwo);
+
+  // …and neither project's evidence query may see the other's publication.
+  await runStep(first.body.id, { pushedBranch: branchOne });
+  const second = await seedChainStep(two, chainId, 12);
+  const secondRun = await startStep(second.id);
+  assert.equal(secondRun.targetBranch, two.repo.defaultBranch, "project 1's push is not project 2's evidence");
+});
+
+test("T6: a template chain still uses agentos/<chainId>, and a branchName override still wins", async () => {
+  const seed = await seedProject("t6");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
+    steps: { create: [0, 1, 2].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {} });
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[0]!.id } });
+  assert.equal(firstRun.branch, `agentos/${chain.chainId}`, "the derived chain name must not leak into template chains");
+  assert.equal(firstRun.targetBranch, seed.repo.defaultBranch);
+
+  await runStep(chain.tasks[0]!.id);
+  const secondRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[1]!.id } });
+  assert.equal(secondRun.branch, `agentos/${chain.chainId}`);
+  assert.equal(secondRun.targetBranch, `agentos/${chain.chainId}`);
+
+  // The `branchName` override is a declared template variable, and it still wins
+  // over both the template default and anything this batch derives.
+  const overridable = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "tmpl-branch", description: "t", variables: ["branchName"],
+    steps: { create: [0, 1].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+    })) },
+  } });
+  const custom = await instantiateTemplate(db, seed.project.id, overridable.id, {
+    repoId: seed.repo.id, variables: { branchName: "custom/branch" },
+  });
+  const customRun = await db.run.findFirstOrThrow({ where: { taskId: custom.tasks[0]!.id } });
+  assert.equal(customRun.branch, "custom/branch");
+});
+
+test("T7: an operator's targetBranch on a chain step is ignored, and the run says so once", async () => {
+  const seed = await seedProject("t7");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  await runStep(first.body.id, { pushedBranch: shared });
+
+  // The shape an operator repoints by hand today: step ⑦ aimed at step ①'s run branch.
+  const seventh = await seedChainStep(seed, chainId, 6, { targetBranch: `agentos/${first.body.id}/run-1` });
+  const seventhRun = await startStep(seventh.id);
+  assert.equal(seventhRun.targetBranch, shared);
+  assert.equal(seventhRun.branch, shared);
+
+  const notices = await db.taskActivity.findMany({ where: { taskId: seventh.id } });
+  const ignored = notices.filter((row) => /is not used for chain steps/.test(row.body));
+  assert.equal(ignored.length, 1, "said once per run — silently ignoring an operator's value is the footgun");
+  assert.match(ignored[0]!.body, new RegExp(shared.replace(/\//g, "\\/")));
+});
+
+test("T7b: a later chain claim retains the first run's custom PR base", async () => {
+  const seed = await seedProject("t7b");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+    chainId, chainIndex: 0, targetBranch: "release/1.x",
+  });
+  const second = await postTask(seed.project.id, {
+    name: "Step 1", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+    chainId, chainIndex: 1,
+  });
+  await linkFollowUps([first.body.id, second.body.id]);
+  await runStep(first.body.id, { pushedBranch: shared });
+  const secondRun = await db.run.findFirstOrThrow({ where: { taskId: second.body.id } });
+  const claim = await claimRun(secondRun.id);
+  assert.equal(claim.run.targetBranch, shared);
+  assert.equal(claim.run.pullRequestBase, "release/1.x");
+});
+
+test("T8: a null-index row never joins an indexed chain with the same chainId", async () => {
+  const seed = await seedProject("t8");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const indexed = await postTask(seed.project.id, {
+    name: "Indexed", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  await runStep(indexed.body.id, { pushedBranch: shared });
+
+  const orphan = await db.task.create({ data: {
+    projectId: seed.project.id, assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+    name: "No index", description: "d", chainId, chainIndex: null,
+  } });
+  const run = await startStep(orphan.id);
+  assert.equal(run.branch, null, "the malformed 1/1 row keeps its per-run workspace branch");
+  assert.equal(run.targetBranch, seed.repo.defaultBranch, "indexed publication evidence is not consumed");
+});
+
+test("T15: two repos in one chain each need their own published branch", async () => {
+  // Spec R2: one chain's steps may sit on different repos; the same branch name
+  // on two remotes is two unrelated refs. A push in repo A is not evidence that
+  // repo B has the ref, and a step that clones it there fails in provisioning.
+  const seed = await seedProject("t15");
+  const repoB = await db.repo.create({ data: {
+    projectId: seed.project.id, name: "repo-b", remoteUrl: "https://example.test/repo-b.git", mountPath: "/repo-b",
+    defaultBranch: "trunk",
+  } });
+  await db.agentRepoAccess.create({ data: {
+    projectId: seed.project.id, agentId: seed.agent.id, repoId: repoB.id, mountPath: "/repo-b", permissions: "GIT_WRITE",
+  } });
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+
+  const onA = await postTask(seed.project.id, {
+    name: "On A", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  await runStep(onA.body.id, { pushedBranch: shared });
+
+  const onB = await seedChainStep(seed, chainId, 1, { repoId: repoB.id });
+  const runB = await startStep(onB.id);
+  assert.equal(runB.targetBranch, repoB.defaultBranch, "repo A's push is not repo B's evidence");
+  assert.equal(runB.branch, shared, "same name on both remotes; different refs");
+
+  // Once repo B has it too, a later repo-B step does base on it.
+  await runStep(onB.id, { pushedBranch: shared });
+  const laterB = await seedChainStep(seed, chainId, 2, { repoId: repoB.id });
+  assert.equal((await startStep(laterB.id)).targetBranch, shared);
+});
+
+test("T16: a pull-request failure after a successful push still counts as publication", async () => {
+  // delivery.ts pushes first; any later `gh` error is reported as
+  // pushStatus FAILED with the ref already on the remote, and the runner then
+  // marks the whole run FAILED and non-retryable. Adding `status` or
+  // `pushStatus` back into the evidence predicate re-breaks this: step ② would
+  // base on the default branch, recreate the already-published shared name
+  // locally, and have its push rejected non-fast-forward — wedged for good,
+  // because no retry clears it.
+  const seed = await seedProject("t16");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
+
+  await runStep(first.body.id, {
+    exitCode: 0,
+    terminalSuccess: false,
+    failureClass: "TOOL_FAILED",
+    retryable: false,
+    branch: shared,
+    pushStatus: "FAILED",
+    pushError: "gh: API rate limit exceeded",
+    pushedBranch: shared,
+  });
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: firstRun.id } })).status, "FAILED");
+
+  const second = await seedChainStep(seed, chainId, 1);
+  assert.equal((await startStep(second.id)).targetBranch, shared, "the branch is on the remote whatever gh did");
+});
+
+// --- WI-4: POST /tasks -------------------------------------------------------
+
+test("T9: a non-chain task's first run is unchanged", async () => {
+  const seed = await seedProject("t9");
+  const explicit = await postTask(seed.project.id, {
+    name: "Solo", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, targetBranch: "some/branch",
+  });
+  const explicitRun = await db.run.findFirstOrThrow({ where: { taskId: explicit.body.id } });
+  assert.equal(explicitRun.targetBranch, "some/branch");
+  assert.equal(explicitRun.branch, null);
+
+  const implicit = await postTask(seed.project.id, {
+    name: "Solo 2", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const implicitRun = await db.run.findFirstOrThrow({ where: { taskId: implicit.body.id } });
+  assert.equal(implicitRun.targetBranch, seed.repo.defaultBranch);
+  assert.equal(implicitRun.branch, null);
+});
+
+// --- WI-5: operator retry and lost-lease requeue -----------------------------
+
+test("T10: an operator retry lands on the shared branch", async () => {
+  const seed = await seedProject("t10");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  const second = await seedChainStep(seed, chainId, 1);
+  await linkFollowUps([first.body.id, second.id]);
+  await runStep(first.body.id, { pushedBranch: shared });
+
+  await runStep(second.id, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false, pushStatus: "FAILED",
+  });
+  const retried = await operatorRequest(`/tasks/${second.id}/retry`, { method: "POST" });
+  assert.equal(retried.status, 201);
+  assert.equal(retried.body.branch, shared);
+  assert.equal(retried.body.targetBranch, shared);
+});
+
+test("T11: a post-push publication ACK survives lease loss and bases the retry on the shared branch", async () => {
+  const seed = await seedProject("t11");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  const run = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
+  const claim = await claimRun(run.id);
+  const published = await publishViaRoute(claim, shared);
+  assert.equal(published.status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).pushedBranch, shared);
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", leaseExpiresAt: new Date(Date.now() - 60_000), heartbeatAt: null,
+  } });
+
+  assert.ok(await reconcileDatabaseRuns(db, new Date()) > 0);
+  const requeued = await db.run.findFirstOrThrow({ where: { taskId: first.body.id, runNumber: 2 } });
+  assert.equal(requeued.branch, shared);
+  assert.equal(requeued.targetBranch, shared, "the ACK is durable before terminal completion");
+});
+
+test("T12: a non-chain requeue is unchanged", async () => {
+  const seed = await seedProject("t12");
+  const solo = await postTask(seed.project.id, {
+    name: "Solo", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, targetBranch: "some/branch",
+  });
+  const run = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id } });
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", leaseExpiresAt: new Date(Date.now() - 60_000), heartbeatAt: null,
+  } });
+  await db.session.create({ data: {
+    runId: run.id, projectId: seed.project.id, agentId: seed.agent.id, taskId: solo.body.id,
+    runner: "CLAUDE", executionStatus: "RUNNING",
+  } });
+
+  await reconcileDatabaseRuns(db, new Date());
+  const requeued = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
+  assert.equal(requeued.targetBranch, "some/branch");
+  assert.equal(requeued.branch, null);
+});
+
+// --- WI-6: the automatic retry inside the completion transaction -------------
+
+test("T13: an automatic retry of a chain step stays on the shared branch", async () => {
+  const seed = await seedProject("t13");
+  const chainId = `chain-${Date.now()}`;
+  const shared = expectedBranch(seed.project.id, chainId);
+  const first = await postTask(seed.project.id, {
+    name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
+  });
+  // A transient failure: no operator involved, and this is the path a chain hits
+  // most often. Before this batch it copied targetBranch and carried no branch,
+  // so the retry silently left the chain's tree.
+  await runStep(first.body.id, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
+  });
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: first.body.id, runNumber: 2 } });
+  assert.equal(retry.branch, shared);
+  assert.equal(retry.targetBranch, seed.repo.defaultBranch, "nothing published yet");
+
+  // …and once a step of the chain has published, the automatic retry bases on it.
+  const second = await seedChainStep(seed, chainId, 1);
+  await startStep(second.id);
+  await runStep(second.id, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    pushStatus: "SUCCEEDED", pushedBranch: shared,
+  });
+  const secondRetry = await db.run.findFirstOrThrow({ where: { taskId: second.id, runNumber: 2 } });
+  assert.equal(secondRetry.branch, shared);
+  assert.equal(secondRetry.targetBranch, shared, "the completing run's own push is evidence in the same transaction");
+});
+
+test("T14: an automatic retry of a non-chain task is unchanged", async () => {
+  const seed = await seedProject("t14");
+  const solo = await postTask(seed.project.id, {
+    name: "Solo", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, targetBranch: "some/branch",
+  });
+  await runStep(solo.body.id, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
+  });
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
+  assert.equal(retry.targetBranch, "some/branch");
+  assert.equal(retry.branch, null, "this path has never carried branch forward; that asymmetry is preserved");
+});
+
+// --- WI-7 / WI-8: the flag through the API ----------------------------------
+
+test("T17: opensPullRequest defaults to true and round-trips", async () => {
+  const seed = await seedProject("t17");
+  const created = await postTask(seed.project.id, {
+    name: "Default", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  assert.equal(created.body.opensPullRequest, true, "behaviour-preserving: every existing workflow keeps its PR");
+
+  const explicit = await postTask(seed.project.id, {
+    name: "Docs", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, opensPullRequest: false,
+  });
+  assert.equal(explicit.body.opensPullRequest, false);
+
+  const patched = await operatorRequest(`/tasks/${explicit.body.id}`, {
+    method: "PATCH", body: JSON.stringify({ opensPullRequest: true }),
+  });
+  assert.equal(patched.status, 200);
+  assert.equal((await operatorRequest(`/tasks/${explicit.body.id}`)).body.opensPullRequest, true);
+});
+
+test("T18: an instantiated template copies each step's flag onto its task", async () => {
+  const seed = await seedProject("t18");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
+    steps: { create: [0, 1, 2].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id,
+      prompt: `do ${index}`, opensPullRequest: index !== 1,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {} });
+  const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
+  assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false, true]);
+});
+
+test("T19: a PATCH does not change a run that is already queued", async () => {
+  const seed = await seedProject("t19");
+  const created = await postTask(seed.project.id, {
+    name: "Queued", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const queued = await db.run.findFirstOrThrow({ where: { taskId: created.body.id } });
+  assert.equal(queued.opensPullRequest, true);
+
+  await operatorRequest(`/tasks/${created.body.id}`, { method: "PATCH", body: JSON.stringify({ opensPullRequest: false }) });
+  assert.equal((await operatorRequest(`/tasks/${created.body.id}`)).body.opensPullRequest, false);
+
+  // The claim payload is where the old behaviour leaked: it reads the live task
+  // row, so a runner would have seen the patched value on an already-queued run.
+  const claim = await claimRun(queued.id);
+  assert.equal(claim.run.opensPullRequest, true, "the run carries the snapshot taken when it was created");
+
+  // …and the *next* run does get the new value.
+  await completeRunViaRoute(claim, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false, pushStatus: "FAILED",
+  });
+  const retried = await operatorRequest(`/tasks/${created.body.id}/retry`, { method: "POST" });
+  assert.equal(retried.body.opensPullRequest, false);
+});
+
+test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots", async () => {
+  const seed = await seedProject("t19b");
+  const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const holdTask = async (taskId: string) => {
+    let release!: () => void;
+    let locked!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const acquired = new Promise<void>((resolve) => { locked = resolve; });
+    const transaction = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${taskId} FOR UPDATE`;
+      locked();
+      await released;
+    });
+    await acquired;
+    return { release, transaction };
+  };
+
+  const automatic = await postTask(seed.project.id, {
+    name: "Automatic", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const automaticRun = await db.run.findFirstOrThrow({ where: { taskId: automatic.body.id } });
+  const automaticClaim = await claimRun(automaticRun.id);
+  const heldAutomatic = await holdTask(automatic.body.id);
+  const patchAutomatic = operatorRequest(`/tasks/${automatic.body.id}`, {
+    method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
+  });
+  await wait(25);
+  const completeAutomatic = completeRunViaRoute(automaticClaim, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true, pushStatus: "FAILED",
+  });
+  await wait(25);
+  heldAutomatic.release();
+  assert.equal((await patchAutomatic).status, 200);
+  assert.equal((await completeAutomatic).status, 200);
+  await heldAutomatic.transaction;
+  assert.equal((await db.run.findFirstOrThrow({ where: { taskId: automatic.body.id, runNumber: 2 } })).opensPullRequest, false);
+
+  const lost = await postTask(seed.project.id, {
+    name: "Lost", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const lostRun = await db.run.findFirstOrThrow({ where: { taskId: lost.body.id } });
+  await db.run.update({ where: { id: lostRun.id }, data: {
+    status: "RUNNING", leaseExpiresAt: new Date(Date.now() - 60_000), heartbeatAt: null,
+  } });
+  await db.session.create({ data: {
+    runId: lostRun.id, projectId: seed.project.id, agentId: seed.agent.id, taskId: lost.body.id,
+    runner: "CLAUDE", executionStatus: "RUNNING",
+  } });
+  const heldLost = await holdTask(lost.body.id);
+  const patchLost = operatorRequest(`/tasks/${lost.body.id}`, {
+    method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
+  });
+  await wait(25);
+  const reconcile = reconcileDatabaseRuns(db, new Date());
+  await wait(25);
+  heldLost.release();
+  assert.equal((await patchLost).status, 200);
+  assert.ok(await reconcile > 0);
+  await heldLost.transaction;
+  assert.equal((await db.run.findFirstOrThrow({ where: { taskId: lost.body.id, runNumber: 2 } })).opensPullRequest, false);
+});
+
+test("T20: a template step's PR flag is settable through the API", async () => {
+  const seed = await seedProject("t20");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
+    steps: { create: [0, 1].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+    })) },
+  } });
+  const steps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: template.id }, orderBy: { stepIndex: "asc" } });
+  const patched = await operatorRequest(`/task-templates/${template.id}/steps/${steps[1]!.id}`, {
+    method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
+  });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.opensPullRequest, false);
+
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {} });
+  const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
+  assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false]);
+
+  // A step of another template is not this template's to patch.
+  const other = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "other", description: "t", variables: [],
+    steps: { create: [{ stepIndex: 0, name: "Only", assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: "do" }] },
+  } });
+  const foreign = await db.taskTemplateStep.findFirstOrThrow({ where: { taskTemplateId: other.id } });
+  const crossed = await operatorRequest(`/task-templates/${template.id}/steps/${foreign.id}`, {
+    method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
+  });
+  assert.equal(crossed.status, 404);
+
+  const malformed = await operatorRequest(`/task-templates/${template.id}/steps/${steps[0]!.id}`, {
+    method: "PATCH", body: JSON.stringify({ opensPullRequest: "no" }),
+  });
+  assert.equal(malformed.status, 400);
+});
+
+test("T21: template steps are creatable with defaults and full ownership/agent validation", async () => {
+  const seed = await seedProject("t21");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id,
+    name: "authorable",
+    description: "t",
+    variables: [],
+    webhookRepoId: seed.repo.id,
+  } });
+  const body = {
+    stepIndex: 0,
+    name: "Implement",
+    assigneeType: "AGENT",
+    assigneeAgentId: seed.agent.id,
+    prompt: "Implement the change",
+  };
+  const created = await operatorRequest(`/task-templates/${template.id}/steps`, {
+    method: "POST", body: JSON.stringify(body),
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.taskTemplateId, template.id);
+  assert.equal(created.body.opensPullRequest, true);
+  assert.equal(created.body.outputKind, "result");
+
+  const duplicate = await operatorRequest(`/task-templates/${template.id}/steps`, {
+    method: "POST", body: JSON.stringify({ ...body, opensPullRequest: false }),
+  });
+  assert.equal(duplicate.status, 409);
+
+  const noAccess = await db.agent.create({ data: {
+    projectId: seed.project.id,
+    environmentId: (await db.environment.findFirstOrThrow({ where: { projectId: seed.project.id } })).id,
+    name: "no-access", title: "No access", model: "claude", foundationalPrompt: "f", rolePrompt: "r",
+  } });
+  const denied = await operatorRequest(`/task-templates/${template.id}/steps`, {
+    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, assigneeAgentId: noAccess.id }),
+  });
+  assert.equal(denied.status, 400);
+  assert.match(denied.body.error, /no grant/i);
+
+  const archived = await db.agent.update({ where: { id: noAccess.id }, data: { archivedAt: new Date() } });
+  const archivedResult = await operatorRequest(`/task-templates/${template.id}/steps`, {
+    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, assigneeAgentId: archived.id }),
+  });
+  assert.equal(archivedResult.status, 400);
+  assert.match(archivedResult.body.error, /archived/i);
+
+  const other = await seedProject("t21-other");
+  const foreign = await operatorRequest(`/task-templates/${template.id}/steps`, {
+    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, assigneeAgentId: other.agent.id }),
+  });
+  assert.equal(foreign.status, 400);
+  assert.match(foreign.body.error, /does not belong/i);
+
+  const missing = await operatorRequest(`/task-templates/${template.id}/steps`, {
+    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, prompt: undefined }),
+  });
+  assert.equal(missing.status, 400);
+});

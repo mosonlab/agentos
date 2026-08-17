@@ -24,6 +24,7 @@ import {
   RunnerKind,
   RunnerPreference,
   recomputeSessionUsage,
+  resolveRunBranches,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -211,6 +212,7 @@ const taskFields = {
   assigneeType: z.nativeEnum(AssigneeType),
   assigneeAgentId: id.nullable(),
   approvalGate: z.boolean(),
+  opensPullRequest: z.boolean(),
   maxDurationMin: z.number().int().min(1).max(24 * 60),
   stallTimeoutMin: z.number().int().min(1).max(24 * 60),
   maxSessionsPerTask: z.number().int().min(1).max(100),
@@ -228,6 +230,7 @@ const taskInput = z.object({
   assigneeType: taskFields.assigneeType.default(AssigneeType.AGENT),
   assigneeAgentId: taskFields.assigneeAgentId.default(null),
   approvalGate: taskFields.approvalGate.default(false),
+  opensPullRequest: taskFields.opensPullRequest.default(true),
   maxDurationMin: taskFields.maxDurationMin.default(120),
   stallTimeoutMin: taskFields.stallTimeoutMin.default(10),
   maxSessionsPerTask: taskFields.maxSessionsPerTask.default(5),
@@ -263,6 +266,11 @@ const heartbeatInput = z.object({
   lastProgressEventAt: z.coerce.date().nullable().optional(),
   inFlightTool: z.record(z.string(), z.unknown()).nullable().optional(),
 });
+const publicationInput = z.object({
+  runnerId: z.string().trim().min(1).max(120),
+  fencingToken: fence,
+  pushedBranch: z.string().trim().min(1).max(255),
+});
 const startInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
@@ -288,6 +296,11 @@ const completionInput = z.object({
   retryable: z.boolean().optional(),
   externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
+  // The ref the runner actually handed to `git push`, which is not always
+  // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
+  // the workspace's. It is the only publication evidence resolveRunBranches
+  // trusts, so it must survive the trip verbatim.
+  pushedBranch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   headSha: z.string().nullable().optional(),
   output: z.string().max(500_000).nullable().optional(),
@@ -355,6 +368,20 @@ const webhookConfigPatch = z.object({
   // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
+const templateStepPatch = z.object({ opensPullRequest: z.boolean() });
+const templateStepInput = z.object({
+  stepIndex: z.number().int().min(0),
+  name: z.string().trim().min(1).max(200),
+  assigneeType: z.nativeEnum(AssigneeType),
+  assigneeAgentId: id.nullable().default(null),
+  prompt: z.string().min(1).max(100_000),
+  approvalGate: z.boolean().default(false),
+  attachmentsFromPrevious: z.boolean().default(false),
+  spawnPolicy: z.record(z.string(), z.unknown()).nullable().default(null),
+  runner: z.nativeEnum(RunnerKind).nullable().default(null),
+  outputKind: z.string().trim().min(1).max(80).default("result"),
+  opensPullRequest: z.boolean().default(true),
+});
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -1317,6 +1344,72 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
   });
+  app.post("/task-templates/:templateId/steps", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const body = await readJson(context.req.raw, templateStepInput);
+    const template = await db.taskTemplate.findUnique({
+      where: { id: templateId },
+      select: { id: true, projectId: true, webhookRepoId: true },
+    });
+    if (!template) return context.json({ error: "Template not found" }, 404);
+    if (body.assigneeType === AssigneeType.AGENT && !body.assigneeAgentId) {
+      return context.json({ error: "Agent template steps require an assignee" }, 400);
+    }
+    if (body.assigneeType === AssigneeType.HUMAN && body.assigneeAgentId) {
+      return context.json({ error: "Human template steps cannot have an agent assignee" }, 400);
+    }
+    const agent = body.assigneeAgentId
+      ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: template.projectId } })
+      : null;
+    if (body.assigneeAgentId && !agent) {
+      return context.json({ error: "Assignee does not belong to this template's project" }, 400);
+    }
+    if (agent?.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
+    if (agent && template.webhookRepoId) {
+      const access = await db.agentRepoAccess.findFirst({
+        where: { projectId: template.projectId, agentId: agent.id, repoId: template.webhookRepoId },
+        select: { agentId: true },
+      });
+      if (!access) return context.json({ error: "Assignee has no grant for this template's Repo" }, 400);
+    }
+    const duplicate = await db.taskTemplateStep.findFirst({
+      where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
+      select: { id: true },
+    });
+    if (duplicate) return context.json({ error: "Template step index already exists" }, 409);
+    return context.json(await db.taskTemplateStep.create({ data: {
+      taskTemplateId: template.id,
+      stepIndex: body.stepIndex,
+      name: body.name,
+      assigneeType: body.assigneeType,
+      assigneeAgentId: body.assigneeAgentId,
+      prompt: body.prompt,
+      approvalGate: body.approvalGate,
+      attachmentsFromPrevious: body.attachmentsFromPrevious,
+      spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
+      runner: body.runner,
+      outputKind: body.outputKind,
+      opensPullRequest: body.opensPullRequest,
+    } }), 201);
+  });
+  // Bounded on purpose: `opensPullRequest` only. A general template-step editor
+  // is a whole authoring surface (stepIndex, name, assigneeType, prompt,
+  // outputKind, approvalGate, attachmentsFromPrevious, runner, spawnPolicy,
+  // agent) that this batch's spec does not describe and no caller wants yet.
+  // Widening this route is a separate decision, not a follow-on edit.
+  app.patch("/task-templates/:templateId/steps/:stepId", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const stepId = id.parse(context.req.param("stepId"));
+    const body = await readJson(context.req.raw, templateStepPatch);
+    // Ownership is checked, not assumed: the step id alone would let a caller
+    // patch another template's step through any templateId that happens to exist.
+    const step = await db.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
+    if (!step) return context.json({ error: "Template step not found" }, 404);
+    return context.json(await db.taskTemplateStep.update({
+      where: { id: stepId },
+      data: { opensPullRequest: body.opensPullRequest },
+    }));
+  });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
     const body = await readJson(context.req.raw, webhookConfigPatch);
@@ -1751,8 +1844,19 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
       });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
-      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW) {
+      // API-created chains arrive one task at a time. Only index 0 may receive
+      // an eager run; later indexed steps stay parked until
+      // activateChainSuccessor observes their predecessor's durable success.
+      // Without this guard every POST snapshots the fallback base before step
+      // 0 can publish, and all runners race the same new shared head.
+      const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
+      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
+        // This run is built inline rather than through enqueueTaskRun, so it is
+        // one of the paths a chain fix can miss. Missing it puts step ① on a
+        // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
+        // silently absent from the tree every later step reviews.
+        const branches = await resolveRunBranches(tx, { ...created, repo }, null);
         await tx.run.create({
           data: {
             projectId,
@@ -1763,7 +1867,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             dedupeKey: makeDedupeKey(created.id, 1),
             runner,
             model: agent.model,
-            targetBranch: body.targetBranch ?? repo.defaultBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: created.opensPullRequest,
             promptHash: hashPrompt([agent.foundationalPrompt, agent.rolePrompt, created.name, created.description]),
             maxDurationMin: body.maxDurationMin,
             stallTimeoutMin: body.stallTimeoutMin,
@@ -1938,6 +2044,18 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       if ("error" in written) return context.json({ error: written.error }, written.code);
       return context.json(written.task);
     }
+    if (body.opensPullRequest !== undefined) {
+      // The flag defines the next Run snapshot. PATCH must therefore share the
+      // same Task-row serialization point as completion retries and lost-lease
+      // requeues; otherwise a request that commits first can still be missed by
+      // a creator holding a stale task relation.
+      const updated = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return null;
+        return tx.task.update({ where: { id: taskId }, data: updateData });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      return updated ? context.json(updated) : context.json({ error: "Task not found" }, 404);
+    }
     return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
   });
   app.delete("/tasks/:taskId", async (context) => {
@@ -1958,6 +2076,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         include: {
           assigneeAgent: true,
           templateStep: true,
+          repo: true,
           runs: { orderBy: { runNumber: "desc" }, take: 1 },
         },
       });
@@ -1975,6 +2094,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
       }
       const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
+      // A task with no repo cannot be a chain step with a branch, and this route
+      // already tolerates a null repoId — so it keeps inheriting run-1's fields.
+      const branches = task.repo
+        ? await resolveRunBranches(tx, { ...task, repo: task.repo }, last)
+        : null;
       const run = await tx.run.create({
         data: {
           projectId: last.projectId,
@@ -1986,8 +2110,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
           runner: derived.runner,
           model: derived.model,
-          targetBranch: last.targetBranch,
-          branch: last.branch,
+          targetBranch: branches ? branches.targetBranch : last.targetBranch,
+          branch: branches ? branches.branch : last.branch,
+          opensPullRequest: task.opensPullRequest,
           promptHash: derived.promptHash,
           maxDurationMin: last.maxDurationMin,
           stallTimeoutMin: last.stallTimeoutMin,
@@ -2453,6 +2578,20 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           secrets[envVar] = decryptSecret(secret.encryptedValue, secret.ciphertextVersion);
         }
         const run = await tx.run.findUniqueOrThrow({ where: { id: candidate.id } });
+        const chainFirstRun = candidate.task.chainId && candidate.task.chainIndex !== null
+          ? await tx.run.findFirst({
+            where: {
+              repoId: candidate.repo.id,
+              task: {
+                projectId: candidate.task.projectId,
+                chainId: candidate.task.chainId,
+                chainIndex: { not: null },
+              },
+            },
+            select: { targetBranch: true },
+            orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
+          })
+          : null;
         const priorOutputsRaw = candidate.task.chainId && candidate.task.chainIndex !== null
           ? await tx.taskStepOutput.findMany({
             where: { task: { chainId: candidate.task.chainId, chainIndex: { lt: candidate.task.chainIndex } } },
@@ -2468,7 +2607,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           task: candidate.task,
           agent: candidate.agent,
           repo: candidate.repo,
-          run,
+          // A later chain run targets the shared head, so its own targetBranch
+          // cannot tell delivery which integration line the chain started
+          // from. Carry the first run's durable base separately for PR create.
+          run: { ...run, pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch },
           session,
           runner: candidate.runner,
           fencingToken,
@@ -2548,6 +2690,27 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
     return waiting
       ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+      : context.json({ error: "Stale fencing token" }, 409);
+  });
+
+  // Publication is a separate durable fact from terminal completion. Persist
+  // it immediately after git push, before GitHub work and cleanup, so a lost
+  // runner does not make the reconciler forget a branch that already exists.
+  app.post("/runner/runs/:runId/publication", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const body = await readJson(context.req.raw, publicationInput);
+    const updated = await db.run.updateMany({
+      where: {
+        id: runId,
+        runnerId: body.runnerId,
+        fencingToken: body.fencingToken,
+        leaseExpiresAt: { gt: new Date() },
+        status: { in: activeRunStatuses },
+      },
+      data: { pushedBranch: body.pushedBranch },
+    });
+    return updated.count === 1
+      ? context.json({ ok: true })
       : context.json({ error: "Stale fencing token" }, 409);
   });
 
@@ -2798,7 +2961,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const result = await db.$transaction(async (tx) => {
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
-        include: { task: { include: { templateStep: true } }, session: true },
+        include: {
+          task: { include: { templateStep: true, repo: { select: { defaultBranch: true } } } },
+          session: true,
+        },
       });
       if (!run?.session) return null;
       const succeeded = completionSucceeded({
@@ -2816,6 +2982,12 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       // An external failure buys the task one more attempt rather than spending one.
       const external = externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
       const budgetCeiling = run.maxRunsPerTask + (external ? 1 : 0);
+      // Join the Task-row exclusion protocol only when this completion can
+      // create a retry. PATCH then retry creation are ordered by this lock, and
+      // the fresh read below snapshots exactly the value current at creation.
+      if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
+        await lockTask(tx, run.task.id);
+      }
       const terminalStatus = succeeded
         ? RunStatus.SUCCEEDED
         : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
@@ -2834,6 +3006,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           retryAt,
           terminationReason: body.terminationReason ?? null,
           branch: body.branch ?? run.branch,
+          // Completion is a second publication write, never an eraser of the
+          // immediate post-push ACK recorded on this run.
+          pushedBranch: body.pushedBranch ?? run.pushedBranch,
           baseSha: body.baseSha ?? run.baseSha,
           headSha: body.headSha ?? null,
           pushStatus: body.pushStatus,
@@ -2864,6 +3039,25 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       let retryCreated = false;
       if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
+        const currentTask = await tx.task.findUniqueOrThrow({
+          where: { id: run.task.id },
+          include: { templateStep: true, repo: { select: { defaultBranch: true } } },
+        });
+        // The fifth run-creating path. It copies `targetBranch` and has never
+        // carried `branch` forward, so before this change an automatic retry of
+        // a chain step silently dropped off the chain branch onto
+        // `agentos/<taskId>/run-<n>` (workspace.ts's fallback) — the same defect
+        // this batch exists to fix, one route further along. Only chain steps
+        // are rerouted; template and non-chain retries keep today's fields
+        // exactly, including carrying no `branch` at all (unlike the operator
+        // retry route — that asymmetry is preserved, not tidied).
+        //
+        // This runs *after* the updateMany that writes the completing run's
+        // `pushedBranch`, so a chain step whose run-1 published the branch and
+        // then failed gives its own retry correct evidence in this transaction.
+        const branches = currentTask.chainId && currentTask.chainIndex !== null && !currentTask.templateId && currentTask.repo
+          ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, null)
+          : { branch: null, targetBranch: run.targetBranch };
         await tx.run.create({
           data: {
             projectId: run.projectId,
@@ -2875,7 +3069,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             dedupeKey: makeDedupeKey(run.task.id, run.runNumber + 1),
             runner: run.runner,
             model: run.model,
-            targetBranch: run.targetBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: currentTask.opensPullRequest,
             promptHash: run.promptHash,
             maxDurationMin: run.maxDurationMin,
             stallTimeoutMin: run.stallTimeoutMin,

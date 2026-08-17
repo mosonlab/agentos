@@ -122,7 +122,13 @@ test("chain successor lookup is project-scoped, gap tolerant, and CAS claimed be
       updateMany: async () => ({ count: 1 }),
       findUniqueOrThrow: async () => successor,
     },
-    run: { create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1" }; } },
+    run: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1" }; },
+      // resolveRunBranches asks whether any run of this chain has published the
+      // shared branch on this repo. Nothing has here, so the successor bases on
+      // the repo default.
+      findFirst: async () => null,
+    },
     taskActivity: { create: async () => ({}) },
   } as any;
   const result = await activateChainSuccessor(tx, {
