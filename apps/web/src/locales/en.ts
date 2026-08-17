@@ -124,6 +124,7 @@ export const en = {
   "chain.title": "Chain",
 
   "common.cancel": "Cancel",
+  "common.close": "Close",
   "common.created": "Created",
   "common.delete": "Delete",
   "common.dismiss": "Dismiss",

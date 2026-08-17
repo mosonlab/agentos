@@ -123,6 +123,7 @@ export const zh = {
   "chain.title": "任务链",
 
   "common.cancel": "取消",
+  "common.close": "关闭",
   "common.created": "创建于",
   "common.delete": "删除",
   "common.dismiss": "关闭",
