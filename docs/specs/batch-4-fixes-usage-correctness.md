@@ -218,8 +218,11 @@ guarantee: at most one recompute per session at a time.
 return type (`Promise<boolean>` — true iff it wrote), and gains this internal shape:
 
 1. Open an interactive transaction (`db.$transaction(async (tx) => …)`) with an explicit `timeout`.
-2. As the **first** statement inside it, take a transaction-scoped advisory lock keyed by the session
-   id: `SELECT pg_advisory_xact_lock($classId, $key)`, where
+2. As the **first** statement inside it, install `SET LOCAL lock_timeout = '3s'`; a timeout configured
+   after acquisition cannot bound the wait it is meant to protect.
+3. Take a transaction-scoped advisory lock keyed by the session id:
+   `SELECT pg_advisory_xact_lock($classId, $key)::text AS locked`, where the cast is required because
+   Prisma 6.19 cannot deserialize PostgreSQL's `void` return, and
    - `$classId` is a module constant reserved for "session usage recompute" — declare it in
      `packages/db/src/usage.ts` with a comment naming what owns it, so the next advisory-lock user
      picks a different class rather than colliding;
@@ -230,12 +233,12 @@ return type (`Promise<boolean>` — true iff it wrote), and gains this internal 
    - Hash collisions between two different session ids are acceptable and must be noted in the
      comment: two unrelated sessions serialise against each other briefly. Correctness is unaffected;
      only concurrency is, and the contended population is tiny (§4.1.4).
-3. Also issue `SET LOCAL lock_timeout = '3s'` inside the transaction so a pathological wait fails
-   fast rather than pinning a pool connection. (Best-effort: whether `lock_timeout` bounds an
-   advisory-lock wait is a PostgreSQL implementation detail; the Prisma `$transaction` `timeout` is
-   the backstop that must be set regardless.)
 4. Then, all on `tx`: read the `FINAL_OUTPUT` events, read the current columns, compare, write.
 5. Return `false` without writing when the session row is gone or when `sameColumns` holds — as today.
+6. A `55P03`/lock-wait `P2028` rolls that attempt back and is retried internally without a fixed
+   count. It must not escape as a clean terminal outcome: the event is already durable and the older
+   holder may be about to commit a snapshot that predates it. Every attempt remains bounded; the
+   public invocation remains pending until one attempt folds the durable event.
 
 The lock is released by commit or rollback; a crashed process releases it when its connection dies.
 No lock can leak.
@@ -243,11 +246,11 @@ No lock can leak.
 #### 4.1.3 The ingest path must stay non-fatal
 
 `packages/api/src/app.ts:2507-2523` wraps the call in `try/catch` and logs. **That must not change**,
-and the reason must survive in the comment: `appendEvents` has no retry, so a throw here would 500
+and the reason must survive in the comment: `appendEvents` has no request-level retry, so a throw here would 500
 the runner's terminal flush and make the runner record a successful run as failed and delete its
-workspace unpushed. With the lock added, the catch also absorbs a lock-wait timeout; the session's
-columns are then repaired by the next `FINAL_OUTPUT` or by `db:backfill-session-usage`, which is the
-same repair path the existing comment already documents.
+workspace unpushed. Bounded lock-wait errors are handled **inside** the recompute and do not reach this
+catch; the catch remains for unrelated database failures, whose recovery is still a later terminal
+event or `db:backfill-session-usage`.
 
 #### 4.1.4 What is actually contended
 
@@ -418,9 +421,11 @@ Two consequences that must be written down, not discovered:
   in §7 and a step in the runbook.
 - **Editing an already-applied migration file changes its checksum.** This is legitimate *only*
   because production has not applied it; the only database that has is the local dev one. On that
-  database a later `prisma migrate deploy`/`dev` will report the file as modified after it was
-  applied. The runbook must carry the one-time re-record step (delete that migration's row from
-  `_prisma_migrations`, then `prisma migrate resolve --applied 20260816165548_batch4_session_usage`),
+   database a later `prisma migrate deploy`/`dev` will report the file as modified after it was
+   applied. The runbook must carry the one-time re-record step (delete that migration's row from the
+   explicitly selected dev schema, then run `DATABASE_URL="$DEV_DATABASE_URL" npx prisma migrate
+   resolve --schema packages/db/prisma/schema.prisma --applied 20260816165548_batch4_session_usage`
+   and verify the replacement row on that same target),
   or, on a disposable dev database, `prisma migrate reset`. Do not create a second migration folder
   to dodge this: a second folder changes nothing about the checksum of the first, and `migrate deploy`
   applies every pending migration in one go, so a split into two folders would not let the operator
@@ -428,57 +433,33 @@ Two consequences that must be written down, not discovered:
 
 #### 4.4.3 What the operator types, in order
 
-The runbook owns the authoritative copy; this is the sequence it must state, and the sequence the
-rehearsal in §7.3 must prove. Substitute the real database name/URL; **never write a token or a
-password into any artifact**.
+The runbook owns the authoritative command copy. Version **1.1** of
+`docs/runbooks/batch-4-rollback.md` supersedes this spec's earlier literal commands; the sequence the
+rehearsal in §7.3 must prove is:
 
-```bash
-# 0. Pre-flight, on the checkout of this batch's merged code.
-npm run db:validate
-psql "$DATABASE_URL" -c '\d+ "Session"'          # confirm the four columns are absent
-psql "$DATABASE_URL" -c "SELECT migration_name, finished_at, rolled_back_at
-                           FROM _prisma_migrations ORDER BY started_at DESC LIMIT 5;"
-                                                  # confirm 20260816165548 is NOT recorded
-psql "$DATABASE_URL" -c "SELECT relname, n_live_tup FROM pg_stat_user_tables
-                           WHERE relname IN ('Session','SessionEvent');"
+1. Derive a credential-safe `PSQL_URL` by removing Prisma's `schema` query parameter, validate the
+   intended schema, and give every psql command that schema through `search_path`. libpq rejects
+   Prisma's `?schema=...` parameter; psql must never receive `$DATABASE_URL` verbatim.
+2. Run `prisma migrate status --schema packages/db/prisma/schema.prisma` and record the **complete**
+   pending set. If batch 2.5's two later migrations are pending, compose its runbook—including
+   `db:backfill-task-source`—into this production window. `migrate deploy` never applies only a named
+   migration; it applies every pending migration in timestamp order.
+3. Build each batch-4 index with its own `CREATE INDEX CONCURRENTLY` psql invocation, using
+   `PGOPTIONS` for both the 3-second lock bound and the validated search path; prove `indisvalid` and
+   `indisready` before continuing.
+4. Construct `MIGRATE_URL` with `URL`/`URLSearchParams.set("options", "-c lock_timeout=3s")`, preserving
+   unrelated query parameters, then run Prisma with an explicit `--schema`. Prisma 6.19 was rehearsed
+   with the resulting `+` encoding and `SHOW lock_timeout` returned `3s`.
+5. On a `55P03`/`P3018`, prove all six batch-4 objects absent, inspect the failed migration row, run
+   `migrate resolve --schema packages/db/prisma/schema.prisma --rolled-back ...`, verify
+   `rolled_back_at`, and only then retry. A blind retry is blocked by `P3009`.
+6. Generate and drift-check; restart onto implementation `792570da5c8f6a4fc7af75cd65b395dead53033b`
+   or a tested descendant, never `2737113`; run the session-usage backfill twice. If batch 2.5 was
+   pending, also run its backfill before restart as its runbook requires.
 
-# 1. Build both indexes out of band. Autocommit — one -c per statement, and never
-#    psql -1/--single-transaction: CONCURRENTLY cannot run inside a transaction.
-psql "$DATABASE_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "Session_projectId_requestedAt_idx" ON "Session"("projectId", "requestedAt");'
-psql "$DATABASE_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "SessionEvent_runId_seq_idx" ON "SessionEvent"("runId", "seq");'
-
-# 2. Prove both are valid. A CONCURRENTLY build that fails leaves an INVALID index
-#    that is never used and never repaired by itself.
-psql "$DATABASE_URL" -c "SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i
-                           JOIN pg_class c ON c.oid = i.indexrelid
-                          WHERE c.relname IN ('Session_projectId_requestedAt_idx','SessionEvent_runId_seq_idx');"
-#    Any row with indisvalid = false:
-#      DROP INDEX CONCURRENTLY "<name>";  then repeat step 1 for that index when the table is quieter.
-
-# 3. Apply the migration through Prisma with a bounded lock wait. ADD COLUMN on a
-#    nullable column with no default is metadata-only, but it still needs
-#    ACCESS EXCLUSIVE, which queues behind the six writers — bound the wait rather
-#    than discover it (batch 2.5's convention).
-DATABASE_URL="${DATABASE_URL}?options=-c%20lock_timeout%3D3s" \
-  npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
-#    On 55P03 (lock_not_available): retry when the runners are idle. Nothing was applied.
-#    If the URL-options form is unavailable in this Prisma version, the documented
-#    fallback is: apply the ALTER TABLE by hand in psql under SET lock_timeout, then
-#    `prisma migrate resolve --applied 20260816165548_batch4_session_usage`.
-
-# 4. Prove the database matches the datamodel.
-npm run db:generate
-npm run db:drift-check          # must exit 0
-
-# 5. Restart the API onto THIS batch's code (operator action; this batch never does it).
-#    Not onto 2737113 — see §4.2.4.
-
-# 6. Backfill, after the restart, so that any session that finished between step 3
-#    and step 5 (ingested by the old API, which writes none of these columns) is also
-#    repaired. Concurrent ingest during the backfill is now safe: that is MF-1's lock.
-npm run db:backfill-session-usage    # exits non-zero if any session failed (§4.3.4)
-npm run db:backfill-session-usage    # second run: `updated 0`
-```
+Substitute the real database URL only in the shell environment; **never write a token, password, or
+connection string into an artifact**. The exact executable commands and verification queries are in
+runbook §§1.0–1.6.
 
 Step 6 running twice, with the second reporting `updated 0`, is the acceptance evidence for
 idempotence and replaces the batch 4 spec's §9 item 9 wording.
@@ -508,36 +489,24 @@ order:
    `docs/specs/batch-4-sessions-viewer.md:652-658`: `GET /runs/:runId/events` returns an envelope in
    batch 4. Revert API and web together, or revert the API alone (the envelope-aware client tolerates
    the old array shape) — **never revert the web app alone while keeping the new API**.
-4. **Exceptional physical rollback**, only for the case where the columns genuinely must go. In this
-   order, with bounded lock waits:
-
-   ```sql
-   -- Indexes first, outside any transaction, so a failure here leaves the columns intact.
-   SET lock_timeout = '3s';
-   DROP INDEX CONCURRENTLY IF EXISTS "SessionEvent_runId_seq_idx";
-   DROP INDEX CONCURRENTLY IF EXISTS "Session_projectId_requestedAt_idx";
-
-   -- Then the columns, in one bounded transaction.
-   BEGIN;
-     SET LOCAL lock_timeout = '3s';
-     ALTER TABLE "Session"
-       DROP COLUMN "totalTokens", DROP COLUMN "cachedInputTokens",
-       DROP COLUMN "outputTokens", DROP COLUMN "inputTokens";
-   COMMIT;
-   ```
+4. **Exceptional physical rollback**, only for the case where the columns genuinely must go. Drop
+   each index with its own `DROP INDEX CONCURRENTLY` psql invocation—never in a transaction or in the
+   same `-c` as `SET`—and supply the lock bound plus validated schema through `PGOPTIONS`. Then drop
+   the four columns in one bounded transaction. Use the runbook's derived libpq-compatible
+   `PSQL_URL`, not the Prisma URL.
 
    State explicitly that `Session.costUsd` **predates this migration** and must not be dropped — it
    is in the schema but not in `20260816165548`'s `ALTER TABLE`, and dropping it destroys data no
    backfill in this batch restores.
-5. **Reconcile `_prisma_migrations`:**
-   `npx prisma migrate resolve --rolled-back 20260816165548_batch4_session_usage`, then the
-   verification `SELECT` showing `rolled_back_at` set. State why this is mandatory rather than
-   cosmetic: without it the next `migrate deploy` skips a migration whose objects no longer exist.
-6. **Verify drift after the rollback** — with the code checkout that predates the migration (whose
-   `schema.prisma` declares neither the columns nor the two indexes), `npm run db:drift-check` must
-   exit 0. State the pairing rule: a physical rollback is only complete when the checked-out
-   datamodel and the live schema agree, so the schema rollback and the code rollback are one step,
-   not two.
+5. **Reconcile `_prisma_migrations`:** a successfully applied migration cannot be passed to
+   `migrate resolve --rolled-back`—Prisma returns `P3012`. After the exceptional physical rollback,
+   delete only `20260816165548_batch4_session_usage`'s history row and verify the query returns zero
+   rows. This is mandatory: otherwise forward deploy skips objects that no longer exist. Reserve
+   `--rolled-back` for §4.4.3's failed-apply (`P3018`) recovery.
+6. **Verify drift after the rollback** against a datamodel that removes **only batch 4** while retaining
+   every other migration applied to the target. A checkout that also predates batch 2.5 correctly
+   reports its objects as drift. State the pairing rule: a physical rollback is complete only when
+   the checked-out datamodel and live schema agree.
 7. **Prove the forward redeploy**: re-checkout the batch 4 code, re-run §4.4.3 steps 1-4, and confirm
    `migrate deploy` applies the (re-recorded) migration cleanly — which now holds even if an index
    survived the rollback, thanks to §4.4.2's `IF NOT EXISTS`.
@@ -681,11 +650,14 @@ with runtime handles the second control plane does not own, whose reconciler the
 orphans and deletes their workspaces. This is a hard rule, learned by destroying a workspace on
 2026-08-16.
 
-The rehearsal proves, in order: indexes build concurrently and report `indisvalid = true`;
-`migrate deploy` applies the columns and records the migration; `db:drift-check` exits 0; the backfill
-runs twice with the second reporting `updated 0`; then the rollback drops indexes and columns,
-`migrate resolve --rolled-back` records it, drift-check against the pre-batch-4 datamodel exits 0; and
-a forward redeploy applies cleanly. Record the date and the result in the runbook's version header.
+The rehearsal proves the complete v1.1 runbook: Prisma URLs are converted to a libpq-compatible URL
+plus validated search path; the complete pending migration set is recorded; indexes build
+concurrently and report `indisvalid = true`; deploy and every required backfill complete;
+`db:drift-check` exits 0; the session backfill's second pass reports `updated 0`; rollback drops
+indexes and columns; the successful migration's history row is deleted and verified absent; drift
+against a batch-4-only rolled-back datamodel exits 0; and forward redeploy applies cleanly. Separately
+force `55P03` and prove the failed-row `--rolled-back` recovery clears `P3009`. Record date, target
+shape, implementation SHA and result in the runbook header.
 
 ### 7.4 What the reviewer should specifically try to break
 

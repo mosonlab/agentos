@@ -247,7 +247,7 @@ and `npm run typecheck` fails. Delete it in the same edit.
 
 | assumption | disposition |
 |---|---|
-| **A1** — retro review file unavailable | **Carried forward unresolved.** The file is still absent from the working tree and from `origin/master` at `95937bc`. Every finding was re-verified here as well as in the spec; the plan does not depend on it. Recorded again in §14. Per the chain's standing rules, not blocking. |
+| **A1** — retro review file unavailable | **Resolved during review fixes.** Exact artifact `docs/reviews/2026-08-16-batch-4-sol-retro-review.md` was recovered from task branch `agentos/cmswiyqdi0s9xmpyj6qlwa08f/run-1` (commit `469ab0e`) and cherry-picked. |
 | **A2** — cost gets the same range guard | **Adopted.** WI-1, with C8's refinement. |
 | **A3** — no behavioural change to `app.ts` | **Adopted**, and re-verified: `app.ts:2519` passes the app-level `PrismaClient`, not a transaction client, so `recomputeSessionUsage` opening its own transaction introduces no nesting. Only its comment is touched. |
 | **A4** — edit the migration in place | **Adopted.** WI-7. The `.dbtest` harness is unaffected (it drops the whole schema, including `_prisma_migrations`, before every `migrate deploy` — `testdb.ts:31-47`), and `db:drift-check` never inspects checksums. The only cost is the local dev database's one-time re-record, which WI-8 writes into the runbook. **Implementation-time consequence: do not run `npm run db:migrate` after WI-7 lands** — use `npm run test:db`. |
@@ -271,9 +271,9 @@ finds a finding with no corresponding change below, that is a defect in this rev
 | **MF-3** | WI-6 test 3 proxied `session.update` on the **outer** client, but WI-3 moved the write onto `tx` — the injected failure would never fire | WI-6 test 3 rewritten to the repo's proven `Proxy`-over-`$transaction` shape (`chain.dbtest.ts:218-239`): intercept `$transaction`, wrap the callback's `tx`, replace the delegate on the **inner** client. | Yes — `chain.dbtest.ts:218-239` is exactly that shape, and WI-3 does put the write on `tx`. |
 | **MF-4** | traceability claimed the backfill's non-zero exit was verified while WI-6 declined to execute it ("covered by reading it") | WI-4 extracts an exported, injectable `runBackfillSessionUsageCli` that **returns** the exit code; WI-6 test 3 asserts `1` then `0` through it, and new **test 4** spawns the real script against the scratch schema and asserts a real process exit code. §10's `§4.3.4` row now names both. | Yes — spec `:667-670` demands the exit; the script is a module-scope top-level `tsx` script (`packages/db/prisma/backfill-session-usage.ts:1-29`) invoked by `packages/db/package.json:21`. |
 | **MF-5** | "say **not rehearsed** in the header" turned the spec's mandatory rehearsal into an optional disclosure, so an unproven rollback could advance toward production | WI-8's verification now makes an unrun rehearsal a **failed implementation gate**: honest header wording is kept, but the step may not report done — it reports FAIL with the reason. §13 item 5 rewritten to match. | Yes — spec `:672-688` (rehearsal) and `:757-766` DoD item 5 ("rehearsed on a scratch database per §7.3"). The reviewer additionally observed `npm run test:db` rebuild `agentos_test` and apply all 12 migrations, so "unreachable" is not the expected outcome. |
-| **MF-6** | `DATABASE_URL="${DATABASE_URL}?options=…"` corrupts any URL that already carries a query — the repo's own convention (`?schema=…`) — silently swallowing `lock_timeout` **and** changing the target schema | WI-8 item 2 and §11.3 now detect an existing query and pick `?`/`&` accordingly, percent-encode the option, and verify the parsed parameter names without printing the URL. Rehearsal must cover both a bare and a `?schema=…` URL. | Yes — `packages/api/src/testdb.ts:6-10` reads a query-bearing URL and parses `schema` explicitly; the swallowing behaviour follows directly from WHATWG URL parsing. |
+| **MF-6** | `DATABASE_URL="${DATABASE_URL}?options=…"` corrupts any URL that already carries a query — the repo's own convention (`?schema=…`) — silently swallowing `lock_timeout` **and** changing the target schema | WI-8 item 2 and §11.3 use `URL`/`URLSearchParams.set` to preserve unrelated parameters and replace `options`, then verify parsed parameter names without printing the URL. Rehearsal covers both a bare and a `?schema=…` URL. | Yes — `packages/api/src/testdb.ts:6-10` reads a query-bearing URL; Prisma 6.19 accepts the URL API's `+` encoding and reports `SHOW lock_timeout = 3s`. |
 | **SF-1** | the diff-surface checks used a PCRE lookahead with `grep -E`, and `grep … && echo VIOLATION` exits **zero** on the violation path | §11.2 rewritten: two explicit filters instead of the lookahead, every check exits non-zero on a match and prints the offending paths, and the credential check reports a **count only** (printing the matching line would leak the very secret it guards). | Yes — re-ran the expression in this workspace: `ugrep: error at position 7 … invalid syntax`. `rg` exists here but is not assumed. |
-| **SF-2** | WI-6 test 2 (open a transaction, take a lock, count `pg_locks` rows) could not settle the `55P03`-vs-`P2028` question §13 assigned to it | test 2 split: **2a** keeps the granted-lock visibility assertion as a preliminary; **2b** holds the lock and races a real `recomputeSessionUsage`, asserting it rejects and recording the observed error code and elapsed time. §13 item 1 now points at 2b. | Anchors yes (`chain.dbtest.ts:67-92` supplies the two-client lifecycle). **Timing probe no** — the reviewer measured `P2010` wrapping `55P03` at ≈279 ms with `lock_timeout=200ms`; 2b records what it actually observes. |
+| **SF-2** | WI-6 test 2 (open a transaction, take a lock, count `pg_locks` rows) could not settle the `55P03`-vs-`P2028` question §13 assigned to it | test 2 split: **2a** keeps lock visibility; **2b** now has an acquired barrier, holds beyond 3 seconds, proves the public recompute remains pending across its internal `55P03`, then succeeds after release. This supersedes R1's earlier “assert it rejects” wording because returning that error leaves a durable event stale. | Verified in review fixes against real PostgreSQL; test 2b took about 4.7 seconds and passed. |
 
 **Did any finding show the spec is wrong?** No. Every one is a defect in the plan's rendering of the
 spec, and five of them (MF-2, MF-4, MF-5 and both should-fix) are the plan drifting *away* from a spec
@@ -528,7 +528,7 @@ export const sessionUsageLockKey = (sessionId: string): number => {
 ```
 
 ```ts
-export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string): Promise<boolean> =>
+const recomputeSessionUsageOnce = async (db: PrismaClient, sessionId: string): Promise<boolean> =>
   db.$transaction(async (tx) => {
     // C1: the timeout must be installed BEFORE the wait it is meant to bound.
     await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '3s'");
@@ -550,7 +550,21 @@ export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string)
     timeout: 15_000,     // backstop: must exceed lock_timeout + the work, so a
     maxWait: 5_000,      // contended caller fails as 55P03, not as an opaque P2028
   });
+
+export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string): Promise<boolean> => {
+  for (;;) {
+    try { return await recomputeSessionUsageOnce(db, sessionId); }
+    catch (error) {
+      if (!lockWaitTimedOut(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+};
 ```
+
+R2 correction: returning `55P03` lets app.ts acknowledge durable events while an older holder later
+commits their predecessor snapshot. The retry is therefore intentionally unbounded; a fixed count
+only moves the stale-cache window. Each attempt is independently bounded and rolled back.
 
 **Replace the false invariant** at `:133-136` (§4.6). Required content, not wording: concurrent
 callers are serialised by a transaction-scoped advisory lock keyed by session id, **because absolute
@@ -563,11 +577,9 @@ existing paragraph about events being the source of truth; it is still true.
 - Signature, return type (`Promise<boolean>`, true iff it wrote) and the missing-session / no-change
   behaviours are unchanged. Both call sites keep compiling untouched.
 - The lock is transaction-scoped: commit, rollback or a dead connection all release it. Nothing leaks.
-- `app.ts:2517-2521` keeps its `try/catch` (**required** — a throw there 500s the runner's terminal
-  flush, and `appendEvents` has no retry, so the runner would record a successful run as failed and
-  delete its workspace unpushed). One sentence may be added to that comment naming the new failure
-  mode: a lock-wait timeout is absorbed the same way, and the columns are repaired by the next
-  `FINAL_OUTPUT` or by `db:backfill-session-usage`.
+- `app.ts:2517-2521` keeps its `try/catch` (**required** — an unrelated database throw there 500s the
+  runner's terminal flush and can turn successful work into a failed run). Lock-wait timeouts are
+  retried inside `recomputeSessionUsage`; only unrelated failures reach the catch.
 - **Raw-SQL form — two separate failure modes, do not conflate them (R1/MF-1).**
   `tx.$queryRaw` is proven in this repo at `workflow.ts:87`.
   1. **Return-type deserialization — known to fail, already fixed above.** `pg_advisory_xact_lock`
@@ -618,6 +630,7 @@ In `usage.ts`:
 export type BackfillSessionUsageResult = {
   scanned: number;
   updated: number;
+  failedCount: number;
   failed: Array<{ sessionId: string; message: string }>;
 };
 
@@ -634,27 +647,26 @@ export type BackfillSessionUsageResult = {
  * same way and dies at the same row.
  */
 export const backfillSessionUsage = async (db: PrismaClient): Promise<BackfillSessionUsageResult> => {
-  const sessions = await db.session.findMany({
-    where: { events: { some: { type: "FINAL_OUTPUT" } } },
-    select: { id: true },
-    orderBy: { requestedAt: "asc" },
-  });
-  const result: BackfillSessionUsageResult = { scanned: sessions.length, updated: 0, failed: [] };
-  for (const session of sessions) {
-    try {
-      if (await recomputeSessionUsage(db, session.id)) result.updated += 1;
-    } catch (error) {
-      result.failed.push({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) });
-    }
+  const result = { scanned: 0, updated: 0, failedCount: 0, failed: [] };
+  let cursor: string | undefined;
+  for (;;) {
+    const sessions = await db.session.findMany({
+      where: { events: { some: { type: "FINAL_OUTPUT" } } },
+      select: { id: true }, orderBy: { id: "asc" }, take: 100,
+      ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
+    });
+    if (sessions.length === 0) break;
+    for (const session of sessions) { /* sequential recompute; count every failure, retain first 20 */ }
+    cursor = sessions.at(-1)?.id;
+    if (sessions.length < 100) break;
   }
   return result;
 };
 ```
 
-The `BATCH = 200` constant and the slicing loop at `:5, :21-25` are dropped: they slice an
-already-materialised array and still await serially, so they are a no-op. Sequential semantics are
-preserved deliberately — 99 live `Session` rows, and a parallel backfill would contend on the new lock
-for no gain.
+R2 applies the independent review's cheap boundedness improvement: page by the unique `id` cursor
+with `take: 100`, keep aggregate counts, and retain only the first 20 failure diagnostics. Sequential
+recompute semantics remain; pagination bounds memory without adding lock contention.
 
 **The reporting half is a second exported function, not inline script text (R1/MF-4).** The spec's
 acceptance criterion (§7.2 item 5) requires the process to *exit* non-zero; reading
@@ -680,10 +692,10 @@ export const runBackfillSessionUsageCli = async (
   { db, log = console.log, error = console.error }: BackfillSessionUsageCliDeps,
 ): Promise<number> => {
   const result = await backfillSessionUsage(db);
-  log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failed.length}`);
-  if (result.failed.length === 0) return 0;
-  for (const failure of result.failed.slice(0, 20)) error(`  ${failure.sessionId}: ${failure.message}`);
-  if (result.failed.length > 20) error(`  … and ${result.failed.length - 20} more`);
+  log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failedCount}`);
+  if (result.failedCount === 0) return 0;
+  for (const failure of result.failed) error(`  ${failure.sessionId}: ${failure.message}`);
+  if (result.failedCount > result.failed.length) error(`  … and ${result.failedCount - result.failed.length} more`);
   return 1;
 };
 ```
@@ -1051,8 +1063,9 @@ a header comment is added:
 
 **Three things this buys, and one it does not.**
 
-1. One ordinary `prisma migrate deploy` on production applies only the four columns, and Prisma
-   records the migration itself — no `migrate resolve --applied` in the happy path.
+1. The batch-4 migration applies only the four columns after its indexes exist, and Prisma records it
+   — no `migrate resolve --applied` in the happy path. The deploy command may also apply later pending
+   migrations; pre-flight must enumerate them and compose their runbooks.
 2. A fresh database (local dev, the `.dbtest` schema, any rebuild) still gets both indexes, built
    instantly against an empty table.
 3. The §2.3 redeploy trap is defused.
@@ -1092,15 +1105,15 @@ into it, so batch 4 cannot.
 
 1. **Version header** — version, the commit it was written against, the date it was last rehearsed,
    and against what (a scratch schema built from migrations — never a dump or clone of live).
-2. **Deploy order** — spec §4.4.3 verbatim as the authoritative copy: pre-flight (`db:validate`,
-   `\d+ "Session"` shows the four columns absent, `_prisma_migrations` has no `20260816165548` row,
-   row counts) → two `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, **one `psql -c` per statement, never
-   `psql -1`/`--single-transaction`** → prove `indisvalid` and `indisready` for both, with the
-   `DROP INDEX CONCURRENTLY` + retry-when-quieter recovery for a false → `migrate deploy` under a
-   `lock_timeout` of 3 s, **built as below**, with the `55P03` retry note and the by-hand
-   `ALTER TABLE` + `migrate resolve --applied` fallback → `db:generate` + `db:drift-check` → **restart
-   the API onto this batch's fixed code, never onto `2737113`** → `db:backfill-session-usage` twice,
-   the second reporting `updated 0`.
+2. **Deploy order** — the corrected spec §4.4.3 and runbook v1.1 are one sequence: derive a
+   libpq-compatible `PSQL_URL` by removing Prisma's `schema` parameter and validate the intended
+   search path → run `prisma migrate status --schema ...` and record the complete pending set → if
+   batch 2.5's two migrations are pending, compose its index/backfill/restart obligations into this
+   window → build the two batch-4 indexes concurrently with one bounded, schema-targeted psql call
+   each → prove `indisvalid`/`indisready` → construct `MIGRATE_URL` with the URL API → deploy all
+   pending migrations → generate/drift-check → restart onto implementation
+   `792570da5c8f6a4fc7af75cd65b395dead53033b` or a tested descendant, never `2737113` → run every
+   required backfill, with session usage twice and the second reporting `updated 0`.
 
    **Building the `lock_timeout` URL — do not append `?options=` (R1/MF-6).** The naive
    `DATABASE_URL="${DATABASE_URL}?options=-c lock_timeout=3s"` is wrong for any URL that already
@@ -1108,11 +1121,13 @@ into it, so batch 4 cannot.
    `?schema=…`). The second `?` is not a delimiter: it is absorbed into the preceding parameter's
    value, so `schema` silently becomes `agentos_test?options=-c lock_timeout=3s` — the timeout is
    never installed **and the migration is aimed at a schema that does not exist**. Detect the query
-   first and pick the separator:
+   with the URL API so an existing `options` value is replaced deterministically:
 
    ```bash
-   case "$DATABASE_URL" in *\?*) SEP='&';; *) SEP='?';; esac
-   MIGRATE_URL="${DATABASE_URL}${SEP}options=-c%20lock_timeout%3D3s"
+   MIGRATE_URL="$(DATABASE_URL="$DATABASE_URL" node -e '
+     const u = new URL(process.env.DATABASE_URL);
+     u.searchParams.set("options", "-c lock_timeout=3s");
+     process.stdout.write(u.toString());')"
 
    # Verify what was actually built, WITHOUT printing the URL (it carries the password):
    MIGRATE_URL="$MIGRATE_URL" node -e '
@@ -1127,11 +1142,8 @@ into it, so batch 4 cannot.
    DATABASE_URL="$MIGRATE_URL" npx prisma migrate deploy
    ```
 
-   Percent-encode by hand (`%20`, `%3D`) rather than letting `URLSearchParams.set` do it:
-   `URLSearchParams` serialises a space as `+`, and a generic URL query parser — which is what
-   Prisma's connection-string handling is — does not decode `+` back to a space, so the option would
-   reach PostgreSQL as the literal `-c+lock_timeout=3s`. The `case` form is also plainly readable in a
-   runbook, which matters more than elegance at 2 a.m.
+   Prisma 6.19 was probed with the `+` serialization from `URLSearchParams.set`; `SHOW lock_timeout`
+   returned `3s`. The prior claim that Prisma forwarded a literal plus was false.
 
    `PGOPTIONS` is **not** an alternative here: Prisma connects with its own Rust driver rather than
    libpq, so libpq's environment variables are ignored.
@@ -1145,26 +1157,28 @@ into it, so batch 4 cannot.
 5. **The inherited ordering rule** (`docs/specs/batch-4-sessions-viewer.md:652-658`):
    `GET /runs/:runId/events` returns an envelope in batch 4 — revert API and web together, or the API
    alone; **never the web app alone while keeping the new API**.
-6. **Exceptional physical rollback** — indexes first with `DROP INDEX CONCURRENTLY IF EXISTS` outside
-   any transaction (so a failure leaves the columns intact), then the four columns in one bounded
-   `BEGIN; SET LOCAL lock_timeout='3s'; ALTER TABLE … COMMIT;`. **`Session.costUsd` predates this
+6. **Exceptional physical rollback** — indexes first with one `DROP INDEX CONCURRENTLY IF EXISTS` per
+   psql call, using the derived `PSQL_URL` plus `PGOPTIONS` for lock bound and validated search path,
+   then the four columns in one bounded transaction. **`Session.costUsd` predates this
    migration** (it is in `20260815000000_phase0_init`, not in `20260816165548`'s `ALTER TABLE`) —
    dropping it destroys data no backfill in this batch restores. Say that explicitly, in bold.
-7. **`npx prisma migrate resolve --rolled-back 20260816165548_batch4_session_usage`** plus the
-   verification `SELECT` showing `rolled_back_at`, and why it is mandatory: without it the next
-   `migrate deploy` skips a migration whose objects no longer exist.
-8. **Drift after rollback** — against the pre-batch-4 checkout (whose `schema.prisma` declares neither
-   the columns nor the two indexes), `db:drift-check` exits 0. State the pairing rule: a physical
-   rollback is complete only when the checked-out datamodel and the live schema agree, so the schema
-   rollback and the code rollback are one step, not two.
+7. **Migration-history reconciliation has two distinct mechanisms.** A `P3018` failed apply leaves a
+   failed row: after proving all six objects absent, use `migrate resolve --schema ... --rolled-back`
+   and verify `rolled_back_at`, then retry. A successfully applied migration later undone physically
+   returns `P3012` from that command: delete only its history row and verify zero rows before forward
+   deploy. Never conflate the two states.
+8. **Drift after rollback** — compare against a datamodel with only batch 4 rolled back while retaining
+   every other applied migration. A checkout that also predates batch 2.5 correctly reports unrelated
+   drift. State the schema/datamodel pairing rule.
 9. **A proven forward redeploy** — re-checkout, re-run deploy steps 1-4, `migrate deploy` applies
    cleanly even if an index survived, thanks to WI-7.
 10. **What the backfill actually is** — "an absolute recompute from `SessionEvent` of every session
     that has a `FINAL_OUTPUT` event; it overwrites any populated cache that differs from the
     recomputed value, and writes nothing when they match." Not "write-only-to-null".
-11. **The dev-database checksum note** — delete that migration's row from `_prisma_migrations` then
-    `prisma migrate resolve --applied 20260816165548_batch4_session_usage`, or `migrate reset` on a
-    disposable dev database.
+11. **The dev-database checksum note** — target both commands explicitly: delete that migration's row
+    from the selected dev schema, then run `DATABASE_URL="$DEV_DATABASE_URL" npx prisma migrate
+    resolve --schema packages/db/prisma/schema.prisma --applied ...` and verify the replacement row on
+    the same database; or `migrate reset` on a disposable dev database.
 12. **Rehearsal rule** — rehearse on a scratch schema built from migrations with fixture rows only
     (`packages/api/src/testdb.ts`, which refuses `public`; `npm run db:fixture -w @agentos/db` seeds
     rows). **Never against a dump or clone of the live database, and never with a second API pointed
@@ -1175,12 +1189,15 @@ into it, so batch 4 cannot.
 **Never inline a credential.** `"$DATABASE_URL"` everywhere; no connection string, no `OPERATOR_TOKEN`,
 no password in this file, in any commit message, or in any task output.
 
-**Verification.** The rehearsal of §7.3, run against a scratch schema, proving in order: indexes build
-concurrently and report `indisvalid = true` → `migrate deploy` applies the columns and records the
-migration → `db:drift-check` exits 0 → backfill runs twice, second reports `updated 0` → rollback
-drops indexes then columns → `migrate resolve --rolled-back` records it → drift-check against the
-pre-batch-4 datamodel exits 0 → forward redeploy applies cleanly. Record the date and result in the
-version header.
+**Verification.** The rehearsal of §7.3, run against a scratch schema, proves in order: the derived
+`PSQL_URL` reaches both public and non-public targets without passing Prisma's `schema` parameter to
+libpq → the complete pending set is recorded → indexes build concurrently and report
+`indisvalid = true` → `migrate deploy` applies every recorded pending migration and the required
+backfills run → drift-check exits 0 → session backfill's second pass reports `updated 0` → rollback
+drops indexes then columns → the successfully-applied history row is deleted and verified absent →
+drift-check against the batch-4-only rolled-back datamodel exits 0 → forward redeploy applies cleanly.
+Separately force `55P03` and prove the failed-row `--rolled-back` recovery clears `P3009`. Record the
+date, target shape, implementation SHA and result in the version header.
 
 Rehearse the `migrate deploy` step **twice: once with a bare `DATABASE_URL` and once with a
 `?schema=…` URL** (R1/MF-6). The second shape is the one the naive `?options=` append corrupts, and it
@@ -1379,13 +1396,13 @@ requirement beyond the existing one, and no client-regeneration ordering problem
   WI-8 item 11, or `prisma migrate reset` if that database is disposable.
 - `npm run db:generate` is unaffected (no datamodel change) but is harmless.
 
-**Operator-side (NOT this chain — WI-8 owns the authoritative copy):** pre-flight → two
-`CREATE INDEX CONCURRENTLY` out of band, one `psql -c` each → prove `indisvalid` → `migrate deploy`
-under `lock_timeout=3s`, with the URL **built by the separator-detecting form in WI-8 item 2, never by
-appending `?options=`** (R1/MF-6: appending a second `?` to this repo's `?schema=…` URLs swallows the
-timeout and redirects the migration at a nonexistent schema) → `db:generate` + `db:drift-check` →
-**restart the API onto this batch's fixed code** → `db:backfill-session-usage` twice, the second
-reporting `updated 0` and exiting zero.
+**Operator-side (NOT this chain — WI-8 owns the authoritative copy):** derive the libpq-compatible
+`PSQL_URL` and validated search path → enumerate the complete pending set and compose batch 2.5 when
+needed → two bounded, schema-targeted `CREATE INDEX CONCURRENTLY` calls → prove `indisvalid` → build
+the Prisma URL with `URLSearchParams.set`, never a second `?options=` → deploy every recorded pending
+migration and run each required backfill → generate/drift-check → **restart the API onto
+`792570da5c8f6a4fc7af75cd65b395dead53033b` or a tested descendant** → run
+`db:backfill-session-usage` twice, the second reporting `updated 0` and exiting zero.
 
 **Restart step, stated plainly:** the API must be restarted **after** the migration and **onto code
 that contains WI-2**. Restarting onto `2737113` (batch 4 as merged) starts writing under-counted
@@ -1422,15 +1439,10 @@ state that a revert cannot tolerate. The one asymmetry is WI-2's corrected numbe
 
 Ordered by how much a wrong guess costs. Each names how to settle it — by running, not by reading.
 
-1. **Whether `lock_timeout` bounds an advisory-lock wait.** PostgreSQL documents `lock_timeout` for
-   locks on "a table, index, row, or other database object"; whether an advisory lock counts is an
-   implementation detail the docs do not promise. The plan therefore treats it as best-effort and
-   makes Prisma's `timeout: 15_000` the real backstop — and WI-6 must not *depend* on either
-   (C7 keeps the poll at 2 000 ms). **Settle it in WI-6 test 2b** (R1/SF-2), which exists for this
-   purpose: hold the lock, start a second *real* recompute, and record which error ends it and after
-   how long (`55P03`, possibly wrapped in `P2010`, at ≈3 s = the timeout works; `P2028` at ≈15 s = it
-   does not). 2b asserts only that the contended recompute **fails**; the code goes in a comment,
-   because pinning today's code as an assertion would make an answer out of the question.
+1. **Lock-wait behavior — settled in review fixes.** PostgreSQL returned `55P03` through Prisma
+   `P2010` at about 3 seconds. WI-6 test 2b now has a holder-acquired barrier, keeps the lock past that
+   bound, proves the public recompute remains pending while it retries, releases, and asserts the
+   latest value is written. Returning the observed error was the stale-cache defect, not acceptance.
 2. **Prisma's raw-SQL behaviour around the lock statement — one half now known, one half still open.**
    - *Return-type deserialization: **no longer a guess. It fails.*** The review probed Prisma 6.19.0
      against `agentos_test`: a bare `SELECT pg_advisory_xact_lock(…)` raises `P2010`, *"Failed to
@@ -1483,20 +1495,10 @@ Ordered by how much a wrong guess costs. Each names how to settle it — by runn
 
 ## 14. Open questions carried forward (recorded, never blocking)
 
-1. **A1 — the retrospective review file is still missing.**
-   `docs/reviews/2026-08-16-batch-4-sol-retro-review.md` is absent from the working tree and from
-   `origin/master` at `95937bc`; it exists only as the output of task `cmswiyqdi0s9xmpyj6qlwa08f`. The
-   brief quotes its findings verbatim and every one was re-verified independently — in the spec and
-   again here (§0.1) — so neither document depends on it. **If the review carries a fourth finding or
-   a caveat the brief did not transcribe, this plan has missed it.** Cheapest fix: commit the review
-   file and have the implementation step (⑤) re-read it before starting. Recorded in the activity log;
-   `inbox_ask` was not called, per the chain's standing rules.
-
-   **R1 note:** this is about the *retrospective* review, which is still missing. The **plan** review
-   that produced R1 is a different document and it is now committed at
-   `docs/reviews/2026-08-16-batch-4-fixes-plan-review.md`, carried onto this branch by this revision
-   so §0.4's citations resolve and ⑤ can read the eight findings in their own words rather than only
-   through my summary of them. Two different reviews; only one of them is still missing.
+1. **A1 — resolved.** The exact retrospective artifact now exists at
+   `docs/reviews/2026-08-16-batch-4-sol-retro-review.md`, recovered from its task branch and read during
+   review fixes. Its three must-fix and one should-fix match the brief's transcript; there is no hidden
+   fourth finding.
 2. **Does the operator want the cost guard (A2) at all?** It extends the review's letter, which named
    only token fields. If Leo prefers the letter, drop §4.3.3 / WI-1's `costColumn` range check —
    nothing else depends on it. The plan implements it, because a `Decimal(12,4)` overflow fails the

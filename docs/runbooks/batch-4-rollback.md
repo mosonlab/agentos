@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Version** | 1.0 |
-| **Written against** | this batch's branch (batch 4 FIXES), on top of `20260816165548_batch4_session_usage` |
+| **Version** | 1.1 |
+| **Written against** | usage implementation `792570da5c8f6a4fc7af75cd65b395dead53033b` (or a tested descendant), on top of `20260816165548_batch4_session_usage` |
 | **Last rehearsed** | **2026-08-16**, end to end, deploy **and** rollback **and** forward redeploy |
-| **Rehearsed against** | a scratch PostgreSQL database `agentos_rehearsal_b4`, created empty and built **from the committed migrations**, seeded with five fixture sessions. **Never a dump or a clone of the live database**, and no second control plane was pointed at anything. See §9. |
-| **Rehearsal result** | Pass, with **three corrections to the sequence as originally specified** — §8. Each correction is already folded into the commands below; §8 exists so a reader who has the spec open knows why they differ. |
+| **Rehearsed against** | scratch PostgreSQL databases created empty and built **from the committed migrations**: the original `agentos_rehearsal_b4` with five fixture sessions, then `agentos_rehearsal_b4_reviewfix` for the v1.1 failure/recovery sequence. Both were dropped afterwards. **Never a dump or clone of live**, and no second control plane was started. See §9. |
+| **Rehearsal result** | Pass. v1.1 re-proved bare/query URL targeting, `SHOW lock_timeout = 3s`, a barrier-confirmed `55P03`/`P3018` failed row followed by `resolve --rolled-back`, successful physical rollback with zero-row history verification, forward redeploy, drift, and two zero-failure backfills. Corrections are summarized in §8; spec and plan carry the same sequence. |
 
 This document extends `docs/runbooks/batch-2.5-rollback.md` §"Index locking during
 `db:migrate`" rather than replacing it. Batch 2.5 accepted a blocking index build
@@ -28,21 +28,47 @@ Run these in order, on a checkout of this batch's code.
 
 ### 1.0 Pre-flight
 
+Prisma accepts the repository's `?schema=...` URL parameter; libpq/psql does
+not. Derive a separate psql URL and a validated search path without ever
+printing the credential-bearing URL:
+
 ```bash
+DB_SCHEMA="$(DATABASE_URL="$DATABASE_URL" node -e '
+  const u = new URL(process.env.DATABASE_URL);
+  const schema = u.searchParams.get("schema") || "public";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(schema)) throw new Error("schema is not a simple PostgreSQL identifier");
+  process.stdout.write(schema);')"
+PSQL_URL="$(DATABASE_URL="$DATABASE_URL" node -e '
+  const u = new URL(process.env.DATABASE_URL);
+  u.searchParams.delete("schema");
+  process.stdout.write(u.toString());')"
+
 npm run db:validate
-psql "$DATABASE_URL" -c '\d+ "Session"'          # the four token columns must be ABSENT
-psql "$DATABASE_URL" -c "SELECT migration_name, finished_at, rolled_back_at
+DATABASE_URL="$DATABASE_URL" npx prisma migrate status --schema packages/db/prisma/schema.prisma
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c '\d+ "Session"'
+                                                  # the four token columns must be ABSENT
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c "SELECT migration_name, finished_at, rolled_back_at
                            FROM _prisma_migrations ORDER BY started_at DESC LIMIT 5;"
                                                   # 20260816165548 must NOT be recorded
-psql "$DATABASE_URL" -c "SELECT relname, n_live_tup FROM pg_stat_user_tables
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c "SELECT relname, n_live_tup FROM pg_stat_user_tables
                            WHERE relname IN ('Session','SessionEvent');"
 ```
 
 `Session.costUsd` **will** already be there. It predates this migration — see §4.
 
+Record the complete pending-migration set printed by `migrate status`. If
+`20260816180000_task_status_backlog` or `20260816180100_tasks_visibility` is
+pending, this is a combined batch-4/batch-2.5 window: read and execute
+`docs/runbooks/batch-2.5-rollback.md` too, including its Task-index lock handling
+and `npm run db:backfill-task-source` before restart. `migrate deploy` always
+applies every pending migration in timestamp order; it cannot be described as a
+single-migration operation unless history proves these later two are applied.
+
 If the host has no `psql`, the database runs in docker-compose and
-`docker exec -i agentos-postgres-1 psql -U agentos -d agentos …` is equivalent.
-That is how the rehearsal was run.
+`docker exec -e PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" -i
+agentos-postgres-1 psql -U agentos -d agentos …` is equivalent. Do not omit the
+validated search path: the fallback must target the same schema as the URL, not
+silently operate on `public`. That is how the rehearsal was run.
 
 ### 1.1 Build both indexes out of band
 
@@ -52,8 +78,8 @@ they can be built before it with no ordering dependency at all. That is the fact
 that makes this split legal.
 
 ```bash
-psql "$DATABASE_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "Session_projectId_requestedAt_idx" ON "Session"("projectId", "requestedAt");'
-psql "$DATABASE_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "SessionEvent_runId_seq_idx" ON "SessionEvent"("runId", "seq");'
+PGOPTIONS="-c lock_timeout=3s -c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "Session_projectId_requestedAt_idx" ON "Session"("projectId", "requestedAt");'
+PGOPTIONS="-c lock_timeout=3s -c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "SessionEvent_runId_seq_idx" ON "SessionEvent"("runId", "seq");'
 ```
 
 **One statement per `psql -c`. Never `psql -1` / `--single-transaction`, and never
@@ -62,12 +88,6 @@ statements passed to one `-c` in an implicit transaction block, and
 `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. Rehearsed: the
 bundled form fails, and it fails *quietly enough to miss* — psql prints `ERROR`
 and carries on to the next `-c`, leaving the index unbuilt.
-
-To bound the wait for these, use `PGOPTIONS` rather than `SET`:
-
-```bash
-PGOPTIONS='-c lock_timeout=3s' psql "$DATABASE_URL" -c 'CREATE INDEX CONCURRENTLY IF NOT EXISTS …'
-```
 
 `PGOPTIONS` works here because psql is libpq. It does **not** work for step 1.3:
 Prisma connects with its own Rust driver and ignores libpq's environment.
@@ -78,7 +98,7 @@ A `CONCURRENTLY` build that fails leaves an **invalid** index behind: never used
 by the planner, never repaired by itself, and invisible unless you look.
 
 ```bash
-psql "$DATABASE_URL" -c "SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c "SELECT c.relname, i.indisvalid, i.indisready FROM pg_index i
                            JOIN pg_class c ON c.oid = i.indexrelid
                           WHERE c.relname IN ('Session_projectId_requestedAt_idx','SessionEvent_runId_seq_idx');"
 ```
@@ -86,7 +106,7 @@ psql "$DATABASE_URL" -c "SELECT c.relname, i.indisvalid, i.indisready FROM pg_in
 Both rows must read `t | t`. For any row with `indisvalid = f`:
 
 ```bash
-psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY "<name>";'    # its own -c, as above
+PGOPTIONS="-c lock_timeout=3s -c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c 'DROP INDEX CONCURRENTLY "<name>";'
 # then repeat step 1.1 for that index when the table is quieter.
 ```
 
@@ -98,10 +118,11 @@ A failed build is retried **by hand**. Nothing retries it automatically.
 takes `ACCESS EXCLUSIVE`, which queues behind the six writers. Bound the wait
 rather than discover it.
 
-**Do not append `?options=` to `$DATABASE_URL`.** This repo's URLs already carry a
-query (`?schema=…`). A second `?` is not a delimiter — it is absorbed into the
-preceding parameter's value. Rehearsed on a `?schema=b4_schema_shape` URL, the
-naive append made `prisma migrate status` report:
+**Do not append a second `?options=` to `$DATABASE_URL`.** This repo's URLs often
+already carry a query (`?schema=…`). A second `?` is not a delimiter — it is
+absorbed into the preceding parameter's value. Rehearsed on a
+`?schema=b4_schema_shape` URL, the naive append made `prisma migrate status`
+report:
 
 ```
 Datasource "db": … schema "b4_schema_shape?options=-c lock_timeout=3s"
@@ -110,12 +131,15 @@ Following migrations have not yet been applied:  20260815000000_phase0_init  …
 
 — i.e. the timeout is not installed, the migration is aimed at a schema that does
 not exist, and `migrate deploy` would have **silently created a new schema and
-applied all twelve migrations into it** while you believed you were bounding a
-lock. Detect the existing query and pick the separator:
+applied all migrations into it** while you believed you were bounding a lock.
+Use the URL API to replace `options` deterministically while preserving every
+unrelated parameter:
 
 ```bash
-case "$DATABASE_URL" in *\?*) SEP='&';; *) SEP='?';; esac
-MIGRATE_URL="${DATABASE_URL}${SEP}options=-c%20lock_timeout%3D3s"
+MIGRATE_URL="$(DATABASE_URL="$DATABASE_URL" node -e '
+  const u = new URL(process.env.DATABASE_URL);
+  u.searchParams.set("options", "-c lock_timeout=3s");
+  process.stdout.write(u.toString());')"
 
 # Verify what was actually built, WITHOUT printing the URL (it carries the password):
 MIGRATE_URL="$MIGRATE_URL" node -e '
@@ -130,10 +154,9 @@ MIGRATE_URL="$MIGRATE_URL" node -e '
 DATABASE_URL="$MIGRATE_URL" npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
 ```
 
-Percent-encode by hand (`%20`, `%3D`). Do **not** reach for
-`URLSearchParams.set`: it serialises a space as `+`, and a generic URL query
-parser — which is what Prisma's connection-string handling is — does not decode
-`+` back to a space, so the option arrives as the literal `-c+lock_timeout=3s`.
+Prisma 6.19 was rehearsed with the `+` serialization produced by
+`URLSearchParams.set`; `SHOW lock_timeout` returned `3s`. The earlier claim that
+Prisma passes a literal plus was false.
 
 Confirm the option actually reached the server (the rehearsal did):
 
@@ -141,14 +164,29 @@ Confirm the option actually reached the server (the rehearsal did):
 SHOW lock_timeout;  ->  3s
 ```
 
-On `55P03` (`lock_not_available`): **nothing was applied.** Retry when the runners
-are idle. If the URL-options form is ever unavailable, the fallback is to apply
-the `ALTER TABLE` by hand in psql under `SET lock_timeout`, then
-`npx prisma migrate resolve --applied 20260816165548_batch4_session_usage`.
+On `55P03` (`lock_not_available`), PostgreSQL rolls the migration objects back,
+but Prisma records a failed row and the next deploy stops with `P3009`. Do not
+blindly retry. Prove all four columns and both indexes are absent, inspect the
+failed `_prisma_migrations` row, then run:
 
-Because the migration's `CREATE INDEX` statements carry `IF NOT EXISTS`, this step
-applies **only the four columns** and Prisma records the migration itself — no
-`migrate resolve --applied` in the happy path. Rehearsed.
+```bash
+DATABASE_URL="$MIGRATE_URL" npx prisma migrate resolve --schema packages/db/prisma/schema.prisma --rolled-back 20260816165548_batch4_session_usage
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c "SELECT migration_name, finished_at, rolled_back_at FROM _prisma_migrations WHERE migration_name = '20260816165548_batch4_session_usage';"
+```
+
+Only retry after `rolled_back_at` is populated. If any object survived, stop and
+reconcile it explicitly; do not mark a partial shape rolled back. If the
+URL-options form is unavailable, apply the `ALTER TABLE` by hand in psql under a
+bounded lock wait, then record it with the explicit target and schema:
+
+```bash
+DATABASE_URL="$DATABASE_URL" npx prisma migrate resolve --schema packages/db/prisma/schema.prisma --applied 20260816165548_batch4_session_usage
+```
+
+Because the migration's `CREATE INDEX` statements carry `IF NOT EXISTS`, the
+batch-4 migration itself applies only the four columns after the indexes exist,
+and Prisma records it — no `migrate resolve --applied` in the happy path. The
+overall deploy may also apply later pending migrations identified in §1.0.
 
 ### 1.4 Prove the database matches the datamodel
 
@@ -167,7 +205,8 @@ that catches it.
 This batch never performs the restart, never touches launchd and never touches the
 runner. Service management is the operator's call.
 
-**Restart onto this batch's fixed code, never onto `2737113` (batch 4 as merged).**
+**Restart onto `792570da5c8f6a4fc7af75cd65b395dead53033b` or a tested descendant,
+never onto `2737113` (batch 4 as merged).**
 The live ingest path (`packages/api/src/app.ts:2519`) uses the same extractor as
 the backfill. An API restarted onto the merged-but-unfixed code starts writing
 under-counted totals for every finishing CLAUDE session immediately — reading only
@@ -222,13 +261,15 @@ a failure there leaves the columns intact.
 ```bash
 # One statement per -c. PGOPTIONS bounds the wait; a `SET` in the same -c would
 # put the DROP inside an implicit transaction block and it would be REFUSED.
-PGOPTIONS='-c lock_timeout=3s' psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS "SessionEvent_runId_seq_idx";'
-PGOPTIONS='-c lock_timeout=3s' psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS "Session_projectId_requestedAt_idx";'
+PGOPTIONS="-c lock_timeout=3s -c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS "SessionEvent_runId_seq_idx";'
+PGOPTIONS="-c lock_timeout=3s -c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c 'DROP INDEX CONCURRENTLY IF EXISTS "Session_projectId_requestedAt_idx";'
 ```
 
 Then the columns, in one bounded transaction:
 
 ```sql
+-- Feed this block to psql with the same PSQL_URL and a validated search_path:
+-- PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL"
 BEGIN;
   SET LOCAL lock_timeout = '3s';
   ALTER TABLE "Session"
@@ -247,7 +288,7 @@ Verify afterwards that the four token columns are gone **and `costUsd` is still
 there**:
 
 ```bash
-psql "$DATABASE_URL" -c '\d "Session"' | grep -E 'inputTokens|outputTokens|cachedInputTokens|totalTokens|costUsd'
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c '\d "Session"' | grep -E 'inputTokens|outputTokens|cachedInputTokens|totalTokens|costUsd'
 # expect exactly one line, costUsd
 ```
 
@@ -259,9 +300,9 @@ Mandatory, not cosmetic: without it the next `migrate deploy` skips a migration
 whose objects no longer exist, and the four columns never come back.
 
 ```bash
-psql "$DATABASE_URL" -c "DELETE FROM _prisma_migrations
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c "DELETE FROM _prisma_migrations
                           WHERE migration_name = '20260816165548_batch4_session_usage';"
-psql "$DATABASE_URL" -c "SELECT migration_name FROM _prisma_migrations
+PGOPTIONS="-c search_path=$DB_SCHEMA,pg_catalog" psql "$PSQL_URL" -c "SELECT migration_name FROM _prisma_migrations
                           WHERE migration_name = '20260816165548_batch4_session_usage';"
 # expect (0 rows)
 ```
@@ -274,11 +315,11 @@ Prisma answers:
 Migration `20260816165548_batch4_session_usage` cannot be rolled back because it is not in a failed state.
 ```
 
-`--rolled-back` exists for a migration whose **apply failed** part-way. A
+`--rolled-back` exists for a migration whose **apply failed**. A
 migration that applied successfully and was then undone by hand is not in that
-state, and Prisma offers no command for it — deleting the row is the supported
-route, and it is the same mechanism §7 already uses for the dev-database checksum.
-Keep `--rolled-back` in mind only for the case where step 1.3 itself died.
+state, and Prisma offers no resolve command for it — the rehearsed recovery is a
+targeted history-row deletion followed by a zero-row verification. Keep
+`--rolled-back` only for §1.3's failed-apply row.
 
 ---
 
@@ -319,9 +360,17 @@ production has not applied it — but the **local dev** database has, so a later
 One-time fix, on the dev database only:
 
 ```bash
-psql "$DEV_DATABASE_URL" -c "DELETE FROM _prisma_migrations
+DEV_SCHEMA="$(DATABASE_URL="$DEV_DATABASE_URL" node -e '
+  const u = new URL(process.env.DATABASE_URL);
+  const schema = u.searchParams.get("schema") || "public";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(schema)) throw new Error("schema is not a simple PostgreSQL identifier");
+  process.stdout.write(schema);')"
+DEV_PSQL_URL="$(DATABASE_URL="$DEV_DATABASE_URL" node -e '
+  const u = new URL(process.env.DATABASE_URL); u.searchParams.delete("schema"); process.stdout.write(u.toString());')"
+PGOPTIONS="-c search_path=$DEV_SCHEMA,pg_catalog" psql "$DEV_PSQL_URL" -c "DELETE FROM _prisma_migrations
                               WHERE migration_name = '20260816165548_batch4_session_usage';"
-npx prisma migrate resolve --applied 20260816165548_batch4_session_usage
+DATABASE_URL="$DEV_DATABASE_URL" npx prisma migrate resolve --schema packages/db/prisma/schema.prisma --applied 20260816165548_batch4_session_usage
+PGOPTIONS="-c search_path=$DEV_SCHEMA,pg_catalog" psql "$DEV_PSQL_URL" -c "SELECT migration_name, finished_at FROM _prisma_migrations WHERE migration_name = '20260816165548_batch4_session_usage';"
 ```
 
 or, on a disposable dev database, `npx prisma migrate reset`. Neither
@@ -350,15 +399,19 @@ leaves the corrected (higher) totals in place until some later recompute rewrite
 them downward. No schema implication; just do not read it as evidence the rollback
 failed.
 
-### The three corrections the rehearsal produced
+### Corrections the rehearsal and independent review produced
 
-Kept here so a reader holding the spec knows why these commands differ from it.
+Kept as an audit trail; spec, plan, and this runbook now agree on the corrected mechanism.
 
 | # | as specified | what actually happens | what this runbook does |
 |---|---|---|---|
 | 1 | `migrate resolve --rolled-back` reconciles `_prisma_migrations` after a physical rollback (spec §4.5 item 5) | refused — *"cannot be rolled back because it is not in a failed state"* | delete the row (§5) |
 | 2 | `SET lock_timeout = '3s';` then `DROP INDEX CONCURRENTLY …` in one block (spec §4.5 item 4) | *"cannot run inside a transaction block"*; the index is silently left behind | one statement per `-c`, bounded with `PGOPTIONS` (§4) |
 | 3 | drift-check against the pre-batch-4 checkout exits 0 (spec §4.5 item 6) | exits 2 when that checkout also predates another applied migration | compare against a batch-4-only rollback, and read the output (§6) |
+| 4 | pass the repository's Prisma `?schema=...` URL directly to psql | libpq rejects the unknown `schema` parameter, or an unscoped docker fallback reaches `public` | derive `PSQL_URL`, validate `DB_SCHEMA`, and set `search_path` on every call (§1.0) |
+| 5 | retry deploy immediately after `55P03` | Prisma leaves a failed row; the retry stops at `P3009` | prove objects absent, mark the failed row rolled back, verify, then retry (§1.3) |
+| 6 | root-level `migrate resolve`, with an implicit target | Prisma cannot find the schema; the dev form can target the wrong database | pass both `DATABASE_URL` and `--schema`, then verify the target row (§§1.3, 7) |
+| 7 | deploy applies only batch 4 | `migrate deploy` applies every pending migration, including batch 2.5 in the tested pre-batch-4 state | enumerate the pending set and compose the batch-2.5 runbook (§1.0) |
 
 ---
 
