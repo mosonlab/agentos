@@ -58,3 +58,34 @@ test("provisioning trusts an already-published intended head after its database 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("workspace clone retries two transient failures and succeeds on the third attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-retry-"));
+  try {
+    let cloneCalls = 0;
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: process.env.HOME ?? root,
+    } as unknown as RunnerConfig;
+    const claim = {
+      task: { id: "task-retry" },
+      repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
+      run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
+    } as ClaimedTask;
+    const fake = async (_config: RunnerConfig, executable: string, args: string[]): Promise<string> => {
+      if (executable === "git" && args[0] === "clone") {
+        cloneCalls += 1;
+        if (cloneCalls < 3) throw new Error("fatal: unable to access remote: ECONNRESET");
+      }
+      if (executable === "git" && args[0] === "rev-parse") return "base-sha";
+      return "";
+    };
+    const workspace = await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
+    assert.equal(cloneCalls, 3);
+    assert.equal(workspace.baseSha, "base-sha");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

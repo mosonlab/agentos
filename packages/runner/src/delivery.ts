@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
+import { runWithNetworkRetry, type RetryOptions } from "./network-retry.js";
 import type { Workspace } from "./workspace.js";
 import { workspaceEnvironment } from "./workspace.js";
 
@@ -94,6 +95,7 @@ export const deliverWorkspace = async (
   workspace: Workspace,
   command: CommandExecutor = executeCommand(config),
   recordPublication: (branch: string) => Promise<void> = async () => undefined,
+  retryOptions: RetryOptions = {},
 ): Promise<DeliveryResult> => {
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
@@ -110,7 +112,10 @@ export const deliverWorkspace = async (
   // The push is unconditional: a step that opens no PR still publishes its
   // branch, which is what lets the *next* step of the chain clone it.
   try {
-    await command("git", ["push", "--set-upstream", "origin", workspace.branch], workspace.path, env);
+    await runWithNetworkRetry("git", ["push"],
+      () => command("git", ["push", "--set-upstream", "origin", workspace.branch], workspace.path, env),
+      retryOptions,
+    );
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     return { pushStatus: "FAILED", pushRemote: remote, pushError: message, failureClass: failureClassFor(message) };
@@ -140,9 +145,10 @@ export const deliverWorkspace = async (
   // silently swallow the push. One open PR per head branch is a GitHub invariant,
   // so a chain sharing a branch keeps exactly one human-facing PR.
   const openPullRequest = async (): Promise<{ url: string; number: number } | null> => {
-    const raw = await command("gh", [
+    const args = [
       "pr", "list", "--repo", repo, "--head", workspace.branch, "--state", "open", "--limit", "1", "--json", "url,number",
-    ], workspace.path, env);
+    ];
+    const raw = await runWithNetworkRetry("gh", args, () => command("gh", args, workspace.path, env), retryOptions);
     const parsed = JSON.parse(raw || "[]") as Array<{ url: string; number: number }>;
     return parsed[0] ?? null;
   };
@@ -153,29 +159,33 @@ export const deliverWorkspace = async (
     const existing = await openPullRequest();
     if (existing) return { pushStatus: "SUCCEEDED", pushRemote: remote, pushedBranch: workspace.branch, pullRequestUrl: existing.url, pullRequestNumber: existing.number };
     if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
-    try {
-      await command("gh", [
-        "pr", "create", "--repo", repo,
-      "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
-        "--head", workspace.branch,
-        "--title", pullRequestTitle(claim.task),
-        "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
-      ], workspace.path, env);
-    } catch (createError: unknown) {
-      // `list(empty) → create(already exists)` is a normal race with another
-      // runner or a human. Confirm once more before classifying it as a tool
-      // failure; if the expected head now owns an open PR, delivery is complete.
-      const raced = await openPullRequest();
-      if (raced) {
-        return {
-          pushStatus: "SUCCEEDED",
-          pushRemote: remote,
-          pushedBranch: workspace.branch,
-          pullRequestUrl: raced.url,
-          pullRequestNumber: raced.number,
-        };
+    const racedDuringCreate = await runWithNetworkRetry("gh", ["pr", "create"], async () => {
+      try {
+        await command("gh", [
+          "pr", "create", "--repo", repo,
+          "--base", claim.run.pullRequestBase ?? claim.repo.defaultBranch,
+          "--head", workspace.branch,
+          "--title", pullRequestTitle(claim.task),
+          "--body", `Automated delivery for AgentOS task ${claim.task.id}.`,
+        ], workspace.path, env);
+        return null;
+      } catch (createError: unknown) {
+        // A create response can be lost after GitHub has committed the PR. Head
+        // lookup is the idempotency key: confirm before retrying create, both for
+        // network ambiguity and for a concurrent human/runner creation race.
+        const raced = await openPullRequest();
+        if (raced) return raced;
+        throw createError;
       }
-      throw createError;
+    }, retryOptions);
+    if (racedDuringCreate) {
+      return {
+        pushStatus: "SUCCEEDED",
+        pushRemote: remote,
+        pushedBranch: workspace.branch,
+        pullRequestUrl: racedDuringCreate.url,
+        pullRequestNumber: racedDuringCreate.number,
+      };
     }
     const created = await openPullRequest();
     return created
@@ -196,12 +206,14 @@ export const deliverWorkspace = async (
     // failureClass non-retryable.
     if (!opensPullRequest) return noPullRequest(workspace.branch, remote);
     return {
-      pushStatus: "FAILED",
+      // Git publication is the durable delivery boundary. A PR API outage is a
+      // degraded success with explicit repair instructions, not a failed agent
+      // run whose completed work is then retried or discarded.
+      pushStatus: "SUCCEEDED",
       pushRemote: remote,
       pushedBranch: workspace.branch,
       pushError: message,
       deliveryInstructions: `Branch '${workspace.branch}' was pushed, but PR creation failed. Run gh pr create manually.`,
-      failureClass: failureClassFor(message),
     };
   }
 };
@@ -228,6 +240,7 @@ export const deliverFailedWorkspace = async (
   claim: ClaimedTask,
   workspace: Workspace,
   command: CommandExecutor = executeCommand(config),
+  retryOptions: RetryOptions = {},
 ): Promise<DeliveryResult | null> => {
   const env = workspaceEnvironment(config);
   const remote = claim.repo.remoteUrl;
@@ -250,7 +263,10 @@ export const deliverFailedWorkspace = async (
     if (head === workspace.baseSha) return null;
     // Plain push, never forced: the run branch is unique per (task, run), so a
     // rejection means something else is there and salvaging must not clobber it.
-    await command("git", ["push", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env);
+    await runWithNetworkRetry("git", ["push"],
+      () => command("git", ["push", "origin", `HEAD:refs/heads/${branch}`], workspace.path, env),
+      retryOptions,
+    );
     return {
       pushStatus: "SUCCEEDED",
       pushRemote: remote,

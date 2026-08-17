@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
+import { runWithNetworkRetry, type RetryOptions } from "./network-retry.js";
 
 export type Workspace = {
   path: string;
@@ -13,7 +14,15 @@ export type Workspace = {
 
 const inside = (root: string, candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
 
-const command = async (
+export type WorkspaceCommandExecutor = (
+  config: RunnerConfig,
+  executable: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+) => Promise<string>;
+
+const command: WorkspaceCommandExecutor = async (
   config: RunnerConfig,
   executable: string,
   args: string[],
@@ -48,7 +57,12 @@ export const workspaceEnvironment = (config: Pick<RunnerConfig, "path" | "home">
   ...(process.env.USER ? { USER: process.env.USER, LOGNAME: process.env.LOGNAME ?? process.env.USER } : {}),
 });
 
-export const provisionWorkspace = async (config: RunnerConfig, claim: ClaimedTask): Promise<Workspace> => {
+export const provisionWorkspace = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  execute: WorkspaceCommandExecutor = command,
+  retryOptions: RetryOptions = {},
+): Promise<Workspace> => {
   const root = resolve(config.workspaceRoot);
   const workspace = resolve(root, claim.run.id);
   if (!inside(root, workspace)) throw new Error("Resolved workspace escaped the controlled root");
@@ -72,15 +86,21 @@ export const provisionWorkspace = async (config: RunnerConfig, claim: ClaimedTas
     let cloneTarget = target;
     if (branch !== target) {
       try {
-        await command(config, "git", ["ls-remote", "--exit-code", "--heads", claim.repo.remoteUrl, `refs/heads/${branch}`], root, env);
+        await runWithNetworkRetry("git", ["ls-remote"],
+          () => execute(config, "git", ["ls-remote", "--exit-code", "--heads", claim.repo.remoteUrl, `refs/heads/${branch}`], root, env),
+          retryOptions,
+        );
         cloneTarget = branch;
       } catch {
         // Exit 2 means the head is absent; clone the resolver-selected fallback.
       }
     }
-    await command(config, "git", ["clone", "--no-local", "--branch", cloneTarget, "--single-branch", claim.repo.remoteUrl, workspace], root, env);
-    const baseSha = await command(config, "git", ["rev-parse", "HEAD"], workspace, env);
-    if (branch !== cloneTarget) await command(config, "git", ["switch", "-c", branch], workspace, env);
+    await runWithNetworkRetry("git", ["clone"],
+      () => execute(config, "git", ["clone", "--no-local", "--branch", cloneTarget, "--single-branch", claim.repo.remoteUrl, workspace], root, env),
+      retryOptions,
+    );
+    const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
+    if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
     return { path: workspace, branch, baseSha };
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);
