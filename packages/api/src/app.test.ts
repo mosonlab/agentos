@@ -1208,8 +1208,8 @@ const taskRow = (overrides: Record<string, unknown> = {}): Record<string, unknow
   ...overrides,
 });
 
-const getTasks = (database: PrismaClient, query: string, headers: Record<string, string> = {}): Promise<Response> =>
-  createApp(database).request(`/tasks${query}`, {
+const getTasks = async (database: PrismaClient, query: string, headers: Record<string, string> = {}): Promise<Response> =>
+  await createApp(database).request(`/tasks${query}`, {
     headers: { Authorization: "Bearer operator-unit-token", ...headers },
   });
 
