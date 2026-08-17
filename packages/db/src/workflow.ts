@@ -585,11 +585,55 @@ export const applyInboxDecisionTx = async (
   if (!gateDecision && question.session.run.status !== RunStatus.WAITING_INBOX) {
     throw new Error("No matching waiting Inbox question");
   }
+  // A HUMAN-gate rejection can queue the executable predecessor. Resolve that
+  // target before taking either mutex, then lock predecessor -> gate: PATCH on
+  // the predecessor takes that same order when it activates the HUMAN
+  // successor. Taking gate -> predecessor here would make the two legitimate
+  // operations deadlock.
+  let rejectionTarget: { id: string; name: string } | null = null;
+  if (gateDecision && question.gateTask && input.decision === "reject") {
+    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT
+      ? question.gateTask
+      : question.gateTask.previousTask;
+    if (!rejectionTarget && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
+      rejectionTarget = await tx.task.findFirst({
+        where: {
+          projectId: question.gateTask.projectId,
+          chainId: question.gateTask.chainId,
+          chainIndex: { lt: question.gateTask.chainIndex },
+          assigneeType: AssigneeType.AGENT,
+          assigneeAgentId: { not: null },
+          repoId: { not: null },
+        },
+        orderBy: { chainIndex: "desc" },
+      });
+    }
+    if (!rejectionTarget) throw new Error("Approval gate has no executable previous task to reject to");
+  }
+  const lockedRejectionTarget = rejectionTarget && rejectionTarget.id !== question.gateTaskId
+    ? await lockTaskRow(tx, rejectionTarget.id)
+    : null;
+  // PATCH DONE takes the gate Task mutex before closing OPEN cards. Take the
+  // same mutex before this path's OPEN claim so PATCH and Inbox decisions have
+  // one winner instead of both advancing the chain.
+  const lockedGateTask = gateDecision && question.gateTask
+    ? await lockTaskRow(tx, question.gateTask.id)
+    : null;
   const claimed = await tx.inboxMessage.updateMany({
     where: { id: question.id, status: InboxStatus.OPEN },
     data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
   });
   if (claimed.count !== 1) return { duplicate: true, resumed: false };
+  if (gateDecision) {
+    // gateTaskId, not an individual card id, is the decision identity. Old or
+    // duplicated cards are allowed by the schema, so the winning card consumes
+    // every sibling OPEN state while the gate Task mutex is held. A later click
+    // on any sibling then loses the selected-card OPEN claim above.
+    await tx.inboxMessage.updateMany({
+      where: { gateTaskId: question.gateTaskId, status: InboxStatus.OPEN, id: { not: question.id } },
+      data: { status: InboxStatus.CLOSED },
+    });
+  }
   const reply = await tx.inboxMessage.create({ data: {
     from: InboxSender.HUMAN,
     agentId: question.agentId,
@@ -626,30 +670,13 @@ export const applyInboxDecisionTx = async (
       }, now);
       return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
     }
-    let redo = question.gateTask.assigneeType === AssigneeType.AGENT
-      ? question.gateTask
-      : question.gateTask.previousTask;
-    if (!redo && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
-      redo = await tx.task.findFirst({
-        where: {
-          projectId: question.gateTask.projectId,
-          chainId: question.gateTask.chainId,
-          chainIndex: { lt: question.gateTask.chainIndex },
-          assigneeType: AssigneeType.AGENT,
-          assigneeAgentId: { not: null },
-          repoId: { not: null },
-        },
-        orderBy: { chainIndex: "desc" },
-      });
-    }
-    if (!redo) throw new Error("Approval gate has no executable previous task to reject to");
-    // Rejection is the one gate path that queues work on a task the operator
-    // never named, so it joins the Task-row mutex here rather than trusting the
-    // row loaded with the Inbox message. Refusing by throwing rolls the whole
-    // transaction back, which leaves the decision OPEN — the human unarchives
-    // the step and decides again, instead of the gate silently closing onto a
-    // run the runner will never claim.
-    const lockedRedo = await lockTaskRow(tx, redo.id);
+    // Refusing by throwing rolls the whole transaction back, which leaves the
+    // decision OPEN — the human unarchives the step and decides again, instead
+    // of the gate silently closing onto a run the runner will never claim.
+    const redo = rejectionTarget!;
+    const lockedRedo = redo.id === question.gateTask.id
+      ? lockedGateTask
+      : lockedRejectionTarget;
     if (lockedRedo?.archivedAt) {
       throw new ArchivedTaskError(redo.id, redo.name);
     }

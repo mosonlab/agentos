@@ -213,10 +213,12 @@ test("a template approval gate persists an outbox card and leaves the task in re
 
 test("the shared decision compare-and-set makes a second Web or Feishu click a no-op", async () => {
   let decisionWrites = 0;
+  const events: string[] = [];
   const tx = {
+    $queryRaw: async () => { events.push("task-lock"); return [{ id: "task-1", archivedAt: null }]; },
     inboxMessage: {
       findUnique: async () => ({ id: "gate-1", gateTaskId: "task-1", session: { id: "session-1", run: { id: "run-1", status: RunStatus.SUCCEEDED } }, gateTask: { id: "task-1" } }),
-      updateMany: async () => ({ count: 0 }),
+      updateMany: async () => { events.push("open-cas"); return { count: 0 }; },
       create: async () => { throw new Error("must not create reply"); },
     },
     inboxDecision: { create: async () => { decisionWrites += 1; } },
@@ -225,6 +227,7 @@ test("the shared decision compare-and-set makes a second Web or Feishu click a n
     duplicate: true, resumed: false,
   });
   assert.equal(decisionWrites, 0);
+  assert.deepEqual(events, ["task-lock", "open-cas"]);
 });
 
 const rejectionTx = (options: { redoArchivedAt?: Date | null } = {}) => {
