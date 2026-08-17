@@ -4,14 +4,14 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "code-reviewer", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "feasibility", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "frontend-dev", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
+  { name: "frontend-dev", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
+  { name: "implementation-plan-executioner", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "librarian", model: "gpt-5.6-luna:high", runner: RunnerPreference.CODEX },
-  { name: "plan", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "plan-reviser", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
+  { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
+  { name: "plan-reviser", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "senior-dev", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "spec", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
+  { name: "senior-dev", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
+  { name: "spec", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
 ] as const;
 
 export const CANONICAL_TEMPLATE_STEPS = [

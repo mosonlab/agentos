@@ -1,8 +1,8 @@
 ---
 name: frontend-dev
 title: Frontend Developer
-model: gpt-5.6-sol:medium
-runner: codex
+model: claude-opus-5:high
+runner: claude
 inboxAccess: false
 skills: []
 collaborators: []

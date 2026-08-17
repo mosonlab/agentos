@@ -17,6 +17,7 @@ const CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 export const MODELS: CatalogModel[] = [
+  { id: "claude-fable-5", label: "Claude Fable 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "medium" },
   { id: "claude-opus-5", label: "Claude Opus 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
@@ -24,8 +25,6 @@ export const MODELS: CatalogModel[] = [
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "xhigh" },
   { id: "openai-codex/gpt-5.6-luna", label: "GPT-5.6 Luna (pi)", runner: "PI", efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], defaultEffort: "xhigh" },
 ];
-
-export const INTENTIONALLY_ABSENT = ["claude-fable-5"] as const;
 
 export const splitModel = (raw: string): { model: string; effort: string | null } => {
   const at = raw.lastIndexOf(":");

@@ -5,19 +5,19 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  findModel, INTENTIONALLY_ABSENT, joinModel, MODELS, resolveRunner, runnerForModel, splitModel, validateModelPair,
+  findModel, joinModel, MODELS, resolveRunner, runnerForModel, splitModel, validateModelPair,
 } from "../lib/models";
 import { ENFORCED_BY, TOOL_KEYS } from "../lib/tools";
 import type { RunnerKind, RunnerPreference } from "../lib/types";
 
-test("the catalog covers every roster model except named retirements", () => {
+test("the catalog covers every canonical roster model", () => {
   const roles = fileURLToPath(new URL("../../../../agents/roles/", import.meta.url));
   const ids = readdirSync(roles).filter((name) => name.endsWith(".md")).map((name) => {
     const source = readFileSync(resolve(roles, name), "utf8");
     return splitModel(source.match(/^model:\s*(\S+)/mu)?.[1] ?? "").model;
   });
-  for (const id of ids) assert.ok(findModel(id) || (INTENTIONALLY_ABSENT as readonly string[]).includes(id), id);
-  for (const id of INTENTIONALLY_ABSENT) assert.equal(findModel(id), null);
+  for (const id of ids) assert.ok(findModel(id), id);
+  assert.equal(findModel("claude-fable-5")?.defaultEffort, "medium");
 });
 
 test("catalog ids are unique and every default effort is selectable", () => {
@@ -29,7 +29,7 @@ test("catalog ids are unique and every default effort is selectable", () => {
 });
 
 test("model effort encoding round-trips on the runner's last-colon rule", () => {
-  for (const raw of ["claude-opus-5:high", "gpt-5.6-luna:max", "openai-codex/gpt-5.6-luna:xhigh", "claude-opus-5", ":high"]) {
+  for (const raw of ["claude-fable-5:medium", "claude-opus-5:high", "gpt-5.6-luna:max", "openai-codex/gpt-5.6-luna:xhigh", "claude-opus-5", ":high"]) {
     const parsed = splitModel(raw);
     assert.equal(joinModel(parsed.model, parsed.effort), raw);
   }
