@@ -20,8 +20,53 @@ const COST_SCALE = 4;
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
-const finite = (value: unknown): number | null =>
-  typeof value === "number" && Number.isFinite(value) ? value : null;
+/** PostgreSQL INTEGER, the type of all four token columns. */
+const MAX_INT4 = 2_147_483_647;
+/** Decimal(12, 4) holds eight integer digits: 99999999.9999 is the ceiling. */
+const MAX_COST = 100_000_000;
+
+/** Diagnostics only. Numbers go through String so NaN and Infinity are legible
+ * (JSON.stringify renders both as `null`, which is the one thing the reader of
+ * the diagnostic must not be told). */
+const render = (value: unknown): string =>
+  typeof value === "number" ? String(value) : JSON.stringify(value) ?? String(value);
+
+/**
+ * A value only counts as tokens if PostgreSQL can store it in INTEGER. Absent is
+ * silent — absent is normal and means "this payload said nothing about it".
+ * Present-but-impossible is dropped with a one-line diagnostic, and never throws:
+ * a payload must not be able to fail the ingest that carries it.
+ */
+const tokenCount = (value: unknown, field: string): number | null => {
+  if (value === undefined) return null;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_INT4) return value;
+  console.warn(`[usage] ignoring ${field}=${render(value)}: not a storable token count`);
+  return null;
+};
+
+/**
+ * Cost is stored as Decimal(12, 4). A value the column cannot hold is dropped
+ * HERE, per event, rather than after summation: `sumUsage` folds every surviving
+ * cost into one number, so a single absurd event would otherwise poison the sum
+ * and erase every valid sibling's cost. The range test is applied to the ROUNDED
+ * value because that is what is actually written — 99999999.99999 is below 10^8
+ * and still fails the write.
+ *
+ * Returns the raw number rather than the rounded one: `sumUsage` must keep
+ * adding exact values and round once at the end, as it does today.
+ */
+const costAmount = (value: unknown): number | null => {
+  if (value === undefined) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    console.warn(`[usage] ignoring total_cost_usd=${render(value)}: not a storable cost`);
+    return null;
+  }
+  if (new Prisma.Decimal(value).toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
+    console.warn(`[usage] ignoring total_cost_usd=${render(value)}: exceeds Decimal(12, 4)`);
+    return null;
+  }
+  return value;
+};
 
 /**
  * One event payload → whatever usage it carries. Shape-driven rather than
@@ -43,23 +88,23 @@ export const extractUsage = (payload: unknown): SessionUsage => {
   const result: SessionUsage = {};
 
   if (usage) {
-    const input = finite(usage.input_tokens);
+    const input = tokenCount(usage.input_tokens, "usage.input_tokens");
     if (input !== null) result.inputTokens = input;
-    const output = finite(usage.output_tokens);
+    const output = tokenCount(usage.output_tokens, "usage.output_tokens");
     if (output !== null) result.outputTokens = output;
 
     // CODEX reports one cached figure; CLAUDE reports a read/creation pair.
     // `reasoning_output_tokens` (CODEX) is deliberately not folded into output.
-    const cached = finite(usage.cached_input_tokens);
-    const cacheRead = finite(usage.cache_read_input_tokens);
-    const cacheCreation = finite(usage.cache_creation_input_tokens);
+    const cached = tokenCount(usage.cached_input_tokens, "usage.cached_input_tokens");
+    const cacheRead = tokenCount(usage.cache_read_input_tokens, "usage.cache_read_input_tokens");
+    const cacheCreation = tokenCount(usage.cache_creation_input_tokens, "usage.cache_creation_input_tokens");
     if (cached !== null) result.cachedInputTokens = cached;
     else if (cacheRead !== null || cacheCreation !== null) {
       result.cachedInputTokens = (cacheRead ?? 0) + (cacheCreation ?? 0);
     }
   }
 
-  const cost = finite(event.total_cost_usd);
+  const cost = costAmount(event.total_cost_usd);
   if (cost !== null) result.costUsd = cost;
   return result;
 };
@@ -88,18 +133,49 @@ type DerivedUsage = {
   costUsd: Prisma.Decimal | null;
 };
 
+/**
+ * The AGGREGATE token guard. Per-event rejection already happened in
+ * `tokenCount`, so this catches only the case that one cannot see: a sum that
+ * leaves INTEGER range even though every contributing event was individually
+ * storable. Each column is judged on its own, so an overflowing `totalTokens`
+ * becomes null while `inputTokens` and `outputTokens` keep their real values.
+ */
+const columnValue = (value: number | undefined, field: string): number | null => {
+  if (value === undefined) return null;
+  if (Number.isInteger(value) && value >= 0 && value <= MAX_INT4) return value;
+  console.warn(`[usage] ${field}=${render(value)} is out of INTEGER range after summing; storing null`);
+  return null;
+};
+
+/** The aggregate cost guard, for the same reason: two individually storable
+ * events of 6e7 sum to 1.2e8, which Decimal(12, 4) cannot hold. Rounds first,
+ * because the rounded value is what is written. */
+const costColumn = (value: number | undefined): Prisma.Decimal | null => {
+  if (value === undefined) return null;
+  if (!Number.isFinite(value) || value < 0) {
+    console.warn(`[usage] costUsd=${render(value)} is not storable after summing; storing null`);
+    return null;
+  }
+  const rounded = new Prisma.Decimal(value).toDecimalPlaces(COST_SCALE);
+  if (rounded.greaterThanOrEqualTo(MAX_COST)) {
+    console.warn(`[usage] costUsd=${render(value)} exceeds Decimal(12, 4) after summing; storing null`);
+    return null;
+  }
+  return rounded;
+};
+
 /** Absolute column values implied by a session's summed usage. Exported for the
  * unit test; the write path goes through `recomputeSessionUsage`. */
 export const deriveUsageColumns = (usage: SessionUsage): DerivedUsage => ({
-  inputTokens: usage.inputTokens ?? null,
-  outputTokens: usage.outputTokens ?? null,
-  cachedInputTokens: usage.cachedInputTokens ?? null,
+  inputTokens: columnValue(usage.inputTokens, "inputTokens"),
+  outputTokens: columnValue(usage.outputTokens, "outputTokens"),
+  cachedInputTokens: columnValue(usage.cachedInputTokens, "cachedInputTokens"),
   // Never 0 and never an estimate: null unless the provider reported at least
   // one of the two halves. Cache is excluded to avoid double counting.
   totalTokens: usage.inputTokens === undefined && usage.outputTokens === undefined
     ? null
-    : (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
-  costUsd: usage.costUsd === undefined ? null : new Prisma.Decimal(usage.costUsd).toDecimalPlaces(COST_SCALE),
+    : columnValue((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0), "totalTokens"),
+  costUsd: costColumn(usage.costUsd),
 });
 
 const sameColumns = (
