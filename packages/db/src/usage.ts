@@ -335,3 +335,72 @@ export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string)
     timeout: 15_000,   // backstop above lock_timeout + the work, so a contended
     maxWait: 5_000,    // caller fails as 55P03 rather than as an opaque P2028
   });
+
+export type BackfillSessionUsageResult = {
+  scanned: number;
+  updated: number;
+  failed: Array<{ sessionId: string; message: string }>;
+};
+
+/**
+ * Absolute recompute of every session that has a `FINAL_OUTPUT` event. It
+ * overwrites any populated cache that differs from the recomputed value and
+ * writes nothing when the two match — it is NOT write-only-to-null. That
+ * property is what repairs a lost write, and it is what lets a corrected
+ * extractor fix rows that were already populated. Safe to re-run, and safe to
+ * run while sessions are ingesting because `recomputeSessionUsage` serialises.
+ *
+ * One session's failure must never starve the rest of the scan: before this,
+ * the first throwing row aborted the run permanently, because a re-run sorts
+ * the same way and dies at the same row. Sequential by choice — the population
+ * is small and a parallel scan would only contend on the new lock.
+ */
+export const backfillSessionUsage = async (db: PrismaClient): Promise<BackfillSessionUsageResult> => {
+  // Every session with a terminal event, not just those whose totalTokens is
+  // null: a cost-only session never gets a totalTokens, and a session whose
+  // first attempt wrote columns but whose second attempt's write was lost to a
+  // crash is exactly the case a backfill exists to repair. The no-write
+  // comparison inside recomputeSessionUsage is what keeps a second pass honest.
+  const sessions = await db.session.findMany({
+    where: { events: { some: { type: "FINAL_OUTPUT" } } },
+    select: { id: true },
+    orderBy: { requestedAt: "asc" },
+  });
+  const result: BackfillSessionUsageResult = { scanned: sessions.length, updated: 0, failed: [] };
+  for (const session of sessions) {
+    try {
+      if (await recomputeSessionUsage(db, session.id)) result.updated += 1;
+    } catch (error) {
+      result.failed.push({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return result;
+};
+
+export type BackfillSessionUsageCliDeps = {
+  db: PrismaClient;
+  log?: (line: string) => void;
+  error?: (line: string) => void;
+};
+
+/**
+ * The CLI's whole body, minus the two lines a test cannot execute: constructing
+ * the client and assigning `process.exitCode`. Returns the exit code rather than
+ * setting it, so a `.dbtest` can execute the real reporting path and assert on
+ * the code instead of reading it out of the source. Injectable log/error so the
+ * test reads the summary it asserts on rather than trusting it.
+ *
+ * The 20-id cap exists so a corrupt-payload *class* failure does not print one
+ * line per session; `scanned` and `updated` are printed on the failing path too,
+ * because "how much of the scan survived" is the first thing an operator needs.
+ */
+export const runBackfillSessionUsageCli = async (
+  { db, log = console.log, error = console.error }: BackfillSessionUsageCliDeps,
+): Promise<number> => {
+  const result = await backfillSessionUsage(db);
+  log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failed.length}`);
+  if (result.failed.length === 0) return 0;
+  for (const failure of result.failed.slice(0, 20)) error(`  ${failure.sessionId}: ${failure.message}`);
+  if (result.failed.length > 20) error(`  … and ${result.failed.length - 20} more`);
+  return 1;
+};
