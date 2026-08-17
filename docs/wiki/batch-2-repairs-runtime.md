@@ -122,7 +122,7 @@ ENOENT: no such file or directory, stat '<另一套 workspace root>/<runId>'
 
 **根因。** workspace root 是进程配置，不是从 run row 动态协商的共享租约。runner 的 clone/reuse/cleanup 和 API 的 startup/post-completion reconcile 只相信各自的 root；不同进程看到的目录集合不一致。
 
-**现在靠什么守着。** `provisionWorkspace`、`reuseWorkspace`、`cleanupWorkspace` 和 API reconcile 都解析并校验各自的 root；clone 窗口的 run-id 反查只解决“路径尚未落库”，不能解决“两个进程使用了不同根”。部署时必须统一 root，迁移期间按下面的滚动规则操作。
+**现在靠什么守着。** `provisionWorkspace`、`reuseWorkspace`、`cleanupWorkspace` 和 API reconcile 都解析并校验各自的 root；clone 窗口的 run-id 反查解决“路径尚未落库”。API 还必须在导入 Prisma、reconcile 或 listen 前取得 canonical root 的主机级独占所有权；同一数据库、复制/不同数据库都不能绕过。runner 不取得该锁，多个 runner 仍可连接同一 owning API。受保护状态、拒绝/恢复判据和非激活回滚见英文运维手册 [`control-plane-workspace-ownership.md`](../runbooks/control-plane-workspace-ownership.md)。部署仍必须统一 API/runner root，迁移期间按下面的滚动规则操作。
 
 ### 4. retention quota 把应该留下的终态现场排除
 
@@ -184,6 +184,8 @@ Files 的部署结论是：采纳 `defaultWorkspaceRoot` 时，滚动期必须�
 2. 所有 runner 实例与 API 使用同一 root；
 3. `workspacePath` 已保存的 retained/WAITING_INBOX run 在切换后仍位于 runner 的 controlled root 内；
 4. 没有旧实例会继续启动 reconcile 并清理另一套 root。
+
+此外，唯一 API 必须使用独立的 `CONTROL_PLANE_STATE_DIR`。该目录必须位于源码允许的本地文件系统上，由 API uid 以 `0700` 独占，且 runner/model uid 无法读写；仅写绝对路径不构成文件系统证据。详细 preflight 和禁止在 live root 上排练的边界只看上述英文手册。
 
 ### archived-run 审计扫描的节流边界
 

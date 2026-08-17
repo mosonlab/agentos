@@ -6,7 +6,7 @@ import test from "node:test";
 
 import type { PrismaClient } from "@agentos/db";
 
-import { createApp } from "../app.js";
+import { createApp } from "../test-app.js";
 import { resetFileStores } from "./config.js";
 
 const auth = { Authorization: "Bearer files-operator-token" };

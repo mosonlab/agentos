@@ -33,7 +33,6 @@ import {
   TaskStatus,
   TriggerFireSource,
   gateQuestion,
-  prisma,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -65,7 +64,7 @@ import {
   retryDelayMs,
   runnerFor,
 } from "./execution.js";
-import { createArchivedRunNoticeScheduler, defaultWorkspaceRoot, noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
+import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns, reconcileWorkspaces } from "./reconcile.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
@@ -77,6 +76,11 @@ import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
 import { DirectoryNotEmptyError, InvalidPathError, IsADirectoryError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
+
+export interface LiveAppOptions {
+  workspaceRoot: string;
+  ownership: { assertHeld(): void | Promise<void> };
+}
 
 const id = z.string().min(1);
 const fence = z.string().min(1);
@@ -625,7 +629,7 @@ const goalInclude = {
   progressLog: { orderBy: { createdAt: "asc" as const } },
 };
 
-export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
+export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
   const runners = createRunnerRegistry();
@@ -2553,6 +2557,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const body = await readJson(context.req.raw, claimInput);
     const now = new Date();
     runners.note(body.runnerId, body, now);
+    await options.ownership.assertHeld();
     await reconcileDatabaseRuns(db, now);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
@@ -3285,9 +3290,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
         : context.json({ error: "Stale fencing token" }, 409);
     }
+    await options.ownership.assertHeld();
     await reconcileWorkspaces(
       db,
-      process.env.RUNNER_WORKSPACE_ROOT ?? defaultWorkspaceRoot(),
+      options.workspaceRoot,
       Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     ).catch((error: unknown) => console.error("Post-run workspace reconciliation failed", error));
     return context.json(result);
@@ -3363,5 +3369,3 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   app.notFound((context) => context.json({ error: "Not found" }, 404));
   return app;
 };
-
-export const app = createApp();

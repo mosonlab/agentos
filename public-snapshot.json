@@ -180,6 +180,16 @@
       "category": "credential-placeholder",
       "glob": "packages/api/src/testdb.ts",
       "reason": "localhost-only test database connection fixture"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/control-plane-ownership.test.ts",
+      "reason": "unreachable localhost database URL used to prove ownership precedes database access"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/testdb.test.ts",
+      "reason": "synthetic loopback scratch-database URLs used by harness guard tests"
     }
   ],
   "generatedRuntimePatterns": [

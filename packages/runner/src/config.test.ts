@@ -25,10 +25,10 @@ test("the default workspace root matches the API's definition of it", () => {
   // The runner cannot import from @agentos/api, so this default exists twice. Two
   // independent definitions of one path is the exact shape of the three-way default bug
   // this batch fixed, so pin them against each other by source: the API side is
-  // reconcile.ts's defaultWorkspaceRoot, and if either moves, this fails loudly instead
+  // workspace-root.ts's defaultWorkspaceRoot, and if either moves, this fails loudly instead
   // of the two silently sweeping different roots.
   assert.match(
-    apiSource("reconcile.ts"),
+    apiSource("workspace-root.ts"),
     /export const defaultWorkspaceRoot = \(\): string => join\(homedir\(\), "\.agentos", "runs"\);/u,
   );
 });

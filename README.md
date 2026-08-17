@@ -28,6 +28,13 @@ SHA. Successful workspaces are deleted. Failed workspaces may be retained;
 keeps. `Task.workingDirectory` remains only as a deprecated migration field and
 is never used as a runtime directory.
 
+Exactly one API control plane may own a canonical workspace root. Ownership is
+acquired from the protected, API-only `CONTROL_PLANE_STATE_DIR` before Prisma is
+imported or reconciliation/listen begins; runner daemons remain ordinary clients
+and any number may poll that one API. See the
+[workspace ownership runbook](docs/runbooks/control-plane-workspace-ownership.md)
+for supported filesystems, evidence, recovery, activation preflight, and rollback.
+
 ## CLI adapter contract
 
 Claude, Codex, and Pi implement the six-method adapter protocol:

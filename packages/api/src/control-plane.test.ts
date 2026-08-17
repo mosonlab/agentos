@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 
 const withOperator = async (callback: () => Promise<void>): Promise<void> => {
   const previousToken = process.env.OPERATOR_TOKEN;

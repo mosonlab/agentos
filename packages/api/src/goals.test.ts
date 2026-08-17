@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { GoalStatus, type PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp } from "./test-app.js";
 
 const operatorRequest = async (path: string, init?: RequestInit): Promise<Response> => createApp(database).request(path, {
   ...init,
