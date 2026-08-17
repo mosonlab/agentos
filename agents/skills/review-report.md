@@ -3,14 +3,13 @@ name: Review Report
 slug: review-report
 kind: prompt
 ---
-Shared format for review reports. Specialist reviewers write one; the
-review coordinator consolidates several into one document with the same
-finding shape.
+Shared format for the Review Coordinator's consolidated review report.
 
 A report is a markdown file with:
 
-1. **Header** — reviewer lens, artifact reviewed (file and version or
-   commit), spec it was judged against.
+1. **Header** — artifact reviewed (file and version or exact base/head
+   commits), Product Contract or approved spec it was judged against, and
+   the applicable security surfaces.
 2. **Verdict line** — `N must-fix, M should-fix`. Zero findings is a valid
    verdict and needs the same evidence as any other: state what you checked
    that let the artifact pass.
@@ -28,5 +27,5 @@ requirements, or unsafe changes. **Should-fix**: a real improvement the
 work survives without. A finding you cannot attach evidence to is a
 question, not a finding — leave it out or resolve it before writing.
 
-The consolidated report adds a per-finding origin lens and, where reviewers
-disagreed, both positions and the coordinator's ruling.
+Every finding records its origin lens: feasibility, scope, coherence,
+security, or risk-focused verification.

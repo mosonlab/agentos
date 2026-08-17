@@ -91,6 +91,51 @@ export const lockTaskRow = async (
   return rows[0] ?? null;
 };
 
+/**
+ * Takes the Agent-row mutex that archive and every assignment/run writer share.
+ *
+ * Archive used to write `archivedAt` unconditionally while task creation,
+ * template instantiation and run enqueue checked it in a different transaction.
+ * Under ReadCommitted both sides can be right at the same instant: the writer
+ * reads an unarchived agent, archive commits, and the writer then inserts a run
+ * the claim query — which filters `agent: { archivedAt: null }` — will never
+ * hand to a runner. That run sits QUEUED forever and its task never completes.
+ *
+ * The Agent row is the serialization point for that whole class. Every writer
+ * that assigns an agent or creates a run for one re-reads `archivedAt` under
+ * this lock; archive takes the same lock and fails closed on live references.
+ *
+ * Lock order is Task rows first, then this one — chain writers already hold a
+ * Task lock when they reach `enqueueTaskRun`. Archive takes only this lock and
+ * no Task lock, so the two orders cannot form a cycle.
+ */
+export const lockAgentRow = async (
+  tx: Tx,
+  agentId: string,
+): Promise<{ id: string; archivedAt: Date | null } | null> => {
+  const rows = await tx.$queryRaw<Array<{ id: string; archivedAt: Date | null }>>`
+    SELECT "id", "archivedAt" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE
+  `;
+  return rows[0] ?? null;
+};
+
+/** The same mutex for a whole step list, in one statement. `ORDER BY "id"` is
+ *  not decoration: it is what stops two concurrent instantiations of templates
+ *  that share agents from deadlocking against each other. */
+export const lockAgentRows = async (
+  tx: Tx,
+  agentIds: string[],
+): Promise<Map<string, Date | null>> => {
+  const unique = [...new Set(agentIds)];
+  if (unique.length === 0) return new Map();
+  const rows = await tx.$queryRaw<Array<{ id: string; archivedAt: Date | null }>>`
+    SELECT "id", "archivedAt" FROM "Agent"
+    WHERE "id" = ANY(${unique})
+    ORDER BY "id" FOR UPDATE
+  `;
+  return new Map(rows.map((row) => [row.id, row.archivedAt]));
+};
+
 /** Locks an indexed chain prefix in the one global order used by manual start,
  * manual completion, and automatic advancement. Raw SQL returns ids only;
  * callers perform typed Prisma reads after this serialization point. */
@@ -273,7 +318,13 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   if (task.archivedAt) {
     throw new ArchivedTaskError(task.id, task.name);
   }
-  if (task.assigneeAgent.archivedAt) {
+  // The assignee is re-read under the shared Agent-row mutex, not trusted from
+  // the relation above: this function is the single place a Run comes into
+  // existence, so an archive committing in parallel has to lose here or be
+  // refused for the run this call is about to create. A row that vanished
+  // falls back to the relation; the foreign key decides that case.
+  const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
+  if (lockedAgent?.archivedAt ?? task.assigneeAgent.archivedAt) {
     throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
   }
   const prior = task.runs[0];
@@ -370,6 +421,61 @@ export const ACTIVE_RUN_STATUSES: RunStatus[] = [
   RunStatus.RUNNING,
   RunStatus.WAITING_INBOX,
 ];
+
+/**
+ * "This task is a live reference to its assignee." Every status here is one the
+ * control plane can still turn into a run without an operator reassigning the
+ * task: TODO covers a queued step, a scheduled definition and a parked future
+ * chain step; DOING covers the step currently executing; REVIEW covers a step
+ * whose approval gate can still be rejected, which queues the producing step
+ * again. DONE is terminal history and BACKLOG is where an operator explicitly
+ * parks work, so neither blocks.
+ */
+export const LIVE_TASK_STATUSES: TaskStatus[] = [
+  TaskStatus.TODO,
+  TaskStatus.DOING,
+  TaskStatus.REVIEW,
+];
+
+/**
+ * Why this agent may not be archived right now, or null.
+ *
+ * Read under `lockAgentRow`, so it is the fail-closed half of the protocol: a
+ * writer that already created a live reference holds the lock until it commits,
+ * and archive then sees that reference instead of stranding it. Runs come first
+ * because a queued run for an archived agent is exactly the row nothing ever
+ * claims; a live task is the same stall one step earlier — nothing has enqueued
+ * its run yet, so no run exists to be found, and archiving now strands the task
+ * the moment anything tries to.
+ *
+ * Archived history is untouched — DONE tasks, BACKLOG tasks and terminal runs
+ * never block, so retiring an agent whose work is finished or explicitly parked
+ * stays a one-click operation.
+ */
+export const agentArchiveBlocker = async (tx: Tx, agentId: string): Promise<string | null> => {
+  const run = await tx.run.findFirst({
+    where: { agentId, status: { in: ACTIVE_RUN_STATUSES } },
+    orderBy: { runNumber: "asc" },
+    select: { runNumber: true, status: true, task: { select: { name: true } } },
+  });
+  if (run) {
+    const where = run.task ? ` on ${run.task.name}` : "";
+    return `Cannot archive an agent with a ${run.status} run${where}; finish or cancel run ${run.runNumber} first`;
+  }
+  const task = await tx.task.findFirst({
+    where: { assigneeAgentId: agentId, archivedAt: null, status: { in: LIVE_TASK_STATUSES } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { name: true, status: true },
+  });
+  // The status is named because the four exits differ by it, and the operator
+  // has to pick one: an executing task is finished or cancelled, a queued one is
+  // parked in Backlog or archived, a reviewed one is decided, and any of them
+  // can instead be handed to another agent.
+  if (task) {
+    return `Cannot archive an agent assigned to ${task.status} task ${task.name}; finish, park, archive, or reassign that task first`;
+  }
+  return null;
+};
 
 const isUniqueConflict = (error: unknown): boolean => (
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"

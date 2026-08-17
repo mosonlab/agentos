@@ -49,6 +49,9 @@ const main = async (): Promise<void> => {
     if (step.outputKind !== expected.outputKind) {
       throw new Error(`template step ${step.stepIndex} must persist ${expected.outputKind}; found ${step.outputKind}`);
     }
+    if (step.approvalGate !== expected.approvalGate) {
+      throw new Error(`template step ${step.stepIndex} approval gate must be ${expected.approvalGate}; found ${step.approvalGate}`);
+    }
     if (step.stepIndex <= 8 && !isTemplateRunnerInherited(step.runner)) {
       throw new Error(`template step ${step.stepIndex} must inherit its Agent runner; found ${step.runner}`);
     }

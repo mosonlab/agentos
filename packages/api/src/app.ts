@@ -5,6 +5,7 @@ import {
   AssigneeType,
   activateChainSuccessor,
   advanceTemplateTask,
+  agentArchiveBlocker,
   applyInboxDecision,
   CleanupStatus,
   deriveRunConfig,
@@ -14,8 +15,10 @@ import {
   InboxStatus,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  LIVE_TASK_STATUSES,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
+  lockAgentRow,
   lockChainPrefixRows,
   NetworkingMode,
   Prisma,
@@ -544,7 +547,28 @@ const isPublic = (path: string, method: string): boolean =>
 
 const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
 
-type LockedTask = { id: string; status: TaskStatus; archivedAt: Date | null };
+type LockedTask = {
+  id: string;
+  status: TaskStatus;
+  archivedAt: Date | null;
+  projectId: string;
+  assigneeAgentId: string | null;
+};
+
+/** Live means exactly what blocks an agent's archival: the same
+ *  `LIVE_TASK_STATUSES` `agentArchiveBlocker` reads, so the two halves of the
+ *  protocol cannot drift into disagreeing about which tasks count. Everything
+ *  else — DONE and BACKLOG — is history or a parking bay, which is why moving
+ *  out of it is the moment the assignee has to be re-validated. */
+const isLiveStatus = (status: TaskStatus): boolean => LIVE_TASK_STATUSES.includes(status);
+
+const lockedTaskSelect = {
+  id: true,
+  status: true,
+  archivedAt: true,
+  projectId: true,
+  assigneeAgentId: true,
+} satisfies Prisma.TaskSelect;
 
 /**
  * The exclusion protocol every writer that can give a task a run shares.
@@ -571,7 +595,7 @@ const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<L
   // transaction.
   return tx.task.findUniqueOrThrow({
     where: { id: taskId },
-    select: { id: true, status: true, archivedAt: true },
+    select: lockedTaskSelect,
   });
 };
 
@@ -604,6 +628,61 @@ const lockDoneTasks = async (
 const hasActiveRun = async (tx: Prisma.TransactionClient, taskId: string): Promise<boolean> => (
   await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } })
 ) > 0;
+
+/**
+ * The assignment half of the Agent-row exclusion protocol: the 400 message if
+ * this agent may not be written onto a task right now, or null.
+ *
+ * Callers check the assignee once before the transaction to answer fast; this
+ * re-read under `lockAgentRow` is the one that decides. Without it the check
+ * and the write straddle a concurrent archive, and the task — or the run
+ * created with it — belongs to an agent the runner will never claim for.
+ */
+const assignmentBlocked = async (
+  tx: Prisma.TransactionClient,
+  assignee: { id: string; name: string } | null,
+): Promise<string | null> => {
+  if (!assignee) return null;
+  const locked = await lockAgentRow(tx, assignee.id);
+  if (!locked) return "Assignee does not belong to this project";
+  return locked.archivedAt ? `Assignee ${assignee.name} is archived` : null;
+};
+
+/**
+ * The reactivation half of the same protocol: the message if this *stored*
+ * assignee may not own a live task right now, or null.
+ *
+ * `assignmentBlocked` only ever sees an assignee the request named, so a
+ * request that carries no `assigneeAgentId` — a status-only promotion out of
+ * Backlog, an unarchive — used to skip the Agent row entirely and hand a live
+ * task back to an archived agent. The runner claims only unarchived TODO|DOING
+ * tasks whose agent is unarchived, so that task is not "assigned": it is stuck,
+ * on a board that shows it as work in progress.
+ *
+ * Called with the Task row already locked, so the order stays the one global
+ * order: Task row first, Agent row second. The name is read outside the Agent
+ * lock because it only decorates the message; `lockAgentRow` is what decides.
+ */
+const reactivationBlocked = async (
+  tx: Prisma.TransactionClient,
+  task: { projectId: string; assigneeAgentId: string | null },
+): Promise<string | null> => {
+  // A human step or an unassigned one has no agent to be archived, so it
+  // reactivates exactly as it did before this guard existed.
+  if (task.assigneeAgentId === null) return null;
+  const assignee = await tx.agent.findFirst({
+    where: { id: task.assigneeAgentId, projectId: task.projectId },
+    select: { id: true, name: true },
+  });
+  if (!assignee) return "Assignee does not belong to this project";
+  const locked = await lockAgentRow(tx, assignee.id);
+  if (!locked) return "Assignee does not belong to this project";
+  // The sentence names the two ways out, because the operator who pressed this
+  // did not name the assignee in the request and cannot see it in the error.
+  return locked.archivedAt
+    ? `Assignee ${assignee.name} is archived; unarchive the agent or reassign this task first`
+    : null;
+};
 
 /** `{archived, skipped}` from a candidate set and the ids that turned out busy.
  *  Extracted so the partitioning is unit-testable without a database. */
@@ -965,16 +1044,28 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       throw error;
     }
   });
+  // Archive is one side of the Agent-row exclusion protocol (see lockAgentRow).
+  // It takes the same mutex every assignment and run writer takes, and inside it
+  // it fails closed: an agent with a live task or run reference stays unarchived
+  // rather than stranding work nothing will ever claim. Re-archiving an already
+  // archived agent stays idempotent and keeps the original timestamp.
   app.post("/agents/:agentId/archive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
-    const agent = await db.agent.findUnique({ where: { id: agentId } });
-    if (!agent) return context.json({ error: "Agent not found" }, 404);
-    const archived = agent.archivedAt ? agent : await db.agent.update({
-      where: { id: agentId },
-      data: { archivedAt: new Date() },
-    });
+    const now = new Date();
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockAgentRow(tx, agentId);
+      if (!locked) return { error: "Agent not found", code: 404 as const };
+      const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
+      if (agent.archivedAt) return { agent };
+      const blocker = await agentArchiveBlocker(tx, agentId);
+      if (blocker) return { error: blocker, code: 409 as const };
+      return { agent: await tx.agent.update({ where: { id: agentId }, data: { archivedAt: now } }) };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    // Unchanged sweep: rows archived before this protocol existed — or queued by
+    // a writer that committed first — still get their explanatory activity.
     await noteArchivedQueuedRuns(db, { agentId });
-    return context.json(archived);
+    return context.json(result.agent);
   });
   app.post("/agents/:agentId/unarchive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -1465,25 +1556,38 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (!access) return context.json({ error: "Assignee has no grant for this template's Repo" }, 400);
     }
-    const duplicate = await db.taskTemplateStep.findFirst({
-      where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
-      select: { id: true },
-    });
-    if (duplicate) return context.json({ error: "Template step index already exists" }, 409);
-    return context.json(await db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id,
-      stepIndex: body.stepIndex,
-      name: body.name,
-      assigneeType: body.assigneeType,
-      assigneeAgentId: body.assigneeAgentId,
-      prompt: body.prompt,
-      approvalGate: body.approvalGate,
-      attachmentsFromPrevious: body.attachmentsFromPrevious,
-      spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
-      runner: body.runner,
-      outputKind: body.outputKind,
-      opensPullRequest: body.opensPullRequest,
-    } }), 201);
+    // A template step is a standing assignment: every future instantiation and
+    // every webhook fire turns this row into a task and a run for this agent. So
+    // it joins the same Agent-row exclusion protocol as the task writers — the
+    // checks above answered from unlocked reads, and only this re-read under
+    // `lockAgentRow` decides. Duplicate detection and the create move inside the
+    // same transaction, because a step written after the lock was released is
+    // exactly the archived assignment this protocol exists to prevent.
+    const result = await db.$transaction(async (tx) => {
+      const blocked = await assignmentBlocked(tx, agent);
+      if (blocked) return { error: blocked, code: 400 as const };
+      const duplicate = await tx.taskTemplateStep.findFirst({
+        where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
+        select: { id: true },
+      });
+      if (duplicate) return { error: "Template step index already exists", code: 409 as const };
+      return { step: await tx.taskTemplateStep.create({ data: {
+        taskTemplateId: template.id,
+        stepIndex: body.stepIndex,
+        name: body.name,
+        assigneeType: body.assigneeType,
+        assigneeAgentId: body.assigneeAgentId,
+        prompt: body.prompt,
+        approvalGate: body.approvalGate,
+        attachmentsFromPrevious: body.attachmentsFromPrevious,
+        spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
+        runner: body.runner,
+        outputKind: body.outputKind,
+        opensPullRequest: body.opensPullRequest,
+      } }) };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.step, 201);
   });
   // Bounded on purpose: `opensPullRequest` only. A general template-step editor
   // is a whole authoring surface (stepIndex, name, assigneeType, prompt,
@@ -1933,6 +2037,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
     }
     const task = await db.$transaction(async (tx) => {
+      // The check above answered from an unlocked read. This one holds the
+      // Agent-row mutex through the task — and the inline run below — so a
+      // concurrent archive either loses the race or is refused for this run.
+      const blocked = await assignmentBlocked(tx, agent);
+      if (blocked) return { error: blocked, code: 400 as const };
       const created = await tx.task.create({
         data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
       });
@@ -1970,9 +2079,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
       }
-      return created;
+      return { created };
     });
-    return context.json(task, 201);
+    if ("error" in task) return context.json({ error: task.error }, task.code);
+    return context.json(task.created, 201);
   });
   app.get("/tasks/:taskId", async (context) => {
     const task = await db.task.findUnique({
@@ -2057,12 +2167,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (before.chainId !== null && body.approvalGate !== undefined && body.approvalGate !== before.approvalGate) {
       return context.json({ error: "Approval gates on dispatched chain tasks are controlled by the chain" }, 409);
     }
-    const changesStatus = body.status !== undefined && body.status !== before.status;
-    const movingToBacklog = body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG;
+    // Held for the whole route: whichever of the three write paths below runs
+    // re-reads this assignee under the Agent-row mutex before it commits.
+    const assignee = body.assigneeAgentId
+      ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } })
+      : null;
     if (body.assigneeAgentId) {
-      const agent = await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } });
-      if (!agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
-      if (agent.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
+      if (!assignee) return context.json({ error: "Assignee does not belong to this project" }, 400);
+      if (assignee.archivedAt) return context.json({ error: `Assignee ${assignee.name} is archived` }, 400);
     }
     if (body.repoId) {
       const repo = await db.repo.findFirst({ where: { id: body.repoId, projectId: before.projectId } });
@@ -2117,7 +2229,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // unarchived, whether or not the transition also advances a chain. Splitting
     // that by `advances` would let an archived chained task be marked DONE while
     // an archived standalone one could not.
-    if (changesStatus || body.status === TaskStatus.DONE) {
+    //
+    // Every request that names a status takes this path, not only the ones that
+    // look like a change against the unlocked `before` read. `before` is stale
+    // by definition, so "status: TODO on a task that is already TODO" can land
+    // on a row another writer has since parked or archived — and outside the
+    // transaction it wrote that TODO back with no lock and no guard at all.
+    if (body.status !== undefined) {
       const written = await db.$transaction(async (tx) => {
         let locked: LockedTask | null;
         if (body.status === TaskStatus.DONE && before.chainId && before.chainIndex !== null) {
@@ -2126,9 +2244,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             chainId: before.chainId,
             targetChainIndex: before.chainIndex,
           });
-          locked = await tx.task.findUnique({
-            where: { id: taskId }, select: { id: true, status: true, archivedAt: true },
-          });
+          locked = await tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect });
         } else {
           locked = await lockTask(tx, taskId);
         }
@@ -2136,7 +2252,31 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
         }
-        if (movingToBacklog && await hasActiveRun(tx, taskId)) {
+        // Task rows first, then the Agent row — the one global lock order.
+        const blockedAssignment = await assignmentBlocked(tx, assignee);
+        if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
+        // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
+        // task back to whoever it is *already* assigned to, and that assignee is
+        // in no request field for `assignmentBlocked` to have checked. So the
+        // stored one joins the same protocol here, read under the Agent-row
+        // mutex the locked Task row above already ordered us into. `locked` is
+        // the authority on it, not the pre-transaction `before` read.
+        //
+        // 409, not the 400 above: nothing in the request is malformed — the
+        // conflict is in the state of the assignee, which the operator can fix
+        // and retry, exactly like Retry's archived-assignee refusal.
+        if (body.assigneeAgentId === undefined
+          && !isLiveStatus(locked.status)
+          && body.status !== undefined
+          && isLiveStatus(body.status)) {
+          const blockedReactivation = await reactivationBlocked(tx, locked);
+          if (blockedReactivation) return { error: blockedReactivation, code: 409 as const };
+        }
+        // Against `locked`, not `before`: a park is a park whenever the row this
+        // transaction holds is not already in Backlog.
+        if (body.status === TaskStatus.BACKLOG
+          && locked.status !== TaskStatus.BACKLOG
+          && await hasActiveRun(tx, taskId)) {
           return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
         }
         if (body.status === TaskStatus.DONE) {
@@ -2208,10 +2348,26 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // a creator holding a stale task relation.
       const updated = await db.$transaction(async (tx) => {
         const locked = await lockTask(tx, taskId);
-        if (!locked) return null;
-        return tx.task.update({ where: { id: taskId }, data: updateData });
+        if (!locked) return { error: "Task not found", code: 404 as const };
+        const blockedAssignment = await assignmentBlocked(tx, assignee);
+        if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
+        return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-      return updated ? context.json(updated) : context.json({ error: "Task not found" }, 404);
+      if ("error" in updated) return context.json({ error: updated.error }, updated.code);
+      return context.json(updated.task);
+    }
+    // A plain field edit that hands the task to an agent is still an assignment
+    // writer, so it joins the same protocol: Task row first, Agent row second.
+    if (assignee) {
+      const written = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return { error: "Task not found", code: 404 as const };
+        const blockedAssignment = await assignmentBlocked(tx, assignee);
+        if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
+        return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      if ("error" in written) return context.json({ error: written.error }, written.code);
+      return context.json(written.task);
     }
     return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
   });
@@ -2247,7 +2403,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (!task.assigneeAgent) {
         return { error: "Task assignee no longer exists; assign an agent before retrying", code: 409 as const };
       }
-      if (task.assigneeAgent.archivedAt) {
+      // Retry builds its Run inline rather than through enqueueTaskRun, so it
+      // takes the Agent-row mutex itself — Task row first, Agent row second.
+      const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
+      if (lockedAgent?.archivedAt ?? task.assigneeAgent.archivedAt) {
         return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
       }
       const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
@@ -2420,13 +2579,32 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/unarchive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    // No lock: unarchiving cannot race a run into existence.
-    const before = await db.task.findUnique({ where: { id: taskId }, select: { archivedAt: true } });
-    if (!before) return context.json({ error: "Task not found" }, 404);
-    if (before.archivedAt === null) return context.json(await db.task.findUniqueOrThrow({ where: { id: taskId } }));
-    const task = await db.task.update({ where: { id: taskId }, data: { archivedAt: null } });
-    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
-    return context.json(task);
+    // This used to run unlocked, on the theory that unarchiving cannot race a
+    // run into existence. It cannot — but archivedAt is the other half of what
+    // makes a task live, so unarchiving a TODO|DOING|REVIEW row *is* a
+    // reactivation and has to join the same protocol: Task row first, Agent row
+    // second, decided on the state this transaction holds.
+    //
+    // Restoring DONE or BACKLOG history stays unconditional. Neither is claimed
+    // by a runner or shown as work in progress, so an archived assignee cannot
+    // strand them — and refusing them would make an agent's archival delete the
+    // operator's ability to read their own history back onto the board.
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockTask(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (locked.archivedAt === null) {
+        return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
+      }
+      if (isLiveStatus(locked.status)) {
+        const blocked = await reactivationBlocked(tx, locked);
+        if (blocked) return { error: blocked, code: 409 as const };
+      }
+      const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: null } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
+      return { task };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
   });
   app.post("/projects/:projectId/tasks/archive-done", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
@@ -2803,10 +2981,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             orderBy: { task: { chainIndex: "asc" } },
           })
           : [];
-        const priorOutputs = priorOutputsRaw.map((output) => ({
-          ...output,
-          body: output.body.length > 10_000 ? output.body.slice(-10_000) : output.body,
-        }));
+        // Persisted outputs are chain authority, not activity previews. A
+        // silent tail slice can remove schemas, state machines, and approval
+        // assumptions while still presenting the remainder as complete. The
+        // write endpoint already caps each artifact at 500k; pass the durable
+        // body verbatim until artifact references replace prompt embedding.
+        const priorOutputs = priorOutputsRaw;
         return {
           task: candidate.task,
           agent: candidate.agent,

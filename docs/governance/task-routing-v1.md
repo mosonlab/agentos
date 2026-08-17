@@ -47,6 +47,36 @@ Treat a task as Critical when it materially affects database migration or restor
 
 All routes may append review, fixes, and human acceptance gates required by the Product Contract. `implementation-plan-executioner` may be used only when a persisted `plan` or `revised-plan` artifact already exists.
 
+## Human approval placement
+
+`Task.approvalGate` is the sole runtime authority for an Agent step. A role
+persists its output and finishes; the control plane moves a gated task to
+REVIEW and an ungated task to DONE. An Agent may ask a blocking Product
+Contract question, but it must not create a second approval request merely
+because its artifact is a specification or plan.
+
+Place the fewest gates that preserve human judgment:
+
+- Add a specification gate only when the SPEC resolves product behavior,
+  acceptance semantics, or a data-contract ambiguity that the approved Product
+  Contract leaves open.
+- Do not gate an initial Plan before independent review. For Planned Critical
+  work, put implementation authorization on the revised Plan after automatic
+  plan review and must-fix closure. Planned Standard work continues
+  automatically unless its Product Contract explicitly requires that gate.
+- Keep implementation, code review, review fixes, and documentation automatic
+  inside the approved boundaries.
+- Require exact-head human authorization before merging a pull request or
+  performing a public, production, destructive, migration, or restore action.
+  Head, base, required-check, or material evidence drift invalidates that
+  authorization.
+
+Direct Standard work normally has only final human acceptance when it opens a
+pull request. A blocking SPEC gate is added for unresolved product semantics.
+Critical work adds the post-review implementation-authorization gate. Gate
+selection is recorded when the task or chain is dispatched; an active Agent
+does not rewrite it.
+
 ## Implementation agent selection
 
 - Use `frontend-dev` for bounded, routine, frontend-only changes.
@@ -72,6 +102,12 @@ If risk or ambiguity increases during execution, pause before the newly unsafe w
 
 ## Existing nine-step template
 
-`compound-engineer-workflow` remains the preserved Full Assurance workflow for work that benefits from its complete specification, planning, implementation, review, and human-acceptance sequence. It is not the universal default, a dynamic router, or a substitute for Critical routing. A Critical implementation still uses `senior-dev` at high effort even when the surrounding Full Assurance structure is appropriate.
+`compound-engineer-workflow` remains the preserved Full Assurance workflow for work that benefits from its complete specification, planning, implementation, review, and human-acceptance sequence. Its static safe default gates the specification, the reviewed and revised Plan that authorizes implementation, and final human PR review. It does not gate the unreviewed initial Plan. It is not the universal default, a dynamic router, or a substitute for Critical routing. A Critical implementation still uses `senior-dev` at high effort even when the surrounding Full Assurance structure is appropriate.
+
+The current template has nine steps. After the separately governed Merge
+Integrator is implemented, final delivery becomes step 9 human exact-head
+authorization followed by step 10 mechanical merge execution. The integrator
+must stop on drift, failed checks, or conflict and return to renewed human
+authorization; it does not make the approval decision itself.
 
 Version 1 uses deterministic dispatch-time routing. It does not require a runtime router or a replacement for the existing template.

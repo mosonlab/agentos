@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   AssigneeType,
   enqueueTaskRun,
+  lockAgentRows,
   Prisma,
   type PrismaClient,
   TaskSource,
@@ -17,9 +18,19 @@ export type InstantiateTemplateInput = {
   description?: string | undefined;
 };
 
-const retryableTransactionConflict = (error: unknown): boolean => (
-  error instanceof Prisma.PrismaClientKnownRequestError && (error.code === "P2034" || error.code === "P2002")
-);
+/** serialization_failure and deadlock_detected: both mean "retry the whole transaction". */
+const SERIALIZATION_SQLSTATE = new Set(["40001", "40P01"]);
+
+const retryableTransactionConflict = (error: unknown): boolean => {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code === "P2034" || error.code === "P2002") return true;
+  // The Agent-row mutex below is a raw statement, and a raw statement that loses
+  // a serializable conflict comes back as P2010 with the SQLSTATE in meta rather
+  // than as the P2034 Prisma raises for its own query builder. Without this the
+  // conflict escapes as a 500 instead of retrying into the named archive error.
+  const sqlstate = (error.meta as { code?: unknown } | undefined)?.code;
+  return error.code === "P2010" && typeof sqlstate === "string" && SERIALIZATION_SQLSTATE.has(sqlstate);
+};
 
 const retryDelay = async (attempt: number): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, attempt * 10 + Math.floor(Math.random() * 25)));
@@ -76,6 +87,26 @@ export const instantiateTemplate = async (
     const branchName = input.variables.branchName ?? `agentos/${chainId}`;
     try {
       return await db.$transaction(async (tx) => {
+        // The step validation above read every assignee outside this
+        // transaction. Re-read them all under the shared Agent-row mutex before
+        // the first task exists: instantiation writes a whole chain plus its
+        // first run, and an archive committing between the check and the write
+        // would leave every step of that chain pointed at an agent no runner
+        // will ever claim for. One id-ordered statement, so two instantiations
+        // sharing agents cannot deadlock.
+        const lockedAgents = await lockAgentRows(
+          tx,
+          template.steps.flatMap((step) => step.assigneeAgentId ? [step.assigneeAgentId] : []),
+        );
+        for (const step of template.steps) {
+          if (!step.assigneeAgentId) continue;
+          if (!lockedAgents.has(step.assigneeAgentId)) {
+            throw new Error(`Template step ${step.name} agent was not found`);
+          }
+          if (lockedAgents.get(step.assigneeAgentId)) {
+            throw new Error(`Template step ${step.name} agent ${step.assigneeAgent?.name ?? step.assigneeAgentId} is archived`);
+          }
+        }
         const tasks = [];
         for (const step of template.steps) {
           const context = [

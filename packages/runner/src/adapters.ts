@@ -374,8 +374,28 @@ const denyArgs = (runner: "CLAUDE" | "PI", disabledTools: string[]): string[] =>
   return [runner === "CLAUDE" ? "--disallowedTools" : "--exclude-tools", names.join(",")];
 };
 
+/**
+ * What the session is actually asked to do: a fresh prompt, or the resume input.
+ *
+ * It never appears in argv. A claim carries the chain's persisted prior outputs
+ * verbatim, each capped at 500k by the write endpoint, so a nine-step chain's
+ * cumulative prompt is measured in megabytes — past Linux's 128 KiB per-argument
+ * MAX_ARG_STRLEN and past macOS's ~1 MiB total argument block. As an argv
+ * element that is E2BIG: `spawn` fails before the provider ever starts, and no
+ * amount of retrying fixes it.
+ *
+ * Every runner reads it from stdin instead, on a documented path of its own:
+ * `claude -p` with no prompt argument, `codex exec -` and `codex exec resume
+ * <id> -` (`-` means "read the instructions from stdin"), and pi, which
+ * prepends piped stdin to the initial message in every non-RPC mode. Resume ids,
+ * MCP wiring and deny flags stay on argv, where they are small and stable.
+ *
+ * The prompt also stops being visible in every `ps` on the box, which is where
+ * a task description and its predecessors' outputs used to sit in the clear.
+ */
+export const inputForRunner = (spec: RunSpec, resume?: ResumeSpec): string => resume?.input ?? spec.prompt;
+
 export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
-  const input = resume?.input ?? spec.prompt;
   const { model, effort } = modelSpec(spec.claim.run.model);
   if (runner === "CLAUDE") return [
     "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
@@ -386,15 +406,15 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     // strict keeps the operator's personal MCP servers out of an agent session:
     // the manifest is supposed to be the whole tool surface.
     "--mcp-config", JSON.stringify(mcpConfig(spec.credentialsPath)), "--strict-mcp-config",
-    ...(resume ? ["--resume", resume.providerConversationId] : []), input,
+    ...(resume ? ["--resume", resume.providerConversationId] : []),
   ];
   if (runner === "CODEX") return resume
-    ? ["exec", "resume", ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, input]
+    ? ["exec", "resume", ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, "-"]
     : [
       "exec", "--json", "-m", model,
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
       ...codexMcpArgs(spec.credentialsPath),
-      "--dangerously-bypass-approvals-and-sandbox", input,
+      "--dangerously-bypass-approvals-and-sandbox", "-",
     ];
   return [
     "-p", "--mode", "json", "--session-dir", join(spec.workingDirectory, ".agentos-pi"),
@@ -402,13 +422,14 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     ...(effort ? ["--thinking", effort] : []),
     ...denyArgs("PI", spec.claim.agent.disabledTools),
     "--extension", piExtensionPath(),
-    ...(resume ? ["--session", resume.providerConversationId] : []), input,
+    ...(resume ? ["--session", resume.providerConversationId] : []),
   ];
 };
 
 const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink, resume?: ResumeSpec): RuntimeHandle => {
   const binary = spec.config.binaries[runner];
   const args = argsForRunner(runner, spec, resume);
+  const input = inputForRunner(spec, resume);
   const prefixed = spec.config.runAsPrefix.length > 0;
   const executable = prefixed ? spec.config.runAsPrefix[0]! : binary;
   const fullArgs = prefixed ? [...spec.config.runAsPrefix.slice(1), binary, ...args] : args;
@@ -416,8 +437,10 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
   const child = spawn(executable, fullArgs, {
     cwd: spec.workingDirectory,
     env: spec.env,
+    // stdin is the prompt channel (see inputForRunner); stdout stays the
+    // structured event protocol every parser below reads.
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   const handle: RuntimeHandle = {
     runner,
@@ -478,7 +501,27 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     });
     child.once("close", (code, signal) => finish(code, signal));
   });
-  sink({ source: "RUNNER", type: "PROCESS_STARTED", payload: { pid: handle.pid, binary, args, promptHash: spec.claim.run.promptHash } });
+  // A CLI that dies before it drains a multi-megabyte prompt (missing binary,
+  // failed auth) closes the pipe under us. That EPIPE is a symptom, never the
+  // diagnosis, so it is recorded as its own event and deliberately kept out of
+  // stderr: the CLI's own exit evidence is what classifies the run.
+  child.stdin!.on("error", (error: NodeJS.ErrnoException) => {
+    sink({
+      source: "RUNNER",
+      type: "PROMPT_DELIVERY_FAILED",
+      payload: { message: error.message, code: error.code ?? null },
+    });
+  });
+  child.stdin!.end(input);
+  sink({ source: "RUNNER", type: "PROCESS_STARTED", payload: {
+    pid: handle.pid,
+    binary,
+    // argv no longer carries the prompt, so this stays safe to persist and read.
+    args,
+    promptTransport: "stdin",
+    promptBytes: Buffer.byteLength(input),
+    promptHash: spec.claim.run.promptHash,
+  } });
   return handle;
 };
 
@@ -624,6 +667,7 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   runAsPrefix: spec.config.runAsPrefix,
   model: spec.claim.run.model,
   promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
+  promptTransport: "stdin",
   structuredEvents: true,
   // What the seat manual promises the agent, and how it was actually injected.
   agentosTools: {

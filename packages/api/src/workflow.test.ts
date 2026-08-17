@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   activateChainSuccessor,
   advanceTemplateTask,
+  agentArchiveBlocker,
   applyInboxDecisionTx,
   ArchivedAssigneeError,
   AssigneeType,
@@ -13,10 +14,12 @@ import {
   InboxKind,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  LIVE_TASK_STATUSES,
   RunStatus,
   runnerFor,
   RunnerKind,
   RunnerPreference,
+  TaskStatus,
   type PrismaClient,
 } from "@agentos/db";
 
@@ -75,6 +78,7 @@ test("task creation keeps its runner, model, and promptHash output while derivat
       repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
       agentRepoAccess: { findFirst: async () => ({ id: "grant-1" }) },
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
         task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
         taskActivity: { create: async () => ({ id: "activity-1" }) },
         run: { create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; } },
@@ -173,6 +177,7 @@ test("a malformed chain row records an activity and falls back to followUpTaskId
 test("a later chain step runs on the chain's shared branch so the chain lands in one PR", async () => {
   const queued: Record<string, unknown>[] = [];
   const tx = {
+    $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
     task: {
       findUniqueOrThrow: async () => ({
         id: "task-2", projectId: "project-1", name: "Plan", description: "plan", assigneeType: AssigneeType.AGENT,
@@ -234,7 +239,7 @@ test("the shared decision compare-and-set makes a second Web or Feishu click a n
   assert.deepEqual(events, ["task-lock", "open-cas"]);
 });
 
-const rejectionTx = (options: { redoArchivedAt?: Date | null } = {}) => {
+const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: Date | null } = {}) => {
   const queued: Record<string, unknown>[] = [];
   const locks: string[] = [];
   const executable = {
@@ -246,12 +251,16 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null } = {}) => {
   };
   let lookup = 0;
   const tx = {
-    // The Task-row mutex the reject path now takes before queueing the redo.
-    // Returning the archive state from *this* read, not from the row that
-    // travelled with the Inbox message, is the point of the lock.
-    $queryRaw: async (_strings: unknown, taskId: string) => {
-      locks.push(taskId);
-      return [{ id: taskId, archivedAt: options.redoArchivedAt ?? null }];
+    // The Task-row mutex the reject path takes before queueing the redo, then
+    // the Agent-row mutex enqueueTaskRun takes before creating the run.
+    // Returning the archive state from *these* reads, not from the rows that
+    // travelled with the Inbox message, is the point of the locks.
+    $queryRaw: async (_strings: unknown, lockedId: string) => {
+      locks.push(lockedId);
+      return [{
+        id: lockedId,
+        archivedAt: lockedId === "agent-1" ? options.agentArchivedAt ?? null : options.redoArchivedAt ?? null,
+      }];
     },
     inboxMessage: {
       findUnique: async () => ({
@@ -278,9 +287,19 @@ test("rejecting a gate transactionally returns the producing step to the queue",
   const result = await applyInboxDecisionTx(tx, { inboxMessageId: "gate-1", externalEventId: "feishu:evt-1", decision: "reject" });
   assert.equal(result.gateAction, "rejected");
   assert.equal(lookups(), 1);
-  assert.deepEqual(locks, ["task-1"]);
+  // Task row first, Agent row second: the one global lock order.
+  assert.deepEqual(locks, ["task-1", "agent-1"]);
   assert.equal(queued[0]!.runNumber, 2);
   assert.equal(queued[0]!.branch, "feature/x");
+});
+
+test("rejecting a gate onto a step whose agent archived under the lock queues nothing", async () => {
+  const { tx, queued } = rejectionTx({ agentArchivedAt: new Date("2026-08-17T00:00:00.000Z") });
+  await assert.rejects(
+    () => applyInboxDecisionTx(tx, { inboxMessageId: "gate-1", externalEventId: "feishu:evt-3", decision: "reject" }),
+    (error: unknown) => isArchivedAssigneeError(error),
+  );
+  assert.equal(queued.length, 0);
 });
 
 test("rejecting a gate onto an archived predecessor throws rather than queueing a run nothing will claim", async () => {
@@ -325,8 +344,49 @@ test("a multiple-choice Inbox decision accepts an option id and persists the hum
   }), /must match an Inbox choice id/);
 });
 
+test("agentArchiveBlocker asks the database for exactly the live task statuses", async () => {
+  // The status set is the contract, and a mocked findFirst cannot demonstrate a
+  // filter it never applies — so the query itself is asserted. DONE is terminal
+  // history and BACKLOG is explicitly parked; both must stay archivable, and an
+  // already-archived task is not a reference to anything.
+  let where: Record<string, unknown> | undefined;
+  const tx = {
+    run: { findFirst: async () => null },
+    task: {
+      findFirst: async (args: { where: Record<string, unknown> }) => { where = args.where; return null; },
+    },
+  } as any;
+  assert.equal(await agentArchiveBlocker(tx, "agent-1"), null);
+  assert.deepEqual(where, {
+    assigneeAgentId: "agent-1",
+    archivedAt: null,
+    status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
+  });
+  assert.deepEqual(LIVE_TASK_STATUSES, [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW]);
+});
+
+test("agentArchiveBlocker reports the live run before the live task and names both precisely", async () => {
+  const blockerFor = (run: unknown, task: unknown) => agentArchiveBlocker({
+    run: { findFirst: async () => run },
+    task: { findFirst: async () => task },
+  } as any, "agent-1");
+  // A queued run and a REVIEW task are the same stranding one step apart; the
+  // run is reported first because cancelling it is the narrower operator action.
+  assert.equal(
+    await blockerFor({ runNumber: 3, status: RunStatus.QUEUED, task: { name: "Ship it" } }, { name: "Ship it", status: TaskStatus.REVIEW }),
+    "Cannot archive an agent with a QUEUED run on Ship it; finish or cancel run 3 first",
+  );
+  assert.equal(
+    await blockerFor(null, { name: "Awaiting the gate", status: TaskStatus.REVIEW }),
+    "Cannot archive an agent assigned to REVIEW task Awaiting the gate; finish, park, archive, or reassign that task first",
+  );
+  assert.equal(await blockerFor(null, null), null);
+});
+
 test("enqueueTaskRun rejects archived agents with a name-recognisable typed error", async () => {
   const tx = {
+    // The locked re-read is the authority; the relation below only agrees.
+    $queryRaw: async () => [{ id: "agent-1", archivedAt: new Date() }],
     task: {
       findUniqueOrThrow: async () => ({
         id: "task-archived", projectId: "project-1", name: "Archived work", description: "work",

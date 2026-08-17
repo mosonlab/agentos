@@ -1,9 +1,7 @@
 import { RunnerKind, RunnerPreference } from "@prisma/client";
 
 export const CANONICAL_AGENT_DEFAULTS = [
-  { name: "code-reviewer", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "feasibility", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "implementation-plan-executioner", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "librarian", model: "gpt-5.6-luna:high", runner: RunnerPreference.CODEX },
@@ -15,15 +13,15 @@ export const CANONICAL_AGENT_DEFAULTS = [
 ] as const;
 
 export const CANONICAL_TEMPLATE_STEPS = [
-  { stepIndex: 1, agentName: "spec", outputKind: "spec" },
-  { stepIndex: 2, agentName: "plan", outputKind: "plan" },
-  { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review" },
-  { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
-  { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
-  { stepIndex: 6, agentName: "review-coordinator", outputKind: "code-review" },
-  { stepIndex: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
-  { stepIndex: 8, agentName: "librarian", outputKind: "documentation" },
-  { stepIndex: 9, agentName: null, outputKind: "approval" },
+  { stepIndex: 1, agentName: "spec", outputKind: "spec", approvalGate: true },
+  { stepIndex: 2, agentName: "plan", outputKind: "plan", approvalGate: false },
+  { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review", approvalGate: false },
+  { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan", approvalGate: true },
+  { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation", approvalGate: false },
+  { stepIndex: 6, agentName: "review-coordinator", outputKind: "code-review", approvalGate: false },
+  { stepIndex: 7, agentName: "senior-dev", outputKind: "fixed-implementation", approvalGate: false },
+  { stepIndex: 8, agentName: "librarian", outputKind: "documentation", approvalGate: false },
+  { stepIndex: 9, agentName: null, outputKind: "approval", approvalGate: true },
 ] as const;
 
 export const IMPLEMENTATION_PLAN_OUTPUT_KINDS = ["plan", "revised-plan"] as const;
