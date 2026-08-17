@@ -68,16 +68,65 @@ const costAmount = (value: unknown): number | null => {
   return value;
 };
 
+type ModelTotals = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+};
+
+/**
+ * CLAUDE's terminal `result` carries a per-model breakdown under `modelUsage`,
+ * keyed by model id, whose entries are camelCase — while the top-level `usage`
+ * object is snake_case and describes ONE model, the primary one, repeated.
+ *
+ * Verified against both captures in `spikes/cli-capabilities/samples/`: the
+ * top-level `usage` equals `modelUsage["claude-opus-5"]` field for field, so
+ * adding the two sources double-counts the primary model and reading only the
+ * top-level one drops every secondary model. This branch is therefore
+ * EXCLUSIVE, and the two vocabularies never share a key list.
+ *
+ * Returns null when nothing usable was found, which is what routes an absent,
+ * malformed or empty `modelUsage` back to the top-level branch.
+ */
+const extractModelUsage = (value: unknown): ModelTotals | null => {
+  const models = asRecord(value);
+  if (!models) return null;
+  const totals: ModelTotals = { inputTokens: null, outputTokens: null, cachedInputTokens: null };
+  for (const entry of Object.values(models)) {
+    const model = asRecord(entry);
+    if (!model) continue;                       // one malformed entry must not discard the others
+    const input = tokenCount(model.inputTokens, "modelUsage.inputTokens");
+    if (input !== null) totals.inputTokens = (totals.inputTokens ?? 0) + input;
+    const output = tokenCount(model.outputTokens, "modelUsage.outputTokens");
+    if (output !== null) totals.outputTokens = (totals.outputTokens ?? 0) + output;
+    const cacheRead = tokenCount(model.cacheReadInputTokens, "modelUsage.cacheReadInputTokens");
+    const cacheCreation = tokenCount(model.cacheCreationInputTokens, "modelUsage.cacheCreationInputTokens");
+    if (cacheRead !== null || cacheCreation !== null) {
+      totals.cachedInputTokens = (totals.cachedInputTokens ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0);
+    }
+  }
+  // Usability is not a separate probe: `modelUsage` was usable iff this one pass
+  // produced something. Two traversals would be free to diverge.
+  return totals.inputTokens === null && totals.outputTokens === null && totals.cachedInputTokens === null
+    ? null
+    : totals;
+};
+
 /**
  * One event payload → whatever usage it carries. Shape-driven rather than
  * runner-driven, and total over `unknown`: any payload that does not match
  * yields `{}` and nothing throws.
  *
  * Verified against `spikes/cli-capabilities/samples/`:
- * - CLAUDE `result`: `usage.{input_tokens,output_tokens,cache_read_input_tokens,
- *   cache_creation_input_tokens}` plus a top-level `total_cost_usd`.
+ * - CLAUDE `result`: `modelUsage`, a per-model breakdown in camelCase, is the
+ *   primary source — it is the only one that sees every model the session used.
+ *   The snake_case top-level `usage.{input_tokens,output_tokens,
+ *   cache_read_input_tokens,cache_creation_input_tokens}` describes the primary
+ *   model alone and is the fallback for payloads carrying no usable
+ *   `modelUsage`. Cost comes from the top-level `total_cost_usd` in both cases:
+ *   it already equals the sum of the per-model `costUSD` values.
  * - CODEX `turn.completed`: `usage.{input_tokens,cached_input_tokens,output_tokens}`,
- *   no cost anywhere.
+ *   no `modelUsage`, no cost anywhere — the fallback branch, unchanged.
  * - PI `agent_settled`: literally `{"type":"agent_settled"}` — no usage, no cost.
  *   PI reports usage per message instead, which this batch does not harvest.
  */
@@ -87,7 +136,15 @@ export const extractUsage = (payload: unknown): SessionUsage => {
   const usage = asRecord(event.usage);
   const result: SessionUsage = {};
 
-  if (usage) {
+  const models = extractModelUsage(event.modelUsage);
+  if (models) {
+    // Absence survives the branch: a breakdown that reports only input leaves
+    // outputTokens absent, never 0. `exactOptionalPropertyTypes` is what keeps
+    // that mechanical — guard and skip, never assign undefined.
+    if (models.inputTokens !== null) result.inputTokens = models.inputTokens;
+    if (models.outputTokens !== null) result.outputTokens = models.outputTokens;
+    if (models.cachedInputTokens !== null) result.cachedInputTokens = models.cachedInputTokens;
+  } else if (usage) {
     const input = tokenCount(usage.input_tokens, "usage.input_tokens");
     if (input !== null) result.inputTokens = input;
     const output = tokenCount(usage.output_tokens, "usage.output_tokens");
