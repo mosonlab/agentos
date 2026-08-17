@@ -28,7 +28,7 @@ const GOAL_MID = "mt-[10px] mb-[8px] flex justify-between text-[12px] text-muted
  *  and twMerge drops its `h-2` / `bg-primary/20` (B14 keeps progress.tsx untouched). */
 const PROGRESS_TRACK = "h-[8px] bg-accent";
 
-const NewGoal = ({ projectId, onClose, onCreated }: {
+export const NewGoal = ({ projectId, onClose, onCreated }: {
   projectId: string;
   onClose: () => void;
   onCreated: () => void;
@@ -68,7 +68,7 @@ const NewGoal = ({ projectId, onClose, onCreated }: {
           <Field label={t("goals.field.title")}><Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("goals.field.title.placeholder")} /></Field>
           <Field label={t("goals.field.spec")}><Textarea rows={10} value={form.spec} onChange={(event) => setForm({ ...form, spec: event.target.value })} placeholder={t("goals.field.spec.placeholder")} /></Field>
           <GoalLimitInputs values={form} onChange={(key, value) => setForm({ ...form, [key]: value })} runner={
-            <Field label={t("goals.field.runner")}><Select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>{["AUTO", "CLAUDE", "CODEX", "PI"].map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}</Select></Field>
+            <Field label={t("goals.field.runner")}><Select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>{(["AUTO", "CLAUDE", "CODEX", "PI"] as RunnerPreference[]).map((runner) => <option key={runner} value={runner}>{t(`runner.preference.${runner}`)}</option>)}</Select></Field>
           } />
           <Field label={t("goals.field.sharedFolder.label")} hint={t("goals.field.sharedFolder.hint")}><Input type="text" value={form.sharedFolderPath} onChange={(event) => setForm({ ...form, sharedFolderPath: event.target.value })} placeholder="/path/to/shared/folder" /></Field>
         </div>
@@ -181,7 +181,7 @@ export const GoalDetailPage = ({ goalId }: { goalId: string }): ReactNode => {
           <Metric label={t("goals.metric.dod")} value={t("goals.metric.dodValue", { done: counts.done, open: counts.total - counts.done })} />
           <Metric label={t("goals.metric.spend")} value={`${money(goal.spendUsd)} / ${goal.spendCap === null ? t("goals.noCap") : money(goal.spendCap)}`} />
           <Metric label={t("goals.metric.stuckThreshold")} value={`${goal.stuckThreshold}`} />
-          <Metric label={t("goals.field.runner")} value={goal.runnerPreference.toLowerCase()} />
+          <Metric label={t("goals.field.runner")} value={t(`runner.preference.${goal.runnerPreference}`)} />
         </div>
 
         <Progress value={percent} className={PROGRESS_TRACK} />

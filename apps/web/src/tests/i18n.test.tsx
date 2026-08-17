@@ -31,6 +31,21 @@ test("no value in either dictionary is empty or whitespace-only", () => {
   assert.deepEqual(empty, []);
 });
 
+test("Chinese dictionary values do not repeat English prose outside technical identifiers", () => {
+  // Product names, CLI/runtime vocabulary, code-shaped placeholders and protocol
+  // identifiers remain untranslated by design. Human-facing prose does not.
+  const technicalValues = new Set([
+    "Agent", "Agents", "Bash", "Claude", "Codex", "Cron", "Daemon", "Endpoint",
+    "English", "Environment ID", "Glob", "Grep", "Inbox", "Pi", "Pull request",
+    "Runner", "Slug", "cron", "provider/model:effort", "rev", "webhook",
+    "Implement feat/inbox-search", "runner {runner}", "{runner} CLI {version}",
+  ]);
+  const repeatedProse = Object.keys(en).filter((key) =>
+    en[key] === zh[key] && /[A-Za-z]{2}/u.test(en[key]!) && !technicalValues.has(en[key]!),
+  );
+  assert.deepEqual(repeatedProse, []);
+});
+
 test("every key carries the same placeholder set in both locales", () => {
   const mismatched = Object.keys(en)
     .filter((key) => placeholders(en[key]!).join(",") !== placeholders(zh[key] ?? "").join(","))

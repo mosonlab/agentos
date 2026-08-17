@@ -150,7 +150,7 @@ export const AgentsPage = (): ReactNode => {
                     <span className={TABLE_SUB}>{agent.name}</span>
                   </TableCell>
                   <TableCell><ModelLabel model={agent.model} /></TableCell>
-                  <TableCell>{agent.runnerPreference.toLowerCase()}</TableCell>
+                  <TableCell>{t(`runner.preference.${agent.runnerPreference}`)}</TableCell>
                   <TableCell>{agent.inboxAccess ? <Pill tone="green">{t("agents.inbox.on")}</Pill> : <Pill tone="grey">{t("agents.inbox.off")}</Pill>}</TableCell>
                   <TableCell>{formatDate(agent.updatedAt)}</TableCell>
                   <TableCell className={TABLE_TIGHT}><RowMenu items={[
@@ -506,7 +506,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         <span className="text-[var(--status-violet-fg)]"><IconRobot /></span>
         <h1 className={DETAIL_HEAD_H1}>{view.title}</h1>
         <Pill tone="grey"><ModelLabel model={view.model} /></Pill>
-        <Pill tone="violet">{t("agents.runnerPill", { runner: view.runnerPreference.toLowerCase() })}</Pill>
+        <Pill tone="violet">{t("agents.runnerPill", { runner: t(`runner.preference.${view.runnerPreference}`) })}</Pill>
         <span className="flex-1" />
         {draft === null
           ? <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(agent)}>{t("common.edit")}</Button>
@@ -539,7 +539,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                 { k: t("agents.field.name.label"), v: view.name },
                 { k: t("agents.field.title"), v: view.title },
                 { k: t("agents.field.model"), v: <ModelLabel model={view.model} /> },
-                { k: t("agents.field.runnerPreference"), v: view.runnerPreference.toLowerCase() },
+                { k: t("agents.field.runnerPreference"), v: t(`runner.preference.${view.runnerPreference}`) },
                 { k: t("agents.field.environment"), v: <span className="text-[11.5px]">{view.environmentId}</span> },
                 { k: t("agents.inbox.label"), v: t(view.inboxAccess ? "agents.inbox.on" : "agents.inbox.off") },
                 { k: t("common.created"), v: formatDateTime(view.createdAt) },

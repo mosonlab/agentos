@@ -6,8 +6,10 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
+import { LocaleProvider } from "../lib/i18n";
 import type { Agent } from "../lib/types";
 import { AgentDetailPage, NewAgent } from "../pages/Agents";
+import { NewGoal } from "../pages/Goals";
 
 const installDom = (url = "http://localhost/agents/a"): { dom: JSDOM; container: Element } => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true, url });
@@ -30,7 +32,7 @@ test("catalog models render a default effort without rewriting a bare stored val
   assert.equal(changes, 0);
   assert.match(markup, /Claude Opus 5/);
   assert.match(markup, /<option value="high" selected="">high<\/option>/);
-  assert.match(markup, /<select[^>]*disabled=""[^>]*>[\s\S]*?<option value="CLAUDE" selected="">claude<\/option>/);
+  assert.match(markup, /<select[^>]*disabled=""[^>]*>[\s\S]*?<option value="CLAUDE" selected="">Claude<\/option>/);
   assert.equal(modelForSave("claude-opus-5"), "claude-opus-5:high");
   assert.equal(modelForSave("private/model:turbo"), "private/model:turbo");
 });
@@ -77,6 +79,21 @@ test("Custom keeps exact model text and exposes all runner preferences", () => {
   assert.match(markup, /value="private\/provider:model:turbo"/);
   for (const runner of ["INHERIT", "AUTO", "CLAUDE", "CODEX", "PI"]) assert.match(markup, new RegExp(`value="${runner}"`));
   assert.match(markup, /Custom models use the selected runner/);
+});
+
+test("Chinese custom-model and goal forms render translated runner preference labels", () => {
+  const picker = renderToStaticMarkup(
+    <LocaleProvider initialLocale="zh"><ModelPicker model="private/model" runnerPreference="AUTO" onChange={() => undefined} /></LocaleProvider>,
+  );
+  assert.match(picker, />继承<\/option>/u);
+  assert.match(picker, />自动<\/option>/u);
+  assert.doesNotMatch(picker, />inherit<\/option>|>auto<\/option>/iu);
+
+  const goal = renderToStaticMarkup(
+    <LocaleProvider initialLocale="zh"><NewGoal projectId="p" onClose={() => undefined} onCreated={() => undefined} /></LocaleProvider>,
+  );
+  assert.match(goal, /<option value="AUTO" selected="">自动<\/option>/u);
+  assert.doesNotMatch(goal, />auto<\/option>/iu);
 });
 
 test("the real Create button blocks a contradictory model and runner pair", () => {

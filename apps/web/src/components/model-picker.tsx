@@ -82,7 +82,7 @@ export const ModelPicker = ({ model, runnerPreference, onChange }: {
           <Select disabled={entry !== null} value={entry?.runner ?? runnerPreference} onChange={(event) => {
             onChange({ model, runnerPreference: event.target.value as RunnerPreference });
           }}>
-            {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
+            {RUNNERS.map((runner) => <option key={runner} value={runner}>{t(`runner.preference.${runner}`)}</option>)}
           </Select>
         </Field>
       </div>
