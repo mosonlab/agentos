@@ -3,6 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import {
   CANONICAL_AGENT_DEFAULTS,
   CANONICAL_TEMPLATE_STEPS,
+  IMPLEMENTATION_PLAN_OUTPUT_KINDS,
   catalogRunnerForModel,
   isTemplateRunnerInherited,
 } from "./agent-contract.js";
@@ -45,11 +46,21 @@ const main = async (): Promise<void> => {
     if ((step.assigneeAgent?.name ?? null) !== expected.agentName) {
       throw new Error(`template step ${step.stepIndex} must bind ${expected.agentName ?? "HUMAN"}; found ${step.assigneeAgent?.name ?? "HUMAN"}`);
     }
+    if (step.outputKind !== expected.outputKind) {
+      throw new Error(`template step ${step.stepIndex} must persist ${expected.outputKind}; found ${step.outputKind}`);
+    }
     if (step.stepIndex <= 8 && !isTemplateRunnerInherited(step.runner)) {
       throw new Error(`template step ${step.stepIndex} must inherit its Agent runner; found ${step.runner}`);
     }
     if (step.spawnPolicy !== null) throw new Error(`template step ${step.stepIndex} must not claim an unimplemented spawn policy`);
   }
+  const executor = template.steps.find((step) => step.assigneeAgent?.name === "implementation-plan-executioner");
+  if (!executor) throw new Error("template must contain an implementation-plan-executioner step");
+  const priorPlan = template.steps.some((step) => (
+    step.stepIndex < executor.stepIndex
+      && IMPLEMENTATION_PLAN_OUTPUT_KINDS.includes(step.outputKind as typeof IMPLEMENTATION_PLAN_OUTPUT_KINDS[number])
+  ));
+  if (!priorPlan) throw new Error("implementation-plan-executioner requires an earlier plan or revised-plan output");
   process.stdout.write(`Agent/template contract verified for ${activeAgents.length} active agents and ${template.steps.length} steps.\n`);
 };
 

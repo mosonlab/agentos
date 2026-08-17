@@ -5,7 +5,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "feasibility", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
+  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "librarian", model: "gpt-5.6-luna:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan-reviser", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
@@ -15,16 +15,18 @@ export const CANONICAL_AGENT_DEFAULTS = [
 ] as const;
 
 export const CANONICAL_TEMPLATE_STEPS = [
-  { stepIndex: 1, agentName: "spec" },
-  { stepIndex: 2, agentName: "plan" },
-  { stepIndex: 3, agentName: "review-coordinator" },
-  { stepIndex: 4, agentName: "plan-reviser" },
-  { stepIndex: 5, agentName: "implementation-plan-executioner" },
-  { stepIndex: 6, agentName: "code-reviewer" },
-  { stepIndex: 7, agentName: "senior-dev" },
-  { stepIndex: 8, agentName: "librarian" },
-  { stepIndex: 9, agentName: null },
+  { stepIndex: 1, agentName: "spec", outputKind: "spec" },
+  { stepIndex: 2, agentName: "plan", outputKind: "plan" },
+  { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review" },
+  { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
+  { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
+  { stepIndex: 6, agentName: "code-reviewer", outputKind: "code-review" },
+  { stepIndex: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
+  { stepIndex: 8, agentName: "librarian", outputKind: "documentation" },
+  { stepIndex: 9, agentName: null, outputKind: "approval" },
 ] as const;
+
+export const IMPLEMENTATION_PLAN_OUTPUT_KINDS = ["plan", "revised-plan"] as const;
 
 export const catalogRunnerForModel = (raw: string): RunnerPreference | null => {
   const model = raw.slice(0, raw.lastIndexOf(":") > 0 ? raw.lastIndexOf(":") : raw.length);
