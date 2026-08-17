@@ -642,3 +642,199 @@ test("enrich=false drops the extra fields and keeps the rows", async () => {
   assert.equal(body[0].chainProgress, null);
   assert.equal(body[0].recurringFireCount, 0);
 });
+
+// --- the Agent-row exclusion protocol (archive versus every run writer) ------
+//
+// Archive used to write `archivedAt` unconditionally while task creation,
+// template instantiation and run enqueue checked it in another transaction.
+// Both sides could be right at the same instant, and the loser left a QUEUED
+// run for an archived agent — a row the claim query filters out forever. These
+// tests hold real PostgreSQL locks, so they fail if either half is missing.
+
+const agentRunCount = (agentId: string) => db.run.count({ where: { agentId } });
+
+const seedTemplate = async (context: Awaited<ReturnType<typeof seedTask>>) => {
+  const template = await db.taskTemplate.create({ data: {
+    projectId: context.project.id, name: "Two steps", description: "two agent steps", variables: [],
+  } });
+  await db.taskTemplateStep.createMany({ data: [0, 1].map((stepIndex) => ({
+    taskTemplateId: template.id,
+    stepIndex,
+    name: `Step ${stepIndex}`,
+    assigneeType: "AGENT" as const,
+    assigneeAgentId: context.agent.id,
+    prompt: "do the work",
+    outputKind: "result",
+  })) });
+  return template;
+};
+
+test("archive and direct task creation released together never strand a queued run", async () => {
+  const context = await seedTask("race-archive-create");
+  const app = createApp(db);
+  const [archive, create] = await asOperator(() => synchronised([
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/agents/${context.agent.id}/archive`, {
+        method: "POST", headers: { Authorization: `Bearer ${OPERATOR}` },
+      });
+    },
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/projects/${context.project.id}/tasks`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Raced task", description: "work",
+          assigneeType: "AGENT", assigneeAgentId: context.agent.id, repoId: context.repo.id,
+        }),
+      });
+    },
+  ]));
+  const archived = (await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } })).archivedAt !== null;
+  const runs = await agentRunCount(context.agent.id);
+  assert.equal(archived !== (runs > 0), true, `archived=${archived}, runs=${runs}`);
+  if (archived) {
+    assert.equal(archive!.status, 200);
+    assert.equal(create!.status, 400);
+    assert.match((await create!.json() as any).error, /is archived/);
+    assert.equal(await db.task.count({ where: { name: "Raced task" } }), 0);
+  } else {
+    assert.equal(create!.status, 201);
+    assert.equal(archive!.status, 409);
+    assert.match((await archive!.json() as any).error, /Cannot archive an agent with a QUEUED run/);
+  }
+});
+
+test("archive and template instantiation released together never strand a queued run", async () => {
+  const context = await seedTask("race-archive-instantiate");
+  const template = await seedTemplate(context);
+  const app = createApp(db);
+  const [archive, instantiate] = await asOperator(() => synchronised([
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/agents/${context.agent.id}/archive`, {
+        method: "POST", headers: { Authorization: `Bearer ${OPERATOR}` },
+      });
+    },
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ repoId: context.repo.id, variables: {} }),
+      });
+    },
+  ]));
+  const archived = (await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } })).archivedAt !== null;
+  const runs = await agentRunCount(context.agent.id);
+  assert.equal(archived !== (runs > 0), true, `archived=${archived}, runs=${runs}`);
+  if (archived) {
+    assert.equal(archive!.status, 200);
+    assert.equal(instantiate!.status, 400);
+    assert.match((await instantiate!.json() as any).error, /is archived/);
+    // A rolled-back instantiation leaves no half-written chain behind.
+    assert.equal(await db.task.count({ where: { templateId: template.id } }), 0);
+  } else {
+    assert.equal(instantiate!.status, 201);
+    assert.equal(archive!.status, 409);
+    assert.equal(await db.task.count({ where: { templateId: template.id } }), 2);
+  }
+});
+
+/** Archives the agent inside a foreign transaction that keeps the row locked,
+ *  starts `operation` while that archive is still uncommitted — so every check
+ *  outside the protocol sees a live agent — and commits underneath it. */
+const archiveUnderHeldLock = async <T>(agentId: string, operation: () => Promise<T>): Promise<T> => {
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let acquired!: () => void;
+  const held = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const archiving = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
+      await tx.$executeRaw`UPDATE "Agent" SET "archivedAt" = now() WHERE "id" = ${agentId}`;
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }, { timeout: 10_000 });
+    await held;
+    const pending = operation();
+    await archiving;
+    return await pending;
+  } finally {
+    await holder.$disconnect();
+  }
+};
+
+test("an archive committing under the lock is seen by task creation and by instantiation", { timeout: 30_000 }, async () => {
+  // Both writers passed their unlocked assignee check before the archive
+  // committed. Only the re-read under the Agent-row mutex can still refuse
+  // them, and refusing is what keeps a queued run out of an archived agent.
+  const create = await seedTask("locked-archive-create");
+  const created = await archiveUnderHeldLock(create.agent.id, () => call("POST", `/projects/${create.project.id}/tasks`, {
+    name: "Loses the race", description: "work",
+    assigneeType: "AGENT", assigneeAgentId: create.agent.id, repoId: create.repo.id,
+  }));
+  assert.equal(created.status, 400, JSON.stringify(created.body));
+  assert.match(created.body.error, /is archived/);
+  assert.equal(await db.task.count({ where: { name: "Loses the race" } }), 0);
+  assert.equal(await agentRunCount(create.agent.id), 0);
+
+  const chain = await seedTask("locked-archive-instantiate");
+  const template = await seedTemplate(chain);
+  const instantiated = await archiveUnderHeldLock(chain.agent.id, () => call(
+    "POST",
+    `/projects/${chain.project.id}/task-templates/${template.id}/instantiate`,
+    { repoId: chain.repo.id, variables: {} },
+  ));
+  assert.equal(instantiated.status, 400, JSON.stringify(instantiated.body));
+  assert.match(instantiated.body.error, /is archived/);
+  assert.equal(await db.task.count({ where: { templateId: template.id } }), 0);
+  assert.equal(await agentRunCount(chain.agent.id), 0);
+});
+
+test("an Agent row held by a foreign transaction makes assignment and archive wait", { timeout: 30_000 }, async () => {
+  // Direct proof that both halves take the same row lock: hold the Agent row in
+  // another transaction and neither writer may answer before it is released.
+  const context = await seedTask("race-agent-lock-proof");
+  const holdAgentRow = async <T>(operation: () => Promise<T>): Promise<{ result: T; waited: boolean }> => {
+    const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+    let released = false;
+    let waited = true;
+    let acquired!: () => void;
+    const lockHeld = new Promise<void>((resolve) => { acquired = resolve; });
+    try {
+      const held = holder.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${context.agent.id} FOR UPDATE`;
+        acquired();
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        released = true;
+      }, { timeout: 10_000 });
+      // Connecting a fresh client is slower than the request under test, so the
+      // writer is only fired once the row is provably held.
+      await lockHeld;
+      const pending = operation().then((value) => { waited = released; return value; });
+      const [, result] = await Promise.all([held, pending]);
+      return { result, waited };
+    } finally {
+      await holder.$disconnect();
+    }
+  };
+
+  const created = await holdAgentRow(() => call("POST", `/projects/${context.project.id}/tasks`, {
+    name: "Waits for the lock", description: "work",
+    assigneeType: "AGENT", assigneeAgentId: context.agent.id, repoId: context.repo.id,
+  }));
+  assert.equal(created.waited, true, "task creation must wait for the Agent row");
+  assert.equal(created.result.status, 201);
+
+  const archived = await holdAgentRow(() => call("POST", `/agents/${context.agent.id}/archive`));
+  assert.equal(archived.waited, true, "archive must wait for the Agent row");
+  // And once it gets the row it fails closed on the run the creation just made.
+  assert.equal(archived.result.status, 409);
+  assert.match(archived.result.body.error, /Cannot archive an agent with a QUEUED run/);
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } })).archivedAt, null);
+});

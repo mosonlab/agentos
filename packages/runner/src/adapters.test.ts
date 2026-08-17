@@ -3,10 +3,10 @@ import test from "node:test";
 
 import {
   adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, failureReasonFromEvidence,
-  mcpConfig, mcpServerPath, piExtensionPath, type ExitEvidence,
+  inputForRunner, mcpConfig, mcpServerPath, piExtensionPath, type ExitEvidence,
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
-import type { RunnerConfig } from "./config.js";
+import type { RunnerConfig, RunnerKind } from "./config.js";
 
 const claim: ClaimedTask = {
   task: {
@@ -107,19 +107,40 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
     "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
     "--model", "codex", "--effort", "high",
     "--mcp-config", "{\"mcpServers\":{\"agentos\":{\"type\":\"stdio\",\"command\":\"<NODE>\",\"args\":[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]}}}",
-    "--strict-mcp-config", "prompt",
+    "--strict-mcp-config",
   ]);
   assert.deepEqual(stableArgv(argsForRunner("CODEX", spec)), [
     "exec", "--json", "-m", "codex",
     "-c", "mcp_servers.agentos.command=\"<NODE>\"",
     "-c", "mcp_servers.agentos.args=[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]",
     "-c", "mcp_servers.agentos.startup_timeout_sec=30",
-    "--dangerously-bypass-approvals-and-sandbox", "prompt",
+    "--dangerously-bypass-approvals-and-sandbox", "-",
   ]);
   assert.deepEqual(stableArgv(argsForRunner("PI", spec)), [
     "-p", "--mode", "json", "--session-dir", "/work/.agentos-pi", "--model", "codex",
-    "--extension", "<PI_EXTENSION>", "prompt",
+    "--extension", "<PI_EXTENSION>",
   ]);
+});
+
+test("no runner carries the prompt or the resume input in argv", () => {
+  const spec = runSpec();
+  const resume = { ...spec, providerConversationId: "thread-1", input: "again" };
+  for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
+    for (const args of [argsForRunner(runner, spec), argsForRunner(runner, spec, resume)]) {
+      assert.equal(args.includes("prompt"), false, `${runner} put the prompt in argv`);
+      assert.equal(args.includes("again"), false, `${runner} put the resume input in argv`);
+    }
+  }
+  // codex needs the positional `-`, which is what tells it to read stdin.
+  assert.equal(argsForRunner("CODEX", spec).at(-1), "-");
+  assert.equal(argsForRunner("CODEX", spec, resume).at(-1), "-");
+  // Resume still names the conversation to resume; only the input moved.
+  assert.deepEqual(argsForRunner("CLAUDE", spec, resume).slice(-2), ["--resume", "thread-1"]);
+  assert.deepEqual(argsForRunner("PI", spec, resume).slice(-2), ["--session", "thread-1"]);
+  assert.deepEqual(argsForRunner("CODEX", spec, resume).slice(0, 2), ["exec", "resume"]);
+  assert.equal(argsForRunner("CODEX", spec, resume).includes("thread-1"), true);
+  assert.equal(inputForRunner(spec), "prompt");
+  assert.equal(inputForRunner(spec, resume), "again");
 });
 
 test("denied tools map in canonical order without consuming the prompt", () => {
@@ -131,7 +152,7 @@ test("denied tools map in canonical order without consuming the prompt", () => {
   assert.equal(argsForRunner("CODEX", spec).includes("--disallowedTools"), false);
   assert.deepEqual(argsForRunner("CODEX", spec), argsForRunner("CODEX", runSpec()));
   assert.ok(claude.indexOf("--disallowedTools") <= claude.length - 4);
-  assert.equal(claude.at(-1), "prompt");
+  assert.equal(claude.at(-1), "--strict-mcp-config");
 });
 
 test("all eight denied tools use each CLI's supported canonical subset", () => {
@@ -148,6 +169,98 @@ test("resume invocations preserve supported deny flags", () => {
   assert.equal(argsForRunner("CLAUDE", spec, resume).includes("--disallowedTools"), true);
   assert.equal(argsForRunner("PI", spec, resume).includes("--exclude-tools"), true);
   assert.equal(argsForRunner("CODEX", spec, resume).some((arg) => arg.includes("Tools")), false);
+});
+
+// --- launch boundary: the largest prompt a legal chain can produce -----------
+//
+// `POST /runner/tasks/claim` hands the runner every prior step output verbatim,
+// and the write endpoint caps one output at 500k characters. The canonical
+// template chain is nine steps, so the last step's claim legally carries eight
+// of them. Put that in argv and the run dies at `spawn` with E2BIG — Linux
+// refuses any single argument over MAX_ARG_STRLEN (128 KiB), macOS refuses an
+// argument block over ~1 MiB — before the provider is ever contacted. These
+// tests spawn real processes, so they fail the same way the runner would.
+const MAX_STEP_OUTPUT_CHARS = 500_000;
+const MAX_PRIOR_OUTPUTS = 8;
+const MAX_ARG_STRLEN = 128 * 1024;
+
+const priorOutput = (index: number): ClaimedTask["priorOutputs"][number] => {
+  const head = `step-${index}-start\n`;
+  const tail = `\nstep-${index}-end`;
+  return {
+    kind: "spec",
+    body: `${head}${"x".repeat(MAX_STEP_OUTPUT_CHARS - head.length - tail.length)}${tail}`,
+    task: { name: `Step ${index}`, chainIndex: index },
+  };
+};
+
+const stubScript = [
+  "let bytes = 0;",
+  "process.stdin.on('data', (chunk) => { bytes += chunk.length; });",
+  "process.stdin.on('end', () => {",
+  "  const longestArg = process.argv.slice(1).reduce((max, arg) => Math.max(max, Buffer.byteLength(arg)), 0);",
+  "  process.stdout.write(JSON.stringify({ type: 'turn.completed', bytes, longestArg }) + '\\n');",
+  "});",
+].join("");
+
+const launch = async (
+  runner: RunnerKind,
+  claimed: ClaimedTask,
+  resume?: { providerConversationId: string; input: string },
+): Promise<{ evidence: ExitEvidence; report: { bytes: number; longestArg: number }; events: Array<{ type: string; payload: Record<string, unknown> }> }> => {
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", stubScript],
+  } as unknown as RunnerConfig;
+  const spec = {
+    config,
+    claim: { ...claimed, runner },
+    workingDirectory: process.cwd(),
+    env: process.env,
+    prompt: buildPrompt(claimed),
+    credentialsPath: "/tmp/session.json",
+  };
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const sink = (event: { type: string; payload: Record<string, unknown> }): void => { events.push(event); };
+  const handle = resume
+    ? await adapters[runner].resume({ ...spec, ...resume }, sink)
+    : await adapters[runner].start(spec, sink);
+  const evidence = await handle.exit;
+  const line = evidence.stdout.trim().split("\n").at(-1) ?? "{}";
+  return { evidence, report: JSON.parse(line) as { bytes: number; longestArg: number }, events };
+};
+
+test("every runner launches with the largest legal chain prompt and receives all of it", { timeout: 60_000 }, async () => {
+  const maximal: ClaimedTask = {
+    ...claim,
+    priorOutputs: Array.from({ length: MAX_PRIOR_OUTPUTS }, (_, index) => priorOutput(index)),
+  };
+  const prompt = buildPrompt(maximal);
+  assert.ok(prompt.length > MAX_PRIOR_OUTPUTS * MAX_STEP_OUTPUT_CHARS, "the fixture must exceed every argv limit");
+  for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
+    const { evidence, report } = await launch(runner, maximal);
+    assert.equal(evidence.exitCode, 0, `${runner} failed to launch: ${evidence.stderr}`);
+    assert.equal(evidence.signal, null);
+    assert.equal(report.bytes, Buffer.byteLength(prompt), `${runner} did not receive the whole prompt`);
+    assert.ok(report.longestArg < MAX_ARG_STRLEN, `${runner} argv element of ${report.longestArg} bytes risks E2BIG`);
+  }
+});
+
+test("an ordinary prompt and a resume input reach every runner unchanged on stdin", { timeout: 30_000 }, async () => {
+  const prompt = buildPrompt(claim);
+  for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
+    const started = await launch(runner, claim);
+    assert.equal(started.evidence.exitCode, 0);
+    assert.equal(started.report.bytes, Buffer.byteLength(prompt));
+    const processStarted = started.events.find((event) => event.type === "PROCESS_STARTED");
+    assert.equal(processStarted?.payload.promptTransport, "stdin");
+    assert.equal(processStarted?.payload.promptBytes, Buffer.byteLength(prompt));
+    assert.equal((processStarted?.payload.args as string[]).some((arg) => arg.includes("Do the work")), false);
+
+    const resumed = await launch(runner, claim, { providerConversationId: "thread-1", input: "operator answered: approve" });
+    assert.equal(resumed.evidence.exitCode, 0);
+    assert.equal(resumed.report.bytes, Buffer.byteLength("operator answered: approve"));
+  }
 });
 
 test("child environment is an explicit allowlist and excludes host variables", () => {

@@ -240,6 +240,7 @@ test("CRON create computes runAt, ignores caller runAt, and creates no immediate
     const agent = { id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" };
     const repo = { id: "repo-1", defaultBranch: "main" };
     const tx = {
+      $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
       task: { create: async ({ data }: { data: Record<string, any> }) => { stored = data; return { id: "task-1", ...data }; } },
       taskActivity: { create: async () => ({}) },
       run: { create: async () => { runs += 1; return {}; } },
@@ -299,6 +300,7 @@ test("AT create waits for the scheduler and merged-view patch cannot remove its 
       agentRepoAccess: { findFirst: async () => ({}) },
       task: { findUniqueOrThrow: async () => before },
       $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
         task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
         taskActivity: { create: async () => ({}) }, run: { create: async () => { runs += 1; return {}; } },
       }),
@@ -620,15 +622,27 @@ test("agent archive and unarchive are idempotent and preserve the original archi
     let archivedAt: Date | null = null;
     const updates: Array<Date | null> = [];
     const noticeIds = new Set<string>();
-    const database = {
-      agent: {
-        findUnique: async () => ({ id: "agent-1", name: "Agent", archivedAt }),
-        update: async ({ data }: { data: { archivedAt: Date | null } }) => {
-          archivedAt = data.archivedAt;
-          updates.push(archivedAt);
-          return { id: "agent-1", name: "Agent", archivedAt };
-        },
+    const agentRow = () => ({ id: "agent-1", name: "Agent", archivedAt });
+    const agentClient = {
+      findUnique: async () => agentRow(),
+      findUniqueOrThrow: async () => agentRow(),
+      update: async ({ data }: { data: { archivedAt: Date | null } }) => {
+        archivedAt = data.archivedAt;
+        updates.push(archivedAt);
+        return agentRow();
       },
+    };
+    const database = {
+      agent: agentClient,
+      // Archive now runs under the Agent-row mutex and fails closed on live
+      // references, so the transaction client answers the lock and both
+      // reference reads. Nothing is queued or in flight here.
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: "agent-1", archivedAt }],
+        agent: agentClient,
+        run: { findFirst: async () => null },
+        task: { findFirst: async () => null },
+      }),
       run: {
         findMany: async () => archivedAt ? [{
           id: "run-queued", taskId: "task-1", runNumber: 1,
@@ -671,9 +685,87 @@ test("agent archive and unarchive are idempotent and preserve the original archi
   });
 });
 
+test("archiving an agent fails closed on a live run or an in-flight task", async () => {
+  await withTokens(async () => {
+    // Both references are the same defect one step apart: a run queued for an
+    // archived agent is filtered out of every claim, so it never runs and its
+    // task never completes. Refusing the archive keeps the operator's options.
+    const cases = [
+      {
+        run: { runNumber: 2, status: "QUEUED", task: { name: "Ship it" } },
+        task: null,
+        expected: "Cannot archive an agent with a QUEUED run on Ship it; finish or cancel run 2 first",
+      },
+      {
+        run: null,
+        task: { name: "Ship it" },
+        expected: "Cannot archive an agent that is still executing Ship it; finish or park that task first",
+      },
+    ];
+    for (const { run, task, expected } of cases) {
+      let updates = 0;
+      const database = {
+        agent: {
+          findUniqueOrThrow: async () => ({ id: "agent-1", name: "Agent", archivedAt: null }),
+          update: async () => { updates += 1; return {}; },
+        },
+        $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+          $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
+          agent: {
+            findUniqueOrThrow: async () => ({ id: "agent-1", name: "Agent", archivedAt: null }),
+            update: async () => { updates += 1; return {}; },
+          },
+          run: { findFirst: async () => run },
+          task: { findFirst: async () => task },
+        }),
+      } as unknown as PrismaClient;
+      const response = await createApp(database).request("/agents/agent-1/archive", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token" },
+      });
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), { error: expected });
+      assert.equal(updates, 0, "a refused archive writes nothing");
+    }
+  });
+});
+
+test("a task creation that loses the Agent-row race writes neither task nor run", async () => {
+  await withTokens(async () => {
+    // The unlocked check above the transaction sees a live agent; the archive
+    // commits; the locked re-read inside the transaction is what decides.
+    let taskCreates = 0;
+    const database = {
+      agent: { findFirst: async () => ({ id: "agent-1", name: "Agent", archivedAt: null, runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
+      repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
+      agentRepoAccess: { findFirst: async () => ({}) },
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: "agent-1", archivedAt: new Date() }],
+        task: { create: async () => { taskCreates += 1; return { id: "task-1" }; } },
+        taskActivity: { create: async () => ({}) },
+        run: { create: async () => { throw new Error("must not create run"); } },
+      }),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Race", description: "race", assigneeAgentId: "agent-1", repoId: "repo-1" }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "Assignee Agent is archived" });
+    assert.equal(taskCreates, 0);
+  });
+});
+
 test("archive and unarchive return 404 for a missing agent", async () => {
   await withTokens(async () => {
-    const database = { agent: { findUnique: async () => null } } as unknown as PrismaClient;
+    const database = {
+      agent: { findUnique: async () => null },
+      // No row to lock is the archive route's 404.
+      $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [],
+      }),
+    } as unknown as PrismaClient;
     const app = createApp(database);
     for (const action of ["archive", "unarchive"]) {
       const response = await app.request(`/agents/missing/${action}`, {
