@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  RunnersProvider, RunnerStatusDetails, runnerSummary, useRunners,
+  RunnerRow, RunnersProvider, RunnerStatusDetails, runnerSummary, useRunners,
 } from "../components/runner-status";
 import { LocaleProvider } from "../lib/i18n";
 import type { RunnersResponse } from "../lib/types";
@@ -84,10 +84,10 @@ test("two daemon blocks are sorted and report two of two online", () => {
   assert.ok(markup.indexOf("runner-a") < markup.indexOf("runner-b"));
 });
 
-type Timer = { at: number; every: number; run: () => void };
+type Timer = { at: number; every: number | null; run: () => void };
 const withProvider = async (
   respond: (path: string, count: number) => { ok: boolean; body: unknown },
-  operation: (context: { requests: string[]; advance: (ms: number) => Promise<void>; latest: () => ReturnType<typeof useRunners> }) => Promise<void>,
+  operation: (context: { dom: JSDOM; requests: string[]; advance: (ms: number) => Promise<void>; latest: () => ReturnType<typeof useRunners> }) => Promise<void>,
 ): Promise<void> => {
   const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true });
   for (const [key, value] of Object.entries({
@@ -109,15 +109,23 @@ const withProvider = async (
     return { ok: response.ok, status: response.ok ? 200 : 503, text: async () => JSON.stringify(response.body) } as Response;
   } });
 
-  let clock = 0;
+  let clock = now.getTime();
   let handle = 0;
   const timers = new Map<number, Timer>();
+  const originalDateNow = Date.now;
+  Object.defineProperty(Date, "now", { configurable: true, value: () => clock });
   Object.defineProperty(dom.window, "setInterval", { configurable: true, value: (run: () => void, every: number) => {
     handle += 1;
     timers.set(handle, { at: clock + every, every, run });
     return handle;
   } });
   Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: (id: number) => timers.delete(id) });
+  Object.defineProperty(dom.window, "setTimeout", { configurable: true, value: (run: () => void, delay: number) => {
+    handle += 1;
+    timers.set(handle, { at: clock + delay, every: null, run });
+    return handle;
+  } });
+  Object.defineProperty(dom.window, "clearTimeout", { configurable: true, value: (id: number) => timers.delete(id) });
 
   let snapshot: ReturnType<typeof useRunners> | null = null;
   const Probe = () => { snapshot = useRunners(); return null; };
@@ -131,7 +139,8 @@ const withProvider = async (
       const due = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((left, right) => left[1].at - right[1].at)[0];
       if (!due) break;
       clock = due[1].at;
-      due[1].at += due[1].every;
+      if (due[1].every === null) timers.delete(due[0]);
+      else due[1].at += due[1].every;
       await act(async () => due[1].run());
       await flush();
     }
@@ -139,12 +148,13 @@ const withProvider = async (
   };
 
   try {
-    await act(async () => root.render(<RunnersProvider><Probe /><Probe /></RunnersProvider>));
+    await act(async () => root.render(<RunnersProvider><Probe /><Probe /><RunnerRow /></RunnersProvider>));
     await flush();
-    await operation({ requests, advance, latest: () => { assert.ok(snapshot); return snapshot; } });
+    await operation({ dom, requests, advance, latest: () => { assert.ok(snapshot); return snapshot; } });
   } finally {
     await act(async () => root.unmount());
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    Object.defineProperty(Date, "now", { configurable: true, value: originalDateNow });
     dom.window.close();
   }
 };
@@ -166,5 +176,21 @@ test("lastSuccessAt survives a later failed poll", async () => {
     await advance(10_000);
     assert.equal(latest().health.lastSuccessAt, first);
     assert.ok(latest().health.error);
+  });
+});
+
+test("a mounted runner row ages to Unknown while hidden and stays Unknown when visibility returns", async () => {
+  await withProvider((path, count) => {
+    if (path.endsWith("/runners") && count > 1) return { ok: false, body: { error: "unreachable" } };
+    return { ok: true, body: path.endsWith("/runners") ? payload() : { status: "ok", database: "connected", checkedAt: now.toISOString() } };
+  }, async ({ dom, advance }) => {
+    const rowState = (): string => dom.window.document.querySelector("button")?.textContent ?? "";
+    assert.match(rowState(), /Busy/);
+    Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: true });
+    await advance(60_001);
+    assert.match(rowState(), /Unknown/);
+    Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: false });
+    await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    assert.match(rowState(), /Unknown/);
   });
 });

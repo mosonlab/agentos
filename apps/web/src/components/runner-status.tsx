@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, useContext } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
 
 import { usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -8,15 +8,33 @@ import { cn } from "../lib/utils";
 import { DOT, DOT_TONE, RUNNER_ROW, RUNNER_STATE } from "./ui";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "./ui/hover-card";
 
-type RunnersContextValue = { runners: Poll<RunnersResponse>; health: Poll<Health> };
+type RunnersContextValue = { runners: Poll<RunnersResponse>; health: Poll<Health>; freshnessNow: number };
 const idlePoll = <T,>(): Poll<T> => ({ data: null, error: null, loading: false, missing: false, lastSuccessAt: null, reload: () => undefined });
-const IDLE_CONTEXT: RunnersContextValue = { runners: idlePoll<RunnersResponse>(), health: idlePoll<Health>() };
+const IDLE_CONTEXT: RunnersContextValue = { runners: idlePoll<RunnersResponse>(), health: idlePoll<Health>(), freshnessNow: 0 };
 const RunnersContext = createContext<RunnersContextValue>(IDLE_CONTEXT);
+
+const useFreshnessClock = (checkedAt: string | undefined): number => {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const refresh = (): void => setNow(Date.now());
+    refresh();
+    document.addEventListener("visibilitychange", refresh);
+    const checkedAtMs = checkedAt === undefined ? Number.NaN : Date.parse(checkedAt);
+    const delay = Number.isFinite(checkedAtMs) ? Math.max(0, checkedAtMs + 60_001 - Date.now()) : 0;
+    const timer = window.setTimeout(refresh, delay);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.clearTimeout(timer);
+    };
+  }, [checkedAt]);
+  return now;
+};
 
 export const RunnersProvider = ({ children }: { children: ReactNode }): ReactNode => {
   const runners = usePoll<RunnersResponse>("/runners", 30_000);
   const health = usePoll<Health>("/health", 10_000);
-  return <RunnersContext.Provider value={{ runners, health }}>{children}</RunnersContext.Provider>;
+  const freshnessNow = useFreshnessClock(runners.data?.checkedAt);
+  return <RunnersContext.Provider value={{ runners, health, freshnessNow }}>{children}</RunnersContext.Provider>;
 };
 
 export const useRunners = (): RunnersContextValue => useContext(RunnersContext);
@@ -83,9 +101,9 @@ export const RunnerStatusDetails = ({ payload, healthProblem = false, runnersPro
 };
 
 export const RunnerRow = (): ReactNode => {
-  const { runners, health } = useRunners();
+  const { runners, health, freshnessNow } = useRunners();
   const t = useT();
-  const summary = runners.error ? { state: "unknown", tone: "grey" } as const : runnerSummary(runners.data, new Date());
+  const summary = runners.error ? { state: "unknown", tone: "grey" } as const : runnerSummary(runners.data, new Date(freshnessNow));
   return (
     <HoverCard openDelay={120} closeDelay={80}>
       <HoverCardTrigger asChild>
