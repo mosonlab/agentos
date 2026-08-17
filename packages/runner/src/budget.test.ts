@@ -51,5 +51,17 @@ test("stall budget gate uses process activity, structured progress, and per-tool
     },
   });
   assert.equal(tool.allowed, false);
-  if (!tool.allowed) assert.match(tool.reason, /tool deadline/u);
+  if (!tool.allowed) assert.match(tool.reason, /tool inactivity deadline/u);
+
+  const progressingTool = evaluateBudget({
+    ...base,
+    lastProgressEventAt: new Date(now.getTime() - base.stallTimeoutMs * 2),
+    inFlightTool: {
+      id: "tool-2",
+      name: "test",
+      startedAt: new Date(now.getTime() - base.toolDeadlineMs * 2),
+      lastProgressAt: new Date(now.getTime() - 1_000),
+    },
+  });
+  assert.deepEqual(progressingTool, { allowed: true });
 });

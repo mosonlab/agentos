@@ -197,6 +197,52 @@ test("Codex structured errors take precedence over stderr warnings", async () =>
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
 });
 
+test("Codex agent progress renews an open command deadline while stderr does not", async () => {
+  const script = [
+    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+    "emit({type:'item.started',item:{id:'command-1',type:'command_execution',status:'in_progress'}});",
+    "setTimeout(() => process.stderr.write('models manager warning\\n'), 20);",
+    "setTimeout(() => emit({type:'item.completed',item:{id:'message-1',type:'agent_message',text:'database gate is still advancing'}}), 60);",
+    "setTimeout(() => emit({type:'item.completed',item:{id:'command-1',type:'command_execution',status:'completed',exit_code:0}}), 100);",
+    "setTimeout(() => emit({type:'turn.completed'}), 120);",
+  ].join("");
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", script],
+  } as unknown as RunnerConfig;
+
+  let resolveStarted!: () => void;
+  let resolveStderr!: () => void;
+  let resolveProgress!: () => void;
+  const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+  const stderr = new Promise<void>((resolve) => { resolveStderr = resolve; });
+  const progress = new Promise<void>((resolve) => { resolveProgress = resolve; });
+  const handle = await adapters.CODEX.start({
+    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
+    credentialsPath: "/tmp/session.json",
+  }, (event) => {
+    if (event.type === "TOOL_STARTED") resolveStarted();
+    if (event.type === "STDERR") resolveStderr();
+    if (event.type === "MODEL_DELTA" && event.payload.item && (event.payload.item as { type?: string }).type === "agent_message") resolveProgress();
+  });
+
+  await started;
+  const initialProgress = (await adapters.CODEX.heartbeat(handle)).inFlightTool?.lastProgressAt;
+  assert.ok(initialProgress);
+
+  await stderr;
+  assert.equal((await adapters.CODEX.heartbeat(handle)).inFlightTool?.lastProgressAt.getTime(), initialProgress.getTime());
+
+  await progress;
+  const renewedProgress = (await adapters.CODEX.heartbeat(handle)).inFlightTool?.lastProgressAt;
+  assert.ok(renewedProgress);
+  assert.ok(renewedProgress.getTime() > initialProgress.getTime());
+
+  const evidence = await handle.exit;
+  assert.equal(evidence.terminalSuccess, true);
+  assert.equal((await adapters.CODEX.heartbeat(handle)).inFlightTool, null);
+});
+
 test("source text cannot misclassify a provider failure as a missing binary", () => {
   const evidence: ExitEvidence = {
     exitCode: 1,

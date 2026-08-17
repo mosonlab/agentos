@@ -192,6 +192,10 @@ const emit = (handle: RuntimeHandle, sink: SessionEventSink, type: string, paylo
   sink({ source: sourceFor(handle.runner), type, payload, ...(toolCallId !== undefined ? { toolCallId } : {}) });
 };
 
+const markInFlightToolProgress = (handle: RuntimeHandle): void => {
+  if (handle.inFlightTool) handle.inFlightTool.lastProgressAt = new Date();
+};
+
 const parseClaude = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
   const type = stringField(event, "type");
   if (type === "system") {
@@ -251,7 +255,15 @@ const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink:
       handle.inFlightTool = null;
       emit(handle, sink, "TOOL_COMPLETED", item ?? {}, stringField(item, "id"));
     } else {
-      if (item && stringField(item, "type") === "agent_message") handle.finalOutput = stringField(item, "text") ?? handle.finalOutput;
+      if (item && stringField(item, "type") === "agent_message") {
+        // Codex may report an agent progress message while a long-running
+        // command_execution remains open. That structured message is the only
+        // positive evidence here that the tool is still advancing. Raw stderr
+        // deliberately does not reach this path: background CLI warnings must
+        // not keep a genuinely stuck command alive.
+        markInFlightToolProgress(handle);
+        handle.finalOutput = stringField(item, "text") ?? handle.finalOutput;
+      }
       emit(handle, sink, "MODEL_DELTA", event);
     }
     // A nonzero shell command inside the session (status "failed") is normal
