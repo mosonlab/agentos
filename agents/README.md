@@ -1,6 +1,6 @@
 # agents/ — Agent role prompts and skills
 
-Source-of-truth files for the eleven canonical v0.1 agents and their skills. The seed script imports these into the `Agent` / `Skill` / `AgentSkill` tables; `packages/db/prisma/seed.ts` is the consumer.
+Source-of-truth files for the nine canonical v0.1 agents and their skills. The seed script imports these into the `Agent` / `Skill` / `AgentSkill` tables; `packages/db/prisma/seed.ts` is the consumer.
 
 All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from Danny Postma's talk); none are his verbatim files.
 
@@ -25,6 +25,12 @@ collaborators: []         # AgentCollaboration rows, by agent name
 Exact canonical model and runner defaults live in the role frontmatter and `packages/db/prisma/agent-contract.ts`; task-chain routing is governed by `docs/governance/task-routing-v1.md`. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `implementation-plan-executioner`).
 
 Provider-specific or temporary roles are not canonical defaults. Keep them out of `roles/`; create them as explicit local overlays and archive them when no longer needed so a seed cannot silently turn a local experiment into a release default.
+
+`review-coordinator` is the single canonical reviewer for specifications,
+plans, and implementation diffs. It performs feasibility, scope, coherence,
+security, and risk-focused verification in one independent session. Narrow
+legacy reviewer roles remain only as archived database history and must not
+be assigned to new tasks or templates.
 
 ## Skill frontmatter
 

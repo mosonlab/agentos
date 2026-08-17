@@ -201,10 +201,10 @@ const main = async (): Promise<void> => {
   const steps = [
     [1, "Write a spec", canonicalStep(1).agentName, AssigneeType.AGENT, null, true, canonicalStep(1).outputKind, "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null],
     [2, "Plan", canonicalStep(2).agentName, AssigneeType.AGENT, null, false, canonicalStep(2).outputKind, "Turn the approved spec into a concrete ordered implementation plan.", null],
-    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, false, canonicalStep(3).outputKind, "Review the plan through feasibility, scope, coherence, and a distinct high-risk feasibility pass; consolidate must-fix and should-fix findings.", null],
+    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, false, canonicalStep(3).outputKind, "Review the plan through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null],
     [4, "Revise plan", canonicalStep(4).agentName, AssigneeType.AGENT, null, false, canonicalStep(4).outputKind, "Revise the plan using every must-fix plan-review finding.", null],
     [5, "Implementation", canonicalStep(5).agentName, AssigneeType.AGENT, null, false, canonicalStep(5).outputKind, "Implement the approved plan on {{branchName}} and run end-to-end tests.", null],
-    [6, "Code review", canonicalStep(6).agentName, AssigneeType.AGENT, null, false, canonicalStep(6).outputKind, "Review the implementation through feasibility, scope, coherence, and a distinct high-risk feasibility pass; consolidate must-fix and should-fix findings.", null],
+    [6, "Code review", canonicalStep(6).agentName, AssigneeType.AGENT, null, false, canonicalStep(6).outputKind, "Review the implementation through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null],
     [7, "Apply review fixes", canonicalStep(7).agentName, AssigneeType.AGENT, null, false, canonicalStep(7).outputKind, "Apply all must-fix review findings and rerun end-to-end tests.", null],
     [8, "Librarian", canonicalStep(8).agentName, AssigneeType.AGENT, null, false, canonicalStep(8).outputKind, "Update internal documentation to match the delivered code.", null],
     [9, "Human PR review", canonicalStep(9).agentName, AssigneeType.HUMAN, null, true, canonicalStep(9).outputKind, "Review and merge the pull request for {{branchName}}.", null],

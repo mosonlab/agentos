@@ -1,9 +1,7 @@
 import { RunnerKind, RunnerPreference } from "@prisma/client";
 
 export const CANONICAL_AGENT_DEFAULTS = [
-  { name: "code-reviewer", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "feasibility", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "implementation-plan-executioner", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "librarian", model: "gpt-5.6-luna:high", runner: RunnerPreference.CODEX },
