@@ -133,7 +133,7 @@ Two independent reasons, the second found by the review (must-fix 2):
    `NULL`. Every one of the four columns starts NULL, so the first write — the
    common case — would store nothing.
 2. Read-modify-write with `+=` is not idempotent, and the ingest route it hangs
-   off *is*: `createMany(..., skipDuplicates: true)` (`app.ts:1770-1783`) is
+   off *is*: `createMany(..., skipDuplicates: true)` (`app.ts:2493-2506`) is
    deliberately replay-safe, so any usage write that adds a delta drifts every
    time the same `FINAL_OUTPUT` reaches it twice. It also cannot recover from a
    crash between `createMany` and the usage write — the event is stored, the
@@ -480,6 +480,17 @@ Covers spec §4.6.1, §4.6.3, §5.2. Depends on WI-1.
     sequentially (`packages/runner/src/api.ts:131-146`); that assumption is
     written into the module's comment, and it is now a performance note rather
     than a correctness requirement.
+
+    > **Superseded 2026-08-16 by batch 4 FIXES**
+    > ([spec](../specs/batch-4-fixes-usage-correctness.md) MF-1). The paragraph
+    > above is false. Both writers write an **absolute** value computed from the
+    > snapshot each one read, so they do not converge: a caller that read at T1
+    > can commit after a caller that read at T2 > T1 and leave the older total
+    > stored, and `sameColumns` then sees a self-consistent row and suppresses
+    > every later repair — the stale value is permanent. Concurrent recomputes
+    > are now serialised by a transaction-scoped advisory lock keyed by session
+    > id (`packages/db/src/usage.ts`), and that is a **correctness requirement**,
+    > not a performance note.
   - `totalTokens` stays `null` when both input and output are absent, so §4.6.5's
     "never `0`, never an estimate" holds. A session with cost but no tokens
     stores `costUsd` and leaves all four token columns `null` — spec §363-367's
@@ -489,9 +500,11 @@ Covers spec §4.6.1, §4.6.3, §5.2. Depends on WI-1.
   `recomputeSessionUsage`, `SessionUsage` (the file already re-exports
   `workflow.ts`'s helpers; follow that shape).
 
-- `packages/api/src/app.ts:1770-1787` — inside `POST /runner/runs/:runId/events`,
-  after the existing `createMany` (line 1770-1783) and before the
-  `providerConversationId` update (1784-1786):
+- `packages/api/src/app.ts:2507-2523` — inside `POST /runner/runs/:runId/events`,
+  after the existing `createMany` and before the `providerConversationId` update.
+  (Line numbers corrected 2026-08-16 by batch 4 FIXES: this was written as
+  `1770-1787` and the code has since moved, which is where the batch 4 FIXES
+  brief's "~1790" came from.)
 
   ```ts
   if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {

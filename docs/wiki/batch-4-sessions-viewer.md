@@ -82,31 +82,27 @@ the API and web together or revert the API alone.
 `Session(projectId, requestedAt)` and `SessionEvent(runId, seq)`. It is additive; the columns may
 be unread by older code and no event data is removed.
 
-[`packages/db/src/usage.ts`](../../packages/db/src/usage.ts) is the single usage implementation.
-`extractUsage` is total over unknown payloads and reads shape rather than runner name:
+Usage extraction, recomputation, backfill, and deployment safety are documented
+in [`batch-4-fixes-usage-correctness.md`](batch-4-fixes-usage-correctness.md).
+The important viewer-facing contract is that the event table is the source of
+truth and the five displayed cache values are absolute, nullable derived values:
+`totalTokens` is input plus output (never cache and never an inferred zero), and
+cost-only data does not become zero tokens. The fixed extractor now sums
+Claude's complete `modelUsage` breakdown without adding the repeated top-level
+primary-model `usage`; CODEX keeps its existing fallback mapping and PI remains
+unknown.
 
-- `usage.input_tokens` and `usage.output_tokens` populate the input/output columns;
-- `usage.cached_input_tokens`, or the sum of Claude's cache-read and cache-creation fields,
-  populates cached input;
-- top-level numeric `total_cost_usd` populates cost;
-- `reasoning_output_tokens` is intentionally not included in output tokens.
+After a `FINAL_OUTPUT` batch is inserted, `recomputeSessionUsage` folds every
+stored terminal event, serializes the read/compare/write with a session advisory
+lock, and writes only when the derived columns differ. Lock-wait attempts retry
+internally; unrelated database failures remain behind the non-fatal ingest catch.
+The backfill examines every session with a `FINAL_OUTPUT`, including populated
+and cost-only rows, pages by session id, reports `scanned N, updated M, failed K`,
+and exits non-zero for any failure. A clean second pass reports `updated 0`.
 
-`sumUsage` preserves absent fields. `deriveUsageColumns` leaves token fields null when the provider
-reported no corresponding value, computes `totalTokens` as input plus output only when at least one
-of those values exists, excludes cache from that total, and rounds cost to the database's four
-decimal places. Thus cost-only data does not become zero tokens, and unknown data is shown as `—`.
-
-The event table is the source of truth. After a batch containing `FINAL_OUTPUT` is inserted,
-`recomputeSessionUsage` folds every stored `FINAL_OUTPUT` for the session and writes absolute
-column values only when they differ. This makes the write idempotent, accumulates resumed attempts,
-repairs a partial write, and avoids arithmetic on nullable columns. A recompute failure is logged
-and does not fail event ingest: usage is a derived cache and can be repaired later.
-
-[`backfill-session-usage.ts`](../../packages/db/prisma/backfill-session-usage.ts) scans every
-session with at least one `FINAL_OUTPUT`, recomputes it in batches of 200, and prints
-`scanned N, updated M`. A second run is a no-op, including for cost-only sessions. The production
-migration must be deployed before the API is restarted; the runner has no migration or restart
-requirement for this feature.
+The migration and restart ordering are operator work, not a viewer change: the
+indexes are built concurrently before deployment on a large database, the API
+must restart onto the fixed usage implementation, and the backfill runs twice.
 
 ## Event normalization and stream rendering
 
