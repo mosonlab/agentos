@@ -12,6 +12,8 @@ Author: spec agent, 2026-08-17
 
 Revision: 2026-08-17 plan-review closure; clarified provider-acceptance evidence, unbound rejection evidence, and server-derived non-Feishu source identities without changing Product Contract scope
 
+Revision: 2026-08-17 current-master plan-revision closure; recorded the product-owner dependency decision that Inbox 3a implementation follows merged Goal 5a0 implementation PR #97, replacing the earlier independent-authorization and post-completion write-surface wording. Scope, acceptance semantics, evidence, route classification, and the accepted security contract are unchanged.
+
 Routing snapshot: Routing Contract v1.0 · Planned Critical · future implementation agent `senior-dev` · high effort
 
 Authority: the task Product Contract and `docs/governance/task-routing-v1.md`. Changing the objective, scope, acceptance semantics, evidence, authority, dependencies, or safety boundary requires a new Product Contract version and product-owner approval.
@@ -706,6 +708,8 @@ The implementation test suite MUST exercise real database transactions for concu
 15. reconciler vs runner start confirmation → consistent `RESUMED` or fail-closed ambiguity;
 16. sequential questions in one Session after the first is `RESUMED` → distinct identities and no reuse of the first Answer/ResumeRequest.
 
+Against merged Goal 5a0 fences, the suite MUST additionally cover six real-database Goal-fence negative races: Goal cancellation against (G1) answer commit, (G2) runner claim, (G3) `starting`, (G4) acceptance confirmation, and (G5) the reconciler, plus (G6) Goal lineage regeneration against a queued unclaimed resume. Each proves that cancellation cannot admit a stale Run queue transition, `STARTING` boundary, provider invocation, resume-grant acceptance, or reconcile decision, asserts the explicit final Question, ResumeRequest, Goal, Task, and Run states, and requires every transaction to commit or fail with a classified, retried-once serialization failure — zero deadlocks and zero unclassified serialization failures.
+
 ### 14.2 Recovery behavior
 
 | Failure | Required behavior |
@@ -723,6 +727,7 @@ The implementation test suite MUST exercise real database transactions for concu
 | process spawns then provider rejects before acceptance signal | pinned adapter records the definitive rejection; real control-plane path stores `BLOCKED_SAFE`, no acceptance evidence/`RESUMED`, and no replacement Run; unknown or malformed evidence is ambiguous |
 | control-plane restart | reconstruct state solely from DB; no in-memory ownership assumption |
 | Question expiry | CAS cancel/timeout, preserve evidence/workspace policy, late answer harmless |
+| Goal lineage cancelled or regenerated while a Question is active | fence mismatch fails closed with no Answer/grant/start; reconcile terminalizes `WAITING` as cancelled with a distinct Goal-lineage reason and cancels a pre-`STARTING` ResumeRequest; an unresolved `STARTING` is ambiguous, and an already-`RESUMED` Question is never rewritten |
 | rollback attempted with active `STARTING`/ambiguous requests | stop rollback; human resolution required |
 
 Real API/database negative tests MUST cover a missing Question id, an unknown/tampered id, an unauthorized existing id, and a cross-project existing id. Each produces one deduped unbound `InboxMutationAttempt`, zero fabricated Question events, no state change, and the same non-disclosing response for existing and non-existing targets. Same-source/same-payload retry returns the recorded rejection; different payload conflicts; a source identity first recorded as rejected cannot later create an Answer.
@@ -767,7 +772,7 @@ This section defines safety gates and evidence; it does not authorize or schedul
 
 ### 16.1 Rollout gates
 
-1. **Write-surface review:** compare current master after Inbox 3a and Goal 5a0 complete. Implementation may begin only when review confirms safe integration with the current Inbox, workflow, runner claim/start, reconcile, notification, web, and schema write surfaces.
+1. **Write-surface review:** revalidate master *after* Goal 5a0 implementation PR #97 is merged/completed and *before* Inbox 3a implementation begins. The review pins the #97 merge commit and its ancestry in current master, rebases once onto that base, names an owner for every shared file/symbol, confirms CP-A ownership and the existing Review/Approval lock order are preserved, and records the exact Goal→Task→Agent→`AgentRepoAccess`→Run/lineage fence join. Implementation may begin only when this review confirms safe integration with the current Inbox, workflow, runner claim/start, reconcile, notification, web, Goal lifecycle, and schema write surfaces.
 2. **Additive schema:** migration precheck, backup, drift check, and rollback artifact pass before schema application.
 3. **Backfill dry run:** counts, quarantine list, mapping checksum, and rerun-idempotency evidence reviewed.
 4. **Shadow/projection verification:** old and v1 read projections agree for exact rows; discrepancies are zero for active questions.
@@ -798,6 +803,7 @@ The feature is acceptable only when a reviewer can cite automated evidence for e
 | --- | --- |
 | Distinct durable identities | Schema/API tests prove Message, Question, Answer, ResumeRequest, delivery, and event ids are separate and immutable. |
 | Correlation | DB constraints and negative API tests cover Project/Goal/Task/Run/Session/Agent mismatches; each fails closed. |
+| Goal fence safety | Write-surface review pins the merged Goal 5a0 base, owners, lock order, and fence join; real-database races G1-G6 prove cancellation admits no stale queue, start, provider invocation, grant acceptance, or reconcile, with no deadlock or unclassified serialization failure. |
 | Atomic suspend | Fault-injection DB test at each write proves no Question without waiting Run/Session and no waiting Run/Session without its Question. |
 | Typed answers | API tests cover valid/invalid choice, text, mixed compatibility, empty/oversize input, duplicate choice ids, and unknown contract version. |
 | Harmless duplicate answers | Real-DB concurrent same-answer tests prove one Answer, one ResumeRequest, one queue transition. |
@@ -827,8 +833,9 @@ Final acceptance evidence MUST include:
 ## 18. Dependencies, authority, and stop conditions
 
 - Specification and planning may proceed now.
-- Goal 5a1 implementation MUST NOT begin until Inbox 3a and Goal 5a0 are complete.
-- Inbox 3a implementation may begin independently only after a fresh write-surface review against current master confirms safe integration.
+- Inbox 3a implementation MUST NOT begin until Goal 5a0 implementation PR #97 is merged or otherwise completed and the exact merged authority is revalidated by the §16.1(1) write-surface review. Inbox 3a and Goal 5a0 are ordered, not independent or concurrent; this is a product-owner decision recorded 2026-08-17.
+- Goal 5a1 implementation MUST NOT begin until Goal 5a0 and Inbox 3a are complete. That later block never justifies reading the §16.1(1) gate as a post-Inbox-3a comparison.
+- Every Inbox 3a write touching a Goal-correlated execution joins and matches the merged Goal 5a0 generation/lineage fence in the same transaction and fails closed on mismatch. Inbox 3a introduces no Goal state machine, cancellation path, or lineage derivation of its own.
 - Future implementation uses the recorded Planned Critical route and `senior-dev`; down-routing or reduced safeguards requires a new Product Contract version and product-owner approval.
 - This chain is specification, planning, review, revision, and human approval only. It does not implement, migrate, restart, or perform production actions.
 - Stop and request product-owner approval for any change to the assumptions that expands answer shape, creates multiple concurrent questions per Session, permits automatic retry after ambiguous provider start, weakens actor mapping, infers identity from a chat, or changes the seven-day default/no-expiry semantics.

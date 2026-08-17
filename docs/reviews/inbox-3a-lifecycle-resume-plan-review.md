@@ -1,4 +1,8 @@
-## must-fix
+# Inbox 3a lifecycle and resume plan review
+
+## Round 1 — initial plan review (2026-08-17)
+
+### must-fix
 
 Verdict: **FAIL — 2 must-fix findings.**
 
@@ -6,8 +10,38 @@ Verdict: **FAIL — 2 must-fix findings.**
 
 2. **[Coherence, Authorization] The required rejection audit cannot represent missing or unknown Question identity.** The fail-closed contract explicitly covers a missing question id and requires the rejected source event plus redacted reason to survive (`docs/specs/inbox-3a-durable-question-resume-contract-v1.md:166-182`), while the audit contract says every rejected mutation appends an `InboxQuestionEvent` carrying a per-question sequence and all correlations (`docs/specs/inbox-3a-durable-question-resume-contract-v1.md:559-572`). The only specified event constraint is keyed by `(questionId, sequence)` (`docs/specs/inbox-3a-durable-question-resume-contract-v1.md:299-310`). The plan adds `InboxQuestionEvent` and `InboxExternalEvent` (`docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:42-48`) and a generic `recordRejectedInboxMutation` (`docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:66-72`), but never defines where a web request with no id, an unknown/tampered id, or a deliberately non-disclosing cross-principal 404 is stored when no valid Question row exists. Such an event cannot have a valid Question foreign key, per-question sequence, or complete correlations. Define a durable unbound rejection/source-event ledger (or explicitly nullable, independently sequenced event form), its dedupe and retention rules, and negative tests proving missing, unknown, unauthorized, and cross-project attempts remain auditable without revealing existence.
 
-## should-fix
+### should-fix
 
 1. **[Coherence] Define stable `sourceAccountId` and `sourceEventId` derivation for non-Feishu answers.** `InboxAnswerV1` requires both fields in addition to `idempotencyKey` (`docs/specs/inbox-3a-durable-question-resume-contract-v1.md:238-254`), and the schema uniqueness contract depends on them (`docs/specs/inbox-3a-durable-question-resume-contract-v1.md:299-310`), but the web answer body supplies only an idempotency key (`docs/specs/inbox-3a-durable-question-resume-contract-v1.md:469-491`). The plan specifies the operator id/config and endpoint but not deterministic WEB or MIGRATION account/event identities (`docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:54-64`, `docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:78-88`). Record the exact server-side derivation and retry semantics so implementers do not invent incompatible values.
 
 2. **[Feasibility] The focused verification commands do not actually enforce their test-name patterns.** The API scripts append fixed test-file globs before extra npm arguments (`packages/api/package.json:6-13`), while plan checks repeatedly pass `--test-name-pattern` after `--` (`docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:50-52`, `docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:196-198`, `docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md:208-210`). Command evidence: `node --test scripts/public-snapshot-scan.test.mjs --test-name-pattern='does-not-exist'` ran all 6 tests and exited 0 on Node v26.5.0, demonstrating that the trailing pattern does not prove a matching test exists. Use scripts that place Node test options before file operands, or pair full-suite execution with an explicit assertion that each required named test/scenario exists. The final full gate remains useful, so this is survivable rather than blocking.
+
+### Round 1 disposition — closed at `e3b2c3a25187659a68dd6f0c94aed9fa8404099b`
+
+| Finding | Decision | Closure |
+| --- | --- | --- |
+| must-fix 1 — spawn-only `RESUMED` | Addressed | Fixed decision 8 and steps 2, 7-9, 14 of `docs/plans/inbox-3a-identity-lifecycle-compatibility-v1-plan.md`: adapter-specific pinned acceptance signals, `InboxResumeAcceptanceEvidence`, pre-acceptance heartbeats, and the named real-control-plane `spawn succeeded, provider rejected before acceptance` test. Spec §§5.3(9)-(11), 7.4, 14.2 updated to match. |
+| must-fix 2 — unrepresentable missing/unknown Question rejection | Addressed | Fixed decision 9 and steps 2, 4-5, 10, 14: the append-only, independently ordered `InboxMutationAttempt` ledger with source-identity dedupe across accepted and rejected outcomes, non-disclosure rules, and four required negative cases. Spec §§5.5, 6.3, 10.3, 14.2 updated to match. |
+| should-fix 1 — non-Feishu source identity | Adopted | Fixed decision 10 and steps 3-5, 13 define and test the exact WEB and MIGRATION account/event identities. |
+| should-fix 2 — ineffective focused commands | Adopted | Fixed decision 11 and step 3 place `--test-name-pattern` before file operands in workspace scripts; no verification command appends a pattern through npm. |
+
+## Round 2 — current-master plan review (task `cmsxpbykd0007mpmxzmr37cev`)
+
+Verdict: **FAIL — 1 must-fix, 1 should-fix.**
+
+### must-fix
+
+1. **[Authorization, Coherence] The plan authorized Inbox 3a implementation independently of Goal 5a0, behind a circular write-surface gate.** The authority block permitted implementation to "proceed independently" once step 1 recorded a safe result, while the spec's rollout gate asked for a comparison of master "after Inbox 3a and Goal 5a0 complete" — a gate that cannot precede the implementation it is supposed to authorize. Step 1 only asked for Goal 5a0's *branch/status*, so two work streams could write the same Inbox/workflow/runner/reconcile/schema surface concurrently, the planned expand migration `20260817040000_…` could sort before a merged Goal 5a0 tail, and no step defined how an answer, claim, `STARTING` boundary, provider acceptance, reconcile pass, or cancellation behaves under Goal generation/lineage fences.
+
+### should-fix
+
+1. **[Coherence] Stale `eff1403` planning provenance read as the current base.** The authority block cited the pre-rebase planning commit without marking it historical and without recording the branch's revalidated base, leaving two candidate bases for an implementer to choose between.
+
+### Round 2 disposition — plan revision on branch `agentos/chain/w2-2026-08-17-inbox-3a-p-38f03953`
+
+| Finding | Decision | Closure |
+| --- | --- | --- |
+| must-fix 1 — independent authorization and circular gate | **Addressed — closed** | The plan authority block now records the product-owner decision that Inbox 3a implementation (#98) must not begin until Goal 5a0 PR #97 is merged/completed and the exact merged authority is revalidated; every independent/concurrent authorization and post-completion overlap reading is removed from plan and spec (§16.1(1), §18). Step 1 pins the #97 merge commit and its ancestry in current master, rebases once, inventories every shared file/symbol with a named owner, preserves CP-A ownership and the Review/Approval lock order, records the exact Goal→Task→Agent→`AgentRepoAccess`→Run/lineage fence join, and returns `SAFE_TO_IMPLEMENT` only on that evidence. The expand migration becomes `20260818010000_inbox_question_v1_expand`, renamed strictly later if the merged Goal tail sorts at or after it. Fixed decisions 12-13 plus the new "Goal 5a0 fence semantics" section define answer, claim, `STARTING`, provider-acceptance, reconcile, and cancel behavior under the merged fences, threaded into steps 2, 4-5, 7-9. Step 14 adds real-PostgreSQL races G1-G6 in `packages/api/src/inbox-v1-goal-fence.dbtest.ts` proving cancellation admits no stale queue, start, provider invocation, grant acceptance, or reconcile, with explicit final Question/ResumeRequest/Goal/Task/Run states, zero deadlocks (`40P01`), and zero unclassified serialization failures. |
+| should-fix 1 — stale `eff1403` provenance | **Adopted — closed** | The authority block labels `eff140346133d3f3efd98256775a95ece2c9a5ad` historical pre-rebase planning provenance, records the current revalidated base `a4a4ba36c116c775d5d1c28ed55b17600869d904` and the plan-revision starting head `e3b2c3a25187659a68dd6f0c94aed9fa8404099b`, and keeps step 1's post-#97 base as the only implementation authority. Step 1 also carries all three SHAs into the write-surface review record. |
+
+No should-fix is declined in either round. Planned Critical classification, the `senior-dev` high-effort route, and the accepted security contract are unchanged; this revision authorizes no implementation, migration, or production action.
