@@ -1605,7 +1605,8 @@ language drags the first along.
 - Rules, all in the picker:
   - Selecting a catalog model sets `runnerPreference` to that entry's `runner` — a
     concrete kind, **never `INHERIT`** (spec §4.6.5), which is what bypasses
-    `workflow.ts:22-30` and keeps the librarian on PI.
+    `workflow.ts:22-30` for provider-prefixed catalog models such as the generic
+    `openai-codex/…` PI regression fixture.
   - Switching models keeps the current effort when the new vocabulary contains it,
     otherwise falls back to the new entry's `defaultEffort`, **visibly, before
     saving** (spec §4.6.11 / scenario B).
@@ -1656,11 +1657,12 @@ language drags the first along.
 6. An agent stored as bare `claude-opus-5` renders effort `high` and, if the form is
    cancelled, the stored value is unchanged.
 
-**Manual** (spec §8.8-§8.10): `senior-dev` shows `GPT-5.6 Luna (codex)` / `xhigh` /
-`codex` read-only; switching to `Claude Opus 5` flips the runner in the same
-interaction; save, then confirm in the database that `Agent.model =
-'claude-opus-5:xhigh'` and `runnerPreference = 'CLAUDE'`; switch it back.
-**`librarian` must show `pi`, not `codex`** — the regression item 6 exists for.
+**Manual** (spec §8.8-§8.10): `senior-dev` shows `Claude Opus 5` / `high` /
+`claude` read-only and the database already stores `claude-opus-5:high` /
+`CLAUDE`. `librarian` shows `gpt-5.6-luna:high` / `codex`. In an unsaved form,
+select the generic `openai-codex/gpt-5.6-luna` catalog entry and confirm its
+derived runner is `pi`, then cancel; this preserves the substring-regression
+coverage without treating that catalog entry as Librarian's current assignment.
 
 **Rollback:** revert restores the two text inputs and the free runner select.
 Nothing was written that the old UI cannot display.
