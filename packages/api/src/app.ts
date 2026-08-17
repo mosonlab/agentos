@@ -1892,6 +1892,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         include: {
           assigneeAgent: true,
           templateStep: true,
+          repo: true,
           runs: { orderBy: { runNumber: "desc" }, take: 1 },
         },
       });
@@ -1909,6 +1910,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
       }
       const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
+      // A task with no repo cannot be a chain step with a branch, and this route
+      // already tolerates a null repoId — so it keeps inheriting run-1's fields.
+      const branches = task.repo
+        ? await resolveRunBranches(tx, { ...task, repo: task.repo }, last)
+        : null;
       const run = await tx.run.create({
         data: {
           projectId: last.projectId,
@@ -1920,8 +1926,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
           runner: derived.runner,
           model: derived.model,
-          targetBranch: last.targetBranch,
-          branch: last.branch,
+          targetBranch: branches ? branches.targetBranch : last.targetBranch,
+          branch: branches ? branches.branch : last.branch,
+          opensPullRequest: task.opensPullRequest,
           promptHash: derived.promptHash,
           maxDurationMin: last.maxDurationMin,
           stallTimeoutMin: last.stallTimeoutMin,

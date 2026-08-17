@@ -6,6 +6,7 @@ import {
   CleanupStatus,
   FailureClass,
   InboxStatus,
+  resolveRunBranches,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
@@ -103,6 +104,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
         runner: true,
         model: true,
         targetBranch: true,
+        branch: true,
         promptHash: true,
         maxDurationMin: true,
         stallTimeoutMin: true,
@@ -157,6 +159,22 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       });
       if (!run.taskId) continue;
       if (run.runNumber < budgetCeiling) {
+        // Chain steps recompute; everything else copies the lost run's base
+        // verbatim, because the resolver's non-chain answer reads the *task's*
+        // current targetBranch and the lost run's may predate an operator edit.
+        const task = await tx.task.findUnique({
+          where: { id: run.taskId },
+          select: {
+            id: true, projectId: true, repoId: true, chainId: true, templateId: true,
+            targetBranch: true, opensPullRequest: true,
+            repo: { select: { defaultBranch: true } },
+          },
+        });
+        // `prior` is null deliberately: for chain steps the resolver ignores it,
+        // and passing the lost run would be misleading.
+        const branches = task?.chainId && !task.templateId && task.repo
+          ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
+          : { branch: run.branch, targetBranch: run.targetBranch };
         await tx.run.create({
           data: {
             projectId: run.projectId,
@@ -168,7 +186,9 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
             dedupeKey: makeDedupeKey(run.taskId, run.runNumber + 1),
             runner: run.runner,
             model: run.model,
-            targetBranch: run.targetBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: task?.opensPullRequest ?? true,
             promptHash: run.promptHash,
             maxDurationMin: run.maxDurationMin,
             stallTimeoutMin: run.stallTimeoutMin,
