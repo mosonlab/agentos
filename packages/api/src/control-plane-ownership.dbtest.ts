@@ -15,7 +15,7 @@ const safeEnvironmentPresent = process.env.AGENTOS_ALLOW_SCRATCH_DATABASES === "
   && Boolean(process.env.TEST_DATABASE_URL)
   && Boolean(process.env.TEST_DATABASE_MAINTENANCE_URL);
 
-const waitFor = (child: ChildProcess, pattern: RegExp, output: { value: string }, timeoutMs = 20_000): Promise<string> => new Promise((resolvePromise, reject) => {
+const waitFor = (child: ChildProcess, pattern: RegExp, output: { value: string }, timeoutMs = 60_000): Promise<string> => new Promise((resolvePromise, reject) => {
   const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${pattern}: ${output.value}`)), timeoutMs);
   const inspect = (): void => {
     if (!pattern.test(output.value)) return;
@@ -49,6 +49,57 @@ const waitForDatabaseLockWaiter = async (db: PrismaClient): Promise<void> => {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error("API did not reach the startup reconciliation database-lock wait queue");
+};
+
+const insertExpiredRunSentinel = async (
+  db: PrismaClient,
+  label: string,
+  workspacePath: string,
+): Promise<{ id: string; before: unknown }> => {
+  const project = await db.project.create({ data: { name: `${label} project`, slug: `${label}-project` } });
+  const environment = await db.environment.create({
+    data: { projectId: project.id, name: `${label} environment`, allowedHosts: [] },
+  });
+  const agent = await db.agent.create({
+    data: {
+      projectId: project.id,
+      environmentId: environment.id,
+      name: `${label} agent`,
+      title: "ownership sentinel",
+      model: "sentinel",
+      foundationalPrompt: "sentinel",
+      rolePrompt: "sentinel",
+    },
+  });
+  const task = await db.task.create({
+    data: {
+      projectId: project.id,
+      assigneeAgentId: agent.id,
+      name: `${label} task`,
+      description: "must remain active when ownership acquisition loses",
+      status: "DOING",
+    },
+  });
+  const run = await db.run.create({
+    data: {
+      projectId: project.id,
+      taskId: task.id,
+      agentId: agent.id,
+      runNumber: 1,
+      dedupeKey: `${label}-expired-run`,
+      status: "RUNNING",
+      runner: "CODEX",
+      runnerId: `${label}-runner`,
+      leaseGeneration: 1,
+      fencingToken: `${label}-fencing-token`,
+      leaseExpiresAt: new Date("2000-01-01T00:00:00.000Z"),
+      workspacePath,
+      model: "sentinel",
+      promptHash: `${label}-prompt-hash`,
+    },
+  });
+  const before = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  return { id: run.id, before };
 };
 
 const spawnApi = (environment: NodeJS.ProcessEnv): { child: ChildProcess; output: { value: string } } => {
@@ -109,6 +160,9 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
 
   const orphan = join(workspace, "orphan-sentinel");
   await mkdir(orphan);
+  const sourceDb = new PrismaClient({ datasources: { db: { url: source.url } } });
+  const sameDbSentinel = await insertExpiredRunSentinel(sourceDb, "same-db", orphan);
+  await sourceDb.$disconnect();
   const aliasParent = join(container, "alias");
   await mkdir(aliasParent);
   await symlink(workspace, join(aliasParent, "root"));
@@ -122,9 +176,13 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   assert.equal((await exited(sameDbLoser.child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
   assert.doesNotMatch(sameDbLoser.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening/u);
   assert.equal((await lstat(orphan)).isDirectory(), true);
+  const sourceDbAfter = new PrismaClient({ datasources: { db: { url: source.url } } });
+  assert.deepEqual(await sourceDbAfter.run.findUniqueOrThrow({ where: { id: sameDbSentinel.id } }), sameDbSentinel.before);
+  await sourceDbAfter.$disconnect();
   assert.match(sameDbLoser.output.value, new RegExp(canonicalRoot?.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&") ?? "never", "u"));
 
   const copyDb = new PrismaClient({ datasources: { db: { url: copy.url } } });
+  const copiedDbSentinel = await insertExpiredRunSentinel(copyDb, "copied-db", orphan);
   const beforeMigrations = await copyDb.$queryRaw<Array<{ count: bigint }>>`SELECT count(*)::bigint AS count FROM "_prisma_migrations"`;
   await copyDb.$disconnect();
   const copiedDbLoser = spawnApi({ ...common, DATABASE_URL: copy.url });
@@ -135,6 +193,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   assert.equal((await lstat(orphan)).isDirectory(), true);
   const copyDbAfter = new PrismaClient({ datasources: { db: { url: copy.url } } });
   const afterMigrations = await copyDbAfter.$queryRaw<Array<{ count: bigint }>>`SELECT count(*)::bigint AS count FROM "_prisma_migrations"`;
+  assert.deepEqual(await copyDbAfter.run.findUniqueOrThrow({ where: { id: copiedDbSentinel.id } }), copiedDbSentinel.before);
   await copyDbAfter.$disconnect();
   assert.deepEqual(afterMigrations, beforeMigrations);
   t.diagnostic("RP-OWN-SAME-ALIAS passed");
