@@ -283,7 +283,26 @@ PGSERVICE=agentos-restore-nonempty psql --set=ON_ERROR_STOP=1 \
 user_object_count() {
   local service_alias="$1"
   PGSERVICE="$service_alias" psql --tuples-only --no-align --quiet --set=ON_ERROR_STOP=1 \
-    --command "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','v','m','S','f')" \
+    --command "
+      WITH user_namespaces AS (
+        SELECT oid FROM pg_namespace
+        WHERE nspname <> 'information_schema' AND nspname !~ '^pg_'
+      ), user_objects AS (
+        SELECT c.oid FROM pg_class c
+        WHERE c.relnamespace IN (SELECT oid FROM user_namespaces)
+          AND c.relkind IN ('r','p','v','m','S','f')
+        UNION ALL
+        SELECT p.oid FROM pg_proc p
+        WHERE p.pronamespace IN (SELECT oid FROM user_namespaces)
+        UNION ALL
+        SELECT t.oid FROM pg_type t
+        WHERE t.typnamespace IN (SELECT oid FROM user_namespaces)
+          AND t.typtype IN ('d','e','r')
+        UNION ALL
+        SELECT n.oid FROM pg_namespace n
+        WHERE n.oid IN (SELECT oid FROM user_namespaces) AND n.nspname <> 'public'
+      )
+      SELECT count(*) FROM user_objects" \
     2>>"$private_log" | tr -d '[:space:]'
 }
 
