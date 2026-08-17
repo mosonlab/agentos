@@ -37,6 +37,20 @@ const exited = (child: ChildProcess): Promise<{ code: number | null; signal: Nod
   child.once("exit", (code, signal) => resolvePromise({ code, signal }));
 });
 
+const waitForDatabaseLockWaiter = async (db: PrismaClient): Promise<void> => {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const waiting = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT count(*)::bigint AS count
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND wait_event_type = 'Lock'
+    `;
+    if ((waiting[0]?.count ?? 0n) > 0n) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error("API did not reach the startup reconciliation database-lock wait queue");
+};
+
 const spawnApi = (environment: NodeJS.ProcessEnv): { child: ChildProcess; output: { value: string } } => {
   const output = { value: "" };
   const child = spawn(process.execPath, [fileURLToPath(new URL("../dist/index.js", import.meta.url))], {
@@ -144,6 +158,46 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   assert.equal((await exited(addressLoser.child)).code, 1);
   assert.match(addressLoser.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*EADDRINUSE[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
   t.diagnostic("RP-OWN-LIFECYCLE EADDRINUSE cleanup passed");
+
+  const signalRoot = join(container, "signal-root");
+  const signalState = join(container, "signal-state");
+  await Promise.all([mkdir(signalRoot), mkdir(signalState, { mode: 0o700 })]);
+  await chmod(signalState, 0o700);
+  const blocker = new PrismaClient({ datasources: { db: { url: copy.url } } });
+  const observer = new PrismaClient({ datasources: { db: { url: copy.url } } });
+  let releaseDatabaseLock!: () => void;
+  let reportDatabaseLock!: () => void;
+  const databaseLockReleased = new Promise<void>((resolvePromise) => { releaseDatabaseLock = resolvePromise; });
+  const databaseLockHeld = new Promise<void>((resolvePromise) => { reportDatabaseLock = resolvePromise; });
+  const blockingTransaction = blocker.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('LOCK TABLE "Run" IN ACCESS EXCLUSIVE MODE');
+    reportDatabaseLock();
+    await databaseLockReleased;
+  }, { maxWait: 5_000, timeout: 30_000 });
+  await databaseLockHeld;
+  const signaledDuringReconciliation = spawnApi({
+    ...common,
+    DATABASE_URL: copy.url,
+    RUNNER_WORKSPACE_ROOT: signalRoot,
+    CONTROL_PLANE_STATE_DIR: signalState,
+  });
+  children.add(signaledDuringReconciliation.child);
+  try {
+    await waitFor(signaledDuringReconciliation.child, /CONTROL_PLANE_OWNERSHIP_ACQUIRED/u, signaledDuringReconciliation.output);
+    await waitForDatabaseLockWaiter(observer);
+    signaledDuringReconciliation.child.kill("SIGTERM");
+    await waitFor(signaledDuringReconciliation.child, /Received SIGTERM/u, signaledDuringReconciliation.output);
+    assert.doesNotMatch(signaledDuringReconciliation.output.value, /AgentOS API listening/u);
+  } finally {
+    releaseDatabaseLock();
+    await blockingTransaction;
+    await Promise.all([blocker.$disconnect(), observer.$disconnect()]);
+  }
+  await waitFor(signaledDuringReconciliation.child, /CONTROL_PLANE_OWNERSHIP_RELEASED/u, signaledDuringReconciliation.output);
+  assert.equal((await exited(signaledDuringReconciliation.child)).code, 0);
+  assert.match(signaledDuringReconciliation.output.value, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Received SIGTERM[\s\S]*Startup reconciliation:[\s\S]*CONTROL_PLANE_OWNERSHIP_RELEASED/u);
+  assert.doesNotMatch(signaledDuringReconciliation.output.value, /AgentOS API listening/u);
+  t.diagnostic("RP-OWN-LIFECYCLE signal-during-reconciliation cleanup passed");
 
   owner.child.kill("SIGTERM");
   assert.equal((await exited(owner.child)).code, 0);
