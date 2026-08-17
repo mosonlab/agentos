@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -247,12 +247,14 @@ test("RP-OWN-FILES-ALIAS production entrypoint refuses Files/state alias before 
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  assert.deepEqual(await readdir(paths.state), []);
   let output = "";
   child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   assert.equal((await waitForExit(child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
   assert.match(output, /CONTROL_PLANE_OWNERSHIP_REFUSED.*control-state-overlaps-files-root/u);
   assert.doesNotMatch(output, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening|PrismaClient/u);
+  assert.deepEqual(await readdir(paths.state), []);
 });
 
 const waitForLine = (child: ChildProcess, pattern: RegExp, timeoutMs = 10_000): Promise<string> => new Promise((resolve, reject) => {

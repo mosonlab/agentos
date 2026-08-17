@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,20 +38,27 @@ const exited = (child: ChildProcess): Promise<{ code: number | null; signal: Nod
   child.once("exit", (code, signal) => resolvePromise({ code, signal }));
 });
 
-const waitForDatabaseLockWaiter = async (db: PrismaClient): Promise<number> => {
+const waitForDatabaseLockWaiter = async (db: PrismaClient, applicationName: string): Promise<number> => {
   for (let attempt = 0; attempt < 500; attempt += 1) {
-    const waiting = await db.$queryRaw<Array<{ pid: number }>>`
+    const waiting = await db.$queryRawUnsafe<Array<{ pid: number }>>(`
       SELECT pid::int AS pid
       FROM pg_stat_activity
       WHERE datname = current_database()
+        AND application_name = $1
         AND wait_event_type = 'Lock'
       ORDER BY query_start DESC
       LIMIT 1
-    `;
+    `, applicationName);
     if (waiting[0]) return waiting[0].pid;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
   }
   throw new Error("API did not reach the startup reconciliation database-lock wait queue");
+};
+
+const withApplicationName = (databaseUrl: string, applicationName: string): string => {
+  const parsed = new URL(databaseUrl);
+  parsed.searchParams.set("application_name", applicationName);
+  return parsed.toString();
 };
 
 const insertExpiredRunSentinel = async (
@@ -163,8 +170,10 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
 
   const workspace = join(container, "workspace");
   const files = join(container, "files");
+  const physicalFiles = join(container, "physical-files");
   const state = join(container, "state");
-  await Promise.all([mkdir(workspace), mkdir(files), mkdir(state, { mode: 0o700 })]);
+  await Promise.all([mkdir(workspace), mkdir(physicalFiles), mkdir(state, { mode: 0o700 })]);
+  await symlink(physicalFiles, files);
   await chmod(state, 0o700);
   const common = {
     ...process.env,
@@ -207,15 +216,28 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   ]);
 
   const stateEntryName = ownershipBeforeFilesAndRunners.entry.slice(state.length + 1);
-  const filesTraversal = await fetch(`${apiBase}/files/content?${new URLSearchParams({ path: `../state/${stateEntryName}/ownership.lock` })}`, {
-    method: "PUT",
-    headers: { Authorization: "Bearer isolated-operator-token" },
-    body: "replacement",
-  });
-  assert.equal(filesTraversal.status, 400);
-  assert.deepEqual(await durableStateSnapshot(state), ownershipBeforeFilesAndRunners);
+  await unlink(files);
+  await symlink(state, files);
+  try {
+    const filesAliasWrite = await fetch(`${apiBase}/files/content?${new URLSearchParams({ path: `${stateEntryName}/ownership.lock` })}`, {
+      method: "PUT",
+      headers: { Authorization: "Bearer isolated-operator-token" },
+      body: "replacement",
+    });
+    assert.equal(filesAliasWrite.status, 200);
+    assert.deepEqual(await durableStateSnapshot(state), ownershipBeforeFilesAndRunners);
+    assert.equal(await readFile(join(physicalFiles, stateEntryName, "ownership.lock"), "utf8"), "replacement");
+    const [authoritativeLock, harmlessFilesCopy] = await Promise.all([
+      lstat(join(ownershipBeforeFilesAndRunners.entry, "ownership.lock"), { bigint: true }),
+      lstat(join(physicalFiles, stateEntryName, "ownership.lock"), { bigint: true }),
+    ]);
+    assert.notEqual(harmlessFilesCopy.ino, authoritativeLock.ino);
+  } finally {
+    await unlink(files);
+    await symlink(physicalFiles, files);
+  }
   t.diagnostic("RP-RUNNERS-TWO production owned API passed");
-  t.diagnostic("RP-OWN-FILES-WRITER traversal refused and ownership state unchanged");
+  t.diagnostic("RP-OWN-FILES-WRITER retargeted Files alias stayed pinned away from ownership state");
 
   const orphan = join(workspace, "orphan-sentinel");
   await mkdir(orphan);
@@ -291,16 +313,17 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
     await databaseLockReleased;
   }, { maxWait: 5_000, timeout: 30_000 });
   await databaseLockHeld;
+  const signalApplicationName = "cp-a-signal-success";
   const signaledDuringReconciliation = spawnApi({
     ...common,
-    DATABASE_URL: copy.url,
+    DATABASE_URL: withApplicationName(copy.url, signalApplicationName),
     RUNNER_WORKSPACE_ROOT: signalRoot,
     CONTROL_PLANE_STATE_DIR: signalState,
   });
   children.add(signaledDuringReconciliation.child);
   try {
     await waitFor(signaledDuringReconciliation.child, /CONTROL_PLANE_OWNERSHIP_ACQUIRED/u, signaledDuringReconciliation.output);
-    await waitForDatabaseLockWaiter(observer);
+    await waitForDatabaseLockWaiter(observer, signalApplicationName);
     signaledDuringReconciliation.child.kill("SIGTERM");
     await waitFor(signaledDuringReconciliation.child, /Received SIGTERM/u, signaledDuringReconciliation.output);
     assert.doesNotMatch(signaledDuringReconciliation.output.value, /AgentOS API listening/u);
@@ -331,16 +354,17 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
     await failureLockReleased;
   }, { maxWait: 5_000, timeout: 30_000 });
   await failureLockHeld;
+  const failureApplicationName = "cp-a-signal-failure";
   const signalThenFailure = spawnApi({
     ...common,
-    DATABASE_URL: copy.url,
+    DATABASE_URL: withApplicationName(copy.url, failureApplicationName),
     RUNNER_WORKSPACE_ROOT: failingSignalRoot,
     CONTROL_PLANE_STATE_DIR: failingSignalState,
   });
   children.add(signalThenFailure.child);
   try {
     await waitFor(signalThenFailure.child, /CONTROL_PLANE_OWNERSHIP_ACQUIRED/u, signalThenFailure.output);
-    const waitingPid = await waitForDatabaseLockWaiter(failureObserver);
+    const waitingPid = await waitForDatabaseLockWaiter(failureObserver, failureApplicationName);
     signalThenFailure.child.kill("SIGTERM");
     await waitFor(signalThenFailure.child, /Received SIGTERM/u, signalThenFailure.output);
     const terminated = await failureObserver.$queryRawUnsafe<Array<{ terminated: boolean }>>(

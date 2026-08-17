@@ -94,13 +94,15 @@ AGENTOS_ALLOW_SCRATCH_DATABASES=1 node --import tsx --test --test-concurrency=1 
 The database test must emit `RP-OWN-FILES-WRITER`, `RP-OWN-LIFECYCLE signal
 plus reconciliation failure`, `RP-OWN-RECOVERY-DESCENDANT`, and
 `RP-RUNNERS-TWO`. The first and same-database loser checks jointly prove that a
-Files API request cannot replace ownership state and that a contender still
-exits 75 while the original descriptor remains locked. The lifecycle check
-proves a signal racing a reconciliation rejection releases ownership and keeps
-the failure exit nonzero. The recovery and runner checks use production
-entrypoints and one genuinely owned API, respectively. Use only generated temp
-roots plus physical scratch databases; unset safe DB variables must skip/refuse
-the suite, never fall back to live state.
+Files API request remains pinned to the startup-canonicalized Files root even
+when its configured symlink is retargeted at the control-state directory. The
+ownership files and inode remain unchanged, and a contender still exits 75
+while the original descriptor remains locked. The lifecycle check proves a
+signal racing a reconciliation rejection releases ownership and keeps the
+failure exit nonzero. The recovery and runner checks use production entrypoints
+and one genuinely owned API, respectively. Use only generated temp roots plus
+physical scratch databases; unset safe DB variables must skip/refuse the suite,
+never fall back to live state.
 
 ## Recovery decision table
 
