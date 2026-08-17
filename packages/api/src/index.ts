@@ -21,7 +21,10 @@ let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let prisma: (typeof import("@agentos/db"))["prisma"] | undefined;
 let cleanupPromise: Promise<void> | undefined;
 let requestedSignal: NodeJS.Signals | undefined;
-let startupBusy = false;
+// Signals must never start cleanup before an in-flight ownership acquisition has
+// published its capability. Keep the whole startup sequence busy and let the
+// explicit checkpoints join it to the single cleanup state machine.
+let startupBusy = true;
 let finalExitCode = 0;
 
 class StartupCancelledBySignalError extends Error {}
@@ -86,7 +89,6 @@ const main = async (): Promise<void> => {
   });
   await ensureStartupActive();
 
-  startupBusy = true;
   const [database, { createApp }, { reconcileAtStartup }, { startScheduler }, files, { serve }] = await Promise.all([
     import("@agentos/db"),
     import("./app.js"),
@@ -96,7 +98,6 @@ const main = async (): Promise<void> => {
     import("@hono/node-server"),
   ]);
   prisma = database.prisma;
-  startupBusy = false;
   await ensureStartupActive();
 
   const filesRoot = files.resolveFilesRoot();
@@ -105,14 +106,12 @@ const main = async (): Promise<void> => {
   await files.getFileStore();
   files.warnIfRunnerSharesPrincipal(filesRoot);
 
-  startupBusy = true;
   await ownership.assertHeld();
   const reconciliation = await reconcileAtStartup(
     prisma,
     ownership.canonicalWorkspaceRoot,
     Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
   );
-  startupBusy = false;
   console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.workspaces} workspaces cleaned, ${reconciliation.archivedNotices} archived-run notices`);
   await ensureStartupActive();
 
@@ -141,6 +140,7 @@ const main = async (): Promise<void> => {
   const listeningPort = typeof address === "object" && address ? address.port : port;
   console.log(`AgentOS API listening on http://${hostname}:${listeningPort}`);
   schedulerTimer = startScheduler(prisma);
+  startupBusy = false;
 };
 
 try {

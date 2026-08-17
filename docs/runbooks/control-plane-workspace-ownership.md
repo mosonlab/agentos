@@ -83,6 +83,25 @@ owner rehearsal with a still-live execed descendant must show recovered ->
 acquired for the successor. Never rehearse against a live database, a live-data
 copy, or a live workspace root.
 
+The code-review regressions are pinned by these exact focused checks:
+
+```sh
+node --import tsx --test --test-name-pattern='RP-OWN-FILES-ALIAS' packages/api/src/control-plane-ownership.test.ts
+# With the explicitly opted-in scratch environment described below:
+AGENTOS_ALLOW_SCRATCH_DATABASES=1 node --import tsx --test --test-concurrency=1 --test-name-pattern='workspace-root ownership real-process database acceptance' packages/api/src/control-plane-ownership.dbtest.ts
+```
+
+The database test must emit `RP-OWN-FILES-WRITER`, `RP-OWN-LIFECYCLE signal
+plus reconciliation failure`, `RP-OWN-RECOVERY-DESCENDANT`, and
+`RP-RUNNERS-TWO`. The first and same-database loser checks jointly prove that a
+Files API request cannot replace ownership state and that a contender still
+exits 75 while the original descriptor remains locked. The lifecycle check
+proves a signal racing a reconciliation rejection releases ownership and keeps
+the failure exit nonzero. The recovery and runner checks use production
+entrypoints and one genuinely owned API, respectively. Use only generated temp
+roots plus physical scratch databases; unset safe DB variables must skip/refuse
+the suite, never fall back to live state.
+
 ## Recovery decision table
 
 Recovery is serialized by the acquired kernel lock. Elapsed time and mtime

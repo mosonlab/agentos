@@ -344,7 +344,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
     signalThenFailure.child.kill("SIGTERM");
     await waitFor(signalThenFailure.child, /Received SIGTERM/u, signalThenFailure.output);
     const terminated = await failureObserver.$queryRawUnsafe<Array<{ terminated: boolean }>>(
-      "SELECT pg_terminate_backend($1) AS terminated",
+      "SELECT pg_terminate_backend($1::int) AS terminated",
       waitingPid,
     );
     assert.equal(terminated[0]?.terminated, true);
