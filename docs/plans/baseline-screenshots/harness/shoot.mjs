@@ -113,6 +113,24 @@ for (const theme of ["light", "dark"]) {
     await shoot(`${name}-${theme}`);
   }
 
+  // Batch 1 targeted states: the shared model picker only appears in edit mode,
+  // and Foundation's revision/read-only treatment lives on the Prompt tab.
+  await goto("/agents/agt_frontend");
+  await evaluate(`(() => {
+    const edit = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Edit");
+    if (edit) edit.click();
+    return true;
+  })()`);
+  await sleep(500);
+  await shoot(`agents-edit-${theme}`);
+  await evaluate(`(() => {
+    const prompt = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Prompt");
+    if (prompt) prompt.click();
+    return true;
+  })()`);
+  await sleep(500);
+  await shoot(`agents-prompt-${theme}`);
+
   // Targeted: the Agents detail page's toggle switches, close up (G2's only
   // evidence). The Capabilities tab shows switches in both states at once.
   await goto("/agents/agt_frontend");

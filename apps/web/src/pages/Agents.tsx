@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { formatDate, formatDateTime, titleCase } from "../lib/format";
+import { contentRevision, formatDate, formatDateTime, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
@@ -30,14 +30,13 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
   onClose: () => void;
   onCreated: () => void;
   /** Deterministic starting values for focused form tests; production omits it. */
-  initial?: Partial<{ name: string; model: string; environmentId: string; runnerPreference: RunnerPreference }>;
+  initial?: Partial<{ name: string; title: string; model: string; environmentId: string; runnerPreference: RunnerPreference; rolePrompt: string }>;
 }): ReactNode => {
   const environments = usePoll<Environment[]>(`/projects/${projectId}/environments`, 30_000);
   const [form, setForm] = useState({
-    name: initial?.name ?? "", title: "", model: initial?.model ?? "claude-opus-5:high", environmentId: initial?.environmentId ?? "",
+    name: initial?.name ?? "", title: initial?.title ?? "", model: initial?.model ?? "claude-opus-5:high", environmentId: initial?.environmentId ?? "",
     runnerPreference: initial?.runnerPreference ?? "CLAUDE" as RunnerPreference, inboxAccess: false,
-    foundationalPrompt: "You are an AgentOS worker. Work only on the assigned task in the provided working directory.",
-    rolePrompt: "",
+    rolePrompt: initial?.rolePrompt ?? "",
   });
   const { pending, error, run } = useAction();
   const t = useT();
@@ -95,15 +94,10 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
         </div>
       </Card>
       <Card title={t("agents.tab.prompt")}>
-        <div className={STACK}>
-          <Field label={t("agents.field.foundation.label")} hint={t("agents.field.foundation.hint")}>
-            <Textarea rows={4} value={form.foundationalPrompt} onChange={(event) => setForm({ ...form, foundationalPrompt: event.target.value })} />
-          </Field>
-          <Field label={t("agents.field.rolePrompt")}>
-            <Textarea rows={10} value={form.rolePrompt} onChange={(event) => setForm({ ...form, rolePrompt: event.target.value })}
-              placeholder={t("agents.field.rolePrompt.placeholder")} />
-          </Field>
-        </div>
+        <Field label={t("agents.field.rolePrompt")}>
+          <Textarea rows={10} value={form.rolePrompt} onChange={(event) => setForm({ ...form, rolePrompt: event.target.value })}
+            placeholder={t("agents.field.rolePrompt.placeholder")} />
+        </Field>
       </Card>
     </FullPanel>
   );
@@ -478,7 +472,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
     const ok = await run(() => api.patch(`/agents/${agentId}`, {
       name: draft.name, title: draft.title, model: modelForSave(draft.model),
       runnerPreference: runnerForModel(draft.model) ?? draft.runnerPreference, inboxAccess: draft.inboxAccess,
-      foundationalPrompt: draft.foundationalPrompt, rolePrompt: draft.rolePrompt,
+      rolePrompt: draft.rolePrompt,
     }));
     if (ok) { setDraft(null); reload(); }
   };
@@ -551,11 +545,18 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
 
         {tab === "prompt" ? (
           <>
-            <Card title={t("agents.foundation.title")} extra={<Pill tone="grey">{t("agents.foundation.pill")}</Pill>}>
-              {draft === null
-                ? <div className={CODE_BLOCK}>{view.foundationalPrompt}</div>
-                : <Textarea rows={6} value={view.foundationalPrompt} onChange={(event) => patch({ foundationalPrompt: event.target.value })} />}
-              <div className="mt-2.5">{t("agents.foundation.hint")}</div>
+            <Card title={t("agents.foundation.title")} extra={(
+              <span className={ROW}>
+                <span title={t("agents.foundation.revisionTitle")}><Pill tone="grey">{t("agents.foundation.revisionPrefix")} {contentRevision(view.foundationalPrompt)}</Pill></span>
+                <Pill tone="grey">{t("agents.foundation.readOnly")}</Pill>
+              </span>
+            )}>
+              <div className={CODE_BLOCK}>{view.foundationalPrompt}</div>
+              <div className="mt-2.5">{t("agents.foundation.sitsAbove")}</div>
+              <div className="mt-1 text-[11.5px] text-[color:var(--faint)]">{t("agents.foundation.hint")}</div>
+              <div className="mt-1 text-[11.5px] text-[color:var(--faint)]">
+                {t("agents.foundation.edit")}
+              </div>
             </Card>
             <Card title={t("agents.field.rolePrompt")}>
               {draft === null

@@ -105,6 +105,7 @@ const agentFields = {
 };
 const agentInput = z.object({
   ...agentFields,
+  foundationalPrompt: agentFields.foundationalPrompt.optional(),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
   // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
@@ -845,7 +846,15 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const body = await readJson(context.req.raw, agentInput);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
-    return context.json(await db.agent.create({ data: { ...body, projectId } }), 201);
+    const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: "asc" },
+      select: { foundationalPrompt: true },
+    }))?.foundationalPrompt;
+    if (foundationalPrompt === undefined) {
+      return context.json({ error: "This project has no foundation yet. Run npm run db:seed." }, 400);
+    }
+    return context.json(await db.agent.create({ data: { ...body, foundationalPrompt, projectId } }), 201);
   });
   app.get("/agents/:agentId", async (context) => {
     const agent = await db.agent.findUnique({

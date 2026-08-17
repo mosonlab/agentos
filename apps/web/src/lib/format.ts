@@ -85,6 +85,16 @@ export const money = (value: string | number | null | undefined): string =>
 
 export const sha = (value: string | null | undefined): string => (value ? value.slice(0, 7) : "—");
 
+/** Stable synchronous content identity for the Foundation card. This is a
+ * revision fingerprint, not a semantic version or a security hash. */
+export const contentRevision = (value: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").slice(0, 7);
+};
+
 export const titleCase = (value: string): string =>
   value.toLowerCase().replace(/[_-]/g, " ").replace(/(^|\s)\S/g, (match) => match.toUpperCase());
 
