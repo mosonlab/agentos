@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "source": "git-tracked-files",
+  "defaultDisposition": "blocker",
+  "include": [
+    { "glob": ".env.example", "purpose": "safe configuration template" },
+    { "glob": ".gitignore", "purpose": "source hygiene" },
+    { "glob": "LICENSE", "purpose": "license grant" },
+    { "glob": "README.md", "purpose": "project documentation" },
+    { "glob": "agents/**", "purpose": "agent definitions" },
+    { "glob": "apps/**", "purpose": "application source and tests" },
+    { "glob": "docker-compose.yml", "purpose": "local development services" },
+    { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
+    { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
+    { "glob": "package.json", "purpose": "workspace definition" },
+    { "glob": "packages/**", "purpose": "package source, schemas, migrations, and tests" },
+    { "glob": "public-snapshot.json", "purpose": "closed snapshot scope" },
+    { "glob": "scripts/public-snapshot-scan.mjs", "purpose": "redacted safety scan" },
+    { "glob": "scripts/public-snapshot-scan.test.mjs", "purpose": "scanner regression tests" },
+    { "glob": "tsconfig.base.json", "purpose": "shared TypeScript configuration" }
+  ],
+  "exclude": [
+    {
+      "glob": "BLUEPRINT.md",
+      "disposition": "later-release-follow-up",
+      "reason": "private upstream product requirements require a separate publication decision"
+    },
+    {
+      "glob": "DECISIONS.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal decision history requires a separate publication decision"
+    },
+    {
+      "glob": "GRILLING-STATE.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal planning state is not needed to build or run the product"
+    },
+    {
+      "glob": "deploy/**",
+      "disposition": "later-release-follow-up",
+      "reason": "host-specific deployment material requires environment and path review"
+    },
+    {
+      "glob": "design-reference/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal design references and image provenance require separate review"
+    },
+    {
+      "glob": "docs/BACKLOG*.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal backlog material is outside the first clean snapshot"
+    },
+    {
+      "glob": "docs/briefs/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal implementation briefs require separate publication review"
+    },
+    {
+      "glob": "docs/merge-notes/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal merge records are not needed to build or run the product"
+    },
+    {
+      "glob": "docs/phase1-verify.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal phase verification material requires separate publication review"
+    },
+    {
+      "glob": "docs/plans/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal plans and generated baseline images require separate review"
+    },
+    {
+      "glob": "docs/reference/**",
+      "disposition": "later-release-follow-up",
+      "reason": "third-party research records and provenance require separate review"
+    },
+    {
+      "glob": "docs/reviews/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal review records require a separate publication decision"
+    },
+    {
+      "glob": "docs/runbooks/**",
+      "disposition": "later-release-follow-up",
+      "reason": "production and operator runbooks require environment review"
+    },
+    {
+      "glob": "docs/specs/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal product specifications require a separate publication decision"
+    },
+    {
+      "glob": "docs/wiki/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal implementation wiki material requires separate publication review"
+    },
+    {
+      "glob": "scripts/watch-chains.py",
+      "disposition": "later-release-follow-up",
+      "reason": "private operations helper is outside the product runtime"
+    },
+    {
+      "glob": "spikes/**",
+      "disposition": "later-release-follow-up",
+      "reason": "experiments and captured CLI runtime output are not release source"
+    }
+  ],
+  "approvedFindings": [
+    {
+      "category": "credential-placeholder",
+      "glob": ".env.example",
+      "reason": "documented empty or non-secret development placeholders"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": ".env.example",
+      "reason": "documented agentrunner service-account path, not a private user identity"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": "apps/web/src/tests/sessions.test.tsx",
+      "reason": "synthetic file-path fixtures used by rendering tests"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/testdb.ts",
+      "reason": "localhost-only test database connection fixture"
+    }
+  ],
+  "generatedRuntimePatterns": [
+    "docs/plans/baseline-screenshots/**",
+    "spikes/**/events/**",
+    "spikes/**/*.meta.json",
+    "spikes/**/*.stderr",
+    "spikes/**/*.stdout"
+  ]
+}
