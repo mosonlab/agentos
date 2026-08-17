@@ -199,15 +199,15 @@ const main = async (): Promise<void> => {
     return step;
   };
   const steps = [
-    [1, "Write a spec", canonicalStep(1).agentName, AssigneeType.AGENT, null, true, canonicalStep(1).outputKind, "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null],
-    [2, "Plan", canonicalStep(2).agentName, AssigneeType.AGENT, null, false, canonicalStep(2).outputKind, "Turn the approved spec into a concrete ordered implementation plan.", null],
-    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, false, canonicalStep(3).outputKind, "Review the plan through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null],
-    [4, "Revise plan", canonicalStep(4).agentName, AssigneeType.AGENT, null, true, canonicalStep(4).outputKind, "Revise the plan using every must-fix plan-review finding and persist the implementation-authority artifact.", null],
-    [5, "Implementation", canonicalStep(5).agentName, AssigneeType.AGENT, null, false, canonicalStep(5).outputKind, "Implement the approved plan on {{branchName}} and run end-to-end tests.", null],
-    [6, "Code review", canonicalStep(6).agentName, AssigneeType.AGENT, null, false, canonicalStep(6).outputKind, "Review the implementation through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null],
-    [7, "Apply review fixes", canonicalStep(7).agentName, AssigneeType.AGENT, null, false, canonicalStep(7).outputKind, "Apply all must-fix review findings and rerun end-to-end tests.", null],
-    [8, "Librarian", canonicalStep(8).agentName, AssigneeType.AGENT, null, false, canonicalStep(8).outputKind, "Update internal documentation to match the delivered code.", null],
-    [9, "Human PR review", canonicalStep(9).agentName, AssigneeType.HUMAN, null, true, canonicalStep(9).outputKind, "Review and merge the pull request for {{branchName}}.", null],
+    [1, "Write a spec", canonicalStep(1).agentName, AssigneeType.AGENT, null, canonicalStep(1).approvalGate, canonicalStep(1).outputKind, "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null],
+    [2, "Plan", canonicalStep(2).agentName, AssigneeType.AGENT, null, canonicalStep(2).approvalGate, canonicalStep(2).outputKind, "Turn the approved spec into a concrete ordered implementation plan.", null],
+    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, canonicalStep(3).approvalGate, canonicalStep(3).outputKind, "Review the plan through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null],
+    [4, "Revise plan", canonicalStep(4).agentName, AssigneeType.AGENT, null, canonicalStep(4).approvalGate, canonicalStep(4).outputKind, "Revise the plan using every must-fix plan-review finding and persist the implementation-authority artifact.", null],
+    [5, "Implementation", canonicalStep(5).agentName, AssigneeType.AGENT, null, canonicalStep(5).approvalGate, canonicalStep(5).outputKind, "Implement the approved plan on {{branchName}} and run end-to-end tests.", null],
+    [6, "Code review", canonicalStep(6).agentName, AssigneeType.AGENT, null, canonicalStep(6).approvalGate, canonicalStep(6).outputKind, "Review the implementation through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null],
+    [7, "Apply review fixes", canonicalStep(7).agentName, AssigneeType.AGENT, null, canonicalStep(7).approvalGate, canonicalStep(7).outputKind, "Apply all must-fix review findings and rerun end-to-end tests.", null],
+    [8, "Librarian", canonicalStep(8).agentName, AssigneeType.AGENT, null, canonicalStep(8).approvalGate, canonicalStep(8).outputKind, "Update internal documentation to match the delivered code.", null],
+    [9, "Human PR review", canonicalStep(9).agentName, AssigneeType.HUMAN, null, canonicalStep(9).approvalGate, canonicalStep(9).outputKind, "Review and merge the pull request for {{branchName}}.", null],
   ] as const;
   for (const [stepIndex, name, agentName, assigneeType, runner, approvalGate, outputKind, prompt, spawnPolicy] of steps) {
     const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
