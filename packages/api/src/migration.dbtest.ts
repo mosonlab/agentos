@@ -256,3 +256,31 @@ test("two backfills running at once produce one ledger row, not two (SOL-REVIEW 
   assert.equal(fire.id, backfilledFireId(template.id, new Date(firedAt)));
   assert.match(fire.id, /^backfill:/);
 });
+
+test("the chain-branch migration installs opensPullRequest on Task, TaskTemplateStep and Run, and pushedBranch on Run", async () => {
+  // Asserted on `column_default`, not merely on existence: the default `true` is
+  // what makes this migration behaviour-preserving — every task, template step
+  // and already-queued run keeps opening its pull request exactly as before, and
+  // a chain creator opts documentation steps *out*. A hand-written migration is
+  // exactly where a default gets dropped without anything noticing.
+  const flags = await db.$queryRaw<Array<{ table_name: string; is_nullable: string; column_default: string | null }>>`
+    SELECT table_name, is_nullable, column_default FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema}
+      AND table_name IN ('Task', 'TaskTemplateStep', 'Run')
+      AND column_name = 'opensPullRequest'
+    ORDER BY table_name
+  `;
+  assert.deepEqual(flags, [
+    { table_name: "Run", is_nullable: "NO", column_default: "true" },
+    { table_name: "Task", is_nullable: "NO", column_default: "true" },
+    { table_name: "TaskTemplateStep", is_nullable: "NO", column_default: "true" },
+  ]);
+
+  // Nullable on purpose: no run that completed before this batch counts as
+  // evidence that a chain branch exists on a remote.
+  const pushed = await db.$queryRaw<Array<{ is_nullable: string; data_type: string }>>`
+    SELECT is_nullable, data_type FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'Run' AND column_name = 'pushedBranch'
+  `;
+  assert.deepEqual(pushed, [{ is_nullable: "YES", data_type: "text" }]);
+});
