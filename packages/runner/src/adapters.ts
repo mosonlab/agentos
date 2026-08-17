@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import type { InFlightTool } from "./budget.js";
+import { isTransientNetworkError } from "./network-retry.js";
 import { workspaceEnvironment } from "./workspace.js";
 
 export const ADAPTER_VERSION = "2.0.0";
@@ -551,7 +552,9 @@ const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
     return { failureClass: "AUTH_REQUIRED", retryable: false, operatorAction: "Log the runner account into the CLI" };
   }
   if (/\b429\b|rate.?limit|usage.?limit|quota/iu.test(text)) return { failureClass: "RATE_LIMITED", retryable: true };
-  if (/\b5\d\d\b|ECONNRESET|ETIMEDOUT|provider outage/iu.test(text)) return { failureClass: "TRANSIENT_PROVIDER", retryable: true };
+  if (isTransientNetworkError(text) || /\b5\d\d\b|provider outage/iu.test(text)) {
+    return { failureClass: "TRANSIENT_PROVIDER", retryable: true };
+  }
   if (/"isError"\s*:\s*true|"command_execution"[\s\S]{0,500}"status"\s*:\s*"failed"/u.test(text)) {
     return { failureClass: "TOOL_FAILED", retryable: false };
   }
