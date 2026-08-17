@@ -8,6 +8,8 @@ import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
+import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
+import { runnerForModel, validateModelPair } from "../lib/models";
 import { cn } from "../lib/utils";
 import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW,
@@ -22,17 +24,17 @@ import { Select } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
 
-const RUNNERS: RunnerPreference[] = ["INHERIT", "AUTO", "CLAUDE", "CODEX", "PI"];
-
-const NewAgent = ({ projectId, onClose, onCreated }: {
+export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
   projectId: string;
   onClose: () => void;
   onCreated: () => void;
+  /** Deterministic starting values for focused form tests; production omits it. */
+  initial?: Partial<{ name: string; model: string; environmentId: string; runnerPreference: RunnerPreference }>;
 }): ReactNode => {
   const environments = usePoll<Environment[]>(`/projects/${projectId}/environments`, 30_000);
   const [form, setForm] = useState({
-    name: "", title: "", model: "claude", environmentId: "",
-    runnerPreference: "INHERIT" as RunnerPreference, inboxAccess: false,
+    name: initial?.name ?? "", title: "", model: initial?.model ?? "claude-opus-5:high", environmentId: initial?.environmentId ?? "",
+    runnerPreference: initial?.runnerPreference ?? "CLAUDE" as RunnerPreference, inboxAccess: false,
     foundationalPrompt: "You are an AgentOS worker. Work only on the assigned task in the provided working directory.",
     rolePrompt: "",
   });
@@ -45,13 +47,17 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
   }, [environments.data, form.environmentId]);
 
   const submit = async (): Promise<void> => {
-    const ok = await run(() => api.post<Agent>(`/projects/${projectId}/agents`, form));
+    const ok = await run(() => api.post<Agent>(`/projects/${projectId}/agents`, {
+      ...form,
+      model: modelForSave(form.model),
+      runnerPreference: runnerForModel(form.model) ?? form.runnerPreference,
+    }));
     if (ok) { onCreated(); onClose(); }
   };
 
   return (
     <FullPanel title={t("agents.new.title")} onClose={onClose} actions={
-      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === ""}
+      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || form.name.trim() === "" || form.environmentId.trim() === "" || validateModelPair(form.model, form.runnerPreference) !== null}
         onClick={() => void submit()}>{t("agents.new.create")}</Button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
@@ -65,16 +71,8 @@ const NewAgent = ({ projectId, onClose, onCreated }: {
               <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("agents.field.title.placeholder")} />
             </Field>
           </div>
-          <div className={FIELD_ROW}>
-            <Field label={t("agents.field.model")}>
-              <Input type="text" value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} placeholder="claude" />
-            </Field>
-            <Field label={t("agents.field.runner")} hint={t("agents.field.runner.hint")}>
-              <Select value={form.runnerPreference} onChange={(event) => setForm({ ...form, runnerPreference: event.target.value as RunnerPreference })}>
-                {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
-              </Select>
-            </Field>
-          </div>
+          <ModelPicker model={form.model} runnerPreference={form.runnerPreference} onChange={(next) => setForm({ ...form, ...next })} />
+          <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
           <Field label={t("agents.field.environment.label")} hint={t(environments.missing
             ? "agents.field.environment.hint.missing"
             : "agents.field.environment.hint")}>
@@ -156,7 +154,7 @@ export const AgentsPage = (): ReactNode => {
                     <span className={ROW}>{agent.title}{agent.archivedAt ? <Pill tone="grey">{t("tasks.tab.archived")}</Pill> : null}</span>
                     <span className={TABLE_SUB}>{agent.name}</span>
                   </TableCell>
-                  <TableCell>{agent.model}</TableCell>
+                  <TableCell><ModelLabel model={agent.model} /></TableCell>
                   <TableCell>{agent.runnerPreference.toLowerCase()}</TableCell>
                   <TableCell>{agent.inboxAccess ? <Pill tone="green">{t("agents.inbox.on")}</Pill> : <Pill tone="grey">{t("agents.inbox.off")}</Pill>}</TableCell>
                   <TableCell>{formatDate(agent.updatedAt)}</TableCell>
@@ -405,8 +403,8 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   const save = async (): Promise<void> => {
     if (!draft) return;
     const ok = await run(() => api.patch(`/agents/${agentId}`, {
-      name: draft.name, title: draft.title, model: draft.model,
-      runnerPreference: draft.runnerPreference, inboxAccess: draft.inboxAccess,
+      name: draft.name, title: draft.title, model: modelForSave(draft.model),
+      runnerPreference: runnerForModel(draft.model) ?? draft.runnerPreference, inboxAccess: draft.inboxAccess,
       foundationalPrompt: draft.foundationalPrompt, rolePrompt: draft.rolePrompt,
     }));
     if (ok) { setDraft(null); reload(); }
@@ -418,7 +416,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         <Link to="/agents" className={BACK_LINK}><IconArrowLeft /></Link>
         <span className="text-[var(--status-violet-fg)]"><IconRobot /></span>
         <h1 className={DETAIL_HEAD_H1}>{view.title}</h1>
-        <Pill tone="grey">{view.model}</Pill>
+        <Pill tone="grey"><ModelLabel model={view.model} /></Pill>
         <Pill tone="violet">{t("agents.runnerPill", { runner: view.runnerPreference.toLowerCase() })}</Pill>
         <span className="flex-1" />
         {draft === null
@@ -426,7 +424,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
           : (
             <>
               <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(null)}>{t("common.cancel")}</Button>
-              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={() => void save()}>{t("common.save")}</Button>
+              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || validateModelPair(view.model, view.runnerPreference) !== null} onClick={() => void save()}>{t("common.save")}</Button>
             </>
           )}
       </div>
@@ -451,7 +449,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
               <KeyValue items={[
                 { k: t("agents.field.name.label"), v: view.name },
                 { k: t("agents.field.title"), v: view.title },
-                { k: t("agents.field.model"), v: view.model },
+                { k: t("agents.field.model"), v: <ModelLabel model={view.model} /> },
                 { k: t("agents.field.runnerPreference"), v: view.runnerPreference.toLowerCase() },
                 { k: t("agents.field.environment"), v: <span className="text-[11.5px]">{view.environmentId}</span> },
                 { k: t("agents.inbox.label"), v: t(view.inboxAccess ? "agents.inbox.on" : "agents.inbox.off") },
@@ -464,14 +462,8 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                   <Field label={t("agents.field.name.label")}><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
                   <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
-                <div className={FIELD_ROW}>
-                  <Field label={t("agents.field.model")}><Input type="text" value={view.model} onChange={(event) => patch({ model: event.target.value })} /></Field>
-                  <Field label={t("agents.field.runnerPreference")} hint={t("agents.field.runner.hint")}>
-                    <Select value={view.runnerPreference} onChange={(event) => patch({ runnerPreference: event.target.value as RunnerPreference })}>
-                      {RUNNERS.map((runner) => <option key={runner} value={runner}>{runner.toLowerCase()}</option>)}
-                    </Select>
-                  </Field>
-                </div>
+                <ModelPicker model={view.model} runnerPreference={view.runnerPreference} onChange={patch} />
+                <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
                 <div className={ROW}>
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label={t("agents.inbox.label")} />
                   <div>
