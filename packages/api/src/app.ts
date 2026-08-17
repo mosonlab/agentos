@@ -289,6 +289,11 @@ const completionInput = z.object({
   retryable: z.boolean().optional(),
   externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
+  // The ref the runner actually handed to `git push`, which is not always
+  // `branch`: a WIP salvage pushes a per-run branch while `branch` still reports
+  // the workspace's. It is the only publication evidence resolveRunBranches
+  // trusts, so it must survive the trip verbatim.
+  pushedBranch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   headSha: z.string().nullable().optional(),
   output: z.string().max(500_000).nullable().optional(),
@@ -2799,6 +2804,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           retryAt,
           terminationReason: body.terminationReason ?? null,
           branch: body.branch ?? run.branch,
+          pushedBranch: body.pushedBranch ?? null,
           baseSha: body.baseSha ?? run.baseSha,
           headSha: body.headSha ?? null,
           pushStatus: body.pushStatus,
