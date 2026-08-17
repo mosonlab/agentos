@@ -125,6 +125,31 @@ export const useLocalStorage = (key: string, fallback: string): [string, (value:
   return [value, update];
 };
 
+/**
+ * A media query as state, so a page can render one layout instead of both.
+ *
+ * The Tasks board is the caller: its desktop and phone shells are different DOM,
+ * not one DOM with different CSS, and rendering both would put every card on the
+ * page twice. Defaults to `false` where there is no `window` — the tests render
+ * to static markup, and the desktop board is the shape they assert.
+ */
+export const useMediaQuery = (query: string): boolean => {
+  const [matches, setMatches] = useState(() => (
+    typeof window === "undefined" || typeof window.matchMedia !== "function"
+      ? false
+      : window.matchMedia(query).matches
+  ));
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const list = window.matchMedia(query);
+    const handler = (): void => setMatches(list.matches);
+    handler();
+    list.addEventListener("change", handler);
+    return () => list.removeEventListener("change", handler);
+  }, [query]);
+  return matches;
+};
+
 /** Closes menus/popovers on outside click. */
 export const useDismiss = (onDismiss: () => void, active: boolean): void => {
   useEffect(() => {

@@ -1,11 +1,14 @@
-import { type ReactNode, useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card as ShadCard } from "./ui/card";
 import { Checkbox } from "./ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 import { Switch } from "./ui/switch";
 import { titleCase } from "../lib/format";
 import { cn } from "../lib/utils";
@@ -108,8 +111,8 @@ export const Page = ({ className, children }: { className?: string; children: Re
 
 export type PillTone = "green" | "amber" | "violet" | "red" | "grey" | "accent";
 
-export const Pill = ({ tone, children }: { tone: PillTone; children: ReactNode }): ReactNode => (
-  <Badge variant="outline" shape="pill" tone={tone}>{children}</Badge>
+export const Pill = ({ tone, className, children }: { tone: PillTone; className?: string; children: ReactNode }): ReactNode => (
+  <Badge variant="outline" shape="pill" tone={tone} className={className}>{children}</Badge>
 );
 
 /** Status semantics follow ui-notes §0: green = succeeded, amber = a human or a
@@ -405,20 +408,36 @@ export const ShowMore = ({ text, lines = 6 }: { text: string; lines?: number }):
   );
 };
 
-export const RowMenu = ({ items }: { items: Array<{ label: string; danger?: boolean; onSelect: () => void }> }): ReactNode => {
+/** A menu entry, or the heading that opens a group of them. The heading exists
+ *  for the board card's `Move to`: five sibling destinations read as five
+ *  unrelated commands without one, and it is the keyboard's only replacement for
+ *  a drag. `kind` is optional on an item so the eight existing call sites, which
+ *  pass a bare `{ label, onSelect }`, keep working unchanged. */
+export type RowMenuEntry =
+  | { kind?: "item"; label: string; danger?: boolean; onSelect: () => void }
+  | { kind: "heading"; label: string };
+
+export const RowMenu = ({ items, label }: { items: RowMenuEntry[]; label?: string }): ReactNode => {
   return (
     <DropdownMenu>
       <span className="relative" onClick={(event) => event.stopPropagation()}>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="icon" size="legacyIcon" aria-label="More actions"><IconDots /></Button>
+          <Button type="button" variant="icon" size="legacyIcon" aria-label={label ?? "More actions"}><IconDots /></Button>
         </DropdownMenuTrigger>
       </span>
       <DropdownMenuContent align="end" className="min-w-32 border-border bg-popover font-mono text-popover-foreground" onClick={(event) => event.stopPropagation()}>
-        {items.map((item) => (
+        {/* A Fragment, not a wrapper element: `role="menu"` admits menu items,
+            groups and separators, and a bare <div> is none of those. */}
+        {items.map((item) => (item.kind === "heading" ? (
+          <Fragment key={`heading:${item.label}`}>
+            <DropdownMenuSeparator className="bg-[color:var(--border-soft)]" />
+            <DropdownMenuLabel className="px-2 py-1 text-[11px] font-normal text-[color:var(--faint)]">{item.label}</DropdownMenuLabel>
+          </Fragment>
+        ) : (
           <DropdownMenuItem key={item.label} className={item.danger === true ? "text-destructive focus:bg-destructive/10 focus:text-destructive" : "focus:bg-accent focus:text-accent-foreground"} onSelect={item.onSelect}>
             {item.label}
           </DropdownMenuItem>
-        ))}
+        )))}
       </DropdownMenuContent>
     </DropdownMenu>
   );
