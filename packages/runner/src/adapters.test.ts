@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -194,20 +195,35 @@ const priorOutput = (index: number): ClaimedTask["priorOutputs"][number] => {
   };
 };
 
+// The child these tests spawn is this stub, not the vendor CLI: `runAsPrefix`
+// replaces the binary. So everything below is evidence about *AgentOS's* side of
+// the process boundary — the bytes it writes to the child's stdin and the argv it
+// builds — and deliberately claims nothing about what a real `claude`, `codex` or
+// `pi` process does with what it reads. The vendor CLIs are free to normalise the
+// outer whitespace of a piped prompt, and that is acceptable: `buildPrompt`
+// carries no significant leading or trailing whitespace, only interior structure,
+// which no CLI rewrites.
+//
+// It reports a digest rather than only a length because a byte count alone would
+// pass on reordered or corrupted content.
 const stubScript = [
+  "const { createHash } = require('node:crypto');",
   "let bytes = 0;",
-  "process.stdin.on('data', (chunk) => { bytes += chunk.length; });",
+  "const digest = createHash('sha256');",
+  "process.stdin.on('data', (chunk) => { bytes += chunk.length; digest.update(chunk); });",
   "process.stdin.on('end', () => {",
   "  const longestArg = process.argv.slice(1).reduce((max, arg) => Math.max(max, Buffer.byteLength(arg)), 0);",
-  "  process.stdout.write(JSON.stringify({ type: 'turn.completed', bytes, longestArg }) + '\\n');",
+  "  process.stdout.write(JSON.stringify({ type: 'turn.completed', bytes, longestArg, sha256: digest.digest('hex') }) + '\\n');",
   "});",
 ].join("");
+
+const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
 const launch = async (
   runner: RunnerKind,
   claimed: ClaimedTask,
   resume?: { providerConversationId: string; input: string },
-): Promise<{ evidence: ExitEvidence; report: { bytes: number; longestArg: number }; events: Array<{ type: string; payload: Record<string, unknown> }> }> => {
+): Promise<{ evidence: ExitEvidence; report: { bytes: number; longestArg: number; sha256: string }; events: Array<{ type: string; payload: Record<string, unknown> }> }> => {
   const config = {
     binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
     runAsPrefix: [process.execPath, "-e", stubScript],
@@ -227,7 +243,7 @@ const launch = async (
     : await adapters[runner].start(spec, sink);
   const evidence = await handle.exit;
   const line = evidence.stdout.trim().split("\n").at(-1) ?? "{}";
-  return { evidence, report: JSON.parse(line) as { bytes: number; longestArg: number }, events };
+  return { evidence, report: JSON.parse(line) as { bytes: number; longestArg: number; sha256: string }, events };
 };
 
 test("every runner launches with the largest legal chain prompt and receives all of it", { timeout: 60_000 }, async () => {
@@ -242,24 +258,37 @@ test("every runner launches with the largest legal chain prompt and receives all
     assert.equal(evidence.exitCode, 0, `${runner} failed to launch: ${evidence.stderr}`);
     assert.equal(evidence.signal, null);
     assert.equal(report.bytes, Buffer.byteLength(prompt), `${runner} did not receive the whole prompt`);
+    assert.equal(report.sha256, sha256(prompt), `${runner} received the right byte count but not the right bytes`);
     assert.ok(report.longestArg < MAX_ARG_STRLEN, `${runner} argv element of ${report.longestArg} bytes risks E2BIG`);
   }
 });
 
-test("an ordinary prompt and a resume input reach every runner unchanged on stdin", { timeout: 30_000 }, async () => {
+test("every runner is handed the prompt and the resume input byte-exact at the process boundary", { timeout: 30_000 }, async () => {
+  // Scope, stated once: the child is the stub above, so this proves what AgentOS
+  // writes and spawns — the full prompt on stdin, digest-identical, and an argv
+  // that never carries it. Whether the vendor CLI then trims a trailing newline
+  // of its own is outside this boundary and outside what AgentOS controls.
   const prompt = buildPrompt(claim);
+  const resumeInput = "operator answered: approve";
+  // What makes the tolerance above safe, kept checkable instead of asserted in a
+  // comment: if a prompt ever grows outer whitespace, a CLI trimming it would be
+  // dropping something AgentOS meant to send.
+  assert.equal(prompt, prompt.trim(), "buildPrompt must keep no significant outer whitespace");
+  assert.equal(resumeInput, resumeInput.trim());
   for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
     const started = await launch(runner, claim);
     assert.equal(started.evidence.exitCode, 0);
     assert.equal(started.report.bytes, Buffer.byteLength(prompt));
+    assert.equal(started.report.sha256, sha256(prompt), `${runner} altered the prompt on the way to stdin`);
     const processStarted = started.events.find((event) => event.type === "PROCESS_STARTED");
     assert.equal(processStarted?.payload.promptTransport, "stdin");
     assert.equal(processStarted?.payload.promptBytes, Buffer.byteLength(prompt));
     assert.equal((processStarted?.payload.args as string[]).some((arg) => arg.includes("Do the work")), false);
 
-    const resumed = await launch(runner, claim, { providerConversationId: "thread-1", input: "operator answered: approve" });
+    const resumed = await launch(runner, claim, { providerConversationId: "thread-1", input: resumeInput });
     assert.equal(resumed.evidence.exitCode, 0);
-    assert.equal(resumed.report.bytes, Buffer.byteLength("operator answered: approve"));
+    assert.equal(resumed.report.bytes, Buffer.byteLength(resumeInput));
+    assert.equal(resumed.report.sha256, sha256(resumeInput), `${runner} altered the resume input on the way to stdin`);
   }
 });
 

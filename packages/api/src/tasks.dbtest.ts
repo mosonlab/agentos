@@ -995,3 +995,254 @@ test("template step creation waits for the Agent row and keeps its duplicate and
   assert.equal(crossed.body.error, "Assignee does not belong to this template's project");
   assert.equal(await db.taskTemplateStep.count({ where: { taskTemplateId: template.id } }), 3);
 });
+
+// --- review fixes: reactivation joins the exclusion protocol (MF-1) ----------
+//
+// A task is live when it is unarchived and TODO|DOING|REVIEW — the same set
+// `agentArchiveBlocker` refuses to archive an agent out from under. Two writers
+// could still produce one: a status-only PATCH out of BACKLOG or DONE named no
+// assignee, so the Agent row was never read, and unarchive took no lock at all.
+// The result is not "assigned": the runner claims only unarchived TODO|DOING
+// tasks whose agent is unarchived, so the task sits on the board as work in
+// progress that nothing will ever pick up.
+
+const archivedAssigneeContext = async (label: string, status: "BACKLOG" | "DONE" | "TODO" | "DOING" | "REVIEW") => {
+  const context = await seedTask(label, { status });
+  // Archived through the real route, which is the only thing that proves the
+  // agent was archivable at all: a live task would have blocked it.
+  assert.equal((await call("POST", `/agents/${context.agent.id}/archive`)).status, 200);
+  return context;
+};
+
+const statusOf = async (taskId: string) => (await db.task.findUniqueOrThrow({ where: { id: taskId } })).status;
+
+test("promoting parked or finished history to a live status is refused while the assignee is archived", async () => {
+  for (const from of ["BACKLOG", "DONE"] as const) {
+    for (const to of ["TODO", "DOING", "REVIEW"] as const) {
+      const context = await archivedAssigneeContext(`reactivate-${from}-${to}`.toLowerCase(), from);
+      const { status, body } = await call("PATCH", `/tasks/${context.task.id}`, { status: to });
+      assert.equal(status, 409, `${from} → ${to}: ${JSON.stringify(body)}`);
+      assert.equal(body.error, "Assignee agent is archived; unarchive the agent or reassign this task first");
+      assert.equal(await statusOf(context.task.id), from, `${from} → ${to} changed the status anyway`);
+      assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id } }), 0);
+      assert.equal(await db.run.count({ where: { taskId: context.task.id } }), 0);
+    }
+  }
+});
+
+test("a status write that only looks like a no-op still joins the Task-row mutex", async () => {
+  // The old entry condition compared the body against a read taken *before* the
+  // transaction, so a request naming the status the row already had skipped the
+  // lock, every guard behind it, and wrote through unchecked. The archived-task
+  // freeze is the observable proof that it no longer does.
+  const context = await seedTask("status-echo-freeze");
+  assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+  const { status, body } = await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO", description: "edited" });
+  assert.equal(status, 409, JSON.stringify(body));
+  assert.equal(body.error, "Cannot change the status of an archived task; unarchive it first");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).description, "work");
+});
+
+test("a promotion decided on a stale read is refused by the row it actually locked", { timeout: 20_000 }, async () => {
+  // The exact gap, deterministically: the route reads the task outside the
+  // transaction, so `status: TODO` on a task that *was* TODO can arrive at a row
+  // another writer has since parked and whose agent it has since archived —
+  // which is the state two ordinary requests (park in Backlog, then archive the
+  // now-idle agent) legitimately leave behind. Both writes are made here inside
+  // the transaction that holds the row, so the PATCH is provably still waiting
+  // when they commit.
+  const context = await seedTask("stale-read-promotion");
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let acquired!: () => void;
+  const lockHeld = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const held = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${context.task.id} FOR UPDATE`;
+      acquired();
+      // Long enough for the route to take its stale `before` read and block.
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      await tx.$executeRaw`UPDATE "Task" SET "status" = 'backlog'::"TaskStatus" WHERE "id" = ${context.task.id}`;
+      await tx.$executeRaw`UPDATE "Agent" SET "archivedAt" = now() WHERE "id" = ${context.agent.id}`;
+    }, { timeout: 10_000 });
+    await lockHeld;
+    const pending = call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" });
+    const [, response] = await Promise.all([held, pending]);
+    assert.equal(response.status, 409, JSON.stringify(response.body));
+    assert.equal(response.body.error, "Assignee agent is archived; unarchive the agent or reassign this task first");
+    assert.equal(await statusOf(context.task.id), "BACKLOG");
+    assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id } }), 0);
+  } finally {
+    await holder.$disconnect();
+  }
+});
+
+test("unarchiving the agent or reassigning the task lets the same promotion through", async () => {
+  const revived = await archivedAssigneeContext("reactivate-unarchive-agent", "BACKLOG");
+  assert.equal((await call("POST", `/agents/${revived.agent.id}/unarchive`)).status, 200);
+  assert.equal((await call("PATCH", `/tasks/${revived.task.id}`, { status: "TODO" })).status, 200);
+  assert.equal(await statusOf(revived.task.id), "TODO");
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: revived.task.id, body: "Status changed: BACKLOG → TODO" },
+  }), 1);
+
+  const reassigned = await archivedAssigneeContext("reactivate-reassign", "BACKLOG");
+  const successor = await db.agent.create({ data: {
+    projectId: reassigned.project.id, environmentId: reassigned.agent.environmentId, name: "successor",
+    title: "Successor", model: "claude", foundationalPrompt: "foundation", rolePrompt: "role",
+  } });
+  await db.agentRepoAccess.create({ data: {
+    projectId: reassigned.project.id, agentId: successor.id, repoId: reassigned.repo.id,
+    mountPath: "/repo", permissions: "GIT_WRITE",
+  } });
+  const handed = await call("PATCH", `/tasks/${reassigned.task.id}`, { status: "TODO", assigneeAgentId: successor.id });
+  assert.equal(handed.status, 200, JSON.stringify(handed.body));
+  assert.equal(await statusOf(reassigned.task.id), "TODO");
+});
+
+test("human and unassigned steps promote out of Backlog exactly as before", async () => {
+  const context = await seedTask("reactivate-human", { status: "BACKLOG", assigneeType: "HUMAN", assigneeAgentId: null });
+  assert.equal((await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" })).status, 200);
+  assert.equal(await statusOf(context.task.id), "TODO");
+
+  const unassigned = await seedTask("reactivate-unassigned", { status: "DONE", assigneeAgentId: null });
+  assert.equal((await call("PATCH", `/tasks/${unassigned.task.id}`, { status: "REVIEW" })).status, 200);
+  assert.equal(await statusOf(unassigned.task.id), "REVIEW");
+});
+
+test("naming an archived agent in the promotion itself is still the 400 it always was", async () => {
+  const context = await archivedAssigneeContext("reactivate-explicit", "BACKLOG");
+  const { status, body } = await call("PATCH", `/tasks/${context.task.id}`, {
+    status: "TODO", assigneeAgentId: context.agent.id,
+  });
+  assert.equal(status, 400, JSON.stringify(body));
+  assert.equal(body.error, "Assignee agent is archived");
+  assert.equal(await statusOf(context.task.id), "BACKLOG");
+});
+
+test("unarchiving a live-status task is refused while its assignee is archived", async () => {
+  for (const status of ["TODO", "DOING", "REVIEW"] as const) {
+    const context = await seedTask(`unarchive-live-${status}`.toLowerCase(), { status });
+    assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+    // Only now is the agent archivable — the archived task no longer blocks it.
+    assert.equal((await call("POST", `/agents/${context.agent.id}/archive`)).status, 200);
+    const response = await call("POST", `/tasks/${context.task.id}/unarchive`);
+    assert.equal(response.status, 409, `${status}: ${JSON.stringify(response.body)}`);
+    assert.equal(response.body.error, "Assignee agent is archived; unarchive the agent or reassign this task first");
+    assert.notEqual((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).archivedAt, null);
+    assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id, body: "Task unarchived" } }), 0);
+    // Unarchive the agent and the operator gets their task back.
+    assert.equal((await call("POST", `/agents/${context.agent.id}/unarchive`)).status, 200);
+    assert.equal((await call("POST", `/tasks/${context.task.id}/unarchive`)).status, 200);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).archivedAt, null);
+  }
+});
+
+test("archived history stays unarchivable whatever became of its assignee", async () => {
+  // Refusing these would let an agent's archival delete the operator's ability
+  // to read their own finished and parked work back onto the board.
+  for (const status of ["DONE", "BACKLOG"] as const) {
+    const context = await seedTask(`unarchive-history-${status}`.toLowerCase(), { status });
+    assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+    assert.equal((await call("POST", `/agents/${context.agent.id}/archive`)).status, 200);
+    const response = await call("POST", `/tasks/${context.task.id}/unarchive`);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    const task = await db.task.findUniqueOrThrow({ where: { id: context.task.id } });
+    assert.equal(task.archivedAt, null);
+    assert.equal(task.status, status);
+    assert.equal(task.assigneeAgentId, context.agent.id, "unarchiving must not quietly unassign");
+    assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id, body: "Task unarchived" } }), 1);
+    // And the row is still frozen out of the live statuses, by the guard above.
+    assert.equal((await call("PATCH", `/tasks/${context.task.id}`, { status: "TODO" })).status, 409);
+  }
+});
+
+test("an agent archive and a Backlog promotion released together never leave a live task on an archived agent", async () => {
+  const context = await seedTask("race-archive-promote", { status: "BACKLOG" });
+  const app = createApp(db);
+  const responses = await asOperator(() => synchronised([
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/agents/${context.agent.id}/archive`, { method: "POST", headers: { Authorization: `Bearer ${OPERATOR}` } });
+    },
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/tasks/${context.task.id}`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "TODO" }),
+      });
+    },
+  ]));
+  for (const response of responses) assert.ok(response.status < 500, `unexpected ${response.status}`);
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } });
+  const task = await db.task.findUniqueOrThrow({ where: { id: context.task.id } });
+  const live = task.archivedAt === null && task.status === "TODO";
+  // Either the archive won (the task stays parked) or the promotion won (the
+  // agent stays unarchived). Never both.
+  assert.equal(
+    (agent.archivedAt !== null) !== live,
+    true,
+    `agentArchivedAt=${agent.archivedAt}, status=${task.status}`,
+  );
+});
+
+test("an archive that commits mid-unarchive is seen by the unarchive, not written over", { timeout: 20_000 }, async () => {
+  // The concurrent half for unarchive, forced into the losing order rather than
+  // left to wall-clock luck: the request is provably already inside the route
+  // when the agent's archival commits. Unlocked, it read `archivedAt` first and
+  // cleared it afterwards — restoring a TODO task onto an agent that no runner
+  // will claim for.
+  const context = await seedTask("race-archive-unarchive", { status: "TODO" });
+  assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let acquired!: () => void;
+  const lockHeld = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const held = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${context.task.id} FOR UPDATE`;
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      // What POST /agents/:id/archive commits here: the task is archived, so it
+      // no longer holds its assignee open and the archival is allowed.
+      await tx.$executeRaw`UPDATE "Agent" SET "archivedAt" = now() WHERE "id" = ${context.agent.id}`;
+    }, { timeout: 10_000 });
+    await lockHeld;
+    const pending = call("POST", `/tasks/${context.task.id}/unarchive`);
+    const [, response] = await Promise.all([held, pending]);
+    assert.equal(response.status, 409, JSON.stringify(response.body));
+    assert.notEqual((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).archivedAt, null);
+    assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id, body: "Task unarchived" } }), 0);
+  } finally {
+    await holder.$disconnect();
+  }
+});
+
+test("a Task row held by a foreign transaction makes unarchive wait", { timeout: 20_000 }, async () => {
+  // Direct proof that unarchive now joins the Task-row mutex instead of writing
+  // outside it: holding the row in another transaction blocks the route.
+  const context = await seedTask("race-unarchive-lock-proof");
+  assert.equal((await call("POST", `/tasks/${context.task.id}/archive`)).status, 200);
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let released = false;
+  let acquired!: () => void;
+  const lockHeld = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const held = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${context.task.id} FOR UPDATE`;
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      released = true;
+    }, { timeout: 10_000 });
+    await lockHeld;
+    let waited = true;
+    const pending = call("POST", `/tasks/${context.task.id}/unarchive`).then((value) => { waited = released; return value; });
+    const [, response] = await Promise.all([held, pending]);
+    assert.equal(waited, true, "unarchive must wait for the Task row");
+    assert.equal(response.status, 200);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).archivedAt, null);
+  } finally {
+    await holder.$disconnect();
+  }
+});
