@@ -102,10 +102,12 @@ test("task creation keeps its runner, model, and promptHash output while derivat
       runner: runData?.runner,
       model: runData?.model,
       promptHash: runData?.promptHash,
+      maxDurationMin: runData?.maxDurationMin,
     }, {
       runner: RunnerKind.CODEX,
       model: agent.model,
       promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
+      maxDurationMin: 240,
     });
   } finally {
     if (previousToken === undefined) delete process.env.OPERATOR_TOKEN;

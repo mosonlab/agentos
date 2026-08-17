@@ -39,7 +39,7 @@ export const NewGoal = ({ projectId, onClose, onCreated }: {
   onCreated: () => void;
 }): ReactNode => {
   const [form, setForm] = useState({
-    title: "", spec: "", spendCap: "", maxDurationMin: "120", stallTimeoutMin: "10",
+    title: "", spec: "", spendCap: "", maxDurationMin: "240", stallTimeoutMin: "10",
     stuckThreshold: "19", runnerPreference: "AUTO" as RunnerPreference, sharedFolderPath: "",
   });
   const [items, setItems] = useState([""]);

@@ -53,8 +53,9 @@ test("Goal creation persists ordered DoD items and returns the frontend detail s
     assert.equal(response.status, 201);
     const created = await response.json() as { definitionOfDone: Array<{ itemIndex: number }> };
     assert.deepEqual(created.definitionOfDone.map((item) => item.itemIndex), [0, 1]);
-    const data = createArguments?.data as { status?: string; definitionOfDone: { create: Array<{ itemIndex: number }> } };
+    const data = createArguments?.data as { status?: string; maxDurationMin?: number; definitionOfDone: { create: Array<{ itemIndex: number }> } };
     assert.equal(data.status, undefined);
+    assert.equal(data.maxDurationMin, 240);
     assert.deepEqual(data.definitionOfDone.create.map((item) => item.itemIndex), [0, 1]);
   });
 });

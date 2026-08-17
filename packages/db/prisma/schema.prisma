@@ -192,7 +192,7 @@ model Project {
   name               String
   slug               String          @unique
   yamlDocument       String          @default("")
-  maxDurationMin     Int             @default(120)
+  maxDurationMin     Int             @default(240)
   stallTimeoutMin    Int             @default(10)
   maxSessionsPerTask Int             @default(3)
   spendCap           Decimal?        @db.Decimal(12, 2)
@@ -507,7 +507,7 @@ model Task {
   runAt                   DateTime?
   cron                    String?
   timezone                String?
-  maxDurationMin          Int                  @default(120)
+  maxDurationMin          Int                  @default(240)
   stallTimeoutMin         Int                  @default(10)
   maxSessionsPerTask      Int                  @default(5)
   spendCap                Decimal?             @db.Decimal(12, 2)
@@ -629,7 +629,7 @@ model Goal {
   status             GoalStatus           @default(PAUSED)
   spendCap           Decimal?             @db.Decimal(12, 2)
   spendUsd           Decimal              @default(0) @db.Decimal(12, 2)
-  maxDurationMin     Int?                 @default(120)
+  maxDurationMin     Int?                 @default(240)
   stallTimeoutMin    Int                  @default(10)
   maxSessionsPerTask Int                  @default(3)
   stuckThreshold     Int                  @default(19)
@@ -755,7 +755,7 @@ model Run {
   authMode              String?
   manifest              Json?
   promptHash            String
-  maxDurationMin        Int                  @default(120)
+  maxDurationMin        Int                  @default(240)
   stallTimeoutMin       Int                  @default(10)
   maxRunsPerTask        Int                  @default(5)
   // How many extra attempts this task has been *granted* on top of whatever
@@ -848,7 +848,7 @@ model Session {
   resumableUntil         DateTime?
   resumeAttempt          Int                    @default(0)
   resumeInput            String?
-  maxDurationMin         Int                    @default(120)
+  maxDurationMin         Int                    @default(240)
   stallTimeoutMin        Int                    @default(10)
   requestedAt            DateTime               @default(now())
   provisionedAt          DateTime?

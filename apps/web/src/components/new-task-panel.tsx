@@ -38,7 +38,7 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
     // has to be able to say so here, and it has to say so by sending the field
     // rather than by omitting it.
     opensPullRequest: true,
-    maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
+    maxDurationMin: 240, stallTimeoutMin: 10, maxSessionsPerTask: 5,
   });
   const [templateId, setTemplateId] = useState("");
   const [variables, setVariables] = useState<Record<string, string>>({});
