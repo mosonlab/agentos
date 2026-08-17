@@ -10,6 +10,8 @@ Status: specification for human review; no implementation is authorized by this 
 
 Author: spec agent, 2026-08-17
 
+Revision: 2026-08-17 plan-review closure; clarified provider-acceptance evidence, unbound rejection evidence, and server-derived non-Feishu source identities without changing Product Contract scope
+
 Routing snapshot: Routing Contract v1.0 · Planned Critical · future implementation agent `senior-dev` · high effort
 
 Authority: the task Product Contract and `docs/governance/task-routing-v1.md`. Changing the objective, scope, acceptance semantics, evidence, authority, dependencies, or safety boundary requires a new Product Contract version and product-owner approval.
@@ -75,7 +77,7 @@ Ambiguities are resolved to the smallest safe behavior:
 - **A3 — Choice compatibility.** A choice question may declare `allowFreeText`. Legacy choice questions migrate with it enabled because the current UI/Feishu flow accepts direct text. New callers must state it explicitly; omission defaults to `false` on the v1 API.
 - **A4 — Default expiry.** Omitted expiry remains seven days; explicit `null` means no automatic expiry. This preserves current behavior.
 - **A5 — Acknowledged meaning.** `ACKNOWLEDGED` means an authorized, fenced runner claim has durably received the immutable answer and a resume grant. It does not mean a notification toast was shown.
-- **A6 — Resumed meaning.** `RESUMED` means the runner has confirmed that the provider continuation process was accepted and a runtime handle exists. Merely queuing or claiming the Run is not resumed.
+- **A6 — Resumed meaning.** `RESUMED` means the runner has observed the runner-kind-specific provider-acceptance signal defined in §5.3, and the control plane has durably stored its redacted evidence plus the runtime handle under the current fence. Process spawn, PID allocation, session lookup alone, queuing, or claiming is not resumed.
 - **A7 — Same execution.** Answering resumes the existing Run and Session. It never creates a replacement Run or Session. A separate operator retry after a terminal failure is a different product action and is not “the resume.”
 - **A8 — Fail closed after ambiguity.** If AgentOS cannot prove whether provider continuation began, it does not invoke the provider again automatically. The Task moves to `REVIEW` with recovery evidence.
 - **A9 — Approval gates.** Existing approval-gate cards may use the question/answer identity model with purpose `APPROVAL_GATE`, but they do not create a resume request unless their correlated Run is actually `WAITING_INBOX`.
@@ -116,6 +118,8 @@ The following is binding compatibility evidence, not the desired design:
 - **Resume grant** — short-lived, single-purpose credential returned only to the runner that wins the fenced claim for that ResumeRequest.
 - **Lifecycle event** — append-only evidence of a Question transition or rejected transition attempt.
 - **Source event** — a web request, Feishu event, MCP request, runner callback, reconciler action, migration action, or control-plane action with a stable source id.
+- **Provider-acceptance evidence** — append-only, redacted proof that a pinned runner adapter observed its defined continuation-acceptance event for the expected provider conversation after `STARTING`.
+- **Mutation attempt** — append-only ingress/source receipt for an answer, supersede, or cancel request. A safely authorized and correlated attempt may bind its Question/result; an unbound rejection keeps `questionId` null because identity is missing, unknown, unauthorized, or correlation-invalid.
 - **Active resumable question** — a `RESUME_EXECUTION` question in `WAITING`, `ANSWERED`, or `ACKNOWLEDGED` state whose ResumeRequest is not terminal.
 - **Ambiguous start** — AgentOS recorded intent to invoke provider continuation but cannot prove that the provider did or did not accept it.
 
@@ -130,6 +134,7 @@ The following is binding compatibility evidence, not the desired design:
 5. Prompt body, response mode, choices, correlation, source request identity, and expiry are immutable after Question creation. Replacement uses `SUPERSEDED` plus a new Question.
 6. Every mutation carries a stable idempotency/source-event key and a canonical payload hash. Reusing a key with the same payload returns the original result; reusing it with different payload returns `409 IDEMPOTENCY_KEY_REUSED` and performs no write.
 7. External channel ids are scoped by channel and account/tenant. A raw Feishu event id or message id is not globally unique without that scope.
+8. An unbound mutation-attempt id and a provider-acceptance-evidence id are globally unique identities; neither substitutes for a lifecycle event id or Question id.
 
 ### 5.2 Correlation
 
@@ -151,8 +156,9 @@ The following is binding compatibility evidence, not the desired design:
 6. At most one runner holds an active resume claim. A stale runner cannot acknowledge, start, complete, heartbeat, or append provider events after suspension or re-claim.
 7. AgentOS MUST record a `STARTING` boundary immediately before invoking the provider. If the runner disappears after this boundary and before `RESUMED`, automatic continuation retry is forbidden; the execution fails closed for operator review.
 8. A safe pre-start failure may requeue the same Run with the same ResumeRequest. It may not create a new Run.
-9. `RESUMED` is written only after provider continuation acceptance and runtime-handle persistence succeed under the same current fence.
+9. `RESUMED` is written only after provider continuation acceptance and runtime-handle persistence succeed under the same current fence. The only v1 acceptance signals are adapter-specific and version-pinned: CLAUDE requires a well-formed stream-json `system` event with `subtype=init` and `session_id` equal to the requested conversation; CODEX requires `thread.started` with the requested `thread_id` followed by `turn.started`; PI requires a `session` event with the requested `id` followed by `agent_start`. A PID, successful `spawn`, process liveness, the conversation-id event alone for CODEX/PI, stderr silence, or an arbitrary first JSON line is not acceptance.
 10. Later Run completion, failure, or cancellation does not rewrite a Question already in `RESUMED`.
+11. The acceptance callback MUST atomically persist a unique `InboxResumeAcceptanceEvidence` row containing runner kind, adapter/CLI version, signal kind, canonical signal hash, observed timestamp, expected provider-conversation hash, runtime handle, claim/lease generations, and runner id while moving ResumeRequest `STARTING → STARTED`, Question `ACKNOWLEDGED → RESUMED`, and Run/Session to running. Raw provider event content is not stored in this evidence row. An unrecognized signal or changed CLI event shape leaves the request `STARTING`; it never falls back to spawn-based confirmation.
 
 ### 5.4 Harmless duplicates
 
@@ -179,7 +185,7 @@ No answer or resume transition occurs when any of these is missing or ambiguous:
 - workspace identity/retention needed for continuation;
 - whether provider continuation may already have begun.
 
-The system MUST retain the rejected source event and a redacted reason for audit. It MUST NOT choose the newest/only Question in a chat, guess from text, or create a replacement execution.
+The system MUST retain the rejected source event and a redacted reason for audit. If a valid, authorized Question binding cannot be established, it MUST write the independent `InboxMutationAttempt` ledger described in §§6.3 and 10.3 rather than inventing a Question foreign key or per-question sequence. It MUST NOT choose the newest/only Question in a chat, guess from text, or create a replacement execution.
 
 ## 6. Versioned data contract
 
@@ -307,6 +313,8 @@ The authoritative schema MUST express, at minimum:
 | `InboxAnswer` | unique `questionId`; unique `(sourceKind, sourceAccountId, sourceEventId)`; unique `(actorId, idempotencyKey)`; typed choice/text check constraint |
 | `InboxResumeRequest` | unique `questionId`; unique `answerId`; correlation must equal Question; one nonterminal request per Run/Session |
 | `InboxQuestionEvent` | unique `(questionId, sequence)`; unique source-event identity where present; append-only |
+| `InboxMutationAttempt` | canonical ingress/source receipt for answer/supersede/cancel; globally unique attempt/ingress receipt id; nullable `questionId` only after authorization and correlation permit binding; accepted Answer/result links when bound; attempted Question reference stored only as a redacted hash when unbound; stable source identity uniquely deduped by `(sourceKind, sourceAccountId, sourceEventId)` across accepted and rejected outcomes; independently ordered by `(occurredAt, id)`; append-only |
+| `InboxResumeAcceptanceEvidence` | unique `resumeRequestId`; expected provider-conversation hash and runner/fence/claim generations must match ResumeRequest; redacted signal kind/hash plus adapter/CLI version and runtime handle required; append-only |
 | `InboxNotificationDelivery` | unique `(questionId, channel, destinationId, renderingVersion)`; attempts append or increment under a delivery claim; external message identity scoped by channel account |
 | active-question constraint | partial unique indexes ensure at most one active resumable Question per `runId` and per `sessionId` |
 
@@ -323,6 +331,8 @@ Foreign keys used for audit MUST default to `RESTRICT` or durable snapshots rath
 | Run/Session execution state | control plane | existing claim/start/heartbeat/complete/reconcile APIs under fences |
 | Notification delivery | Inbox notification service | adapter worker under outbox CAS; never the source of question state truth |
 | Audit events | control plane | append-only alongside every accepted or rejected mutation |
+| Mutation attempts | control plane ingress | one append-only source receipt for every answer/supersede/cancel ingress; bind Question/result only after identity/authorization/correlation validate |
+| Provider-acceptance evidence | control plane | authenticated runner callback under the current fence/grant; runner never writes DB directly |
 | UI state | server-derived | web client never invents lifecycle status or assumes success before response |
 
 ## 7. Lifecycle contract
@@ -348,7 +358,7 @@ create + suspend
 | `ANSWERED` | runner claim | same Run/Session; current claim CAS and fence | bind resume grant and lease generation; event | `ACKNOWLEDGED` |
 | `ACKNOWLEDGED` | runner re-claim before `STARTING` | prior claim expired safely; no provider-start intent | rotate resume grant and claim generation; retain event history | `ACKNOWLEDGED` |
 | `ACKNOWLEDGED` | start intent | current resume grant/fence; workspace/provider identity match | ResumeRequest `STARTING`; event written before provider call | `ACKNOWLEDGED` |
-| `ACKNOWLEDGED` | start confirmed | same grant/fence; request is `STARTING`; runtime handle present | ResumeRequest `STARTED`; Session/Run running; Question event | `RESUMED` |
+| `ACKNOWLEDGED` | provider acceptance confirmed | same grant/fence; request is `STARTING`; adapter-specific acceptance evidence and runtime handle present | acceptance evidence + ResumeRequest `STARTED` + Session/Run running + Question event in one transaction | `RESUMED` |
 | `WAITING` | supersede | authorized operator/control plane; replacement payload valid | old terminal event + new Question; Session pointer moves; Run remains waiting; old actions invalidated | `SUPERSEDED` |
 | `WAITING`, `ANSWERED`, or safely claimed `ACKNOWLEDGED` | cancel | authorized operator/control plane; provider start not possible/in progress | Question/ResumeRequest cancel; Run/Session cancel; open notifications invalidated; Task to review where applicable | `CANCELLED` |
 
@@ -373,15 +383,16 @@ Illegal or stale transitions return a deterministic conflict response and append
 
 ### 7.4 Safe and ambiguous resume failure
 
-- **Safe pre-start failure:** missing local binary before spawn, failed workspace verification, or failed preflight with evidence that no provider process was invoked. Set ResumeRequest `BLOCKED_SAFE`; the same Run may be requeued after the cause clears. The Answer remains authoritative.
+- **Safe pre-start failure:** missing local binary before spawn, failed workspace verification, failed preflight with evidence that no provider process was invoked, or a spawned CLI's version-pinned parser records a definitive authentication/session-not-found rejection before any adapter-specific acceptance signal. Set ResumeRequest `BLOCKED_SAFE`; the same Run may be requeued after the cause clears. The Answer remains authoritative.
 - **Ambiguous start failure:** runner loss, network loss, or control-plane failure after `STARTING` where provider acceptance is unknown. Set/detect `BLOCKED_AMBIGUOUS`; mark the Run non-retryable and Task `REVIEW`; do not invoke the provider again automatically.
+- A spawned process exiting, emitting malformed/unknown output, or changing its event shape before the expected signal is not proof of rejection; unless the pinned adapter classifies explicit pre-acceptance rejection evidence, it is `BLOCKED_AMBIGUOUS`.
 - **Confirmed post-start failure:** once Question is `RESUMED`, ordinary Run failure/retry policy applies, but any retry is a new execution attempt and MUST NOT replay the consumed ResumeRequest.
 
 ## 8. Concrete scenarios
 
 ### S1 — Free-text question and normal resume
 
-An authenticated agent Session calls create with prompt “Which branch?” and no choices. The control plane validates the current Run fence and provider conversation id, writes Message/Question/event, suspends the same Run/Session, revokes the Session token, and returns `201` with `WAITING`. The operator submits text with one idempotency key. One transaction writes the Answer and ResumeRequest and queues the same Run. A runner claims it, receives a bound resume grant and answer, records `STARTING`, invokes the provider, then confirms a runtime handle. The Question reads `RESUMED`; one provider continuation exists.
+An authenticated agent Session calls create with prompt “Which branch?” and no choices. The control plane validates the current Run fence and provider conversation id, writes Message/Question/event, suspends the same Run/Session, revokes the Session token, and returns `201` with `WAITING`. The operator submits text with one idempotency key. One transaction writes the Answer and ResumeRequest and queues the same Run. A runner claims it, receives a bound resume grant and answer, records `STARTING`, invokes the provider, waits for its adapter-specific acceptance signal, then confirms that signal together with the runtime handle. The Question reads `RESUMED`; one provider continuation exists.
 
 ### S2 — Choice answer
 
@@ -496,6 +507,7 @@ Text body:
 - `409 QUESTION_ALREADY_ANSWERED`, `QUESTION_SUPERSEDED`, `QUESTION_CANCELLED`, `QUESTION_EXPIRED`, or `CORRELATION_MISMATCH`: no mutation.
 - `422 INVALID_CHOICE`, `ANSWER_KIND_NOT_ALLOWED`, or `EMPTY_ANSWER`: no mutation.
 - Success returns `questionId`, `answerId`, `resumeRequestId` when resumable, `state`, `duplicate`, and timestamps. It never returns provider credentials.
+- The server derives Answer source identity; clients never supply `sourceAccountId` or `sourceEventId`. For `WEB`, `sourceAccountId` is exactly the authenticated `operatorActorId` and `sourceEventId` is exactly the case-sensitive request `idempotencyKey`. For `MIGRATION`, `sourceAccountId` is the literal stable namespace `agentos/inbox-3a-backfill/v1` and `sourceEventId` is `InboxDecision:<legacy-primary-key>` for a migrated accepted Answer. The migration run id is separate audit evidence and MUST NOT enter either identity. Retries reuse these derived values; same identity/same canonical payload returns the original Answer, while same identity/different payload is `409 IDEMPOTENCY_KEY_REUSED` with no write.
 
 ### 9.4 Supersede and cancel
 
@@ -522,8 +534,9 @@ The existing runner claim response adds:
 
 - This envelope is returned only to the winning fenced runner claim and is never persisted in logs as a whole.
 - A runner records the pre-provider boundary through `POST /runner/runs/:runId/resume/starting` with current fence and resume grant.
-- Existing `POST /runner/runs/:runId/start` confirms the resume by including the three ids and resume grant when `resume != null`; it atomically records runtime handle and `RESUMED`.
+- Existing `POST /runner/runs/:runId/start` confirms the resume only after adapter acceptance by including the three ids, resume grant, runtime handle, runner kind, adapter/CLI version, acceptance signal kind, canonical signal hash, and observed timestamp when `resume != null`; it validates the exact signal allowed for that pinned runner kind, then atomically records `InboxResumeAcceptanceEvidence`, runtime handle, and `RESUMED`.
 - All callbacks are idempotent for the same fence/grant and reject stale or mismatched credentials.
+- Pre-acceptance heartbeats are allowed while the ResumeRequest remains `STARTING`. A child exit or explicit rejection before acceptance uses `/resume/failure`; a definitive pinned-parser authentication/session rejection may become `BLOCKED_SAFE`, while unknown output, callback loss, or any uncertainty becomes `BLOCKED_AMBIGUOUS`.
 
 ### 9.6 Legacy endpoint compatibility
 
@@ -556,9 +569,9 @@ An external answer is valid only if all applicable values agree:
 
 Chat-only fallback is forbidden. Action tokens are opaque, tamper-evident, single-question scoped, expire no later than the Question, and contain/version-bind the rendering. Raw database ids in an unsigned card action are insufficient.
 
-### 10.3 Audit ledger
+### 10.3 Audit ledgers
 
-Every accepted and rejected mutation appends an immutable `InboxQuestionEvent` containing:
+Every answer/supersede/cancel ingress first resolves or creates one immutable `InboxMutationAttempt` source receipt. An accepted mutation and every rejected mutation that has established a valid, authorized, correlation-consistent Question binding also appends an immutable `InboxQuestionEvent` containing:
 
 - event id and per-question sequence;
 - contract version;
@@ -572,6 +585,10 @@ Every accepted and rejected mutation appends an immutable `InboxQuestionEvent` c
 - linkage to replacement/cancellation/Answer/ResumeRequest where relevant.
 
 Prompt/answer content is not duplicated into structured logs or metrics. Database access may show content to the operator; service logs use ids, lengths, hashes, and redacted error details.
+
+A request with a missing Question id, unknown/tampered id, unauthorized principal, or cross-project/correlation-invalid target leaves its immutable `InboxMutationAttempt` unbound and appends no fabricated `InboxQuestionEvent`. The control plane MUST NOT attach its `questionId` or per-question sequence until the principal is authorized to know and mutate that Question and all correlations validate. An attempt row contains attempt/ingress-receipt id, contract version, operation, source kind/account/event/idempotency identity when valid, canonical payload hash or bounded shape hash, attempted-question-reference hash, actor/source class, authorization-evidence id when available, validated correlations only, timestamp, service instance, HTTP-equivalent outcome, redacted reason code, and accepted Answer/result linkage only when bound. The API response remains the same non-disclosing `404` or specified rejection and never reveals whether the attempted id exists.
+
+Stable source identities dedupe centrally on `InboxMutationAttempt(sourceKind, sourceAccountId, sourceEventId)` across accepted, bound-rejected, and unbound-rejected outcomes: same payload returns the original result, while a different payload records/returns `IDEMPOTENCY_KEY_REUSED` without a business mutation. `InboxAnswer` references the winning attempt, so the same source identity cannot exist once as a rejection and again as an Answer. If the request lacks a valid stable source identity, ingress generates a unique receipt id and records exactly one rejected attempt for that receipt; such a request is never eligible for idempotent business processing. `InboxMutationAttempt`, `InboxQuestionEvent`, authorization evidence, and provider-acceptance evidence are append-only with `RESTRICT`/durable snapshots, survive rollback and legacy contraction, and may be removed only by a separately approved retention/export process.
 
 ## 11. Web UI contract
 
@@ -661,9 +678,10 @@ Ambiguous active rows are quarantined: no automatic answer, cancellation, or res
 2. Backfill is restartable and idempotent by legacy primary key plus migration run id.
 3. During the compatibility window, v1 is the only business-logic writer after the write flag flips. Legacy fields are one-way projections written in the same transaction; there are not two independent state machines.
 4. Legacy APIs call the v1 service. New APIs never call legacy decision logic.
-5. Legacy runners may consume projected `resumeInput` only while the compatibility flag is enabled. A mixed runner fleet cannot consume the same ResumeRequest twice; the control plane issues a resume grant to one claim regardless of runner version.
+5. Legacy runners may consume projected `resumeInput` only while the compatibility flag is enabled and claim telemetry advertises both `resumeGrantV1` and `resumeAcceptanceV1`. A runner missing either capability cannot claim a v1 ResumeRequest; it remains `ANSWERED` for a capable runner. A mixed runner fleet cannot consume the same ResumeRequest twice; the control plane issues a resume grant to one capable claim regardless of runner version.
 6. Active pre-cutover `WAITING_INBOX` executions may continue only when preflight maps them exactly. Otherwise they remain stopped for operator action.
 7. Contracting/removing legacy columns occurs only in a later separately approved migration after the rollback window and zero legacy consumers are proven.
+8. Migrated accepted Answers use the fixed source identity from §9.3. A backfill rerun reuses `sourceAccountId=agentos/inbox-3a-backfill/v1` and `sourceEventId=InboxDecision:<legacy-primary-key>` regardless of migration run id, so it cannot create a second Answer.
 
 ## 14. Concurrency and failure-recovery requirements
 
@@ -702,15 +720,18 @@ The implementation test suite MUST exercise real database transactions for concu
 | workspace missing before `STARTING` | `BLOCKED_SAFE`, Task review/repair; no new execution |
 | crash after `STARTING` before confirmation | `BLOCKED_AMBIGUOUS`, non-retryable automatic path, Task review |
 | provider rejects resume definitively | record reason; if adapter proves no continuation began, `BLOCKED_SAFE`; otherwise ambiguous |
+| process spawns then provider rejects before acceptance signal | pinned adapter records the definitive rejection; real control-plane path stores `BLOCKED_SAFE`, no acceptance evidence/`RESUMED`, and no replacement Run; unknown or malformed evidence is ambiguous |
 | control-plane restart | reconstruct state solely from DB; no in-memory ownership assumption |
 | Question expiry | CAS cancel/timeout, preserve evidence/workspace policy, late answer harmless |
 | rollback attempted with active `STARTING`/ambiguous requests | stop rollback; human resolution required |
+
+Real API/database negative tests MUST cover a missing Question id, an unknown/tampered id, an unauthorized existing id, and a cross-project existing id. Each produces one deduped unbound `InboxMutationAttempt`, zero fabricated Question events, no state change, and the same non-disclosing response for existing and non-existing targets. Same-source/same-payload retry returns the recorded rejection; different payload conflicts; a source identity first recorded as rejected cannot later create an Answer.
 
 ## 15. Observability contract
 
 ### 15.1 Structured logs
 
-Every create, answer, transition, delivery attempt, authorization rejection, claim, start boundary, start confirmation, reconcile action, and migration decision logs contract version, ids, state versions, actor/source class, result code, duration, and service instance. Prompt/answer text, raw tokens, resume grants, and provider conversation ids are excluded.
+Every create, answer, transition, delivery attempt, authorization rejection, unbound mutation attempt, claim, start boundary, provider-acceptance confirmation, reconcile action, and migration decision logs contract version, ids, state versions, actor/source class, result code, duration, and service instance. Prompt/answer text, raw tokens, resume grants, raw acceptance events, and provider conversation ids are excluded.
 
 ### 15.2 Metrics
 
@@ -719,7 +740,8 @@ At minimum:
 - question counts by purpose/state/source;
 - age histograms for `WAITING`, `ANSWERED`, and `ACKNOWLEDGED`;
 - answer accepted, duplicate, conflict, validation reject, authorization reject, and correlation reject counters;
-- resume claim/start/confirmed, safe-block, ambiguous-block, and stale-grant counters;
+- bound/unbound mutation-attempt counts and dedupe/conflict outcomes by source class, without target ids;
+- resume claim/start/adapter-acceptance/confirmed, safe-block, ambiguous-block, capability-mismatch, and stale-grant counters;
 - delivery pending age, attempts, failures, and duplicates by channel;
 - migration quarantined/low-confidence counts;
 - invariant-violation counter, which should remain zero.
@@ -762,8 +784,8 @@ Production migration/restart is a human-controlled later action. Active Runs, ac
 
 - Before write cutover: disable the feature flag; additive unused tables may remain.
 - After write cutover but before legacy contraction: disable new question creation, let exact safe in-flight transitions settle, and switch reads/runners only through the maintained one-way legacy projection.
-- Rollback MUST NOT proceed while a ResumeRequest is `STARTING` or `BLOCKED_AMBIGUOUS`, while an active v1 Question lacks an exact legacy projection, or while a runner version could consume without resume grants.
-- No rollback deletes Question, Answer, ResumeRequest, lifecycle, source-event, or delivery evidence.
+- Rollback MUST NOT proceed while a ResumeRequest is `STARTING` or `BLOCKED_AMBIGUOUS`, while an active v1 Question lacks an exact legacy projection, or while a runner version could consume without resume grants and provider-acceptance evidence.
+- No rollback deletes Question, Answer, ResumeRequest, provider-acceptance, lifecycle, unbound-mutation, source-event, or delivery evidence.
 - Schema down migration is not the operational rollback. Dropping data requires a separate destructive migration and approval after retention/export.
 - If legacy projection cannot represent a v1 state safely, freeze the affected execution in review; do not coerce `ACKNOWLEDGED`, `SUPERSEDED`, or ambiguous state to `OPEN` and continue.
 - Rollback verification includes database counts/checksums, zero active new-only states, no duplicate provider start, UI/API smoke tests, and notification rejection of stale action tokens.
@@ -780,11 +802,11 @@ The feature is acceptable only when a reviewer can cite automated evidence for e
 | Typed answers | API tests cover valid/invalid choice, text, mixed compatibility, empty/oversize input, duplicate choice ids, and unknown contract version. |
 | Harmless duplicate answers | Real-DB concurrent same-answer tests prove one Answer, one ResumeRequest, one queue transition. |
 | Competing answers | Real-DB web/Feishu race proves one winner and immutable winner payload. |
-| Exactly one logical resume | Two-runner claim/start tests plus stale-fence tests prove one ResumeRequest consumer and at-most-one automatic provider start. |
-| Ambiguous start safety | Crash/fault injection after `STARTING` proves no automatic retry/new Run and visible Task review evidence. |
+| Exactly one logical resume | Two-runner claim/start tests plus stale-fence tests prove one ResumeRequest consumer and at-most-one automatic provider start; CLAUDE/CODEX/PI tests require their exact acceptance signals before `RESUMED`. |
+| Ambiguous start safety | Crash/fault injection after `STARTING` and spawn-success/provider-rejection-before-acceptance tests prove no spawn-only `RESUMED`, no automatic retry/new Run, and visible safe/ambiguous evidence. |
 | Lifecycle | Transition-table tests cover every legal edge and every illegal/stale edge, including supersede/cancel/expiry races. |
 | Authorization | Web, Session, runner, authorized Feishu actor, unmapped actor, wrong chat/account, tampered token, and cross-project tests. |
-| Audit | Each accepted/rejected scenario produces ordered immutable events with ids/hashes and no secrets/content in logs. |
+| Audit | Each bound accepted/rejected scenario produces ordered immutable Question events; missing, unknown, unauthorized, and cross-project attempts produce deduped append-only unbound evidence without existence disclosure; neither ledger leaks secrets/content in logs. |
 | Notification | Delivery worker race, retry/restart, duplicate external card/event, explicit reply binding, unmatched text, and stale superseded action tests. |
 | UI | Component/browser tests show filters and all six lifecycle states, stable retry id, Goal/Task/Run/Session links, duplicate success, conflicts, and blocked resume states. |
 | Compatibility | Fixture migration covers every mapping row; active ambiguity stops; rerun produces zero extra rows; legacy endpoints share v1 logic. |
@@ -795,7 +817,7 @@ Final acceptance evidence MUST include:
 
 1. schema/migration precheck output and mapping counts;
 2. the real-database concurrency suite results;
-3. runner-kind resume tests for Claude, Codex, and Pi adapters (provider calls may be deterministic fakes, but the runner/control-plane transactions are real);
+3. runner-kind resume tests for Claude, Codex, and Pi adapters, including exact acceptance signals and spawn-success/provider-rejection-before-acceptance (provider calls may be deterministic fakes, but the runner/control-plane transactions are real);
 4. API and authorization test results;
 5. web component/browser results;
 6. Feishu adapter ingestion/delivery results;
