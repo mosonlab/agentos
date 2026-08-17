@@ -2,7 +2,7 @@
 
 **Branch:** `agentos/chain/w2-2026-08-17-task-chain-9ca4e7ae`
 
-**Planning authority:** freshly fetched `origin/master` at `70995b5ada80f968b0c929dc91717b2e102df717`; at planning time `HEAD`, local `master`, and `origin/master` are identical.
+**Planning authority:** `master` was explicitly fetched into `refs/remotes/origin/master` and captured at immutable SHA `70995b5ada80f968b0c929dc91717b2e102df717`. Local `master` is not used as authority in this run workspace.
 
 **Route:** Planned Critical; implementation role `senior-dev` at the route's high-effort default.
 
@@ -13,7 +13,7 @@ The implementation will first make polled resources and every local/action state
 - **Chain order:** an indexed chain is scoped by `(projectId, chainId)` and ordered by `chainIndex`. A "surviving" predecessor is any still-existing indexed row, including an archived row; deletion removes a row from the dependency set, while archiving does not silently waive unfinished work. A null-`chainIndex` row remains the existing isolated 1/1 malformed-chain case.
 - **Next executable step:** the first surviving row whose status is not `DONE` is the only candidate. It gets a manual action only when it is an `AGENT` row in `TODO` or `BACKLOG`, has a live agent/repo grant, is unarchived, has no active run, and has budget. `TODO` means **Start next step**; `BACKLOG` means **Recover parked step**. An unfinished `HUMAN`, `DOING`, or `REVIEW` row blocks every successor.
 - **Current execution:** a row is labelled **Current execution** only when its run facts contain an active run (`QUEUED`, `CLAIMED`, `PROVISIONING`, `RUNNING`, or `WAITING_INBOX`). **Viewed here** is independently keyed to the URL task id. If both facts are true, both labels may appear on that one row; otherwise they never masquerade as the same marker.
-- **Locking:** retain PostgreSQL Task rows as the mutex. For an indexed-chain start or `PATCH ... status=DONE`, lock the existing prefix from the earliest chain row through the target in ascending `(chainIndex, id)` order, then re-read typed rows and decide. Automatic activation locks and re-reads its successor before checking runs or creating one; successful chain completion locks its current Task before changing task/chain state. All paths therefore acquire predecessor before successor, matching the existing Inbox rejection order.
+- **Locking:** retain PostgreSQL Task rows as the chain mutex. For indexed-chain start or `PATCH ... status=DONE`, lock the prefix in ascending `(chainIndex, id)` order, then re-read typed rows. Manual start next locks the exact `AgentRepoAccess` row before final grant revalidation and Run creation; revocation locks only that grant row and checks active Runs, establishing the acyclic order Task-prefix → grant. Automatic activation selects the first surviving non-DONE successor, locks and re-reads it, and reselects after deletion or a legacy DONE gap. Successful chain completion locks its current Task before changing task/chain state.
 - **PATCH authority:** ordinary PATCH may not change `approvalGate` on any dispatched Task row with non-null `chainId`; this deliberately uses a stable, auditable definition rather than trying to infer whether a paused chain is "active." A PATCH to `DONE` is rejected while that task has an active run or while an earlier surviving predecessor is unfinished. Inbox gate decisions and runner/automatic advancement continue through their dedicated transactional helpers, not ordinary PATCH.
 - **Prompt truth:** the card is titled **Task prompt**. When a description contains `Product Contract:` and `Step responsibility:`, the responsibility is rendered first and the common Product Contract is in a closed disclosure; unstructured descriptions remain wholly visible as the task responsibility. A note states that the effective runner prompt *also* includes the foundational prompt, role prompt, tool manifest, and available prior outputs; it does not claim those unavailable bodies are displayed.
 - **Compatibility:** keep the existing `startable` response boolean, but redefine it to the safe single candidate and add `startAction: "start" | "recover" | null` plus `currentExecution: boolean`. An older web bundle therefore becomes safer against a newer API, while the new bundle uses the richer fields.
@@ -55,7 +55,7 @@ The implementation will first make polled resources and every local/action state
 
 5. **Add ordered chain locks and enforce dependency-safe manual start atomically.**
 
-   **Change** — In `packages/db/src/workflow.ts`, add an exported helper that locks an indexed chain prefix with one `SELECT ... WHERE projectId/chainId AND chainIndex <= target ORDER BY chainIndex, id FOR UPDATE`; return ids only from raw SQL and perform typed Prisma reads after the lock, avoiding raw PostgreSQL enum comparisons. In `packages/api/src/app.ts::POST /tasks/:taskId/start`, read immutable chain identity, acquire the ordered prefix lock for indexed chains (or the existing single Task lock for non-chain tasks), re-read target, predecessors, agent, repo grant, active-run count, and budget under the lock, then call the shared dependency decision. A future step returns 409 with the first unfinished predecessor's name and creates no Run, status write, output, Inbox change, or activity. Preserve non-chain manual start; preserve BACKLOG recovery as status `TODO` plus exactly one queued Run; change operator activity copy to distinguish **Started next chain step manually** from **Recovered parked chain step manually**.
+   **Change** — Add exported helpers for the ordered indexed-chain prefix and exact repo-grant row. `POST /tasks/:taskId/start` acquires Task-prefix then grant, revalidates immediately before Run creation, and shares the dependency helpers used by rendering. Grant revocation takes only the exact grant lock and refuses to remove a grant used by an active Run. A future step returns 409 with the first unfinished predecessor's name and creates no Run, status write, output, Inbox change, or activity. Preserve standalone start and BACKLOG recovery exactly once.
 
    **Depends on** — step 4.
 
@@ -63,7 +63,7 @@ The implementation will first make polled resources and every local/action state
 
 6. **Complete the mutex in automatic advancement and prove completion/start idempotency.**
 
-   **Change** — In `packages/db/src/workflow.ts::activateChainSuccessor`, after locating the successor, take its Task-row lock and re-read its status, runs, assignee, and archive state before the active/parked/CAS/enqueue decision. In `packages/api/src/app.ts::POST /runner/runs/:runId/complete`, take the current chain Task lock before successful completion mutates task/output/chain state; retain predecessor-then-successor ordering. Keep `applyInboxDecisionTx`'s existing rejection-target-then-gate order and make approval flow use the same successor-locking helper through `activateChainSuccessor`. Do not change runner model selection, branch routing, lease/fencing, retry policy, gate choices, or automatic advancement semantics beyond serializing the decision.
+   **Change** — In `activateChainSuccessor`, resolve, lock, and re-read the first surviving non-DONE successor in a reselection loop so concurrent deletion and legacy DONE gaps cannot stall advancement. Successful completion locks its current chain Task before mutating task/output/chain state and retains predecessor-then-successor ordering. Inbox approval continues through the same successor helper; runner routing, lease/fencing, retry policy, and gate choices are unchanged.
 
    **Depends on** — step 5.
 
@@ -87,7 +87,7 @@ The implementation will first make polled resources and every local/action state
 
 9. **Add the mounted path-switch/browser regression matrix.**
 
-   **Change** — Add `apps/web/src/tests/task-detail-navigation.test.tsx` using the repository's JSDOM + `createRoot` + deferred-fetch pattern. Mount a task with a `revised-plan` output, a typed activity draft, an expanded run, and actionable controls; switch to a second task id whose main response is delayed and whose output returns 404. Assert both the immediate render and settled destination: correct title/prompt/status, **No output recorded**, no old artifact/draft/expansion/error, and late old responses cannot restore them. On the settled destination, exercise status PATCH (standalone fixture), archive/unarchive, safe chain start, and activity send, and assert every request path/body belongs to the destination task or its destination chain step—never the source task. Also cover a destination 404 and a transient error/retry without exposing source controls.
+   **Change** — Add `task-detail-navigation.test.tsx` with JSDOM, `createRoot`, and deferred fetch. The immediate A→B assertion is a B-identity loading shell with no A content or controls; destination title/prompt/status and **No output recorded** are asserted only after B task 200 and output 404 settle. Late A responses cannot restore source state. Destination PATCH, archive, safe chain start, and activity send must all use B (or B's chain row), never A.
 
    **Depends on** — steps 2, 3, and 8.
 
@@ -102,19 +102,22 @@ The implementation will first make polled resources and every local/action state
    **Verify** — in this order:
 
    ```sh
-   git fetch origin master
-   git rev-parse origin/master HEAD
+   git fetch origin master:refs/remotes/origin/master
+   FINAL_BASE_SHA=$(git rev-parse refs/remotes/origin/master)
+   git rev-parse HEAD
+   git merge-base --is-ancestor "$FINAL_BASE_SHA" HEAD
    npm run build
    npm test
    npm run test:db
    npm run typecheck
-   git diff --check origin/master...HEAD
+   git diff --check "$FINAL_BASE_SHA"...HEAD
    git status --short --branch
-   git diff --name-only origin/master...HEAD
-   git diff -- packages/db/prisma/schema.prisma packages/db/prisma/migrations
+   git diff --name-only "$FINAL_BASE_SHA"...HEAD
+   git diff --exit-code "$FINAL_BASE_SHA"...HEAD -- packages/db/prisma/schema.prisma packages/db/prisma/migrations
+   git diff --exit-code -- packages/db/prisma/schema.prisma packages/db/prisma/migrations
    ```
 
-   `npm run test:db` must use the existing dedicated non-public schema guard and pass in one final-tree invocation. The schema/migrations diff must be empty. Rollback is a revert of the TC-UX implementation commits/PR followed by the same build/unit/typecheck gates; no data rollback exists because there is no migration. Production activation, restart, live mutation, and migration remain outside this chain; if implementation unexpectedly needs any of them, stop and return for Product Contract review.
+   `npm run test:db` must use the existing dedicated non-public schema guard and pass in one final-tree invocation. Both committed-range and working-tree schema/migration diffs must be empty. Rollback is a whole-PR revert followed by build, unit, typecheck, and one no-retry dedicated-schema DB invocation; no data rollback exists because there is no migration. Production activation, restart, live mutation, and migration remain outside this chain.
 
 ## Requirement-to-step map
 

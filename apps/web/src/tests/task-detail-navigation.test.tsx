@@ -1,0 +1,174 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { JSDOM } from "jsdom";
+import { act } from "react";
+
+import type { Chain, Task, TaskStepOutput } from "../lib/types";
+
+const now = "2026-08-17T00:00:00.000Z";
+const task = (id: string, name: string, chainId: string | null = null): Task => ({
+  id, projectId: "project-1", assigneeAgentId: "agent-1", repoId: "repo-1",
+  templateId: null, templateStepId: null, followUpTaskId: null, name,
+  description: `Product Contract: TC-UX v1.0\nCommon contract\n\nStep responsibility: ${name} responsibility`,
+  workingDirectory: null, targetBranch: "main", failureReason: null, status: "TODO",
+  assigneeType: "AGENT", approvalGate: false, scheduleKind: "NOW", runAt: null,
+  cron: null, timezone: null, maxDurationMin: 120, stallTimeoutMin: 10,
+  maxSessionsPerTask: 3, createdAt: now, updatedAt: now, assigneeAgent: null,
+  repo: null, runs: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
+  archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null,
+  templateStep: null, chainProgress: null, recurringLastFiredAt: null, recurringFireCount: 0,
+});
+
+const output = (taskId: string, body: string): TaskStepOutput => ({
+  id: `output-${taskId}`, taskId, runId: `run-${taskId}`, kind: "revised-plan", body,
+  createdAt: now, updatedAt: now,
+});
+
+const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, steps: [] });
+const chainFor = (taskId: string): Chain => ({
+  chainId: "chain-c", total: 1, done: 0, steps: [{
+    taskId, position: 1, chainIndex: 0, name: "Chain C", stepName: "Chain C",
+    status: "TODO", approvalGate: false, assigneeType: "AGENT",
+    agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
+    failureReason: null, latestRun: null, startable: true, startAction: "start",
+    currentExecution: false,
+  }],
+});
+
+const settle = async (): Promise<void> => {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+};
+
+test("task-id switches expose a clean loading shell and destination-scoped actions", async () => {
+  const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "http://localhost/tasks/a", pretendToBeVisual: true });
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    navigator: globalThis.navigator,
+    fetch: globalThis.fetch,
+  };
+  for (const [name, value] of Object.entries({
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLFormElement: dom.window.HTMLFormElement,
+    HTMLInputElement: dom.window.HTMLInputElement,
+    Node: dom.window.Node,
+    Element: dom.window.Element,
+    Event: dom.window.Event,
+    InputEvent: dom.window.InputEvent,
+    MouseEvent: dom.window.MouseEvent,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  const [{ createRoot }, { TaskDetailPage }] = await Promise.all([
+    import("react-dom/client"),
+    import("../pages/TaskDetail"),
+  ]);
+
+  const mutations: Array<{ url: string; method: string; body: string }> = [];
+  let resolveB: ((response: Response) => void) | null = null;
+  let resolveAActivity: ((response: Response) => void) | null = null;
+  let firstB = true;
+  let firstAActivity = true;
+  const tasks = { a: task("a", "Source A"), b: task("b", "Destination B"), c: task("c", "Destination C", "chain-c") };
+  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input).replace(/^.*\/api/, "");
+    const method = init.method ?? "GET";
+    if (method !== "GET") {
+      mutations.push({ url, method, body: String(init.body ?? "") });
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/tasks/b" && firstB) {
+      firstB = false;
+      return new Promise<Response>((resolve) => { resolveB = resolve; });
+    }
+    const main = /^\/tasks\/([^/]+)$/.exec(url);
+    if (main) return new Response(JSON.stringify(tasks[main[1] as keyof typeof tasks]), { status: 200 });
+    const out = /^\/tasks\/([^/]+)\/output$/.exec(url);
+    if (out) {
+      if (out[1] === "a") return new Response(JSON.stringify(output("a", "revised-plan source artifact")), { status: 200 });
+      return new Response(JSON.stringify({ error: "Output not found" }), { status: 404 });
+    }
+    const activity = /^\/tasks\/([^/]+)\/activity$/.exec(url);
+    if (activity) {
+      if (activity[1] === "a" && firstAActivity) {
+        firstAActivity = false;
+        return new Promise<Response>((resolve) => { resolveAActivity = resolve; });
+      }
+      return new Response("[]", { status: 200 });
+    }
+    const chain = /^\/tasks\/([^/]+)\/chain$/.exec(url);
+    if (chain) return new Response(JSON.stringify(chain[1] === "c" ? chainFor("c") : emptyChain()), { status: 200 });
+    return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+  }) as typeof fetch;
+
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    act(() => root.render(<TaskDetailPage taskId="a" />));
+    await settle();
+    assert.match(container.textContent ?? "", /Source A/);
+    assert.match(container.textContent ?? "", /revised-plan source artifact/);
+
+    act(() => root.render(<TaskDetailPage taskId="b" />));
+    assert.match(container.textContent ?? "", /Loading/);
+    assert.doesNotMatch(container.textContent ?? "", /Source A|revised-plan source artifact/);
+    assert.equal(container.querySelector("button"), null, "destination shell exposes no source action");
+
+    resolveB!(new Response(JSON.stringify(tasks.b), { status: 200 }));
+    await settle();
+    assert.match(container.textContent ?? "", /Destination B/);
+    assert.match(container.textContent ?? "", /No output recorded/);
+    assert.doesNotMatch(container.textContent ?? "", /revised-plan source artifact/);
+    resolveAActivity!(new Response(JSON.stringify([{
+      id: "late-a", taskId: "a", actorType: "operator", actorId: null,
+      body: "late source activity", metadata: null, createdAt: now,
+    }]), { status: 200 }));
+    await settle();
+    assert.doesNotMatch(container.textContent ?? "", /late source activity/);
+
+    const select = container.querySelector("select")!;
+    await act(async () => {
+      select.value = "DOING";
+      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await settle();
+    const archive = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Archive"))!;
+    await act(async () => { archive.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+    await settle();
+    const input = container.querySelector("input[placeholder='Add a comment...']") as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "destination comment");
+      input.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertText", data: "destination comment" }));
+      input.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await settle();
+    const send = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Send"))!;
+    assert.equal(send.disabled, false, `comment=${input.value}`);
+    await act(async () => { send.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+    await settle();
+
+    act(() => root.render(<TaskDetailPage taskId="c" />));
+    assert.doesNotMatch(container.textContent ?? "", /Destination B|destination comment/);
+    await settle();
+    const start = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Start next step"))!;
+    await act(async () => { start.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+    await settle();
+
+    assert.ok(mutations.some((item) => item.url === "/tasks/b" && item.method === "PATCH"));
+    assert.ok(mutations.some((item) => item.url === "/tasks/b/archive" && item.method === "POST"));
+    assert.ok(mutations.some((item) => item.url === "/tasks/b/activity" && item.body.includes("destination comment")), JSON.stringify(mutations));
+    assert.ok(mutations.some((item) => item.url === "/tasks/c/start" && item.method === "POST"));
+    assert.equal(mutations.some((item) => item.url.includes("/tasks/a")), false);
+  } finally {
+    act(() => root.unmount());
+    globalThis.fetch = previous.fetch;
+    for (const [name, value] of Object.entries({ window: previous.window, document: previous.document, navigator: previous.navigator })) {
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    }
+    dom.window.close();
+  }
+});

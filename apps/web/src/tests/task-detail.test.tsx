@@ -4,7 +4,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { StepOutput, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
+import { StepOutput, TaskPrompt, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
+import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { TaskStepOutput } from "../lib/types";
 
 const source = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx", import.meta.url)), "utf8");
@@ -31,6 +32,27 @@ test("the pull-request label is the number, falling back to the whole URL", () =
   assert.equal(pullRequestLabel("https://github.com/o/r/pull/39/"), "#39");
   assert.equal(pullRequestLabel("https://github.com/o/r/pull/39/files"), "https://github.com/o/r/pull/39/files");
   assert.equal(pullRequestLabel("https://example.com/mr/7"), "https://example.com/mr/7");
+});
+
+test("structured task prompts lead with responsibility and collapse the common contract", () => {
+  const description = "Product Contract: TC-UX v1.0\nShared behavior\n\nStep responsibility: Implement dependency guards.";
+  assert.deepEqual(partitionTaskPrompt(description), {
+    responsibility: "Implement dependency guards.",
+    productContract: "Product Contract: TC-UX v1.0\nShared behavior",
+  });
+  const markup = renderToStaticMarkup(<TaskPrompt description={description} />);
+  assert.ok(markup.indexOf("Implement dependency guards") < markup.indexOf("Product Contract"));
+  assert.match(markup, /<details>/);
+  assert.doesNotMatch(markup, /<details open/);
+  assert.match(markup, /foundational prompt.*role prompt.*tool manifest.*prior outputs/i);
+  assert.match(markup, /Task prompt/);
+});
+
+test("unstructured task prompts remain the responsibility verbatim", () => {
+  assert.deepEqual(partitionTaskPrompt("  Free-form responsibility  "), {
+    responsibility: "Free-form responsibility",
+    productContract: null,
+  });
 });
 
 /* --------------------------------------------------------- step output card */

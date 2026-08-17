@@ -31,6 +31,9 @@ export type ChainProgress = {
 export const stepName = (row: Pick<ChainRow, "name" | "templateStep">): string => row.templateStep?.name ?? row.name;
 
 const byChainIndex = (left: ChainRow, right: ChainRow): number => (left.chainIndex ?? 0) - (right.chainIndex ?? 0);
+const byChainPosition = <T extends { chainIndex: number | null; id: string }>(left: T, right: T): number => (
+  (left.chainIndex ?? 0) - (right.chainIndex ?? 0) || left.id.localeCompare(right.id)
+);
 
 /**
  * `n/m` plus the step the chain is currently sitting on.
@@ -95,6 +98,8 @@ export type StartableRow = {
   repoId: string | null;
   archivedAt: Date | null;
   assigneeAgent: { archivedAt: Date | null } | null;
+  /** The exact AgentRepoAccess row exists at decision time. */
+  hasRepoGrant: boolean;
 };
 
 /**
@@ -107,11 +112,62 @@ export type StartableRow = {
 export const startable = (row: StartableRow, facts: RunFacts, maxSessionsPerTask: number): boolean => {
   if (row.assigneeType !== AssigneeType.AGENT) return false;
   if (!row.assigneeAgentId || !row.repoId) return false;
+  if (!row.hasRepoGrant) return false;
   if (row.assigneeAgent?.archivedAt) return false;
   if (row.archivedAt !== null) return false;
   if (row.status !== TaskStatus.TODO && row.status !== TaskStatus.BACKLOG) return false;
   if (facts.active) return false;
   return facts.total < maxSessionsPerTask;
+};
+
+export type ChainDecisionRow = ChainRow & StartableRow & { maxSessionsPerTask: number };
+export type ChainStartAction = "start" | "recover" | null;
+export type ChainStartDecision = {
+  startable: boolean;
+  startAction: ChainStartAction;
+  currentExecution: boolean;
+  blockingPredecessor: { id: string; name: string } | null;
+};
+
+/** The earliest surviving row that still owns chain progress. Deleted rows are
+ * absent; archived rows remain dependencies until they are DONE. */
+export const firstUnfinishedStep = <T extends Pick<ChainRow, "chainIndex" | "id" | "status">>(rows: T[]): T | null => (
+  [...rows].sort(byChainPosition)
+    .find((item) => item.status !== TaskStatus.DONE) ?? null
+);
+
+/** The first unfinished surviving row before target, or null when the ordered
+ * prefix is complete. This is the predecessor named by the 409 response. */
+export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id" | "name" | "status">>(
+  rows: T[],
+  targetId: string,
+): T | null => {
+  const ordered = [...rows].sort(byChainPosition);
+  const targetIndex = ordered.findIndex((item) => item.id === targetId);
+  if (targetIndex < 0) return null;
+  return ordered.slice(0, targetIndex).find((item) => item.status !== TaskStatus.DONE) ?? null;
+};
+
+/** One dependency decision for the whole chain. Row-local capability remains
+ * `startable`; chain position narrows it to the sole first-unfinished row. */
+export const chainStartDecisions = (
+  rows: ChainDecisionRow[],
+  factsByTask: ReadonlyMap<string, RunFacts>,
+): Map<string, ChainStartDecision> => {
+  const ordered = [...rows].sort((left, right) => byChainIndex(left, right) || left.id.localeCompare(right.id));
+  const first = firstUnfinishedStep(ordered);
+  return new Map(ordered.map((row) => {
+    const facts = factsByTask.get(row.id) ?? { total: 0, active: false };
+    const isCandidate = first?.id === row.id;
+    const allowed = isCandidate && startable(row, facts, row.maxSessionsPerTask);
+    const predecessor = blockingPredecessor(ordered, row.id);
+    return [row.id, {
+      startable: allowed,
+      startAction: allowed ? row.status === TaskStatus.BACKLOG ? "recover" : "start" : null,
+      currentExecution: facts.active,
+      blockingPredecessor: predecessor ? { id: predecessor.id, name: predecessor.name } : null,
+    }];
+  }));
 };
 
 /** One grouped run query → per-task facts. Constant in task count, which is what

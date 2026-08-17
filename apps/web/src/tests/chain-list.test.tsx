@@ -18,7 +18,7 @@ const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep =
   taskId: `t${position}`, position, chainIndex: position - 1, name: `Task ${position}`,
   stepName: `Step ${position}`, status: "TODO", approvalGate: false, assigneeType: "AGENT",
   agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
-  startable: false,
+  startable: false, startAction: null, currentExecution: false,
   ...overrides,
 });
 
@@ -30,13 +30,13 @@ const render = (value: Chain, taskId: string): string => renderToStaticMarkup(
   <ChainList chain={value} taskId={taskId} pending={false} onStart={() => undefined} />,
 );
 
-test("a nine-step chain renders nine rows and exactly one You are here", () => {
+test("a nine-step chain renders nine rows and exactly one Viewed here", () => {
   const steps = Array.from({ length: 9 }, (_, index) => step(index + 1));
   const markup = render(chain(steps), "t4");
   assert.equal([...markup.matchAll(/Step \d+</g)].length, 9);
-  assert.equal([...markup.matchAll(new RegExp(en("chain.here"), "g"))].length, 1);
+  assert.equal([...markup.matchAll(new RegExp(en("chain.viewedHere"), "g"))].length, 1);
   // The marker sits on the open task's row, not the first row.
-  assert.match(markup, new RegExp(`Step 4</a><span[^>]*>${en("chain.here")}`));
+  assert.match(markup, new RegExp(`Step 4</a><span[^>]*>${en("chain.viewedHere")}`));
 });
 
 test("the gate's meaning is spelled out verbatim, once per gated step", () => {
@@ -45,15 +45,20 @@ test("the gate's meaning is spelled out verbatim, once per gated step", () => {
   assert.equal([...markup.matchAll(new RegExp(en(GATE_TITLE_KEY), "g"))].length, 2);
 });
 
-test("a human step is labelled Human and offers no Start now", () => {
+test("a human step uses semantic human presentation and offers no start action", () => {
   const markup = render(chain([step(1, { assigneeType: "HUMAN", agent: null, startable: false })]), "t1");
   assert.match(markup, new RegExp(`>${en("chain.human")}<`));
-  assert.doesNotMatch(markup, new RegExp(en("chain.startNow")));
+  assert.match(markup, /data-assignee-kind="human"/);
+  assert.match(markup, new RegExp(`aria-label="${en("chain.humanAssignee")}"`));
+  assert.doesNotMatch(markup, new RegExp(en("chain.startNext")));
+  assert.doesNotMatch(markup, /rect x="2\.6" y="5\.4"/);
 });
 
-test("Start now appears exactly where the API said it may", () => {
-  const markup = render(chain([step(1, { startable: true }), step(2), step(3)]), "t2");
-  assert.equal([...markup.matchAll(new RegExp(en("chain.startNow"), "g"))].length, 1);
+test("start and recovery copy appear only where the API supplied an action", () => {
+  const startMarkup = render(chain([step(1, { startable: true, startAction: "start" }), step(2), step(3)]), "t2");
+  assert.equal([...startMarkup.matchAll(new RegExp(en("chain.startNext"), "g"))].length, 1);
+  const recoverMarkup = render(chain([step(1, { status: "BACKLOG", startable: true, startAction: "recover" }), step(2)]), "t1");
+  assert.equal([...recoverMarkup.matchAll(new RegExp(en("chain.recoverParked"), "g"))].length, 1);
 });
 
 test("sparse template indices renumber to 1 2 3 and the header still reads n/m", () => {
@@ -66,7 +71,7 @@ test("sparse template indices renumber to 1 2 3 and the header still reads n/m",
   const markup = render(chain(steps), "t2");
   const positions = [...markup.matchAll(/w-\[18px\][^>]*>(\d+)</g)].map((match) => match[1]);
   assert.deepEqual(positions, ["1", "2", "3"]);
-  assert.match(markup, /1\/3/);
+  assert.match(markup, new RegExp(en("chain.completed", { done: 1, total: 3 })));
 });
 
 test("a long chain shows the first fifty rows behind a Show all press", () => {
@@ -88,6 +93,15 @@ test("an archived step is badged, and a Backlog step says why it is idle", () =>
   assert.match(markup, new RegExp(en("chain.parked")));
 });
 
+test("Viewed here and Current execution are independent facts", () => {
+  const separate = render(chain([step(1, { currentExecution: true }), step(2)]), "t2");
+  assert.match(separate, new RegExp(`Step 1</a><span[^>]*>${en("chain.currentExecution")}`));
+  assert.match(separate, new RegExp(`Step 2</a><span[^>]*>${en("chain.viewedHere")}`));
+  const same = render(chain([step(1, { currentExecution: true })]), "t1");
+  assert.equal([...same.matchAll(new RegExp(en("chain.viewedHere"), "g"))].length, 1);
+  assert.equal([...same.matchAll(new RegExp(en("chain.currentExecution"), "g"))].length, 1);
+});
+
 /* ---------------------------------------------------------------- E14 wiring */
 
 // These two are wiring assertions over the page's source, and they are labelled
@@ -104,5 +118,5 @@ test("the task page routes its error branch through fatal (E14 wiring)", () => {
 });
 
 test("the chain card is rendered only for a task that is in a chain (wiring)", () => {
-  assert.match(detailSource, /chain\.data\.chainId !== null/);
+  assert.match(detailSource, /task\.chainId === null/);
 });

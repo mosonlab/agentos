@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import type { Chain, ChainStep } from "../lib/types";
-import { IconLock } from "./icons";
+import { IconLock, IconUser } from "./icons";
 import { COUNT, HINT, ROW, AgentChip, Card, Pill, TaskPill } from "./ui";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
@@ -34,20 +34,21 @@ export const ChainRow = ({ step, here, pending, onStart }: {
       <span className={STEP_POSITION}>{step.position}</span>
       <span className="min-w-0 flex-1">
         <Link to={`/tasks/${step.taskId}`}>{step.stepName}</Link>
-        {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.here")}</span> : null}
+        {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.viewedHere")}</span> : null}
+        {step.currentExecution ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.currentExecution")}</span> : null}
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
       </span>
       {/* `AgentChip` renders its Unassigned state when it has no label at all,
           which is exactly the case for an agent step with no agent. */}
       {step.assigneeType === "HUMAN"
-        ? <AgentChip agent={null} name={t("chain.human")} />
+        ? <span data-assignee-kind="human" aria-label={t("chain.humanAssignee")} className="inline-flex items-center gap-[6px] rounded-full border border-border bg-secondary px-[9px] py-[2px] text-[11.5px] leading-[19px] text-secondary-foreground"><IconUser />{t("chain.human")}</span>
         : <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />}
       {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
       <TaskPill status={step.status} />
       {step.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
-      {step.startable ? (
+      {step.startAction ? (
         <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => onStart(step)}>
-          {t("chain.startNow")}
+          {t(step.startAction === "recover" ? "chain.recoverParked" : "chain.startNext")}
         </Button>
       ) : null}
     </div>
@@ -71,7 +72,7 @@ export const ChainList = ({ chain, taskId, pending, onStart }: {
   const t = useT();
   const shown = all ? chain.steps : chain.steps.slice(0, CHAIN_PAGE);
   return (
-    <Card title={t("chain.title")} extra={<span className={COUNT}>{chain.done}/{chain.total}</span>} flush>
+    <Card title={t("chain.title")} extra={<span className={COUNT}>{t("chain.completed", { done: chain.done, total: chain.total })}</span>} flush>
       {shown.map((step) => (
         <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} onStart={onStart} />
       ))}

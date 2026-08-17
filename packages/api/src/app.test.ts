@@ -120,6 +120,7 @@ test("task status patch does not apply create defaults to other fields", async (
         findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null }),
         update: async ({ data }: { data: unknown }) => { updateData = data; return { id: "task-1", status: "DONE" }; },
       },
+      run: { count: async () => 0 },
       inboxMessage: { updateMany: async () => ({ count: 0 }), count: async () => 0 },
       taskActivity: { create: async () => ({ id: "activity-1" }) },
     };
@@ -158,13 +159,15 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
       repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
-    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, followUpTaskId: null, assigneeAgentId: "agent-1", repoId: "repo-1" };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, followUpTaskId: null, assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
     const tx = {
       // The status write takes the Task-row mutex before advancing the chain.
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
       task: {
         update: async () => ({ ...before, status: "DONE" }),
         findFirst: async () => successor,
+        findMany: async () => [before],
+        findUnique: async ({ where }: { where: { id: string } }) => where.id === before.id ? before : successor,
         updateMany: async () => ({ count: 1 }),
         findUniqueOrThrow: async () => successor,
       },
@@ -175,7 +178,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       taskActivity: { create: async () => ({}) },
       // findFirst answers resolveRunBranches' publication query: nothing in this
       // chain has pushed the shared branch, so the successor bases on the default.
-      run: { create: async () => ({ id: "run-1" }), findFirst: async () => null },
+      run: { create: async () => ({ id: "run-1" }), findFirst: async () => null, count: async () => 0 },
     };
     const database = {
       task: { findUniqueOrThrow: async () => before },
@@ -204,9 +207,12 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
       $queryRaw: async () => [{ id: before.id }],
       task: {
         findUniqueOrThrow: async () => before,
+        findUnique: async () => before,
+        findMany: async () => [before],
         update: async () => ({ ...before, status: "DONE" }),
         findFirst: async () => null,
       },
+      run: { count: async () => 0 },
       inboxMessage: {
         updateMany: async ({ where }: { where: unknown }) => { closedWhere = where; return { count: 1 }; },
         count: async () => 1,
@@ -913,6 +919,7 @@ test("successful completion commits output and parks an archived chain successor
         session: { id: "session-1" },
       };
       const tx = {
+        $queryRaw: async () => [{ id: "locked" }],
         run: {
           findFirst: async () => run,
           updateMany: async () => { closed = true; return { count: 1 }; },

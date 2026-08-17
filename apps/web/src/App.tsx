@@ -23,7 +23,7 @@ import { TaskDetailPage } from "./pages/TaskDetail";
 
 export const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) => ReactNode }> = [
   { pattern: "/tasks", render: () => <TasksPage /> },
-  { pattern: "/tasks/:taskId", render: (params) => <TaskDetailPage taskId={params.taskId ?? ""} /> },
+  { pattern: "/tasks/:taskId", render: (params) => <TaskDetailPage key={params.taskId ?? ""} taskId={params.taskId ?? ""} /> },
   // Siblings of /tasks, not children: matchRoute compares segment counts and
   // /tasks/:taskId already owns the second segment.
   { pattern: "/automations", render: () => <AutomationsPage /> },

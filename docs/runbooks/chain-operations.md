@@ -5,6 +5,17 @@
 
 来源：2026-08-16 通宵值守，四个批次合并、五次故障救火的实战沉淀。
 
+## TC-UX v1.0：普通启动与恢复
+
+- 普通链严格串行：只有最早的未完成 AGENT 步骤可能显示动作；前面任何 surviving
+  步骤处于 TODO、BACKLOG、DOING 或 REVIEW，后继都不可启动。
+- 下一步为 TODO 时动作是 **Start next step**；停在 BACKLOG 时是 **Recover parked
+  step**。v1 没有 force bypass。
+- HUMAN 与审批闸门由 Inbox 决策；普通 Task PATCH/UI 不得改写已派发链的
+  `approvalGate`，也不得越过前置步骤或在 active Run 存在时标 DONE。
+- 只用 scratch fixture 和 dedicated non-public test database 验证。禁止拿活链上的未来步骤按钮、
+  CP-A 链或生产 control plane 当验收探针。
+
 ---
 
 ## 合并流程
@@ -18,7 +29,7 @@
 4. **逐条 `git show` 核对 must-fix 是真代码**，不采信任务输出里"已应用"的声明。
 5. `gh pr merge <N> --merge` → 关掉同链其余 PR → ⑨ 标 DONE。
 6. **收尾必做**：`POST /inbox/messages/:id/decision {"decision":"approve","requestId":"..."}` 关掉 ⑨ 的闸门消息。
-   PATCH 标 DONE **不会**关它（平台缺陷，已挂账）。**URL 结尾是 `/decision`，漏了返回 `{"error":"Not found"}`。**
+   Inbox 是审批闸门的授权通道；不要用普通 PATCH 代替。**URL 结尾是 `/decision`，漏了返回 `{"error":"Not found"}`。**
 
 ### 合并前置条件（不满足就停手，留记录给人）
 
@@ -141,11 +152,11 @@ Leo 已确认：这类瞬时网络错误应自动重试，而不是直接把任�
 
 ## 平台机制备忘（踩过的坑）
 
-- **`approvalGate` 不能当汇合点。** 它拦的是"跑完之后往下走"，不拦"开跑"。
-  想要真汇合只能串行建步。
+- **`approvalGate` 不是并行汇合点。** TC-UX v1.0 的普通链按 surviving row 严格串行；
+  REVIEW/HUMAN 会阻塞全部后继，闸门决策仍只走 Inbox。
 - `activateChainSuccessor`（`packages/db/src/workflow.ts`）：非 AGENT 后继一律进 REVIEW + `gateQuestion`，
   与 `approvalGate` 无关；agent 步骤才看 `approvalGate`。
-- 开闸看步骤类型（`workflow.ts:254`），关闸看 `approvalGate`（`app.ts:1335`）——**两套判据，所以闸门消息关不掉**。
+- 开闸看步骤类型；关闸由 Inbox 的 gate-card authority 决定。普通 PATCH/UI 不再提供绕过这套 authority 的链控制。
 - 链的分支拓扑：兄弟分支挂在 spec 提交上，不是栈；每步一个 PR。
 
 ---

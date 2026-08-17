@@ -5,6 +5,7 @@ import {
   chainKey,
   chainProgress,
   chainProgressByChain,
+  chainStartDecisions,
   positions,
   runFactsByTask,
   startable,
@@ -113,6 +114,7 @@ const startableRow = (overrides: Partial<StartableRow> = {}): StartableRow => ({
   repoId: "repo-1",
   archivedAt: null,
   assigneeAgent: { archivedAt: null },
+  hasRepoGrant: true,
   ...overrides,
 });
 
@@ -134,6 +136,10 @@ test("human steps, done steps, and archived steps are not startable", () => {
 test("a step with no agent or no repo is not startable", () => {
   assert.equal(startable(startableRow({ assigneeAgentId: null }), { total: 0, active: false }, 3), false);
   assert.equal(startable(startableRow({ repoId: null }), { total: 0, active: false }, 3), false);
+});
+
+test("a missing repo grant blocks starting", () => {
+  assert.equal(startable(startableRow({ hasRepoGrant: false }), { total: 0, active: false }, 3), false);
 });
 
 test("an archived assignee blocks starting", () => {
@@ -161,4 +167,51 @@ test("runFactsByTask sums a grouped run query into totals and an active flag", (
   assert.deepEqual(facts.get("a"), { total: 3, active: true });
   assert.deepEqual(facts.get("b"), { total: 1, active: false });
   assert.equal(facts.get("c"), undefined);
+});
+
+const decisionRow = (index: number, overrides: Partial<ChainRow & StartableRow & { maxSessionsPerTask: number }> = {}) => ({
+  ...row({ id: `step-${index}`, chainIndex: index }),
+  ...startableRow(),
+  maxSessionsPerTask: 3,
+  ...overrides,
+});
+
+test("chain dependency exposes only the first unfinished TODO or BACKLOG action", () => {
+  const prefix = [1, 2, 3].map((index) => decisionRow(index, { status: "DONE" }));
+  const doing = chainStartDecisions([...prefix, decisionRow(4, { status: "DOING" }), decisionRow(5), decisionRow(6)], new Map());
+  assert.deepEqual([...doing.values()].map((item) => item.startAction), [null, null, null, null, null, null]);
+  assert.equal(doing.get("step-5")!.blockingPredecessor?.name, "Task step-4");
+
+  const todo = chainStartDecisions([...prefix, decisionRow(4), decisionRow(5)], new Map());
+  assert.equal(todo.get("step-4")!.startAction, "start");
+  assert.equal(todo.get("step-5")!.startAction, null);
+
+  const parked = chainStartDecisions([...prefix, decisionRow(4, { status: "BACKLOG" }), decisionRow(5)], new Map());
+  assert.equal(parked.get("step-4")!.startAction, "recover");
+});
+
+test("REVIEW, HUMAN, archive, grant, budget, and active-run facts fail closed", () => {
+  for (const first of [
+    decisionRow(1, { status: "REVIEW" }),
+    decisionRow(1, { assigneeType: "HUMAN", assigneeAgentId: null }),
+    decisionRow(1, { archivedAt: new Date() }),
+    decisionRow(1, { hasRepoGrant: false }),
+  ]) {
+    assert.equal(chainStartDecisions([first, decisionRow(2)], new Map()).get("step-1")!.startAction, null);
+  }
+  assert.equal(chainStartDecisions([decisionRow(1)], new Map([["step-1", { total: 3, active: false }]])).get("step-1")!.startAction, null);
+  const active = chainStartDecisions([decisionRow(1)], new Map([["step-1", { total: 1, active: true }]])).get("step-1")!;
+  assert.equal(active.startAction, null);
+  assert.equal(active.currentExecution, true);
+});
+
+test("deleted predecessors disappear while archived unfinished predecessors still block", () => {
+  const deletedGap = chainStartDecisions([decisionRow(1, { status: "DONE" }), decisionRow(3)], new Map());
+  assert.equal(deletedGap.get("step-3")!.startAction, "start");
+  const archived = chainStartDecisions([
+    decisionRow(1, { status: "DONE" }),
+    decisionRow(2, { status: "BACKLOG", archivedAt: new Date() }),
+    decisionRow(3),
+  ], new Map());
+  assert.equal(archived.get("step-3")!.blockingPredecessor?.id, "step-2");
 });
