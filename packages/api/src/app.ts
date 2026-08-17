@@ -2739,7 +2739,10 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const result = await db.$transaction(async (tx) => {
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
-        include: { task: { include: { templateStep: true } }, session: true },
+        include: {
+          task: { include: { templateStep: true, repo: { select: { defaultBranch: true } } } },
+          session: true,
+        },
       });
       if (!run?.session) return null;
       const succeeded = completionSucceeded({
@@ -2805,6 +2808,21 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       let retryCreated = false;
       if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
+        // The fifth run-creating path. It copies `targetBranch` and has never
+        // carried `branch` forward, so before this change an automatic retry of
+        // a chain step silently dropped off the chain branch onto
+        // `agentos/<taskId>/run-<n>` (workspace.ts's fallback) — the same defect
+        // this batch exists to fix, one route further along. Only chain steps
+        // are rerouted; template and non-chain retries keep today's fields
+        // exactly, including carrying no `branch` at all (unlike the operator
+        // retry route — that asymmetry is preserved, not tidied).
+        //
+        // This runs *after* the updateMany that writes the completing run's
+        // `pushedBranch`, so a chain step whose run-1 published the branch and
+        // then failed gives its own retry correct evidence in this transaction.
+        const branches = run.task.chainId && !run.task.templateId && run.task.repo
+          ? await resolveRunBranches(tx, { ...run.task, repo: run.task.repo }, null)
+          : { branch: null, targetBranch: run.targetBranch };
         await tx.run.create({
           data: {
             projectId: run.projectId,
@@ -2816,7 +2834,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             dedupeKey: makeDedupeKey(run.task.id, run.runNumber + 1),
             runner: run.runner,
             model: run.model,
-            targetBranch: run.targetBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: run.task.opensPullRequest,
             promptHash: run.promptHash,
             maxDurationMin: run.maxDurationMin,
             stallTimeoutMin: run.stallTimeoutMin,
