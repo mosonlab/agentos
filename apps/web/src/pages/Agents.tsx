@@ -235,7 +235,15 @@ const BindingToggle = ({ on, label, add, remove, onDone }: {
       onDone();
     });
   };
-  return <div>{error === null ? null : <ErrorNotice message={error} />}<Toggle on={on} onChange={change} disabled={pending} label={label} /></div>;
+  /* The wrapper is a `ROW`, not a bare block, for the same reason the other four
+   * `Toggle` call sites are: inside a block container the switch is an inline-flex
+   * box whose baseline is now its thumb's bottom margin edge — 3px above the root's
+   * bottom border edge, because of the `border-[3px]` that reproduces the legacy
+   * knob inset (ui.tsx:280). Baseline alignment then drops the whole switch by
+   * exactly 3.00 px, which is the drift the batch-1 screenshot re-shoot measured on
+   * `agents-toggle-*`. As a flex item the switch is blockified and no baseline
+   * applies. The 3px border itself is correct and stays. */
+  return <div className={ROW}>{error === null ? null : <ErrorNotice message={error} />}<Toggle on={on} onChange={change} disabled={pending} label={label} /></div>;
 };
 
 const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant: FilesystemGrant; onDone: () => void }): ReactNode => {
