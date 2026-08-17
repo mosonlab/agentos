@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import { AssigneeType, enqueueTaskRun, Prisma, TaskStatus, type PrismaClient } from "@agentos/db";
+import {
+  AssigneeType,
+  enqueueTaskRun,
+  Prisma,
+  type PrismaClient,
+  TaskSource,
+  TaskStatus,
+  type TriggerFireSource,
+} from "@agentos/db";
 
 export type InstantiateTemplateInput = {
   repoId: string;
@@ -27,7 +35,15 @@ export const instantiateTemplate = async (
   projectId: string,
   templateId: string,
   input: InstantiateTemplateInput,
-  options: { actorType?: string; activityMetadata?: Record<string, unknown> } = {},
+  options: {
+    actorType?: string;
+    activityMetadata?: Record<string, unknown>;
+    /** Provenance stamped on every task of the chain. */
+    source?: TaskSource;
+    /** When set, one ledger row is written inside the same transaction, so a
+     *  fire that never produced a chain never produced a fire either. */
+    fire?: { source: TriggerFireSource; dedupeKey?: string | null };
+  } = {},
 ) => {
   const [template, repo] = await Promise.all([
     db.taskTemplate.findFirst({
@@ -81,6 +97,7 @@ export const instantiateTemplate = async (
             chainId,
             chainIndex: step.stepIndex,
             status: TaskStatus.TODO,
+            source: options.source ?? TaskSource.MANUAL,
             targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
           } }));
         }
@@ -97,7 +114,15 @@ export const instantiateTemplate = async (
           body: index === 0 ? "Template instantiated; first step queued" : "Template instantiated; waiting for predecessor",
           metadata: { chainId, templateId: template.id, ...options.activityMetadata },
         })) });
-        return { chainId, branchName, tasks };
+        const fire = options.fire
+          ? await tx.triggerFire.create({ data: {
+            templateId: template.id,
+            chainId,
+            source: options.fire.source,
+            dedupeKey: options.fire.dedupeKey ?? null,
+          } })
+          : null;
+        return { chainId, branchName, tasks, fireId: fire?.id ?? null };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error: unknown) {
       if (!retryableTransactionConflict(error) || attempt >= 5) throw error;

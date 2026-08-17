@@ -25,6 +25,7 @@
     "db:seed": "npm run db:seed -w @agentos/db",
     "db:validate": "npm run db:validate -w @agentos/db",
     "db:backfill-session-usage": "npm run db:backfill-session-usage -w @agentos/db",
+    "db:backfill-task-source": "npm run db:backfill-task-source -w @agentos/db",
     "postinstall": "npm run db:generate"
   },
   "devDependencies": {

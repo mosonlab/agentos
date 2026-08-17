@@ -87,3 +87,9 @@ export const IconFolder = (): ReactNode => (
 export const IconArchive = (): ReactNode => (
   <Svg size={14}><rect x="1.9" y="2.6" width="12.2" height="3" rx="1" /><path d="M3.2 5.6v7a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1v-7M6.4 8.4h3.2" /></Svg>
 );
+export const IconLock = (): ReactNode => (
+  <Svg size={13}><rect x="3.4" y="7" width="9.2" height="6.4" rx="1.2" /><path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7" /></Svg>
+);
+export const IconBolt = ({ size = 16 }: { size?: number } = {}): ReactNode => (
+  <Svg size={size}><path d="M8.9 1.8 3.4 9.1h3.9l-.8 5.1 5.5-7.3H8.1z" /></Svg>
+);

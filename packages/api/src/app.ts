@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+
 import {
+  ACTIVE_RUN_STATUSES,
   AssigneeType,
   activateChainSuccessor,
   advanceTemplateTask,
@@ -7,7 +10,10 @@ import {
   deriveRunConfig,
   FailureClass,
   GoalStatus,
+  enqueueTaskRun,
+  InboxStatus,
   isArchivedAssigneeError,
+  isArchivedTaskError,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -22,7 +28,9 @@ import {
   SkillKind,
   SessionEventSource,
   SessionExecutionStatus,
+  TaskSource,
   TaskStatus,
+  TriggerFireSource,
   gateQuestion,
   prisma,
 } from "@agentos/db";
@@ -33,6 +41,15 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
+import {
+  chainKey,
+  chainProgress,
+  chainProgressByChain,
+  positions,
+  runFactsByTask,
+  startable,
+  stepName,
+} from "./chain.js";
 import {
   completionSucceeded,
   externalFailure,
@@ -48,8 +65,8 @@ import { createArchivedRunNoticeScheduler, defaultWorkspaceRoot, noteArchivedQue
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { instantiateTemplate } from "./templates.js";
-import { validateSchedule } from "./scheduler.js";
-import { authenticateWebhook, resolvePayloadVariables } from "./hooks.js";
+import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
+import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
 import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
 import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
@@ -319,6 +336,11 @@ const instantiateTemplateInput = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
 });
+// `Fire now` merges over the template's own defaults, so an all-defaulted
+// trigger fires from an empty body.
+const manualFireInput = z.object({
+  variables: z.record(z.string(), z.string()).optional(),
+}).default({});
 const webhookPayloadMapping = z.object({
   map: z.record(z.string(), z.string().trim().min(1)).optional(),
   defaults: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
@@ -327,6 +349,9 @@ const webhookConfigPatch = z.object({
   webhookSecretId: id.nullable().optional(),
   webhookRepoId: id.nullable().optional(),
   webhookPayloadMapping: webhookPayloadMapping.nullable().optional(),
+  // 0 and null both mean "no replay window"; the write side normalises 0 to
+  // null so the read side has exactly one representation of disabled.
+  webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
@@ -419,6 +444,78 @@ const isPublic = (path: string, method: string): boolean =>
 
 const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
 
+type LockedTask = { id: string; status: TaskStatus; archivedAt: Date | null };
+
+/**
+ * The exclusion protocol every writer that can give a task a run shares.
+ *
+ * Start, retry, archive, archive-done and the AT fire all answer "may this task
+ * gain a run right now?" in different transactions. Reading `runs` and then
+ * writing is not atomic under ReadCommitted: PostgreSQL re-checks a predicate on
+ * the *locked row* after a blocking write commits, but a subquery over another
+ * table is re-evaluated against the statement's original snapshot. So the Task
+ * row is the mutex — every writer takes it before it reads anything else.
+ *
+ * `fireCronTask` is already compliant: its claim is a single-statement CAS on
+ * the Task row, whose predicate does get re-checked.
+ */
+const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<LockedTask | null> => {
+  const [locked] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${taskId} FOR UPDATE
+  `;
+  if (!locked) return null;
+  // Read the typed row only after the lock is held. $queryRaw hands back raw
+  // PostgreSQL enum labels ('backlog'), not Prisma's member names, so comparing
+  // its status against TaskStatus.BACKLOG silently never matches — and the lock
+  // is exactly what makes this second read consistent for the rest of the
+  // transaction.
+  return tx.task.findUniqueOrThrow({
+    where: { id: taskId },
+    select: { id: true, status: true, archivedAt: true },
+  });
+};
+
+/** Locks a whole candidate set in one statement. `ORDER BY "id"` is not
+ *  decoration: it is what stops two concurrent Archive All presses from
+ *  deadlocking against each other.
+ *
+ *  The scope predicates are re-stated here rather than trusted from the
+ *  unlocked selection above: `FOR UPDATE` re-evaluates its own `WHERE` against
+ *  the row version it waited for, so a task dragged back out of `Done` between
+ *  selection and lock drops out of the result instead of being archived out
+ *  from under the operator who moved it. */
+const lockDoneTasks = async (
+  tx: Prisma.TransactionClient,
+  projectId: string,
+  taskIds: string[],
+): Promise<string[]> => {
+  if (taskIds.length === 0) return [];
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task"
+    WHERE "id" = ANY(${taskIds})
+      AND "archivedAt" IS NULL
+      AND "projectId" = ${projectId}
+      AND "status" = 'done'::"TaskStatus"
+    ORDER BY "id" FOR UPDATE
+  `;
+  return rows.map((row) => row.id);
+};
+
+const hasActiveRun = async (tx: Prisma.TransactionClient, taskId: string): Promise<boolean> => (
+  await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } })
+) > 0;
+
+/** `{archived, skipped}` from a candidate set and the ids that turned out busy.
+ *  Extracted so the partitioning is unit-testable without a database. */
+export const partitionArchivable = (
+  candidateIds: string[],
+  busyIds: string[],
+): { archive: string[]; skipped: number } => {
+  const busy = new Set(busyIds);
+  const archive = candidateIds.filter((taskId) => !busy.has(taskId));
+  return { archive, skipped: candidateIds.length - archive.length };
+};
+
 const secretPublicSelect = {
   id: true,
   name: true,
@@ -441,7 +538,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
 
-  app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type", "X-Fencing-Token", "X-AgentOS-Webhook-Secret", "X-AgentOS-Delivery-Id"] }));
   app.use("*", async (context, next) => {
     if (isPublic(context.req.path, context.req.method)) {
       context.set("principal", { kind: "public" });
@@ -477,14 +574,30 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       context.req.header("X-AgentOS-Webhook-Secret"),
     );
     if (!template) return context.json({ error: "Unauthorized" }, 401);
+    // The body is read exactly once, as text: the replay key hashes the raw
+    // bytes, and a Request body cannot be consumed twice.
+    const raw = await context.req.text();
     let payload: unknown;
     try {
-      payload = await context.req.json();
+      payload = JSON.parse(raw);
     } catch {
       return context.json({ error: "Invalid JSON payload" }, 400);
     }
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return context.json({ error: "Webhook payload must be an object" }, 400);
+    }
+    const window = template.webhookReplayWindowSec ?? 0;
+    const dedupeKey = window > 0
+      ? context.req.header("X-AgentOS-Delivery-Id") ?? createHash("sha256").update(raw).digest("hex")
+      : null;
+    if (dedupeKey) {
+      const seen = await db.triggerFire.findFirst({
+        where: { templateId: template.id, dedupeKey, createdAt: { gt: new Date(Date.now() - window * 1000) } },
+        orderBy: { createdAt: "desc" },
+        select: { chainId: true },
+      });
+      // A redelivery is not an error: the sender did what it was told to do.
+      if (seen) return context.json({ duplicate: true, chainId: seen.chainId }, 200);
     }
     const resolved = resolvePayloadVariables(template, payload as Record<string, unknown>);
     if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
@@ -494,6 +607,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       }, {
         actorType: "webhook",
         activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
+        source: TaskSource.WEBHOOK,
+        fire: { source: TriggerFireSource.WEBHOOK, dedupeKey },
       });
       return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
     } catch (error: unknown) {
@@ -1188,6 +1303,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
         ...(body.webhookPayloadMapping !== undefined
           ? { webhookPayloadMapping: body.webhookPayloadMapping === null ? Prisma.JsonNull : body.webhookPayloadMapping }
           : {}),
+        ...(body.webhookReplayWindowSec !== undefined
+          ? { webhookReplayWindowSec: body.webhookReplayWindowSec ? body.webhookReplayWindowSec : null }
+          : {}),
       },
     }));
   });
@@ -1207,16 +1325,328 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     }
   });
 
+  // --- triggers: webhook-configured templates, their ledger, and manual fire --
+  //
+  // Every select below is explicit. `include: { webhookSecret: true }` would put
+  // the ciphertext on the wire, so the secret relation is only ever read through
+  // a field list that names `disabledAt` and `name` and nothing else.
+  const triggerSelect = {
+    id: true,
+    name: true,
+    description: true,
+    projectId: true,
+    webhookRepoId: true,
+    webhookPausedAt: true,
+    webhookReplayWindowSec: true,
+    variables: true,
+    webhookPayloadMapping: true,
+    webhookRepo: { select: { id: true, name: true } },
+    webhookSecret: { select: { name: true, disabledAt: true } },
+    _count: { select: { steps: true } },
+  } as const;
+
+  /** One grouped query for every listed trigger — never one per row (E5). */
+  const fireStats = async (templateIds: string[]): Promise<Map<string, { fireCount: number; lastFiredAt: Date | null }>> => {
+    if (templateIds.length === 0) return new Map();
+    const grouped = await db.triggerFire.groupBy({
+      by: ["templateId"],
+      where: { templateId: { in: templateIds } },
+      _count: { _all: true },
+      _max: { createdAt: true },
+    });
+    return new Map(grouped.map((row) => [row.templateId, {
+      fireCount: row._count._all,
+      lastFiredAt: row._max.createdAt ?? null,
+    }]));
+  };
+
+  const cannotFireReason = (trigger: { webhookRepoId: string | null; _count: { steps: number } }): string | null => {
+    if (!trigger.webhookRepoId) return "This trigger has no repository configured";
+    if (trigger._count.steps === 0) return "This trigger's template has no steps";
+    return null;
+  };
+
+  const payloadMapping = (raw: unknown): { map: Record<string, string>; defaults: Record<string, unknown> } => {
+    const value = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as { map?: unknown; defaults?: unknown } : {};
+    return {
+      map: value.map && typeof value.map === "object" && !Array.isArray(value.map) ? value.map as Record<string, string> : {},
+      defaults: value.defaults && typeof value.defaults === "object" && !Array.isArray(value.defaults) ? value.defaults as Record<string, unknown> : {},
+    };
+  };
+
+  app.get("/projects/:projectId/triggers", async (context) => {
+    const triggers = await db.taskTemplate.findMany({
+      // A trigger is defined by its secret, not its repo: a template with a
+      // secret and no repo is un-fireable, and hiding it is exactly the wrong
+      // answer — the operator needs to see the one that cannot fire.
+      where: { projectId: id.parse(context.req.param("projectId")), webhookSecretId: { not: null } },
+      select: triggerSelect,
+      orderBy: { createdAt: "asc" },
+    });
+    const stats = await fireStats(triggers.map((trigger) => trigger.id));
+    return context.json(triggers.map((trigger) => ({
+      id: trigger.id,
+      name: trigger.name,
+      description: trigger.description,
+      repo: trigger.webhookRepo,
+      stepCount: trigger._count.steps,
+      paused: trigger.webhookPausedAt !== null,
+      secretDisabled: trigger.webhookSecret?.disabledAt != null,
+      lastFiredAt: stats.get(trigger.id)?.lastFiredAt ?? null,
+      fireCount: stats.get(trigger.id)?.fireCount ?? 0,
+    })));
+  });
+
+  app.get("/triggers/:templateId", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const trigger = await db.taskTemplate.findFirst({ where: { id: templateId, webhookSecretId: { not: null } }, select: triggerSelect });
+    if (!trigger) return context.json({ error: "Trigger not found" }, 404);
+    const stats = (await fireStats([trigger.id])).get(trigger.id);
+    const mapping = payloadMapping(trigger.webhookPayloadMapping);
+    const reason = cannotFireReason(trigger);
+    return context.json({
+      id: trigger.id,
+      name: trigger.name,
+      description: trigger.description,
+      projectId: trigger.projectId,
+      endpointPath: `/hooks/templates/${trigger.id}`,
+      secretName: trigger.webhookSecret?.name ?? null,
+      secretDisabled: trigger.webhookSecret?.disabledAt != null,
+      repo: trigger.webhookRepo,
+      variables: trigger.variables,
+      mapping: mapping.map,
+      defaults: mapping.defaults,
+      replayWindowSec: trigger.webhookReplayWindowSec,
+      paused: trigger.webhookPausedAt !== null,
+      stepCount: trigger._count.steps,
+      fireCount: stats?.fireCount ?? 0,
+      lastFiredAt: stats?.lastFiredAt ?? null,
+      canFire: reason === null,
+      cannotFireReason: reason,
+    });
+  });
+
+  app.get("/triggers/:templateId/fires", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const take = Math.min(Math.max(Number(context.req.query("take") ?? 20) || 20, 1), 100);
+    const template = await db.taskTemplate.findUnique({ where: { id: templateId }, select: { projectId: true } });
+    if (!template) return context.json({ error: "Template not found" }, 404);
+    const fires = await db.triggerFire.findMany({
+      where: { templateId },
+      orderBy: { createdAt: "desc" },
+      take,
+      select: { id: true, createdAt: true, source: true, chainId: true },
+    });
+    const chainIds = [...new Set(fires.map((fire) => fire.chainId).filter((chainId): chainId is string => chainId !== null))];
+    // One query for every referenced chain, then the shared assembler — a fire
+    // whose chain has since been deleted keeps its row and reports nothing.
+    // Scoped to the trigger's own project because `chainId` is unique per
+    // project only by convention: without this predicate a colliding chainId in
+    // another project supplies this trigger's `firstTask` and progress.
+    const rows = chainIds.length === 0 ? [] : await db.task.findMany({
+      where: { chainId: { in: chainIds }, projectId: template.projectId },
+      select: { id: true, projectId: true, chainId: true, chainIndex: true, name: true, status: true, archivedAt: true, templateStep: { select: { name: true } } },
+    });
+    const progress = chainProgressByChain(rows);
+    // Keyed by `chainKey`, not `chainId`, for the same reason — the query above
+    // makes the two equivalent today, and this keeps them equivalent if it changes.
+    const firstByChain = new Map<string, { id: string; name: string }>();
+    for (const row of [...rows].sort((left, right) => (left.chainIndex ?? 0) - (right.chainIndex ?? 0))) {
+      if (!row.chainId) continue;
+      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+      if (!firstByChain.has(key)) firstByChain.set(key, { id: row.id, name: row.name });
+    }
+    const keyOf = (chainId: string) => chainKey({ projectId: template.projectId, chainId });
+    return context.json(fires.map((fire) => ({
+      id: fire.id,
+      createdAt: fire.createdAt,
+      source: fire.source,
+      chainId: fire.chainId,
+      firstTask: fire.chainId ? firstByChain.get(keyOf(fire.chainId)) ?? null : null,
+      progress: fire.chainId ? progress.get(keyOf(fire.chainId)) ?? null : null,
+    })));
+  });
+
+  const setTriggerPaused = async (context: Context, paused: boolean) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const trigger = await db.taskTemplate.findFirst({ where: { id: templateId, webhookSecretId: { not: null } }, select: { id: true } });
+    if (!trigger) return context.json({ error: "Trigger not found" }, 404);
+    await db.taskTemplate.update({ where: { id: templateId }, data: { webhookPausedAt: paused ? new Date() : null } });
+    return context.json({ paused });
+  };
+  app.post("/triggers/:templateId/pause", async (context) => setTriggerPaused(context, true));
+  app.post("/triggers/:templateId/enable", async (context) => setTriggerPaused(context, false));
+
+  app.post("/task-templates/:templateId/fire", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    // `Fire now` on a fully-defaulted trigger sends no body at all, and
+    // `request.json()` throws on an empty one — hence the hand-rolled parse
+    // instead of `readJson`. It still has to answer a malformed body the way
+    // every other route does: a client error is a 400, not a 500.
+    const raw = await context.req.text();
+    let parsed: unknown;
+    try {
+      parsed = raw.trim() === "" ? {} : JSON.parse(raw);
+    } catch {
+      return context.json({ error: "Invalid JSON payload" }, 400);
+    }
+    const body = manualFireInput.parse(parsed);
+    const trigger = await db.taskTemplate.findUnique({ where: { id: templateId }, select: triggerSelect });
+    if (!trigger) return context.json({ error: "Template not found" }, 404);
+    // The repository is the template's own webhook repo — the same one the hook
+    // passes — and it is nullable, so this check comes before variables. It is
+    // also `canFire: false` in the detail route, so the button is already
+    // disabled with the reason shown; this 400 is for direct API callers.
+    const reason = cannotFireReason(trigger);
+    if (reason && !trigger.webhookRepoId) return context.json({ error: reason }, 400);
+    const mapping = payloadMapping(trigger.webhookPayloadMapping);
+    const variables: Record<string, string> = {};
+    const unresolved: string[] = [];
+    for (const name of trigger.variables) {
+      const supplied = body.variables?.[name];
+      const fallback = mapping.defaults[name];
+      // Same `usableDefault` the webhook path uses, so an empty-string default
+      // does not resolve here while the UI badges the variable `required`.
+      const value = supplied !== undefined ? supplied
+        : usableDefault(fallback) ? String(fallback)
+        : undefined;
+      if (value === undefined) unresolved.push(name); else variables[name] = value;
+    }
+    // The names go in the prose, not only in `unresolved`: the web client's
+    // parseError keeps the `error` string and discards every sibling field, so
+    // prose is the only form the operator ever sees.
+    if (unresolved.length > 0) {
+      return context.json({ error: `Unresolved template variables: ${unresolved.join(", ")}`, unresolved }, 400);
+    }
+    try {
+      const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
+        repoId: trigger.webhookRepoId!, variables,
+      }, {
+        actorType: "operator",
+        activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
+        source: TaskSource.MANUAL,
+        fire: { source: TriggerFireSource.MANUAL },
+      });
+      return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
+    } catch (error: unknown) {
+      if (error instanceof Error && /(not found|has no|is archived|Missing template|Unknown template|must be agent)/i.test(error.message)) {
+        return context.json({ error: error.message }, 400);
+      }
+      throw error;
+    }
+  });
+
   app.get("/tasks", async (context) => {
     const projectId = context.req.query("projectId");
-    return context.json(await db.task.findMany({
-      ...(projectId ? { where: { projectId } } : {}),
+    const archived = context.req.query("archived") ?? "false";
+    if (archived !== "false" && archived !== "true" && archived !== "all") {
+      return context.json({ error: "archived must be false, true, or all" }, 400);
+    }
+    // Archived tasks are finished work; a board and a per-project count that
+    // keep growing after Archive All are the bug, not the fix. `all` is the
+    // escape hatch for anyone who needs the old, archived-inclusive numbers.
+    const archivedFilter = archived === "false" ? { archivedAt: null }
+      : archived === "true" ? { archivedAt: { not: null } }
+      : {};
+    const tasks = await db.task.findMany({
+      where: { ...(projectId ? { projectId } : {}), ...archivedFilter },
       include: {
         assigneeAgent: true,
         repo: true,
+        templateStep: { select: { name: true } },
         runs: { orderBy: { runNumber: "desc" }, take: 1, include: { session: true } },
       },
       orderBy: { createdAt: "asc" },
+    });
+
+    // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
+    // queries over the whole task table, and `Projects.tsx` polls this endpoint
+    // globally every 2.5 s purely to count tasks per project — it renders none
+    // of them. `?enrich=false` lets that caller stop paying for it.
+    //
+    // Opt-out rather than "only when projectId is present": the global call is
+    // still *correct* (grouping is keyed by `(projectId, chainId)`, so two
+    // projects sharing a chainId never read each other's progress), and silently
+    // dropping the fields from every global response would delete that
+    // guarantee's only coverage along with the cost.
+    const enrich = (context.req.query("enrich") ?? "true") !== "false";
+
+    // Progress must count *all* the chain's rows, including archived ones, so it
+    // cannot be computed from the rows above. One extra scoped query, grouped in
+    // memory — two queries per request regardless of how many tasks come back.
+    //
+    // `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
+    // null-index row as its own one-row chain. Without it a single broken row
+    // inflates `total` and shifts `position` for every real sibling on the board
+    // while its own detail page still reads `1/1` — the same rows, two answers.
+    const chainIds = !enrich ? [] : [...new Set(tasks
+      .filter((task) => task.chainIndex !== null)
+      .map((task) => task.chainId)
+      .filter((value): value is string => value !== null))];
+    const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
+      where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
+      select: {
+        id: true, projectId: true, chainId: true, chainIndex: true, status: true,
+        name: true, archivedAt: true, templateStep: { select: { name: true } },
+      },
+      orderBy: { chainIndex: "asc" },
+    });
+    const progressByChain = chainProgressByChain(chainRows);
+    const positionsByChain = new Map<string, Map<string, number>>();
+    for (const row of chainRows) {
+      if (!row.chainId) continue;
+      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+      const group = positionsByChain.get(key);
+      if (group) continue;
+      positionsByChain.set(key, positions(chainRows.filter((candidate) => (
+        candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
+      ))));
+    }
+
+    // The Automations page needs `Last run` on a *collapsed* row, and a poll
+    // that only mounts while a row is expanded can never supply it. Skipped
+    // entirely on a board with no automations.
+    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
+    const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
+      by: ["recurringSourceTaskId"],
+      where: { recurringSourceTaskId: { in: cronIds } },
+      _max: { createdAt: true },
+      _count: { _all: true },
+    });
+    const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
+
+    return context.json(tasks.map((task) => {
+      const fired = firedByDefinition.get(task.id);
+      const recurring = {
+        recurringLastFiredAt: fired?._max.createdAt ?? null,
+        recurringFireCount: fired?._count._all ?? 0,
+      };
+      if (!enrich || !task.chainId) return { ...task, chainProgress: null, ...recurring };
+      // The same one-row-chain rule the detail route applies (E1), so a broken
+      // row reports `n/1` in both places instead of `null` here and `1/1` there.
+      if (task.chainIndex === null) {
+        return {
+          ...task,
+          chainProgress: {
+            chainId: task.chainId,
+            done: task.status === TaskStatus.DONE ? 1 : 0,
+            total: 1,
+            activeStepName: task.templateStep?.name ?? task.name,
+            activeStatus: task.status.toLowerCase(),
+            position: 1,
+          },
+          ...recurring,
+        };
+      }
+      const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
+      const progress = progressByChain.get(key) ?? null;
+      return {
+        ...task,
+        chainProgress: progress
+          ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null }
+          : null,
+        ...recurring,
+      };
     }));
   });
   app.post("/projects/:projectId/tasks", async (context) => {
@@ -1278,6 +1708,64 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     return task ? context.json(task) : context.json({ error: "Task not found" }, 404);
   });
+  app.get("/tasks/:taskId/chain", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const subject = await db.task.findUnique({
+      where: { id: taskId },
+      select: { id: true, projectId: true, chainId: true, chainIndex: true, status: true },
+    });
+    if (!subject) return context.json({ error: "Task not found" }, 404);
+    if (!subject.chainId) return context.json({ chainId: null, total: 0, done: 0, steps: [] });
+
+    const chainInclude = {
+      assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
+      templateStep: { select: { name: true } },
+      runs: { orderBy: { runNumber: "desc" as const }, take: 1 },
+    };
+    // A chainId with a null chainIndex is a broken row the advancer already
+    // refuses to follow. PostgreSQL sorts NULL last, so leaving it in the query
+    // would render it at the bottom of somebody else's chain instead of as its
+    // own one-row chain — and would shift every real row's position by one.
+    const rows = subject.chainIndex === null
+      ? [await db.task.findUniqueOrThrow({ where: { id: taskId }, include: chainInclude })]
+      : await db.task.findMany({
+        where: { projectId: subject.projectId, chainId: subject.chainId, chainIndex: { not: null } },
+        orderBy: { chainIndex: "asc" },
+        include: chainInclude,
+      });
+
+    const runGroups = rows.length === 0 ? [] : await db.run.groupBy({
+      by: ["taskId", "status"],
+      where: { taskId: { in: rows.map((row) => row.id) } },
+      _count: { _all: true },
+    });
+    const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
+    const ordinals = positions(rows);
+    const progress = chainProgress(rows);
+
+    return context.json({
+      chainId: subject.chainId,
+      total: progress?.total ?? rows.length,
+      done: progress?.done ?? 0,
+      steps: rows.map((row) => ({
+        taskId: row.id,
+        position: ordinals.get(row.id) ?? 1,
+        chainIndex: row.chainIndex,
+        name: row.name,
+        stepName: stepName(row),
+        status: row.status,
+        approvalGate: row.approvalGate,
+        assigneeType: row.assigneeType,
+        agent: row.assigneeAgent ? { id: row.assigneeAgent.id, title: row.assigneeAgent.title } : null,
+        archivedAt: row.archivedAt,
+        failureReason: row.failureReason,
+        latestRun: row.runs[0]
+          ? { id: row.runs[0].id, status: row.runs[0].status, runNumber: row.runs[0].runNumber }
+          : null,
+        startable: startable(row, facts.get(row.id) ?? { total: 0, active: false }, row.maxSessionsPerTask),
+      })),
+    });
+  });
   app.patch("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskPatch);
@@ -1285,6 +1773,8 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     if (body.status === TaskStatus.DONE && before.templateId && before.approvalGate) {
       return context.json({ error: "Template approval gates must be decided through Inbox" }, 409);
     }
+    const changesStatus = body.status !== undefined && body.status !== before.status;
+    const movingToBacklog = body.status === TaskStatus.BACKLOG && before.status !== TaskStatus.BACKLOG;
     if (body.assigneeAgentId) {
       const agent = await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } });
       if (!agent) return context.json({ error: "Assignee does not belong to this project" }, 400);
@@ -1329,23 +1819,52 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const advances = before.status !== TaskStatus.DONE
       && body.status === TaskStatus.DONE
       && Boolean(before.chainId || before.followUpTaskId);
-    const task = advances ? await db.$transaction(async (tx) => {
-      const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
-      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
-      if (!before.templateId && before.approvalGate) {
-        await tx.inboxMessage.updateMany({
-          where: { gateTaskId: before.id, status: "OPEN" },
-          data: { status: "CLOSED" },
-        });
-      }
-      await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
-      return updated;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted })
-      : await db.task.update({ where: { id: taskId }, data: updateData });
-    if (!advances && body.status && body.status !== before.status) {
-      await db.taskActivity.create({ data: { taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}` } });
+    // A status write joins the Task-row mutex, like start / retry / archive /
+    // the scheduler's claims. Two reasons, both proven by regression tests:
+    //
+    //  - Parking in Backlog must be atomic with `Start now`. Counting active
+    //    runs outside a transaction and writing later loses the race, and the
+    //    loss does not "resolve on completion": the runner claims only
+    //    `TODO|DOING`, so a QUEUED run left on a BACKLOG task is never claimed
+    //    and never completes.
+    //  - Without the lock a status write can land *after* `archive-done`
+    //    committed and drag an archived task back onto a board that does not
+    //    show it — a guard set in which one writer ignores `archivedAt`
+    //    excludes nothing.
+    //
+    // One rule, no exceptions: an archived task's status is frozen until it is
+    // unarchived, whether or not the transition also advances a chain. Splitting
+    // that by `advances` would let an archived chained task be marked DONE while
+    // an archived standalone one could not.
+    if (changesStatus) {
+      const written = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return { error: "Task not found", code: 404 as const };
+        if (locked.archivedAt !== null) {
+          return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
+        }
+        if (movingToBacklog && await hasActiveRun(tx, taskId)) {
+          return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
+        }
+        const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
+        await tx.taskActivity.create({ data: {
+          taskId, actorType: "operator", body: `Status changed: ${before.status} → ${body.status}`,
+        } });
+        if (advances) {
+          if (!before.templateId && before.approvalGate) {
+            await tx.inboxMessage.updateMany({
+              where: { gateTaskId: before.id, status: "OPEN" },
+              data: { status: "CLOSED" },
+            });
+          }
+          await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
+        }
+        return { task: updated };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      if ("error" in written) return context.json({ error: written.error }, written.code);
+      return context.json(written.task);
     }
-    return context.json(task);
+    return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
   });
   app.delete("/tasks/:taskId", async (context) => {
     await db.task.delete({ where: { id: id.parse(context.req.param("taskId")) } });
@@ -1355,6 +1874,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     const taskId = id.parse(context.req.param("taskId"));
     const now = new Date();
     const result = await db.$transaction(async (tx) => {
+      const locked = await lockTask(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      // Retry joins the exclusion protocol: a guard set in which one writer
+      // ignores archivedAt excludes nothing.
+      if (locked.archivedAt !== null) return { error: "Cannot retry an archived task", code: 409 as const };
       const task = await tx.task.findUnique({
         where: { id: taskId },
         include: {
@@ -1403,6 +1927,196 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
     });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.run, 201);
+  });
+  app.post("/tasks/:taskId/start", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    try {
+      const result = await db.$transaction(async (tx) => {
+        const locked = await lockTask(tx, taskId);
+        if (!locked) return { error: "Task not found", code: 404 as const };
+        if (locked.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
+        if (locked.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
+        const task = await tx.task.findUniqueOrThrow({
+          where: { id: taskId },
+          include: { assigneeAgent: { select: { archivedAt: true } } },
+        });
+        if (task.assigneeType !== AssigneeType.AGENT) {
+          return { error: "Human steps cannot be started", code: 409 as const };
+        }
+        if (await hasActiveRun(tx, taskId)) {
+          return { error: "Task already has an active run", code: 409 as const };
+        }
+        // A count, not the latest run number: Run is one-to-many and a task at
+        // its ceiling whose last run failed must not look startable.
+        const total = await tx.run.count({ where: { taskId } });
+        if (total >= task.maxSessionsPerTask) {
+          return { error: "Run budget exhausted", code: 409 as const };
+        }
+        // The specific messages above and below are a reason ladder in front of
+        // the shared predicate, so the operator gets the sentence that names
+        // their problem. `startable` itself is the authority: spec §4.3 defines
+        // the button's enabled state and this guard as one thing, and the route
+        // re-deriving them by hand was how it came to accept gated REVIEW steps
+        // and DOING steps and to answer 500 on a task with no repo.
+        if (task.status !== TaskStatus.TODO && task.status !== TaskStatus.BACKLOG) {
+          return { error: "Only Todo and Backlog steps can be started", code: 409 as const };
+        }
+        if (!task.repoId) {
+          return { error: "This task has no repository", code: 400 as const };
+        }
+        if (!startable({ ...task, archivedAt: locked.archivedAt }, { total, active: false }, task.maxSessionsPerTask)) {
+          // The one remaining `startable` condition with no message of its own
+          // is the archived assignee, and `enqueueTaskRun` already throws an
+          // error that names the agent — a better sentence than anything this
+          // branch could write. Fall through to it; the catch maps it to 409.
+          if (!task.assigneeAgent?.archivedAt) {
+            return { error: "This step cannot be started", code: 409 as const };
+          }
+        }
+        const run = await enqueueTaskRun(tx, taskId);
+        if (locked.status === TaskStatus.BACKLOG) {
+          await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO } });
+        }
+        await tx.taskActivity.create({ data: {
+          taskId, actorType: "operator", body: "Started manually from the chain view",
+        } });
+        return { run };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      if ("error" in result) return context.json({ error: result.error }, result.code);
+      return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
+    } catch (error: unknown) {
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
+      // Unreachable under the lock, because the loser sees the winner's run and
+      // returns the 409 above. Mapped anyway: a 500 on a double-click is exactly
+      // the failure the guard exists to prevent.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        return context.json({ error: "Task already has an active run" }, 409);
+      }
+      throw error;
+    }
+  });
+  app.post("/tasks/:taskId/archive", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockTask(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (await hasActiveRun(tx, taskId)) {
+        return { error: "Cannot archive a task with an active run", code: 409 as const };
+      }
+      if (locked.status === TaskStatus.REVIEW) {
+        const open = await tx.inboxMessage.count({ where: { gateTaskId: taskId, status: InboxStatus.OPEN } });
+        if (open > 0) return { error: "Decide the approval gate in the Inbox first", code: 409 as const };
+      }
+      if (locked.archivedAt !== null) {
+        return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
+      }
+      const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: new Date() } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task archived" } });
+      return { task };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
+  });
+  app.post("/tasks/:taskId/unarchive", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    // No lock: unarchiving cannot race a run into existence.
+    const before = await db.task.findUnique({ where: { id: taskId }, select: { archivedAt: true } });
+    if (!before) return context.json({ error: "Task not found" }, 404);
+    if (before.archivedAt === null) return context.json(await db.task.findUniqueOrThrow({ where: { id: taskId } }));
+    const task = await db.task.update({ where: { id: taskId }, data: { archivedAt: null } });
+    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
+    return context.json(task);
+  });
+  app.post("/projects/:projectId/tasks/archive-done", async (context) => {
+    const projectId = id.parse(context.req.param("projectId"));
+    const result = await db.$transaction(async (tx) => {
+      const candidates = await tx.task.findMany({
+        where: { projectId, status: TaskStatus.DONE, archivedAt: null },
+        select: { id: true },
+      });
+      // Lock before reading runs, so a retry cannot slip a run in between the
+      // selection and the write. Ids that vanished, moved out of `Done` or were
+      // archived in between simply do not come back from the lock and count as
+      // neither archived nor skipped.
+      const lockedIds = await lockDoneTasks(tx, projectId, candidates.map((task) => task.id));
+      const busy = lockedIds.length === 0 ? [] : await tx.run.findMany({
+        where: { taskId: { in: lockedIds }, status: { in: ACTIVE_RUN_STATUSES } },
+        select: { taskId: true },
+        distinct: ["taskId"],
+      });
+      const { archive, skipped } = partitionArchivable(
+        lockedIds,
+        busy.map((run) => run.taskId).filter((taskId): taskId is string => taskId !== null),
+      );
+      if (archive.length > 0) {
+        await tx.task.updateMany({ where: { id: { in: archive } }, data: { archivedAt: new Date() } });
+        await tx.taskActivity.createMany({ data: archive.map((taskId) => ({
+          taskId, actorType: "operator", body: "Task archived",
+        })) });
+      }
+      return { archived: archive.length, skipped };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    return context.json(result);
+  });
+  app.post("/tasks/:taskId/schedule/pause", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const task = await db.task.findUnique({ where: { id: taskId }, select: { scheduleKind: true } });
+    if (!task) return context.json({ error: "Task not found" }, 404);
+    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be paused" }, 400);
+    // In-flight copies are left alone: pausing stops future occurrences, it does
+    // not reach into work that already started.
+    const paused = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
+    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
+    return context.json(paused);
+  });
+  app.post("/tasks/:taskId/schedule/resume", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const task = await db.task.findUnique({
+      where: { id: taskId },
+      select: { scheduleKind: true, cron: true, timezone: true },
+    });
+    if (!task) return context.json({ error: "Task not found" }, 404);
+    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be resumed" }, 400);
+    let runAt: Date;
+    try {
+      if (!task.cron) throw new Error("CRON tasks require cron");
+      // Recomputed from *now*, so a long pause produces no catch-up burst.
+      runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
+    } catch (error: unknown) {
+      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
+    }
+    const resumed = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
+    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
+    return context.json(resumed);
+  });
+  app.get("/tasks/:taskId/recurring-fires", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const requested = Number(context.req.query("take") ?? 5);
+    const take = Number.isSafeInteger(requested) ? Math.min(50, Math.max(1, requested)) : 5;
+    const copies = await db.task.findMany({
+      where: { recurringSourceTaskId: taskId },
+      orderBy: { createdAt: "desc" },
+      take,
+      include: {
+        runs: {
+          orderBy: { runNumber: "desc" },
+          take: 1,
+          include: { session: { select: { id: true, costUsd: true } } },
+        },
+      },
+    });
+    return context.json(copies.map((copy) => ({
+      taskId: copy.id,
+      name: copy.name,
+      createdAt: copy.createdAt,
+      status: copy.status,
+      latestRun: copy.runs[0] ? {
+        id: copy.runs[0].id,
+        status: copy.runs[0].status,
+        runNumber: copy.runs[0].runNumber,
+        session: copy.runs[0].session ? { id: copy.runs[0].session.id, costUsd: copy.runs[0].session.costUsd } : null,
+      } : null,
+    })));
   });
   app.get("/tasks/:taskId/activity", async (context) => context.json(await db.taskActivity.findMany({
     where: { taskId: id.parse(context.req.param("taskId")) },
@@ -1472,7 +2186,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -1494,7 +2208,7 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -1564,7 +2278,15 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
           status: RunStatus.QUEUED,
           readyAt: { lte: now },
           agent: { archivedAt: null },
-          task: { status: { in: [TaskStatus.TODO, TaskStatus.DOING] }, assigneeType: AssigneeType.AGENT },
+          // `archivedAt: null` is defense in depth: `enqueueTaskRun` already
+          // refuses an archived task, and archive already refuses a task with an
+          // active run, so a queued run on an archived task should be
+          // unreachable. If one ever exists it must not be handed to a runner.
+          task: {
+            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+            assigneeType: AssigneeType.AGENT,
+            archivedAt: null,
+          },
           OR: [{ blockedByRunId: null }, { blockedBy: { status: RunStatus.SUCCEEDED } }],
         },
         include: {

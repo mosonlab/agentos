@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { Prisma, RunStatus, RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
 
-import { createApp } from "./app.js";
+import { createApp, partitionArchivable } from "./app.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
 import { noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
 
@@ -91,12 +91,19 @@ test("operator principal cannot impersonate a runner", async () => {
 test("task status patch does not apply create defaults to other fields", async () => {
   await withTokens(async () => {
     let updateData: unknown;
-    const database = {
+    // A status write now runs under the Task-row mutex, so the mock supplies
+    // `$transaction` and the `FOR UPDATE` read the route takes first.
+    const tx = {
+      $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId, status: "REVIEW", archivedAt: null }],
       task: {
-        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW" }),
+        findUniqueOrThrow: async () => ({ id: "task-1", projectId: "project-1", status: "REVIEW", archivedAt: null }),
         update: async ({ data }: { data: unknown }) => { updateData = data; return { id: "task-1", status: "DONE" }; },
       },
       taskActivity: { create: async () => ({ id: "activity-1" }) },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/tasks/task-1", {
       method: "PATCH",
@@ -127,10 +134,12 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       updatedAt: new Date(), assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1", templateId: null,
       targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
-      repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null,
+      repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
     const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, followUpTaskId: null, assigneeAgentId: "agent-1", repoId: "repo-1" };
     const tx = {
+      // The status write takes the Task-row mutex before advancing the chain.
+      $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
       task: {
         update: async () => ({ ...before, status: "DONE" }),
         findFirst: async () => successor,
@@ -425,7 +434,10 @@ const retryRequest = async (
   };
   const database = {
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      // Retry takes the shared task-row lock before it reads anything else.
+      $queryRaw: async () => [{ id: "task-1" }],
       task: {
+        findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
         findUnique: async () => ({
           id: "task-1",
           name: "Retry me",
@@ -939,6 +951,9 @@ test("archived successor errors from gate approve and reject map to named 409 re
         previousTask: null,
       };
       const tx = {
+        // The reject path locks the redo row before queueing it. This task is
+        // unarchived — the archived *assignee* is what must produce the 409.
+        $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId, archivedAt: null }],
         inboxMessage: {
           findUnique: async () => ({
             id: "message-1", kind: "MULTIPLE_CHOICE", gateTaskId: gateTask.id,
@@ -1159,4 +1174,12 @@ test("a failing usage recompute does not fail the ingest", async () => {
     assert.equal(updates.length, 0);
     assert.equal(errors.length, 1);
   });
+});
+
+test("partitionArchivable keeps the busy tasks out of the archive set and counts them as skipped", () => {
+  assert.deepEqual(partitionArchivable(["a", "b", "c"], ["b"]), { archive: ["a", "c"], skipped: 1 });
+  assert.deepEqual(partitionArchivable(["a", "b"], []), { archive: ["a", "b"], skipped: 0 });
+  assert.deepEqual(partitionArchivable([], ["b"]), { archive: [], skipped: 0 });
+  // A busy id that is not a candidate cannot inflate the skipped count.
+  assert.deepEqual(partitionArchivable(["a"], ["z"]), { archive: ["a"], skipped: 0 });
 });

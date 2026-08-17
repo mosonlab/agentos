@@ -184,10 +184,12 @@ unconfigured templates intentionally return the same `401` shape and create no
 rows. Invalid JSON/object shape is `400`; an unresolved variable list is `400`;
 an over-limit body is `413`.
 
-Replay handling is deliberately absent: there is no replay window, timestamp
-tolerance, idempotency key, or duplicate-fire dedupe in this version. Every
-authenticated repeat creates a separate chain; the caller must provide replay
-protection if it needs it. Under concurrent
+With replay protection disabled, there is no timestamp tolerance, idempotency
+key, or duplicate-fire dedupe: every authenticated repeat creates a separate
+chain. Batch 2.5 adds an optional replay window and a fire ledger; its current
+contract, including the best-effort duplicate check and the Triggers UI, is
+documented in [`batch-2.5-tasks-visibility.md`](batch-2.5-tasks-visibility.md).
+Under concurrent
 instantiation, the server retries `P2034`/`P2002` transaction conflicts up to
 five attempts with jitter and a fresh chain id per attempt. Exhausted `P2034`
 contention is mapped to `503` so the caller can retry; any other residual

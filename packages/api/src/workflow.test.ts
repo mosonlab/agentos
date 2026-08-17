@@ -12,6 +12,7 @@ import {
   enqueueTaskRun,
   InboxKind,
   isArchivedAssigneeError,
+  isArchivedTaskError,
   RunStatus,
   runnerFor,
   RunnerKind,
@@ -220,21 +221,30 @@ test("the shared decision compare-and-set makes a second Web or Feishu click a n
   assert.equal(decisionWrites, 0);
 });
 
-test("rejecting a gate transactionally returns the producing step to the queue", async () => {
+const rejectionTx = (options: { redoArchivedAt?: Date | null } = {}) => {
   const queued: Record<string, unknown>[] = [];
+  const locks: string[] = [];
   const executable = {
     id: "task-1", projectId: "project-1", name: "Write spec", description: "spec", assigneeType: AssigneeType.AGENT,
     assigneeAgentId: "agent-1", repoId: "repo-1", targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10,
-    maxSessionsPerTask: 3, assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r" },
+    maxSessionsPerTask: 3, archivedAt: null,
+    assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r" },
     repo: { id: "repo-1", defaultBranch: "main" }, templateStep: { runner: null }, runs: [{ runNumber: 1, branch: "feature/x" }],
   };
   let lookup = 0;
   const tx = {
+    // The Task-row mutex the reject path now takes before queueing the redo.
+    // Returning the archive state from *this* read, not from the row that
+    // travelled with the Inbox message, is the point of the lock.
+    $queryRaw: async (_strings: unknown, taskId: string) => {
+      locks.push(taskId);
+      return [{ id: taskId, archivedAt: options.redoArchivedAt ?? null }];
+    },
     inboxMessage: {
       findUnique: async () => ({
         id: "gate-1", gateTaskId: "task-1", agentId: "agent-1", sessionId: "session-1", taskId: "task-1", goalId: null, threadId: "thread-1",
         session: { id: "session-1", run: { id: "run-1", status: RunStatus.SUCCEEDED } },
-        gateTask: { id: "task-1", assigneeType: AssigneeType.AGENT, previousTask: null },
+        gateTask: { id: "task-1", name: "Write spec", assigneeType: AssigneeType.AGENT, previousTask: null },
       }),
       updateMany: async () => ({ count: 1 }),
       create: async () => ({ id: "reply-1" }),
@@ -247,11 +257,29 @@ test("rejecting a gate transactionally returns the producing step to the queue",
     taskActivity: { create: async () => ({}) },
     run: { create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-2", ...data }; } },
   } as any;
+  return { tx, queued, locks, lookups: () => lookup };
+};
+
+test("rejecting a gate transactionally returns the producing step to the queue", async () => {
+  const { tx, queued, locks, lookups } = rejectionTx();
   const result = await applyInboxDecisionTx(tx, { inboxMessageId: "gate-1", externalEventId: "feishu:evt-1", decision: "reject" });
   assert.equal(result.gateAction, "rejected");
-  assert.equal(lookup, 1);
+  assert.equal(lookups(), 1);
+  assert.deepEqual(locks, ["task-1"]);
   assert.equal(queued[0]!.runNumber, 2);
   assert.equal(queued[0]!.branch, "feature/x");
+});
+
+test("rejecting a gate onto an archived predecessor throws rather than queueing a run nothing will claim", async () => {
+  // The runner claims only unarchived TODO/DOING tasks, so a run queued here
+  // would sit forever. Throwing rolls the transaction back, which leaves the
+  // Inbox decision OPEN for the human to make again after unarchiving.
+  const { tx, queued } = rejectionTx({ redoArchivedAt: new Date("2026-08-16T00:00:00.000Z") });
+  await assert.rejects(
+    () => applyInboxDecisionTx(tx, { inboxMessageId: "gate-1", externalEventId: "feishu:evt-2", decision: "reject" }),
+    (error: unknown) => isArchivedTaskError(error) && /archived/.test((error as Error).message),
+  );
+  assert.equal(queued.length, 0);
 });
 
 test("a multiple-choice Inbox decision accepts an option id and persists the human reply", async () => {

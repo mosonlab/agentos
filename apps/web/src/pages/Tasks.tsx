@@ -5,18 +5,16 @@ import { money, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useProjectScope } from "../lib/project";
 import { navigate } from "../lib/router";
-import type { Agent, Repo, Task, TaskStatus, TaskTemplate } from "../lib/types";
-import { IconPlus, IconRobot } from "../components/icons";
+import type { Task, TaskStatus } from "../lib/types";
+import { IconRobot } from "../components/icons";
 import { cn } from "../lib/utils";
+import { TasksPageHead } from "../components/tasks-tabs";
+import { chainMarker } from "../lib/chain";
 import {
-  CARD_TITLE, CODE_BLOCK, COUNT, DOT, DOT_TONE, FIELD_ROW, PAGE_ACTIONS, PAGE_HEAD,
-  PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
-  Card, EmptyState, ErrorNotice, Field, FullPanel, Page, Pill, RowMenu, Segmented, Tabs, Toggle,
+  COUNT, DOT, DOT_TONE, ROW, STACK,
+  EmptyState, ErrorNotice, InfoNotice, Page, Pill, RowMenu,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
-import { Select } from "../components/ui/select";
-import { Textarea } from "../components/ui/textarea";
 
 const BOARD = "grid grid-flow-col auto-cols-[minmax(250px,1fr)] gap-[14px] overflow-x-auto pb-[10px]";
 const COLUMN = "flex min-h-[420px] flex-col";
@@ -32,7 +30,10 @@ const TASK_META_ROW = "flex flex-wrap items-center gap-[8px]";
 /** `size-[13px]`, not the button base's `[&_svg]:size-4`. */
 const TASK_FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-muted-foreground [&_svg]:size-[13px] [&_svg]:flex-none [&_svg]:opacity-85";
 
-const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
+export const COLUMNS: Array<{ status: TaskStatus; label: string }> = [
+  // Backlog is first: it is where work waits before it is queued, and the
+  // scheduler never picks anything out of it.
+  { status: "BACKLOG", label: "Backlog" },
   { status: "TODO", label: "Todo" },
   { status: "DOING", label: "Doing" },
   { status: "REVIEW", label: "Review" },
@@ -62,10 +63,18 @@ export const retryable = (task: Task): boolean => {
   return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
 };
 
-const TaskCard = ({ task, onDelete, onRetry }: {
+/** The two shapes of the Archive All result, as one string. Exported so the
+ *  message is testable without driving a click through a static render. */
+export const archiveDoneNotice = (result: { archived: number; skipped: number }): string =>
+  (result.skipped > 0
+    ? `Archived ${result.archived}, skipped ${result.skipped} (running)`
+    : `Archived ${result.archived}`);
+
+export const TaskCard = ({ task, onDelete, onRetry, onArchive }: {
   task: Task;
   onDelete: (task: Task) => void;
   onRetry: (task: Task) => void;
+  onArchive: (task: Task) => void;
 }): ReactNode => {
   const run = task.runs[0];
   return (
@@ -79,6 +88,7 @@ const TaskCard = ({ task, onDelete, onRetry }: {
         <h3 className="flex-1 text-[13px] leading-[1.45]">{task.name}</h3>
         <RowMenu items={[
           ...(retryable(task) ? [{ label: "Retry", onSelect: () => onRetry(task) }] : []),
+          { label: "Archive", onSelect: () => onArchive(task) },
           { label: "Delete", danger: true, onSelect: () => onDelete(task) },
         ]} />
       </div>
@@ -87,7 +97,16 @@ const TaskCard = ({ task, onDelete, onRetry }: {
           <span>{task.scheduleKind === "NOW" ? "Once" : task.scheduleKind.toLowerCase()}</span>
           {task.approvalGate ? <Pill tone="amber">Approval</Pill> : null}
           {task.templateId ? <Pill tone="violet">Template</Pill> : null}
+          {/* MANUAL renders nothing: most tasks are manual, and a pill on every
+              card would be noise rather than provenance ([A8]). */}
+          {task.source === "CRON" ? <Pill tone="grey">cron</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent">webhook</Pill> : null}
         </div>
+        {/* No placeholder for a chain-less card (K4). */}
+        {task.chainProgress ? (
+          <div className={cn(TASK_META_ROW, "overflow-hidden text-ellipsis whitespace-nowrap")}>
+            {chainMarker(task.chainProgress)}
+          </div>
+        ) : null}
         <div className={TASK_META_ROW}>{runLabel(task)}</div>
         {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, "text-[var(--destructive-fg)]")}>{task.failureReason}</div>}
       </div>
@@ -104,173 +123,56 @@ const TaskCard = ({ task, onDelete, onRetry }: {
   );
 };
 
-const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
-  projectId: string;
-  agents: Agent[];
-  repos: Repo[];
-  onClose: () => void;
-  onCreated: () => void;
-}): ReactNode => {
-  const templates = usePoll<TaskTemplate[]>(`/projects/${projectId}/task-templates`, 30_000);
-  const activeAgents = agents.filter((agent) => !agent.archivedAt);
-  const [mode, setMode] = useState<"blank" | "template">("blank");
-  const [form, setForm] = useState({
-    name: "", description: "",
-    assigneeAgentId: activeAgents[0]?.id ?? "", repoId: repos[0]?.id ?? "", targetBranch: "",
-    assigneeType: "AGENT" as "AGENT" | "HUMAN", approvalGate: false,
-    maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
-  });
-  const [templateId, setTemplateId] = useState("");
-  const [variables, setVariables] = useState<Record<string, string>>({});
-  const { pending, error, run } = useAction();
-
-  const template = (templates.data ?? []).find((candidate) => candidate.id === templateId) ?? templates.data?.[0] ?? null;
-
-  const createBlank = async (): Promise<void> => {
-    const ok = await run(() => api.post(`/projects/${projectId}/tasks`, {
-      name: form.name,
-      description: form.description,
-      assigneeType: form.assigneeType,
-      assigneeAgentId: form.assigneeType === "AGENT" ? form.assigneeAgentId : null,
-      repoId: form.repoId === "" ? null : form.repoId,
-      targetBranch: form.targetBranch === "" ? null : form.targetBranch,
-      approvalGate: form.approvalGate,
-      maxDurationMin: form.maxDurationMin,
-      stallTimeoutMin: form.stallTimeoutMin,
-      maxSessionsPerTask: form.maxSessionsPerTask,
-    }));
-    if (ok) { onCreated(); onClose(); }
-  };
-
-  const createFromTemplate = async (): Promise<void> => {
-    if (!template) return;
-    const ok = await run(() => api.post(`/projects/${projectId}/task-templates/${template.id}/instantiate`, {
-      repoId: form.repoId,
-      variables,
-      ...(form.name.trim() === "" ? {} : { name: form.name }),
-    }));
-    if (ok) { onCreated(); onClose(); }
-  };
-
-  return (
-    <FullPanel title="New Task" onClose={onClose} actions={
-      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || (mode === "blank" ? form.name.trim() === "" : template === null)}
-        onClick={() => void (mode === "blank" ? createBlank() : createFromTemplate())}>
-        Create
-      </Button>
-    }>
-      <Tabs value={mode} onChange={setMode} options={[{ value: "blank", label: "Blank task" }, { value: "template", label: "From template" }]} />
-      {error === null ? null : <ErrorNotice message={error} />}
-
-      {mode === "blank" ? (
-        <Card title="Task">
-          <div className={STACK}>
-            <Field label="Title"><Input type="text" value={form.name} autoFocus onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Implement feat/inbox-search" /></Field>
-            <Field label="Prompt" hint="Handed to the agent verbatim together with its foundation and role prompt.">
-              <Textarea rows={10} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-            </Field>
-            <div className={FIELD_ROW}>
-              <Field label="Assignee type">
-                <Select value={form.assigneeType} onChange={(event) => setForm({ ...form, assigneeType: event.target.value as "AGENT" | "HUMAN" })}>
-                  <option value="AGENT">Agent</option>
-                  <option value="HUMAN">Human</option>
-                </Select>
-              </Field>
-              <Field label="Agent" hint="Agent tasks need an agent that already holds a grant on the repo.">
-                {/* Same as TaskDetail's status select: no `select:disabled` rule
-                    existed, and this one is disabled in the form's default state
-                    (assignee HUMAN), so the primitive's dimming would be visible
-                    at rest. */}
-                <Select className="disabled:opacity-100 disabled:cursor-default" value={form.assigneeAgentId} disabled={form.assigneeType === "HUMAN"}
-                  onChange={(event) => setForm({ ...form, assigneeAgentId: event.target.value })}>
-                  {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.title} · {agent.model}</option>)}
-                </Select>
-              </Field>
-            </div>
-            <div className={FIELD_ROW}>
-              <Field label="Repo">
-                <Select value={form.repoId} onChange={(event) => setForm({ ...form, repoId: event.target.value })}>
-                  <option value="">No repo</option>
-                  {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
-                </Select>
-              </Field>
-              <Field label="Target branch" hint="Empty falls back to the repo default branch.">
-                <Input type="text" value={form.targetBranch} onChange={(event) => setForm({ ...form, targetBranch: event.target.value })} placeholder="feat/…" />
-              </Field>
-            </div>
-            <div className={ROW}>
-              <Toggle on={form.approvalGate} onChange={(next) => setForm({ ...form, approvalGate: next })} label="Requires approval" />
-              <div>
-                <div>Requires approval</div>
-                <div>Template steps with a gate are decided in the Inbox — the board cannot close them.</div>
-              </div>
-            </div>
-            <div className={FIELD_ROW}>
-              <Field label="Wall-clock limit (minutes)" hint="The run is killed and the task moves to review after this many minutes.">
-                <Input type="number" min={1} value={form.maxDurationMin} onChange={(event) => setForm({ ...form, maxDurationMin: Number(event.target.value) })} />
-              </Field>
-              <Field label="Stall timeout (minutes)" hint="No new tool call for this long counts as dead.">
-                <Input type="number" min={1} value={form.stallTimeoutMin} onChange={(event) => setForm({ ...form, stallTimeoutMin: Number(event.target.value) })} />
-              </Field>
-              <Field label="Max runs per task" hint="Retries stop here and the Inbox gets an operator message.">
-                <Input type="number" min={1} value={form.maxSessionsPerTask} onChange={(event) => setForm({ ...form, maxSessionsPerTask: Number(event.target.value) })} />
-              </Field>
-            </div>
-          </div>
-        </Card>
-      ) : (
-        <Card title="From template">
-          {(templates.data ?? []).length === 0
-            ? <EmptyState>No templates in this project yet.</EmptyState>
-            : (
-              <div className={STACK}>
-                <Field label="Template">
-                  <Select value={template?.id ?? ""} onChange={(event) => { setTemplateId(event.target.value); setVariables({}); }}>
-                    {(templates.data ?? []).map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>{candidate.name} ({candidate.steps.length} steps)</option>
-                    ))}
-                  </Select>
-                </Field>
-                <Field label="Repo">
-                  <Select value={form.repoId} onChange={(event) => setForm({ ...form, repoId: event.target.value })}>
-                    {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
-                  </Select>
-                </Field>
-                {(template?.variables ?? []).map((variable) => (
-                  <Field key={variable} label={variable}>
-                    <Input type="text" value={variables[variable] ?? ""}
-                      onChange={(event) => setVariables({ ...variables, [variable]: event.target.value })}
-                      placeholder={/branch/i.test(variable) ? "feat/…" : ""} />
-                  </Field>
-                ))}
-                {template ? (
-                  <div>
-                    <div className={CARD_TITLE}>Will create</div>
-                    <div className={CODE_BLOCK}>
-                      {template.steps.map((step) => [
-                        `- ${step.name}`,
-                        step.assigneeAgent ? `    agent: ${step.assigneeAgent.title}` : "    agent: (human)",
-                        step.approvalGate ? "    (approval gate)" : null,
-                      ].filter((line) => line !== null).join("\n")).join("\n")}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            )}
-        </Card>
-      )}
-    </FullPanel>
-  );
-};
+/** One board column, extracted so its three rules — the head, the `Archive All`
+ *  presence rule and the empty-state drop invitation — can be asserted from
+ *  rendered markup rather than from the page's source text. */
+export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, cardProps }: {
+  column: { status: TaskStatus; label: string };
+  tasks: Task[];
+  loading: boolean;
+  dragOver: TaskStatus | null;
+  onDragOver: (status: TaskStatus) => void;
+  onDragLeave: (status: TaskStatus) => void;
+  onDrop: (taskId: string, status: TaskStatus) => void;
+  onArchiveDone: () => void;
+  cardProps: { onDelete: (task: Task) => void; onRetry: (task: Task) => void; onArchive: (task: Task) => void };
+}): ReactNode => (
+  <div className={COLUMN}>
+    <div className={COLUMN_HEAD}>
+      {column.label}<span className={COUNT}>{tasks.length}</span>
+      {/* Only on a non-empty Done column: a button that would archive nothing
+          is not offered (A2). */}
+      {column.status === "DONE" && tasks.length > 0 ? (
+        <>
+          <span className="flex-1" />
+          <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" onClick={onArchiveDone}>
+            Archive All
+          </Button>
+        </>
+      ) : null}
+    </div>
+    <div
+      className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
+      onDragOver={(event) => { event.preventDefault(); onDragOver(column.status); }}
+      onDragLeave={() => onDragLeave(column.status)}
+      onDrop={(event) => {
+        event.preventDefault();
+        onDrop(event.dataTransfer.getData("text/plain"), column.status);
+      }}
+    >
+      {tasks.map((task) => <TaskCard key={task.id} task={task} {...cardProps} />)}
+      {/* Every column gets the same invitation, Backlog included (E16). */}
+      {tasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
+    </div>
+  </div>
+);
 
 export const TasksPage = (): ReactNode => {
-  const { projectId, project } = useProjectScope();
+  const { projectId } = useProjectScope();
   const tasksPath = projectId === "" ? null : `/tasks?projectId=${encodeURIComponent(projectId)}`;
   const { data, loading, error, reload } = usePoll<Task[]>(tasksPath);
-  const { data: agents } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
-  const { data: repos } = usePoll<Repo[]>(projectId === "" ? null : `/projects/${projectId}/repos`, 15_000);
-  const [creating, setCreating] = useState(false);
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const { error: actionError, run } = useAction();
   const tasks = useMemo(() => data ?? [], [data]);
 
@@ -286,56 +188,53 @@ export const TasksPage = (): ReactNode => {
   const retry = (task: Task): void => {
     void run(async () => { await api.post(`/tasks/${task.id}/retry`, {}); reload(); });
   };
+  const archive = (task: Task): void => {
+    void run(async () => { await api.post(`/tasks/${task.id}/archive`, {}); reload(); });
+  };
+  /** `api.post` is called for its payload, which `useAction.run` discards — but
+   *  the call still runs *inside* `run`, so failures land in the same
+   *  `ErrorNotice` as everything else on the page. One error surface, one
+   *  information surface. */
+  const archiveDone = async (): Promise<void> => {
+    const done = tasks.filter((task) => task.status === "DONE");
+    if (!window.confirm(`Archive ${done.length} done tasks?`)) return;
+    setNotice(null);
+    let result: { archived: number; skipped: number } | null = null;
+    const ok = await run(async () => {
+      result = await api.post<{ archived: number; skipped: number }>(`/projects/${projectId}/tasks/archive-done`, {});
+      reload();
+    });
+    if (ok && result !== null) setNotice(archiveDoneNotice(result));
+  };
 
   if (projectId === "") return <Page><EmptyState>Select a project first.</EmptyState></Page>;
 
   return (
     <Page className="text-foreground">
-      <div className={PAGE_HEAD}>
-        <div className={PAGE_HEAD_TITLES}>
-          <h1 className={PAGE_HEAD_H1}>Tasks</h1>
-          <div className={PAGE_HEAD_SUBTITLE}>Work queued for agents in {project?.name ?? "this project"}</div>
-        </div>
-        <div className={PAGE_ACTIONS}>
-          <Button type="button" variant="legacyPrimary" size="legacy" onClick={() => setCreating(true)}><IconPlus />Create Task</Button>
-        </div>
-      </div>
-
-      <Segmented options={[{ value: "board", label: "Tasks" }]} value="board" onChange={() => undefined} />
+      <TasksPageHead active="tasks" onCreated={reload} />
 
       <div className={cn(STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
+        {notice === null ? null : <InfoNotice message={notice} onDismiss={() => setNotice(null)} />}
 
         <div className={BOARD}>
-          {COLUMNS.map((column) => {
-            const columnTasks = tasks.filter((task) => task.status === column.status);
-            return (
-              <div className={COLUMN} key={column.status}>
-                <div className={COLUMN_HEAD}>{column.label}<span className={COUNT}>{columnTasks.length}</span></div>
-                <div
-                  className={cn(COLUMN_BODY, dragOver === column.status && COLUMN_BODY_OVER)}
-                  onDragOver={(event) => { event.preventDefault(); setDragOver(column.status); }}
-                  onDragLeave={() => setDragOver((current) => (current === column.status ? null : current))}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    setDragOver(null);
-                    move(event.dataTransfer.getData("text/plain"), column.status);
-                  }}
-                >
-                  {columnTasks.map((task) => <TaskCard key={task.id} task={task} onDelete={remove} onRetry={retry} />)}
-                  {columnTasks.length === 0 ? <div className={COLUMN_EMPTY}>{loading ? "Loading…" : "Drop tasks here"}</div> : null}
-                </div>
-              </div>
-            );
-          })}
+          {COLUMNS.map((column) => (
+            <BoardColumn
+              key={column.status}
+              column={column}
+              tasks={tasks.filter((task) => task.status === column.status)}
+              loading={loading}
+              dragOver={dragOver}
+              onDragOver={setDragOver}
+              onDragLeave={(status) => setDragOver((current) => (current === status ? null : current))}
+              onDrop={(taskId, status) => { setDragOver(null); move(taskId, status); }}
+              onArchiveDone={() => void archiveDone()}
+              cardProps={{ onDelete: remove, onRetry: retry, onArchive: archive }}
+            />
+          ))}
         </div>
       </div>
-
-      {creating ? (
-        <NewTask projectId={projectId} agents={agents ?? []} repos={repos ?? []}
-          onClose={() => setCreating(false)} onCreated={reload} />
-      ) : null}
     </Page>
   );
 };

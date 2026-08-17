@@ -72,7 +72,11 @@ const NewProject = ({ onClose, onCreated }: { onClose: () => void; onCreated: ()
 
 export const ProjectsPage = (): ReactNode => {
   const { projects, loading, error, reload, select } = useProjectScope();
-  const { data: tasks } = usePoll<Task[]>("/tasks");
+  // `enrich=false`: this poll is global and runs every 2.5 s, and all it does
+  // with the response is count rows per project. Chain progress, positions and
+  // recurring-fire summaries would cost two extra whole-table queries per tick
+  // for fields this page never renders.
+  const { data: tasks } = usePoll<Task[]>("/tasks?enrich=false");
   const [creating, setCreating] = useState(false);
   const { error: actionError, run } = useAction();
 
@@ -132,7 +136,8 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
   const { data: project, error, reload } = usePoll<Project>(`/projects/${projectId}`, 5_000);
   const { data: agents } = usePoll<Agent[]>(`/projects/${projectId}/agents`, 5_000);
   const { data: repos } = usePoll<Repo[]>(`/projects/${projectId}/repos`, 5_000);
-  const { data: tasks } = usePoll<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}`);
+  // Same as above: this page counts tasks per status and renders no chain data.
+  const { data: tasks } = usePoll<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}&enrich=false`);
   const [editingYaml, setEditingYaml] = useState<string | null>(null);
   const { pending, error: actionError, run } = useAction();
 

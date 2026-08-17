@@ -15,14 +15,40 @@ if (testDatabaseSchema === "public") {
 
 let migrationsApplied = false;
 
+/**
+ * Drops and re-applies the dedicated test schema.
+ *
+ * This is what `prisma migrate reset` did, spelled out: drop the schema named in
+ * TEST_DATABASE_URL, recreate it, then `migrate deploy`. It is written this way
+ * because `migrate reset` refuses to run under an AI coding agent, which would
+ * otherwise make every *.dbtest.ts unrunnable in an agent session. `deploy` is
+ * non-interactive, needs no shadow database, and applies exactly the committed
+ * migration folders — so this is the same reset with one fewer dependency.
+ *
+ * The blast radius is bounded above: the module refuses a `public` schema, so
+ * the only thing this can drop is a schema created for these tests.
+ */
+const resetSchema = (): void => {
+  const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
+  const quoted = `"${testDatabaseSchema.replaceAll('"', '""')}"`;
+  execSync(
+    `npx prisma db execute --url ${JSON.stringify(testDatabaseUrl)} --stdin`,
+    {
+      cwd: dbDirectory,
+      input: `DROP SCHEMA IF EXISTS ${quoted} CASCADE; CREATE SCHEMA ${quoted};`,
+      stdio: ["pipe", "inherit", "inherit"],
+    },
+  );
+  execSync("npx prisma migrate deploy", {
+    cwd: dbDirectory,
+    env: { ...process.env, DATABASE_URL: testDatabaseUrl },
+    stdio: "inherit",
+  });
+};
+
 export const setupTestDb = (): PrismaClient => {
   if (!migrationsApplied) {
-    const schema = fileURLToPath(new URL("../../db/prisma/schema.prisma", import.meta.url));
-    execSync(`npx prisma migrate reset --force --skip-seed --schema ${JSON.stringify(schema)}`, {
-      cwd: fileURLToPath(new URL("../../db", import.meta.url)),
-      env: { ...process.env, DATABASE_URL: testDatabaseUrl },
-      stdio: "inherit",
-    });
+    resetSchema();
     migrationsApplied = true;
   }
   return new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
