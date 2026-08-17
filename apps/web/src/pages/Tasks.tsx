@@ -118,10 +118,14 @@ export const TasksPage = (): ReactNode => {
   // and every answer would be a guess that then visibly corrects itself.
   const settled = useRef(false);
   useEffect(() => {
-    if (!narrow || settled.current || resolved !== null || loading) return;
+    if (!narrow || settled.current || loading) return;
     settled.current = true;
-    selectTab(defaultTab(counts));
-  }, [narrow, resolved, loading, counts, selectTab]);
+    // Also when the tab came from memory rather than from the URL: the address
+    // bar is supposed to say which list is on screen, and a remembered Done tab
+    // under a bare `#/tasks` is a URL that describes a different page than the
+    // one being looked at.
+    if (urlTab === null) selectTab(resolved ?? defaultTab(counts));
+  }, [narrow, urlTab, resolved, loading, counts, selectTab]);
 
   // A different project is different work: it inherits neither the tab nor the
   // deep link that named one. Skipped on the first render, so arriving on

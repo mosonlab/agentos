@@ -3,7 +3,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
-import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, dragEdgeStep } from "../components/desktop-board";
+import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
@@ -129,6 +129,23 @@ test("every free-text field on the card is bounded", () => {
   assert.match(markup, /overflow-wrap:anywhere/);
 });
 
+test("the card's meta column is declared, so a nowrap line cannot widen the card", () => {
+  // A grid with no declared columns sizes its implicit one by `auto`, whose
+  // minimum is the widest item's min-content. Measured in Chrome, that let
+  // "At 09:00 AM, only on Monday (Asia/Shanghai)" push a 196px card to 312px
+  // and the column clipped the overflow away.
+  const markup = card({ scheduleKind: "CRON", cron: "0 9 * * 1", timezone: "Asia/Shanghai" });
+  assert.match(markup, /grid-cols-\[minmax\(0,1fr\)\]/);
+});
+
+test("the schedule line wraps rather than losing its last two characters", () => {
+  // In a 170px content box the ellipsis produced "Waiting for previous st…" and
+  // "At 09:00 AM, only on M…". This line is the whole answer to what starts the
+  // task, so it gets a second line instead of a truncation.
+  const markup = card({ scheduleKind: "AT", chainId: "c1", chainIndex: 4, runAt: "2099-01-01T00:00:00.000Z" });
+  assert.match(markup, /line-clamp-2[^"]*">Waiting for previous step</);
+});
+
 test("the failure text is carried in full even though only three lines show", () => {
   const reason = `${"x".repeat(2000)} END`;
   assert.match(card({ failureReason: reason }), /END/);
@@ -198,6 +215,17 @@ test("five columns fit at 1440px and are fixed-width below it", () => {
   assert.match(BOARD_GRID, /grid-cols-\[repeat\(5,250px\)\]/);
   assert.match(BOARD_GRID, /min-width:1440px\)\]:grid-cols-\[repeat\(5,minmax\(0,1fr\)\)\]/);
   assert.match(BOARD_PAGE, /\bmax-w-none\b/);
+});
+
+test("the frame the fades hang on is a flex parent, so the board still sizes itself", () => {
+  // Measured in Chrome at 1440x900 when it was a bare block: `flex-1` on the
+  // board resolved to `height: auto`, the board came out 15,755px tall inside a
+  // 696px frame with no scrollbar of its own, and the page's `overflow-hidden`
+  // clipped 97 Done cards away. A wrapper whose only job is to position two
+  // fades must not be what decides the board's height.
+  assert.match(FRAME, /\bflex\b/);
+  assert.match(FRAME, /\bmin-h-0\b/);
+  assert.match(BOARD, /\bflex-1\b/);
 });
 
 test("the arrows say which way they go, and an arrow at its end is disabled", () => {

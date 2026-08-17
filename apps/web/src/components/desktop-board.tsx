@@ -118,7 +118,12 @@ const SHELL = "relative flex min-h-0 flex-1 flex-col gap-[8px]";
  *  whole board up by 36px at exactly that moment. */
 const NAV = "flex h-[28px] flex-none items-center justify-end gap-[6px]";
 const NAV_HINT = "mr-auto text-[12px] text-[color:var(--faint)]";
-const FRAME = "relative min-h-0 flex-1";
+/** `flex`, not a bare block. The board inside it is sized by `flex-1`, and in a
+ *  block parent that resolves to `height: auto` — measured, that made the board
+ *  15,755px tall inside a 696px frame, with no scrollbar of its own and 97 Done
+ *  cards clipped away by the page. A wrapper that only exists to position two
+ *  fades must not be the thing that decides the board's height. */
+export const FRAME = "relative flex min-h-0 flex-1 flex-col";
 /** Drawn over the board, never in the way of it: the fade is the only thing on
  *  the page that says a column is cut off rather than absent. */
 const FADE = "pointer-events-none absolute inset-y-0 z-[3] w-[28px]";
@@ -269,6 +274,12 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
     const board = boardRef.current;
     if (!board) return;
     board.scrollLeft = storedScroll(storage.get(scrollKey(projectId)), board);
+    // Vertically, back to the top. Measured without this: switching projects
+    // kept the *other* board's 300px of vertical travel, so a new project opened
+    // part-way down a column it had nothing to do with. Only the horizontal
+    // position is remembered, because only it is about which columns you were
+    // reading.
+    board.scrollTop = 0;
     syncEdges();
   }, [boardRef, projectId, syncEdges]);
 

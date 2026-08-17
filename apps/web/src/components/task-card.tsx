@@ -22,7 +22,12 @@ import { DOT, DOT_TONE, Pill, ROW, RowMenu, type RowMenuEntry } from "./ui";
  * short title has no business reserving space for rows it does not have. */
 const TASK_CARD = "relative cursor-pointer rounded-xl border border-border bg-card px-[14px] py-[13px] hover:border-[color:var(--border-hover)] has-[a:focus-visible]:border-[color:var(--primary)]";
 const TASK_TITLE = "line-clamp-3 text-foreground [overflow-wrap:anywhere] hover:underline focus-visible:underline";
-const TASK_META = "mt-[9px] grid gap-[6px] text-[11.5px] text-muted-foreground";
+/** `grid-cols-[minmax(0,1fr)]` is the whole reason this is bounded. A grid with
+ *  no declared columns sizes its implicit one by `auto`, whose *minimum* is the
+ *  widest item's min-content — and a `whitespace-nowrap` schedule line has no
+ *  min-content smaller than itself. Measured, "At 09:00 AM, only on Monday
+ *  (Asia/Shanghai)" made a 196px card 312px wide and the column clipped it. */
+const TASK_META = "mt-[9px] grid grid-cols-[minmax(0,1fr)] gap-[6px] text-[11.5px] text-muted-foreground";
 /** `min-h-[20px]`: the first meta row is plain text on most cards and text plus
  *  a pill on some, and a pill is 20px against text's 17.25px. Left alone, the
  *  same row changes height by 6.75px depending on whether a task happens to
@@ -144,7 +149,12 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
     </div>
     <div className={TASK_META}>
       <div className={TASK_META_ROW}>
-        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{scheduleLabel(task)}</span>
+        {/* Two lines, not one ellipsized one. Measured in a 170px content box:
+            "Waiting for previous step" came out as "Waiting for previous st…"
+            and a cron's prose as "At 09:00 AM, only on M…". This line is the
+            answer to "what starts this task" — an answer cut off two characters
+            from the end is not a shorter answer, it is no answer. */}
+        <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{scheduleLabel(task)}</span>
         {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>Approval</Pill> : null}
         {task.templateId ? <Pill tone="violet" className={TASK_PILL}>Template</Pill> : null}
         {/* MANUAL renders nothing: most tasks are manual, and a pill on every
