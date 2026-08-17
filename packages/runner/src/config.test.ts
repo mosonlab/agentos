@@ -37,3 +37,23 @@ test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
 });
+
+test("the tool inactivity deadline defaults to 30 minutes and rejects unsafe values", () => {
+  const previous = process.env.RUNNER_TOOL_DEADLINE_MS;
+  try {
+    delete process.env.RUNNER_TOOL_DEADLINE_MS;
+    assert.equal(loadRunnerConfig().toolDeadlineMs, 30 * 60_000);
+
+    process.env.RUNNER_TOOL_DEADLINE_MS = "0";
+    assert.throws(() => loadRunnerConfig(), /RUNNER_TOOL_DEADLINE_MS must be a positive integer/u);
+
+    process.env.RUNNER_TOOL_DEADLINE_MS = "not-a-number";
+    assert.throws(() => loadRunnerConfig(), /RUNNER_TOOL_DEADLINE_MS must be a positive integer/u);
+
+    process.env.RUNNER_TOOL_DEADLINE_MS = "1800000ms";
+    assert.throws(() => loadRunnerConfig(), /RUNNER_TOOL_DEADLINE_MS must be a positive integer/u);
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_TOOL_DEADLINE_MS;
+    else process.env.RUNNER_TOOL_DEADLINE_MS = previous;
+  }
+});

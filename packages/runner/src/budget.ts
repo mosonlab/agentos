@@ -34,7 +34,7 @@ export const evaluateBudget = (snapshot: BudgetSnapshot): BudgetDecision => {
   }
   if (snapshot.inFlightTool) {
     if (snapshot.now.getTime() - snapshot.inFlightTool.lastProgressAt.getTime() >= snapshot.toolDeadlineMs) {
-      return { allowed: false, gate: "stall", reason: `tool deadline exceeded: ${snapshot.inFlightTool.name}` };
+      return { allowed: false, gate: "stall", reason: `tool inactivity deadline exceeded: ${snapshot.inFlightTool.name}` };
     }
     return { allowed: true };
   }

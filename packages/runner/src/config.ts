@@ -26,6 +26,13 @@ export type RunnerConfig = {
 
 const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
 
+const positiveInteger = (name: string, value: string): number => {
+  if (!/^\d+$/u.test(value)) throw new Error(`${name} must be a positive integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
+  return parsed;
+};
+
 export const loadRunnerConfig = (): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
   return {
@@ -40,7 +47,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
     workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
-    toolDeadlineMs: Number.parseInt(process.env.RUNNER_TOOL_DEADLINE_MS ?? "600000", 10),
+    toolDeadlineMs: positiveInteger("RUNNER_TOOL_DEADLINE_MS", process.env.RUNNER_TOOL_DEADLINE_MS ?? "1800000"),
     runAsPrefix: splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? ""),
     binaries: {
       CLAUDE: process.env.CLAUDE_BINARY ?? "claude",
