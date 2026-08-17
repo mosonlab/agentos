@@ -5,12 +5,13 @@ import { JSDOM } from "jsdom";
 import { act } from "react";
 
 import type { Chain, Task, TaskStepOutput } from "../lib/types";
+import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
-const task = (id: string, name: string, chainId: string | null = null): Task => ({
+const task = (id: string, name: string, promptIndex: number, chainId: string | null = null): Task => ({
   id, projectId: "project-1", assigneeAgentId: "agent-1", repoId: "repo-1",
   templateId: null, templateStepId: null, followUpTaskId: null, name,
-  description: `Product Contract: TC-UX v1.0\nCommon contract\n\nStep responsibility: ${name} responsibility`,
+  description: prompts[promptIndex]!.prompt,
   workingDirectory: null, targetBranch: "main", failureReason: null, status: "TODO",
   assigneeType: "AGENT", approvalGate: false, scheduleKind: "NOW", runAt: null,
   cron: null, timezone: null, maxDurationMin: 120, stallTimeoutMin: 10,
@@ -72,7 +73,7 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
   let resolveAActivity: ((response: Response) => void) | null = null;
   let firstB = true;
   let firstAActivity = true;
-  const tasks = { a: task("a", "Source A"), b: task("b", "Destination B"), c: task("c", "Destination C", "chain-c") };
+  const tasks = { a: task("a", "Source A", 0), b: task("b", "Destination B", 1), c: task("c", "Destination C", 2, "chain-c") };
   globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input).replace(/^.*\/api/, "");
     const method = init.method ?? "GET";
@@ -121,6 +122,7 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     await settle();
     assert.match(container.textContent ?? "", /Destination B/);
     assert.match(container.textContent ?? "", /No output recorded/);
+    assert.match(container.textContent ?? "", /independently review the persisted plan/);
     assert.doesNotMatch(container.textContent ?? "", /revised-plan source artifact/);
     resolveAActivity!(new Response(JSON.stringify([{
       id: "late-a", taskId: "a", actorType: "operator", actorId: null,

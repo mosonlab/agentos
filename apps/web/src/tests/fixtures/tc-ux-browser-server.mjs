@@ -5,12 +5,12 @@ import { extname, join, normalize } from "node:path";
 const root = new URL("../../../dist/", import.meta.url).pathname;
 const port = Number(process.env.TC_UX_FIXTURE_PORT ?? 4179);
 const now = "2026-08-17T00:00:00.000Z";
+const prompts = JSON.parse(await readFile(new URL("./tc-ux-v1-prompts.json", import.meta.url), "utf8"));
 
-const description = (name) => `Product Contract: TC-UX v1.0\nShared dependency and resource identity contract.\n\nStep responsibility: ${name} owns its unique responsibility.`;
 const task = (id, name, status = "TODO") => ({
   id, projectId: "fixture-project", assigneeAgentId: "agent-1", repoId: "repo-1",
   templateId: null, templateStepId: null, followUpTaskId: null, name,
-  description: description(name), workingDirectory: null, targetBranch: "main",
+  description: prompts[Number(id.replace(/\D/g, "")) - 1].prompt, workingDirectory: null, targetBranch: "main",
   failureReason: null, status, assigneeType: id === "t7" ? "HUMAN" : "AGENT",
   approvalGate: id === "t7", scheduleKind: "NOW", runAt: null, cron: null,
   timezone: null, maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3,
@@ -22,8 +22,8 @@ const task = (id, name, status = "TODO") => ({
 });
 
 const row = (position, status, extra = {}) => ({
-  taskId: `t${position}`, position, chainIndex: position - 1, name: `TC-UX step ${position}`,
-  stepName: `TC-UX step ${position}`, status, approvalGate: position === 7,
+  taskId: `t${position}`, position, chainIndex: position - 1, name: prompts[position - 1].name,
+  stepName: prompts[position - 1].name, status, approvalGate: position === 7,
   assigneeType: position === 7 ? "HUMAN" : "AGENT",
   agent: position === 7 ? null : { id: "agent-1", title: "Senior developer" },
   archivedAt: null, failureReason: null, latestRun: null, startable: false,
