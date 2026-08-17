@@ -86,4 +86,4 @@ Three chains are in flight. Batch 1 (Settings + i18n) touches `apps/web` broadly
 
 ## Standing clauses
 
-- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Plan steps (②④) use `claude-opus-5:xhigh`; implementation and review steps use `:high`. Never write OPERATOR_TOKEN into any artifact.
+- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Model, runner, and reasoning tier come from the assigned agent configuration and are never copied into task prompts. Never write OPERATOR_TOKEN into any artifact.

@@ -1,8 +1,8 @@
 ---
 name: default
 title: Default
-model: claude-opus-5:high
-runner: claude
+model: gpt-5.6-sol:medium
+runner: codex
 inboxAccess: true
 skills: []
 collaborators: []

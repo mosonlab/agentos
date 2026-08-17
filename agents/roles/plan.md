@@ -1,8 +1,8 @@
 ---
 name: plan
 title: Planner
-model: claude-opus-5:high
-runner: claude
+model: gpt-5.6-sol:high
+runner: codex
 inboxAccess: true
 skills: [plan-mode]
 collaborators: []

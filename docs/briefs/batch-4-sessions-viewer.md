@@ -8,8 +8,8 @@ You are step ① (spec) of the nine-step chain for Batch 4. Write a requirements
 - `docs/reference/danny-agentos-video/decisions.md` §10 item 1, §13 (observability ruling: Batch 4 pulled forward, scope aligned to the original session screens).
 
 ## Chain configuration (fixed, do not revisit)
-- ⑤ implementation and ⑦ fixes: `frontend-dev` (claude-opus-5:high / CLAUDE).
-- ⑥ code review: **`code-reviewer` (claude-opus-5:high / CLAUDE)** — 前端例外，Leo 2026-08-16 裁决（decisions.md §12）：前端批次不走跨厂商评审，Sol 对 React/Tailwind 的判断不如 Opus。⑥ 的任务书必须声明这是同厂商评审、独立性不受保护、一切从 diff 重新推导。
+- ⑤ implementation and ⑦ fixes: `frontend-dev`（模型与 runner 由 agent 配置决定）。
+- ⑥ code review: **`code-reviewer`**；任务书使用 runbook 的 `REVIEW INDEPENDENCE` 规则，不写模型或厂商身份。
 - Runs after the frontend-convergence chain is merged; spec against the converged codebase.
 
 ## In scope (from BACKLOG-V2 Batch 4)
@@ -31,4 +31,4 @@ You are step ① (spec) of the nine-step chain for Batch 4. Write a requirements
 - Rollback notes required (expected UI-only; call out any API additions for event pagination explicitly).
 
 ## Standing clauses
-- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Former Fable positions use `claude-opus-5:xhigh`（仅限 ②④ plan 步；实现/评审步用 `:high`）. Never write OPERATOR_TOKEN into any artifact.
+- Task-creation field is `name`, not `title`. Implementation steps set `maxDurationMin: 240`. Model, runner, and reasoning tier come from the assigned agent configuration and are never copied into task prompts. Never write OPERATOR_TOKEN into any artifact.
