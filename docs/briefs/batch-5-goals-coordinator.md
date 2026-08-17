@@ -1,6 +1,6 @@
 # Task briefs — Batch 5: Goals coordinator (two chains: 5a backend, 5b frontend)
 
-Batch 5 splits into two chains so the cross-vendor pairing stays honest: the coordinator mechanism is backend (Sol writes, Opus reviews); the Goals UI is frontend (frontend-dev/Opus writes, Sol reviews). 5b's spec may start once 5a's spec is approved (interfaces known); 5b's implementation waits for 5a's merge. Wave 3: feed after wave-2 chains merge.
+Batch 5 splits into two chains so implementation and review remain separate responsibilities without binding either role to a model vendor. 5b's spec may start once 5a's spec is approved (interfaces known); 5b's implementation waits for 5a's merge. Wave 3: feed after wave-2 chains merge.
 
 Shared sources of authority:
 - `docs/reference/danny-agentos-video/decisions.md` §8 (coordinator mechanism, system-agent rules, phase-gating, guardrails), §12 (chain/roster), §13.
@@ -19,7 +19,7 @@ Leo's rulings 2026-08-16 (binding for both specs, do not re-open):
 
 You are step ① (spec). Deliver `docs/specs/batch-5a-goals-coordinator-backend.md`, push, STOP at the gate. Do not call `inbox_ask`.
 
-Chain config: ⑤ executioner (Sol/CODEX), ⑥ code-reviewer (claude-opus-5:xhigh/CLAUDE), ⑦ senior-dev-opus — Sol writes, Opus reviews.
+Chain config: ⑤ `implementation-plan-executioner`, ⑥ `code-reviewer`, ⑦ `senior-dev`. Model, runner, and reasoning tier come from each agent's current configuration; task prompts stay model-neutral.
 
 In scope:
 1. System agents: register `orchestrator-router` and `dod-generator` — `system` flag, non-dispatchable, decision-only; model/effort configured via the Agents page (initial: Luna-tier cheap). No hardcoded model names anywhere (decisions §8 standing rule).
@@ -41,7 +41,7 @@ Acceptance shape: a seeded goal runs dispatch→complete end-to-end against a st
 
 You are step ① (spec). Deliver `docs/specs/batch-5b-goals-ui.md`, push, STOP at the gate. Do not call `inbox_ask`. Spec against 5a's approved spec (interfaces); implementation depends on 5a merged.
 
-Chain config: ⑤ and ⑦ frontend-dev (claude-opus-5:xhigh/CLAUDE), ⑥ review-coordinator (Sol/CODEX) — Opus writes, Sol reviews.
+Chain config: ⑤ and ⑦ `frontend-dev`, ⑥ `review-coordinator`. Model, runner, and reasoning tier come from each agent's current configuration; task prompts stay model-neutral.
 
 In scope:
 1. Goal detail: DoD checklist tab (generate → Leo confirms → auto-check from router updates; tri-state rendering incl. waived with distinct styling + waive/unwaive action, Leo-only).
@@ -58,4 +58,4 @@ Acceptance shape: mechanical checklist per page/control; every control round-tri
 
 ---
 
-Standing clauses (both chains): task-creation field is `name`, not `title`; implementation steps `maxDurationMin: 240`; former Fable positions use `claude-opus-5:xhigh`; never write OPERATOR_TOKEN into any artifact; chains are real chains ending in a HUMAN-assigned ⑨.
+Standing clauses (both chains): task-creation field is `name`, not `title`; implementation steps `maxDurationMin: 240`; model, runner, and reasoning tier are configuration rather than prompt content; never write OPERATOR_TOKEN into any artifact; chains are real chains ending in a HUMAN-assigned ⑨.

@@ -1,8 +1,8 @@
 ---
 name: coherence
 title: Coherence Reviewer
-model: claude-opus-5:high
-runner: claude
+model: gpt-5.6-sol:high
+runner: codex
 inboxAccess: false
 skills: [review-report]
 collaborators: []
