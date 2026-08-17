@@ -4,6 +4,14 @@ Implements [`docs/specs/batch-4-fixes-usage-correctness.md`](../specs/batch-4-fi
 (committed `95937bc`). Written against that spec's tree state and re-verified anchor by anchor at
 `95937bc` on branch `agentos/cmswjrnbw0t4ampyj86lr3ymb/run-1`.
 
+**Revision R1 (2026-08-16)** — revised against
+[`docs/reviews/2026-08-16-batch-4-fixes-plan-review.md`](../reviews/2026-08-16-batch-4-fixes-plan-review.md)
+(review of `3720d74`, verdict FAIL: six must-fix, two should-fix). **All eight findings are adopted;
+none is rejected.** §0.4 records what each one changed and where. Two of the review's findings rest on
+probes it ran against a live scratch schema (`agentos_test`); this revision could not re-run them — the
+revision workspace has no `.env` and no generated Prisma client — so §0.4 marks them *adopted on the
+reviewer's evidence, confirm on first run*, and §13 says how the implementer confirms each.
+
 **How to read this.** §0 is the shape of the change and the corrections where the code contradicts
 the spec — read it before opening a file. WI-1…WI-9 are the ordered work items; each names its files
 with line anchors, what changes, its own verification command, and its rollback. §10 maps every spec
@@ -172,6 +180,14 @@ without also inheriting `.env`. **WI-4 extracts `backfillSessionUsage(db)` into
 `backfillTaskSource`. This is a structural change the spec does not mention but its own acceptance
 criterion requires.
 
+**R1/MF-4 extends this.** Extracting the *scan* alone still leaves the summary, the 20-id cap and the
+exit code inside untestable script text — and the spec's acceptance criterion is about the **exit
+code**. So WI-4 extracts a second function, `runBackfillSessionUsageCli({db, log, error})`, which
+returns the exit code instead of assigning it; the script keeps only what a test genuinely cannot
+reach. Spawning is then no longer the *only* way to check the exit code, but it is still worth doing
+once for the success path (WI-6 test 4), because the three surviving lines are exactly where an import
+or `finally` regression would hide.
+
 ### C4 — after SF-1, no payload can make a recompute throw, so the failure must be injected
 
 Spec §7.2 item 5 asks for a `.dbtest` "seeding three sessions where the middle one's stored payload
@@ -181,6 +197,12 @@ must be produced by an instrumented client** (a `Proxy` whose `session.update` t
 id), the same technique `app.test.ts:1088-1103` already offers via `ingestDatabase`'s `onUpdate`. The test
 then proves what it is actually for: the *scan* survives a failing session, reports it, and exits
 non-zero. Written as the spec words it, the test would pass vacuously.
+
+**And the `Proxy` must wrap the inner transaction client, not the outer one (R1/MF-3).**
+WI-3 puts the write on `tx.session.update` inside `db.$transaction`, so an outer-client `session.update`
+is never called by the code under test — the test would inject nothing and assert `failed: 1` against a
+run where nothing failed. That is a second way to pass vacuously, and it is more insidious than the
+first because the test *looks* instrumented. WI-6 test 3 spells out the correct shape.
 
 ### C5 — "usable `modelUsage`" is one pass, not a probe plus a pass
 
@@ -236,6 +258,31 @@ and `npm run typecheck` fails. Delete it in the same edit.
 
 ---
 
+## 0.4 Disposition of the plan review (R1)
+
+The review of `3720d74` returned **FAIL** with six must-fix and two should-fix findings.
+**Every one is adopted. Nothing was rejected, and nothing was dropped silently.** If a later reader
+finds a finding with no corresponding change below, that is a defect in this revision, not a decision.
+
+| # | finding, in one line | adopted as | re-verified here? |
+|---|---|---|---|
+| **MF-1** | `$queryRaw` cannot deserialize `pg_advisory_xact_lock`'s `void` return under Prisma 6.19.0 → `P2010`, so **every** recompute would throw | WI-3's raw statement now casts: `pg_advisory_xact_lock(…)::text AS locked`. New WI-6 **test 0** exercises the real call against a real database as the first thing in the file. §13 item 2 split into two distinct failure modes. | Anchors yes (Prisma `6.19.0` pinned at `packages/db/package.json:29,34`). **Probe no** — adopted on the reviewer's evidence; test 0 confirms it on first run. |
+| **MF-2** | `costAmount` accepted any finite ≥ 0, deferring the range check until after summation, so one absurd event erased a valid sibling's cost | WI-1: the `Decimal(12,4)` storable-range check moves **into `costAmount`**, on the rounded value (C8), so an invalid event is omitted *before* `sumUsage`. `costColumn` keeps an aggregate guard for overflow across individually-valid events. WI-5 gains a mixed invalid-plus-valid regression. | Yes — spec `:356-361` requires per-value rejection; `sumUsage` (`packages/db/src/usage.ts:72-79`) folds costs into one number exactly as described. |
+| **MF-3** | WI-6 test 3 proxied `session.update` on the **outer** client, but WI-3 moved the write onto `tx` — the injected failure would never fire | WI-6 test 3 rewritten to the repo's proven `Proxy`-over-`$transaction` shape (`chain.dbtest.ts:218-239`): intercept `$transaction`, wrap the callback's `tx`, replace the delegate on the **inner** client. | Yes — `chain.dbtest.ts:218-239` is exactly that shape, and WI-3 does put the write on `tx`. |
+| **MF-4** | traceability claimed the backfill's non-zero exit was verified while WI-6 declined to execute it ("covered by reading it") | WI-4 extracts an exported, injectable `runBackfillSessionUsageCli` that **returns** the exit code; WI-6 test 3 asserts `1` then `0` through it, and new **test 4** spawns the real script against the scratch schema and asserts a real process exit code. §10's `§4.3.4` row now names both. | Yes — spec `:667-670` demands the exit; the script is a module-scope top-level `tsx` script (`packages/db/prisma/backfill-session-usage.ts:1-29`) invoked by `packages/db/package.json:21`. |
+| **MF-5** | "say **not rehearsed** in the header" turned the spec's mandatory rehearsal into an optional disclosure, so an unproven rollback could advance toward production | WI-8's verification now makes an unrun rehearsal a **failed implementation gate**: honest header wording is kept, but the step may not report done — it reports FAIL with the reason. §13 item 5 rewritten to match. | Yes — spec `:672-688` (rehearsal) and `:757-766` DoD item 5 ("rehearsed on a scratch database per §7.3"). The reviewer additionally observed `npm run test:db` rebuild `agentos_test` and apply all 12 migrations, so "unreachable" is not the expected outcome. |
+| **MF-6** | `DATABASE_URL="${DATABASE_URL}?options=…"` corrupts any URL that already carries a query — the repo's own convention (`?schema=…`) — silently swallowing `lock_timeout` **and** changing the target schema | WI-8 item 2 and §11.3 now detect an existing query and pick `?`/`&` accordingly, percent-encode the option, and verify the parsed parameter names without printing the URL. Rehearsal must cover both a bare and a `?schema=…` URL. | Yes — `packages/api/src/testdb.ts:6-10` reads a query-bearing URL and parses `schema` explicitly; the swallowing behaviour follows directly from WHATWG URL parsing. |
+| **SF-1** | the diff-surface checks used a PCRE lookahead with `grep -E`, and `grep … && echo VIOLATION` exits **zero** on the violation path | §11.2 rewritten: two explicit filters instead of the lookahead, every check exits non-zero on a match and prints the offending paths, and the credential check reports a **count only** (printing the matching line would leak the very secret it guards). | Yes — re-ran the expression in this workspace: `ugrep: error at position 7 … invalid syntax`. `rg` exists here but is not assumed. |
+| **SF-2** | WI-6 test 2 (open a transaction, take a lock, count `pg_locks` rows) could not settle the `55P03`-vs-`P2028` question §13 assigned to it | test 2 split: **2a** keeps the granted-lock visibility assertion as a preliminary; **2b** holds the lock and races a real `recomputeSessionUsage`, asserting it rejects and recording the observed error code and elapsed time. §13 item 1 now points at 2b. | Anchors yes (`chain.dbtest.ts:67-92` supplies the two-client lifecycle). **Timing probe no** — the reviewer measured `P2010` wrapping `55P03` at ≈279 ms with `lock_timeout=200ms`; 2b records what it actually observes. |
+
+**Did any finding show the spec is wrong?** No. Every one is a defect in the plan's rendering of the
+spec, and five of them (MF-2, MF-4, MF-5 and both should-fix) are the plan drifting *away* from a spec
+requirement — adopting them moves the plan back onto the spec. Nothing here re-specifies anything, so
+§14 gains no new open question from the review. The spec's own open assumptions (A1 above all) are
+unchanged and still carried in §14.
+
+---
+
 ## WI-1 — `usage.ts`: validation that actually validates (SF-1)
 
 **Files.** `packages/db/src/usage.ts:20-24` (validators), `:93-103` (`deriveUsageColumns`),
@@ -265,17 +312,40 @@ and `npm run typecheck` fails. Delete it in the same edit.
      return null;
    };
 
+   /** Cost is Decimal(12, 4). A value the column cannot hold is dropped HERE, per
+    *  event, not after summation — otherwise one absurd event poisons the sum and
+    *  erases every valid sibling's cost (R1/MF-2). The range test is applied to the
+    *  ROUNDED value (C8) because that is what is actually written.
+    *  Returns the raw number, not the rounded one: sumUsage must keep adding exact
+    *  values and round once at the end, as it does today. */
    const costAmount = (value: unknown): number | null => {
      if (value === undefined) return null;
-     if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
-     console.warn(`[usage] ignoring total_cost_usd=${render(value)}: not a storable cost`);
-     return null;
+     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+       console.warn(`[usage] ignoring total_cost_usd=${render(value)}: not a storable cost`);
+       return null;
+     }
+     if (new Prisma.Decimal(value).toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
+       console.warn(`[usage] ignoring total_cost_usd=${render(value)}: exceeds Decimal(12, 4)`);
+       return null;
+     }
+     return value;
    };
    ```
 
    Note the `undefined` early return: an explicit `null` in the payload **is** diagnosed (it is
    present-but-invalid), a missing key is not. Without that split, every PI event would log four
    lines.
+
+   `Prisma` and `COST_SCALE` are already in scope in this module (`deriveUsageColumns` uses both), so
+   this adds no import. The `Decimal` construction only happens when a payload actually carries a
+   cost, which is the CLAUDE terminal event and nothing else.
+
+   **Why per-event and not only after the sum (R1/MF-2).** `sumUsage` (`:72-79`) folds every surviving
+   cost into one number. With the check only at the end, `{total_cost_usd: 1e9}` arriving alongside a
+   valid `{total_cost_usd: 0.05}` sums to an out-of-range value and stores `costUsd: null` — the
+   session loses a cost it legitimately had, and `extractUsage` returns a value its own specified
+   contract (spec §4.3.3: "accept cost only when it is finite, `>= 0` and `< 10^8`; otherwise omit")
+   says it must not. Per-event rejection omits the impossible event and keeps the `0.05`.
 3. Replace the six `finite(...)` calls in `extractUsage` with `tokenCount(usage.input_tokens,
    "usage.input_tokens")` and friends, and the cost call with `costAmount(event.total_cost_usd)`.
    Nothing else in that branch changes — the CODEX `cached_input_tokens` / CLAUDE read+creation
@@ -291,6 +361,10 @@ and `npm run typecheck` fails. Delete it in the same edit.
      return null;
    };
 
+   // R1/MF-2: this is now the AGGREGATE guard only — it catches a sum that leaves
+   // the range even though every contributing event was individually storable
+   // (two valid events of 6e7 each). Per-event rejection already happened in
+   // costAmount, so by here `value` is a sum of values each < 10^8.
    const costColumn = (value: number | undefined): Prisma.Decimal | null => {
      if (value === undefined) return null;
      if (!Number.isFinite(value) || value < 0) { /* diagnostic */ return null; }
@@ -458,7 +532,12 @@ export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string)
   db.$transaction(async (tx) => {
     // C1: the timeout must be installed BEFORE the wait it is meant to bound.
     await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '3s'");
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}::int, ${sessionUsageLockKey(sessionId)}::int)`;
+    // R1/MF-1: the `::text AS locked` cast is LOAD-BEARING, not style.
+    // pg_advisory_xact_lock returns `void`, and Prisma 6.19.0 cannot deserialize a
+    // void column — the bare form fails with P2010 "Failed to deserialize column of
+    // type 'void'" on EVERY call. Do not "simplify" it away; WI-6 test 0 is what
+    // catches it if someone does.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}::int, ${sessionUsageLockKey(sessionId)}::int)::text AS locked`;
 
     const rows = await tx.sessionEvent.findMany({ …unchanged… });
     const derived = deriveUsageColumns(sumUsage(rows.map((row) => extractUsage(row.payload))));
@@ -489,11 +568,26 @@ existing paragraph about events being the source of truth; it is still true.
   delete its workspace unpushed). One sentence may be added to that comment naming the new failure
   mode: a lock-wait timeout is absorbed the same way, and the columns are repaired by the next
   `FINAL_OUTPUT` or by `db:backfill-session-usage`.
-- Raw-SQL form: `tx.$queryRaw` is proven in this repo at `workflow.ts:87`. If the `::int` casts on
-  bound parameters are rejected at runtime (see §13 item 2), the documented fallback is
-  `` tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}, ${key})`) `` —
-  safe from injection because both operands are integers this module computed, never payload data.
-  **Do not adopt the fallback without first seeing the parameterised form fail** in WI-6.
+- **Raw-SQL form — two separate failure modes, do not conflate them (R1/MF-1).**
+  `tx.$queryRaw` is proven in this repo at `workflow.ts:87`.
+  1. **Return-type deserialization — known to fail, already fixed above.** `pg_advisory_xact_lock`
+     returns `void`; Prisma 6.19.0 cannot deserialize a `void` column and raises `P2010`,
+     *"Failed to deserialize column of type 'void'"*, before a single event is read. The reviewer
+     probed both shapes against the dedicated `agentos_test` schema: bare → `P2010`;
+     `pg_advisory_xact_lock(…)::text AS locked` → `{"ok":true,"rows":[{"locked":""}]}`. The cast is
+     therefore in the code above, not offered as a contingency. Without it the failure is
+     catastrophic-but-quiet: the ingest `try/catch` at `app.ts:2517-2521` swallows every throw, so no
+     session's usage is ever cached and the backfill reports *every* session failed.
+  2. **Bound-parameter numeric typing — still unverified** (§13 item 2). A JS number may arrive as
+     `int8`, `numeric` or `double precision`; all three cast to `int4`, so the `::int` casts should
+     suffice. If they are rejected at runtime, the documented fallback is
+     `` tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}, ${key})`) `` —
+     safe from injection because both operands are integers this module computed, never payload data,
+     and immune to mode 1 as well since `$executeRaw*` returns a row count rather than deserializing
+     columns. **Do not adopt the fallback without first seeing the parameterised form fail** in WI-6.
+  3. Do not substitute `` tx.$executeRaw`SELECT pg_advisory_xact_lock(…)` `` for the parameterised
+     `$queryRaw` on the grounds that it also dodges mode 1. It probably works, but **it was not
+     probed**, and the form above was. Changing it means re-probing it.
 
 **Verification.**
 
@@ -562,28 +656,65 @@ already-materialised array and still await serially, so they are a no-op. Sequen
 preserved deliberately — 99 live `Session` rows, and a parallel backfill would contend on the new lock
 for no gain.
 
-The script becomes:
+**The reporting half is a second exported function, not inline script text (R1/MF-4).** The spec's
+acceptance criterion (§7.2 item 5) requires the process to *exit* non-zero; reading
+`process.exitCode = 1` in a source file is not an executable check and catches no wrapper, import or
+`finally` regression. So everything except constructing the client and assigning `process.exitCode`
+moves behind an injectable seam:
 
 ```ts
-const result = await backfillSessionUsage(prisma);
-console.log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failed.length}`);
-if (result.failed.length > 0) {
-  for (const failure of result.failed.slice(0, 20)) console.error(`  ${failure.sessionId}: ${failure.message}`);
-  if (result.failed.length > 20) console.error(`  … and ${result.failed.length - 20} more`);
-  process.exitCode = 1;   // NOT process.exit(1): the finally block must still $disconnect
+export type BackfillSessionUsageCliDeps = {
+  db: PrismaClient;
+  log?: (line: string) => void;
+  error?: (line: string) => void;
+};
+
+/**
+ * The CLI's whole body, minus the two lines a test cannot execute (constructing
+ * the client, assigning process.exitCode). Returns the exit code rather than
+ * setting it, so `usage.dbtest.ts` can execute the real reporting path and assert
+ * on 1 then 0 (R1/MF-4). Injectable log/error so the test reads the summary it
+ * asserts on instead of trusting it.
+ */
+export const runBackfillSessionUsageCli = async (
+  { db, log = console.log, error = console.error }: BackfillSessionUsageCliDeps,
+): Promise<number> => {
+  const result = await backfillSessionUsage(db);
+  log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failed.length}`);
+  if (result.failed.length === 0) return 0;
+  for (const failure of result.failed.slice(0, 20)) error(`  ${failure.sessionId}: ${failure.message}`);
+  if (result.failed.length > 20) error(`  … and ${result.failed.length - 20} more`);
+  return 1;
+};
+```
+
+and the script becomes three lines that no test needs to reach inside:
+
+```ts
+const prisma = new PrismaClient();
+try {
+  // NOT process.exit(1): the finally block must still $disconnect.
+  process.exitCode = await runBackfillSessionUsageCli({ db: prisma });
+} finally {
+  await prisma.$disconnect();
 }
 ```
 
 `scanned` and `updated` are printed on the failing path too (spec §4.3.4). The 20-id cap exists so a
 corrupt-payload *class* failure does not print 70 000 lines.
 
+The seam is deliberately narrow: WI-6 test 3 drives `runBackfillSessionUsageCli` for the failure path
+(the injected failure cannot cross a process boundary), and WI-6 test 4 **spawns the real script** for
+the success path, so the surviving three lines — the import, the client, the `finally` — are covered by
+a real process with a real exit code. Neither test alone is sufficient; that split is the point.
+
 **Verification.**
 
 ```bash
 npm run typecheck -w @agentos/db
-npm run test:db                 # WI-6's resilience test
+npm run test:db                 # WI-6 test 3 (exit 1, injected) and test 4 (exit 0, spawned)
 # and, against the local dev database only, the shape check:
-npm run db:backfill-session-usage && echo "exit=$?"
+npm run db:backfill-session-usage; echo "exit=$?"    # `;` not `&&`: the exit code is the point
 ```
 
 **Rollback.** Two files, no stored state. The exported function and the script wrapper revert
@@ -643,6 +774,8 @@ runbook, the operator's shell history) needs to know.
    | SF-1 rejection | each of `-7`, `1.5`, `2147483648`, `NaN`, `Infinity`, `"5"`, `null`, `true` in `usage.input_tokens` leaves `inputTokens` absent while a valid `output_tokens` in the same payload still comes through, and a diagnostic is emitted (swap `console.warn` the way `app.test.ts:1166` swaps `console.error`) |
    | summed overflow | two events of `input_tokens: 2_000_000_000` → `inputTokens: null` **and** `totalTokens: null`, with the write not throwing |
    | cost guard | `total_cost_usd` of `-1`, `1e9` and `99999999.99999` each store `costUsd: null` (C8) |
+   | **cost rejection is per event** (R1/MF-2) | two events, `{total_cost_usd: 1e9}` and `{total_cost_usd: 0.05}`, through `sumUsage` + `deriveUsageColumns` → `costUsd` is `"0.0500"`, **not** `null`: the impossible event is omitted and the valid one survives. Assert `extractUsage` on the bad event alone returns no `costUsd` key at all. |
+   | **aggregate cost overflow still caught** (R1/MF-2) | two events of `total_cost_usd: 6e7` — each individually storable — sum to `1.2e8` → `costUsd: null` from `costColumn`. This is the case the per-event check cannot see, and it is why both guards exist. |
    | lock key | `sessionUsageLockKey` is deterministic, differs across a handful of cuid-shaped ids, and always lies in `[-2147483648, 2147483647]` |
 
 **Verification.**
@@ -666,13 +799,55 @@ item 3).
 `npm run test:db` (`node --test --test-concurrency=1 src/*.dbtest.ts`).
 
 **Header comment — required by spec §7.2 item 1.** State, at the top of the file, that deleting the
-`pg_advisory_xact_lock` statement in `packages/db/src/usage.ts` must make **this test and only this
-test** fail, and that this is how the next reader checks the test still earns its keep.
+`pg_advisory_xact_lock` statement in `packages/db/src/usage.ts` must make **test 1 and test 2b fail,
+and nothing outside this file**, and that this is how the next reader checks these tests still earn
+their keep.
+
+Say "test 1 and test 2b", not "this test and only this test": once R1/SF-2 gave test 2b a real
+contended recompute, removing the lock makes that recompute *succeed*, which 2b asserts against. Two
+tests failing for the same deletion is the correct expectation, and a header that claims only one
+will fail teaches the next reader to treat a true positive as a broken test. Note also which tests are
+*insensitive* to the deletion and why — test 0 never contends, test 2a takes its lock directly rather
+than through `recomputeSessionUsage`, test 3 and test 4 inject their own failure — so a reader who
+deletes the line and sees them stay green has learned nothing alarming.
 
 **Harness.** Copy `before`/`beforeEach`/`after` from `migration.dbtest.ts:9-12`. Copy the seed chain
 verbatim from `scheduler.dbtest.ts:15-24` (project → environment → agent → repo) and
 `chain.dbtest.ts:41-49` (task → run → session); do not re-derive the required fields.
 `SessionEvent` rows need `{sessionId, runId, seq, source: "CLAUDE", type: "FINAL_OUTPUT", payload}`.
+
+**Holding a lock open while another client contends — use the repo's existing template.**
+`packages/api/src/tasks.dbtest.ts:307-326` ("a lock held by a foreign transaction makes start wait
+rather than double-run") is the same experiment as test 2b with a row lock instead of an advisory
+one: a second `PrismaClient` on `testDatabaseUrl`, a holding `$transaction`, the contended call
+raced against it with `Promise.all`, and `finally { await holder.$disconnect(); }`. Copy its shape.
+Two numbers in it are load-bearing and are the likeliest way to lose an hour here:
+
+- **`{ timeout: 10_000 }` on the holding transaction.** Prisma's default interactive-transaction
+  timeout is 5 s. Test 2b's contended recompute takes ≈3 s to give up (WI-3 sets
+  `lock_timeout = '3s'`) and may take up to 15 s if `lock_timeout` turns out not to bound an advisory
+  wait at all — which is the very thing 2b is measuring. A holder on the default 5 s can therefore
+  time out *first*, releasing the lock and letting the contended recompute succeed: the test then
+  fails while reporting the opposite of what happened. Give the holder `timeout: 20_000`.
+- **`{ timeout: 20_000 }` on the `test()` itself**, as all four of that file's race tests do. Node's
+  default per-test timeout will not accommodate a deliberate 3-15 s wait.
+
+The same applies to test 1's stalling transaction, which C7's 2 000 ms poll keeps well inside the
+default — but state the timeout explicitly there too rather than relying on the margin.
+
+**Test 0 — the locked recompute runs at all (R1/MF-1). First test in the file.** Seed one session
+with one `FINAL_OUTPUT` event; call `recomputeSessionUsage(db, S)` **once**, against the real
+database, with nothing instrumented; assert it returns `true` and that the session's stored columns
+match the payload. Then call it a second time and assert `false` (no write when nothing changed).
+
+This is trivial and it is the most valuable test in the file. It is the whole of MF-1's remedy reduced
+to its cheapest check: one call exercises `SET LOCAL lock_timeout`, the `::int` parameter casts and the
+`::text AS locked` return cast together. Without it, a `void`-deserialization regression surfaces only
+as test 1 failing, where the reader will reasonably suspect the interleaving. And because the ingest
+path swallows this exact throw (`app.ts:2517-2521`), no other test in the repo would catch it either:
+the unit stubs return `[]` from `$queryRaw` and never touch PostgreSQL. It also settles §13 item 2 —
+if the parameterised `::int` form is going to be rejected, it is rejected here, in the simplest
+possible context.
 
 **Test 1 — the interleaving.**
 
@@ -706,19 +881,128 @@ assert stored inputTokens === 30
   last and `sameColumns` makes it permanent.
 - Disconnect the second client in a `finally` (`chain.dbtest.ts:89-92` does this).
 
-**Test 2 — the lock is actually taken** (cheap, and it localises a failure in test 1): open an
+**Test 2a — the lock is actually taken** (cheap, and it localises a failure in test 1): open an
 interactive transaction that takes `pg_advisory_xact_lock(CLASS, sessionUsageLockKey(S))` and holds
 it; assert `pg_locks` shows one granted advisory lock for that class; release. This is what tells the
-reviewer whether test 1 failed because the lock is missing or because the interleaving is wrong.
+reviewer whether test 1 failed because the lock is missing or because the interleaving is wrong, and
+it is what settles §13 item 3 (that a lock is visible in `pg_locks` from another connection at all).
 
-**Test 3 — backfill resilience (C3/C4).** Seed three sessions, each with a `FINAL_OUTPUT`. Call
-`backfillSessionUsage` with a `Proxy` whose `session.update` throws
-`new Error("value out of range for type integer")` for the middle session's id only and passes
-everything else through. Assert `{scanned: 3, updated: 2, failed: [{sessionId: middle}]}`. Then call
-it again with the **plain** client and assert `failed` is empty and `updated` is 1 (the previously
-failed session is repaired) — which also demonstrates the non-zero-exit path is reachable and
-recoverable. The exit code itself belongs to the script wrapper and is covered by reading it, not by
-spawning a process.
+**Test 2b — a contended recompute fails, and this is where §13 item 1 is settled (R1/SF-2).**
+2a proves a lock is *visible*; it cannot prove a *second recompute* is actually made to wait, nor how
+that wait ends — which is the open question §13 item 1 assigns to this test. So:
+
+```
+open tx on client 1; take pg_advisory_xact_lock(CLASS, sessionUsageLockKey(S)) directly; hold it
+start = performance.now()
+outcome = await recomputeSessionUsage(db2, S).then(() => "resolved", (error) => error)
+elapsed = performance.now() - start
+release client 1's transaction; disconnect db2 in a `finally`
+assert outcome is an Error, never the string "resolved"
+assert elapsed < 12_000                      // below Prisma's timeout: 15_000, above lock_timeout: 3_000
+record, in an assertion message and a code comment, which of these was observed:
+  55P03 (possibly wrapped in Prisma's P2010) at ≈3 s  -> lock_timeout DOES bound an advisory wait
+  P2028 / transaction timeout at ≈15 s               -> it does NOT; Prisma's timeout is the only backstop
+```
+
+- `db2` is a second `PrismaClient` on `testDatabaseUrl`, the two-client shape of
+  `chain.dbtest.ts:67-92` and `tasks.dbtest.ts:307-326`, including its
+  `finally { await holder.$disconnect(); }` and the two explicit timeouts noted under **Harness**.
+- **Assert the class of outcome, record the code.** The test must fail if the second recompute
+  *succeeds* — that would mean no serialisation at all. It must **not** hard-assert `55P03`, because
+  which code appears is precisely the thing that is unknown; pinning it would encode today's guess as
+  tomorrow's requirement. Recording it in a comment is what closes §13 item 1.
+- The reviewer measured `P2010` wrapping PostgreSQL `55P03` at ≈279 ms with a deliberately short
+  `lock_timeout=200ms`, so the experiment is known to be practical. This test cannot shorten the
+  timeout the same way — WI-3's `SET LOCAL lock_timeout = '3s'` runs *inside* the transaction under
+  test and overrides any session-level default set beforehand — so it pays the full ≈3 s. That is
+  acceptable: `test:db` runs at `--test-concurrency=1` and this is one test.
+- Do not attempt to make the timeout injectable to speed this up. A configuration seam whose only
+  consumer is a test is how the production value stops being the tested value.
+
+**Test 3 — backfill resilience and the non-zero exit (C3/C4, R1/MF-3, R1/MF-4).** Seed three
+sessions, each with a `FINAL_OUTPUT`. Drive **`runBackfillSessionUsageCli`** (not
+`backfillSessionUsage` directly) with an instrumented client and captured `log`/`error`, so the
+reporting path and the returned exit code are executed rather than read:
+
+```
+exit = await runBackfillSessionUsageCli({ db: failingFor(middle.id), log: lines.push, error: lines.push })
+assert exit === 1
+assert lines[0] === "scanned 3, updated 2, failed 1"
+assert lines[1] contains middle.id
+exit = await runBackfillSessionUsageCli({ db, log: …, error: … })       // plain client, repair pass
+assert exit === 0  and  "scanned 3, updated 1, failed 0"
+```
+
+`updated 1` on the repair pass is not a typo: the two sessions that succeeded the first time now match
+their stored columns, so `sameColumns` suppresses their writes; only the previously-failed session is
+written. That asymmetry is itself evidence the recompute is an absolute repair and not a blind write.
+
+**The injection must wrap the *inner* transaction client (R1/MF-3).** WI-3 moved the write to
+`tx.session.update` inside `db.$transaction`, so a `Proxy` that replaces `session.update` on the
+**outer** client is bypassed entirely — `recomputeSessionUsage` receives Prisma's native `tx`, no
+failure is injected, and the test asserts `failed: 1` against a run in which nothing failed. Use the
+repo's proven shape, `chain.dbtest.ts:218-239`, unchanged in structure:
+
+```ts
+const failingFor = (targetId: string) => new Proxy(db, { get(target, property, receiver) {
+  if (property !== "$transaction") {
+    const value = Reflect.get(target, property, receiver);
+    return typeof value === "function" ? value.bind(target) : value;   // the bind is required
+  }
+  return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+    const sessionDelegate = new Proxy(tx.session, { get(sessionTarget, sessionProperty, sessionReceiver) {
+      if (sessionProperty !== "update") return Reflect.get(sessionTarget, sessionProperty, sessionReceiver);
+      return async (args: Parameters<typeof tx.session.update>[0]) => {
+        if (args?.where?.id === targetId) throw new Error("value out of range for type integer");
+        return tx.session.update(args);
+      };
+    } });
+    const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+      return txProperty === "session" ? sessionDelegate : Reflect.get(txTarget, txProperty, txReceiver);
+    } });
+    return operation(instrumentedTx);
+  }, options as any);
+} }) as PrismaClient;
+```
+
+Three details that are load-bearing, all inherited from the prior art:
+
+- **`value.bind(target)`** on the pass-through branch. `backfillSessionUsage` calls
+  `db.session.findMany` on the outer client for its scan; an unbound delegate method called through a
+  `Proxy` receiver breaks Prisma's internals.
+- **Filter on `args.where.id`**, not on a call counter. The scan is ordered by `requestedAt`, so a
+  counter silently retargets the moment seed timestamps change.
+- **The throw rolls its transaction back**, which is exactly why the repair pass has something to
+  repair. Do not "helpfully" catch it inside the proxy.
+
+**Test 4 — the real script, a real process, a real exit code (R1/MF-4).** Test 3 proves the reporting
+function; it cannot prove the three lines the script still owns (the import, the client construction,
+the `finally` that must still `$disconnect`). Seed two sessions with `FINAL_OUTPUT` events, then spawn
+the committed script against the scratch schema:
+
+```ts
+const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
+const result = spawnSync(process.execPath, ["--import", "tsx", "prisma/backfill-session-usage.ts"], {
+  cwd: dbDirectory,
+  env: { ...process.env, DATABASE_URL: testDatabaseUrl },   // the script's PrismaClient reads DATABASE_URL
+  encoding: "utf8",
+});
+assert.equal(result.status, 0);                              // a REAL exit code, not a read constant
+assert.match(result.stdout, /scanned 2, updated 2, failed 0/);
+```
+
+- This spawn shape is not invented: `testdb.ts:32-48` already runs `npx prisma` with
+  `cwd: packages/db` and `env: { ...process.env, DATABASE_URL: testDatabaseUrl }` in this same
+  harness, so both the working directory and the environment override are proven here.
+- `beforeEach` truncates every table (`testdb.ts:57-68`), so this test's counts are its own; it does
+  not depend on test 3 having run.
+- The failure path deliberately is **not** spawned: an injected `Proxy` cannot cross a process
+  boundary, and after SF-1 no payload can force a failure (C4). Exit 1 belongs to test 3, exit 0 to
+  test 4, and between them the whole of spec §7.2 item 5 is executed.
+- If the spawn cannot be made to work in this monorepo layout, that is a finding, not a licence to
+  drop it: record what failed in §13 and say plainly in the traceability table that the process exit
+  code is unverified. Do not re-describe it as "covered by reading it" — that framing is what R1/MF-4
+  rejected.
 
 **Verification.**
 
@@ -726,9 +1010,15 @@ spawning a process.
 npm run test:db
 # then the deletion check, which must be run and then reverted:
 #   remove the pg_advisory_xact_lock line from packages/db/src/usage.ts
-#   npm run test:db     -> test 1 fails with storedInputTokens 10; everything else stays green
+#   npm run test:db     -> test 1 fails with storedInputTokens 10
+#                       -> test 2b fails because the contended recompute now RESOLVES
+#                       -> tests 0, 2a, 3, 4 and every other suite stay green
 #   git checkout -- packages/db/src/usage.ts
 ```
+
+Record, in the file's header comment, two things the run tells you and nothing else can: which error
+code test 2b actually observed (§13 item 1), and that the parameterised `::int` form was accepted
+(§13 item 2). Both are one-line comments and both close an open question.
 
 **Requires.** A reachable PostgreSQL and a `TEST_DATABASE_URL` naming a non-`public` schema
 (`testdb.ts:12-14` refuses `public`). The harness drops and re-applies that schema from the committed
@@ -806,11 +1096,45 @@ into it, so batch 4 cannot.
    `\d+ "Session"` shows the four columns absent, `_prisma_migrations` has no `20260816165548` row,
    row counts) → two `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, **one `psql -c` per statement, never
    `psql -1`/`--single-transaction`** → prove `indisvalid` and `indisready` for both, with the
-   `DROP INDEX CONCURRENTLY` + retry-when-quieter recovery for a false → `migrate deploy` with
-   `?options=-c%20lock_timeout%3D3s` and the `55P03` retry note and the by-hand
+   `DROP INDEX CONCURRENTLY` + retry-when-quieter recovery for a false → `migrate deploy` under a
+   `lock_timeout` of 3 s, **built as below**, with the `55P03` retry note and the by-hand
    `ALTER TABLE` + `migrate resolve --applied` fallback → `db:generate` + `db:drift-check` → **restart
    the API onto this batch's fixed code, never onto `2737113`** → `db:backfill-session-usage` twice,
    the second reporting `updated 0`.
+
+   **Building the `lock_timeout` URL — do not append `?options=` (R1/MF-6).** The naive
+   `DATABASE_URL="${DATABASE_URL}?options=-c lock_timeout=3s"` is wrong for any URL that already
+   carries a query, which is this repo's own convention (`packages/api/src/testdb.ts:6-10` reads
+   `?schema=…`). The second `?` is not a delimiter: it is absorbed into the preceding parameter's
+   value, so `schema` silently becomes `agentos_test?options=-c lock_timeout=3s` — the timeout is
+   never installed **and the migration is aimed at a schema that does not exist**. Detect the query
+   first and pick the separator:
+
+   ```bash
+   case "$DATABASE_URL" in *\?*) SEP='&';; *) SEP='?';; esac
+   MIGRATE_URL="${DATABASE_URL}${SEP}options=-c%20lock_timeout%3D3s"
+
+   # Verify what was actually built, WITHOUT printing the URL (it carries the password):
+   MIGRATE_URL="$MIGRATE_URL" node -e '
+     const u = new URL(process.env.MIGRATE_URL);
+     console.log("params:", [...u.searchParams.keys()].join(","));
+     console.log("options:", u.searchParams.get("options"));
+     console.log("schema:", u.searchParams.get("schema"));'
+   # expect  params: schema,options   (or just `options` on a bare URL)
+   #         options: -c lock_timeout=3s      <- decoded, with a real space and a real `=`
+   #         schema:  <unchanged, or null>    <- if this grew a `?`, STOP
+
+   DATABASE_URL="$MIGRATE_URL" npx prisma migrate deploy
+   ```
+
+   Percent-encode by hand (`%20`, `%3D`) rather than letting `URLSearchParams.set` do it:
+   `URLSearchParams` serialises a space as `+`, and a generic URL query parser — which is what
+   Prisma's connection-string handling is — does not decode `+` back to a space, so the option would
+   reach PostgreSQL as the literal `-c+lock_timeout=3s`. The `case` form is also plainly readable in a
+   runbook, which matters more than elegance at 2 a.m.
+
+   `PGOPTIONS` is **not** an alternative here: Prisma connects with its own Rust driver rather than
+   libpq, so libpq's environment variables are ignored.
 3. **Why the restart order is what it is** — the live ingest path (`app.ts:2519`) uses the same
    extractor, so an API restarted onto the merged-but-unfixed code starts writing under-counted
    totals for every finishing CLAUDE session immediately, and those rows look self-consistent to
@@ -856,9 +1180,33 @@ concurrently and report `indisvalid = true` → `migrate deploy` applies the col
 migration → `db:drift-check` exits 0 → backfill runs twice, second reports `updated 0` → rollback
 drops indexes then columns → `migrate resolve --rolled-back` records it → drift-check against the
 pre-batch-4 datamodel exits 0 → forward redeploy applies cleanly. Record the date and result in the
-version header. If the rehearsal cannot be run in this chain's environment (no scratch database
-reachable), **say so in the header** — an unrehearsed runbook that claims to be rehearsed is worse
-than one that admits it is not.
+version header.
+
+Rehearse the `migrate deploy` step **twice: once with a bare `DATABASE_URL` and once with a
+`?schema=…` URL** (R1/MF-6). The second shape is the one the naive `?options=` append corrupts, and it
+is the shape this repo actually uses; a rehearsal that only ever exercises a bare URL would have
+passed while shipping the bug.
+
+**The rehearsal is a gate, not a disclosure (R1/MF-5).** An earlier draft of this plan said that if no
+scratch database were reachable, WI-8's header should say "not rehearsed" and the work could proceed.
+That is wrong, and it is the failure mode the whole runbook exists to prevent: spec §7.3 requires the
+rehearsal *before the operator runs the sequence*, and spec §10 DoD item 5 makes "rehearsed on a
+scratch database per §7.3" part of done. A truthful header on an unproven rollback procedure is still
+an unproven rollback procedure heading for production.
+
+So:
+
+- Honest header wording stays mandatory — never date a rehearsal that did not happen.
+- **"Not rehearsed" is a failed implementation gate.** If the rehearsal cannot be run, the
+  implementation step reports **FAIL** with the reason, records it as an open question in its
+  deliverable and the activity log, and does **not** report the DoD satisfied. It does not wait for a
+  human (the chain's standing rules), and it does not waive the criterion by describing it.
+- This is not an expected outcome. The reviewer ran `npm run test:db` in this chain's environment and
+  watched it rebuild `agentos_test` and apply all 12 migrations. If `test:db` runs, the rehearsal
+  harness exists. A rehearsal skipped for convenience is the one thing this item forbids.
+- **The rehearsal target is a scratch schema built from migrations, and nothing else.** Never a dump
+  or clone of the live database, never a second API pointed at one (item 12). "I could not get a
+  scratch schema" is a FAIL; "I rehearsed against a clone instead" is the incident of 2026-08-16.
 
 **Rollback.** A document. Deleting it loses the procedure; it changes no behaviour.
 
@@ -900,20 +1248,21 @@ grep -rn "app.ts:1770" docs/     # expect: no output
 
 | spec requirement | work item(s) | check |
 |---|---|---|
-| §4.1.1-4.1.2 advisory-lock serialisation, signature unchanged | WI-3 | `test:db` test 1; `typecheck` proves the signature |
+| §4.1.1-4.1.2 advisory-lock serialisation, signature unchanged | WI-3 | `test:db` **test 0** (the locked recompute runs against a real database at all — R1/MF-1), **test 1** (the interleaving), **test 2b** (a contended recompute is actually made to wait); `typecheck` proves the signature |
 | §4.1.3 ingest stays non-fatal | WI-3 (comment only) | `app.test.ts:1154` "a failing usage recompute does not fail the ingest" still green |
 | §4.1.5 stub scaffolding; both false invariants corrected | WI-5, WI-3, WI-9 | `npm test`; §9's greps |
 | §4.2.1 `modelUsage` branch, exclusive, camel/snake split, fallback intact | WI-2 | WI-5's four branch tests |
 | §4.2.2 545/98/8768/643 and 535/20/2969/555 | WI-2, WI-5 | `npm test -w @agentos/api` |
 | §4.2.3 complete untrimmed fixtures | WI-5 | reviewer diffs fixture against the sample |
 | §4.2.4 blocks the restart, not just the backfill | WI-8 item 3 | the runbook states the order |
-| §4.2.5 no UI change | — | `git diff --name-only origin/master… \| grep apps/web` → empty |
+| §4.2.5 no UI change | — | §11.2's diff-surface script (R1/SF-1 — it exits non-zero on a violation, unlike the draft it replaces) |
 | §4.3.1 token validation | WI-1 | WI-5 rejection table |
 | §4.3.2 summed-value validation | WI-1 | WI-5 summed-overflow test |
-| §4.3.3 cost guard (A2) | WI-1 + C8 | WI-5 cost-guard test |
-| §4.3.4 backfill resilience, summary, non-zero exit | WI-4 | WI-6 test 3 |
+| §4.3.3 cost guard (A2), **rejection per event** | WI-1 + C8 + R1/MF-2 | WI-5's three cost tests: the guard, the mixed invalid-plus-valid event (per-event rejection), and the aggregate overflow across individually-valid events |
+| §4.3.4 backfill resilience and summary | WI-4 | WI-6 **test 3** — drives `runBackfillSessionUsageCli` with a `Proxy` that wraps the **inner** transaction client (R1/MF-3), asserting `scanned 3, updated 2, failed 1` then the repair pass |
+| §4.3.4 backfill **exits non-zero** | WI-4 | WI-6 **test 3** asserts the returned exit code is `1`, and **test 4** spawns the real script and asserts a real `result.status` of `0` (R1/MF-4). Not "covered by reading the source". |
 | §4.4.2 `IF NOT EXISTS` + header comment | WI-7 | `test:db` (fresh-schema apply), `db:drift-check` |
-| §4.4.3 operator sequence | WI-8 item 2 | rehearsal |
+| §4.4.3 operator sequence | WI-8 item 2 | the §7.3 rehearsal, run against a scratch schema, in **both** URL shapes (bare and `?schema=…` — R1/MF-6). **Unrehearsed = FAIL**, not a header disclaimer (R1/MF-5). |
 | §4.4.4 drift-check still passes | WI-7 | `npm run db:drift-check` |
 | §4.5 rollback runbook, 9 required contents | WI-8 | §12 of the runbook itself |
 | §4.6 five documentation corrections (+2 found here) | WI-9 | §9's greps |
@@ -947,7 +1296,9 @@ Hard dependencies, and why:
 - **WI-1 before WI-2**: `extractModelUsage` calls `tokenCount`.
 - **WI-3 before WI-5**: the stub scaffolding is only meaningful once `$transaction` is actually
   called; landing WI-3 alone leaves `npm test` red, so do not stop between them.
-- **WI-4 before WI-6 test 3**: the test imports `backfillSessionUsage` from `@agentos/db`.
+- **WI-4 before WI-6 tests 3 and 4**: test 3 imports `runBackfillSessionUsageCli` from `@agentos/db`
+  (not `backfillSessionUsage` — R1/MF-4 moved the assertion onto the returned exit code), and test 4
+  spawns the rewritten `prisma/backfill-session-usage.ts`.
 - **WI-7 before the first `npm run test:db` of the session is *not* required** — the harness applies
   whatever migrations are committed either way.
 
@@ -970,14 +1321,49 @@ npm run db:drift-check      # exit 0
 `npm test` does **not** run `*.dbtest.ts`; an acceptance run without `npm run test:db` is incomplete.
 Re-run all five **after** the rebase, not just before.
 
-Diff-surface checks, which are cheap and catch the two constraints most likely to be violated:
+Diff-surface checks, which are cheap and catch the constraints most likely to be violated. **Run this
+as a script, not as three interactive lines** (R1/SF-1): the previous draft used a PCRE negative
+lookahead that `grep -E` cannot parse — this workspace's grep answers it with
+`error at position 7 … invalid syntax`, and BSD grep with `repetition-operator operand invalid` — and
+wrote the other two as `grep … && echo "VIOLATION"`, which **exits zero when a violation is found**.
+A gate that reports success on the failure path is worse than no gate.
 
 ```bash
-git diff --name-only origin/master...HEAD | grep -E '^apps/web/' && echo "VIOLATION: apps/web in the diff"
-git diff --name-only origin/master...HEAD | grep -E 'schema\.prisma|migrations/20[0-9]{12}_(?!batch4_session_usage)' \
-  && echo "VIOLATION: schema or a new migration folder"
-git log origin/master..HEAD -p | grep -i "OPERATOR_TOKEN" && echo "VIOLATION: credential in the diff"
+#!/usr/bin/env bash
+set -uo pipefail
+fail=0
+report() { printf '\nVIOLATION: %s\n%s\n' "$1" "$2"; fail=1; }
+
+# apps/web and schema.prisma: two explicit filters, no lookahead.
+web=$(git diff --name-only origin/master...HEAD | grep -E '^apps/web/' || true)
+[ -n "$web" ] && report "apps/web is in the diff (spec §5)" "$web"
+
+schema=$(git diff --name-only origin/master...HEAD | grep -E '(^|/)schema\.prisma$' || true)
+[ -n "$schema" ] && report "schema.prisma is in the diff (spec §5)" "$schema"
+
+# A NEW migration folder. WI-7 only MODIFIES 20260816165548_batch4_session_usage,
+# so filter on added files and then exclude that folder — this is the lookahead,
+# spelled portably.
+added=$(git diff --name-only --diff-filter=A origin/master...HEAD \
+        | grep -E '^packages/db/prisma/migrations/' \
+        | grep -v '^packages/db/prisma/migrations/20260816165548_batch4_session_usage/' || true)
+[ -n "$added" ] && report "a new migration folder was added (spec §5)" "$added"
+
+# Credentials. Report a COUNT and the touched files, never the matching line:
+# printing the match would write the secret into the terminal, the CI log and
+# whatever artifact captures them — the exact thing this check exists to stop.
+secrets=$(git log origin/master..HEAD -p | grep -ci 'operator_token' || true)
+if [ "$secrets" -gt 0 ]; then
+  report "OPERATOR_TOKEN appears $secrets time(s) in the diff" \
+         "$(git diff --name-only origin/master...HEAD)"
+fi
+
+[ "$fail" -eq 0 ] && echo "diff surface OK: no apps/web, no schema.prisma, no new migration, no credential"
+exit "$fail"
 ```
+
+`|| true` after each `grep` is required under `pipefail`: grep exits 1 when it matches nothing, which
+is the *success* case here. `set -e` is deliberately not used for the same reason.
 
 ### 11.3 Migration and restart steps
 
@@ -995,8 +1381,11 @@ requirement beyond the existing one, and no client-regeneration ordering problem
 
 **Operator-side (NOT this chain — WI-8 owns the authoritative copy):** pre-flight → two
 `CREATE INDEX CONCURRENTLY` out of band, one `psql -c` each → prove `indisvalid` → `migrate deploy`
-under `lock_timeout=3s` → `db:generate` + `db:drift-check` → **restart the API onto this batch's fixed
-code** → `db:backfill-session-usage` twice, the second reporting `updated 0` and exiting zero.
+under `lock_timeout=3s`, with the URL **built by the separator-detecting form in WI-8 item 2, never by
+appending `?options=`** (R1/MF-6: appending a second `?` to this repo's `?schema=…` URLs swallows the
+timeout and redirects the migration at a nonexistent schema) → `db:generate` + `db:drift-check` →
+**restart the API onto this batch's fixed code** → `db:backfill-session-usage` twice, the second
+reporting `updated 0` and exiting zero.
 
 **Restart step, stated plainly:** the API must be restarted **after** the migration and **onto code
 that contains WI-2**. Restarting onto `2737113` (batch 4 as merged) starts writing under-counted
@@ -1037,29 +1426,46 @@ Ordered by how much a wrong guess costs. Each names how to settle it — by runn
    locks on "a table, index, row, or other database object"; whether an advisory lock counts is an
    implementation detail the docs do not promise. The plan therefore treats it as best-effort and
    makes Prisma's `timeout: 15_000` the real backstop — and WI-6 must not *depend* on either
-   (C7 keeps the poll at 2 000 ms). **Settle it** while running WI-6 test 2: hold the lock, start a
-   second recompute, time how long it takes to fail and with which error code (`55P03` = the timeout
-   works; `P2028`/transaction timeout = it does not). Record the answer in a comment either way.
-2. **Prisma's parameter typing for `${…}::int` in `$queryRaw`.** `tx.$queryRaw` inside a transaction is
-   proven at `workflow.ts:87`, but that call binds a `String`. A JS number may arrive as `int8`,
-   `numeric` or `double precision`; all three cast to `int4` in PostgreSQL, so this should work — but
-   it is unverified in this repo. **Settle it** the first time WI-6 runs; the documented fallback
-   (`$executeRawUnsafe` with the two integers interpolated) is in WI-3 and must not be adopted before
-   the parameterised form is seen to fail.
+   (C7 keeps the poll at 2 000 ms). **Settle it in WI-6 test 2b** (R1/SF-2), which exists for this
+   purpose: hold the lock, start a second *real* recompute, and record which error ends it and after
+   how long (`55P03`, possibly wrapped in `P2010`, at ≈3 s = the timeout works; `P2028` at ≈15 s = it
+   does not). 2b asserts only that the contended recompute **fails**; the code goes in a comment,
+   because pinning today's code as an assertion would make an answer out of the question.
+2. **Prisma's raw-SQL behaviour around the lock statement — one half now known, one half still open.**
+   - *Return-type deserialization: **no longer a guess. It fails.*** The review probed Prisma 6.19.0
+     against `agentos_test`: a bare `SELECT pg_advisory_xact_lock(…)` raises `P2010`, *"Failed to
+     deserialize column of type 'void'"*, and `pg_advisory_xact_lock(…)::text AS locked` returns a
+     row. WI-3 carries the cast for that reason. This revision could not re-run the probe (no `.env`,
+     no generated client in the revision workspace), so **WI-6 test 0 is the confirmation** — and it
+     is also the permanent regression guard, because nothing else in the repo would catch the cast
+     being "simplified" away: the unit stubs return `[]` from `$queryRaw` and the ingest path swallows
+     the throw.
+   - *Numeric parameter typing for `${…}::int`: still open.* `tx.$queryRaw` inside a transaction is
+     proven at `workflow.ts:87`, and `testdb.ts:60-64` binds a string the same way, but neither binds
+     a **number**. A JS number may arrive as `int8`, `numeric` or `double precision`; all three cast
+     to `int4`, so this should work. **Settle it** in WI-6 test 0, the simplest context in which it
+     can fail. The documented fallback (`$executeRawUnsafe` with the two integers interpolated) is in
+     WI-3 and must not be adopted before the parameterised form is seen to fail — and if it is
+     adopted, note that it moots the first half of this item too.
 3. **`pg_locks` visibility of the queued lock.** The poll assumes a waiting `pg_advisory_xact_lock`
    appears as `locktype='advisory' AND NOT granted` on the *same database*. Standard behaviour, and
    the test schema shares the database with the poller. If the row never appears, the test still
    terminates (the 2 000 ms deadline) and still asserts 30 — it just loses its determinism guarantee
-   in the blocked branch. **Settle it** by asserting, in test 2, that the granted row is visible.
+   in the blocked branch. **Settle it** by asserting, in test 2a, that the granted row is visible.
 4. **`console.warn` as the diagnostic channel.** The spec says "a one-line diagnostic" and does not
    name a channel. `console.warn` matches `app.ts`'s `console.error` habit and is swappable in a test.
    The cost: a corrupt-payload *class* failure logs per field per session during a backfill. Accepted;
    the 20-id cap in WI-4 bounds the *summary*, not the diagnostics. If that proves noisy in the
    rehearsal, the cheapest fix is to log at most once per field per `extractUsage` call.
 5. **Whether the rehearsal (spec §7.3) can run in this chain's environment.** It needs a scratch
-   PostgreSQL schema. If none is reachable, WI-8's version header must say **"not rehearsed"** rather
-   than carry a date. Under no circumstances rehearse against a dump or clone of the live database, or
-   point a second API at one.
+   PostgreSQL schema. The evidence says yes: the reviewer watched `npm run test:db` rebuild
+   `agentos_test`, apply all 12 migrations and pass the existing database suites. (Note that the
+   *revision* workspace had neither `.env` nor a generated Prisma client, so environments in this
+   chain differ — check, do not assume, and do not assume the negative either.)
+   **If it cannot run, that is a FAIL, not a footnote (R1/MF-5).** The header never carries a date for
+   a rehearsal that did not happen, and the step does not report the DoD satisfied on the strength of
+   having disclosed the gap. Under no circumstances rehearse against a dump or clone of the live
+   database, or point a second API at one.
 6. **Exact fixture size in `usage.test.ts`.** The two complete captures are large (≈40 lines of JSON
    each). If the file becomes unreadable, the alternative is importing them from the sample files at
    test time — but that trades "the fixture is visible next to its assertion" for "the fixture cannot
@@ -1085,6 +1491,12 @@ Ordered by how much a wrong guess costs. Each names how to settle it — by runn
    a caveat the brief did not transcribe, this plan has missed it.** Cheapest fix: commit the review
    file and have the implementation step (⑤) re-read it before starting. Recorded in the activity log;
    `inbox_ask` was not called, per the chain's standing rules.
+
+   **R1 note:** this is about the *retrospective* review, which is still missing. The **plan** review
+   that produced R1 is a different document and it is now committed at
+   `docs/reviews/2026-08-16-batch-4-fixes-plan-review.md`, carried onto this branch by this revision
+   so §0.4's citations resolve and ⑤ can read the eight findings in their own words rather than only
+   through my summary of them. Two different reviews; only one of them is still missing.
 2. **Does the operator want the cost guard (A2) at all?** It extends the review's letter, which named
    only token fields. If Leo prefers the letter, drop §4.3.3 / WI-1's `costColumn` range check —
    nothing else depends on it. The plan implements it, because a `Decimal(12,4)` overflow fails the
