@@ -115,9 +115,9 @@ const BOARD_GAP_PX = 12;
 const REMEMBER_MS = 200;
 
 const SHELL = "relative flex min-h-0 flex-1 flex-col gap-[8px]";
-/** Reserved whether or not the arrows are in it. They appear the moment the
- *  board overflows, and a row that collapsed when it emptied would move the
- *  whole board up by 36px at exactly that moment. */
+/** Present only when horizontal travel exists. A permanently reserved row left
+ *  36px of unexplained whitespace (28px plus the shell gap) on wide screens
+ *  where all five columns already fit. */
 const NAV = "flex h-[28px] flex-none items-center justify-end gap-[6px]";
 const NAV_HINT = "mr-auto text-[12px] text-[color:var(--faint)]";
 /** `flex`, not a bare block. The board inside it is sized by `flex-1`, and in a
@@ -173,6 +173,20 @@ export const BoardArrows = ({ edges, onStep }: { edges: Edges; onStep: (directio
       →
     </Button>
   </>;
+};
+
+/** The entire navigation row is conditional, not just its contents. Wide
+ *  boards therefore spend no vertical space explaining movement they do not
+ *  have, while overflowed boards retain the hint and keyboard controls. */
+export const BoardNavigation = ({ edges, onStep }: { edges: Edges; onStep: (direction: -1 | 1) => void }): ReactNode => {
+  const t = useT();
+  if (!edges.overflowing) return null;
+  return (
+    <div className={NAV}>
+      <span className={NAV_HINT}>{t("tasks.board.scrollHint")}</span>
+      <BoardArrows edges={edges} onStep={onStep} />
+    </div>
+  );
 };
 
 /** How close to the board's edge a drag has to get before the board starts
@@ -297,17 +311,7 @@ export const DesktopBoard = ({ byStatus, loading, dragOver, setDragOver, onMove,
 
   return (
     <div className={SHELL}>
-      <div className={NAV}>
-        {/* Only when there is something off screen. Two permanently disabled
-            arrows at 1440px, where all five columns are already visible, would
-            be a control that has never once had anything to do. */}
-        {edges.overflowing ? (
-          <>
-            <span className={NAV_HINT}>{t("tasks.board.scrollHint")}</span>
-            <BoardArrows edges={edges} onStep={step} />
-          </>
-        ) : null}
-      </div>
+      <BoardNavigation edges={edges} onStep={step} />
 
       <div className={FRAME}>
         <div

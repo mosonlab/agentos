@@ -3,7 +3,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
-import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, FRAME, dragEdgeStep } from "../components/desktop-board";
+import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
@@ -247,6 +247,19 @@ test("the arrows say which way they go, and an arrow at its end is disabled", ()
   // Real buttons, so they are in the tab order and take Enter and Space for
   // free — the requirement is a keyboard-usable control, not a clickable div.
   assert.match(start, /<button/);
+});
+
+test("the horizontal navigation row exists only when columns overflow", () => {
+  const wide = renderToStaticMarkup(
+    <BoardNavigation edges={{ overflowing: false, atStart: true, atEnd: true }} onStep={noop} />,
+  );
+  assert.equal(wide, "", "a wide board must not reserve a blank navigation row");
+
+  const narrow = renderToStaticMarkup(
+    <BoardNavigation edges={{ overflowing: true, atStart: true, atEnd: false }} onStep={noop} />,
+  );
+  assert.match(narrow, new RegExp(en("tasks.board.scrollHint")));
+  assert.equal((narrow.match(/<button/g) ?? []).length, 2);
 });
 
 test("a press moves the board by exactly the column width the grid declares", () => {
