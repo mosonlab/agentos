@@ -24,6 +24,7 @@ import {
   RunnerKind,
   RunnerPreference,
   recomputeSessionUsage,
+  resolveRunBranches,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -1679,6 +1680,11 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
       if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
+        // This run is built inline rather than through enqueueTaskRun, so it is
+        // one of the paths a chain fix can miss. Missing it puts step ① on a
+        // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
+        // silently absent from the tree every later step reviews.
+        const branches = await resolveRunBranches(tx, { ...created, repo }, null);
         await tx.run.create({
           data: {
             projectId,
@@ -1689,7 +1695,9 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
             dedupeKey: makeDedupeKey(created.id, 1),
             runner,
             model: agent.model,
-            targetBranch: body.targetBranch ?? repo.defaultBranch,
+            targetBranch: branches.targetBranch,
+            branch: branches.branch,
+            opensPullRequest: created.opensPullRequest,
             promptHash: hashPrompt([agent.foundationalPrompt, agent.rolePrompt, created.name, created.description]),
             maxDurationMin: body.maxDurationMin,
             stallTimeoutMin: body.stallTimeoutMin,
