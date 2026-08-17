@@ -57,6 +57,7 @@ shasum -a 256 /ABSOLUTE/PATH/TO/agentos-ARCHIVE.dump | awk '{print $1}'
 Choose a brand-new name beginning with `agentos_restore_`. Create it from a separately configured maintenance alias, owned by the restore role, then apply the exact marker:
 
 ```sh
+PGSERVICEFILE=/ABSOLUTE/PATH/TO/pg_service.conf \
 createdb --maintenance-db=service=agentos-maintenance \
   --owner=<RESTORE_ROLE> <agentos_restore_OPAQUE>
 
@@ -121,7 +122,7 @@ The rehearsal performs `npm run db:validate` internally while its synthetic envi
 
 The restore command owns only its temporary diagnostics and removes them on exit. It intentionally leaves the isolated target intact for inspection. Retain a failed target or have a human explicitly remove that exact disposable database after confirming its identity; the scripts never perform database deletion.
 
-The rehearsal removes only its exact container ID after confirming both the expected name and unique `com.agentos.ossd-rehearsal` label. It then removes only the temporary root containing its matching ownership marker. If either identity check fails, stop and inspect that exact ID and label. Never widen the deletion target or use a blanket cleanup command.
+The rehearsal treats HUP, INT, and TERM as nonzero exits. An owned Docker CID file lets cleanup recover the exact container ID even when interruption occurs before shell assignment. Cleanup removes only that ID after confirming both the expected name and unique `com.agentos.ossd-rehearsal` label, then removes only the temporary root containing its matching ownership marker. If either identity check fails, stop and inspect that exact ID and label. Never widen the deletion target or use a blanket cleanup command.
 
 ## Redacted result template
 

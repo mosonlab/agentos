@@ -8,6 +8,7 @@ temp_base="${TMPDIR:-/tmp}"
 temp_base="${temp_base%/}"
 temp_root=""
 container_id=""
+container_cid_file=""
 container_name=""
 run_token=""
 private_log=""
@@ -20,6 +21,16 @@ fail() {
 
 cleanup_resources() {
   local cleanup_status=0
+  if [[ -z "$container_id" && -n "$container_cid_file" && -f "$container_cid_file" ]]; then
+    local recovered_container_id
+    recovered_container_id="$(<"$container_cid_file")" || cleanup_status=1
+    if [[ -n "$recovered_container_id" && ${#recovered_container_id} -ge 12 \
+      && -z "${recovered_container_id//[0-9a-f]/}" ]]; then
+      container_id="$recovered_container_id"
+    else
+      cleanup_status=1
+    fi
+  fi
   if [[ -n "$container_id" ]]; then
     local actual_label actual_name
     actual_label="$(docker inspect --format "{{index .Config.Labels \"$rehearsal_label\"}}" "$container_id" 2>/dev/null)" || \
@@ -56,7 +67,17 @@ on_exit() {
   fi
   exit "$exit_status"
 }
-trap on_exit EXIT HUP INT TERM
+
+on_signal() {
+  local signal_status="$1"
+  trap - HUP INT TERM
+  exit "$signal_status"
+}
+
+trap on_exit EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 for required_command in docker npm shasum awk sed grep head wc; do
   command -v "$required_command" >/dev/null 2>&1 || fail "required-tool-$required_command"
@@ -72,11 +93,14 @@ private_log="$temp_root/private.log"
 chmod 600 "$private_log"
 
 container_name="agentos-ossd-$run_token"
-container_id="$(docker run --detach --name "$container_name" \
+container_cid_file="$temp_root/container.cid"
+docker run --detach --cidfile "$container_cid_file" --name "$container_name" \
   --label "$rehearsal_label=$run_token" \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
-  --publish 127.0.0.1::5432 postgres:16-alpine 2>>"$private_log")" || \
+  --publish 127.0.0.1::5432 postgres:16-alpine >>"$private_log" 2>&1 || \
   fail "container-start"
+[[ -f "$container_cid_file" ]] || fail "container-start"
+container_id="$(<"$container_cid_file")" || fail "container-start"
 [[ -n "$container_id" ]] || fail "container-start"
 
 ready=0

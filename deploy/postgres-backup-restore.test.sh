@@ -114,6 +114,14 @@ test_restore_contract() {
   write_service_file "$service_file"
   print -n -- "custom-archive" >"$archive"
 
+  awk '
+    index(previous, "PGSERVICEFILE=/ABSOLUTE/PATH/TO/pg_service.conf") == 1 \
+      && /^createdb --maintenance-db=service=agentos-maintenance/ { found = 1 }
+    { previous = $0 }
+    END { exit(found ? 0 : 1) }
+  ' "$script_dir/../docs/runbooks/postgres-backup-restore.md" || \
+    fail "runbook createdb does not explicitly select the credential-free service file"
+
   print -r -- '#!/bin/zsh
 set -u
 sql=""
@@ -209,10 +217,83 @@ fi' >"$bin/psql"
   print -- "verifier-contract: pass"
 }
 
+assert_rehearsal_resources_cleaned() {
+  local docker_command="$1"
+  local temp_base="$2"
+  [[ -z "$("$docker_command" ps -a --filter label=com.agentos.ossd-rehearsal --format '{{.ID}}')" ]] || \
+    fail "signal test left a labelled rehearsal container"
+  [[ -z "$(find "$temp_base" -maxdepth 1 -type d -name 'agentos-ossd-rehearsal.*' -print -quit)" ]] || \
+    fail "signal test left an owned temporary root"
+}
+
+test_rehearsal_signal_contract() {
+  local real_docker
+  real_docker="$(command -v docker)" || fail "signal test requires docker"
+  [[ -x "$script_dir/../node_modules/.bin/prisma" ]] || fail "signal test requires node dependencies"
+
+  local root="$test_root/signals"
+  local early_bin="$root/early-bin"
+  local early_temp="$root/early-temp"
+  local early_pid_file="$root/early.pid"
+  mkdir -p "$early_bin" "$early_temp"
+  print -r -- '#!/bin/zsh
+set -u
+if [[ "${1:-}" == run ]]; then
+  output="$("$OSSD_REAL_DOCKER" "$@")" || exit $?
+  for attempt in {1..100}; do
+    [[ -s "$OSSD_SIGNAL_PID_FILE" ]] && break
+    sleep 0.05
+  done
+  [[ -s "$OSSD_SIGNAL_PID_FILE" ]] || exit 97
+  kill -TERM "$(<"$OSSD_SIGNAL_PID_FILE")" || exit 98
+  print -r -- "$output"
+  exit 0
+fi
+exec "$OSSD_REAL_DOCKER" "$@"' >"$early_bin/docker"
+  chmod +x "$early_bin/docker"
+
+  PATH="$early_bin:$PATH" TMPDIR="$early_temp" OSSD_REAL_DOCKER="$real_docker" \
+    OSSD_SIGNAL_PID_FILE="$early_pid_file" \
+    zsh "$script_dir/rehearse-postgres-backup-restore.sh" >"$root/early.out" 2>&1 &
+  local early_pid=$!
+  print -n -- "$early_pid" >"$early_pid_file"
+  wait "$early_pid"
+  local early_status=$?
+  (( early_status != 0 )) || fail "early signal returned success"
+  assert_rehearsal_resources_cleaned "$real_docker" "$early_temp"
+
+  local mid_bin="$root/mid-bin"
+  local mid_temp="$root/mid-temp"
+  local mid_pid_file="$root/mid.pid"
+  command -v npm >/dev/null 2>&1 || fail "signal test requires npm"
+  mkdir -p "$mid_bin" "$mid_temp"
+  print -r -- '#!/bin/zsh
+set -u
+for attempt in {1..100}; do
+  [[ -s "$OSSD_SIGNAL_PID_FILE" ]] && break
+  sleep 0.05
+done
+[[ -s "$OSSD_SIGNAL_PID_FILE" ]] || exit 97
+kill -TERM "$(<"$OSSD_SIGNAL_PID_FILE")" || exit 98
+exit 143' >"$mid_bin/npm"
+  chmod +x "$mid_bin/npm"
+
+  PATH="$mid_bin:$PATH" TMPDIR="$mid_temp" OSSD_SIGNAL_PID_FILE="$mid_pid_file" \
+    zsh "$script_dir/rehearse-postgres-backup-restore.sh" >"$root/mid.out" 2>&1 &
+  local mid_pid=$!
+  print -n -- "$mid_pid" >"$mid_pid_file"
+  wait "$mid_pid"
+  local mid_status=$?
+  (( mid_status != 0 )) || fail "mid-run signal returned success"
+  assert_rehearsal_resources_cleaned "$real_docker" "$mid_temp"
+  print -- "rehearsal-signal-contract: pass"
+}
+
 case "${1:-all}" in
   backup) test_backup_contract ;;
   restore) test_restore_contract ;;
   verifier) test_verifier_contract ;;
+  signals) test_rehearsal_signal_contract ;;
   all)
     test_backup_contract
     test_restore_contract
@@ -220,7 +301,7 @@ case "${1:-all}" in
     print -- "fast-contracts: pass"
     ;;
   *)
-    print -u2 -- "usage: postgres-backup-restore.test.sh [backup|restore|verifier|all]"
+    print -u2 -- "usage: postgres-backup-restore.test.sh [backup|restore|verifier|signals|all]"
     exit 64
     ;;
 esac
