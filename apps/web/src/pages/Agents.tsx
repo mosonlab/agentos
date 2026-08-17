@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import { formatDate, formatDateTime, titleCase } from "../lib/format";
@@ -9,7 +9,8 @@ import { Link, navigate } from "../lib/router";
 import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
-import { runnerForModel, validateModelPair } from "../lib/models";
+import { resolveRunner, runnerForModel, validateModelPair } from "../lib/models";
+import { isEnforced, TOOL_KEYS, TOOL_LABEL_KEYS, type ToolKey } from "../lib/tools";
 import { cn } from "../lib/utils";
 import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW,
@@ -222,7 +223,7 @@ const RepoAccessRow = ({ agent, repo, granted, onDone }: {
   );
 };
 
-const BindingToggle = ({ on, label, add, remove, onDone }: {
+export const BindingToggle = ({ on, label, add, remove, onDone }: {
   on: boolean;
   label: string;
   add: () => Promise<unknown>;
@@ -246,6 +247,77 @@ const BindingToggle = ({ on, label, add, remove, onDone }: {
    * `agents-toggle-*`. As a flex item the switch is blockified and no baseline
    * applies. The 3px border itself is correct and stays. */
   return <div className={ROW}>{error === null ? null : <ErrorNotice message={error} />}<Toggle on={on} onChange={change} disabled={pending} label={label} /></div>;
+};
+
+const toolSet = (raw: string[] | undefined): Set<ToolKey> => new Set((raw ?? []).filter((key): key is ToolKey => (TOOL_KEYS as readonly string[]).includes(key)));
+const toolArray = (set: Set<ToolKey>): ToolKey[] => TOOL_KEYS.filter((key) => set.has(key));
+
+export const AgentToolsCard = ({ agent, onSaved }: { agent: Agent; onSaved: () => void }): ReactNode => {
+  const incoming = toolArray(toolSet(agent.disabledTools)).join(",");
+  const lastSeed = useRef(incoming);
+  const [denied, setDenied] = useState<Set<ToolKey>>(() => toolSet(agent.disabledTools));
+  const deniedRef = useRef(denied);
+  const chain = useRef<Promise<unknown>>(Promise.resolve());
+  const queued = useRef(0);
+  const [pendingWrites, setPendingWrites] = useState(0);
+  const [writeError, setWriteError] = useState<string | null>(null);
+  const t = useT();
+  const runner = resolveRunner(agent.runnerPreference, agent.model);
+  const heuristic = agent.runnerPreference === "INHERIT" || agent.runnerPreference === "AUTO";
+
+  useEffect(() => {
+    if (pendingWrites !== 0 || incoming === lastSeed.current) return;
+    const next = toolSet(agent.disabledTools);
+    lastSeed.current = incoming;
+    deniedRef.current = next;
+    setDenied(next);
+  }, [agent.disabledTools, incoming, pendingWrites]);
+
+  const change = (key: ToolKey, enabled: boolean): void => {
+    const next = new Set(deniedRef.current);
+    if (enabled) next.delete(key);
+    else next.add(key);
+    deniedRef.current = next;
+    setDenied(next);
+    setWriteError(null);
+    const body = toolArray(next);
+    queued.current += 1;
+    setPendingWrites(queued.current);
+    const request = chain.current.then(() => api.patch(`/agents/${agent.id}`, { disabledTools: body }));
+    chain.current = request.catch(() => undefined);
+    void request.catch((reason: unknown) => {
+      setWriteError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      queued.current -= 1;
+      setPendingWrites(queued.current);
+      if (queued.current === 0) onSaved();
+    });
+  };
+
+  return (
+    <div data-agent-tools="">
+    <Card title={t("agents.tools.title")} extra={<span className={COUNT}>{TOOL_KEYS.length - denied.size}/{TOOL_KEYS.length}</span>}>
+      <div className={cn(STACK, "mb-3.5")}>
+        <div>{t(heuristic ? "agents.tools.resolvesHeuristic" : "agents.tools.resolves", { runner: runner.toLowerCase() })}</div>
+        {runner === "CODEX" ? <div className="text-destructive">{t("agents.tools.codexNotice")}</div> : null}
+        {denied.size === TOOL_KEYS.length ? <div className="text-destructive">{t("agents.tools.none")}</div> : null}
+        {writeError === null ? null : <ErrorNotice message={writeError} />}
+      </div>
+      {TOOL_KEYS.map((key) => {
+        const enforced = isEnforced(runner, key);
+        const piDefaultOff = runner === "PI" && (key === "GLOB" || key === "GREP");
+        return (
+          <div key={key} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
+            <Toggle on={!denied.has(key)} onChange={(next) => change(key, next)} label={t("agents.tools.toggle", { tool: t(TOOL_LABEL_KEYS[key]) })} />
+            <div className="flex-1 text-foreground" {...(piDefaultOff ? { title: t("agents.tools.piDefaultOff") } : {})}>{t(TOOL_LABEL_KEYS[key])}</div>
+            {enforced ? null : <Pill tone="grey">{t("agents.tools.notEnforced", { runner: runner.toLowerCase() })}</Pill>}
+          </div>
+        );
+      })}
+      {pendingWrites > 0 ? <div className="mt-2.5 text-[11.5px] text-[color:var(--faint)]">{t("common.saving")}</div> : null}
+    </Card>
+    </div>
+  );
 };
 
 const FilesystemGrantRow = ({ agentId, grant, onDone }: { agentId: string; grant: FilesystemGrant; onDone: () => void }): ReactNode => {
@@ -313,6 +385,7 @@ const CapabilitiesTab = ({ agent, projectId, onSaved }: { agent: Agent; projectI
 
   return (
     <div className={STACK}>
+      <AgentToolsCard agent={agent} onSaved={onSaved} />
       <Card title={t("agents.cap.repos")} extra={<span className={COUNT}>{(repos.data ?? []).length}</span>}>
         {(repos.data ?? []).length === 0
           ? <EmptyState>{t("connections.repos.empty")}</EmptyState>

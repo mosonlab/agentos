@@ -82,6 +82,9 @@ const shoot = async (name, clip) => {
 
 const PAGES = [
   ["agents", "/agents"],
+  // Batch 1's page. Like the Batch 4 additions below, it has no pre-batch
+  // counterpart but belongs in the same deterministic light/dark visual pass.
+  ["settings", "/settings"],
   ["taskdetail", "/tasks/tsk_impl"],
   ["goals", "/goals"],
   ["secrets", "/secrets"],
@@ -122,7 +125,11 @@ for (const theme of ["light", "dark"]) {
   })()`);
   await sleep(1200);
   const box = await evaluate(`(() => {
-    const knobs = [...document.querySelectorAll('[role="switch"]')];
+    // WI-16 adds eight Tools switches above the binding cards. They have no
+    // pre-WI-16 counterpart, so keep this G2 crop on the binding switches whose
+    // exact 3px baseline drift the fixture was created to measure.
+    const knobs = [...document.querySelectorAll('[role="switch"]')]
+      .filter((knob) => !knob.closest('[data-agent-tools]'));
     if (knobs.length === 0) return null;
     const boxes = knobs.map((k) => k.getBoundingClientRect());
     const top = Math.min(...boxes.map((b) => b.top));

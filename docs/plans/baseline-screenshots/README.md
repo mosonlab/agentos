@@ -35,6 +35,11 @@ and `sessiondetail-{light,dark}`. Those four frames have **no baseline counterpa
 not exist at `82b1de5` — so they are not part of the W16/E5 pairwise comparison. They exist so the
 batch's headline page is inside the visual-regression tool rather than outside it.
 
+**Batch 1 addendum.** The harness also captures `settings-{light,dark}`. These two
+frames have no baseline counterpart. The targeted Agents crop ignores the new
+Tools card's eight switches so it continues comparing the pre-existing binding
+switches whose 3px baseline drift it was created to measure.
+
 ## Reproducing them (W16/E5 re-shoots the identical frames)
 
 `harness/` is committed for exactly that reason — E5 requires a pairwise comparison at the same
