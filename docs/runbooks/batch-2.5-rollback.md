@@ -30,7 +30,32 @@ changed.
 
 Running the API before the backfill is harmless. Un-backfilled tasks read
 `source = manual` and list no historical fires — an observability gap for the
-few seconds the backfill takes, not a fault.
+few seconds the backfill takes, not a fault. Run `db:backfill-task-source` once;
+it is safe to re-run and safe to run twice at once, because each backfilled fire
+is written under a deterministic primary key with `skipDuplicates`.
+
+### Index locking during `db:migrate`
+
+`20260816180100_tasks_visibility` builds two indexes on the existing `Task`
+table with ordinary, non-concurrent `CREATE INDEX`:
+`(projectId, archivedAt, status)` and `(recurringSourceTaskId)`. An ordinary
+build takes `SHARE` on the table, which **blocks every `INSERT`/`UPDATE` to
+`Task` for its duration** — and the old API is still serving during this step,
+so chain advance, run completion and the scheduler all stall behind it.
+
+At dogfood volume (`Task` in the thousands) this is milliseconds and needs no
+ceremony. Before running it against a large table, bound the wait rather than
+discovering it:
+
+```sql
+SET lock_timeout = '5s';   -- fail fast instead of queueing behind a long txn
+-- then run the migration; on 55P03 (lock_not_available), retry when idle
+```
+
+`CREATE INDEX CONCURRENTLY` is the alternative, but it cannot run inside the
+transaction Prisma wraps a migration in, so it would have to be applied by hand
+outside `db:migrate` and recorded as applied. Not worth it at this size —
+documented so the choice is deliberate.
 
 ## Rollback
 
@@ -52,13 +77,44 @@ The same statement is what makes a web-only rollback safe: after reverting the
 board, a task sitting in `Backlog` is invisible in every column until it is
 moved back to `todo`.
 
-### Code-only rollback (recommended)
+### Code-only rollback
 
-Every new column is nullable or defaulted and old code ignores all of them;
-`TriggerFire` is append-only and nothing else reads it. So a code revert is safe
-once the `UPDATE` above has run.
+Schema-wise a code revert is clean: every new column is nullable or defaulted,
+old code ignores all of them, and `TriggerFire` is append-only.
 
-Two ordering rules:
+**It is not, however, safe by default, because two of this batch's guarantees
+live entirely in the code being reverted and have no database backstop.** Both
+concern inbound webhook traffic:
+
+| Guarantee | Enforced only by | On rollback |
+|---|---|---|
+| A paused trigger rejects deliveries | `authenticateWebhook` reading `webhookPausedAt` (`packages/api/src/hooks.ts`) | **Every paused trigger silently goes live again** and outside traffic instantiates chains from it. The column keeps its value; nothing reads it. |
+| A redelivered webhook does not fire twice | the ledger lookup over `TriggerFire` in `POST /hooks/templates/:id` | **The replay window disappears.** A retrying sender creates one chain per delivery. |
+
+So the rollback is conditional on quiescing webhook ingress. Do this **before**
+starting the old build, not after:
+
+1. Record the restore list, so pause state survives the rollback:
+   ```sql
+   SELECT id, name, "webhookPausedAt", "webhookReplayWindowSec"
+     FROM "TaskTemplate" WHERE "webhookPausedAt" IS NOT NULL;
+   ```
+   Keep the output. Nothing else records it once the code that reads the column
+   is gone.
+2. Detach the credential for every paused trigger, which the old code *does*
+   honour — an unauthenticated delivery is rejected by any build:
+   ```sql
+   UPDATE "TaskTemplate" SET "webhookSecretId" = NULL WHERE "webhookPausedAt" IS NOT NULL;
+   ```
+   Restore from the list in step 1 when rolling forward again.
+3. Drain in-flight redeliveries: wait out the longest configured
+   `webhookReplayWindowSec` (`SELECT max("webhookReplayWindowSec") FROM
+   "TaskTemplate";`) with ingress stopped, so no sender is mid-retry when the
+   window protection disappears. During and after the rollback, duplicate
+   deliveries create duplicate chains; there is no way to keep that promise on
+   old code.
+
+Two further ordering rules:
 
 - **Revert the `workflow.ts` parked-successor guard only together with the board
   change that introduced the `Backlog` column.** Without the guard, a task in
@@ -88,10 +144,24 @@ path above.
 
 ### Undoing just the backfill
 
+Backfilled ledger rows are the ones whose primary key carries the
+`backfill:<templateId>:<firedAt>` marker `backfillTaskSource` writes
+(`packages/db/src/task-source.ts`). Live webhook fires keep their generated
+cuid, so the marker — not `source` — is what separates the two.
+
 ```sql
 UPDATE "Task" SET source = 'manual', "recurringSourceTaskId" = NULL;
-DELETE FROM "TriggerFire" WHERE source = 'webhook';
+DELETE FROM "TriggerFire" WHERE "id" LIKE 'backfill:%';
 ```
+
+> **Do not** delete by `source = 'webhook'`. Every *live* inbound fire is written
+> with that same source into that same table, and those rows are the replay-window
+> guard: deleting them erases post-deploy history and immediately re-permits
+> duplicate chains for any delivery still inside its window.
+
+Deleting backfilled rows is purely an observability rollback — the historical
+fires they describe are outside every live replay window by construction, since
+they predate the deploy.
 
 ## Deliberate behaviour changes worth announcing
 
