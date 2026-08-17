@@ -2,7 +2,9 @@
 
 Status: specification for human review; no implementation is authorized by this document
 
-Product Contract: Goal 5a0 v1.0
+Product Contract: Goal 5a0 v1.1
+
+Contract-version note (round 6, 2026-08-17): the contract moved from v1.0 to v1.1 to carry the merge-authorization and dependency-handoff **evidence and authority mechanics** recorded in `docs/plans/goal-5a0-idempotent-execution-kernel-plan.md` §"Product Contract v1.1 decision" — typed, schema-versioned handoff records; a fail-closed server-bound authorization half; and named implementation dependency D1, which is outside this contract's implementation scope. **No invariant, data contract, transition, acceptance proof, reviewer checklist item, or scope boundary in this specification is changed by that bump**; every section below is carried forward verbatim from v1.0.
 
 Routing Contract: v1.0, Planned Critical, future implementation role `senior-dev`
 
