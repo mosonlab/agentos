@@ -31,11 +31,10 @@ import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
  * - The parameterised `${…}::int` bind form is accepted by Prisma 6.19.0
  *   (test 0 exercises it). The documented `$executeRawUnsafe` fallback was
  *   therefore NOT adopted.
- * - `lock_timeout` DOES bound an advisory-lock wait: test 2b observed
- *   PostgreSQL `55P03` ("canceling statement due to lock timeout"), wrapped in
- *   Prisma `P2010`, at ≈3 s — not Prisma's own `P2028` at 15 s. Prisma's
- *   `timeout: 15_000` remains the backstop; nothing here depends on which one
- *   fires.
+ * - `lock_timeout` DOES bound an advisory-lock wait at ≈3 s. That error must
+ *   remain internal: test 2b holds the lock beyond the bound, proves the
+ *   contender is still pending, then proves it succeeds after release. Returning
+ *   55P03 would acknowledge a durable FINAL_OUTPUT without repairing its cache.
  *
  * The schema this runs against is built from the committed migrations by
  * `testdb.ts`, which refuses `public`. It is never a dump or clone of the live
@@ -185,6 +184,13 @@ test("1: a recompute that reads a stale event set cannot overwrite a fresher tot
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
 
+    // Hold A beyond B's first 3 s lock_timeout. Before the review fix B returned
+    // 55P03 here, app.ts swallowed it, and A then committed 10 permanently even
+    // though event 2 was already durable. B must instead roll back that attempt,
+    // retry, and remain pending until A releases the lock.
+    await new Promise((resolve) => setTimeout(resolve, 3_300));
+    assert.equal(bSettled, false, "B must retry after its first bounded lock wait");
+
     releaseA();
     const [aOutcome, bOutcome] = await Promise.all([a, b]);
     assert.equal(aOutcome, "resolved", `A failed: ${String(aOutcome)}`);
@@ -237,17 +243,12 @@ test("2a: the recompute's advisory lock is visible from another connection", { t
 
 /* ------------------------------------------------------------- test 2b */
 
-test("2b: a recompute contending for a held lock waits and then gives up", { timeout: 30_000 }, async () => {
+test("2b: a recompute retries a bounded lock wait until the durable event is folded", { timeout: 30_000 }, async () => {
   // 2a proves a lock is visible. Only this proves a second RECOMPUTE is actually
-  // made to wait. It asserts the CLASS of outcome — the contended call must not
-  // succeed, because succeeding would mean no serialisation at all — and records
-  // which error ended it rather than hard-asserting one: pinning today's code
-  // would make an answer out of the open question (plan §13 item 1).
-  //
-  // Observed on the first run: PostgreSQL 55P03 ("canceling statement due to
-  // lock timeout"), wrapped in Prisma P2010, at ≈3 s. So `lock_timeout` DOES
-  // bound an advisory-lock wait on this PostgreSQL; Prisma's `timeout: 15_000`
-  // never had to fire.
+  // made to wait. The first attempt reaches PostgreSQL's 3 s lock_timeout, but
+  // that cannot be the public outcome: app.ts intentionally suppresses a
+  // recompute error after the FINAL_OUTPUT rows are already durable. The
+  // recompute must retry and eventually fold the event after the holder leaves.
   const seeded = await seedSession("contended");
   await addFinalOutput(seeded, 1, { type: "result", usage: { input_tokens: 7 } });
   const key = sessionUsageLockKey(seeded.session.id);
@@ -256,6 +257,8 @@ test("2b: a recompute contending for a held lock waits and then gives up", { tim
   const contender = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   let release!: () => void;
   const mayRelease = new Promise<void>((resolve) => { release = resolve; });
+  let signalLocked!: () => void;
+  const holderLocked = new Promise<void>((resolve) => { signalLocked = resolve; });
   try {
     // 20 s, not Prisma's default 5 s: the contender needs ≈3 s to give up and
     // could need 15 s if `lock_timeout` ever stops bounding an advisory wait. A
@@ -263,25 +266,25 @@ test("2b: a recompute contending for a held lock waits and then gives up", { tim
     // succeed, and fail this test while reporting the opposite of what happened.
     const held = holder.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}::int, ${key}::int)::text AS locked`;
+      signalLocked();
       await mayRelease;
     }, { timeout: 20_000 });
 
+    await holderLocked;
     const start = performance.now();
-    const outcome = await recomputeSessionUsage(contender, seeded.session.id).then(() => "resolved", (error: unknown) => error);
-    const elapsed = performance.now() - start;
+    let settled = false;
+    const outcome = recomputeSessionUsage(contender, seeded.session.id).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 3_300));
+    assert.equal(settled, false, "the contender must still be retrying after the first 3 s lock timeout");
     release();
-    await held;
-
-    assert.notEqual(outcome, "resolved", "the contended recompute must not succeed while the lock is held");
-    assert.ok(outcome instanceof Error, `expected an Error, got ${String(outcome)}`);
-    assert.ok(elapsed < 12_000, `expected the contended recompute to give up under 12 s, took ${Math.round(elapsed)} ms`);
-    // Recorded, not asserted (plan §13 item 1). `55P03` at ≈3 s means
-    // lock_timeout bounds the wait; `P2028` at ≈15 s would mean only Prisma's
-    // transaction timeout does.
-    const code = (outcome as { code?: string }).code ?? "no-code";
-    const detail = String((outcome as { message?: string }).message ?? outcome).replace(/\s+/g, " ").slice(0, 200);
-    console.log(`[usage.dbtest 2b] contended recompute failed after ${Math.round(elapsed)} ms, code ${code}: ${detail}`);
+    const [wrote] = await Promise.all([outcome, held]);
+    const elapsed = performance.now() - start;
+    assert.equal(wrote, true);
+    assert.ok(elapsed >= 3_000, `expected a real lock timeout before retry, took ${Math.round(elapsed)} ms`);
+    assert.ok(elapsed < 10_000, `expected success soon after release, took ${Math.round(elapsed)} ms`);
+    assert.equal((await storedColumns(seeded.session.id)).inputTokens, 7);
   } finally {
+    release();
     await contender.$disconnect();
     await holder.$disconnect();
   }

@@ -10,7 +10,7 @@ export type SessionUsage = {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
-  costUsd?: number;
+  costUsd?: Prisma.Decimal;
 };
 
 /** Cost is stored as Decimal(12, 4); derive at that precision so a recompute of
@@ -28,8 +28,18 @@ const MAX_COST = 100_000_000;
 /** Diagnostics only. Numbers go through String so NaN and Infinity are legible
  * (JSON.stringify renders both as `null`, which is the one thing the reader of
  * the diagnostic must not be told). */
-const render = (value: unknown): string =>
-  typeof value === "number" ? String(value) : JSON.stringify(value) ?? String(value);
+const render = (value: unknown): string => {
+  if (typeof value === "number" || typeof value === "bigint") return String(value);
+  try {
+    const rendered = JSON.stringify(value) ?? String(value);
+    return rendered.length > 200 ? `${rendered.slice(0, 197)}...` : rendered;
+  } catch {
+    // Diagnostics are deliberately weaker than ingestion. BigInt, cycles, and
+    // hostile toJSON/valueOf implementations must not turn a rejected field
+    // into a failed FINAL_OUTPUT request.
+    return `[unrenderable ${typeof value}]`;
+  }
+};
 
 /**
  * A value only counts as tokens if PostgreSQL can store it in INTEGER. Absent is
@@ -52,20 +62,22 @@ const tokenCount = (value: unknown, field: string): number | null => {
  * value because that is what is actually written — 99999999.99999 is below 10^8
  * and still fails the write.
  *
- * Returns the raw number rather than the rounded one: `sumUsage` must keep
- * adding exact values and round once at the end, as it does today.
+ * Returns an unrounded Decimal: `sumUsage` adds exact decimal values and rounds
+ * once at the column boundary. Adding binary JS numbers first is not exact —
+ * 0.000001 + 0.000049 lands just below the half-unit and rounds to 0.0000.
  */
-const costAmount = (value: unknown): number | null => {
+const costAmount = (value: unknown): Prisma.Decimal | null => {
   if (value === undefined) return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     console.warn(`[usage] ignoring total_cost_usd=${render(value)}: not a storable cost`);
     return null;
   }
-  if (new Prisma.Decimal(value).toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
+  const decimal = new Prisma.Decimal(String(value));
+  if (decimal.toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
     console.warn(`[usage] ignoring total_cost_usd=${render(value)}: exceeds Decimal(12, 4)`);
     return null;
   }
-  return value;
+  return decimal;
 };
 
 type ModelTotals = {
@@ -177,7 +189,9 @@ export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
     if (usage.inputTokens !== undefined) total.inputTokens = (total.inputTokens ?? 0) + usage.inputTokens;
     if (usage.outputTokens !== undefined) total.outputTokens = (total.outputTokens ?? 0) + usage.outputTokens;
     if (usage.cachedInputTokens !== undefined) total.cachedInputTokens = (total.cachedInputTokens ?? 0) + usage.cachedInputTokens;
-    if (usage.costUsd !== undefined) total.costUsd = (total.costUsd ?? 0) + usage.costUsd;
+    if (usage.costUsd !== undefined) {
+      total.costUsd = (total.costUsd ?? new Prisma.Decimal(0)).plus(usage.costUsd);
+    }
   }
   return total;
 };
@@ -207,15 +221,15 @@ const columnValue = (value: number | undefined, field: string): number | null =>
 /** The aggregate cost guard, for the same reason: two individually storable
  * events of 6e7 sum to 1.2e8, which Decimal(12, 4) cannot hold. Rounds first,
  * because the rounded value is what is written. */
-const costColumn = (value: number | undefined): Prisma.Decimal | null => {
+const costColumn = (value: Prisma.Decimal | undefined): Prisma.Decimal | null => {
   if (value === undefined) return null;
-  if (!Number.isFinite(value) || value < 0) {
-    console.warn(`[usage] costUsd=${render(value)} is not storable after summing; storing null`);
+  if (!value.isFinite() || value.isNegative()) {
+    console.warn(`[usage] costUsd=${value.toString()} is not storable after summing; storing null`);
     return null;
   }
-  const rounded = new Prisma.Decimal(value).toDecimalPlaces(COST_SCALE);
+  const rounded = value.toDecimalPlaces(COST_SCALE);
   if (rounded.greaterThanOrEqualTo(MAX_COST)) {
-    console.warn(`[usage] costUsd=${render(value)} exceeds Decimal(12, 4) after summing; storing null`);
+    console.warn(`[usage] costUsd=${value.toString()} exceeds Decimal(12, 4) after summing; storing null`);
     return null;
   }
   return rounded;
@@ -301,7 +315,15 @@ export const sessionUsageLockKey = (sessionId: string): number => {
  * later repair, making the stale value permanent. Serialising the read, the
  * compare and the write is a correctness requirement, not a performance note.
  */
-export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string): Promise<boolean> =>
+const lockWaitTimedOut = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const code = "code" in error ? String(error.code) : "";
+  const detail = `${error.message} ${"meta" in error ? render(error.meta) : ""}`;
+  return (code === "P2010" && /55P03|lock timeout/i.test(detail))
+    || (code === "P2028" && /timeout|expired/i.test(detail));
+};
+
+const recomputeSessionUsageOnce = async (db: PrismaClient, sessionId: string): Promise<boolean> =>
   db.$transaction(async (tx) => {
     // The timeout must be installed BEFORE the wait it is meant to bound.
     await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '3s'");
@@ -336,11 +358,37 @@ export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string)
     maxWait: 5_000,    // caller fails as 55P03 rather than as an opaque P2028
   });
 
+/**
+ * A 55P03 is not a clean outcome: the FINAL_OUTPUT event is already durable,
+ * and the caller in app.ts intentionally suppresses recompute failures. If the
+ * older lock holder then commits a snapshot that predates that event, no later
+ * event need arrive to repair the cache. Keep this invocation alive across
+ * bounded lock waits instead of acknowledging an unperformed recompute.
+ *
+ * The retry count is deliberately unbounded. A fixed count merely moves the
+ * stale-cache window. Each attempt is still bounded by PostgreSQL and Prisma,
+ * rolls back before retrying, and holds no application resource between tries.
+ */
+export const recomputeSessionUsage = async (db: PrismaClient, sessionId: string): Promise<boolean> => {
+  for (;;) {
+    try {
+      return await recomputeSessionUsageOnce(db, sessionId);
+    } catch (error) {
+      if (!lockWaitTimedOut(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+};
+
 export type BackfillSessionUsageResult = {
   scanned: number;
   updated: number;
+  failedCount: number;
   failed: Array<{ sessionId: string; message: string }>;
 };
+
+const BACKFILL_PAGE_SIZE = 100;
+const BACKFILL_DIAGNOSTIC_LIMIT = 20;
 
 /**
  * Absolute recompute of every session that has a `FINAL_OUTPUT` event. It
@@ -361,18 +409,30 @@ export const backfillSessionUsage = async (db: PrismaClient): Promise<BackfillSe
   // first attempt wrote columns but whose second attempt's write was lost to a
   // crash is exactly the case a backfill exists to repair. The no-write
   // comparison inside recomputeSessionUsage is what keeps a second pass honest.
-  const sessions = await db.session.findMany({
-    where: { events: { some: { type: "FINAL_OUTPUT" } } },
-    select: { id: true },
-    orderBy: { requestedAt: "asc" },
-  });
-  const result: BackfillSessionUsageResult = { scanned: sessions.length, updated: 0, failed: [] };
-  for (const session of sessions) {
-    try {
-      if (await recomputeSessionUsage(db, session.id)) result.updated += 1;
-    } catch (error) {
-      result.failed.push({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) });
+  const result: BackfillSessionUsageResult = { scanned: 0, updated: 0, failedCount: 0, failed: [] };
+  let cursor: string | undefined;
+  for (;;) {
+    const sessions = await db.session.findMany({
+      where: { events: { some: { type: "FINAL_OUTPUT" } } },
+      select: { id: true },
+      orderBy: { id: "asc" },
+      take: BACKFILL_PAGE_SIZE,
+      ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
+    });
+    if (sessions.length === 0) break;
+    for (const session of sessions) {
+      result.scanned += 1;
+      try {
+        if (await recomputeSessionUsage(db, session.id)) result.updated += 1;
+      } catch (error) {
+        result.failedCount += 1;
+        if (result.failed.length < BACKFILL_DIAGNOSTIC_LIMIT) {
+          result.failed.push({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) });
+        }
+      }
     }
+    cursor = sessions.at(-1)?.id;
+    if (sessions.length < BACKFILL_PAGE_SIZE) break;
   }
   return result;
 };
@@ -398,9 +458,9 @@ export const runBackfillSessionUsageCli = async (
   { db, log = console.log, error = console.error }: BackfillSessionUsageCliDeps,
 ): Promise<number> => {
   const result = await backfillSessionUsage(db);
-  log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failed.length}`);
-  if (result.failed.length === 0) return 0;
-  for (const failure of result.failed.slice(0, 20)) error(`  ${failure.sessionId}: ${failure.message}`);
-  if (result.failed.length > 20) error(`  … and ${result.failed.length - 20} more`);
+  log(`scanned ${result.scanned}, updated ${result.updated}, failed ${result.failedCount}`);
+  if (result.failedCount === 0) return 0;
+  for (const failure of result.failed) error(`  ${failure.sessionId}: ${failure.message}`);
+  if (result.failedCount > result.failed.length) error(`  … and ${result.failedCount - result.failed.length} more`);
   return 1;
 };

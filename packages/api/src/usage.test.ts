@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  Prisma, deriveUsageColumns, extractUsage, recomputeSessionUsage, sessionUsageLockKey, sumUsage,
+  Prisma, backfillSessionUsage, deriveUsageColumns, extractUsage, recomputeSessionUsage, sessionUsageLockKey, sumUsage,
   type PrismaClient, type SessionUsage,
 } from "@agentos/db";
 
@@ -219,21 +219,19 @@ const stubDatabase = (payloads: unknown[], columns: SessionColumns) => {
 test("extractUsage reads the real CLAUDE result payload across every model it used", () => {
   // 545 = 541 (haiku) + 4 (opus); 98 = 21 + 77. The top-level `usage` block
   // reports only opus's 4 / 77, which is the under-count this batch fixes.
-  assert.deepEqual(extractUsage(CLAUDE_RESULT), {
-    inputTokens: 545,
-    outputTokens: 98,
-    cachedInputTokens: 8768,
-    costUsd: 0.049117,
-  });
+  const usage = extractUsage(CLAUDE_RESULT);
+  assert.equal(usage.inputTokens, 545);
+  assert.equal(usage.outputTokens, 98);
+  assert.equal(usage.cachedInputTokens, 8768);
+  assert.equal(usage.costUsd?.toString(), "0.049117");
 });
 
 test("extractUsage reads the second real CLAUDE capture the same way", () => {
-  assert.deepEqual(extractUsage(CLAUDE_RESULT_SAFE_MODE), {
-    inputTokens: 535,
-    outputTokens: 20,
-    cachedInputTokens: 2969,
-    costUsd: 0.030392999999999996,
-  });
+  const usage = extractUsage(CLAUDE_RESULT_SAFE_MODE);
+  assert.equal(usage.inputTokens, 535);
+  assert.equal(usage.outputTokens, 20);
+  assert.equal(usage.cachedInputTokens, 2969);
+  assert.equal(usage.costUsd?.toString(), "0.030392999999999996");
 });
 
 test("the modelUsage branch is exclusive: the primary model is never counted twice", () => {
@@ -281,16 +279,22 @@ test("extractUsage is total over unknown input", () => {
   for (const payload of [null, undefined, 42, "x", [], {}, { usage: null }, { usage: 42 }, { usage: { input_tokens: "nope" } }, { total_cost_usd: "free" }]) {
     assert.deepEqual(extractUsage(payload), {}, JSON.stringify(payload ?? null));
   }
+  assert.deepEqual(extractUsage({ usage: { input_tokens: 1n } }), {});
+  const cyclic: { usage?: unknown; self?: unknown } = {};
+  cyclic.self = cyclic;
+  cyclic.usage = { input_tokens: cyclic };
+  assert.doesNotThrow(() => extractUsage(cyclic));
+  assert.deepEqual(extractUsage(cyclic), {});
 });
 
 test("extractUsage keeps partial usage partial", () => {
   assert.deepEqual(extractUsage({ usage: { output_tokens: 5 } }), { outputTokens: 5 });
-  assert.deepEqual(extractUsage({ total_cost_usd: 1.5 }), { costUsd: 1.5 });
+  assert.equal(extractUsage({ total_cost_usd: 1.5 }).costUsd?.toString(), "1.5");
 });
 
 test("sumUsage never turns an absent field into zero", () => {
   assert.deepEqual(sumUsage([{ inputTokens: 1 }, { outputTokens: 2 }]), { inputTokens: 1, outputTokens: 2 });
-  assert.deepEqual(sumUsage([{ costUsd: 1 }, { costUsd: 2 }]), { costUsd: 3 });
+  assert.equal(sumUsage([{ costUsd: new Prisma.Decimal(1) }, { costUsd: new Prisma.Decimal(2) }]).costUsd?.toString(), "3");
   assert.deepEqual(sumUsage([]), {});
 });
 
@@ -415,12 +419,18 @@ test("a sum that leaves INTEGER range stores null for that column only", async (
   assert.equal(derived.outputTokens, 9);
 });
 
-test("the summed-overflow session still writes rather than throwing", async () => {
+test("the summed-overflow session still writes a valid sibling rather than throwing", async () => {
   const columns = emptyColumns();
-  const { database } = stubDatabase([{ usage: { input_tokens: 2_000_000_000 } }, { usage: { input_tokens: 2_000_000_000 } }], columns);
+  const { database, updates } = stubDatabase([
+    { usage: { input_tokens: 2_000_000_000 } },
+    { usage: { input_tokens: 2_000_000_000, output_tokens: 9 } },
+  ], columns);
   const { result: wrote } = await withCapturedWarnings(() => recomputeSessionUsage(database, "session-1"));
-  assert.equal(wrote, false);   // every column derives to null, which is what the row already holds
+  assert.equal(wrote, true);
+  assert.equal(updates.length, 1);
   assert.equal(columns.inputTokens, null);
+  assert.equal(columns.totalTokens, null);
+  assert.equal(columns.outputTokens, 9);
 });
 
 test("a cost the Decimal(12, 4) column cannot hold is dropped", async () => {
@@ -447,6 +457,14 @@ test("cost rejection is per event, so one absurd event cannot erase a valid one"
   assert.equal(derived.costUsd?.toNumber(), 0.05);
 });
 
+test("cost aggregation uses decimal arithmetic at the exact half-unit boundary", () => {
+  const derived = deriveUsageColumns(sumUsage([
+    extractUsage({ total_cost_usd: 0.000001 }),
+    extractUsage({ total_cost_usd: 0.000049 }),
+  ]));
+  assert.equal(derived.costUsd?.toString(), "0.0001");
+});
+
 test("an aggregate cost overflow across individually storable events is still caught", async () => {
   // 6e7 is storable; 6e7 + 6e7 is not. This is the case the per-event check
   // cannot see, and it is why both guards exist.
@@ -455,6 +473,51 @@ test("an aggregate cost overflow across individually storable events is still ca
     () => deriveUsageColumns(sumUsage(events.map(extractUsage))),
   );
   assert.equal(derived.costUsd, null);
+});
+
+test("backfill pages by a stable id cursor instead of materializing every session", async () => {
+  const ids = Array.from({ length: 205 }, (_, index) => `session-${String(index).padStart(3, "0")}`);
+  let pageReads = 0;
+  const database: PrismaClient = {
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
+    $executeRawUnsafe: async () => 0,
+    $queryRaw: async () => [],
+    sessionEvent: { findMany: async () => [] },
+    session: {
+      findMany: async ({ cursor, take }: { cursor?: { id: string }; take: number }) => {
+        pageReads += 1;
+        const start = cursor ? ids.indexOf(cursor.id) + 1 : 0;
+        return ids.slice(start, start + take).map((id) => ({ id }));
+      },
+      findUnique: async () => null,
+      update: async () => assert.fail("a missing session must not write"),
+    },
+  } as unknown as PrismaClient;
+
+  const result = await backfillSessionUsage(database);
+  assert.deepEqual(result, { scanned: 205, updated: 0, failedCount: 0, failed: [] });
+  assert.equal(pageReads, 3);
+});
+
+test("backfill counts every failure while retaining only bounded diagnostics", async () => {
+  const ids = Array.from({ length: 25 }, (_, index) => `failed-${String(index).padStart(2, "0")}`);
+  const database: PrismaClient = {
+    $transaction: async () => { throw new Error("injected failure"); },
+    session: {
+      findMany: async ({ cursor, take }: { cursor?: { id: string }; take: number }) => {
+        const start = cursor ? ids.indexOf(cursor.id) + 1 : 0;
+        return ids.slice(start, start + take).map((id) => ({ id }));
+      },
+    },
+  } as unknown as PrismaClient;
+
+  const result = await backfillSessionUsage(database);
+  assert.equal(result.scanned, 25);
+  assert.equal(result.updated, 0);
+  assert.equal(result.failedCount, 25);
+  assert.equal(result.failed.length, 20);
+  assert.equal(result.failed[0]?.sessionId, "failed-00");
+  assert.equal(result.failed.at(-1)?.sessionId, "failed-19");
 });
 
 /* ------------------------------------------- MF-1: the advisory lock's key */
