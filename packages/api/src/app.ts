@@ -356,6 +356,7 @@ const webhookConfigPatch = z.object({
   // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
+const templateStepPatch = z.object({ opensPullRequest: z.boolean() });
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -1282,6 +1283,24 @@ export const createApp = (db: PrismaClient = prisma): Hono<AppEnvironment> => {
       include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
+  });
+  // Bounded on purpose: `opensPullRequest` only. A general template-step editor
+  // is a whole authoring surface (stepIndex, name, assigneeType, prompt,
+  // outputKind, approvalGate, attachmentsFromPrevious, runner, spawnPolicy,
+  // agent) that this batch's spec does not describe and no caller wants yet.
+  // Widening this route is a separate decision, not a follow-on edit.
+  app.patch("/task-templates/:templateId/steps/:stepId", async (context) => {
+    const templateId = id.parse(context.req.param("templateId"));
+    const stepId = id.parse(context.req.param("stepId"));
+    const body = await readJson(context.req.raw, templateStepPatch);
+    // Ownership is checked, not assumed: the step id alone would let a caller
+    // patch another template's step through any templateId that happens to exist.
+    const step = await db.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
+    if (!step) return context.json({ error: "Template step not found" }, 404);
+    return context.json(await db.taskTemplateStep.update({
+      where: { id: stepId },
+      data: { opensPullRequest: body.opensPullRequest },
+    }));
   });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
