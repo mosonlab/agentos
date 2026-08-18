@@ -18,6 +18,7 @@ config({
 let ownership: ControlPlaneOwnership | undefined;
 let server: ServerType | undefined;
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+let evidenceTimer: ReturnType<typeof setInterval> | null = null;
 let prisma: (typeof import("@agentos/db"))["prisma"] | undefined;
 let cleanupPromise: Promise<void> | undefined;
 let requestedSignal: NodeJS.Signals | undefined;
@@ -49,6 +50,8 @@ const cleanup = (exitCode: number): Promise<void> => {
     const failures: unknown[] = [];
     if (schedulerTimer) clearInterval(schedulerTimer);
     schedulerTimer = null;
+    if (evidenceTimer) clearInterval(evidenceTimer);
+    evidenceTimer = null;
     await closeServer().catch((error: unknown) => failures.push(error));
     if (prisma) await prisma.$disconnect().catch((error: unknown) => failures.push(error));
     if (ownership) await ownership.release().catch((error: unknown) => failures.push(error));
@@ -89,11 +92,20 @@ const main = async (): Promise<void> => {
   });
   await ensureStartupActive();
 
-  const [database, { createApp }, { reconcileAtStartup }, { startScheduler }, files, { serve }] = await Promise.all([
+  const [
+    database,
+    { createApp },
+    { reconcileAtStartup },
+    { startScheduler },
+    { startEvidenceWorker },
+    files,
+    { serve },
+  ] = await Promise.all([
     import("@agentos/db"),
     import("./app.js"),
     import("./reconcile.js"),
     import("./scheduler.js"),
+    import("./merge-evidence-worker.js"),
     import("./files/config.js"),
     import("@hono/node-server"),
   ]);
@@ -140,6 +152,10 @@ const main = async (): Promise<void> => {
   const listeningPort = typeof address === "object" && address ? address.port : port;
   console.log(`AgentOS API listening on http://${hostname}:${listeningPort}`);
   schedulerTimer = startScheduler(prisma);
+  // §D-P3 Phase B. Attaches to the process that already owns the single-instance
+  // control plane and already holds the read credential, rather than inventing
+  // a fourth service.
+  evidenceTimer = startEvidenceWorker(prisma);
   startupBusy = false;
 };
 

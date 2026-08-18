@@ -13,6 +13,7 @@ if (process.env.NODE_ENV !== "production") {
 export * from "@prisma/client";
 export * from "./chain-branch.js";
 export * from "./merge-integrator.js";
+export * from "./merge-integrator-db.js";
 export * from "./workflow.js";
 export * from "./usage.js";
 export * from "./task-source.js";

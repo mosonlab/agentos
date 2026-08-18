@@ -81,6 +81,24 @@ export const integratorBindingRefusal = (
     : `Step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME} may bind only agent ${INTEGRATOR_AGENT_NAME}`;
 };
 
+/**
+ * `owner/name` for a GitHub remote, or null for any other host. Mirrors the
+ * runner's `githubRepo` (delivery.ts) deliberately: the executor must resolve
+ * the same repository the chain actually delivered to, and a second convention
+ * here would be a way for the two to disagree.
+ */
+export const githubRepositoryFromRemote = (remote: string): string | null => {
+  const ssh = remote.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/iu);
+  if (ssh?.[1]) return ssh[1];
+  try {
+    const url = new URL(remote);
+    if (url.hostname.toLowerCase() !== "github.com") return null;
+    return url.pathname.replace(/^\//u, "").replace(/\.git$/u, "") || null;
+  } catch {
+    return null;
+  }
+};
+
 // ---------------------------------------------------------------------------
 // §D-P2 — the evidence block, carried in the gate card body
 // ---------------------------------------------------------------------------

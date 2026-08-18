@@ -39,6 +39,8 @@ import {
   TaskStatus,
   TriggerFireSource,
   gateQuestion,
+  gateFeedsIntegratorStep,
+  produceMergeAuthorization,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -2279,6 +2281,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           && await hasActiveRun(tx, taskId)) {
           return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
         }
+        let winningGateCard: { id: string; body: string; gateTaskId: string | null; sessionId: string | null } | null = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
             return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
@@ -2307,6 +2310,26 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               };
             }
           }
+          // §D-P2 rule 2 / Y4. For an integrator gate the closed-card set plus a
+          // status activity is not a durable decision identity, and it is partly
+          // forgeable through POST /tasks/:taskId/activity. This channel
+          // therefore names one winning card and answers it, so the same
+          // server-only anchors the Inbox channel produces exist here too. The
+          // earliest OPEN card is the deterministic winner.
+          const integratorGate = await gateFeedsIntegratorStep(tx, before);
+          if (integratorGate) {
+            winningGateCard = await tx.inboxMessage.findFirst({
+              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              select: { id: true, body: true, gateTaskId: true, sessionId: true },
+            });
+            if (winningGateCard) {
+              await tx.inboxMessage.update({
+                where: { id: winningGateCard.id },
+                data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
+              });
+            }
+          }
           // This OPEN row is the gate-decision CAS. It deliberately depends on
           // neither templateId nor approvalGate: gate creation records the
           // relationship in gateTaskId, and that is the only authority here.
@@ -2314,10 +2337,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             where: { gateTaskId: taskId, status: InboxStatus.OPEN },
             data: { status: InboxStatus.CLOSED },
           });
-          if (closed.count === 0) {
+          if (closed.count === 0 && !winningGateCard) {
             // A gate exists but none is OPEN only after another channel won or
             // this request is a replay. Do not overwrite a concurrent reject
-            // or activate the successor a second time.
+            // or activate the successor a second time. No decision row is
+            // created on this branch, and no authorization: the SPEC's
+            // fail-closed resolution (missing-authorization) is preserved.
             const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
             if (decidedGate > 0) {
               return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
@@ -2326,14 +2351,38 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
         const statusChanged = body.status !== undefined && body.status !== locked.status;
         const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
+        let statusActivityId: string | null = null;
         if (statusChanged) {
-          await tx.taskActivity.create({ data: {
+          const statusActivity = await tx.taskActivity.create({ data: {
             taskId, actorType: "operator", body: `Status changed: ${locked.status} → ${body.status}`,
           } });
+          statusActivityId = statusActivity.id;
+        }
+        let authorization: Awaited<ReturnType<typeof produceMergeAuthorization>> = null;
+        if (winningGateCard) {
+          const session = winningGateCard.sessionId
+            ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
+            : null;
+          if (!session?.runId) {
+            return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
+          }
+          const decisionRow = await tx.inboxDecision.create({ data: {
+            inboxMessageId: winningGateCard.id,
+            runId: session.runId,
+            externalEventId: `patch:${taskId}:${statusActivityId ?? winningGateCard.id}`,
+            decision: "approve",
+            actorOpenId: "patch-operator",
+          } });
+          authorization = await produceMergeAuthorization(tx, {
+            card: winningGateCard,
+            inboxDecisionId: decisionRow.id,
+            channel: "patch",
+          }, new Date());
         }
         if (locked.status !== TaskStatus.DONE
           && body.status === TaskStatus.DONE
-          && Boolean(updated.chainId || updated.followUpTaskId)) {
+          && Boolean(updated.chainId || updated.followUpTaskId)
+          && authorization?.purpose !== "confirmation") {
           await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
         }
         return { task: updated };

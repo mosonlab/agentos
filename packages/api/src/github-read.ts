@@ -1,0 +1,245 @@
+/**
+ * The read-only half of the §11 platform binding.
+ *
+ * This client holds `GITHUB_READ_TOKEN`, which is a *different* credential from
+ * the merge token and lives in a different process: the API server may read a
+ * pull request's state, and may never merge one. The two are never exchanged
+ * and neither is ever written to a log, an activity, or an output.
+ *
+ * The query below is §11.1 verbatim. Field names, enum values and their
+ * classification are the normative binding; §D-P6's schema-introspection gate
+ * (in the merge-executor package) is what turns a wrong name here into a
+ * failing test rather than a wrong merge.
+ */
+
+export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
+
+/** §11.1 — one round trip per verification pass. */
+export const PULL_REQUEST_QUERY = `
+query($owner:String!,$name:String!,$number:Int!,$base:String!) {
+  repository(owner:$owner,name:$name) {
+    mergeQueue(branch:$base) { id }
+    branchProtectionRules(first:100) { nodes {
+      pattern requiresStatusChecks requiresStrictStatusChecks
+      requiredStatusCheckContexts } }
+    ref(qualifiedName:$base) { target { oid } }
+    pullRequest(number:$number) {
+      number state isDraft merged mergedAt
+      mergeable mergeStateStatus
+      baseRefName headRefOid
+      autoMergeRequest { enabledAt mergeMethod }
+      mergeQueueEntry { id state position }
+      mergedBy { login }
+      mergeCommit { oid parents(first:5) { nodes { oid } } }
+      commits(last:1) { nodes { commit { oid statusCheckRollup {
+        state contexts(first:100) { nodes {
+          __typename
+          ... on CheckRun { name conclusion status }
+          ... on StatusContext { context state } } } } } } }
+    }
+  }
+}`;
+
+export type CheckContext =
+  | { __typename: "CheckRun"; name: string; conclusion: string | null; status: string | null }
+  | { __typename: "StatusContext"; context: string; state: string | null }
+  | { __typename: string };
+
+export type PullRequestSnapshot = {
+  repository: string;
+  number: number;
+  state: string | null;
+  isDraft: boolean | null;
+  merged: boolean | null;
+  mergeable: string | null;
+  mergeStateStatus: string | null;
+  baseRefName: string | null;
+  headRefOid: string | null;
+  baseSha: string | null;
+  autoMergeRequest: { enabledAt: string | null; mergeMethod: string | null } | null;
+  mergeQueueEntry: { id: string; state: string | null; position: number | null } | null;
+  repositoryMergeQueue: { id: string } | null;
+  mergedBy: { login: string } | null;
+  mergeCommit: { oid: string; parents: string[] } | null;
+  requiredCheckNames: string[];
+  checkContexts: CheckContext[];
+  headCommitOid: string | null;
+  readAt: string;
+};
+
+export class GitHubReadError extends Error {
+  constructor(message: string, readonly kind: "timeout" | "permission" | "transport" | "response") {
+    super(message);
+    this.name = "GitHubReadError";
+  }
+}
+
+export type GitHubReader = {
+  readPullRequest: (
+    repository: string,
+    prNumber: number,
+    baseRef: string,
+    signal: AbortSignal,
+  ) => Promise<PullRequestSnapshot>;
+};
+
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+const asObject = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+/**
+ * The required checks for a base ref are the union of every protection rule
+ * whose pattern matches it and which actually requires status checks. Matching
+ * is exact or a single trailing `*` — GitHub's full fnmatch surface is wider,
+ * and guessing at it would silently *drop* a required check, which is the one
+ * direction that must never happen.
+ */
+export const requiredCheckNamesFor = (
+  rules: Array<{ pattern: string; requiresStatusChecks: boolean; requiredStatusCheckContexts: string[] | null }>,
+  baseRef: string,
+): string[] => {
+  const names = new Set<string>();
+  for (const rule of rules) {
+    if (!rule.requiresStatusChecks) continue;
+    const pattern = rule.pattern;
+    const matches = pattern === baseRef
+      || (pattern.endsWith("*") && baseRef.startsWith(pattern.slice(0, -1)));
+    if (!matches) continue;
+    for (const context of rule.requiredStatusCheckContexts ?? []) names.add(context);
+  }
+  return [...names].sort();
+};
+
+export const parsePullRequestResponse = (
+  repository: string,
+  baseRef: string,
+  payload: unknown,
+  readAt: string,
+): PullRequestSnapshot => {
+  const root = asObject(payload);
+  const errors = asArray(root?.errors);
+  if (errors.length > 0) {
+    const first = asObject(errors[0]);
+    const type = typeof first?.type === "string" ? first.type : "";
+    // A permission error is never read as "no queue" or "no auto-merge" (§11.2).
+    const kind = type === "FORBIDDEN" || type === "INSUFFICIENT_SCOPES" ? "permission" : "response";
+    throw new GitHubReadError(`GitHub GraphQL errors: ${JSON.stringify(errors)}`, kind);
+  }
+  const repo = asObject(asObject(root?.data)?.repository);
+  if (!repo) throw new GitHubReadError("repository resolved to null", "response");
+  const pr = asObject(repo.pullRequest);
+  if (!pr) throw new GitHubReadError("pullRequest resolved to null", "response");
+
+  const rules = asArray(asObject(repo.branchProtectionRules)?.nodes).flatMap((node) => {
+    const rule = asObject(node);
+    if (!rule) return [];
+    return [{
+      pattern: typeof rule.pattern === "string" ? rule.pattern : "",
+      requiresStatusChecks: rule.requiresStatusChecks === true,
+      requiredStatusCheckContexts: Array.isArray(rule.requiredStatusCheckContexts)
+        ? rule.requiredStatusCheckContexts.filter((entry): entry is string => typeof entry === "string")
+        : null,
+    }];
+  });
+
+  const lastCommit = asObject(asObject(asArray(asObject(pr.commits)?.nodes)[0])?.commit);
+  const rollup = asObject(lastCommit?.statusCheckRollup);
+  const checkContexts = asArray(asObject(rollup?.contexts)?.nodes)
+    .flatMap((node) => (asObject(node) ? [asObject(node) as unknown as CheckContext] : []));
+
+  const mergeCommit = asObject(pr.mergeCommit);
+  const autoMerge = asObject(pr.autoMergeRequest);
+  const queueEntry = asObject(pr.mergeQueueEntry);
+  const mergedBy = asObject(pr.mergedBy);
+
+  return {
+    repository,
+    number: typeof pr.number === "number" ? pr.number : -1,
+    state: typeof pr.state === "string" ? pr.state : null,
+    isDraft: typeof pr.isDraft === "boolean" ? pr.isDraft : null,
+    merged: typeof pr.merged === "boolean" ? pr.merged : null,
+    mergeable: typeof pr.mergeable === "string" ? pr.mergeable : null,
+    mergeStateStatus: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus : null,
+    baseRefName: typeof pr.baseRefName === "string" ? pr.baseRefName : null,
+    headRefOid: typeof pr.headRefOid === "string" ? pr.headRefOid : null,
+    baseSha: typeof asObject(asObject(repo.ref)?.target)?.oid === "string"
+      ? asObject(asObject(repo.ref)?.target)!.oid as string
+      : null,
+    autoMergeRequest: autoMerge ? {
+      enabledAt: typeof autoMerge.enabledAt === "string" ? autoMerge.enabledAt : null,
+      mergeMethod: typeof autoMerge.mergeMethod === "string" ? autoMerge.mergeMethod : null,
+    } : null,
+    mergeQueueEntry: queueEntry && typeof queueEntry.id === "string" ? {
+      id: queueEntry.id,
+      state: typeof queueEntry.state === "string" ? queueEntry.state : null,
+      position: typeof queueEntry.position === "number" ? queueEntry.position : null,
+    } : null,
+    repositoryMergeQueue: asObject(repo.mergeQueue) && typeof asObject(repo.mergeQueue)!.id === "string"
+      ? { id: asObject(repo.mergeQueue)!.id as string }
+      : null,
+    mergedBy: mergedBy && typeof mergedBy.login === "string" ? { login: mergedBy.login } : null,
+    mergeCommit: mergeCommit && typeof mergeCommit.oid === "string" ? {
+      oid: mergeCommit.oid,
+      parents: asArray(asObject(mergeCommit.parents)?.nodes)
+        .flatMap((node) => {
+          const parent = asObject(node);
+          return typeof parent?.oid === "string" ? [parent.oid] : [];
+        }),
+    } : null,
+    requiredCheckNames: requiredCheckNamesFor(rules, baseRef),
+    checkContexts,
+    headCommitOid: typeof lastCommit?.oid === "string" ? lastCommit.oid : null,
+    readAt,
+  };
+};
+
+/** The conclusion this snapshot records for one required check name, or null when absent. */
+export const checkConclusionFor = (snapshot: PullRequestSnapshot, name: string): string | null => {
+  for (const context of snapshot.checkContexts) {
+    if (context.__typename === "CheckRun" && "name" in context && context.name === name) {
+      // A check that has not completed is not a pass, and its conclusion is not
+      // yet meaningful — the status is what the caller must poll on.
+      return context.status === "COMPLETED" ? context.conclusion ?? null : `PENDING:${context.status ?? "UNKNOWN"}`;
+    }
+    if (context.__typename === "StatusContext" && "context" in context && context.context === name) {
+      return context.state ?? null;
+    }
+  }
+  return null;
+};
+
+export const createGitHubReader = (
+  token: string | undefined = process.env.GITHUB_READ_TOKEN,
+  fetchImpl: typeof fetch = fetch,
+): GitHubReader | null => {
+  if (!token) return null;
+  return {
+    readPullRequest: async (repository, prNumber, baseRef, signal) => {
+      const [owner, name] = repository.split("/");
+      if (!owner || !name) throw new GitHubReadError(`malformed repository ${repository}`, "response");
+      let response: Response;
+      try {
+        response = await fetchImpl(GITHUB_GRAPHQL_URL, {
+          method: "POST",
+          signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/vnd.github+json",
+          },
+          body: JSON.stringify({ query: PULL_REQUEST_QUERY, variables: { owner, name, number: prNumber, base: baseRef } }),
+        });
+      } catch (error: unknown) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
+        }
+        throw new GitHubReadError(`GitHub read failed: ${error instanceof Error ? error.message : "unknown"}`, "transport");
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new GitHubReadError(`GitHub read refused with ${response.status}`, "permission");
+      }
+      if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
+      return parsePullRequestResponse(repository, baseRef, await response.json(), new Date().toISOString());
+    },
+  };
+};
