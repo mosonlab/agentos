@@ -3565,7 +3565,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
         include: {
-          task: { include: { templateStep: true, repo: { select: { defaultBranch: true } } } },
+          // §D-P5. The step's template name is part of the step-10 identity, so
+          // the completion route has to read it rather than the step alone.
+          task: { include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: { select: { defaultBranch: true } } } },
           session: true,
         },
       });

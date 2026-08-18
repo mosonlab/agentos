@@ -242,7 +242,7 @@ test("N20 an external failure at the ceiling buys an integrator step no extra ru
   const run = await liveIntegratorRun(chain, 5, 5);
   const completion = await completeRun(run, {
     exitCode: 1, terminalSuccess: false, terminalEventSeen: false, externalFailure: true,
-    failureClass: "PREFLIGHT_FAILED", retryable: true, failureReason: "network",
+    failureClass: "TRANSIENT_PROVIDER", retryable: true, failureReason: "network",
   });
   assert.equal(completion.status, 200);
   // §D-P5: the automatic path may not raise the ceiling, so no run 6 exists and
@@ -266,7 +266,7 @@ test("N20 an ordinary task's external-failure compensation is unchanged", async 
   await db.task.update({ where: { id: chain.gateTask.id }, data: { status: "DOING" } });
   const completion = await completeRun(run, {
     exitCode: 1, terminalSuccess: false, terminalEventSeen: false, externalFailure: true,
-    failureClass: "PREFLIGHT_FAILED", retryable: true, failureReason: "network",
+    failureClass: "TRANSIENT_PROVIDER", retryable: true, failureReason: "network",
   });
   assert.equal(completion.status, 200);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).maxRunsPerTask, 6);
