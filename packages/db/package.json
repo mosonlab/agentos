@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test prisma/*.test.ts",
+    "test": "node --import tsx --test prisma/*.test.ts src/*.test.ts",
     "db:generate": "prisma generate",
     "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
     "db:drift-check": "node scripts/check-drift.mjs",
