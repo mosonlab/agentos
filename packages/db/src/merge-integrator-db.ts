@@ -23,9 +23,14 @@ import {
   INTEGRATOR_OUTPUT_KIND,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
+  FOLLOW_UP_CHOICES,
+  STOP_CHOICES,
   type Disposition,
   type StopCondition,
+  dispositionFor,
+  followUpDispositionFor,
   githubRepositoryFromRemote,
+  stopChoicePayload,
   isIntegratorStep,
   isStopCondition,
   isTerminalDisposition,
@@ -439,3 +444,268 @@ export const closeIntegratorQuestions = async (tx: Tx, integratorTaskId: string)
 };
 
 export const INTEGRATOR_OUTPUT = INTEGRATOR_OUTPUT_KIND;
+
+// ---------------------------------------------------------------------------
+// §D-P7 — stop questions, follow-ups, and the answer transaction
+// ---------------------------------------------------------------------------
+
+/**
+ * A stop question is identified by the `mergeIntegrator.result` activity that
+ * recorded the stop. `InboxMessage` has no metadata column, so the binding
+ * rides in `dedupeKey` — a server-written column with a unique constraint,
+ * which additionally makes opening the same stop's question twice impossible
+ * rather than merely unlikely.
+ */
+export const STOP_QUESTION_PREFIX = "merge-stop";
+export const FOLLOW_UP_QUESTION_PREFIX = "merge-stop-followup";
+
+export const stopQuestionKey = (stopId: string): string => `${STOP_QUESTION_PREFIX}:${stopId}`;
+export const followUpQuestionKey = (stopId: string): string => `${FOLLOW_UP_QUESTION_PREFIX}:${stopId}`;
+
+export type StopQuestionBinding = { stopId: string; followUp: boolean };
+
+export const parseStopQuestionKey = (dedupeKey: string | null | undefined): StopQuestionBinding | null => {
+  if (!dedupeKey) return null;
+  if (dedupeKey.startsWith(`${FOLLOW_UP_QUESTION_PREFIX}:`)) {
+    return { stopId: dedupeKey.slice(FOLLOW_UP_QUESTION_PREFIX.length + 1), followUp: true };
+  }
+  if (dedupeKey.startsWith(`${STOP_QUESTION_PREFIX}:`)) {
+    return { stopId: dedupeKey.slice(STOP_QUESTION_PREFIX.length + 1), followUp: false };
+  }
+  return null;
+};
+
+const stopQuestionBody = (condition: StopCondition, evidence: string, followUp: boolean): string => [
+  followUp ? `合并事故待结案：${condition}` : `机械合并已停止：${condition}`,
+  "",
+  evidence.trim() || "（执行器未记录额外证据）",
+  "",
+  followUp
+    ? "这一步仍未结案。接受他人已完成的合并，或放弃本链。"
+    : "在你回答之前，这个任务不会重试、不会推进，也不会被改状态。",
+].join("\n");
+
+/**
+ * Opens the question a recorded stop lands in. Returns null when one already
+ * exists for this stop, which is what makes a replayed completion idempotent.
+ */
+export const openStopQuestion = async (
+  tx: Tx,
+  input: {
+    integratorTaskId: string;
+    stopId: string;
+    condition: StopCondition;
+    evidence: string;
+    agentId: string;
+    sessionId: string | null;
+    followUp?: boolean;
+  },
+): Promise<{ id: string } | null> => {
+  const followUp = input.followUp ?? false;
+  const dedupeKey = followUp ? followUpQuestionKey(input.stopId) : stopQuestionKey(input.stopId);
+  const existing = await tx.inboxMessage.findFirst({ where: { dedupeKey } });
+  if (existing) return null;
+  const choices = followUp ? FOLLOW_UP_CHOICES : STOP_CHOICES[input.condition];
+  const card = await tx.inboxMessage.create({ data: {
+    from: InboxSender.AGENT,
+    agentId: input.agentId,
+    sessionId: input.sessionId,
+    taskId: input.integratorTaskId,
+    kind: "MULTIPLE_CHOICE",
+    body: stopQuestionBody(input.condition, input.evidence, followUp),
+    choices: stopChoicePayload(choices),
+    dedupeKey,
+  } });
+  return { id: card.id };
+};
+
+export type StopAnswerOutcome = {
+  disposition: Disposition;
+  condition: StopCondition;
+  stopId: string;
+  integratorTaskId: string;
+  followUpQuestionId?: string | null;
+  confirmationCardId?: string | null;
+};
+
+/**
+ * §D-P7's answer transaction. Every exit from a stop runs through here, and the
+ * guard downstream keys on the *disposition* this writes rather than on the
+ * answer merely existing — which is the whole of C3: `flag-incident` records an
+ * answer and still leaves the chain guarded.
+ */
+export const applyStopAnswer = async (
+  tx: Tx,
+  input: {
+    question: { id: string; taskId: string | null; dedupeKey: string | null; agentId: string | null; sessionId: string | null };
+    choice: string;
+    now?: Date;
+  },
+): Promise<StopAnswerOutcome | null> => {
+  const binding = parseStopQuestionKey(input.question.dedupeKey);
+  if (!binding || !input.question.taskId) return null;
+  const now = input.now ?? new Date();
+  const task = await loadIntegratorTask(tx, input.question.taskId);
+  if (!task || !taskIsIntegratorStep(task)) return null;
+  const stop = await tx.taskActivity.findUnique({ where: { id: binding.stopId }, select: { metadata: true } });
+  const stopMetadata = asRecord(stop?.metadata);
+  const condition = stopMetadata?.condition;
+  if (!isStopCondition(condition)) return null;
+  const disposition = binding.followUp
+    ? followUpDispositionFor(input.choice)
+    : dispositionFor(condition, input.choice);
+  if (!disposition) throw new Error(`Choice ${input.choice} is not offered for stop condition ${condition}`);
+
+  await tx.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "operator",
+    body: `Merge stop ${condition} answered: ${input.choice}`,
+    metadata: {
+      kind: MERGE_INTEGRATOR_KIND.stopAnswer,
+      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+      stopId: binding.stopId,
+      condition,
+      choice: input.choice,
+      disposition,
+      followUp: binding.followUp,
+      answeredAt: now.toISOString(),
+    },
+  } });
+
+  const outcome: StopAnswerOutcome = {
+    disposition, condition, stopId: binding.stopId, integratorTaskId: task.id,
+    followUpQuestionId: null, confirmationCardId: null,
+  };
+
+  if (disposition === "nonterminal") {
+    // C3's resolution: the incident stays open, and the later exits the SPEC
+    // promised are actually offered rather than merely described.
+    const followUp = await openStopQuestion(tx, {
+      integratorTaskId: task.id,
+      stopId: binding.stopId,
+      condition,
+      evidence: `已标记为事故（${condition}）。本链仍未结案。`,
+      agentId: input.question.agentId ?? task.assigneeAgentId!,
+      sessionId: input.question.sessionId,
+      followUp: true,
+    });
+    outcome.followUpQuestionId = followUp?.id ?? null;
+    return outcome;
+  }
+
+  if (disposition === "refresh-requested") {
+    // Evidence precedes judgment (C2): this creates no run and writes no
+    // authorization. It asks for a card the human will read and then approve.
+    outcome.confirmationCardId = await requestConfirmationCard(tx, task, binding.stopId, now);
+    return outcome;
+  }
+
+  if (disposition === "repair-requested") {
+    // Nothing further until POST /tasks/:taskId/merge-target lands a correction.
+    return outcome;
+  }
+
+  await closeIntegratorQuestions(tx, task.id);
+  const abandoned = disposition === "terminal-abandoned";
+  const body = abandoned
+    ? `Chain abandoned after merge stop ${condition}. No merge was performed by this contract.`
+    : `Merge stop ${condition} closed by operator decision: ${input.choice}.`;
+  await tx.taskStepOutput.upsert({
+    where: { taskId: task.id },
+    create: { taskId: task.id, kind: INTEGRATOR_OUTPUT_KIND, body },
+    update: { body },
+  });
+  await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE, failureReason: null } });
+  await tx.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "control-plane",
+    body: abandoned
+      ? `Chain abandoned; step 10 closed without a merge (${condition})`
+      : `Chain complete; step 10 closed by operator decision (${condition})`,
+  } });
+  return outcome;
+};
+
+/**
+ * The confirmation card a renewal or a repair asks for. It is a real gate card
+ * on the step-9 task, so it travels the identical production path — the same
+ * worker fills it and the same transaction reads it back.
+ */
+export const requestConfirmationCard = async (
+  tx: Tx,
+  integratorTask: IntegratorTask,
+  stopId: string,
+  now = new Date(),
+): Promise<string | null> => {
+  if (!integratorTask.chainId || integratorTask.chainIndex === null) return null;
+  const gate = await tx.task.findFirst({
+    where: {
+      projectId: integratorTask.projectId,
+      chainId: integratorTask.chainId,
+      chainIndex: { lt: integratorTask.chainIndex },
+    },
+    orderBy: { chainIndex: "desc" },
+  });
+  if (!gate) return null;
+  const target = await resolveChainTarget(tx, integratorTask);
+  if (!target.resolved) return null;
+  const source = await tx.run.findFirst({
+    where: { taskId: gate.id, session: { isNot: null } },
+    include: { session: { select: { id: true } } },
+    orderBy: { runNumber: "desc" },
+  });
+  if (!source?.session) return null;
+  const requested = await requestMergeEvidence(tx, {
+    gateTaskId: gate.id,
+    integratorTaskId: integratorTask.id,
+    sourceRunId: source.id,
+    agentId: source.agentId,
+    sessionId: source.session.id,
+    purpose: "confirmation",
+    repository: target.repository,
+    prNumber: target.prNumber,
+    dedupeKey: `confirmation:${integratorTask.id}:${stopId}`,
+  }, now);
+  return requested.cardId;
+};
+
+/**
+ * Records a stop the executor reported and lands the control-plane stop state:
+ * task REVIEW, successor not activated, and a question the human must answer.
+ */
+export const recordIntegratorStop = async (
+  tx: Tx,
+  input: {
+    integratorTaskId: string;
+    condition: StopCondition;
+    evidence: string;
+    agentId: string;
+    sessionId: string | null;
+  },
+): Promise<{ stopId: string; questionId: string | null }> => {
+  const stop = await tx.taskActivity.create({ data: {
+    taskId: input.integratorTaskId,
+    actorType: "control-plane",
+    body: `Mechanical merge stopped: ${input.condition}`,
+    metadata: {
+      kind: MERGE_INTEGRATOR_KIND.result,
+      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+      outcome: "stopped",
+      condition: input.condition,
+      evidence: input.evidence,
+    },
+  } });
+  await tx.task.update({
+    where: { id: input.integratorTaskId },
+    data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${input.condition}` },
+  });
+  const question = await openStopQuestion(tx, {
+    integratorTaskId: input.integratorTaskId,
+    stopId: stop.id,
+    condition: input.condition,
+    evidence: input.evidence,
+    agentId: input.agentId,
+    sessionId: input.sessionId,
+  });
+  return { stopId: stop.id, questionId: question?.id ?? null };
+};

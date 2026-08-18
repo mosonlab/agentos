@@ -25,11 +25,14 @@ import {
   parseEvidence,
 } from "./merge-integrator.js";
 import {
+  applyStopAnswer,
   createAuthorizedIntegratorRun,
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
+  parseStopQuestionKey,
   requestMergeEvidence,
   resolveChainTarget,
+  stopStateFor,
 } from "./merge-integrator-db.js";
 
 type Tx = Prisma.TransactionClient;
@@ -85,6 +88,17 @@ export class ArchivedTaskError extends Error {
     this.name = "ArchivedTaskError";
   }
 }
+
+/** A run may not be created for an integrator step whose stop nobody has answered terminally. */
+export class IntegratorStoppedError extends Error {
+  constructor(readonly taskId: string, readonly condition: string) {
+    super(`Merge integrator stopped on ${condition}; answer the stop question before starting another run`);
+    this.name = "IntegratorStoppedError";
+  }
+}
+
+export const isIntegratorStoppedError = (error: unknown): error is IntegratorStoppedError =>
+  error instanceof Error && error.name === "IntegratorStoppedError";
 
 export const isArchivedTaskError = (error: unknown): error is ArchivedTaskError =>
   error instanceof Error && error.name === "ArchivedTaskError";
@@ -333,6 +347,12 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   if (task.archivedAt) {
     throw new ArchivedTaskError(task.id, task.name);
   }
+  // §D-P7, the last line of the exclusivity guard. This function is the single
+  // place a Run comes into existence outside the two inline creates and the
+  // answer transaction, so a route added later inherits the refusal by
+  // construction rather than by remembering to ask.
+  const stopped = await stopStateFor(tx, task.id);
+  if (stopped) throw new IntegratorStoppedError(task.id, stopped.stop.condition);
   // The assignee is re-read under the shared Agent-row mutex, not trusted from
   // the relation above: this function is the single place a Run comes into
   // existence, so an archive committing in parallel has to lose here or be
@@ -910,8 +930,52 @@ export const applyInboxDecisionTx = async (
     ));
     if (!matchesChoice) throw new Error("Decision must match an Inbox choice id");
   }
-  if (!gateDecision && question.session.run.status !== RunStatus.WAITING_INBOX) {
+  // §D-P7. A stop question is answered long after its run ended, so it cannot
+  // travel the WAITING_INBOX path — and it is not a gate card either, because a
+  // gate card would trip the gate CAS at PATCH time. It is its own thing, bound
+  // to the stop it answers by a server-written dedupeKey.
+  const stopBinding = gateDecision ? null : parseStopQuestionKey(question.dedupeKey);
+  if (!gateDecision && !stopBinding && question.session.run.status !== RunStatus.WAITING_INBOX) {
     throw new Error("No matching waiting Inbox question");
+  }
+  if (stopBinding) {
+    const claimedStop = await tx.inboxMessage.updateMany({
+      where: { id: question.id, status: InboxStatus.OPEN },
+      data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
+    });
+    if (claimedStop.count !== 1) return { duplicate: true, resumed: false };
+    await tx.inboxMessage.create({ data: {
+      from: InboxSender.HUMAN,
+      agentId: question.agentId,
+      sessionId: question.sessionId,
+      taskId: question.taskId,
+      threadId: question.threadId,
+      replyToMessageId: question.id,
+      kind: "TEXT",
+      body: input.decision,
+      selectedChoiceId: input.decision,
+      status: InboxStatus.CLOSED,
+      dedupeKey: `decision:${input.externalEventId}:reply`,
+      externalMessageId: input.externalMessageId ?? null,
+      deliveryStatus: InboxDeliveryStatus.DELIVERED,
+      deliveredAt: now,
+    } });
+    await tx.inboxDecision.create({ data: {
+      inboxMessageId: question.id,
+      runId: question.session.run.id,
+      externalEventId: input.externalEventId,
+      decision: input.decision,
+      actorOpenId: input.actorOpenId ?? null,
+    } });
+    await applyStopAnswer(tx, {
+      question: {
+        id: question.id, taskId: question.taskId, dedupeKey: question.dedupeKey,
+        agentId: question.agentId, sessionId: question.sessionId,
+      },
+      choice: input.decision,
+      now,
+    });
+    return { duplicate: false, resumed: false, messageId: question.id };
   }
   // A HUMAN-gate rejection can queue the executable predecessor. Resolve that
   // target before taking either mutex, then lock predecessor -> gate: PATCH on

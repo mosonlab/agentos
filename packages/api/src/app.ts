@@ -15,6 +15,7 @@ import {
   InboxStatus,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  isIntegratorStoppedError,
   LIVE_TASK_STATUSES,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
@@ -41,6 +42,22 @@ import {
   gateQuestion,
   gateFeedsIntegratorStep,
   produceMergeAuthorization,
+  MERGE_INTEGRATOR_KIND,
+  isIntegratorStep,
+  latestTargetCorrection,
+  loadIntegratorTask,
+  observedChainPullRequests,
+  parseMergeResult,
+  recordIntegratorStop,
+  requestConfirmationCard,
+  resolveChainTarget,
+  selectAuthorization,
+  stopStateFor,
+  stopStateRefusal,
+  taskIsIntegratorStep,
+  type CandidateActivity,
+  type CardRow,
+  type DecisionRow,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -283,6 +300,7 @@ const activityInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 const fencedActivityInput = activityInput.extend({ fencingToken: fence });
+const mergeTargetInput = z.object({ prNumber: z.number().int().positive() });
 const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
   console.warn("Discarded runner telemetry", { input, issues: error.issues });
   return undefined;
@@ -2281,6 +2299,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           && await hasActiveRun(tx, taskId)) {
           return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
         }
+        // §D-P7 / Step 5. The exclusivity guard, composed rather than
+        // duplicated: while a recorded stop has no terminal-disposition answer,
+        // this task does not move. Keyed on the disposition, not on an answer
+        // existing, because `flag-incident` writes an answer and must still
+        // hold the chain.
+        const stopped = await stopStateFor(tx, taskId);
+        if (stopped && body.status !== undefined && body.status !== locked.status) {
+          return { error: stopStateRefusal(stopped), code: 409 as const };
+        }
         let winningGateCard: { id: string; body: string; gateTaskId: string | null; sessionId: string | null } | null = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
@@ -2448,6 +2475,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (last.status === RunStatus.QUEUED || last.status === RunStatus.CLAIMED || last.status === RunStatus.RUNNING) {
         return { error: "Task already has an active run", code: 409 as const };
       }
+      const stoppedForRetry = await stopStateFor(tx, taskId);
+      if (stoppedForRetry) return { error: stopStateRefusal(stoppedForRetry), code: 409 as const };
       if (last.runNumber >= last.maxRunsPerTask) return { error: "Run budget exhausted", code: 409 as const };
       if (!task.assigneeAgent) {
         return { error: "Task assignee no longer exists; assign an agent before retrying", code: 409 as const };
@@ -2594,7 +2623,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if ("error" in result) return context.json({ error: result.error }, result.code);
       return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
       // Unreachable under the lock, because the loser sees the winner's run and
       // returns the 409 above. Mapped anyway: a 500 on a double-click is exactly
       // the failure the guard exists to prevent.
@@ -2763,6 +2792,68 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       update: { kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
     }));
   });
+  /**
+   * §D-P8 — the only mutation that can change a `target-unresolvable` outcome.
+   *
+   * MF-8's defect was that `re-authorize` could not change the immutable run
+   * rows the target is derived from, so every renewed run returned the same
+   * stop. This route writes a durable, authenticated correction — and it is
+   * constrained to pull request numbers the chain's own runs actually recorded,
+   * recomputed inside the transaction, so a correction can select among what
+   * the chain delivered and can never introduce a foreign pull request.
+   */
+  app.post("/tasks/:taskId/merge-target", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const body = await readJson(context.req.raw, mergeTargetInput);
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockTask(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      const task = await loadIntegratorTask(tx, taskId);
+      if (!task || !taskIsIntegratorStep(task)) {
+        return { error: "Task is not a mechanical merge step", code: 409 as const };
+      }
+      const stopped = await stopStateFor(tx, taskId);
+      if (!stopped) return { error: "Task is not in a merge stop state", code: 409 as const };
+      if (stopped.stop.condition !== "target-unresolvable") {
+        return { error: `Merge target correction applies to target-unresolvable only, not ${stopped.stop.condition}`, code: 409 as const };
+      }
+      if (!task.chainId) return { error: "Task is not part of a chain", code: 409 as const };
+      const observed = await observedChainPullRequests(tx, task.projectId, task.chainId);
+      if (observed.length === 0) {
+        return {
+          error: "This chain delivered no pull request; abandon it, or deliver the pull request by re-running the delivering step, after which resolution succeeds with no correction",
+          code: 409 as const,
+        };
+      }
+      if (!observed.includes(body.prNumber)) {
+        return {
+          error: `Pull request #${body.prNumber} is not among this chain's own delivered pull requests (${observed.join(", ")})`,
+          code: 409 as const,
+        };
+      }
+      const priorCorrection = await latestTargetCorrection(tx, taskId);
+      const activity = await tx.taskActivity.create({ data: {
+        taskId,
+        actorType: "operator",
+        body: `Merge target corrected to PR #${body.prNumber}`,
+        metadata: jsonValue({
+          kind: MERGE_INTEGRATOR_KIND.targetCorrection,
+          schemaVersion: 1,
+          chainId: task.chainId,
+          prNumber: body.prNumber,
+          observedSet: observed,
+          supersedesActivityId: priorCorrection?.activityId ?? null,
+        }),
+      } });
+      // The operator's next action is the ordinary "see the evidence, approve"
+      // path: the correction alone authorizes nothing.
+      const cardId = await requestConfirmationCard(tx, task, stopped.stop.stopId, new Date());
+      return { correction: { id: activity.id, prNumber: body.prNumber, observed, confirmationCardId: cardId } };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.correction, 201);
+  });
+
   app.post("/tasks/:taskId/activity", async (context) => {
     const body = await readJson(context.req.raw, activityInput);
     return context.json(await db.taskActivity.create({
@@ -2814,7 +2905,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -2836,7 +2927,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -3230,6 +3321,82 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   // The agent's own view of its run: what it is working on, what budget is left,
   // and what the prior chain steps produced. Read-only, session-scoped.
+  /**
+   * SPEC §8.4 — the merge executor's only read path.
+   *
+   * Three narrowing axes, all server-side, plus §D-P2's validation. The route
+   * returns *validated authorizations*, never raw activity metadata: the
+   * executor cannot be handed a forged record to reason about, because the
+   * reasoning happens here against rows no client can write.
+   */
+  app.get("/session/runs/:runId/chain/steps/:chainIndex/activity", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const principal = context.get("principal");
+    if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
+    const requestedIndex = Number(context.req.param("chainIndex"));
+    if (!Number.isInteger(requestedIndex)) return context.json({ error: "chainIndex must be an integer" }, 400);
+    const run = await db.run.findUnique({ where: { id: runId }, select: { taskId: true } });
+    if (!run?.taskId) return context.json({ error: "Run not found" }, 404);
+    const caller = await loadIntegratorTask(db, run.taskId);
+    if (!caller) return context.json({ error: "Run not found" }, 404);
+    // Eligibility: only the mechanical step may read across the chain at all.
+    if (!taskIsIntegratorStep(caller)) return context.json({ error: "Forbidden for this step" }, 403);
+    if (caller.chainId === null || caller.chainIndex === null) return context.json({ error: "Run is not part of a chain" }, 404);
+    const ownIndex = caller.chainIndex;
+    if (requestedIndex !== ownIndex && requestedIndex !== ownIndex - 1) {
+      return context.json({ error: "Only this step and its predecessor are addressable" }, 403);
+    }
+    const subject = requestedIndex === ownIndex
+      ? caller
+      : await db.task.findFirst({
+        where: { projectId: caller.projectId, chainId: caller.chainId, chainIndex: requestedIndex },
+      });
+    if (!subject) return context.json({ error: "No task at that chain index" }, 404);
+
+    const target = await resolveChainTarget(db, caller);
+    const activities = await db.taskActivity.findMany({
+      where: { taskId: subject.id },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, createdAt: true, actorType: true, metadata: true },
+    });
+
+    if (requestedIndex === ownIndex) {
+      // The caller's own history: intent and result rows only. Operator notes
+      // and every non-contractual row stay on the server.
+      const own = activities.filter((row) => {
+        const kind = (row.metadata as Record<string, unknown> | null)?.kind;
+        return kind === MERGE_INTEGRATOR_KIND.intent || kind === MERGE_INTEGRATOR_KIND.result;
+      });
+      return context.json({
+        chainIndex: requestedIndex,
+        target,
+        records: own.map((row) => ({
+          id: row.id, createdAt: row.createdAt, actorType: row.actorType, payload: row.metadata,
+        })),
+      });
+    }
+
+    // The predecessor: authorizations, and only after validation.
+    const candidates: CandidateActivity[] = activities;
+    const cards = await db.inboxMessage.findMany({
+      where: { gateTaskId: subject.id },
+      select: { id: true, gateTaskId: true, status: true, selectedChoiceId: true, body: true },
+    });
+    const decisions = await db.inboxDecision.findMany({
+      where: { inboxMessageId: { in: cards.map((card) => card.id) } },
+      select: { id: true, decision: true, createdAt: true, inboxMessageId: true },
+    });
+    const selection = selectAuthorization(candidates, decisions as DecisionRow[], cards as CardRow[], subject.id);
+    return context.json({
+      chainIndex: requestedIndex,
+      target,
+      authorization: selection.authorization,
+      nearMatchCount: selection.nearMatchCount,
+      ignoredCount: selection.ignoredCount,
+      refusal: selection.refusal,
+    });
+  });
+
   app.get("/session/runs/:runId/status", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const principal = context.get("principal");
@@ -3417,7 +3584,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
       // An external failure buys the task one more attempt rather than spending one.
       const external = externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
-      const budgetCeiling = run.maxRunsPerTask + (external ? 1 : 0);
+      // §D-P5 / MF-5. For the integrator step that compensation is switched off
+      // entirely, so the answer transaction is the *only* writer of a ceiling
+      // above the task's original. Otherwise a run authorized once could buy
+      // itself unbounded further attempts by failing externally, and "only a
+      // human re-authorization may exceed the ceiling" would be false in a
+      // reachable interleaving rather than merely hard to reach.
+      const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
+      const budgetCeiling = run.maxRunsPerTask + (external && !mechanical ? 1 : 0);
       if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
         await lockTask(tx, run.task.id);
       }
@@ -3522,7 +3696,36 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
-        if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
+        // §4.0 outcome branching. The executor's own fenced write is the only
+        // writer of a step-10 output: neither synthesis nor the metadata update
+        // may touch it, because a synthesized body would read as a merge that
+        // never happened.
+        if (succeeded && mechanical && run.task) {
+          const persisted = await tx.taskStepOutput.findUnique({
+            where: { taskId: run.taskId }, select: { kind: true, body: true },
+          });
+          const outcome = parseMergeResult(persisted);
+          if (outcome.outcome === "merged") {
+            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+          } else {
+            await recordIntegratorStop(tx, {
+              integratorTaskId: run.taskId,
+              condition: outcome.outcome === "stopped" ? outcome.condition : "missing-or-malformed-result",
+              evidence: outcome.outcome === "stopped" ? outcome.evidence : outcome.reason,
+              agentId: run.agentId,
+              sessionId: run.session.id,
+            });
+          }
+          await tx.taskActivity.create({ data: {
+            taskId: run.taskId,
+            actorType: "runner",
+            actorId: body.runnerId,
+            body: outcome.outcome === "merged"
+              ? `Run ${run.runNumber} merged the chain's pull request`
+              : `Run ${run.runNumber} stopped before merging`,
+            metadata: jsonValue({ exitCode: body.exitCode, mergeOutcome: outcome.outcome }),
+          } });
+        } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
           const existingOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } });
           if (existingOutput) {
             await tx.taskStepOutput.update({
@@ -3542,7 +3745,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             } });
           }
         }
-        if (succeeded && run.task?.templateId) {
+        if (succeeded && mechanical) {
+          // Already branched above; the mechanical path owns its own advance.
+        } else if (succeeded && run.task?.templateId) {
           await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
         } else if (succeeded && (run.task?.chainId || run.task?.followUpTaskId)) {
           if (run.task.approvalGate) {
@@ -3573,7 +3778,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
         }
-        await tx.taskActivity.create({
+        if (!(succeeded && mechanical)) await tx.taskActivity.create({
           data: {
             taskId: run.taskId,
             actorType: "runner",
