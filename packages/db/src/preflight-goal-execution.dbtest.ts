@@ -53,7 +53,7 @@ execFileSync("git", [
 // The recorded authority evidence, so these cases stop on the condition they are
 // about rather than on `authority`. The preflight checks both the signed
 // attestation content and that its commits are ancestors of HEAD.
-const MASTER_SHA = "29aac967f373ec6fd96f52b8289724f76eb4721f";
+const MASTER_SHA = "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b";
 const CONTROL_PLANE_A_SHA = "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d";
 
 /**
