@@ -7,7 +7,7 @@
  * Both directions matter and they fail differently. The sentinel Agent on an
  * ordinary step claims as an *agent* run, so a model runner spawns a CLI with
  * `mechanical/merge-executor-v1` as its model and the merge authority's name on
- * the row. An ordinary agent on step 10 claims as a *mechanical* run, so the
+ * the row. An ordinary agent on step 12 claims as a *mechanical* run, so the
  * step that merges is executed by an LLM in a workspace with a repo checkout.
  *
  * The invariant is therefore checked at every place a (task, agent, step)
@@ -348,8 +348,8 @@ test("the agents list marks the sentinel unassignable", async () => {
 });
 
 test("the integrator step is the only step the sentinel matches", async () => {
-  // The fixture's own shape, asserted once: every test above rests on step 10
-  // being an integrator step and step 9 not being one, and `isIntegratorStep`
+  // The fixture's own shape, asserted once: every test above rests on step 12
+  // being an integrator step and step 11 not being one, and `isIntegratorStep`
   // is a conjunction over three fields that a fixture can silently get wrong.
   const chain = await seedIntegratorChain(db, { label: "shape" });
   assert.equal(chain.integratorStep!.stepIndex, INTEGRATOR_STEP_INDEX);

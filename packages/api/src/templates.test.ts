@@ -16,7 +16,7 @@ import {
 
 import { instantiateTemplate } from "./templates.js";
 
-test("instantiating the canonical feature template creates ten tasks including the mechanical integrator", async () => {
+test("instantiating the canonical feature template creates twelve tasks including the mechanical integrator", async () => {
   const created: Array<Record<string, any>> = [];
   const runs: Array<Record<string, any>> = [];
   const agents = new Map(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
@@ -35,7 +35,7 @@ test("instantiating the canonical feature template creates ten tasks including t
       name: `Step ${contract.stepIndex}`,
       prompt: `Work on {{branchName}} step ${contract.stepIndex}`,
       outputKind: contract.outputKind,
-      attachmentsFromPrevious: contract.stepIndex > 1,
+      attachmentsFromPrevious: contract.attachmentsFromPrevious,
       assigneeType: agent ? AssigneeType.AGENT : AssigneeType.HUMAN,
       assigneeAgentId: agent?.id ?? null,
       assigneeAgent: agent,
@@ -80,7 +80,7 @@ test("instantiating the canonical feature template creates ten tasks including t
       create: async ({ data }: { data: Record<string, any> }) => { const run = { id: "run-1", ...data }; runs.push(run); return run; },
       update: async ({ data }: { data: Record<string, any> }) => { Object.assign(runs[0]!, data); return runs[0]; },
     },
-    taskActivity: { createMany: async () => ({ count: 10 }) },
+    taskActivity: { createMany: async () => ({ count: 12 }) },
     taskTemplateStep: {
       findUnique: async ({ where }: { where: { id: string } }) => steps.find((step) => step.id === where.id) ?? null,
     },
@@ -93,22 +93,32 @@ test("instantiating the canonical feature template creates ten tasks including t
     $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
   const result = await instantiateTemplate(db, "project-1", "template-1", {
-    repoId: "repo-1", variables: { branchName: "feature/ten-steps" }, description: "Build it",
+    repoId: "repo-1", variables: { branchName: "feature/twelve-steps" }, description: "Build it",
   });
-  assert.equal(result.tasks.length, 10);
+  assert.equal(result.tasks.length, 12);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
   assert.equal(created[0]!.followUpTaskId, "task-2");
-  assert.equal(created[8]!.assigneeType, AssigneeType.HUMAN);
-  assert.equal(created[9]!.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
-  assert.equal(created[9]!.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
-  assert.equal(created[9]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
-  assert.equal(created[9]!.opensPullRequest, false);
-  assert.equal(executionModeFor(created[9]!.templateStep), "mechanical");
+  assert.equal(created[10]!.assigneeType, AssigneeType.HUMAN);
+  assert.equal(created[11]!.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
+  assert.equal(created[11]!.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
+  assert.equal(created[11]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
+  assert.equal(created[11]!.opensPullRequest, false);
+  assert.equal(executionModeFor(created[11]!.templateStep), "mechanical");
   assert.deepEqual(created.map((task) => task.outputKind ?? task.templateStep.outputKind), CANONICAL_TEMPLATE_STEPS.map((step) => step.outputKind));
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runner, RunnerKind.CLAUDE);
-  assert.equal(runs[0]!.branch, "feature/ten-steps");
-  assert.equal(runs.some((run) => run.taskId === created[9]!.id), false, "step 10 waits for the human gate and never queues a model at instantiation");
+  assert.equal(runs[0]!.branch, "feature/twelve-steps");
+  assert.equal(runs.some((run) => run.taskId === created[11]!.id), false, "step 12 waits for the human gate and never queues a model at instantiation");
+  assert.doesNotMatch(
+    created[6]!.description,
+    /Read the prior template steps' persisted outputs before working/u,
+    "blind-review step 7 materializes without an upstream-read instruction",
+  );
+  assert.match(
+    created[8]!.description,
+    /Read the prior template steps' persisted outputs before working/u,
+    "regression-verification step 9 still consumes prior outputs",
+  );
 });
 
 test("the lower-level materializer rejects blank variables and invalid branches before a transaction", async () => {

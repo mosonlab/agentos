@@ -1,5 +1,5 @@
 /**
- * Step 7 / SF-3 — the seeded ten-step template, and the verifier that guards it.
+ * Step 7 / SF-3 — the seeded twelve-step template, and the verifier that guards it.
  *
  * The prior plan left this as "edit the seed wherever it is" and relied on
  * `verify-agent-template.ts` to catch a mistake. That is circular: the verifier
@@ -20,12 +20,19 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  activateChainSuccessor,
+  AssigneeType,
+  executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_SENTINEL_MODEL,
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
+  legacyNineStepTemplateName,
+  legacyTenStepTemplateName,
   PrismaClient,
+  type Task,
+  TaskStatus,
 } from "@agentos/db";
 
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -61,39 +68,44 @@ const integratorStep = async () => db.taskTemplateStep.findFirstOrThrow({
 
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes a ten-step template whose step 10 publishes nothing", async () => {
+test("a fresh seed writes a twelve-step template whose step 12 is mechanical", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
   // Read directly. Not through the verifier, not through the contract module —
   // this is the assertion the verifier's own correctness is allowed to rest on.
   const step = await integratorStep();
-  assert.equal(step.taskTemplate.steps.length, 10, "the template has ten steps");
-  assert.equal(step.opensPullRequest, false, "SF-3: the seeded step-10 row must not open a pull request");
+  assert.equal(step.taskTemplate.steps.length, 12, "the template has twelve steps");
+  assert.equal(step.opensPullRequest, false, "SF-3: the seeded step-12 row must not open a pull request");
   assert.equal(step.approvalGate, false);
   assert.equal(step.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.equal(step.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(step.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
   assert.equal(step.spawnPolicy, null);
+  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 7)?.attachmentsFromPrevious, false);
+  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.match(
+    step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
+    /vertical slice[\s\S]*blocked_by[\s\S]*expand-migrate-contract[\s\S]*fail at base/iu,
+  );
 
-  // And the nine steps before it are unchanged in the property SF-3 is about.
-  const others = step.taskTemplate.steps.filter((candidate) => candidate.stepIndex !== INTEGRATOR_STEP_INDEX);
-  assert.deepEqual([...new Set(others.map((candidate) => candidate.opensPullRequest))], [true]);
+  const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
+  assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
 });
 
 test("the verifier passes on a freshly seeded database, and says how many steps it saw", async () => {
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /10 steps/u);
+  assert.match(verified.output, /12 steps/u);
 });
 
-test("re-seeding is idempotent and does not flip step 10 back", async () => {
+test("re-seeding is idempotent and does not flip step 12 back", async () => {
   assert.equal((await seed()).code, 0);
   assert.equal((await seed()).code, 0);
   const step = await integratorStep();
   assert.equal(step.opensPullRequest, false, "the update branch of the upsert sets it too, not only create");
-  assert.equal(step.taskTemplate.steps.length, 10);
+  assert.equal(step.taskTemplate.steps.length, 12);
 });
 
 /* ------------------------------------------------------- the verifier negatives */
@@ -103,7 +115,7 @@ test("re-seeding is idempotent and does not flip step 10 back", async () => {
  *  verifier. */
 const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegExp }> = [
   {
-    name: "step 10 opening a pull request",
+    name: "step 12 opening a pull request",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.update({ where: { id: step.id }, data: { opensPullRequest: true } });
@@ -118,7 +130,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     expect: /model|runner/iu,
   },
   {
-    name: "a non-null spawn policy on step 10",
+    name: "a non-null spawn policy on step 12",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.update({ where: { id: step.id }, data: { spawnPolicy: { maxChildren: 1 } } });
@@ -126,7 +138,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     expect: /spawnPolicy/u,
   },
   {
-    name: "a nine-step template",
+    name: "an eleven-step template",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.delete({ where: { id: step.id } });
@@ -134,7 +146,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     expect: /step/iu,
   },
   {
-    name: "an eleventh step",
+    name: "a thirteenth step",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.create({ data: {
@@ -144,6 +156,15 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
       } });
     },
     expect: /step/iu,
+  },
+  {
+    name: "an upstream attachment on blind-review step 7",
+    break: async () => {
+      const step = await integratorStep();
+      const blind = step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 7)!;
+      await db.taskTemplateStep.update({ where: { id: blind.id }, data: { attachmentsFromPrevious: true } });
+    },
+    expect: /attachmentsFromPrevious/u,
   },
 ];
 
@@ -158,41 +179,198 @@ for (const negative of negatives) {
   });
 }
 
-/* ---------------------------------------------------------- A4: in-flight chains */
+/* -------------------------------------------- 10 -> 12: in-flight continuation */
 
-test("a chain instantiated before the tenth step exists keeps its nine tasks", async () => {
+test("re-seeding a historical ten-step template preserves and queues its in-flight integrator", async () => {
   assert.equal((await seed()).code, 0);
-  const step = await integratorStep();
-  const templateId = step.taskTemplateId;
-  const projectId = step.taskTemplate.projectId;
+  const fresh = await integratorStep();
+  const templateId = fresh.taskTemplateId;
+  const projectId = fresh.taskTemplate.projectId;
+  const agents = new Map((await db.agent.findMany({ where: { projectId } })).map((agent) => [agent.name, agent]));
 
-  // Stand the world back up as it was before this change: a nine-step template.
-  await db.taskTemplateStep.delete({ where: { id: step.id } });
-  const nineStepSteps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" } });
-  assert.equal(nineStepSteps.length, 9);
-
-  const chainId = `in-flight-${process.pid}`;
-  for (const templateStep of nineStepSteps) {
-    await db.task.create({ data: {
-      projectId, templateId, templateStepId: templateStep.id, name: templateStep.name,
-      description: templateStep.prompt, assigneeType: templateStep.assigneeType,
-      assigneeAgentId: templateStep.assigneeAgentId, approvalGate: templateStep.approvalGate,
-      opensPullRequest: templateStep.opensPullRequest, chainId, chainIndex: templateStep.stepIndex,
-    } });
+  // Reconstruct the historical 10-row shape exactly where the routing changed:
+  // review, fix, docs, human approval, then physical step-10 mechanical merge.
+  await db.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId, stepIndex: { in: [11, 12] } } });
+  const historicalTail = [
+    [6, "review-coordinator", AssigneeType.AGENT, "code-review"],
+    [7, "senior-dev", AssigneeType.AGENT, "fixed-implementation"],
+    [8, "librarian", AssigneeType.AGENT, "documentation"],
+    [9, null, AssigneeType.HUMAN, "approval"],
+    [10, INTEGRATOR_AGENT_NAME, AssigneeType.AGENT, INTEGRATOR_OUTPUT_KIND],
+  ] as const;
+  for (const [stepIndex, agentName, assigneeType, outputKind] of historicalTail) {
+    const assigneeAgentId = agentName ? agents.get(agentName)!.id : null;
+    await db.taskTemplateStep.update({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: templateId, stepIndex } },
+      data: {
+        name: `Historical step ${stepIndex}`,
+        assigneeType,
+        assigneeAgentId,
+        approvalGate: stepIndex === 9,
+        outputKind,
+        opensPullRequest: false,
+      },
+    });
   }
-  const before = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+  const historicalSteps = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" },
+  });
+  assert.equal(historicalSteps.length, 10);
 
-  // Now seed the ten-step template on top, exactly as an upgrade would.
+  const repo = await db.repo.create({ data: {
+    projectId, name: "legacy-upgrade", remoteUrl: "https://github.com/acme/legacy-upgrade.git",
+    mountPath: "/scratch/legacy-upgrade", defaultBranch: "main",
+  } });
+  const integratorAgent = agents.get(INTEGRATOR_AGENT_NAME)!;
+  await db.agentRepoAccess.create({ data: {
+    projectId, agentId: integratorAgent.id, repoId: repo.id,
+    mountPath: "/scratch/legacy-upgrade", permissions: "GIT_WRITE",
+  } });
+
+  const chainId = `in-flight-ten-${process.pid}`;
+  const tasks: Task[] = [];
+  for (const templateStep of historicalSteps) {
+    tasks.push(await db.task.create({ data: {
+      projectId, repoId: repo.id, templateId, templateStepId: templateStep.id,
+      name: templateStep.name, description: templateStep.prompt,
+      assigneeType: templateStep.assigneeType, assigneeAgentId: templateStep.assigneeAgentId,
+      approvalGate: templateStep.approvalGate, opensPullRequest: templateStep.opensPullRequest,
+      chainId, chainIndex: templateStep.stepIndex,
+      status: templateStep.stepIndex < 10 ? TaskStatus.DONE : TaskStatus.TODO,
+      targetBranch: "agentos/chain/legacy-upgrade",
+    } }));
+  }
+
+  // New code re-seeds: the historical template is retained under a deterministic
+  // marker and the canonical name is assigned to a different 12-row template.
   assert.equal((await seed()).code, 0);
-  assert.equal((await db.taskTemplateStep.count({ where: { taskTemplateId: templateId } })), 10);
+  const legacy = await db.taskTemplate.findUniqueOrThrow({
+    where: { id: templateId }, include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(legacy.name, legacyTenStepTemplateName(templateId));
+  assert.equal(legacy.steps.length, 10);
+  const canonical = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: true },
+  });
+  assert.notEqual(canonical.id, templateId);
+  assert.equal(canonical.steps.length, 12);
 
-  // `templates.ts` materializes task rows at creation time and the task row is
-  // the runtime authority, so an in-flight chain is not rewritten by a template
-  // that grew a step under it.
-  const after = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
-  assert.equal(after.length, 9, "the in-flight chain still has nine tasks");
-  assert.deepEqual(
-    after.map((task) => ({ index: task.chainIndex, step: task.templateStepId, opens: task.opensPullRequest })),
-    before.map((task) => ({ index: task.chainIndex, step: task.templateStepId, opens: task.opensPullRequest })),
-  );
+  const oldIntegrator = await db.task.findUniqueOrThrow({
+    where: { id: tasks[9]!.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  assert.equal(executionModeFor(oldIntegrator.templateStep), "mechanical");
+
+  // The real chain successor path must accept the preserved binding and enqueue
+  // the old physical step 10 after its human predecessor completes.
+  const advanced = await db.$transaction((tx) => activateChainSuccessor(tx, tasks[8]!));
+  assert.deepEqual(advanced, { nextTaskId: oldIntegrator.id, gated: false });
+  const queued = await db.run.findFirst({ where: { taskId: oldIntegrator.id }, orderBy: { runNumber: "desc" } });
+  assert.ok(queued, "the historical integrator receives a run after re-seed");
+  assert.equal(queued.status, "QUEUED");
+});
+
+/* ---------------------------------------------- 9 -> 12: foreign-key preservation */
+
+test("re-seeding a historical nine-step template preserves its in-flight task semantics", async () => {
+  assert.equal((await seed()).code, 0);
+  const fresh = await integratorStep();
+  const templateId = fresh.taskTemplateId;
+  const projectId = fresh.taskTemplate.projectId;
+  const agents = new Map((await db.agent.findMany({ where: { projectId } })).map((agent) => [agent.name, agent]));
+
+  await db.taskTemplateStep.deleteMany({
+    where: { taskTemplateId: templateId, stepIndex: { in: [10, 11, 12] } },
+  });
+  const historicalContract = [
+    [1, "Write a spec", "spec", AssigneeType.AGENT, "spec", true],
+    [2, "Plan", "plan", AssigneeType.AGENT, "plan", false],
+    [3, "Plan review", "review-coordinator", AssigneeType.AGENT, "plan-review", false],
+    [4, "Revise plan", "plan-reviser", AssigneeType.AGENT, "revised-plan", true],
+    [5, "Implementation", "implementation-plan-executioner", AssigneeType.AGENT, "implementation", false],
+    [6, "Code review", "review-coordinator", AssigneeType.AGENT, "code-review", false],
+    [7, "Apply review fixes", "senior-dev", AssigneeType.AGENT, "fixed-implementation", false],
+    [8, "Librarian", "librarian", AssigneeType.AGENT, "documentation", false],
+    [9, "Human PR review", null, AssigneeType.HUMAN, "approval", true],
+  ] as const;
+  for (const [stepIndex, name, agentName, assigneeType, outputKind, approvalGate] of historicalContract) {
+    await db.taskTemplateStep.update({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: templateId, stepIndex } },
+      data: {
+        name,
+        assigneeType,
+        assigneeAgentId: agentName ? agents.get(agentName)!.id : null,
+        approvalGate,
+        outputKind,
+      },
+    });
+  }
+  const historicalSteps = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" },
+  });
+  assert.deepEqual(historicalSteps.map((step) => step.stepIndex), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const beforeSemantics = historicalSteps.map((step) => ({
+    id: step.id,
+    stepIndex: step.stepIndex,
+    name: step.name,
+    assigneeType: step.assigneeType,
+    assigneeAgentId: step.assigneeAgentId,
+    approvalGate: step.approvalGate,
+    outputKind: step.outputKind,
+  }));
+
+  const reviewStep = historicalSteps[5]!;
+  const repo = await db.repo.create({ data: {
+    projectId, name: "legacy-nine-upgrade", remoteUrl: "https://github.com/acme/legacy-nine-upgrade.git",
+    mountPath: "/scratch/legacy-nine-upgrade", defaultBranch: "main",
+  } });
+  const inFlight = await db.task.create({ data: {
+    projectId, repoId: repo.id, templateId, templateStepId: reviewStep.id,
+    name: reviewStep.name, description: reviewStep.prompt,
+    assigneeType: reviewStep.assigneeType, assigneeAgentId: reviewStep.assigneeAgentId,
+    approvalGate: reviewStep.approvalGate, opensPullRequest: reviewStep.opensPullRequest,
+    chainId: `in-flight-nine-${process.pid}`, chainIndex: reviewStep.stepIndex,
+    status: TaskStatus.DOING, targetBranch: "agentos/chain/legacy-nine-upgrade",
+  } });
+  await db.taskStepOutput.create({ data: {
+    taskId: inFlight.id, kind: reviewStep.outputKind, body: "historical review",
+  } });
+
+  assert.equal((await seed()).code, 0);
+  const legacy = await db.taskTemplate.findUniqueOrThrow({
+    where: { id: templateId }, include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(legacy.name, legacyNineStepTemplateName(templateId));
+  assert.deepEqual(legacy.steps.map((step) => ({
+    id: step.id,
+    stepIndex: step.stepIndex,
+    name: step.name,
+    assigneeType: step.assigneeType,
+    assigneeAgentId: step.assigneeAgentId,
+    approvalGate: step.approvalGate,
+    outputKind: step.outputKind,
+  })), beforeSemantics);
+
+  const canonical = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: true },
+  });
+  assert.notEqual(canonical.id, templateId);
+  assert.equal(canonical.steps.length, 12);
+
+  const preserved = await db.task.findUniqueOrThrow({
+    where: { id: inFlight.id },
+    include: {
+      stepOutput: true,
+      templateStep: { include: { assigneeAgent: true, taskTemplate: true } },
+    },
+  });
+  assert.equal(preserved.templateId, templateId);
+  assert.equal(preserved.templateStepId, reviewStep.id);
+  assert.equal(preserved.templateStep?.taskTemplate.name, legacyNineStepTemplateName(templateId));
+  assert.equal(preserved.templateStep?.name, "Code review");
+  assert.equal(preserved.templateStep?.assigneeAgent?.name, "review-coordinator");
+  assert.equal(preserved.templateStep?.outputKind, "code-review");
+  assert.equal(preserved.stepOutput?.kind, "code-review");
 });

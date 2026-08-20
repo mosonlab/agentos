@@ -27,12 +27,25 @@ export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 /** v1.1 pins exactly one merge method (SPEC D4). */
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
-export const INTEGRATOR_STEP_INDEX = 10;
+export const INTEGRATOR_STEP_INDEX = 12;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
 export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
+export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
+export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
+
+/**
+ * Seed rollover keeps the historical template row and its step ids intact so
+ * already-materialized tasks retain their runtime contract. The template id in
+ * this marker makes the rename deterministic and collision-free on retries.
+ */
+export const legacyTenStepTemplateName = (templateId: string): string =>
+  `${LEGACY_TEN_STEP_TEMPLATE_PREFIX}${templateId}`;
+
+export const legacyNineStepTemplateName = (templateId: string): string =>
+  `${LEGACY_NINE_STEP_TEMPLATE_PREFIX}${templateId}`;
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant
@@ -49,11 +62,11 @@ const templateNameOf = (step: NonNullable<IntegratorStepShape>): string | null =
   step.taskTemplate?.name ?? step.taskTemplateName ?? null;
 
 /**
- * The canonical step-10 shape. All four facts are required: an outputKind alone
+ * The canonical step-12 shape. All three facts are required: an outputKind alone
  * is client-influenceable through a doctored template, and a stepIndex alone
- * collides with any other template that happens to have ten steps.
+ * collides with any other template that happens to use the same step index.
  */
-export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
+export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean => {
   if (!step) return false;
   return step.stepIndex === INTEGRATOR_STEP_INDEX
     && step.outputKind === INTEGRATOR_OUTPUT_KIND
@@ -61,15 +74,45 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
 };
 
 /**
+ * Runtime recognition includes the one historical shape the seed can mark
+ * during a 10 -> 12 rollover. It is deliberately narrower than "step 10" or
+ * "merge-result": only a seed-minted legacy template identity qualifies.
+ */
+export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
+  if (!step) return false;
+  const templateName = templateNameOf(step);
+  return isCanonicalIntegratorStep(step)
+    || (step.stepIndex === 10
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);
+};
+
+/**
  * Bidirectional: the sentinel Agent may bind only the integrator step, and the
  * integrator step may bind only the sentinel Agent. One direction alone leaves
- * a hole — the sentinel dispatchable as an ordinary model agent, or step 10
+ * a hole — the sentinel dispatchable as an ordinary model agent, or step 12
  * executable by a real LLM.
  */
 export const integratorBindingValid = (
   agentName: string | null | undefined,
   step: IntegratorStepShape,
 ): boolean => (agentName === INTEGRATOR_AGENT_NAME) === isIntegratorStep(step);
+
+/** New template instantiation is stricter than runtime compatibility. */
+export const canonicalIntegratorBindingValid = (
+  agentName: string | null | undefined,
+  step: IntegratorStepShape,
+): boolean => (agentName === INTEGRATOR_AGENT_NAME) === isCanonicalIntegratorStep(step);
+
+export const canonicalIntegratorBindingRefusal = (
+  agentName: string | null | undefined,
+  step: IntegratorStepShape,
+): string | null => {
+  if (canonicalIntegratorBindingValid(agentName, step)) return null;
+  return agentName === INTEGRATOR_AGENT_NAME
+    ? `Agent ${INTEGRATOR_AGENT_NAME} may bind only step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME}`
+    : `Step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME} may bind only agent ${INTEGRATOR_AGENT_NAME}`;
+};
 
 export const integratorBindingRefusal = (
   agentName: string | null | undefined,
@@ -400,7 +443,7 @@ export const selectAuthorization = (
     if (parsed.status === "malformed") { nearMatchCount += 1; continue; }
     const payload = parsed.payload;
     const decision = decisionById.get(payload.decision.inboxDecisionId);
-    // Rule 2: the decision must exist and belong to *this* chain's step-9 gate,
+    // Rule 2: the decision must exist and belong to *this* chain's step-11 gate,
     // resolved from the caller's own chain and never from the payload.
     if (!decision) { ignoredCount += 1; continue; }
     const card = cardById.get(decision.inboxMessageId);

@@ -45,9 +45,9 @@ const snapshot = (): PullRequestSnapshot => ({
 });
 
 /**
- * The step-10 run holding a live session token. The gate approval already
+ * The step-12 run holding a live session token. The gate approval already
  * activated the successor and enqueued its run, so this adopts that row rather
- * than creating a second one — a step-10 task with two runs would be a fixture
+ * than creating a second one — a step-12 task with two runs would be a fixture
  * artefact the production path never produces.
  */
 const seedIntegratorSession = async (chain: IntegratorChain) => {
@@ -83,6 +83,14 @@ const sessionGet = async (token: string, path: string): Promise<{ status: number
   return { status: response.status, body: await response.json().catch(() => null) as any };
 };
 
+const requiredChainIndex = (chainIndex: number | null): number => {
+  if (chainIndex === null) throw new Error("Integrator fixture task has no chain index");
+  return chainIndex;
+};
+
+const stepActivityPath = (runId: string, chainIndex: number | null): string =>
+  `/session/runs/${runId}/chain/steps/${requiredChainIndex(chainIndex)}/activity`;
+
 const operatorPost = async (path: string, body: unknown): Promise<{ status: number; body: any }> => {
   const prior = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
@@ -98,7 +106,7 @@ const operatorPost = async (path: string, body: unknown): Promise<{ status: numb
   }
 };
 
-/** A chain approved through the real inbox channel, with a live step-10 session. */
+/** A chain approved through the real inbox channel, with a live step-12 session. */
 const approvedChain = async (label: string) => {
   const chain = await seedIntegratorChain(db, { label });
   const card = await db.$transaction(
@@ -114,8 +122,8 @@ const approvedChain = async (label: string) => {
 };
 
 test("N15 the executor reads its predecessor's validated authorization and its own records", async () => {
-  const { token, run } = await approvedChain("n15");
-  const predecessor = await sessionGet(token, `/session/runs/${run.id}/chain/steps/9/activity`);
+  const { chain, token, run } = await approvedChain("n15");
+  const predecessor = await sessionGet(token, stepActivityPath(run.id, chain.gateTask.chainIndex));
   assert.equal(predecessor.status, 200);
   assert.equal(predecessor.body.authorization.headSha, "a".repeat(40));
   assert.equal(predecessor.body.authorization.prNumber, 123);
@@ -134,7 +142,7 @@ test("N15 sensitive fields never leave the server", async () => {
     body: "operator note: the deploy key is hunter2",
     metadata: { note: "private" },
   } });
-  const response = await sessionGet(token, `/session/runs/${run.id}/chain/steps/9/activity`);
+  const response = await sessionGet(token, stepActivityPath(run.id, chain.gateTask.chainIndex));
   assert.equal(response.status, 200);
   const serialized = JSON.stringify(response.body);
   assert.ok(!serialized.includes("hunter2"), "operator prose is not part of the contract and is not returned");
@@ -142,13 +150,13 @@ test("N15 sensitive fields never leave the server", async () => {
 });
 
 test("N15 scope: an earlier index, a later index, and another run's id are all refused", async () => {
-  const { token, run } = await approvedChain("n15-scope");
-  assert.equal((await sessionGet(token, `/session/runs/${run.id}/chain/steps/8/activity`)).status, 403);
-  assert.equal((await sessionGet(token, `/session/runs/${run.id}/chain/steps/11/activity`)).status, 403);
+  const { chain, token, run } = await approvedChain("n15-scope");
+  assert.equal((await sessionGet(token, stepActivityPath(run.id, requiredChainIndex(chain.gateTask.chainIndex) - 1))).status, 403);
+  assert.equal((await sessionGet(token, stepActivityPath(run.id, requiredChainIndex(chain.integratorTask!.chainIndex) + 1))).status, 403);
   const other = await approvedChain("n15-other");
   // Path scoping: a session token is bound to its own runId by the auth layer,
   // before any handler sees the request.
-  assert.equal((await sessionGet(token, `/session/runs/${other.run.id}/chain/steps/9/activity`)).status, 403);
+  assert.equal((await sessionGet(token, stepActivityPath(other.run.id, other.chain.gateTask.chainIndex))).status, 403);
 });
 
 test("N15 eligibility: an ordinary step's session may not use the route at all", async () => {
@@ -160,7 +168,7 @@ test("N15 eligibility: an ordinary step's session may not use the route at all",
     promptHash: "hash", status: "RUNNING", sessionTokenHash: hash, leaseGeneration: 1,
     sessionTokenExpiresAt: new Date(Date.now() + 3_600_000), leaseExpiresAt: new Date(Date.now() + 3_600_000),
   } });
-  assert.equal((await sessionGet(token, `/session/runs/${run.id}/chain/steps/9/activity`)).status, 403);
+  assert.equal((await sessionGet(token, stepActivityPath(run.id, chain.gateTask.chainIndex))).status, 403);
 });
 
 test("N14 a forged authorization carrying a real winning decision id is not returned", async () => {
@@ -183,7 +191,7 @@ test("N14 a forged authorization carrying a real winning decision id is not retu
   });
   assert.equal(forged.status, 201);
 
-  const response = await sessionGet(token, `/session/runs/${run.id}/chain/steps/9/activity`);
+  const response = await sessionGet(token, stepActivityPath(run.id, chain.gateTask.chainIndex));
   assert.equal(response.status, 200);
   // Rule 5 first: the reused decision id disqualifies *both* records, so the
   // executor is left with no authorization rather than with the genuine one —
@@ -205,14 +213,14 @@ test("N14 a decision id belonging to another chain's gate is refused", async () 
   await operatorPost(`/tasks/${chain.gateTask.id}/activity`, {
     body: "authorization", metadata: foreignAuthorization!.metadata,
   });
-  const response = await sessionGet(token, `/session/runs/${run.id}/chain/steps/9/activity`);
+  const response = await sessionGet(token, stepActivityPath(run.id, chain.gateTask.chainIndex));
   assert.equal(response.body.authorization, null);
   assert.equal(response.body.ignoredCount, 1, "a cross-chain decision id is structurally ignored");
 });
 
 test("N22 read legs: one, zero, and two observed pull request numbers", async () => {
   const one = await approvedChain("n22-one");
-  const single = await sessionGet(one.token, `/session/runs/${one.run.id}/chain/steps/10/activity`);
+  const single = await sessionGet(one.token, stepActivityPath(one.run.id, one.chain.integratorTask!.chainIndex));
   assert.equal(single.body.target.resolved, true);
   assert.equal(single.body.target.prNumber, 123);
   assert.deepEqual(single.body.records, []);
@@ -222,7 +230,7 @@ test("N22 read legs: one, zero, and two observed pull request numbers", async ()
   // surfaces at the gate rather than becoming a coin flip at merge time.
   const twoChain = await seedIntegratorChain(db, { label: "n22-two", prNumbers: [10, 11] });
   const twoSession = await seedIntegratorSession(twoChain);
-  const ambiguous = await sessionGet(twoSession.token, `/session/runs/${twoSession.run.id}/chain/steps/10/activity`);
+  const ambiguous = await sessionGet(twoSession.token, stepActivityPath(twoSession.run.id, twoChain.integratorTask!.chainIndex));
   assert.equal(ambiguous.body.target.resolved, false);
   assert.equal(ambiguous.body.target.unresolvable, "ambiguous");
   assert.deepEqual(ambiguous.body.target.observed, [10, 11]);
@@ -230,7 +238,7 @@ test("N22 read legs: one, zero, and two observed pull request numbers", async ()
   const none = await seedIntegratorChain(db, { label: "n22-none" });
   await db.run.updateMany({ where: { taskId: none.gateTask.id }, data: { pullRequestNumber: null } });
   const session = await seedIntegratorSession(none);
-  const empty = await sessionGet(session.token, `/session/runs/${session.run.id}/chain/steps/10/activity`);
+  const empty = await sessionGet(session.token, stepActivityPath(session.run.id, none.integratorTask!.chainIndex));
   assert.equal(empty.body.target.resolved, false);
   assert.equal(empty.body.target.unresolvable, "none");
 });

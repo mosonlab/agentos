@@ -58,7 +58,7 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   }
 };
 
-/** A live step-10 run the merge executor would be holding. */
+/** A live step-12 run the merge executor would be holding. */
 const liveIntegratorRun = async (chain: IntegratorChain, runNumber = 1, maxRuns = 5) => {
   const run = await db.run.create({ data: {
     projectId: chain.project.id, taskId: chain.integratorTask!.id, agentId: chain.integratorAgent.id,

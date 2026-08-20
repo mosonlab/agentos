@@ -521,7 +521,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
   // reading GitHub here: this function runs inside applyInboxDecisionTx in the
   // separate @agentos/inbox process, which can reach neither the API's GitHub
   // client nor its configuration (MF-3). The read also must not happen inside
-  // this lock-holding transaction (SF-2). Ordinary nine-step chains never enter
+  // this lock-holding transaction (SF-2). Chains without a mechanical successor never enter
   // this branch and are byte-for-byte unchanged.
   const integrator = await gateFeedsIntegratorStep(tx, task);
   if (integrator) {
@@ -543,7 +543,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
     }
     // An unresolvable target cannot produce an evidence card. The gate still
     // opens through the ordinary path so a human is not left with silence; the
-    // approval simply produces no authorization, and step 10 later stops
+    // approval simply produces no authorization, and step 12 later stops
     // target-unresolvable — fail closed, and the §D-P8 repair is the exit.
   }
   // The approver decides from the card; the produced artifact rides along so
@@ -949,7 +949,7 @@ export const produceMergeAuthorization = async (
   });
   if (!gateTask) return null;
   const integrator = await gateFeedsIntegratorStep(tx, gateTask);
-  // Not an integrator gate: an ordinary nine-step approval, untouched.
+  // Not an integrator gate: an ordinary approval without a mechanical successor, untouched.
   if (!integrator) return null;
 
   const block = parseEvidence(input.card.body);

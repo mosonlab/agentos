@@ -1,11 +1,11 @@
 /**
  * Shared fixture for the Merge Integrator v1.1 database tests.
  *
- * Every integrator test needs the same shape — a chain whose step 9 is a human
- * gate and whose step 10 is the mechanical integrator step — and the shape is
+ * Every integrator test needs the same shape — a chain whose step 11 is a human
+ * gate and whose step 12 is the mechanical integrator step — and the shape is
  * load-bearing: `isIntegratorStep` is a conjunction over the template name, the
  * step index, and the output kind, so a fixture that gets any of them wrong
- * silently tests the ordinary nine-step path instead. Building it once here
+ * silently tests the ordinary non-integrator path instead. Building it once here
  * keeps the dbtest files honest about what they are exercising.
  */
 
@@ -30,7 +30,7 @@ export type IntegratorChain = Awaited<ReturnType<typeof seedIntegratorChain>>;
 
 export const seedIntegratorChain = async (
   db: PrismaClient,
-  options: { label?: string; prNumbers?: number[]; tenStep?: boolean } = {},
+  options: { label?: string; prNumbers?: number[]; withIntegrator?: boolean } = {},
 ) => {
   const label = options.label ?? "mi";
   const project = await db.project.create({ data: { name: label, slug: unique(label) } });
@@ -55,14 +55,14 @@ export const seedIntegratorChain = async (
     } });
   }
   const template = await db.taskTemplate.create({ data: {
-    projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME, description: "Ten-step Full Assurance workflow", variables: [],
+    projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME, description: "Twelve-step Full Assurance workflow", variables: [],
   } });
   const gateStep = await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id, stepIndex: INTEGRATOR_STEP_INDEX - 1, name: "Approval",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "deliver", approvalGate: true,
     outputKind: "delivery", opensPullRequest: true,
   } });
-  const integratorStep = options.tenStep === false ? null : await db.taskTemplateStep.create({ data: {
+  const integratorStep = options.withIntegrator === false ? null : await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id, stepIndex: INTEGRATOR_STEP_INDEX, name: "Merge",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: integratorAgent.id, prompt: "merge", approvalGate: false,
     outputKind: INTEGRATOR_OUTPUT_KIND, opensPullRequest: false,
