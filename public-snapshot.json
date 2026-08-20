@@ -39,6 +39,8 @@
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/demos/templates-release-demo.md", "purpose": "templates release-demo operator contract" },
     { "glob": "docs/demos/templates-release-evidence.schema.json", "purpose": "templates release-demo verification schema" },
+    { "glob": "docs/governance/review-role-convergence-v1.md", "purpose": "public review-role convergence contract" },
+    { "glob": "docs/governance/task-routing-v1.md", "purpose": "public task-routing contract" },
     { "glob": "docs/release/fixtures/oss-b0-smoke-task.json", "purpose": "the frozen, non-secret smoke-task fixture the published UI and API parity tests read" },
     { "glob": "docs/release/v0.1.0-developer-preview.md", "purpose": "the install sequence for the supported platform, step by step, with what each refusal means" },
     { "glob": "docs/release/v0.1.0-license-and-assets.md", "purpose": "file-level license and provenance accounting for everything the snapshot publishes" },
@@ -99,6 +101,9 @@
     { "glob": "scripts/goal-5a0-handoff-preimage.mjs", "purpose": "migration authorization preimage and recovery" },
     { "glob": "scripts/goal-5a0-handoff-preimage.test.mjs", "purpose": "migration preimage recovery tests" },
     { "glob": "scripts/merge-gate.sh", "purpose": "merge gate, the repository's only CI" },
+    { "glob": "scripts/merge-integrator-evidence.md", "purpose": "portable merge-integrator evidence procedure" },
+    { "glob": "scripts/merge-integrator-real-checks.mjs", "purpose": "redacted real-infrastructure merge-integrator checks" },
+    { "glob": "scripts/merge-integrator-system-test.mjs", "purpose": "redacted end-to-end merge-integrator system harness" },
     { "glob": "scripts/os-isolation/patch-runner-plists.sh", "purpose": "OS isolation: launchd RUNNER_RUN_AS_PREFIX wiring" },
     { "glob": "scripts/os-isolation/provision.sh", "purpose": "OS isolation: runner accounts, workspace root, sudoers grant" },
     { "glob": "scripts/os-isolation/reclaim-orphan-workspaces.sh", "purpose": "OS isolation: fail-closed operator reclamation of orphaned run workspaces" },
@@ -113,6 +118,9 @@
     { "glob": "scripts/templates-release-demo.test.mjs", "purpose": "templates release-demo regression tests" },
     { "glob": "scripts/verify-secret-hygiene.mjs", "purpose": "bundle and tracked-file secret hygiene scan" },
     { "glob": "scripts/verify-secret-hygiene.test.mjs", "purpose": "secret hygiene scan regression tests" },
+    { "glob": "scripts/verify-oss-b0.mjs", "purpose": "redacted OSS-B0 acceptance harness" },
+    { "glob": "scripts/verify-oss-b0-review.mjs", "purpose": "OSS-B0 independent-review structure checker" },
+    { "glob": "scripts/verify-oss-b0.test.mjs", "purpose": "OSS-B0 acceptance-harness regression tests" },
     { "glob": "tsconfig.base.json", "purpose": "shared TypeScript configuration" }
   ],
   "deny": [
@@ -178,11 +186,6 @@
       "reason": "internal implementation briefs require separate publication review"
     },
     {
-      "glob": "docs/governance/**",
-      "disposition": "later-release-follow-up",
-      "reason": "internal governance for how this repository's own agents are routed and reviewed; it describes the operating process, not the product, and requires a separate publication decision"
-    },
-    {
       "glob": "docs/merge-notes/**",
       "disposition": "later-release-follow-up",
       "reason": "internal merge records are not needed to build or run the product"
@@ -236,36 +239,6 @@
       "glob": "scripts/gate-worker/**",
       "disposition": "later-release-follow-up",
       "reason": "host-specific merge-gate worker provisioning and drivers, the same class as deploy/**: they encode one operator's server, account and paths and require environment review"
-    },
-    {
-      "glob": "scripts/merge-integrator-evidence.md",
-      "disposition": "later-release-follow-up",
-      "reason": "internal acceptance-evidence procedure, and it documents only the two harnesses below"
-    },
-    {
-      "glob": "scripts/merge-integrator-real-checks.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "one-off acceptance-evidence harness that runs against private scratch infrastructure and writes into the excluded review records"
-    },
-    {
-      "glob": "scripts/merge-integrator-system-test.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "one-off acceptance-evidence harness that runs against private scratch infrastructure and writes into the excluded review records"
-    },
-    {
-      "glob": "scripts/verify-oss-b0.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "maintainer release-acceptance harness; Step 7 owns the decision to publish release scripts"
-    },
-    {
-      "glob": "scripts/verify-oss-b0.test.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "tests for the maintainer release-acceptance harness, published or withheld with it"
-    },
-    {
-      "glob": "scripts/verify-oss-b0-review.mjs",
-      "disposition": "later-release-follow-up",
-      "reason": "structure checker for the Step 9 review ledger, which lives in the excluded docs/reviews records; published or withheld with the acceptance harness it is invoked by"
     },
     {
       "glob": "scripts/verify-oss-f0.mjs",
