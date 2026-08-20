@@ -406,6 +406,7 @@ step "frozen records append-only" bash scripts/check-frozen-docs.sh --master "${
 # The checker is a gate rule, so it is gated too: PR #156 shipped one whose
 # date-prefix rule was unreachable by construction, and nothing ran to say so.
 step "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs
+step "release documentation executable contract" npm run test:release-docs
 
 # --- docker ----------------------------------------------------------------
 

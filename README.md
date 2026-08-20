@@ -128,10 +128,13 @@ release path above runs `npm run db:migrate:release -- --fresh`, which takes an
 exclusive maintenance lock before it inspects schema state and holds it through
 the guarded migration. An export without a valid `release-authority.json`
 attestation stops rather than defaulting to trusted. `--existing` separately
-stops at `oss-d-interface-unavailable`, so migrating an installation that already
-holds data is unsupported. The full sequence and refusal conditions are in the
-release quickstart and migration guide. Packaging, notarization and auto-update
-are not in this release candidate.
+implements the verified-bundle consumer, but this repository does not ship the
+backup producer needed to create a conforming bundle. The supported release
+workflow therefore remains fresh-only; `--existing` does not emit a synthetic
+"interface unavailable" refusal and must not be treated as an end-to-end
+supported migration path. The exact implemented sequence and refusal conditions
+are in the release quickstart and migration guide. Packaging, notarization and
+auto-update are not in this release candidate.
 
 `npm run setup:local` writes `.env` once, at mode 0600, with distinct random
 operator and runner tokens, a session-cookie secret, a base64 32-byte encryption

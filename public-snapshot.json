@@ -101,6 +101,7 @@
     { "glob": "scripts/os-isolation/verify.sh", "purpose": "OS isolation: read-only posture check and containment probe" },
     { "glob": "scripts/public-snapshot-scan.mjs", "purpose": "redacted safety scan" },
     { "glob": "scripts/public-snapshot-scan.test.mjs", "purpose": "scanner regression tests" },
+    { "glob": "scripts/release-docs.test.mjs", "purpose": "executable release documentation contract tests" },
     { "glob": "scripts/setup-local.mjs", "purpose": "atomic local configuration generator" },
     { "glob": "scripts/setup-local.test.mjs", "purpose": "local configuration generator regression tests" },
     { "glob": "scripts/verify-secret-hygiene.mjs", "purpose": "bundle and tracked-file secret hygiene scan" },
