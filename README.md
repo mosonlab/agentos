@@ -74,8 +74,8 @@ AgentOS does not supply provider credentials or entitlement.
 ## Start locally
 
 The Developer Preview targets one platform: an Apple Silicon Mac. For this
-release, use Node.js `22.17.0` from `.nvmrc`; the broader range accepted by the
-top-level checks is not covered by every locked development dependency. You
+release, use Node.js `22.17.0` from `.nvmrc`. Installation enforces Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`,
+the range shared by the locked toolchain; Node 22.12.x and 23 are refused. You
 also need
 
 - npm 10.9.2 or newer;

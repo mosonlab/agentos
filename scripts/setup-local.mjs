@@ -45,10 +45,10 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The locked web toolchain's range (Vite 7 `engines.node`). Root
+/** The narrowest range shared by the locked toolchain. Root
  *  `package.json` `engines.node` and the published prerequisite carry this
  *  exact string; `setup-local.test.mjs` compares all three for equality. */
-export const SUPPORTED_NODE_RANGE = "^20.19.0 || >=22.12.0";
+export const SUPPORTED_NODE_RANGE = "^20.19.0 || ^22.13.0 || >=24";
 
 /** Every class this command can emit. Output is one of these and nothing else,
  *  so callers and documentation can match on a fixed vocabulary. */
@@ -118,6 +118,7 @@ export const REQUIRED_KEYS = Object.freeze([
   "DATABASE_URL",
   "API_HOST",
   "API_PORT",
+  "RUNNER_ID",
   "OPERATOR_TOKEN",
   "RUNNER_TOKEN",
   "SESSION_COOKIE_SECRET",
@@ -136,6 +137,7 @@ const SECRET_KEYS = Object.freeze([
  * credentials of an existing PostgreSQL installation. Existing assignments,
  * including weak ones, are never replaced by upgrade. */
 export const UPGRADE_GENERATED_KEYS = Object.freeze([
+  "RUNNER_ID",
   "OPERATOR_TOKEN",
   "RUNNER_TOKEN",
   "SESSION_COOKIE_SECRET",
@@ -176,7 +178,7 @@ export function parseSemanticVersion(text) {
   };
 }
 
-/** `^20.19.0 || >=22.12.0`, spelled out rather than resolved by a dependency:
+/** `^20.19.0 || ^22.13.0 || >=24`, spelled out rather than resolved by a dependency:
  *  the check has to run before `npm install` has necessarily succeeded, so it
  *  cannot import semver. A prerelease is refused — fail closed rather than
  *  guess that a nightly behaves like its release. */
@@ -184,8 +186,8 @@ export function isSupportedNodeVersion(version) {
   const parsed = parseSemanticVersion(version);
   if (!parsed || parsed.prerelease !== null) return false;
   if (parsed.major === 20) return parsed.minor >= 19;
-  if (parsed.major === 22) return parsed.minor >= 12;
-  return parsed.major > 22;
+  if (parsed.major === 22) return parsed.minor >= 13;
+  return parsed.major >= 24;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +233,9 @@ export function generateConfiguration(randomBytes = cryptoRandomBytes) {
     postgresUser: DATABASE_DEFAULTS.user,
     databasePassword,
     databaseUrl: composeDatabaseUrl({ password: databasePassword }),
+    // Stable once published, opaque, and safe in filenames and logs. It is an
+    // identity, not a credential, but a random suffix avoids hostname reuse.
+    runnerId: `runner-${urlSafeSecret(randomBytes, 12)}`,
     // Bearer tokens: 32 bytes, URL-safe so they survive a header, a shell
     // variable and a `.env` line without quoting.
     operatorToken: urlSafeSecret(randomBytes, 32),
@@ -293,6 +298,7 @@ WEB_API_URL=http://127.0.0.1:3000
 
 # Local runner process: runner principal only.
 RUNNER_API_URL=http://127.0.0.1:3000
+RUNNER_ID=${values.runnerId}
 CLAUDE_BINARY=claude
 CODEX_BINARY=codex
 PI_BINARY=pi
@@ -417,9 +423,11 @@ function generateUpgradeAdditions(assignments, randomBytes) {
   const additions = new Map();
   for (const key of UPGRADE_GENERATED_KEYS) {
     if (assignments.has(key)) continue;
-    const value = key === "SESSION_COOKIE_SECRET" || key === "AGENTOS_SECRET_ENCRYPTION_KEY"
-      ? base64Secret(randomBytes, 32)
-      : urlSafeSecret(randomBytes, 32);
+    const value = key === "RUNNER_ID"
+      ? `runner-${urlSafeSecret(randomBytes, 12)}`
+      : key === "SESSION_COOKIE_SECRET" || key === "AGENTOS_SECRET_ENCRYPTION_KEY"
+        ? base64Secret(randomBytes, 32)
+        : urlSafeSecret(randomBytes, 32);
     additions.set(key, value);
   }
   const existingSecrets = SECRET_KEYS.flatMap((key) => assignments.has(key) ? [assignments.get(key)] : []);

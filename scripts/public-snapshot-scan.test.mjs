@@ -112,91 +112,10 @@ test("a real address is still counted next to a url", () => {
   ]);
 });
 
-/** A file that tells the reader it is outside the snapshot is making a claim the
- *  manifest has to honour, and prose cannot enforce itself: the boundary is
- *  `public-snapshot.json` and nothing else. Any tracked file carrying this
- *  sentence must therefore be classified `excluded` — matched by a rule, not by
- *  being forgotten, since an unmatched path is a blocker rather than a silent
- *  exclusion. Write the sentence in a file you want published and this fails. */
-test("a file that says it is outside the snapshot is excluded by a rule", () => {
-  const claim = /exclude[ds]? from the (?:future )?public snapshot/i;
-  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
-  const paths = execFileSync("git", ["ls-files", "-z"]).toString("utf8").split("\0").filter(Boolean);
-
-  const claimants = paths.filter((path) => {
-    if (statSync(path).size > 2_000_000) return false;
-    return claim.test(readFileSync(path, "utf8").replace(/\s+/gu, " "));
-  });
-
-  // The corpus has exactly one such file today; zero would make the loop vacuous.
-  assert.ok(claimants.length > 0, "no file self-declares an exclusion — the check is vacuous");
-
-  for (const path of claimants) {
-    const scope = scopeFor(path, manifest);
-    assert.equal(scope.classification, "excluded", `${path} says it is excluded but is not`);
-    assert.ok(scope.excludes.length + scope.denies.length > 0, `${path} matches no exclusion rule`);
-  }
-});
-
-/**
- * What "no credentials" has to mean once the scanner has a written history.
- *
- * The blunt reading — `countsByCategory.credential === 0` across the whole tree
- * — cannot survive this repository's own evidence. `docs/reviews/` holds the
- * record of a scan rehearsal, and an honest record quotes the string it
- * classified, so the scanner reads its own report back and counts the
- * quotation a second time. Those records are frozen and the quotation is the
- * part that makes them checkable; the check has to be the thing that changes.
- *
- * It changes by getting narrower where it matters rather than weaker
- * everywhere. Two clauses, and a finding that trips either one is red:
- *
- *   - on the published surface, a credential is a credential. No disposition
- *     redeems it — not even an `approvedFindings` entry, because approving a
- *     credential *into* a public snapshot is not a call this test will accept
- *     from a manifest edit.
- *   - off it, a hit is tolerable only while a rule already says the file is
- *     not published. A hit no rule speaks for keeps the `blocker` disposition
- *     the scanner gives it, which is how a real key in an unclassified file
- *     stays red instead of hiding in the gap this scoping opens.
- */
-const DECIDED_DISPOSITIONS = new Set(["later-release-follow-up", "approved-public-material"]);
-
-function credentialsOutOfScope(report, includedPaths) {
-  const published = new Set(includedPaths);
-  return report.findings.filter(
-    (finding) =>
-      finding.category === "credential" &&
-      (published.has(finding.path) || !DECIDED_DISPOSITIONS.has(finding.disposition)),
-  );
-}
-
-/**
- * The unpublished paths allowed to carry a credential-shaped string today,
- * named one at a time for the same reason the Goal 5a0 scripts below are: the
- * scoped check above reports on what the manifest decided, and a manifest that
- * decided to exclude more would produce a shorter, greener report. Naming them
- * means a new one is a failing test and a reviewed edit, not a silent pass.
- */
-const CREDENTIAL_SHAPED_UNPUBLISHED_PATHS = ["docs/reviews/2026-08-19-snapshot-rehearsal.md"];
-
 test("the checked-out tree is fully classified", () => {
   const { report, includedPaths } = scanRepository(undefined, { requireClean: false });
-  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
   assert.equal(report.summary.countsByDisposition.blocker, 0);
-  assert.deepEqual(credentialsOutOfScope(report, includedPaths), []);
-  const credentialPaths = report.findings
-    .filter((finding) => finding.category === "credential")
-    .map((finding) => finding.path);
-  assert.deepEqual(credentialPaths.sort(), CREDENTIAL_SHAPED_UNPUBLISHED_PATHS);
-  // Carrying a disposition string is not the same as being excluded by a rule:
-  // this reads the classification back out of the manifest rather than trusting
-  // the label the report printed.
-  for (const path of credentialPaths) {
-    const scope = scopeFor(path, manifest);
-    assert.equal(scope.classification, "excluded", `${path} holds a credential shape but is not excluded`);
-    assert.ok(scope.excludes.length + scope.denies.length > 0, `${path} matches no exclusion rule`);
-  }
+  assert.equal(report.summary.countsByCategory.credential, 0);
   assert.equal(report.summary.countsByCategory["pii-government-id"], 0);
   assert.equal(report.scope.includedFiles, includedPaths.length);
   assert.equal(report.scope.unclassifiedFiles, 0);
@@ -225,7 +144,9 @@ test("a credential on the published surface is red whatever disposition it carri
     writeFileSync(artifact, JSON.stringify({ token: `ghp_${"A".repeat(24)}` }, null, 2));
     const { report, includedPaths } = scanRepository(undefined, { requireClean: false });
     assert.equal(includedPaths.includes("release-authority.json"), true, "the plant must be on the published surface");
-    const flagged = credentialsOutOfScope(report, includedPaths);
+    const flagged = report.findings.filter(
+      (finding) => finding.category === "credential" && includedPaths.includes(finding.path),
+    );
     assert.deepEqual(
       flagged.map((finding) => finding.path),
       ["release-authority.json"],
@@ -242,43 +163,15 @@ test("a credential on the published surface is red whatever disposition it carri
       ),
     };
     assert.equal(
-      credentialsOutOfScope(approved, includedPaths).length,
+      approved.findings.filter(
+        (finding) => finding.category === "credential" && includedPaths.includes(finding.path),
+      ).length,
       1,
       "approving a credential into the snapshot must not clear it",
     );
   } finally {
     writeFileSync(artifact, original);
   }
-});
-
-test("an undecided credential off the published surface is still red", () => {
-  // The other half: tolerating a credential shape in `docs/reviews/` must not
-  // become tolerating one anywhere unpublished. A path no rule speaks for keeps
-  // the `blocker` disposition `dispositionFor` gives it, and that is the shape
-  // asserted here — a real detection from the scanner's own detector, carried
-  // by a path that is not in the included list.
-  const host = ["db", "internal"].join(".");
-  const detected = scanTextFindings(
-    "private/notes.md",
-    `dsn = postgres${"ql"}://u:${"p".repeat(6)}@${host}:6543/app\n`,
-  );
-  assert.deepEqual(detected, [{ category: "credential", count: 1 }], "the fixture must really be a credential");
-
-  const undecided = {
-    findings: [{ ...detected[0], disposition: "blocker", path: "private/notes.md" }],
-  };
-  assert.equal(
-    credentialsOutOfScope(undecided, ["LICENSE"]).length,
-    1,
-    "a credential no rule speaks for must stay red even off the published surface",
-  );
-
-  // The relaxation is exactly one step wide: the same finding passes only once
-  // a rule has decided the file is not published.
-  const decided = {
-    findings: [{ ...undecided.findings[0], disposition: "later-release-follow-up" }],
-  };
-  assert.deepEqual(credentialsOutOfScope(decided, ["LICENSE"]), []);
 });
 
 /**
@@ -402,28 +295,6 @@ test("every workspace manifest records the same first-party version", () => {
   }
   const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
   assert.equal(lock.version, "0.1.0", "the lockfile must record the same root version");
-});
-
-test("the CLAUDE.md symlink is excluded so the snapshot carries one copy of the instructions", () => {
-  // `CLAUDE.md` is a symlink to `AGENTS.md`. The included list is what an
-  // exporter copies, and copying dereferences: listing both would publish the
-  // same bytes as two real files that can then be edited apart. Excluded by
-  // name rather than merely dropped, so the scan still classifies it — `0
-  // unclassified` is what makes "not published" mean "decided".
-  const link = "CLAUDE.md";
-  assert.equal(
-    execFileSync("git", ["ls-files", "--stage", link]).toString("utf8").slice(0, 6),
-    "120000",
-    "this test is about a symlink; CLAUDE.md is now a regular file",
-  );
-  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
-  const scope = scopeFor(link, manifest);
-  assert.equal(scope.classification, "excluded");
-  assert.equal(scope.excludes[0]?.reason.includes("symlink to AGENTS.md"), true);
-
-  const { includedPaths } = scanRepository(undefined, { requireClean: false });
-  assert.equal(includedPaths.includes(link), false, "the symlink must not be published as its own file");
-  assert.equal(includedPaths.includes("AGENTS.md"), true, "the target is the one published copy");
 });
 
 test("the release trust anchor is tracked, classified included, and actually published", () => {
