@@ -2,8 +2,17 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
+import { dirname, isAbsolute, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DISPOSITIONS = new Set([
@@ -56,6 +65,31 @@ function matches(glob, path) {
   return globToRegExp(glob).test(path);
 }
 
+function validateRepositoryPath(path, label) {
+  if (typeof path !== "string" || path.length === 0) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  if (path.includes("\0")) throw new Error(`${label} must not contain NUL`);
+  if (isAbsolute(path) || path.startsWith("/")) {
+    throw new Error(`${label} must be repository-relative`);
+  }
+  if (path.includes("\\")) throw new Error(`${label} must use slash separators`);
+  if (posix.normalize(path) !== path || path === "." || path.startsWith("../")) {
+    throw new Error(`${label} must be normalized and repository-relative`);
+  }
+  return path;
+}
+
+function validatePathList(paths, label) {
+  const normalized = new Set();
+  for (const path of paths) {
+    const checked = validateRepositoryPath(path, label);
+    const key = posix.normalize(checked);
+    if (normalized.has(key)) throw new Error(`${label} contains a duplicate normalized path`);
+    normalized.add(key);
+  }
+}
+
 function validateManifest(manifest) {
   if (manifest.schemaVersion !== 2) throw new Error("unsupported manifest schema");
   if (manifest.source !== "git-tracked-files+minted-artifacts") {
@@ -65,16 +99,30 @@ function validateManifest(manifest) {
   for (const key of ["include", "deny", "exclude", "approvedFindings", "generatedRuntimePatterns", "mintedArtifacts"]) {
     if (!Array.isArray(manifest[key])) throw new Error(`manifest ${key} must be an array`);
   }
+  validatePathList(manifest.include.map((rule) => rule.glob), "manifest include glob");
+  validatePathList(manifest.deny.map((rule) => rule.glob), "manifest deny glob");
+  validatePathList(manifest.exclude.map((rule) => rule.glob), "manifest exclude glob");
   for (const rule of manifest.deny) {
+    validateRepositoryPath(rule.glob, "manifest deny glob");
     if (!new Set(["internal-only-artifact", "generated-runtime-data"]).has(rule.category)) {
       throw new Error(`invalid deny category for ${rule.glob}`);
     }
   }
   for (const rule of manifest.exclude) {
+    validateRepositoryPath(rule.glob, "manifest exclude glob");
     if (!DISPOSITIONS.has(rule.disposition) || rule.disposition === "approved-public-material") {
       throw new Error(`invalid exclusion disposition for ${rule.glob}`);
     }
   }
+  const approvalKeys = new Set();
+  for (const rule of manifest.approvedFindings) {
+    validateRepositoryPath(rule.glob, "manifest approved finding glob");
+    const key = `${rule.category}\0${rule.glob}`;
+    if (approvalKeys.has(key)) throw new Error("manifest approved finding contains a duplicate rule");
+    approvalKeys.add(key);
+  }
+  validatePathList(manifest.mintedArtifacts, "manifest minted artifact");
+  validatePathList(manifest.generatedRuntimePatterns, "manifest generated runtime pattern");
 }
 
 export function scopeFor(path, manifest) {
@@ -96,14 +144,13 @@ export function scopeFor(path, manifest) {
 }
 
 function isProbablyBinary(buffer) {
-  const sample = buffer.subarray(0, Math.min(buffer.length, 8192));
-  if (sample.includes(0)) return true;
-  if (sample.length === 0) return false;
+  if (buffer.includes(0)) return true;
+  if (buffer.length === 0) return false;
   let suspicious = 0;
-  for (const byte of sample) {
+  for (const byte of buffer) {
     if (byte < 7 || (byte > 14 && byte < 32)) suspicious += 1;
   }
-  return suspicious / sample.length > 0.1;
+  return suspicious / buffer.length > 0.1;
 }
 
 function countMatches(text, expression, predicate = () => true) {
@@ -231,6 +278,12 @@ function dispositionFor(category, path, scope, manifest) {
       reason: scope.denies[0].reason,
     };
   }
+  if (category === "credential" && scope.included) {
+    return {
+      disposition: "blocker",
+      reason: "real credentials cannot be approved on the public surface",
+    };
+  }
   const approval = manifest.approvedFindings.find(
     (rule) => rule.category === category && matches(rule.glob, path),
   );
@@ -272,33 +325,109 @@ function assertCleanTrackedWorktree(root) {
   }
 }
 
+function readGitTree(root, commit) {
+  const output = execFileSync("git", ["ls-tree", "-rz", "--full-tree", "-r", commit], {
+    cwd: root,
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  const entries = [];
+  for (const record of output.toString("utf8").split("\0").filter(Boolean)) {
+    const match = /^(\d{6}) ([a-z]+) ([0-9a-f]{40})\t([\s\S]+)$/.exec(record);
+    if (!match) throw new Error("git tree contains an unsupported entry record");
+    const [, mode, type, oid, path] = match;
+    validateRepositoryPath(path, "tracked path");
+    entries.push({ mode, type, oid, path });
+  }
+  entries.sort((left, right) => left.path.localeCompare(right.path));
+  return entries;
+}
+
+function readGitBlobs(root, entries) {
+  const oids = [...new Set(entries.filter((entry) => entry.type === "blob").map((entry) => entry.oid))];
+  if (oids.length === 0) return new Map();
+  const output = execFileSync("git", ["cat-file", "--batch"], {
+    cwd: root,
+    input: `${oids.join("\n")}\n`,
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  const blobs = new Map();
+  let offset = 0;
+  for (const expectedOid of oids) {
+    const newline = output.indexOf(10, offset);
+    if (newline === -1) throw new Error("git cat-file returned a truncated header");
+    const header = output.subarray(offset, newline).toString("ascii");
+    const match = /^([0-9a-f]{40}) blob (\d+)$/.exec(header);
+    if (!match || match[1] !== expectedOid) throw new Error("git cat-file returned an unexpected object");
+    const size = Number(match[2]);
+    const start = newline + 1;
+    const end = start + size;
+    if (!Number.isSafeInteger(size) || end >= output.length || output[end] !== 10) {
+      throw new Error("git cat-file returned truncated blob bytes");
+    }
+    blobs.set(expectedOid, output.subarray(start, end));
+    offset = end + 1;
+  }
+  if (offset !== output.length) throw new Error("git cat-file returned trailing output");
+  return blobs;
+}
+
+function isWithinRoot(root, path) {
+  const pathFromRoot = relative(root, path);
+  return pathFromRoot === "" || (!pathFromRoot.startsWith(`..${posix.sep}`) && pathFromRoot !== "..");
+}
+
+function readMintedFile(root, path) {
+  const candidate = resolve(root, path);
+  if (!isWithinRoot(root, candidate)) throw new Error("minted artifact escapes repository root");
+  const lexical = lstatSync(candidate);
+  if (!lexical.isFile() || lexical.isSymbolicLink()) {
+    throw new Error("minted artifact must be a regular file, not a symlink or special file");
+  }
+  const canonical = realpathSync(candidate);
+  if (!isWithinRoot(root, canonical)) throw new Error("minted artifact resolves outside repository root");
+  const descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== lexical.dev || opened.ino !== lexical.ino) {
+      throw new Error("minted artifact identity changed while opening");
+    }
+    return readFileSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 export function scanRepository(
   root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   { requireClean = true } = {},
 ) {
+  root = realpathSync(root);
   if (requireClean) assertCleanTrackedWorktree(root);
-  const manifestPath = resolve(root, "public-snapshot.json");
-  const manifestBytes = readFileSync(manifestPath);
+  const commit = execFileSync("git", ["rev-parse", "HEAD^{commit}"], { cwd: root })
+    .toString("utf8")
+    .trim();
+  const trackedEntries = readGitTree(root, commit);
+  const trackedByPath = new Map(trackedEntries.map((entry) => [entry.path, entry]));
+  const blobs = readGitBlobs(root, trackedEntries);
+  const manifestEntry = trackedByPath.get("public-snapshot.json");
+  if (!manifestEntry || manifestEntry.type !== "blob" || !["100644", "100755"].includes(manifestEntry.mode)) {
+    throw new Error("public-snapshot.json must be a tracked regular file");
+  }
+  const manifestBytes = blobs.get(manifestEntry.oid);
+  if (!manifestBytes) throw new Error("public-snapshot.json blob is unavailable");
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
   validateManifest(manifest);
 
-  const trackedPaths = execFileSync("git", ["ls-files", "-z"], { cwd: root })
-    .toString("utf8")
-    .split("\0")
-    .filter(Boolean)
-    .sort();
+  const trackedPaths = trackedEntries.map((entry) => entry.path);
   // Files the snapshot procedure mints rather than tracks — today, the release
   // authority attestation. They are `.gitignore`d by design, so `git ls-files`
   // cannot see them, and a snapshot input that no scan reads is a snapshot
   // input nobody has checked. They are classified and read exactly like a
   // tracked path; the only difference is where the list comes from.
   const mintedPaths = manifest.mintedArtifacts
-    .filter((path) => !trackedPaths.includes(path) && existsSync(resolve(root, path)))
+    .filter((path) => !trackedByPath.has(path) && existsSync(resolve(root, path)))
     .sort();
   const paths = [...trackedPaths, ...mintedPaths].sort();
-  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root })
-    .toString("utf8")
-    .trim();
 
   const findings = [];
   const includedPaths = [];
@@ -314,6 +443,15 @@ export function scanRepository(
     else if (scope.classification === "excluded") excludedPaths.push(path);
     else if (scope.classification === "unclassified") unclassifiedPaths.push(path);
     else overlappingPaths.push(path);
+
+    const tracked = trackedByPath.get(path);
+    if (
+      scope.included &&
+      tracked &&
+      (tracked.type !== "blob" || !["100644", "100755"].includes(tracked.mode))
+    ) {
+      throw new Error("included tracked path must be a regular Git file");
+    }
 
     if (scope.classification === "overlapping") {
       addFinding(findings, {
@@ -382,8 +520,13 @@ export function scanRepository(
   }
 
   for (const path of paths) {
-    const bytes = readFileSync(resolve(root, path));
     const scope = scopeByPath.get(path);
+    const tracked = trackedByPath.get(path);
+    if (tracked && (tracked.type !== "blob" || !["100644", "100755"].includes(tracked.mode))) {
+      continue;
+    }
+    const bytes = tracked ? blobs.get(tracked.oid) : readMintedFile(root, path);
+    if (!bytes) throw new Error("snapshot input bytes are unavailable");
     if (isProbablyBinary(bytes)) {
       const decision = dispositionFor("binary-material", path, scope, manifest);
       addFinding(findings, {
@@ -429,7 +572,7 @@ export function scanRepository(
     report: {
       schemaVersion: 2,
       commit,
-      source: mintedPaths.length > 0 ? "clean-tracked-worktree+minted-artifacts" : "clean-tracked-worktree",
+      source: mintedPaths.length > 0 ? "git-objects+minted-artifacts" : "git-objects",
       manifestSha256: createHash("sha256").update(manifestBytes).digest("hex"),
       scope: {
         trackedFiles: trackedPaths.length,
