@@ -10,6 +10,13 @@
 > [`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md)
 > for what is supported and on what evidence.
 
+> **Host-execution warning.** AgentOS launches coding CLIs with non-interactive
+> permission bypass. In the default installation they run as your macOS user,
+> outside an application sandbox, with that user's filesystem and network
+> authority. AgentOS grants constrain AgentOS APIs; they are not host
+> containment. Use only a disposable repository and a machine/account you are
+> willing to let an agent modify.
+
 AgentOS is a local, single-operator control plane for assigning scoped software
 tasks to coding agents and keeping the work observable and durable. It connects
 tasks, agents, repository and file grants, isolated run records, provider event
@@ -66,16 +73,18 @@ AgentOS does not supply provider credentials or entitlement.
 
 ## Start locally
 
-The Developer Preview targets one platform: an Apple Silicon Mac. You need
+The Developer Preview targets one platform: an Apple Silicon Mac. For this
+release, use Node.js `22.17.0` from `.nvmrc`; the broader range accepted by the
+top-level checks is not covered by every locked development dependency. You
+also need
 
-- Node.js satisfying `^20.19.0 || >=22.12.0` — the range root `engines.node`,
-  `package-lock.json` and `npm run setup:local` all carry, and a Node outside it
-  is refused rather than warned about — with npm 10.9.2 or newer, the npm that
-  generated the lockfile;
+- npm 10.9.2 or newer;
 - Docker with Docker Compose, for the PostgreSQL service defined here;
 - Git;
 - the official **Codex CLI, already installed and already signed in**, under the
-  same macOS account that will run the AgentOS runner.
+  same macOS account that will run the AgentOS runner;
+- optionally, the GitHub CLI (`gh`), installed and authenticated under that
+  account, if AgentOS should open pull requests automatically.
 
 Codex is the only provider CLI this preview requires. The starter agent it
 installs runs on Codex; Claude Code and the experimental Pi adapter are optional,
@@ -85,60 +94,57 @@ into a provider and never reads a credential store.
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
+git checkout v0.1.0
 npm ci
 npm run setup:local
+npm run build
 docker compose up -d postgres
-npm run db:migrate
+until docker compose exec -T postgres \
+  sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+do
+  sleep 1
+done
+export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
+export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
+npm run db:migrate:release -- --fresh
 ```
 
-Then `npm run dev:api`, `npm run dev:web` and `npm run dev:runner` in three
-terminals, and open `http://127.0.0.1:5173`. A database with no projects in it
-opens a five-screen wizard, and nothing else; finishing it creates your project,
-environment, starter agent, repository and grant in one transaction.
+This is the release installation path, not a contributor bootstrap. Follow the
+corrected, literal sequence in
+[`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md),
+including its filesystem, port, runner identity and repository preflights. Then
+start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`, in that
+order, in three terminals, and open `http://127.0.0.1:5173`.
 
 `npm ci` must be allowed to run the lockfile's lifecycle scripts — this
 repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
-is not supported. The Inbox service, launchd definitions, any form of remote
-access, and this repository's internal task-chain templates are optional and are
-not part of that sequence.
+is not supported. The Inbox service is optional. No launchd definition is
+shipped or supported in v0.1.0; remote access and this repository's internal
+task-chain templates are also outside the supported sequence.
 
 Read [`docs/release/v0.1.0-security.md`](docs/release/v0.1.0-security.md)
 before pointing this at anything, and
 [`docs/release/v0.1.0-migration-and-recovery.md`](docs/release/v0.1.0-migration-and-recovery.md)
 before putting data in it.
 
-`npm run db:migrate` is `prisma migrate dev`, and it is **development only**: it
-bypasses the migration preflight entirely. Never point it at a database you would
-miss. It belongs to the development bootstrap above, not to an install.
-
-> **This is a development install, not the Developer Preview install.** The
-> guarded release path checks out a release tag and runs
-> `npm run db:migrate:release -- --fresh`, which takes an exclusive maintenance
-> lock before it inspects any schema state and holds it across the emptiness
-> census, the migration-set check, the composed migration preflight, the deploy,
-> the status check and the drift check. That preflight stops any checkout that
-> cannot show this migration set passed review: a private checkout carries that
-> evidence as its own review record, and a release clone carries it as a signed
-> `release-authority.json` verified against the tracked Ed25519
-> `release-authority.pub`. An export without a valid attestation stops rather
-> than defaulting to trusted.
-> `--existing` is a separate refusal: it stops at `oss-d-interface-unavailable`
-> while the verified-backup attestation producer it depends on is unmerged, so
-> migrating an installation that already holds data is not supported in this
-> release. None of these refusals may be worked around by taking the preflight
-> out of the published path. The full sequence is
-> [`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md);
-> [`docs/release/v0.1.0-migration-and-recovery.md`](docs/release/v0.1.0-migration-and-recovery.md)
-> lists every stop condition and how the attestation is provisioned.
-> Packaging, notarization and auto-update are not in this release candidate.
+`npm run db:migrate` is `prisma migrate dev`, and it is **development only**. It
+is documented in `CONTRIBUTING.md`, not as an installation command. The guarded
+release path above runs `npm run db:migrate:release -- --fresh`, which takes an
+exclusive maintenance lock before it inspects schema state and holds it through
+the guarded migration. An export without a valid `release-authority.json`
+attestation stops rather than defaulting to trusted. `--existing` separately
+stops at `oss-d-interface-unavailable`, so migrating an installation that already
+holds data is unsupported. The full sequence and refusal conditions are in the
+release quickstart and migration guide. Packaging, notarization and auto-update
+are not in this release candidate.
 
 `npm run setup:local` writes `.env` once, at mode 0600, with distinct random
 operator and runner tokens, a session-cookie secret, a base64 32-byte encryption
 key, and one database password written identically into `POSTGRES_PASSWORD` and
-`DATABASE_URL`. It prints a class — `configuration-created`,
-`configuration-valid`, `configuration-raced` — and never a value, refuses to
-overwrite or repair an existing file, and has no rotation flag. `.env.example`
-documents the keys; it is not a file to copy.
+`DATABASE_URL`. It prints a class and never a value. Its `--upgrade` form
+preserves every assignment and adds only missing safe-to-generate keys; it never
+rotates weak credentials automatically. There is no overwrite or rotation flag.
+`.env.example` documents the keys; it is not a file to copy.
 
 ## Architecture grounded in the current code
 
