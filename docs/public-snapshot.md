@@ -112,16 +112,18 @@ An attestation left stale after the migration set moves is refused by the
 preflight rather than ignored, so a release whose authority was not re-signed
 stops at `authority`.
 
-**What a checkout proves, and what it cannot.** The attested commit belongs to
-the pre-cutover assembly lineage, and no current checkout has it, so the
-preflight does not ask about it: the commit and tree ids stay covered by the
-signature. What a checkout with history is asked is whether every release-path
-file is committed there, at `HEAD`, with the bytes the attestation was minted
-over. The run prints which of the two bindings answered:
+**What the published repository proves, and what it cannot.** A public snapshot
+is this export committed into a fresh repository, so it has history — its own.
+None of the private commits the attestation names exist there, which means the
+preflight cannot ask that repository about the private ancestry at all. It asks
+the strongest question that lineage can answer instead: every release-path file
+must be committed there, at `HEAD`, with the bytes the attestation was minted
+over. The run prints which of the three bindings answered:
 
 ```text
-preflight authority=attestation binding=signature-content-and-committed-tree
+preflight authority=attestation binding=signature-content-and-published-tree
 preflight authority=attestation binding=signature-and-content
+preflight authority=revalidation-document+attestation binding=signature-content-and-history
 ```
 
 Nothing else is relaxed there. Signature, trust anchor, closed file manifest,

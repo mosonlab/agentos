@@ -281,7 +281,7 @@ describe("minting an attestation", () => {
     await sql(`CREATE SCHEMA ${quoted(schema)}`);
     const outcome = runPreflight(fixture.root, fixture, schema, { GOAL5A0_FRESH_TARGET: schema });
     assert.equal(outcome.status, 0, outcome.output);
-    assert.match(outcome.output, /preflight authority=revalidation-document\+attestation binding=signature-content-and-committed-tree/u);
+    assert.match(outcome.output, /preflight authority=revalidation-document\+attestation binding=signature-content-and-history/u);
   });
 
   it("refuses an untracked migration, which HEAD does not contain", () => {
@@ -539,7 +539,7 @@ describe("a published snapshot: the export committed into a fresh repository", (
 
     const outcome = runPreflight(published.root, fixture, schema, { GOAL5A0_FRESH_TARGET: schema });
     assert.equal(outcome.status, 0, outcome.output);
-    assert.match(outcome.output, /preflight authority=attestation binding=signature-content-and-committed-tree/u);
+    assert.match(outcome.output, /preflight authority=attestation binding=signature-content-and-published-tree/u);
     assert.match(outcome.output, /preflight mode=first-run target=confirmed-empty/u);
     assert.match(outcome.output, /preflight PASS/u);
     // Asking a lineage whether it holds a commit it is expected not to hold is
