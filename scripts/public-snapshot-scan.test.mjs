@@ -345,11 +345,13 @@ test("the docs surface is closed and named one file at a time", () => {
   const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
   const docs = manifest.include.map((entry) => entry.glob).filter((glob) => glob.startsWith("docs/"));
   // `docs/` is closed by default and this is the whole of what is open in it.
-  // Publishing user documentation must not become a reason to publish plans,
-  // reviews, specifications or runbooks alongside it.
+  // Publishing user or governance documentation must not become a reason to
+  // publish plans, reviews, specifications or runbooks alongside it.
   assert.deepEqual(docs.sort(), [
     "docs/demos/templates-release-demo.md",
     "docs/demos/templates-release-evidence.schema.json",
+    "docs/governance/review-role-convergence-v1.md",
+    "docs/governance/task-routing-v1.md",
     "docs/public-snapshot.md",
     "docs/release/fixtures/oss-b0-smoke-task.json",
     "docs/release/v0.1.0-developer-preview.md",
