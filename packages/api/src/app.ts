@@ -3455,6 +3455,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           })
           : null;
         const priorOutputsRaw = candidate.task.chainId && candidate.task.chainIndex !== null
+          && (candidate.task.templateStepId === null || candidate.task.templateStep?.attachmentsFromPrevious !== false)
           ? await tx.taskStepOutput.findMany({
             where: { task: { chainId: candidate.task.chainId, chainIndex: { lt: candidate.task.chainIndex } } },
             select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
