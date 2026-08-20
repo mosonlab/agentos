@@ -1,23 +1,26 @@
-import { PrismaClient } from "@prisma/client";
+import { AssigneeType, PrismaClient } from "@prisma/client";
 
+import {
+  CANONICAL_AGENT_DEFAULTS,
+  DIRECT_TEMPLATE_NAME,
+  IMPLEMENTATION_PLAN_OUTPUT_KINDS,
+  catalogRunnerForModel,
+  isTemplateRunnerInherited,
+} from "../src/agent-contract.js";
 import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_SENTINEL_MODEL,
   INTEGRATOR_STEP_INDEX,
+  INTEGRATOR_TEMPLATE_NAME,
+  integratorBindingValid,
 } from "../src/merge-integrator.js";
-
-import {
-  CANONICAL_AGENT_DEFAULTS,
-  CANONICAL_TEMPLATE_STEPS,
-  IMPLEMENTATION_PLAN_OUTPUT_KINDS,
-  catalogRunnerForModel,
-  isTemplateRunnerInherited,
-} from "../src/agent-contract.js";
+import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
 const prisma = new PrismaClient();
 
 const main = async (): Promise<void> => {
+  const templateSources = await loadAllTemplateStepSources();
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const activeAgents = await prisma.agent.findMany({
     where: { projectId: project.id, archivedAt: null },
@@ -40,45 +43,57 @@ const main = async (): Promise<void> => {
     }
   }
 
-  const template = await prisma.taskTemplate.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } },
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...templateSources.keys()] } },
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
   });
-  if (template.steps.length !== CANONICAL_TEMPLATE_STEPS.length) {
-    throw new Error(`template must contain ${CANONICAL_TEMPLATE_STEPS.length} steps; found ${template.steps.length}`);
+  if (templates.length !== templateSources.size) {
+    throw new Error(`expected ${templateSources.size} canonical templates; found ${templates.length}`);
   }
-  for (const expected of CANONICAL_TEMPLATE_STEPS) {
-    const step = template.steps.find((candidate) => candidate.stepIndex === expected.stepIndex);
-    if (!step) throw new Error(`template is missing step ${expected.stepIndex}`);
-    if ((step.assigneeAgent?.name ?? null) !== expected.agentName) {
-      throw new Error(`template step ${step.stepIndex} must bind ${expected.agentName ?? "HUMAN"}; found ${step.assigneeAgent?.name ?? "HUMAN"}`);
+
+  for (const [templateName, expectedSteps] of templateSources) {
+    const template = templates.find((candidate) => candidate.name === templateName);
+    if (!template) throw new Error(`template ${templateName} was not found`);
+    if (template.steps.length !== expectedSteps.length) {
+      throw new Error(`${templateName} must contain ${expectedSteps.length} steps; found ${template.steps.length}`);
     }
-    if (step.outputKind !== expected.outputKind) {
-      throw new Error(`template step ${step.stepIndex} must persist ${expected.outputKind}; found ${step.outputKind}`);
-    }
-    if (step.approvalGate !== expected.approvalGate) {
-      throw new Error(`template step ${step.stepIndex} approval gate must be ${expected.approvalGate}; found ${step.approvalGate}`);
-    }
-    if (step.stepIndex < INTEGRATOR_STEP_INDEX && !isTemplateRunnerInherited(step.runner)) {
-      throw new Error(`template step ${step.stepIndex} must inherit its Agent runner; found ${step.runner}`);
-    }
-    if (step.spawnPolicy !== null) throw new Error(`template step ${step.stepIndex} must not claim an unimplemented spawn policy`);
-    if (step.opensPullRequest !== expected.opensPullRequest) {
-      throw new Error(`template step ${step.stepIndex} opensPullRequest must be ${expected.opensPullRequest}; found ${step.opensPullRequest}`);
-    }
-    if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
-      throw new Error(`template step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
+    for (const expected of expectedSteps) {
+      const step = template.steps.find((candidate) => candidate.stepIndex === expected.stepIndex);
+      if (!step) throw new Error(`${templateName} is missing step ${expected.stepIndex}`);
+      if ((step.assigneeAgent?.name ?? null) !== expected.agentName) {
+        throw new Error(`${templateName} step ${step.stepIndex} must bind ${expected.agentName ?? "HUMAN"}; found ${step.assigneeAgent?.name ?? "HUMAN"}`);
+      }
+      const expectedAssigneeType = expected.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
+      if (step.assigneeType !== expectedAssigneeType) {
+        throw new Error(`${templateName} step ${step.stepIndex} assignee type must be ${expectedAssigneeType}; found ${step.assigneeType}`);
+      }
+      if (step.outputKind !== expected.outputKind) {
+        throw new Error(`${templateName} step ${step.stepIndex} must persist ${expected.outputKind}; found ${step.outputKind}`);
+      }
+      if (step.approvalGate !== expected.approvalGate) {
+        throw new Error(`${templateName} step ${step.stepIndex} approval gate must be ${expected.approvalGate}; found ${step.approvalGate}`);
+      }
+      if (step.prompt !== expected.prompt) {
+        throw new Error(`${templateName} step ${step.stepIndex} prompt differs from its canonical Markdown source`);
+      }
+      if (!isTemplateRunnerInherited(step.runner)) {
+        throw new Error(`${templateName} step ${step.stepIndex} must inherit its Agent runner; found ${step.runner}`);
+      }
+      if (JSON.stringify(step.spawnPolicy) !== JSON.stringify(expected.spawnPolicy)) {
+        throw new Error(`${templateName} step ${step.stepIndex} spawnPolicy differs from its canonical Markdown source`);
+      }
+      if (step.opensPullRequest !== expected.opensPullRequest) {
+        throw new Error(`${templateName} step ${step.stepIndex} opensPullRequest must be ${expected.opensPullRequest}; found ${step.opensPullRequest}`);
+      }
+      if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
+        throw new Error(`${templateName} step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
+      }
     }
   }
 
-  // The integrator step, asserted explicitly rather than only through the
-  // generic loop. The pre-integrator runner-inheritance bound above protects
-  // business steps from a template-pinned runner that would override the Agent's own;
-  // step 12 has no Agent runner to inherit at all, because nothing spawns for
-  // it. These assertions are what stands in for that protection: an LLM model on
-  // this row, or a `true` opensPullRequest, would mean a model CLI could be
-  // handed the merge step or the merge step could publish.
-  const integrator = template.steps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX);
+  const compound = templates.find((template) => template.name === INTEGRATOR_TEMPLATE_NAME)!;
+  const integrator = compound.steps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX);
   if (!integrator) throw new Error(`template must contain step ${INTEGRATOR_STEP_INDEX}`);
   if (integrator.assigneeAgent?.name !== INTEGRATOR_AGENT_NAME) {
     throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must bind ${INTEGRATOR_AGENT_NAME}; found ${integrator.assigneeAgent?.name ?? "HUMAN"}`);
@@ -95,14 +110,32 @@ const main = async (): Promise<void> => {
   if (integrator.approvalGate !== false) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not carry an approval gate`);
   if (integrator.opensPullRequest !== false) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not open a pull request`);
   if (integrator.spawnPolicy !== null) throw new Error(`template step ${INTEGRATOR_STEP_INDEX} must not claim a spawn policy`);
-  const executor = template.steps.find((step) => step.assigneeAgent?.name === "implementation-plan-executioner");
+
+  const executor = compound.steps.find((step) => step.assigneeAgent?.name === "implementation-plan-executioner");
   if (!executor) throw new Error("template must contain an implementation-plan-executioner step");
-  const priorPlan = template.steps.some((step) => (
+  const priorPlan = compound.steps.some((step) => (
     step.stepIndex < executor.stepIndex
       && IMPLEMENTATION_PLAN_OUTPUT_KINDS.includes(step.outputKind as typeof IMPLEMENTATION_PLAN_OUTPUT_KINDS[number])
   ));
   if (!priorPlan) throw new Error("implementation-plan-executioner requires an earlier plan or revised-plan output");
-  process.stdout.write(`Agent/template contract verified for ${activeAgents.length} active agents and ${template.steps.length} steps.\n`);
+
+  const direct = templates.find((template) => template.name === DIRECT_TEMPLATE_NAME)!;
+  const directLast = direct.steps.at(-1)!;
+  if (directLast.assigneeAgent !== null || directLast.approvalGate !== true) {
+    throw new Error(`${DIRECT_TEMPLATE_NAME} must end at a human approval gate`);
+  }
+  for (const step of direct.steps) {
+    if (!integratorBindingValid(step.assigneeAgent?.name ?? null, {
+      stepIndex: step.stepIndex,
+      outputKind: step.outputKind,
+      taskTemplate: { name: DIRECT_TEMPLATE_NAME },
+    })) {
+      throw new Error(`${DIRECT_TEMPLATE_NAME} step ${step.stepIndex} violates the integrator binding contract`);
+    }
+  }
+
+  const stepCount = templates.reduce((sum, template) => sum + template.steps.length, 0);
+  process.stdout.write(`Agent/template contract verified for ${activeAgents.length} active agents and ${stepCount} steps across ${templates.length} templates.\n`);
 };
 
 try {

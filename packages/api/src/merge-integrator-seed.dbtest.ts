@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import {
   activateChainSuccessor,
   AssigneeType,
+  DIRECT_TEMPLATE_NAME,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -66,9 +67,14 @@ const integratorStep = async () => db.taskTemplateStep.findFirstOrThrow({
   include: { assigneeAgent: true, taskTemplate: { include: { steps: true } } },
 });
 
+const directTemplate = async () => db.taskTemplate.findUniqueOrThrow({
+  where: { projectId_name: { projectId: (await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } })).id, name: DIRECT_TEMPLATE_NAME } },
+  include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+});
+
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes a twelve-step template whose step 12 is mechanical", async () => {
+test("a fresh seed writes the twelve-step mechanical template and six-step direct template", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
@@ -91,13 +97,24 @@ test("a fresh seed writes a twelve-step template whose step 12 is mechanical", a
 
   const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
   assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
+
+  const direct = await directTemplate();
+  assert.equal(direct.steps.length, 6);
+  assert.equal(direct.steps[0]?.assigneeAgent?.name, "senior-dev");
+  assert.equal(direct.steps[0]?.opensPullRequest, true);
+  assert.match(direct.steps[0]?.prompt ?? "", /brief is the specification of record/u);
+  assert.equal(direct.steps[2]?.attachmentsFromPrevious, false);
+  assert.equal(direct.steps[5]?.assigneeType, AssigneeType.HUMAN);
+  assert.equal(direct.steps[5]?.approvalGate, true);
+  assert.match(direct.steps[5]?.prompt ?? "", /no mechanical merge step/u);
+  assert.equal(direct.steps.some((candidate) => candidate.assigneeAgent?.name === INTEGRATOR_AGENT_NAME), false);
 });
 
 test("the verifier passes on a freshly seeded database, and says how many steps it saw", async () => {
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /12 steps/u);
+  assert.match(verified.output, /18 steps across 2 templates/u);
 });
 
 test("re-seeding is idempotent and does not flip step 12 back", async () => {

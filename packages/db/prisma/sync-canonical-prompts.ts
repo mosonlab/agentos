@@ -1,60 +1,13 @@
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-
 import { PrismaClient } from "@prisma/client";
-import ts from "typescript";
 
-import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
-import { INTEGRATOR_TEMPLATE_NAME } from "../src/merge-integrator.js";
+import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
-// Every template the seed states prompts for, every step of each, and every
-// role under agents/, is synced. A hand-kept subset is how a prompt edit
-// silently misses production.
-const SEED_STEP_VARIABLES: Record<string, string> = {
-  steps: INTEGRATOR_TEMPLATE_NAME,
-  directSteps: DIRECT_TEMPLATE_NAME,
-};
-
-const loadStepPrompts = async (): Promise<Map<string, Map<number, string>>> => {
-  const seedPath = fileURLToPath(new URL("./seed.ts", import.meta.url));
-  const sourceText = await readFile(seedPath, "utf8");
-  const source = ts.createSourceFile(seedPath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const arrays = new Map<string, ts.ArrayLiteralExpression>();
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node)
-      && ts.isIdentifier(node.name)
-      && node.name.text in SEED_STEP_VARIABLES
-      && node.initializer
-      && ts.isAsExpression(node.initializer)
-      && ts.isArrayLiteralExpression(node.initializer.expression)) {
-      arrays.set(SEED_STEP_VARIABLES[node.name.text]!, node.initializer.expression);
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  const missing = Object.values(SEED_STEP_VARIABLES).filter((name) => !arrays.has(name));
-  if (missing.length > 0) throw new Error(`Seed steps tuple array(s) not found in prisma/seed.ts for: ${missing.join(", ")}`);
-
-  const byTemplate = new Map<string, Map<number, string>>();
-  for (const [templateName, elements] of arrays) {
-    const prompts = new Map<number, string>();
-    for (const element of elements.elements) {
-      if (!ts.isArrayLiteralExpression(element)) continue;
-      const indexNode = element.elements[0];
-      const promptNode = element.elements[7];
-      if (!indexNode || !ts.isNumericLiteral(indexNode) || !promptNode || !ts.isStringLiteral(promptNode)) continue;
-      prompts.set(Number(indexNode.text), promptNode.text);
-    }
-    if (prompts.size === 0) throw new Error(`No step prompts were found in prisma/seed.ts for ${templateName}`);
-    byTemplate.set(templateName, prompts);
-  }
-  return byTemplate;
-};
-
+// Every canonical template, every step of each, and every role under agents/
+// is synced. Omitting any source here would let a prompt edit silently miss
+// production, so the loader owns the complete template inventory.
 const main = async (): Promise<void> => {
-  const [stepPrompts, sources] = await Promise.all([loadStepPrompts(), loadAgentSources()]);
+  const [templateSources, sources] = await Promise.all([loadAllTemplateStepSources(), loadAgentSources()]);
   const rolePrompts = new Map(sources.roles.map((role) => [role.name, role.rolePrompt]));
   const roleNames = [...rolePrompts.keys()];
 
@@ -63,7 +16,7 @@ const main = async (): Promise<void> => {
     const result = await prisma.$transaction(async (tx) => {
       const updatedSteps: Record<string, Record<number, number>> = {};
       let templateCount = 0;
-      for (const [templateName, prompts] of stepPrompts) {
+      for (const [templateName, steps] of templateSources) {
         const templates = await tx.taskTemplate.findMany({
           where: { name: templateName },
           select: { id: true },
@@ -71,18 +24,23 @@ const main = async (): Promise<void> => {
         if (templates.length === 0) throw new Error(`Template ${templateName} was not found`);
         templateCount += templates.length;
         const templateIds = templates.map((template) => template.id);
+        const present = await tx.taskTemplateStep.count({ where: { taskTemplateId: { in: templateIds } } });
+        const expected = templates.length * steps.length;
+        if (present !== expected) {
+          throw new Error(`Expected ${expected} total steps on ${templates.length} ${templateName} templates; found ${present}`);
+        }
+
         const updated: Record<number, number> = {};
-        for (const stepIndex of [...prompts.keys()].sort((left, right) => left - right)) {
-          const prompt = prompts.get(stepIndex)!;
-          const present = await tx.taskTemplateStep.count({
-            where: { taskTemplateId: { in: templateIds }, stepIndex },
+        for (const step of steps) {
+          const stepCount = await tx.taskTemplateStep.count({
+            where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex },
           });
-          if (present !== templates.length) {
-            throw new Error(`Expected step ${stepIndex} on ${templates.length} ${templateName} templates; found ${present}`);
+          if (stepCount !== templates.length) {
+            throw new Error(`Expected step ${step.stepIndex} on ${templates.length} ${templateName} templates; found ${stepCount}`);
           }
-          updated[stepIndex] = (await tx.taskTemplateStep.updateMany({
-            where: { taskTemplateId: { in: templateIds }, stepIndex, prompt: { not: prompt } },
-            data: { prompt },
+          updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
+            where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex, prompt: { not: step.prompt } },
+            data: { prompt: step.prompt },
           })).count;
         }
         updatedSteps[templateName] = updated;

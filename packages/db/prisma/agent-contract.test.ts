@@ -17,11 +17,10 @@ import {
 import {
   assertCanonicalAgentSources,
   CANONICAL_AGENT_DEFAULTS,
-  CANONICAL_TEMPLATE_STEPS,
   catalogRunnerForModel,
   DIRECT_TEMPLATE_NAME,
-  DIRECT_TEMPLATE_STEPS,
 } from "../src/agent-contract.js";
+import { loadAllTemplateStepSources, loadTemplateStepSources } from "../src/template-sources.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 
@@ -83,10 +82,11 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(finalReview, /label `opus_blind_review`/u);
 });
 
-test("the canonical twelve-step template splits code review and preserves mechanical merge", () => {
-  assert.equal(CANONICAL_TEMPLATE_STEPS.length, 12);
+test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {
+  const templateSteps = await loadTemplateStepSources();
+  assert.equal(templateSteps.length, 12);
   assert.deepEqual(
-    CANONICAL_TEMPLATE_STEPS.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    templateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
     [
       { stepIndex: 1, agentName: "spec", outputKind: "spec" },
       { stepIndex: 2, agentName: "plan", outputKind: "plan" },
@@ -102,15 +102,21 @@ test("the canonical twelve-step template splits code review and preserves mechan
       { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
-  assert.equal(CANONICAL_TEMPLATE_STEPS.some((step) => step.agentName === "code-reviewer"), false);
-  assert.equal(CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
-  assert.equal(CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
+  assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
+  assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
+  assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
+  assert.match(templateSteps[1]!.prompt, /this run's id/u);
+  assert.match(templateSteps[2]!.prompt, /merge or split decisions priced against frontier width/u);
+  assert.match(templateSteps[3]!.prompt, /run id labelled `plan_authoring`/u);
 });
 
-test("only implementation opens a pull request, and the integrator is not a model row", () => {
-  const opening = CANONICAL_TEMPLATE_STEPS.filter((step) => step.opensPullRequest).map((step) => step.stepIndex);
+test("only implementation opens a pull request, and the integrator is not a model row", async () => {
+  const templateSteps = await loadTemplateStepSources();
+  const opening = templateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex);
   assert.deepEqual(opening, [5]);
-  const integrator = CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX)!;
+  const integrator = templateSteps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX)!;
   assert.equal(integrator.agentName, INTEGRATOR_AGENT_NAME);
   assert.equal(integrator.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.equal(integrator.approvalGate, false);
@@ -123,9 +129,10 @@ test("only implementation opens a pull request, and the integrator is not a mode
   assert.equal(catalogRunnerForModel(sentinel.model), null);
 });
 
-test("the direct template keeps the review spine, drops planning, and ends at the human gate", () => {
+test("the direct template sources keep the review spine, drop planning, and end at the human gate", async () => {
+  const directTemplateSteps = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   assert.deepEqual(
-    DIRECT_TEMPLATE_STEPS.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    directTemplateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
     [
       { stepIndex: 1, agentName: "senior-dev", outputKind: "implementation" },
       { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
@@ -137,22 +144,31 @@ test("the direct template keeps the review spine, drops planning, and ends at th
   );
   // Only implementation opens the chain's pull request; the blind review
   // starts blind; regression verification reads the fix diff.
-  assert.deepEqual(DIRECT_TEMPLATE_STEPS.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
-  assert.equal(DIRECT_TEMPLATE_STEPS.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
-  assert.equal(DIRECT_TEMPLATE_STEPS.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
+  assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
+  assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
+  assert.match(directTemplateSteps[5]!.prompt, /no mechanical merge step/u);
   // The human pull-request gate is the terminal step: the integrator's
   // bidirectional binding admits no mechanical merge outside the twelve-step
   // template, so no direct step may bind the sentinel.
-  const last = DIRECT_TEMPLATE_STEPS.at(-1)!;
+  const last = directTemplateSteps.at(-1)!;
   assert.equal(last.approvalGate, true);
   assert.equal(last.agentName, null);
-  for (const step of DIRECT_TEMPLATE_STEPS) {
+  for (const step of directTemplateSteps) {
     assert.notEqual(step.agentName, INTEGRATOR_AGENT_NAME);
     assert.equal(
       integratorBindingValid(step.agentName, { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: DIRECT_TEMPLATE_NAME } }),
       true,
     );
   }
+});
+
+test("the complete template source inventory contains only the twelve-step and direct workflows", async () => {
+  const templates = await loadAllTemplateStepSources();
+  assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
+  assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
+  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 6);
 });
 
 test("the sentinel may bind only step 12, and step 12 only the sentinel", () => {
