@@ -652,18 +652,32 @@ const capture = async (config: RunnerConfig, runner: RunnerKind, args: string[],
  */
 export const PREFLIGHT_CLASS = {
   cliMissing: "cli-missing",
+  cliIncompatible: "cli-incompatible",
   notAuthenticated: "not-authenticated",
   unsupportedModel: "unsupported-model",
 } as const;
 
 export const PREFLIGHT_REASONS = {
   cliMissing: `${PREFLIGHT_CLASS.cliMissing}: the CLI did not answer --version`,
+  cliIncompatible: `${PREFLIGHT_CLASS.cliIncompatible}: the CLI does not expose the required AgentOS exec protocol`,
   notAuthenticated: `${PREFLIGHT_CLASS.notAuthenticated}: the CLI's own login check did not pass`,
   unsupportedModel: `${PREFLIGHT_CLASS.unsupportedModel}: an explicit provider/model is required`,
 } as const;
 
 const preflightFailure = (reason: string, code: number | null): string =>
   code === null ? reason : `${reason} (exit ${code})`;
+
+export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
+
+const codexExecHelpIsCompatible = (help: string, resumeHelp: string): boolean => [
+  "--json",
+  "--model",
+  "--config",
+  "--dangerously-bypass-approvals-and-sandbox",
+].every((flag) => help.includes(flag) && resumeHelp.includes(flag))
+  && help.includes("resume")
+  && resumeHelp.includes("SESSION_ID")
+  && resumeHelp.includes("read from stdin");
 
 const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
@@ -679,6 +693,20 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   const version = await capture(spec.config, spec.runner, ["--version"], spec.env);
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
+  }
+  if (spec.runner === "CODEX") {
+    const help = await capture(spec.config, spec.runner, ["exec", "--help"], spec.env);
+    const resumeHelp = await capture(spec.config, spec.runner, ["exec", "resume", "--help"], spec.env);
+    if (help.code !== 0 || resumeHelp.code !== 0 || !codexExecHelpIsCompatible(help.stdout, resumeHelp.stdout)) {
+      return {
+        ok: false,
+        cliVersion: version.stdout.trim() || version.stderr.trim(),
+        authMode: null,
+        capabilities,
+        error: PREFLIGHT_REASONS.cliIncompatible,
+      };
+    }
+    Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "exec-json-stdin-resume" });
   }
   const authArgs = spec.runner === "CLAUDE" ? ["auth", "status"]
     : spec.runner === "CODEX" ? ["login", "status"]
