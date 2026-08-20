@@ -104,9 +104,9 @@ function collectOutput() {
 // Node version predicate
 // ---------------------------------------------------------------------------
 
-test("the Node predicate implements exactly ^20.19.0 || >=22.12.0", () => {
-  const supported = ["20.19.0", "20.19.5", "20.20.1", "22.12.0", "22.17.0", "23.0.0", "24.4.1", "26.5.0"];
-  const refused = ["18.20.8", "20.0.0", "20.18.3", "20.18.9", "21.0.0", "21.7.3", "22.0.0", "22.11.0"];
+test("the Node predicate implements exactly ^20.19.0 || ^22.13.0 || >=24", () => {
+  const supported = ["20.19.0", "20.19.5", "20.20.1", "22.13.0", "22.17.0", "24.0.0", "24.4.1", "26.5.0"];
+  const refused = ["18.20.8", "20.0.0", "20.18.3", "20.18.9", "21.0.0", "21.7.3", "22.0.0", "22.12.0", "23.0.0"];
 
   for (const version of supported) {
     assert.equal(isSupportedNodeVersion(version), true, `${version} must be supported`);
@@ -259,6 +259,7 @@ test("the rendered file agrees with itself, exposes no browser token, and valida
   const assignments = parseEnvAssignments(rendered);
 
   for (const key of REQUIRED_KEYS) assert.ok(assignments.has(key), `${key} must be present`);
+  assert.match(assignments.get("RUNNER_ID"), /^runner-[A-Za-z0-9_-]{16}$/u);
   assert.equal(assignments.get("POSTGRES_PASSWORD"), values.databasePassword);
   assert.equal(assignments.get("DATABASE_URL"), values.databaseUrl);
   assert.equal(assignments.get("API_HOST"), "127.0.0.1");
@@ -996,10 +997,11 @@ test("argument parsing accepts the documented flags and refuses everything else"
   assert.throws(() => parseArguments(["--rotate"]), (error) => error.setupClass === SETUP_CLASSES.usage);
 });
 
-test("upgrade adds a missing encryption key without changing any existing assignment and is idempotent", () => {
+test("upgrade adds a stable runner id and missing encryption key without changing existing assignments", () => {
   withTemporaryDirectory((directory) => {
     const target = join(directory, CONFIG_FILE_NAME);
     const original = renderEnvFile(generateConfiguration(seededRandomBytes(41)))
+      .replace(/^RUNNER_ID=.*\n/m, "")
       .replace(/^AGENTOS_SECRET_ENCRYPTION_KEY=.*\n/m, "");
     writeFileSync(target, original, { mode: CONFIG_FILE_MODE });
     const before = parseEnvAssignments(original);
@@ -1012,17 +1014,18 @@ test("upgrade adds a missing encryption key without changing any existing assign
       stderr: () => assert.fail("upgrade must keep stderr empty"),
     });
     assert.equal(first.setupClass, SETUP_CLASSES.upgraded);
-    assert.deepEqual(first.changed, ["AGENTOS_SECRET_ENCRYPTION_KEY"]);
+    assert.deepEqual(first.changed, ["RUNNER_ID", "AGENTOS_SECRET_ENCRYPTION_KEY"]);
     assert.deepEqual(first.remaining, []);
     assert.deepEqual(firstOutput.lines, [
       `setup:local upgrade ${SETUP_CLASSES.upgraded}`,
-      "changed: AGENTOS_SECRET_ENCRYPTION_KEY",
+      "changed: RUNNER_ID,AGENTOS_SECRET_ENCRYPTION_KEY",
       "remaining: none",
     ]);
 
     const afterText = readFileSync(target, "utf8");
     const after = parseEnvAssignments(afterText);
     for (const [key, value] of before) assert.equal(after.get(key), value, key);
+    assert.match(after.get("RUNNER_ID"), /^runner-[A-Za-z0-9_-]{16}$/u);
     assert.equal(Buffer.from(after.get("AGENTOS_SECRET_ENCRYPTION_KEY"), "base64").length, 32);
     assert.equal(statSync(target).mode & 0o777, CONFIG_FILE_MODE);
 

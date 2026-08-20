@@ -66,8 +66,8 @@ Provider CLI、账号、认证、订阅、用量、速率限制、模型和 prov
 ## 本地启动
 
 Developer Preview 只面向一个平台：Apple Silicon Mac。本版本应使用 `.nvmrc`
-记录的 Node.js `22.17.0`；顶层检查接受的更宽范围并没有被每个锁定的开发依赖覆盖。
-此外还需要
+记录的 Node.js `22.17.0`。安装会强制要求 Node.js 满足 `^20.19.0 || ^22.13.0 || >=24`，
+即锁定工具链共同支持的范围；Node 22.12.x 与 23 会被拒绝。此外还需要
 
 - npm 10.9.2 或更高；
 - Docker 与 Docker Compose，用于仓库内定义的 PostgreSQL 服务；
@@ -88,12 +88,7 @@ git checkout v0.1.0
 npm ci
 npm run setup:local
 npm run build
-docker compose up -d postgres
-until docker compose exec -T postgres \
-  sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-do
-  sleep 1
-done
+docker compose up -d --wait --wait-timeout 60 postgres
 export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
 export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
 npm run db:migrate:release -- --fresh

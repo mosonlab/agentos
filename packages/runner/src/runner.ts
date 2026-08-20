@@ -441,7 +441,56 @@ export const pollForTask = async (config: RunnerConfig): Promise<boolean> => {
   return true;
 };
 
-export const runStartupPreflight = async (config: RunnerConfig): Promise<Record<RunnerKind, boolean>> => {
+export const STARTUP_REPORT_ATTEMPTS = 5;
+
+export type StartupReportRetryOptions = {
+  attempts?: number;
+  wait?: (attempt: number) => Promise<void>;
+  onRetry?: (runner: RunnerKind, attempt: number, attempts: number) => void;
+};
+
+const waitBeforeStartupReportRetry = async (attempt: number): Promise<void> => {
+  // 0.5s + 1s + 2s + 4s = 7.5s maximum wait. Together with five API request
+  // ceilings this keeps startup below 57.5s with the default 10s API timeout,
+  // while covering the ordinary API-after-runner launch ordering race.
+  const delayMs = Math.min(4_000, 500 * 2 ** (attempt - 1));
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+};
+
+const startupApiMayBecomeReady = (error: unknown): boolean => {
+  const status = (error as { status?: unknown }).status;
+  return status === undefined || (typeof status === "number" && status >= 500);
+};
+
+const reportPreflightWithRetry = async (
+  config: RunnerConfig,
+  runner: RunnerKind,
+  result: Parameters<typeof reportPreflight>[2],
+  options: StartupReportRetryOptions,
+): Promise<void> => {
+  const attempts = options.attempts ?? STARTUP_REPORT_ATTEMPTS;
+  if (!Number.isSafeInteger(attempts) || attempts < 1) throw new Error("startup report attempts must be a positive integer");
+  const wait = options.wait ?? waitBeforeStartupReportRetry;
+  const onRetry = options.onRetry ?? ((kind, attempt, total) => {
+    console.error(`AgentOS API unavailable during ${kind.toLowerCase()} startup preflight; retrying ${attempt + 1}/${total}`);
+  });
+
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await reportPreflight(config, runner, result);
+      return;
+    } catch (error: unknown) {
+      if (attempt >= attempts || !startupApiMayBecomeReady(error)) throw error;
+      onRetry(runner, attempt, attempts);
+      await wait(attempt);
+    }
+  }
+};
+
+export const runStartupPreflight = async (
+  config: RunnerConfig,
+  retryOptions: StartupReportRetryOptions = {},
+): Promise<Record<RunnerKind, boolean>> => {
   const results = {} as Record<RunnerKind, boolean>;
   const env = workspaceEnvironment(config);
   for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
@@ -449,7 +498,7 @@ export const runStartupPreflight = async (config: RunnerConfig): Promise<Record<
       : runner === "CODEX" ? CODEX_STARTER_MODEL : runner.toLowerCase();
     const result = await adapters[runner].preflight({ config, runner, model, env });
     results[runner] = result.ok;
-    await reportPreflight(config, runner, result);
+    await reportPreflightWithRetry(config, runner, result, retryOptions);
   }
   return results;
 };

@@ -275,6 +275,69 @@ test("startup blocks a Codex CLI that lacks the exec protocol AgentOS invokes", 
   }
 });
 
+test("startup retries a temporarily unavailable API without rerunning CLI probes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-startup-retry-"));
+  try {
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(log));
+    await chmod(binary, 0o755);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let calls = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if (calls <= 2) throw new TypeError("fetch failed");
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const waits: number[] = [];
+    const retries: Array<{ runner: string; attempt: number; attempts: number }> = [];
+
+    const results = await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary), {
+      wait: async (attempt) => { waits.push(attempt); },
+      onRetry: (runner, attempt, attempts) => { retries.push({ runner, attempt, attempts }); },
+    });
+
+    assert.deepEqual(results, { CLAUDE: false, CODEX: true, PI: false });
+    assert.equal(calls, 5, "two failed sends plus one successful report per backend");
+    assert.deepEqual(waits, [1, 2]);
+    assert.deepEqual(retries, [
+      { runner: "CLAUDE", attempt: 1, attempts: 5 },
+      { runner: "CLAUDE", attempt: 2, attempts: 5 },
+    ]);
+    assert.deepEqual(posts.map((post) => post.body.runner), ["CLAUDE", "CODEX", "PI"]);
+    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
+      "--version", "exec --help", "exec resume --help", "login status",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startup does not retry an API authentication refusal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-startup-refused-"));
+  try {
+    const waits: number[] = [];
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ code: "unauthorized" }), { status: 401, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await assert.rejects(
+      runStartupPreflight(codexOnly(join(root, "workspaces"), root, join(root, "codex")), {
+        wait: async (attempt) => { waits.push(attempt); },
+        onRetry: () => assert.fail("a deterministic refusal must not be retried"),
+      }),
+      /AgentOS API 401/u,
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(waits, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a Codex claim passes its own preflight and starts while the others stay blocked", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-claim-"));
   try {

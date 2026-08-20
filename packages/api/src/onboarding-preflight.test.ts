@@ -19,7 +19,7 @@ test("repository preflight checks identity, exact head, fetch, and dry-run push 
   const run: RepositoryPreflightCommand = async (_executable, args) => {
     calls.push(args);
     if (args.includes("user.name")) return { code: 0, stdout: "AgentOS Runner\n" };
-    if (args.includes("user.email")) return { code: 0, stdout: "runner@example.invalid\n" };
+    if (args.includes("user.email")) return { code: 0, stdout: "runner@example.com\n" };
     if (args[0] === "ls-remote") return { code: 0, stdout: `${"a".repeat(40)}\trefs/heads/main\n` };
     return { code: 0, stdout: "" };
   };
