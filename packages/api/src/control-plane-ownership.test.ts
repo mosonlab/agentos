@@ -106,6 +106,27 @@ test("UT-OWN-STATE-MATRIX preserves stable identity across clean release and rea
   await second.ownership.release();
 });
 
+test("UT-OWN-STATE-MATRIX upgrades a released v1 record after device numbers drift across reboot", async (t) => {
+  const paths = await fixture();
+  t.after(() => rm(paths.container, { recursive: true, force: true }));
+  const first = await acquire(paths);
+  await first.ownership.release();
+  const ownerPath = join(first.ownership.controlStateEntryPath, controlPlaneOwnerFilename);
+  const released = JSON.parse(await readFile(ownerPath, "utf8")) as Record<string, unknown>;
+  released.formatVersion = 1;
+  released.workspaceRootDevice = (first.ownership.workspaceRootDevice + 3n).toString();
+  released.lockDevice = (first.ownership.lockDevice + 3n).toString();
+  await writeFile(ownerPath, `${JSON.stringify(released)}\n`, { mode: 0o600 });
+
+  const second = await acquire(paths);
+  assert.equal(second.ownership.controlPlaneId, first.ownership.controlPlaneId);
+  const upgraded = JSON.parse(await readFile(ownerPath, "utf8")) as Record<string, unknown>;
+  assert.equal(upgraded.formatVersion, 2);
+  assert.equal("workspaceRootDevice" in upgraded, false);
+  assert.equal("lockDevice" in upgraded, false);
+  await second.ownership.release();
+});
+
 test("UT-OWN-STATE-MATRIX advances valid stable-without-owner and removes only bounded temp debris", async (t) => {
   const paths = await fixture();
   t.after(() => rm(paths.container, { recursive: true, force: true }));
