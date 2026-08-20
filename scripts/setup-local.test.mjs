@@ -45,6 +45,7 @@ import {
   SETUP_CLASSES,
   SUPPORTED_NODE_RANGE,
   TEMPORARY_PREFIX,
+  UPGRADE_GENERATED_KEYS,
   composeDatabaseUrl,
   generateConfiguration,
   isSupportedNodeVersion,
@@ -984,14 +985,96 @@ test("a run killed between the write and the link leaves an ignored temporary fi
 // ---------------------------------------------------------------------------
 
 test("argument parsing accepts the documented flags and refuses everything else", () => {
-  assert.deepEqual(parseArguments([]), { dryRun: false, help: false });
+  assert.deepEqual(parseArguments([]), { dryRun: false, help: false, upgrade: false });
   assert.equal(parseArguments(["--dry-run"]).dryRun, true);
+  assert.equal(parseArguments(["--upgrade"]).upgrade, true);
   assert.equal(parseArguments(["--directory", "/tmp/x"]).directory, "/tmp/x");
   assert.equal(parseArguments(["--directory=/tmp/y"]).directory, "/tmp/y");
   assert.throws(() => parseArguments(["--force"]), (error) => error.setupClass === SETUP_CLASSES.usage);
   // There is no overwrite or rotation flag, and adding one is a product change.
   assert.throws(() => parseArguments(["--overwrite"]), (error) => error.setupClass === SETUP_CLASSES.usage);
   assert.throws(() => parseArguments(["--rotate"]), (error) => error.setupClass === SETUP_CLASSES.usage);
+});
+
+test("upgrade adds a missing encryption key without changing any existing assignment and is idempotent", () => {
+  withTemporaryDirectory((directory) => {
+    const target = join(directory, CONFIG_FILE_NAME);
+    const original = renderEnvFile(generateConfiguration(seededRandomBytes(41)))
+      .replace(/^AGENTOS_SECRET_ENCRYPTION_KEY=.*\n/m, "");
+    writeFileSync(target, original, { mode: CONFIG_FILE_MODE });
+    const before = parseEnvAssignments(original);
+    const firstOutput = collectOutput();
+    const first = runSetup({
+      directory,
+      upgrade: true,
+      randomBytes: seededRandomBytes(42),
+      stdout: firstOutput.write,
+      stderr: () => assert.fail("upgrade must keep stderr empty"),
+    });
+    assert.equal(first.setupClass, SETUP_CLASSES.upgraded);
+    assert.deepEqual(first.changed, ["AGENTOS_SECRET_ENCRYPTION_KEY"]);
+    assert.deepEqual(first.remaining, []);
+    assert.deepEqual(firstOutput.lines, [
+      `setup:local upgrade ${SETUP_CLASSES.upgraded}`,
+      "changed: AGENTOS_SECRET_ENCRYPTION_KEY",
+      "remaining: none",
+    ]);
+
+    const afterText = readFileSync(target, "utf8");
+    const after = parseEnvAssignments(afterText);
+    for (const [key, value] of before) assert.equal(after.get(key), value, key);
+    assert.equal(Buffer.from(after.get("AGENTOS_SECRET_ENCRYPTION_KEY"), "base64").length, 32);
+    assert.equal(statSync(target).mode & 0o777, CONFIG_FILE_MODE);
+
+    const secondOutput = collectOutput();
+    const second = runSetup({ directory, upgrade: true, stdout: secondOutput.write, stderr: () => {} });
+    assert.equal(second.setupClass, SETUP_CLASSES.valid);
+    assert.deepEqual(second.changed, []);
+    assert.deepEqual(second.remaining, []);
+    assert.equal(readFileSync(target, "utf8"), afterText);
+    assert.deepEqual(secondOutput.lines, [
+      `setup:local upgrade ${SETUP_CLASSES.valid}`,
+      "changed: none",
+      "remaining: none",
+    ]);
+  });
+});
+
+test("upgrade reports weak credentials for manual rotation while preserving them", () => {
+  withTemporaryDirectory((directory) => {
+    const target = join(directory, CONFIG_FILE_NAME);
+    const values = generateConfiguration(seededRandomBytes(51));
+    const weakUrl = composeDatabaseUrl({ password: "agentos" });
+    const original = renderEnvFile(values)
+      .replace(/^POSTGRES_PASSWORD=.*$/m, "POSTGRES_PASSWORD=agentos")
+      .replace(/^DATABASE_URL=.*$/m, `DATABASE_URL=${weakUrl}`)
+      .replace(/^AGENTOS_SECRET_ENCRYPTION_KEY=.*\n/m, "");
+    writeFileSync(target, original, { mode: CONFIG_FILE_MODE });
+
+    const output = collectOutput();
+    const result = runSetup({
+      directory,
+      upgrade: true,
+      randomBytes: seededRandomBytes(52),
+      stdout: output.write,
+      stderr: () => {},
+    });
+    assert.equal(result.setupClass, SETUP_CLASSES.upgradedNeedsAction);
+    assert.deepEqual(result.changed, ["AGENTOS_SECRET_ENCRYPTION_KEY"]);
+    assert.deepEqual(result.remaining, ["rotate:POSTGRES_PASSWORD+DATABASE_URL"]);
+    const upgraded = parseEnvAssignments(readFileSync(target, "utf8"));
+    assert.equal(upgraded.get("POSTGRES_PASSWORD"), "agentos");
+    assert.equal(upgraded.get("DATABASE_URL"), weakUrl);
+    for (const key of UPGRADE_GENERATED_KEYS.filter((key) => key !== "AGENTOS_SECRET_ENCRYPTION_KEY")) {
+      assert.equal(upgraded.get(key), parseEnvAssignments(original).get(key), key);
+    }
+
+    const bytes = readFileSync(target, "utf8");
+    const rerun = runSetup({ directory, upgrade: true, stdout: () => {}, stderr: () => {} });
+    assert.equal(rerun.setupClass, SETUP_CLASSES.upgradeNeedsAction);
+    assert.deepEqual(rerun.changed, []);
+    assert.equal(readFileSync(target, "utf8"), bytes);
+  });
 });
 
 test("the CLI publishes, reports its class, and prints no value", async () => {

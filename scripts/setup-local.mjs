@@ -5,26 +5,23 @@
 // Three properties are the point of the file, and every design choice below
 // serves one of them:
 //
-//   1. **The machine output is a stable class and nothing else.** stdout
-//      carries exactly one `setup:local [dry-run ]<class>` line and stderr
-//      carries nothing, on every path. The reason a run ended the way it did
-//      is returned to the caller, never written to a stream: free text on a
-//      stream is not a contract callers can match on, and a secret that
-//      reaches a terminal reaches a scrollback buffer, a CI log, and a
-//      screenshot. `--help` prints the usage text because a human asked for
-//      it; a run never does.
-//   2. **Publication is atomic and no-clobber.** The bytes are written to a
+//   1. **Output uses a stable, value-free vocabulary.** The create command
+//      emits one class line. Upgrade adds `changed` and `remaining` lines that
+//      contain key names and reason/action codes only. stderr stays empty, and
+//      no configuration value reaches terminal scrollback, logs, or screenshots.
+//   2. **Fresh publication is atomic and no-clobber.** The bytes are written to a
 //      same-directory temporary file and then published with `link(2)`, which
 //      fails `EEXIST` rather than replacing. `rename(2)` is never the final
 //      primitive: rename succeeds over an existing target, so two concurrent
 //      writers would both report success and one configuration would silently
-//      lose. With `link`, exactly one writer creates the file and the other
-//      learns that it lost.
+//      lose. Upgrade is different: it retains every existing assignment, checks
+//      that the source bytes are unchanged, then atomically renames a durable
+//      replacement containing only missing generated keys.
 //   3. **It fails closed.** An unsupported Node, an unreadable directory, a
-//      filesystem without directory `fsync` or `link`, an existing but invalid
-//      `.env` — each stops before or instead of writing, and leaves `.env`
-//      absent or byte-identical. There is no overwrite or rotation flag;
-//      rotation is a documented human recovery, not a command-line switch.
+//      filesystem without directory `fsync` or `link`, or an unsafe `.env` type
+//      or mode each stops before writing. Upgrade repairs only missing generated
+//      keys; weak, placeholder, inconsistent, or malformed existing values are
+//      reported for human recovery and never replaced.
 //
 // The helpers are pure and exported so the tests can prove those properties
 // without a live checkout. `randomBytes`, the filesystem, and the
@@ -41,6 +38,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -62,6 +60,9 @@ export const SETUP_CLASSES = Object.freeze({
   unsupportedNode: "configuration-unsupported-node",
   unsupportedFilesystem: "configuration-unsupported-filesystem",
   entropyUnusable: "configuration-entropy-unusable",
+  upgraded: "configuration-upgraded",
+  upgradedNeedsAction: "configuration-upgraded-needs-action",
+  upgradeNeedsAction: "configuration-upgrade-needs-action",
   usage: "configuration-usage-error",
 });
 
@@ -74,6 +75,9 @@ export const EXIT_CODES = Object.freeze({
   [SETUP_CLASSES.raced]: 3,
   [SETUP_CLASSES.unsupportedFilesystem]: 4,
   [SETUP_CLASSES.entropyUnusable]: 5,
+  [SETUP_CLASSES.upgraded]: 0,
+  [SETUP_CLASSES.upgradedNeedsAction]: 1,
+  [SETUP_CLASSES.upgradeNeedsAction]: 1,
   [SETUP_CLASSES.usage]: 64,
 });
 
@@ -122,6 +126,16 @@ export const REQUIRED_KEYS = Object.freeze([
 
 const SECRET_KEYS = Object.freeze([
   "POSTGRES_PASSWORD",
+  "OPERATOR_TOKEN",
+  "RUNNER_TOKEN",
+  "SESSION_COOKIE_SECRET",
+  "AGENTOS_SECRET_ENCRYPTION_KEY",
+]);
+
+/** Missing values that can be generated without guessing the identity or
+ * credentials of an existing PostgreSQL installation. Existing assignments,
+ * including weak ones, are never replaced by upgrade. */
+export const UPGRADE_GENERATED_KEYS = Object.freeze([
   "OPERATOR_TOKEN",
   "RUNNER_TOKEN",
   "SESSION_COOKIE_SECRET",
@@ -365,6 +379,9 @@ export function validateEnvContent(text) {
       // Same mechanism as packages/db/prisma/preflight-goal-execution.ts: an
       // operator who has not named the schema has not named the target.
       if (!parsed.searchParams.get("schema")) reasons.push("database-url-missing-schema:DATABASE_URL");
+      if (WEAK_SECRET_VALUES.has(decodeURIComponent(parsed.password))) {
+        reasons.push("database-url-weak-password:DATABASE_URL");
+      }
       const postgresPassword = assignments.get("POSTGRES_PASSWORD");
       if (
         postgresPassword !== undefined &&
@@ -393,7 +410,89 @@ const nodeFileSystem = Object.freeze({
   linkSync,
   unlinkSync,
   readFileSync,
+  renameSync,
 });
+
+function generateUpgradeAdditions(assignments, randomBytes) {
+  const additions = new Map();
+  for (const key of UPGRADE_GENERATED_KEYS) {
+    if (assignments.has(key)) continue;
+    const value = key === "SESSION_COOKIE_SECRET" || key === "AGENTOS_SECRET_ENCRYPTION_KEY"
+      ? base64Secret(randomBytes, 32)
+      : urlSafeSecret(randomBytes, 32);
+    additions.set(key, value);
+  }
+  const existingSecrets = SECRET_KEYS.flatMap((key) => assignments.has(key) ? [assignments.get(key)] : []);
+  const combined = [...existingSecrets, ...additions.values()];
+  if (new Set(combined).size !== combined.length) {
+    throw new SetupError(SETUP_CLASSES.entropyUnusable, "generated-values-not-distinct");
+  }
+  return additions;
+}
+
+function renderUpgrade(existing, additions) {
+  if (additions.size === 0) return existing;
+  const prefix = existing.endsWith("\n") ? existing : `${existing}\n`;
+  const lines = [
+    "",
+    "# Added by `npm run setup:local -- --upgrade`; existing values were preserved.",
+    ...[...additions].map(([key, value]) => `${key}=${value}`),
+    "",
+  ];
+  return `${prefix}${lines.join("\n")}`;
+}
+
+function upgradeActions(reasons) {
+  const actions = reasons.map((reason) => {
+    const [kind, key] = reason.split(":", 2);
+    if (kind === "missing-key") return `add:${key}`;
+    if (kind === "placeholder-value" || kind === "secret-too-short") {
+      if (key === "POSTGRES_PASSWORD") return "rotate:POSTGRES_PASSWORD+DATABASE_URL";
+      if (key === "AGENTOS_SECRET_ENCRYPTION_KEY") return `recover-or-rotate:${key}`;
+      return SECRET_KEYS.includes(key) ? `rotate:${key}` : `replace:${key}`;
+    }
+    if (kind === "encryption-key-not-32-bytes") return `recover-or-rotate:${key}`;
+    if (kind === "database-url-weak-password") return "rotate:POSTGRES_PASSWORD+DATABASE_URL";
+    if (kind === "database-password-mismatch") return "align:POSTGRES_PASSWORD+DATABASE_URL";
+    if (kind === "database-url-missing-schema") return `add-schema:${key}`;
+    if (kind === "database-url-unparsable") return `repair:${key}`;
+    if (kind === "browser-exposed-token") return `remove:${key}`;
+    if (reason === "operator-runner-token-identical") return "rotate:OPERATOR_TOKEN+RUNNER_TOKEN";
+    return `fix:${reason}`;
+  });
+  return [...new Set(actions)];
+}
+
+/** Atomically replace a validated mode-0600 file after proving its bytes have
+ * not changed since inspection. The temporary file is durable before rename;
+ * the directory entry is durable before success is reported. */
+function replaceConfiguration({ directory, fileName, expectedContents, contents, fs = nodeFileSystem }) {
+  const target = join(directory, fileName);
+  const temporaryPath = join(directory, `${TEMPORARY_PREFIX}${process.pid}.${cryptoRandomBytes(6).toString("hex")}.upgrade.tmp`);
+  let fd;
+  try {
+    fd = fs.openSync(temporaryPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
+    writeAll(fs, fd, Buffer.from(contents, "utf8"));
+    fs.fchmodSync(fd, 0o600);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    const current = inspectExisting(fs, target);
+    if (current === null || current.reason !== undefined || current.contents !== expectedContents) {
+      throw new SetupError(SETUP_CLASSES.raced, "configuration-changed-during-upgrade");
+    }
+    fs.renameSync(temporaryPath, target);
+    const directoryFd = fs.openSync(directory, fsConstants.O_RDONLY);
+    try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* the primary failure governs */ }
+    }
+    try { fs.unlinkSync(temporaryPath); } catch { /* renamed or already absent */ }
+    if (error instanceof SetupError) throw error;
+    throw new SetupError(SETUP_CLASSES.unsupportedFilesystem, `upgrade-publication-failed:${errorCode(error) ?? "unknown"}`);
+  }
+}
 
 function errorCode(error) {
   return error && typeof error === "object" ? error.code : undefined;
@@ -582,8 +681,9 @@ function inspectExisting(fs, path) {
 export const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
 /**
- * One invocation. Returns `{ setupClass, exitCode, reason }`; writes exactly one
- * class line to `stdout` and nothing at all to `stderr`.
+ * One invocation. Returns the class, exit code, reason, changed keys, and
+ * remaining actions. Create writes one class line; upgrade adds its two report
+ * lines. Neither mode writes to stderr.
  *
  * `reason` is a stable, value-free code for callers and tests. It is
  * deliberately not printed: the contract this command publishes is a class, and
@@ -595,6 +695,7 @@ export function runSetup({
   nodeVersion = process.versions.node,
   randomBytes = cryptoRandomBytes,
   dryRun = false,
+  upgrade = false,
   fs = nodeFileSystem,
   beforePublish,
   stdout = (line) => process.stdout.write(`${line}\n`),
@@ -603,9 +704,15 @@ export function runSetup({
   // `stderr` is accepted and never used. It stays in the signature because the
   // CLI wires both streams and the tests assert this one stays silent.
   void stderr;
-  const finish = (setupClass, reason) => {
-    stdout(`setup:local ${dryRun ? "dry-run " : ""}${setupClass}`);
-    return { setupClass, exitCode: EXIT_CODES[setupClass], reason };
+  const finish = (setupClass, reason, changed = [], remaining = []) => {
+    if (upgrade) {
+      stdout(`setup:local ${dryRun ? "dry-run " : ""}upgrade ${setupClass}`);
+      stdout(`changed: ${changed.length === 0 ? "none" : changed.join(",")}`);
+      stdout(`remaining: ${remaining.length === 0 ? "none" : remaining.join(",")}`);
+    } else {
+      stdout(`setup:local ${dryRun ? "dry-run " : ""}${setupClass}`);
+    }
+    return { setupClass, exitCode: EXIT_CODES[setupClass], reason, changed, remaining };
   };
 
   // Before any value exists. An unsupported Node leaves the directory exactly
@@ -616,6 +723,46 @@ export function runSetup({
 
   const target = join(directory, fileName);
   const existing = inspectExisting(fs, target);
+  if (upgrade && existing !== null) {
+    if (existing.reason !== undefined) {
+      return finish(SETUP_CLASSES.upgradeNeedsAction, existing.reason, [], [existing.reason]);
+    }
+    let additions;
+    try {
+      additions = generateUpgradeAdditions(parseEnvAssignments(existing.contents), randomBytes);
+    } catch (error) {
+      if (error instanceof SetupError) return finish(error.setupClass, error.reason);
+      throw error;
+    }
+    const changed = [...additions.keys()];
+    const upgradedContents = renderUpgrade(existing.contents, additions);
+    const validation = validateEnvContent(upgradedContents);
+    const remaining = upgradeActions(validation.reasons);
+    if (dryRun) {
+      const setupClass = remaining.length > 0
+        ? (changed.length > 0 ? SETUP_CLASSES.upgradedNeedsAction : SETUP_CLASSES.upgradeNeedsAction)
+        : (changed.length > 0 ? SETUP_CLASSES.upgraded : SETUP_CLASSES.valid);
+      return finish(setupClass, "upgrade-dry-run", changed, remaining);
+    }
+    if (changed.length > 0) {
+      try {
+        assertDurableDirectory(directory, fs);
+        replaceConfiguration({ directory, fileName, expectedContents: existing.contents, contents: upgradedContents, fs });
+      } catch (error) {
+        if (error instanceof SetupError) return finish(error.setupClass, error.reason);
+        throw error;
+      }
+    }
+    if (remaining.length > 0) {
+      return finish(
+        changed.length > 0 ? SETUP_CLASSES.upgradedNeedsAction : SETUP_CLASSES.upgradeNeedsAction,
+        remaining.join(" "),
+        changed,
+        remaining,
+      );
+    }
+    return finish(changed.length > 0 ? SETUP_CLASSES.upgraded : SETUP_CLASSES.valid, "upgrade-complete", changed, []);
+  }
   if (existing !== null) {
     // Refused on type or mode before its bytes were ever read.
     if (existing.reason !== undefined) return finish(SETUP_CLASSES.invalid, existing.reason);
@@ -638,14 +785,15 @@ export function runSetup({
     if (error instanceof SetupError) return finish(error.setupClass, error.reason);
     throw error;
   }
-  return finish(SETUP_CLASSES.created, "published-at-mode-0600");
+  return finish(upgrade ? SETUP_CLASSES.upgraded : SETUP_CLASSES.created, "published-at-mode-0600", upgrade ? [...REQUIRED_KEYS] : [], []);
 }
 
 export function parseArguments(argv) {
-  const options = { dryRun: false, help: false };
+  const options = { dryRun: false, help: false, upgrade: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--dry-run") options.dryRun = true;
+    else if (argument === "--upgrade") options.upgrade = true;
     else if (argument === "--help" || argument === "-h") options.help = true;
     else if (argument === "--directory") {
       const value = argv[index + 1];
@@ -661,10 +809,10 @@ export function parseArguments(argv) {
   return options;
 }
 
-const USAGE = `Usage: npm run setup:local [-- --dry-run] [-- --directory <path>]
+const USAGE = `Usage: npm run setup:local [-- --upgrade] [-- --dry-run] [-- --directory <path>]
 
-Generates this checkout's .env once, with mode 0600. A run writes exactly one
-line to stdout, "setup:local [dry-run ]<class>", and nothing to stderr:
+Generates this checkout's .env once, with mode 0600. The create form writes one
+class line; upgrade adds changed/remaining report lines. Both keep stderr empty:
 
   configuration-created            the file did not exist and this invocation published it
   configuration-valid              a usable 0600 file already existed and was left untouched
@@ -674,9 +822,15 @@ line to stdout, "setup:local [dry-run ]<class>", and nothing to stderr:
   configuration-unsupported-node   this Node does not satisfy ${SUPPORTED_NODE_RANGE}
   configuration-unsupported-filesystem  the directory cannot publish the file durably
   configuration-entropy-unusable   the entropy source returned unusable material
+  configuration-upgraded           missing safe-to-generate keys were added
+  configuration-upgraded-needs-action  keys were added, but named repairs remain
+  configuration-upgrade-needs-action   nothing was changed; named repairs remain
   configuration-usage-error        the arguments could not be parsed
 
-No generated value is ever printed. There is no overwrite or rotation flag.`;
+Upgrade preserves every existing assignment, adds only missing locally generated
+secret keys, and reports changed key names plus remaining value-free reason codes.
+Weak or placeholder credentials are never rotated automatically. No generated
+value is ever printed. There is no overwrite or rotation flag.`;
 
 export function main(argv = process.argv.slice(2)) {
   let options;
@@ -698,7 +852,11 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   try {
-    const { exitCode } = runSetup({ directory: options.directory ?? repositoryRoot, dryRun: options.dryRun });
+    const { exitCode } = runSetup({
+      directory: options.directory ?? repositoryRoot,
+      dryRun: options.dryRun,
+      upgrade: options.upgrade,
+    });
     return exitCode;
   } catch (error) {
     if (error instanceof SetupError) {
