@@ -23,6 +23,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  toolchain-range:
+    name: Node ${{ matrix.node }} install compatibility
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20.19.0", "22.13.0", "24"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm install --global npm@10.9.2
+      - run: npm ci
+      - run: npm run test:setup-local
+
   gate:
     name: typecheck + unit tests + dbtest
     runs-on: ubuntu-latest
