@@ -995,7 +995,7 @@ say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, d
 DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 4))))')"
 export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
-  -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=agentos \
+  -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
   -e POSTGRES_DB=agentos_gate \
   -e PGDATA=/var/lib/postgresql/data \
   --tmpfs /var/lib/postgresql/data:rw,size=1024m \
@@ -1026,8 +1026,11 @@ note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores min
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
 # schema it is given, and the scratch-database manager refuses a source database
 # named agentos.
-export TEST_DATABASE_URL="postgresql://agentos:agentos@127.0.0.1:${PGPORT}/agentos_gate?schema=agentos_gate"
-export TEST_DATABASE_MAINTENANCE_URL="postgresql://agentos:agentos@127.0.0.1:${PGPORT}/postgres"
+# Not "agentos": startup-config.ts lists the compose default in WEAK_SECRET_VALUES,
+# and spawn-type dbtests derive POSTGRES_PASSWORD from this URL, so a placeholder
+# here makes the spawned API refuse to start. Fixture value, ≥24 chars on purpose.
+export TEST_DATABASE_URL="postgresql://agentos:gate-scratch-fixture-password-000000@127.0.0.1:${PGPORT}/agentos_gate?schema=agentos_gate"
+export TEST_DATABASE_MAINTENANCE_URL="postgresql://agentos:gate-scratch-fixture-password-000000@127.0.0.1:${PGPORT}/postgres"
 # Pointing DATABASE_URL at the same throwaway server closes the last hole: a
 # subprocess that reads it — including one that would otherwise pick it up from
 # a repository .env — lands in the container, never on a real database.
