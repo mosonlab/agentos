@@ -7,7 +7,9 @@ import {
   EVIDENCE_PLACEHOLDER_BODY,
   EVIDENCE_UNAVAILABLE_MARKER,
   INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_STEP_INDEX,
+  INTEGRATOR_TEMPLATE_NAME,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   STOP_CHOICES,
@@ -17,12 +19,14 @@ import {
   type DecisionRow,
   type MergeEvidence,
   authorizationMetadata,
+  canonicalIntegratorBindingValid,
   dispositionFor,
   evidenceEquals,
   followUpDispositionFor,
   integratorBindingValid,
   isIncidentCondition,
   isIntegratorStep,
+  legacyTenStepTemplateName,
   isTerminalDisposition,
   parseEvidence,
   parseMergeResult,
@@ -240,6 +244,28 @@ test("the binding predicate holds in both directions", () => {
   assert.ok(!integratorBindingValid(INTEGRATOR_AGENT_NAME, null));
   assert.ok(!integratorBindingValid(INTEGRATOR_AGENT_NAME, { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }));
   assert.ok(!integratorBindingValid("senior-dev", integratorStep));
+});
+
+test("seed-marked legacy step 10 stays mechanical without widening new-template binding", () => {
+  const legacy = {
+    stepIndex: 10,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: legacyTenStepTemplateName("template-old") },
+  };
+  assert.equal(isIntegratorStep(legacy), true);
+  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
+  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
+
+  assert.equal(isIntegratorStep({
+    stepIndex: 10,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME },
+  }), false);
+  assert.equal(isIntegratorStep({
+    stepIndex: 10,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: `${INTEGRATOR_TEMPLATE_NAME}-legacy-lookalike` },
+  }), false);
 });
 
 test("a lookalike step in another template or with another output kind is not the integrator step", () => {

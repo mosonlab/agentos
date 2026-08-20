@@ -20,12 +20,18 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  activateChainSuccessor,
+  AssigneeType,
+  executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_SENTINEL_MODEL,
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
+  legacyTenStepTemplateName,
   PrismaClient,
+  type Task,
+  TaskStatus,
 } from "@agentos/db";
 
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -75,6 +81,12 @@ test("a fresh seed writes a twelve-step template whose step 12 is mechanical", a
   assert.equal(step.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(step.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
   assert.equal(step.spawnPolicy, null);
+  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 7)?.attachmentsFromPrevious, false);
+  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.match(
+    step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
+    /vertical slice[\s\S]*blocked_by[\s\S]*expand-migrate-contract[\s\S]*fail at base/iu,
+  );
 
   const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
   assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
@@ -144,6 +156,15 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     },
     expect: /step/iu,
   },
+  {
+    name: "an upstream attachment on blind-review step 7",
+    break: async () => {
+      const step = await integratorStep();
+      const blind = step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 7)!;
+      await db.taskTemplateStep.update({ where: { id: blind.id }, data: { attachmentsFromPrevious: true } });
+    },
+    expect: /attachmentsFromPrevious/u,
+  },
 ];
 
 for (const negative of negatives) {
@@ -157,41 +178,94 @@ for (const negative of negatives) {
   });
 }
 
-/* ---------------------------------------------------------- A4: in-flight chains */
+/* -------------------------------------------- 10 -> 12: in-flight continuation */
 
-test("a chain instantiated before the twelfth step exists keeps its eleven tasks", async () => {
+test("re-seeding a historical ten-step template preserves and queues its in-flight integrator", async () => {
   assert.equal((await seed()).code, 0);
-  const step = await integratorStep();
-  const templateId = step.taskTemplateId;
-  const projectId = step.taskTemplate.projectId;
+  const fresh = await integratorStep();
+  const templateId = fresh.taskTemplateId;
+  const projectId = fresh.taskTemplate.projectId;
+  const agents = new Map((await db.agent.findMany({ where: { projectId } })).map((agent) => [agent.name, agent]));
 
-  // Remove only the mechanical continuation, leaving the eleven business stages.
-  await db.taskTemplateStep.delete({ where: { id: step.id } });
-  const businessSteps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" } });
-  assert.equal(businessSteps.length, 11);
-
-  const chainId = `in-flight-${process.pid}`;
-  for (const templateStep of businessSteps) {
-    await db.task.create({ data: {
-      projectId, templateId, templateStepId: templateStep.id, name: templateStep.name,
-      description: templateStep.prompt, assigneeType: templateStep.assigneeType,
-      assigneeAgentId: templateStep.assigneeAgentId, approvalGate: templateStep.approvalGate,
-      opensPullRequest: templateStep.opensPullRequest, chainId, chainIndex: templateStep.stepIndex,
-    } });
+  // Reconstruct the historical 10-row shape exactly where the routing changed:
+  // review, fix, docs, human approval, then physical step-10 mechanical merge.
+  await db.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId, stepIndex: { in: [11, 12] } } });
+  const historicalTail = [
+    [6, "review-coordinator", AssigneeType.AGENT, "code-review"],
+    [7, "senior-dev", AssigneeType.AGENT, "fixed-implementation"],
+    [8, "librarian", AssigneeType.AGENT, "documentation"],
+    [9, null, AssigneeType.HUMAN, "approval"],
+    [10, INTEGRATOR_AGENT_NAME, AssigneeType.AGENT, INTEGRATOR_OUTPUT_KIND],
+  ] as const;
+  for (const [stepIndex, agentName, assigneeType, outputKind] of historicalTail) {
+    const assigneeAgentId = agentName ? agents.get(agentName)!.id : null;
+    await db.taskTemplateStep.update({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: templateId, stepIndex } },
+      data: {
+        name: `Historical step ${stepIndex}`,
+        assigneeType,
+        assigneeAgentId,
+        approvalGate: stepIndex === 9,
+        outputKind,
+        opensPullRequest: false,
+      },
+    });
   }
-  const before = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+  const historicalSteps = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" },
+  });
+  assert.equal(historicalSteps.length, 10);
 
-  // Re-seeding restores the mechanical continuation without mutating the chain.
+  const repo = await db.repo.create({ data: {
+    projectId, name: "legacy-upgrade", remoteUrl: "https://github.com/acme/legacy-upgrade.git",
+    mountPath: "/scratch/legacy-upgrade", defaultBranch: "main",
+  } });
+  const integratorAgent = agents.get(INTEGRATOR_AGENT_NAME)!;
+  await db.agentRepoAccess.create({ data: {
+    projectId, agentId: integratorAgent.id, repoId: repo.id,
+    mountPath: "/scratch/legacy-upgrade", permissions: "GIT_WRITE",
+  } });
+
+  const chainId = `in-flight-ten-${process.pid}`;
+  const tasks: Task[] = [];
+  for (const templateStep of historicalSteps) {
+    tasks.push(await db.task.create({ data: {
+      projectId, repoId: repo.id, templateId, templateStepId: templateStep.id,
+      name: templateStep.name, description: templateStep.prompt,
+      assigneeType: templateStep.assigneeType, assigneeAgentId: templateStep.assigneeAgentId,
+      approvalGate: templateStep.approvalGate, opensPullRequest: templateStep.opensPullRequest,
+      chainId, chainIndex: templateStep.stepIndex,
+      status: templateStep.stepIndex < 10 ? TaskStatus.DONE : TaskStatus.TODO,
+      targetBranch: "agentos/chain/legacy-upgrade",
+    } }));
+  }
+
+  // New code re-seeds: the historical template is retained under a deterministic
+  // marker and the canonical name is assigned to a different 12-row template.
   assert.equal((await seed()).code, 0);
-  assert.equal((await db.taskTemplateStep.count({ where: { taskTemplateId: templateId } })), 12);
+  const legacy = await db.taskTemplate.findUniqueOrThrow({
+    where: { id: templateId }, include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(legacy.name, legacyTenStepTemplateName(templateId));
+  assert.equal(legacy.steps.length, 10);
+  const canonical = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: true },
+  });
+  assert.notEqual(canonical.id, templateId);
+  assert.equal(canonical.steps.length, 12);
 
-  // `templates.ts` materializes task rows at creation time and the task row is
-  // the runtime authority, so an in-flight chain is not rewritten by a template
-  // that grew a step under it.
-  const after = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
-  assert.equal(after.length, 11, "the in-flight chain still has eleven tasks");
-  assert.deepEqual(
-    after.map((task) => ({ index: task.chainIndex, step: task.templateStepId, opens: task.opensPullRequest })),
-    before.map((task) => ({ index: task.chainIndex, step: task.templateStepId, opens: task.opensPullRequest })),
-  );
+  const oldIntegrator = await db.task.findUniqueOrThrow({
+    where: { id: tasks[9]!.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  assert.equal(executionModeFor(oldIntegrator.templateStep), "mechanical");
+
+  // The real chain successor path must accept the preserved binding and enqueue
+  // the old physical step 10 after its human predecessor completes.
+  const advanced = await db.$transaction((tx) => activateChainSuccessor(tx, tasks[8]!));
+  assert.deepEqual(advanced, { nextTaskId: oldIntegrator.id, gated: false });
+  const queued = await db.run.findFirst({ where: { taskId: oldIntegrator.id }, orderBy: { runNumber: "desc" } });
+  assert.ok(queued, "the historical integrator receives a run after re-seed");
+  assert.equal(queued.status, "QUEUED");
 });

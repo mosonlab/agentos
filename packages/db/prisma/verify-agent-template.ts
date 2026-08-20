@@ -66,6 +66,9 @@ const main = async (): Promise<void> => {
     if (step.opensPullRequest !== expected.opensPullRequest) {
       throw new Error(`template step ${step.stepIndex} opensPullRequest must be ${expected.opensPullRequest}; found ${step.opensPullRequest}`);
     }
+    if (step.attachmentsFromPrevious !== expected.attachmentsFromPrevious) {
+      throw new Error(`template step ${step.stepIndex} attachmentsFromPrevious must be ${expected.attachmentsFromPrevious}; found ${step.attachmentsFromPrevious}`);
+    }
   }
 
   // The integrator step, asserted explicitly rather than only through the

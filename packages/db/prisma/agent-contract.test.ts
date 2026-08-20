@@ -67,6 +67,9 @@ test("the split review prompts enforce frozen-range, blind-order, adjudication, 
   const firstReportRead = finalReview.indexOf("read the first reviewer's report attachment");
   assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
   assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
+  assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
+  assert.match(finalReview, /stop in this step, and use Inbox to present both\s+bodies of evidence to the human/u);
+  assert.match(finalReview, /does not become effective\s+automatically/u);
   assert.match(finalReview, /entire fix diff as one\s+unit/u);
   assert.match(finalReview, /exact fixed head/u);
 });
@@ -91,6 +94,8 @@ test("the canonical twelve-step template splits code review and preserves mechan
     ],
   );
   assert.equal(CANONICAL_TEMPLATE_STEPS.some((step) => step.agentName === "code-reviewer"), false);
+  assert.equal(CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
+  assert.equal(CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
 });
 
 test("only implementation opens a pull request, and the integrator is not a model row", () => {

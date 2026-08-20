@@ -23,8 +23,8 @@ export const MODELS: CatalogModel[] = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "high" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "medium" },
-  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "xhigh" },
-  { id: "openai-codex/gpt-5.6-luna", label: "GPT-5.6 Luna (pi)", runner: "PI", efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], defaultEffort: "xhigh" },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "max" },
+  { id: "openai-codex/gpt-5.6-luna", label: "GPT-5.6 Luna (pi)", runner: "PI", efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], defaultEffort: "max" },
 ];
 
 export const splitModel = (raw: string): { model: string; effort: string | null } => {

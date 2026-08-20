@@ -21,23 +21,25 @@ export const CANONICAL_AGENT_DEFAULTS = [
 ] as const;
 
 export const CANONICAL_TEMPLATE_STEPS = [
-  { stepIndex: 1, agentName: "spec", outputKind: "spec", approvalGate: true, opensPullRequest: false },
-  { stepIndex: 2, agentName: "plan", outputKind: "plan", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan", approvalGate: true, opensPullRequest: false },
-  { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation", approvalGate: false, opensPullRequest: true },
-  { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 9, agentName: "review-coordinator-opus", outputKind: "regression-verification", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 10, agentName: "librarian", outputKind: "documentation", approvalGate: false, opensPullRequest: false },
-  { stepIndex: 11, agentName: null, outputKind: "approval", approvalGate: true, opensPullRequest: false },
+  { stepIndex: 1, agentName: "spec", outputKind: "spec", approvalGate: true, opensPullRequest: false, attachmentsFromPrevious: false },
+  { stepIndex: 2, agentName: "plan", outputKind: "plan", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan", approvalGate: true, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation", approvalGate: false, opensPullRequest: true, attachmentsFromPrevious: true },
+  { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  // Blind review must persist its own report before reading step 6.
+  { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: false },
+  { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  // Regression verification consumes the complete step-8 fix diff.
+  { stepIndex: 9, agentName: "review-coordinator-opus", outputKind: "regression-verification", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 10, agentName: "librarian", outputKind: "documentation", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 11, agentName: null, outputKind: "approval", approvalGate: true, opensPullRequest: false, attachmentsFromPrevious: true },
   // Step 12 executes the merge mechanically and publishes nothing:
   // `opensPullRequest: false` is load-bearing, because `templates.ts` copies it
   // onto the materialized task row and `enqueueTaskRun` copies that onto the
   // run. Step 5 is the only row allowed to create the chain's pull request;
   // every review, fix, documentation, approval, and merge row reuses it.
-  { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result", approvalGate: false, opensPullRequest: false },
+  { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
 ] as const;
 
 export const IMPLEMENTATION_PLAN_OUTPUT_KINDS = ["plan", "revised-plan"] as const;

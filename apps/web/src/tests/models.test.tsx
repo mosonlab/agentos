@@ -27,6 +27,8 @@ test("the catalog covers every canonical roster model", () => {
   assert.deepEqual(mechanical, ["mechanical/merge-executor-v1"]);
   for (const id of mechanical) assert.equal(findModel(id), null, id);
   assert.equal(findModel("claude-fable-5")?.defaultEffort, "medium");
+  assert.equal(findModel("gpt-5.6-luna")?.defaultEffort, "max");
+  assert.equal(findModel("openai-codex/gpt-5.6-luna")?.defaultEffort, "max");
 });
 
 test("catalog ids are unique and every default effort is selectable", () => {
