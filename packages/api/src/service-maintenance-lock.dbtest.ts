@@ -9,10 +9,10 @@
  * then checked `pg_locks` would prove PostgreSQL's compatibility matrix, which
  * `maintenance-lock.dbtest.ts` already proves; this proves the API participates.
  *
- * The four cases are the whole protocol: acquisition while serving, refusal of
- * a migrator during it, release on shutdown, and the two ways a service is not
- * allowed to serve — starting under an exclusive holder, and losing the lock
- * after it started.
+ * The cases are the whole protocol: acquisition while serving, refusal of a
+ * migrator during it, release on shutdown, startup refusal under an exclusive
+ * holder, recovery from a dropped backend, and shutdown when an exclusive
+ * holder wins the recovery race.
  */
 
 import assert from "node:assert/strict";
@@ -192,10 +192,7 @@ test("api shared maintenance lock real-process acceptance", {
     }
   });
 
-  await t.test("an API that loses its lock backend stops serving", async () => {
-    // The silent failure this exists to catch: the session dies, the key is
-    // free, a migrator takes it — and the API keeps answering requests against
-    // a schema being rewritten underneath it.
+  await t.test("an API reacquires shared after its lock backend is lost", async () => {
     const api = spawnApi(common);
     children.add(api.child);
     await waitFor(api.child, /AgentOS API listening/u, api.output);
@@ -203,11 +200,44 @@ test("api shared maintenance lock real-process acceptance", {
     assert.equal(holders.length, 1);
     await observer.$queryRawUnsafe("SELECT pg_terminate_backend($1::int4)", holders[0]);
 
-    const stopped = await exited(api.child);
-    assert.equal(stopped.code, SERVICE_LOCK_CONTENTION_EXIT_CODE);
-    assert.match(api.output.value, /AgentOS API stopping: shared-service-lock-was-not-retained/u);
+    await waitFor(api.child, /result=reacquired/u, api.output);
+    assert.equal(api.child.exitCode, null, api.output.value);
+    const replacement = await holderPids(observer, schema);
+    assert.equal(replacement.length, 1);
+    assert.notEqual(replacement[0], holders[0]);
     assert.deepEqual(await inspectMaintenanceLock(target, prismaMaintenanceLockSession), {
-      exclusive: 0, shared: 0, waiting: 0,
+      exclusive: 0, shared: 1, waiting: 0,
     });
+
+    api.child.kill("SIGTERM");
+    assert.equal((await exited(api.child)).code, 0);
+  });
+
+  await t.test("an API stops when maintenance wins after its shared backend is lost", async () => {
+    const api = spawnApi(common);
+    children.add(api.child);
+    await waitFor(api.child, /AgentOS API listening/u, api.output);
+    const holders = await holderPids(observer, schema);
+    assert.equal(holders.length, 1);
+    await observer.$queryRawUnsafe("SELECT pg_terminate_backend($1::int4)", holders[0]);
+
+    const maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
+    assert.equal(maintenance.ok, true, JSON.stringify(maintenance));
+    if (!maintenance.ok) return;
+    try {
+      await waitFor(
+        api.child,
+        /result=reacquire-strike .*reason=exclusive-maintenance-lock-held-by-another-session/u,
+        api.output,
+      );
+      const stopped = await exited(api.child);
+      assert.equal(stopped.code, SERVICE_LOCK_CONTENTION_EXIT_CODE);
+      assert.match(api.output.value, /AgentOS API stopping: shared-service-lock-was-not-retained/u);
+      assert.deepEqual(await inspectMaintenanceLock(target, prismaMaintenanceLockSession), {
+        exclusive: 1, shared: 0, waiting: 0,
+      });
+    } finally {
+      await maintenance.lock.release();
+    }
   });
 });
