@@ -270,33 +270,55 @@ export const acquireMaintenanceLock = async (
  * `connection_limit=1` is not a performance choice. A session advisory lock
  * belongs to the backend that took it, so a pool free to hand the next
  * statement to a second connection would report a lock that is not there. One
- * connection makes "the session" a well-defined thing; `verifyStillHeld()`
- * checks the claim anyway, because a pool is still free to reconnect.
+ * connection makes "the session" a well-defined thing. Prisma's PostgreSQL
+ * pool otherwise retires an idle connection after 300 seconds, even if the
+ * client is still alive. Both pool lifetime controls are disabled for this
+ * session lock; `verifyStillHeld()` still checks the claim, because a broken
+ * connection can reconnect for reasons unrelated to planned recycling.
  *
- * Driver errors become `null` rather than exceptions. Raw driver text can carry
- * the URL and is never returned to a caller that might print it.
+ * Driver errors become `null` rather than exceptions, but are never silent:
+ * the stable Prisma code and error class are logged without raw driver text,
+ * which can carry the URL.
  */
 export const prismaMaintenanceLockSession: MaintenanceLockSessionFactory = async (url) => {
   const { PrismaClient } = await import("@prisma/client");
+  const logDriverError = (operation: "connect" | "query" | "disconnect", error: unknown): void => {
+    const record = typeof error === "object" && error !== null ? error as Record<string, unknown> : {};
+    const code = typeof record["code"] === "string" ? record["code"] : "unknown";
+    const errorName = error instanceof Error ? error.name : "unknown";
+    console.error(`maintenance-lock-session operation=${operation} result=error code=${code} error=${errorName}`);
+  };
   const pinned = new URL(url);
   pinned.searchParams.set("connection_limit", "1");
+  pinned.searchParams.set("max_connection_lifetime", "0");
+  pinned.searchParams.set("max_idle_connection_lifetime", "0");
   const db = new PrismaClient({ datasources: { db: { url: pinned.href } } });
   try {
     await db.$connect();
-  } catch {
-    await db.$disconnect().catch(() => undefined);
+  } catch (error: unknown) {
+    logDriverError("connect", error);
+    try {
+      await db.$disconnect();
+    } catch (disconnectError: unknown) {
+      logDriverError("disconnect", disconnectError);
+    }
     return null;
   }
   return {
     query: async <T>(sql: string, parameters: readonly (string | number)[]): Promise<T[] | null> => {
       try {
         return await db.$queryRawUnsafe<T[]>(sql, ...parameters);
-      } catch {
+      } catch (error: unknown) {
+        logDriverError("query", error);
         return null;
       }
     },
     close: async (): Promise<void> => {
-      await db.$disconnect().catch(() => undefined);
+      try {
+        await db.$disconnect();
+      } catch (error: unknown) {
+        logDriverError("disconnect", error);
+      }
     },
   };
 };

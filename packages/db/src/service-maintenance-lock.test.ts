@@ -19,6 +19,7 @@ import {
   SERVICE_LOCK_CONFIGURATION_EXIT_CODE,
   SERVICE_LOCK_CONTENTION_EXIT_CODE,
   SERVICE_LOCK_LOST_REASON,
+  SERVICE_LOCK_REACQUIRE_ATTEMPTS,
   SERVICE_LOCK_RETENTION_INTERVAL_MS,
 } from "./service-maintenance-lock.js";
 
@@ -52,10 +53,10 @@ const harness = (): Harness => ({
   lost: [], logs: [], roles: [], verifications: 0, releases: 0, cancels: 0, scheduled: [], held: { value: true },
 });
 
-const fakeLock = (state: Harness): HeldMaintenanceLock => ({
+const fakeLock = (state: Harness, backendPid = 4242): HeldMaintenanceLock => ({
   role: "shared",
   schema: "public",
-  backendPid: 4242,
+  backendPid,
   verifyStillHeld: async (): Promise<boolean> => {
     state.verifications += 1;
     return state.held.value;
@@ -65,21 +66,32 @@ const fakeLock = (state: Harness): HeldMaintenanceLock => ({
 
 const hold = (
   state: Harness,
-  overrides: { databaseUrl?: string | undefined; acquisition?: MaintenanceLockAcquisition } = {},
-): ReturnType<typeof holdSharedServiceMaintenanceLock> => holdSharedServiceMaintenanceLock({
-  service: "api",
-  databaseUrl: "databaseUrl" in overrides ? overrides.databaseUrl : URL_WITH_SCHEMA,
-  onLost: (reason) => { state.lost.push(reason); },
-  log: (line) => { state.logs.push(line); },
-  acquire: async (_target, role) => {
-    state.roles.push(role);
-    return overrides.acquisition ?? { ok: true, lock: fakeLock(state) };
-  },
-  schedule: (check, intervalMs) => {
-    state.scheduled.push({ check, intervalMs });
-    return (): void => { state.cancels += 1; };
-  },
-});
+  overrides: {
+    databaseUrl?: string | undefined;
+    acquisition?: MaintenanceLockAcquisition;
+    reacquisitions?: MaintenanceLockAcquisition[];
+  } = {},
+): ReturnType<typeof holdSharedServiceMaintenanceLock> => {
+  let acquisition = 0;
+  return holdSharedServiceMaintenanceLock({
+    service: "api",
+    databaseUrl: "databaseUrl" in overrides ? overrides.databaseUrl : URL_WITH_SCHEMA,
+    onLost: (reason) => { state.lost.push(reason); },
+    log: (line) => { state.logs.push(line); },
+    acquire: async (_target, role) => {
+      state.roles.push(role);
+      const result = acquisition === 0
+        ? (overrides.acquisition ?? { ok: true, lock: fakeLock(state) })
+        : (overrides.reacquisitions?.[acquisition - 1] ?? { ok: true, lock: fakeLock(state, 4242 + acquisition) });
+      acquisition += 1;
+      return result;
+    },
+    schedule: (check, intervalMs) => {
+      state.scheduled.push({ check, intervalMs });
+      return (): void => { state.cancels += 1; };
+    },
+  });
+};
 
 describe("resolveServiceLockTarget", () => {
   it("takes the schema from the URL and never defaults it", () => {
@@ -189,21 +201,38 @@ describe("holdSharedServiceMaintenanceLock", () => {
     assert.equal(state.cancels, 0);
   });
 
-  it("stops the service the first time it cannot prove it still holds the lock", async () => {
+  it("stops when an exclusive maintenance holder refuses recovery", async () => {
     const state = harness();
-    const lock = await hold(state);
+    const lock = await hold(state, {
+      reacquisitions: [{
+        ok: false,
+        reason: "exclusive-maintenance-lock-held-by-another-session",
+        holders: { exclusive: 1, shared: 0, waiting: 0 },
+      }],
+    });
     state.held.value = false;
     assert.equal(await lock.verifyRetention(), false);
     assert.deepEqual(state.lost, [SERVICE_LOCK_LOST_REASON]);
     assert.equal(state.cancels, 1, "the interval stops with the lock it was watching");
-    assert.ok(state.logs.includes("api step=maintenance-lock role=shared result=lost"));
+    assert.ok(state.logs.includes(
+      "api step=maintenance-lock role=shared result=reacquire-strike attempt=1/3 reason=exclusive-maintenance-lock-held-by-another-session",
+    ));
+    assert.ok(state.logs.includes(
+      "api step=maintenance-lock role=shared result=lost reason=exclusive-maintenance-lock-held-by-another-session",
+    ));
   });
 
   it("never reports the loss twice, however often it is asked", async () => {
     // The scheduled check and a shutdown path can both notice; a service that
     // was told to stop twice would run its shutdown twice.
     const state = harness();
-    const lock = await hold(state);
+    const lock = await hold(state, {
+      reacquisitions: [{
+        ok: false,
+        reason: "exclusive-maintenance-lock-held-by-another-session",
+        holders: { exclusive: 1, shared: 0, waiting: 0 },
+      }],
+    });
     state.held.value = false;
     await lock.verifyRetention();
     const afterFirst = state.verifications;
@@ -213,22 +242,107 @@ describe("holdSharedServiceMaintenanceLock", () => {
     assert.equal(state.verifications, afterFirst, "a lock already known lost is not re-queried");
   });
 
-  it("does not retake the lock it lost", async () => {
-    // Retaking races the maintenance session that may already have started. The
-    // supervisor's restart re-enters acquisition, which is where a refusal is
-    // the right answer.
+  it("reacquires shared after a recycled backend without stopping the service", async () => {
     const state = harness();
     const lock = await hold(state);
     state.held.value = false;
-    await lock.verifyRetention();
+    assert.equal(await lock.verifyRetention(), true);
+    assert.equal(lock.backendPid, 4243, "the public handle follows the replacement session");
+    assert.equal(state.releases, 1, "the replacement is held before the stale session is retired");
+    assert.deepEqual(state.roles, ["shared", "shared"]);
+    assert.deepEqual(state.lost, []);
+    assert.ok(state.logs.includes(
+      "api step=maintenance-lock role=shared result=reacquired attempt=1/3 previous_backend_pid=4242 backend_pid=4243",
+    ));
+  });
+
+  it("shares one in-flight retention recovery across overlapping interval ticks", async () => {
+    const state = harness();
+    let answer: ((held: boolean) => void) | undefined;
+    const initial = fakeLock(state);
+    const delayed: HeldMaintenanceLock = {
+      ...initial,
+      verifyStillHeld: async () => {
+        state.verifications += 1;
+        return await new Promise<boolean>((resolve) => { answer = resolve; });
+      },
+    };
+    const lock = await hold(state, { acquisition: { ok: true, lock: delayed } });
+    const first = lock.verifyRetention();
+    const second = lock.verifyRetention();
+    assert.equal(first, second, "overlap must observe the same check and recovery");
+    assert.equal(state.verifications, 1);
+    assert.notEqual(answer, undefined);
+    answer?.(false);
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.deepEqual(state.roles, ["shared", "shared"], "only one replacement session was opened");
+  });
+
+  it("retries only connection-unavailable strikes and recovers within the bound", async () => {
+    const state = harness();
+    const unavailable: MaintenanceLockAcquisition = {
+      ok: false,
+      reason: "lock-connection-unavailable",
+      holders: null,
+    };
+    const lock = await hold(state, {
+      reacquisitions: [unavailable, unavailable, { ok: true, lock: fakeLock(state, 9001) }],
+    });
+    state.held.value = false;
+    assert.equal(await lock.verifyRetention(), true);
+    assert.equal(lock.backendPid, 9001);
+    assert.equal(
+      state.logs.filter((line) => line.includes("result=reacquire-strike")).length,
+      2,
+    );
+    assert.deepEqual(state.lost, []);
+  });
+
+  it("stops after connection-unavailable recovery attempts are exhausted", async () => {
+    const state = harness();
+    const unavailable: MaintenanceLockAcquisition = {
+      ok: false,
+      reason: "lock-connection-unavailable",
+      holders: null,
+    };
+    const lock = await hold(state, {
+      reacquisitions: Array.from({ length: SERVICE_LOCK_REACQUIRE_ATTEMPTS }, () => unavailable),
+    });
+    state.held.value = false;
+    assert.equal(await lock.verifyRetention(), false);
+    assert.equal(state.roles.length, 1 + SERVICE_LOCK_REACQUIRE_ATTEMPTS);
+    assert.equal(
+      state.logs.filter((line) => line.includes("result=reacquire-strike")).length,
+      SERVICE_LOCK_REACQUIRE_ATTEMPTS,
+    );
+    assert.ok(state.logs.includes(
+      "api step=maintenance-lock role=shared result=lost reason=reacquire-attempts-exhausted",
+    ));
+    assert.deepEqual(state.lost, [SERVICE_LOCK_LOST_REASON]);
+  });
+
+  it("does not retry a refusal whose lock state was readable", async () => {
+    const state = harness();
+    const lock = await hold(state, {
+      reacquisitions: [{ ok: false, reason: "lock-not-granted", holders: { exclusive: 0, shared: 0, waiting: 0 } }],
+    });
+    state.held.value = false;
+    assert.equal(await lock.verifyRetention(), false);
+    assert.deepEqual(state.roles, ["shared", "shared"]);
     state.held.value = true;
     assert.equal(await lock.verifyRetention(), false);
-    assert.deepEqual(state.roles, ["shared"], "exactly one acquisition, ever");
+    assert.deepEqual(state.lost, [SERVICE_LOCK_LOST_REASON]);
   });
 
   it("runs the retention check the schedule was given", async () => {
     const state = harness();
-    await hold(state);
+    await hold(state, {
+      reacquisitions: [{
+        ok: false,
+        reason: "exclusive-maintenance-lock-held-by-another-session",
+        holders: { exclusive: 1, shared: 0, waiting: 0 },
+      }],
+    });
     const scheduled = state.scheduled[0];
     assert.ok(scheduled);
     state.held.value = false;

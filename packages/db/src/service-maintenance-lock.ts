@@ -28,10 +28,11 @@
  * connection is not the one the service uses for its own queries. A holder that
  * lost its backend would be a service still serving a database that now looks
  * unattended — the failure mode is silent and it is the dangerous one. So the
- * lock is re-verified on an interval, and a service that cannot prove it still
- * holds the lock stops serving. It does not try to retake it: retaking races
- * the maintenance session that may already have started, and a supervisor
- * restart re-enters this same acquisition with the same refusal.
+ * lock is re-verified on an interval. A failed check opens a replacement
+ * session and asks for the shared lock again without waiting. A concurrent
+ * exclusive holder refuses that request and stops the service; a successful
+ * shared acquisition proves that no exclusive holder is running and restores
+ * the service's claim without turning a recycled backend into a crash loop.
  *
  * The whole module is failure-closed in one direction only — every unknown
  * ends with the service not serving.
@@ -56,6 +57,13 @@ import {
  * the check is invisible next to a poll interval.
  */
 export const SERVICE_LOCK_RETENTION_INTERVAL_MS = 10_000;
+
+/**
+ * A reconnect can fail while PostgreSQL or the local network is recovering.
+ * Retrying only the stable "connection unavailable" refusal gives that event
+ * more than one chance without ever retrying past an observed lock conflict.
+ */
+export const SERVICE_LOCK_REACQUIRE_ATTEMPTS = 3;
 
 /** `EX_TEMPFAIL`: a restart is the right response and will eventually work. */
 export const SERVICE_LOCK_CONTENTION_EXIT_CODE = 75;
@@ -123,12 +131,12 @@ export const resolveServiceLockTarget = (databaseUrl: string | undefined): Servi
 
 export interface HeldServiceMaintenanceLock {
   readonly schema: string;
-  /** The backend that took it; a different one means a different session. */
+  /** The current backend; recovery updates it to the replacement session. */
   readonly backendPid: number;
   /**
-   * Runs one retention check now, returning whether the lock is still held and
-   * firing `onLost` if it is not. The interval calls this; a fixture calls it to
-   * avoid sleeping through one.
+   * Runs one retention check now, recovering a dropped shared session when it
+   * is safe and firing `onLost` if recovery is refused or exhausted. The
+   * interval calls this; a fixture calls it to avoid sleeping through one.
    */
   verifyRetention(): Promise<boolean>;
   /** Releases, stops the interval, and is safe to call more than once. */
@@ -189,23 +197,103 @@ export const holdSharedServiceMaintenanceLock = async (
   if (!acquired.ok) {
     throw new ServiceMaintenanceLockError(options.service, acquired.reason, SERVICE_LOCK_CONTENTION_EXIT_CODE);
   }
-  const lock = acquired.lock;
-  log(`${options.service} step=maintenance-lock role=shared result=acquired schema=${lock.schema}`);
+  const initialLock = acquired.lock;
+  log(`${options.service} step=maintenance-lock role=shared result=acquired schema=${initialLock.schema}`);
 
-  const state = { finished: false, cancel: (): void => undefined };
-  const verifyRetention = async (): Promise<boolean> => {
+  const state: {
+    finished: boolean;
+    cancel: () => void;
+    lock: typeof initialLock;
+    verification: Promise<boolean> | undefined;
+  } = {
+    finished: false,
+    cancel: (): void => undefined,
+    lock: initialLock,
+    verification: undefined,
+  };
+
+  const lose = (reason: string): false => {
     if (state.finished) return false;
-    const held = await lock.verifyStillHeld();
+    state.finished = true;
+    state.cancel();
+    log(`${options.service} step=maintenance-lock role=shared result=lost reason=${reason}`);
+    options.onLost(SERVICE_LOCK_LOST_REASON);
+    return false;
+  };
+
+  const runRetentionCheck = async (): Promise<boolean> => {
+    if (state.finished) return false;
+    const checkedLock = state.lock;
+    let held = false;
+    try {
+      held = await checkedLock.verifyStillHeld();
+    } catch (error: unknown) {
+      const errorName = error instanceof Error ? error.name : "unknown";
+      log(`${options.service} step=maintenance-lock role=shared result=retention-strike reason=verify-error error=${errorName}`);
+    }
     // `finished` is re-read after the await: a release that happened while the
     // server was answering makes this check's answer irrelevant, and reporting
     // a loss then would shut down a service that is already shutting down.
     if (state.finished) return false;
     if (held) return true;
-    state.finished = true;
-    state.cancel();
-    log(`${options.service} step=maintenance-lock role=shared result=lost`);
-    options.onLost(SERVICE_LOCK_LOST_REASON);
-    return false;
+
+    log(`${options.service} step=maintenance-lock role=shared result=retention-miss backend_pid=${checkedLock.backendPid}`);
+    for (let attempt = 1; attempt <= SERVICE_LOCK_REACQUIRE_ATTEMPTS; attempt += 1) {
+      log(
+        `${options.service} step=maintenance-lock role=shared result=reacquire-attempt attempt=${attempt}/${SERVICE_LOCK_REACQUIRE_ATTEMPTS} previous_backend_pid=${checkedLock.backendPid}`,
+      );
+      let replacement: MaintenanceLockAcquisition;
+      try {
+        replacement = await acquire(resolved.target, "shared");
+      } catch (error: unknown) {
+        const errorName = error instanceof Error ? error.name : "unknown";
+        log(
+          `${options.service} step=maintenance-lock role=shared result=reacquire-strike attempt=${attempt}/${SERVICE_LOCK_REACQUIRE_ATTEMPTS} reason=acquire-error error=${errorName}`,
+        );
+        return lose("reacquire-error");
+      }
+
+      if (state.finished) {
+        if (replacement.ok) await replacement.lock.release();
+        return false;
+      }
+      if (replacement.ok) {
+        state.lock = replacement.lock;
+        log(
+          `${options.service} step=maintenance-lock role=shared result=reacquired attempt=${attempt}/${SERVICE_LOCK_REACQUIRE_ATTEMPTS} previous_backend_pid=${checkedLock.backendPid} backend_pid=${replacement.lock.backendPid}`,
+        );
+        // Acquire first, retire second. If the old check was a transient query
+        // error and its backend still held the lock, this order leaves no gap
+        // in which an exclusive holder can enter.
+        try {
+          await checkedLock.release();
+        } catch (error: unknown) {
+          const errorName = error instanceof Error ? error.name : "unknown";
+          log(
+            `${options.service} step=maintenance-lock role=shared result=retire-strike reason=release-error error=${errorName} backend_pid=${checkedLock.backendPid}`,
+          );
+        }
+        return !state.finished;
+      }
+
+      log(
+        `${options.service} step=maintenance-lock role=shared result=reacquire-strike attempt=${attempt}/${SERVICE_LOCK_REACQUIRE_ATTEMPTS} reason=${replacement.reason}`,
+      );
+      if (replacement.reason !== "lock-connection-unavailable") return lose(replacement.reason);
+    }
+    return lose("reacquire-attempts-exhausted");
+  };
+
+  const verifyRetention = (): Promise<boolean> => {
+    if (state.finished) return Promise.resolve(false);
+    if (state.verification !== undefined) return state.verification;
+    const verification = runRetentionCheck();
+    state.verification = verification;
+    const clear = (): void => {
+      if (state.verification === verification) state.verification = undefined;
+    };
+    void verification.then(clear, clear);
+    return verification;
   };
 
   state.cancel = (options.schedule ?? defaultSchedule)(
@@ -214,14 +302,14 @@ export const holdSharedServiceMaintenanceLock = async (
   );
 
   return {
-    schema: lock.schema,
-    backendPid: lock.backendPid,
+    schema: initialLock.schema,
+    get backendPid(): number { return state.lock.backendPid; },
     verifyRetention,
     release: async (): Promise<void> => {
       const alreadyFinished = state.finished;
       state.finished = true;
       state.cancel();
-      await lock.release();
+      await state.lock.release();
       if (!alreadyFinished) log(`${options.service} step=maintenance-lock role=shared result=released`);
     },
   };

@@ -151,6 +151,33 @@ const exited = (child: ChildProcess, timeoutMs = 60_000): Promise<number | null>
   child.once("exit", (code) => { clearTimeout(deadline); resolve(code); });
 });
 
+const terminateSharedBackend = async (target: { url: string; schema: string }): Promise<number> => {
+  const executioner = await prismaMaintenanceLockSession(target.url);
+  assert.notEqual(executioner, null);
+  if (executioner === null) throw new Error("executioner-lock-session-unavailable");
+  try {
+    const rows = await executioner.query<{ pid: number }>(`
+      SELECT pid::int4 AS pid FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+        AND objid = (hashtext($1::text) & 2147483647)::oid
+        AND objsubid = 2
+        AND granted
+        AND mode = 'ShareLock'
+    `, [target.schema]);
+    assert.equal(rows?.length, 1);
+    const pid = Number(rows?.[0]?.pid);
+    const terminated = await executioner.query<{ terminated: boolean }>(
+      "SELECT pg_terminate_backend($1::int4) AS terminated",
+      [pid],
+    );
+    assert.equal(terminated?.[0]?.terminated, true);
+    return pid;
+  } finally {
+    await executioner.close();
+  }
+};
+
 describe("the shipped runner and the shared lock", () => {
   it("holds one shared lock while it polls, and a migration is refused for as long as it does", async () => {
     const target = targetFor("polling");
@@ -212,32 +239,41 @@ describe("the shipped runner and the shared lock", () => {
     assert.match(runner.output.value, /AgentOS runner startup refused: database-url-schema-unnamed/u);
   });
 
-  it("stops when its lock backend is terminated underneath it", async () => {
-    const target = targetFor("terminated");
+  it("reacquires shared when its lock backend is terminated without maintenance", async () => {
+    const target = targetFor("terminated-recover");
     const runner = await spawnRunner(target.url);
     await waitForOutput(runner.child, /AgentOS local runner .* polling/u, runner.output);
 
-    const executioner = await prismaMaintenanceLockSession(target.url);
-    assert.notEqual(executioner, null);
-    if (executioner === null) return;
-    try {
-      const rows = await executioner.query<{ pid: number }>(`
-        SELECT pid::int4 AS pid FROM pg_locks
-        WHERE locktype = 'advisory'
-          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
-          AND objid = (hashtext($1::text) & 2147483647)::oid
-          AND objsubid = 2
-          AND granted
-          AND mode = 'ShareLock'
-      `, [target.schema]);
-      assert.equal(rows?.length, 1);
-      await executioner.query("SELECT pg_terminate_backend($1::int4) AS terminated", [Number(rows?.[0]?.pid)]);
-    } finally {
-      await executioner.close();
-    }
+    const oldPid = await terminateSharedBackend(target);
+    await waitForOutput(runner.child, /result=reacquired/u, runner.output);
+    assert.equal(runner.child.exitCode, null, runner.output.value);
+    assert.match(runner.output.value, new RegExp(`previous_backend_pid=${oldPid} backend_pid=\\d+`, "u"));
+    assert.deepEqual(await inspectMaintenanceLock(target, prismaMaintenanceLockSession), {
+      exclusive: 0, shared: 1, waiting: 0,
+    });
+    const maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
+    assert.equal(maintenance.ok, false);
+    assert.equal(maintenance.ok ? "" : maintenance.reason, "shared-service-lock-held-by-an-active-service");
 
-    // The retention check is what notices; nothing else in the runner would.
-    await waitForOutput(runner.child, /Shared maintenance lock lost/u, runner.output);
-    assert.equal(await exited(runner.child), SERVICE_LOCK_CONTENTION_EXIT_CODE);
+    runner.child.kill("SIGTERM");
+    assert.equal(await exited(runner.child), 0);
+  });
+
+  it("stops when maintenance acquires exclusively after the shared backend is lost", async () => {
+    const target = targetFor("terminated-maintenance");
+    const runner = await spawnRunner(target.url);
+    await waitForOutput(runner.child, /AgentOS local runner .* polling/u, runner.output);
+
+    await terminateSharedBackend(target);
+    const maintenance = await acquireMaintenanceLock(target, "exclusive", prismaMaintenanceLockSession);
+    assert.equal(maintenance.ok, true, JSON.stringify(maintenance));
+    if (!maintenance.ok) return;
+    try {
+      await waitForOutput(runner.child, /result=reacquire-strike .*reason=exclusive-maintenance-lock-held-by-another-session/u, runner.output);
+      await waitForOutput(runner.child, /Shared maintenance lock lost/u, runner.output);
+      assert.equal(await exited(runner.child), SERVICE_LOCK_CONTENTION_EXIT_CODE);
+    } finally {
+      await maintenance.lock.release();
+    }
   });
 });
