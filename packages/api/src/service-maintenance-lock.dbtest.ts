@@ -128,12 +128,11 @@ test("api shared maintenance lock real-process acceptance", {
   await Promise.all([mkdir(workspace), mkdir(files), mkdir(state, { mode: 0o700 })]);
   const common = {
     ...process.env,
-    ...spawnedStartupEnvironment(),
+    ...spawnedStartupEnvironment({ DATABASE_URL: source.url }),
     SCHEDULER_POLL_INTERVAL_MS: "0",
     RUNNER_WORKSPACE_ROOT: workspace,
     FILES_ROOT: files,
     CONTROL_PLANE_STATE_DIR: state,
-    DATABASE_URL: source.url,
   };
 
   await t.test("nothing holds the key before a service starts", async () => {

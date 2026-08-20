@@ -13,9 +13,16 @@
  *
  * - `DATABASE_URL` is the caller's, because only the caller knows whether this
  *   process should reach a scratch database or an address nothing answers on.
- * - `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` are cleared. Startup
- *   validation cross-checks them against `DATABASE_URL`, and a scratch database
- *   name never matches whatever an operator happens to export.
+ * - `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD` follow the caller's
+ *   `DATABASE_URL` rather than the shell. Startup validation cross-checks them
+ *   against `DATABASE_URL`, and clearing them is not enough: the entrypoint
+ *   itself loads the repository's `.env` (index.ts), which would refill the
+ *   cleared variables with the operator's values and fail the cross-check
+ *   before the behaviour under test is ever reached. dotenv never overwrites a
+ *   variable that is already set, so deriving matching values from the caller's
+ *   URL pins all three. Without a `DATABASE_URL` they are cleared as before.
+ *   The derived values are judged like any deployment's, which means a scratch
+ *   database's password has to satisfy the startup secret floor.
  * - `MERGE_EXECUTOR_TOKEN` and `SESSION_COOKIE_SECRET` are cleared for the same
  *   reason: an inherited value would be judged here, and it is not what any of
  *   these tests are about.
@@ -29,6 +36,18 @@
 export const SPAWNED_OPERATOR_TOKEN = "spawned-fixture-operator-token-000000";
 export const SPAWNED_RUNNER_TOKEN = "spawned-fixture-runner-token-000000";
 
+const postgresVariablesFor = (databaseUrl: string | undefined): NodeJS.ProcessEnv => {
+  if (databaseUrl === undefined) {
+    return { POSTGRES_DB: undefined, POSTGRES_USER: undefined, POSTGRES_PASSWORD: undefined };
+  }
+  const parsed = new URL(databaseUrl);
+  return {
+    POSTGRES_DB: decodeURIComponent(parsed.pathname.replace(/^\//u, "")),
+    POSTGRES_USER: decodeURIComponent(parsed.username),
+    POSTGRES_PASSWORD: decodeURIComponent(parsed.password),
+  };
+};
+
 export const spawnedStartupEnvironment = (overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   API_HOST: "127.0.0.1",
   // Ephemeral on purpose: no test process may take the operator's port 3000.
@@ -38,8 +57,6 @@ export const spawnedStartupEnvironment = (overrides: NodeJS.ProcessEnv = {}): No
   AGENTOS_SECRET_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
   MERGE_EXECUTOR_TOKEN: undefined,
   SESSION_COOKIE_SECRET: undefined,
-  POSTGRES_DB: undefined,
-  POSTGRES_USER: undefined,
-  POSTGRES_PASSWORD: undefined,
+  ...postgresVariablesFor(overrides.DATABASE_URL),
   ...overrides,
 });

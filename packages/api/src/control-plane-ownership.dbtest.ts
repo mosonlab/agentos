@@ -176,15 +176,18 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await Promise.all([mkdir(workspace), mkdir(physicalFiles), mkdir(state, { mode: 0o700 })]);
   await symlink(physicalFiles, files);
   await chmod(state, 0o700);
-  const common = {
+  // Each spawn names its own database, and the POSTGRES_* cross-check values
+  // have to be derived from that exact URL (see test-startup-environment.ts),
+  // so the shared part is a function of the URL rather than one frozen object.
+  const common = (databaseUrl: string): NodeJS.ProcessEnv => ({
     ...process.env,
-    ...spawnedStartupEnvironment(),
+    ...spawnedStartupEnvironment({ DATABASE_URL: databaseUrl }),
     SCHEDULER_POLL_INTERVAL_MS: "0",
     RUNNER_WORKSPACE_ROOT: workspace,
     FILES_ROOT: files,
     CONTROL_PLANE_STATE_DIR: state,
-  };
-  const owner = spawnApi({ ...common, DATABASE_URL: source.url });
+  });
+  const owner = spawnApi(common(source.url));
   children.add(owner.child);
   const ready = await waitFor(owner.child, /AgentOS API listening/u, owner.output);
   assert.match(ready, /CONTROL_PLANE_OWNERSHIP_ACQUIRED[\s\S]*Startup reconciliation:[\s\S]*AgentOS API listening/u);
@@ -246,8 +249,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await mkdir(aliasParent);
   await symlink(workspace, join(aliasParent, "root"));
   const sameDbLoser = spawnApi({
-    ...common,
-    DATABASE_URL: source.url,
+    ...common(source.url),
     RUNNER_WORKSPACE_ROOT: join(aliasParent, "unused", "..", "root"),
   });
   children.add(sameDbLoser.child);
@@ -264,7 +266,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   const copiedDbSentinel = await insertExpiredRunSentinel(copyDb, "copied-db", orphan);
   const beforeMigrations = await copyDb.$queryRaw<Array<{ count: bigint }>>`SELECT count(*)::bigint AS count FROM "_prisma_migrations"`;
   await copyDb.$disconnect();
-  const copiedDbLoser = spawnApi({ ...common, DATABASE_URL: copy.url });
+  const copiedDbLoser = spawnApi(common(copy.url));
   children.add(copiedDbLoser.child);
   await waitFor(copiedDbLoser.child, /CONTROL_PLANE_OWNERSHIP_CONFLICT/u, copiedDbLoser.output);
   assert.equal((await exited(copiedDbLoser.child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
@@ -283,8 +285,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await Promise.all([mkdir(secondRoot), mkdir(secondState, { mode: 0o700 })]);
   await chmod(secondState, 0o700);
   const addressLoser = spawnApi({
-    ...common,
-    DATABASE_URL: copy.url,
+    ...common(copy.url),
     API_PORT: String(listenPort),
     RUNNER_WORKSPACE_ROOT: secondRoot,
     CONTROL_PLANE_STATE_DIR: secondState,
@@ -313,8 +314,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await databaseLockHeld;
   const signalApplicationName = "cp-a-signal-success";
   const signaledDuringReconciliation = spawnApi({
-    ...common,
-    DATABASE_URL: withApplicationName(copy.url, signalApplicationName),
+    ...common(withApplicationName(copy.url, signalApplicationName)),
     RUNNER_WORKSPACE_ROOT: signalRoot,
     CONTROL_PLANE_STATE_DIR: signalState,
   });
@@ -354,8 +354,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await failureLockHeld;
   const failureApplicationName = "cp-a-signal-failure";
   const signalThenFailure = spawnApi({
-    ...common,
-    DATABASE_URL: withApplicationName(copy.url, failureApplicationName),
+    ...common(withApplicationName(copy.url, failureApplicationName)),
     RUNNER_WORKSPACE_ROOT: failingSignalRoot,
     CONTROL_PLANE_STATE_DIR: failingSignalState,
   });
@@ -391,8 +390,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   await Promise.all([mkdir(recoveryRoot), mkdir(recoveryFiles), mkdir(recoveryState, { mode: 0o700 })]);
   await chmod(recoveryState, 0o700);
   const recoveryOwner = spawnApi({
-    ...common,
-    DATABASE_URL: copy.url,
+    ...common(copy.url),
     RUNNER_WORKSPACE_ROOT: recoveryRoot,
     FILES_ROOT: recoveryFiles,
     CONTROL_PLANE_STATE_DIR: recoveryState,
@@ -418,8 +416,7 @@ test("workspace-root ownership real-process database acceptance", { skip: !safeE
   assert.equal(crashedOwner.incarnationId, priorAcquired.incarnationId);
 
   const recoverySuccessor = spawnApi({
-    ...common,
-    DATABASE_URL: copy.url,
+    ...common(copy.url),
     RUNNER_WORKSPACE_ROOT: recoveryRoot,
     FILES_ROOT: recoveryFiles,
     CONTROL_PLANE_STATE_DIR: recoveryState,
