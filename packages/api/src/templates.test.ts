@@ -1,36 +1,70 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AssigneeType, Prisma, RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
+import {
+  AssigneeType,
+  CANONICAL_AGENT_DEFAULTS,
+  CANONICAL_TEMPLATE_STEPS,
+  executionModeFor,
+  INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_SENTINEL_MODEL,
+  Prisma,
+  RunnerKind,
+  RunnerPreference,
+  type PrismaClient,
+} from "@agentos/db";
 
 import { instantiateTemplate } from "./templates.js";
 
-test("instantiating the feature template creates a nine-task chain and queues only step one", async () => {
+test("instantiating the canonical feature template creates ten tasks including the mechanical integrator", async () => {
   const created: Array<Record<string, any>> = [];
   const runs: Array<Record<string, any>> = [];
-  const agent = {
-    id: "agent-1", name: "worker", model: "codex", runnerPreference: RunnerPreference.CODEX,
-    foundationalPrompt: "foundation", rolePrompt: "role",
-  };
-  const steps = Array.from({ length: 9 }, (_, offset) => ({
-    id: `step-${offset + 1}`,
-    stepIndex: offset + 1,
-    name: `Step ${offset + 1}`,
-    prompt: `Work on {{branchName}} step ${offset + 1}`,
-    outputKind: offset === 0 ? "spec" : "result",
-    attachmentsFromPrevious: offset > 0,
-    assigneeType: offset === 8 ? AssigneeType.HUMAN : AssigneeType.AGENT,
-    assigneeAgentId: offset === 8 ? null : agent.id,
-    assigneeAgent: offset === 8 ? null : agent,
-    approvalGate: [0, 3, 8].includes(offset),
-    runner: offset < 2 ? RunnerKind.CLAUDE : RunnerKind.CODEX,
-  }));
+  const agents = new Map(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
+    id: `agent-${index + 1}`,
+    name: contract.name,
+    model: contract.model,
+    runnerPreference: contract.runner,
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  }]));
+  const steps = CANONICAL_TEMPLATE_STEPS.map((contract) => {
+    const agent = contract.agentName ? agents.get(contract.agentName)! : null;
+    return {
+      id: `step-${contract.stepIndex}`,
+      stepIndex: contract.stepIndex,
+      name: `Step ${contract.stepIndex}`,
+      prompt: `Work on {{branchName}} step ${contract.stepIndex}`,
+      outputKind: contract.outputKind,
+      attachmentsFromPrevious: contract.stepIndex > 1,
+      assigneeType: agent ? AssigneeType.AGENT : AssigneeType.HUMAN,
+      assigneeAgentId: agent?.id ?? null,
+      assigneeAgent: agent,
+      approvalGate: contract.approvalGate,
+      opensPullRequest: contract.opensPullRequest,
+      runner: null,
+      taskTemplate: { name: "compound-engineer-workflow" },
+    };
+  });
   const tx = {
-    // The Agent-row mutex instantiation takes before it writes the chain.
-    $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
+    // The Agent-row mutex and each exact Repo-grant mutex are acquired before
+    // the first task write. Returning both row shapes lets the shared lock
+    // helpers exercise their normal paths.
+    $queryRaw: async () => [...agents.values()].map((agent) => ({
+      id: agent.id, archivedAt: null, agentId: agent.id, repoId: "repo-1",
+    })),
     task: {
       create: async ({ data }: { data: Record<string, any> }) => {
-        const task = { id: `task-${created.length + 1}`, ...data, followUpTaskId: null, assigneeAgent: data.assigneeAgentId ? agent : null, repo: { id: "repo-1", defaultBranch: "main" }, templateStep: steps[created.length], runs: [] };
+        const task = {
+          id: `task-${created.length + 1}`,
+          ...data,
+          followUpTaskId: null,
+          assigneeAgent: data.assigneeAgentId
+            ? [...agents.values()].find((agent) => agent.id === data.assigneeAgentId)
+            : null,
+          repo: { id: "repo-1", defaultBranch: "main" },
+          templateStep: steps[created.length],
+          runs: [],
+        };
         created.push(task);
         return task;
       },
@@ -40,39 +74,66 @@ test("instantiating the feature template creates a nine-task chain and queues on
         return task;
       },
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => created.find((item) => item.id === where.id),
-      // `enqueueTaskRun` asks whether the task it is about to queue is a chain's
-      // step-10 task sitting in a recorded stop (§D-P7). A nine-step chain's
-      // steps have no integrator step, so the answer is no — but it is asked.
       findUnique: async ({ where }: { where: { id: string } }) => created.find((item) => item.id === where.id) ?? null,
     },
     run: {
       create: async ({ data }: { data: Record<string, any> }) => { const run = { id: "run-1", ...data }; runs.push(run); return run; },
       update: async ({ data }: { data: Record<string, any> }) => { Object.assign(runs[0]!, data); return runs[0]; },
     },
-    taskActivity: { createMany: async () => ({ count: 9 }) },
-    // §D-P4 resolves the queued task's step to check the (agent, step) binding.
-    // None of these nine is an integrator step, so every answer is "valid".
+    taskActivity: { createMany: async () => ({ count: 10 }) },
     taskTemplateStep: {
       findUnique: async ({ where }: { where: { id: string } }) => steps.find((step) => step.id === where.id) ?? null,
     },
+    agentRepoAccess: { count: async () => 1 },
   };
   const db = {
-    taskTemplate: { findFirst: async () => ({ id: "template-1", variables: ["branchName"], steps }) },
+    taskTemplate: { findFirst: async () => ({ id: "template-1", name: "compound-engineer-workflow", variables: ["branchName"], steps }) },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
-    agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
+    agentRepoAccess: { findFirst: async () => ({ agentId: "granted-agent" }) },
     $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
   const result = await instantiateTemplate(db, "project-1", "template-1", {
-    repoId: "repo-1", variables: { branchName: "feature/nine-steps" }, description: "Build it",
+    repoId: "repo-1", variables: { branchName: "feature/ten-steps" }, description: "Build it",
   });
-  assert.equal(result.tasks.length, 9);
+  assert.equal(result.tasks.length, 10);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
   assert.equal(created[0]!.followUpTaskId, "task-2");
   assert.equal(created[8]!.assigneeType, AssigneeType.HUMAN);
-  assert.deepEqual(created.map((task) => task.approvalGate), [true, false, false, true, false, false, false, false, true]);
+  assert.equal(created[9]!.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
+  assert.equal(created[9]!.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
+  assert.equal(created[9]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
+  assert.equal(created[9]!.opensPullRequest, false);
+  assert.equal(executionModeFor(created[9]!.templateStep), "mechanical");
+  assert.deepEqual(created.map((task) => task.outputKind ?? task.templateStep.outputKind), CANONICAL_TEMPLATE_STEPS.map((step) => step.outputKind));
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runner, RunnerKind.CLAUDE);
-  assert.equal(runs[0]!.branch, "feature/nine-steps");
+  assert.equal(runs[0]!.branch, "feature/ten-steps");
+  assert.equal(runs.some((run) => run.taskId === created[9]!.id), false, "step 10 waits for the human gate and never queues a model at instantiation");
+});
+
+test("the lower-level materializer rejects blank variables and invalid branches before a transaction", async () => {
+  const db = {
+    taskTemplate: { findFirst: async () => ({
+      id: "template-1",
+      name: "Template",
+      variables: ["branchName"],
+      steps: [{
+        id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
+        outputKind: "result", attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+        assigneeAgentId: "agent-1", assigneeAgent: { id: "agent-1", name: "Agent", archivedAt: null },
+        approvalGate: false, opensPullRequest: true, runner: null,
+      }],
+    }) },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    $transaction: async () => { throw new Error("transaction must not start"); },
+  } as unknown as PrismaClient;
+  for (const branchName of ["", "   ", "bad..branch", "refs/heads/main", "feature/.hidden", "feature/main.lock", "bad\nbranch"]) {
+    await assert.rejects(
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName } }),
+      /Missing template variables|Invalid template branch name/,
+      branchName,
+    );
+  }
 });
 
 test("an agent archived after the step check still loses to the locked re-read", async () => {

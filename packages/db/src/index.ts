@@ -21,4 +21,5 @@ export * from "./usage.js";
 export * from "./task-source.js";
 export * from "./failure-envelope.js";
 export * from "./agent-sources.js";
+export * from "./agent-contract.js";
 export * from "./verify-starter-onboarding.js";

@@ -24,10 +24,9 @@ test("payload mapping resolves dot paths, stringifies scalars, and falls back to
   });
 });
 
-test("payload mapping preserves empty strings and magic variable names as own properties", () => {
+test("payload mapping rejects empty strings and preserves magic variable names as own properties", () => {
   const empty = resolvePayloadVariables({ variables: ["ticket"], webhookPayloadMapping: { map: { ticket: "issue.title" } } } as any, { issue: { title: "" } });
-  assert.ok("variables" in empty);
-  assert.equal(empty.variables.ticket, "");
+  assert.deepEqual(empty, { unresolved: ["ticket"] });
   const magic = resolvePayloadVariables({ variables: ["__proto__"], webhookPayloadMapping: { map: JSON.parse('{"__proto__":"value"}') } } as any, { value: "safe" });
   assert.ok("variables" in magic);
   assert.equal(Object.getPrototypeOf(magic.variables), null);
