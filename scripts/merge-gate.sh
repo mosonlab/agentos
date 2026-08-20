@@ -535,10 +535,6 @@ parallel_unit_tests() {
   run_workspace_script_parallel test 1
 }
 
-run_workspace_script_parallel_typecheck() {
-  run_workspace_script_parallel typecheck
-}
-
 verify_build_only_lifecycle_hooks() {
   local hook="$1"
   node -e '
@@ -947,16 +943,14 @@ step "npm ci" install_dependencies
 step "release documentation executable contract" npm run test:release-docs
 step "templates release-demo harness" npm run test:demo-templates
 step "prisma generate" npm run db:generate
+step "typecheck (all workspaces)" run_workspace_script_parallel typecheck
 # The minimum lint gate (#143): Biome's opt-in safety rules, then the one
 # type-aware rule (no-floating-promises) through typescript-eslint. Both are
 # npm dependencies and nothing here shells out, so the remote gate worker runs
-# it unchanged. Typecheck and lint are read-only and both must finish green;
-# running them together changes only which diagnostic arrives first on a red
-# tree. Both finish before build, and formatting is deliberately not checked —
-# see biome.jsonc.
-parallel_two_steps \
-  "typecheck (all workspaces)" run_workspace_script_parallel_typecheck \
-  "lint (biome + type-aware no-floating-promises)" parallel_lint
+# it unchanged. It sits after typecheck because both processes saturate the same
+# cores and concurrent eslint was slower than letting typecheck finish first.
+# Formatting is deliberately not checked — see biome.jsonc.
+step "lint (biome + type-aware no-floating-promises)" parallel_lint
 # apps/web's CSS regression test reads the built stylesheet out of apps/web/dist,
 # and the dbtests spawn the real API out of packages/api/dist.
 step "build (all workspaces)" build_all
