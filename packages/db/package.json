@@ -42,6 +42,7 @@
     "db:verify-agent-template": "dotenv -e ../../.env -- tsx prisma/verify-agent-template.ts",
     "db:validate": "dotenv -e ../../.env -- prisma validate",
     "db:seed": "dotenv -e ../../.env -- prisma db seed",
+    "db:sync-canonical-prompts": "tsx prisma/sync-canonical-prompts.ts",
     "db:fixture": "dotenv -e ../../.env -- tsx prisma/acceptance-fixture.ts",
     "snapshot:authority": "node --import tsx prisma/write-release-authority.ts",
     "snapshot:authority-keygen": "node --import tsx prisma/keygen-release-authority.ts"
