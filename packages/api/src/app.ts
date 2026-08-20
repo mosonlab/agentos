@@ -1166,7 +1166,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.body(null, 204);
   });
 
-  // §D-P4. The sentinel Agent row exists so step 10 can carry a non-null
+  // §D-P4. The sentinel Agent row exists so step 12 can carry a non-null
   // `Run.agentId`; it is not something an operator may assign. It is returned
   // rather than hidden so an operator can still see that it exists and read its
   // role prompt, but `assignable: false` is what the pickers filter on — and
@@ -2697,7 +2697,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           assigneeAgent: true,
           // The template name travels with the step because §D-P4's predicate
           // needs all four facts; a stepIndex and an outputKind alone collide
-          // with any other ten-step template.
+          // with any other template that uses the same step index.
           templateStep: { include: { taskTemplate: { select: { name: true } } } },
           repo: true,
           runs: { orderBy: { runNumber: "desc" }, take: 1 },
@@ -3355,7 +3355,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           continue;
         }
         // §D-P4. A candidate whose (agent, step) binding is invalid is *skipped*,
-        // not claimed: a mis-bound step-10 row must never be handed to anything,
+        // not claimed: a mis-bound step-12 row must never be handed to anything,
         // and the sentinel Agent on an ordinary step must never reach an adapter.
         if (integratorBindingRefusal(candidate.agent.name, candidate.task.templateStep)) continue;
         const executionMode = executionModeFor(candidate.task.templateStep);
@@ -3786,7 +3786,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       select: {
         taskId: true,
         runnerId: true,
-        // §4.0. The step-10 output is the only evidence the chain has that a
+        // §4.0. The step-12 output is the only evidence the chain has that a
         // merge happened, so writing one is bound to the executor identity as
         // well as to the session token: a session issued to anything but an
         // allowlisted merge executor cannot author a `merge-result`, and the
@@ -3943,7 +3943,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
         include: {
-          // §D-P5. The step's template name is part of the step-10 identity, so
+          // §D-P5. The step's template name is part of the step-12 identity, so
           // the completion route has to read it rather than the step alone.
           task: { include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: { select: { defaultBranch: true } } } },
           session: true,
@@ -4135,7 +4135,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
         // §4.0 outcome branching. The executor's own fenced write is the only
-        // writer of a step-10 output: neither synthesis nor the metadata update
+        // writer of a step-12 output: neither synthesis nor the metadata update
         // may touch it, because a synthesized body would read as a merge that
         // never happened.
         if (succeeded && mechanical && run.task) {

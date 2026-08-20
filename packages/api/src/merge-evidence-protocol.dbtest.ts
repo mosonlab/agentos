@@ -76,8 +76,8 @@ test("Phase A opens a card that says nothing yet, withholds it from the outbox, 
   assert.equal(metadata.purpose, "gate");
 });
 
-test("an ordinary nine-step gate is untouched by the protocol", async () => {
-  const chain = await seedIntegratorChain(db, { label: "nine-step", tenStep: false });
+test("an ordinary gate without a mechanical successor is untouched by the protocol", async () => {
+  const chain = await seedIntegratorChain(db, { label: "ordinary-gate", withIntegrator: false });
   const card = await openGate(chain);
   assert.notEqual(card.body, EVIDENCE_PLACEHOLDER_BODY);
   assert.equal(

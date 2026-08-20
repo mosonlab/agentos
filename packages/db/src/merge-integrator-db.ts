@@ -21,6 +21,7 @@ import {
 import {
   EVIDENCE_PLACEHOLDER_BODY,
   INTEGRATOR_OUTPUT_KIND,
+  INTEGRATOR_STEP_INDEX,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   FOLLOW_UP_CHOICES,
@@ -58,14 +59,14 @@ const INTEGRATOR_INCLUDE = { templateStep: { include: { taskTemplate: { select: 
 
 export type IntegratorTask = Prisma.TaskGetPayload<{ include: typeof INTEGRATOR_INCLUDE }>;
 
-/** True when this task row *is* the chain's step-10 task. */
+/** True when this task row *is* the chain's step-12 task. */
 export const taskIsIntegratorStep = (task: IntegratorTask | null | undefined): boolean =>
   isIntegratorStep(task?.templateStep ?? null);
 
 export const loadIntegratorTask = async (tx: Tx, taskId: string): Promise<IntegratorTask | null> =>
   tx.task.findUnique({ where: { id: taskId }, include: INTEGRATOR_INCLUDE });
 
-/** The chain's step-10 task, or null for an ordinary nine-step chain. */
+/** The chain's step-12 task, or null when the chain has no mechanical continuation. */
 export const findChainIntegratorTask = async (
   tx: Tx,
   projectId: string,
@@ -82,7 +83,7 @@ export const findChainIntegratorTask = async (
 
 /**
  * Does the successor of this gate task run mechanically? This is what turns the
- * two-phase evidence protocol on: an ordinary nine-step chain's gate is
+ * two-phase evidence protocol on: an ordinary gate without that successor is
  * byte-for-byte unchanged.
  */
 export const gateFeedsIntegratorStep = async (
@@ -628,15 +629,15 @@ export const applyStopAnswer = async (
     taskId: task.id,
     actorType: "control-plane",
     body: abandoned
-      ? `Chain abandoned; step 10 closed without a merge (${condition})`
-      : `Chain complete; step 10 closed by operator decision (${condition})`,
+      ? `Chain abandoned; step ${INTEGRATOR_STEP_INDEX} closed without a merge (${condition})`
+      : `Chain complete; step ${INTEGRATOR_STEP_INDEX} closed by operator decision (${condition})`,
   } });
   return outcome;
 };
 
 /**
  * The confirmation card a renewal or a repair asks for. It is a real gate card
- * on the step-9 task, so it travels the identical production path — the same
+ * on the step-11 task, so it travels the identical production path — the same
  * worker fills it and the same transaction reads it back.
  */
 export const requestConfirmationCard = async (

@@ -924,7 +924,12 @@ test("GET /tasks reports the same chainProgress on every card of a chain", async
     assert.equal(task.chainProgress.done, 1);
     assert.equal(task.chainProgress.chainId, chain.chainId);
   }
-  assert.deepEqual(body.map((task: any) => task.chainProgress.position), [1, 2, 3]);
+  // GET /tasks is ordered by creation time, not by chain position. Template
+  // tasks may share one PostgreSQL timestamp, so bind each position to the task
+  // identity instead of treating an otherwise unspecified tie order as API
+  // semantics.
+  const positionByTask = new Map(body.map((task: any) => [task.id, task.chainProgress.position]));
+  assert.deepEqual(chain.tasks.map((task) => positionByTask.get(task.id)), [1, 2, 3]);
 });
 
 test("GET /tasks counts archived chain rows toward progress but omits them from the board", async () => {

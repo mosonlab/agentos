@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   AssigneeType,
+  canonicalIntegratorBindingRefusal,
   enqueueTaskRun,
-  integratorBindingRefusal,
   lockAgentRepoGrant,
   lockAgentRows,
   Prisma,
@@ -86,7 +86,7 @@ export const instantiateTemplate = async (
     // an ordinary step, or a model agent on the integrator step — fails
     // instantiation rather than materializing a chain that would later claim as
     // the wrong execution mode.
-    const bindingRefusal = integratorBindingRefusal(step.assigneeAgent?.name ?? null, {
+    const bindingRefusal = canonicalIntegratorBindingRefusal(step.assigneeAgent?.name ?? null, {
       stepIndex: step.stepIndex,
       outputKind: step.outputKind,
       taskTemplateName: template.name,

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
@@ -15,13 +18,30 @@ import { preKernelRun, preKernelSeed, stageAtPreviousMigration } from "./goal-ex
  */
 
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
+const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const isolatedCheckout = mkdtempSync(join(tmpdir(), "agentos-public-lineage-"));
+const currentBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
+  cwd: repositoryRoot,
+  encoding: "utf8",
+}).trim();
+
+// Linked worktrees can share private objects with this public lineage. Clone
+// only the current branch so the preflight sees the history a standalone public
+// clone sees, without weakening the production authority checks.
+execFileSync("git", [
+  "clone", "--quiet", "--no-local", "--no-checkout", "--single-branch",
+  "--branch", currentBranch, repositoryRoot, isolatedCheckout,
+]);
 // The authority the recorded revalidation names; the preflight refuses to pass
 // without them, so these are the real values, not placeholders.
 const MASTER_SHA = "485fb118db96e3977006a2edc866a38b751ff0e2";
 const CONTROL_PLANE_A_SHA = "c671439831b075568420b92f4494227fa7fc392b";
 
 let fixture: ReturnType<typeof stageAtPreviousMigration>;
-after(() => fixture?.cleanup());
+after(() => {
+  fixture?.cleanup();
+  rmSync(isolatedCheckout, { recursive: true, force: true });
+});
 
 const stage = (rows: string[]): void => {
   fixture?.cleanup();
@@ -37,6 +57,8 @@ const runPreflight = (environment: Record<string, string | undefined> = {}): Pre
     DATABASE_URL: fixture.url,
     GOAL5A0_MASTER_SHA: MASTER_SHA,
     GOAL5A0_CONTROL_PLANE_A_SHA: CONTROL_PLANE_A_SHA,
+    GIT_DIR: join(isolatedCheckout, ".git"),
+    GIT_WORK_TREE: repositoryRoot,
     PATH: `${dbDirectory}/node_modules/.bin:${process.env.PATH ?? ""}`,
     ...environment,
   } as NodeJS.ProcessEnv;
