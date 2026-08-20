@@ -9,6 +9,11 @@
 > 支持范围与各自的证据边界见
 > [`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md)。
 
+> **裸机执行警告。** AgentOS 会用非交互式 permission bypass 启动 coding CLI。
+> 默认安装下，CLI 以你的 macOS 用户身份、在 application sandbox 之外运行，拥有该
+> 用户的文件系统与网络权限。AgentOS grant 约束的是 AgentOS API，不构成 host
+> containment。只应使用可丢弃仓库，以及你愿意让 agent 修改的机器和账号。
+
 AgentOS 是面向单一操作者的本地控制平面，用于把有明确权限范围的软件任务交给
 编码 agent，并让工作过程可观察、结果可持久化。它把任务、agent、仓库与文件
 授权、独立的运行记录、provider 事件流、人工提问、评审关卡和 git 交付串成一个
@@ -60,15 +65,17 @@ Provider CLI、账号、认证、订阅、用量、速率限制、模型和 prov
 
 ## 本地启动
 
-Developer Preview 只面向一个平台：Apple Silicon Mac。你需要
+Developer Preview 只面向一个平台：Apple Silicon Mac。本版本应使用 `.nvmrc`
+记录的 Node.js `22.17.0`；顶层检查接受的更宽范围并没有被每个锁定的开发依赖覆盖。
+此外还需要
 
-- Node.js 满足 `^20.19.0 || >=22.12.0`——根 `engines.node`、`package-lock.json`
-  与 `npm run setup:local` 携带的是同一个范围，范围之外的 Node 会被拒绝而不是仅
-  仅告警——以及 npm 10.9.2 或更高，也就是生成这份 lockfile 的那个 npm；
+- npm 10.9.2 或更高；
 - Docker 与 Docker Compose，用于仓库内定义的 PostgreSQL 服务；
 - Git；
 - **已安装且已登录**的官方 Codex CLI，位于将要运行 AgentOS runner 的同一个 macOS
-  账号下。
+  账号下；
+- 如果希望 AgentOS 自动创建 pull request，还需在同一账号下安装并认证 GitHub CLI
+  (`gh`)；只交付 branch 时不需要它。
 
 本预览只要求 Codex 这一个 provider CLI：它安装的 starter agent 跑在 Codex 上；
 Claude Code 与实验性的 Pi adapter 都是可选的，没装它们的机器同样是一份完整安装。
@@ -77,20 +84,30 @@ AgentOS 从不替你登录 provider，也从不读取任何凭据存储。
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
+git checkout v0.1.0
 npm ci
 npm run setup:local
+npm run build
 docker compose up -d postgres
-npm run db:migrate
+until docker compose exec -T postgres \
+  sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+do
+  sleep 1
+done
+export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
+export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
+npm run db:migrate:release -- --fresh
 ```
 
-然后在三个终端里分别运行 `npm run dev:api`、`npm run dev:web`、
-`npm run dev:runner`，并打开 `http://127.0.0.1:5173`。项目数为零的数据库只会打开一个
-五屏向导，别的什么都不挂载；走完它会在同一个事务里创建项目、环境、starter agent、
-仓库与授权。
+这是发布安装路径，不是 contributor bootstrap。请逐字执行已更正的
+[`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md)，
+包括文件系统、端口、runner identity 与仓库 preflight。然后在三个终端里依次启动
+`npm run dev:api`、`npm run dev:runner`、`npm run dev:web`，并打开
+`http://127.0.0.1:5173`。
 
 `npm ci` 必须被允许运行 lockfile 声明的生命周期脚本——本仓库的 `postinstall` 生成
-Prisma client——因此**不支持 `--ignore-scripts`**。Inbox 服务、launchd 服务定义、
-任何形式的远程访问，以及本仓库内部的 task-chain 模板，都是可选项，不属于上面这段
+Prisma client——因此**不支持 `--ignore-scripts`**。Inbox 服务可选。v0.1.0 不交付、
+也不支持任何 launchd 定义；远程访问和本仓库内部 task-chain 模板同样不属于受支持
 流程。
 
 在把它指向任何东西之前先读
@@ -98,29 +115,19 @@ Prisma client——因此**不支持 `--ignore-scripts`**。Inbox 服务、launc
 之前先读
 [`docs/release/v0.1.0-migration-and-recovery.md`](docs/release/v0.1.0-migration-and-recovery.md)。
 
-`npm run db:migrate` 就是 `prisma migrate dev`，**只用于开发**：它完全绕过迁移预检。
-绝不要把它指向任何你还想保留的数据库。它属于上面这段开发引导，不属于任何一次安装。
-
-> **这是一份开发安装，不是 Developer Preview 安装。** 有闸的发布路径会切到 release
-> tag 并运行 `npm run db:migrate:release -- --fresh`：该命令在读取任何 schema 状态
-> 之前取得排他维护锁，并一直持有它走过空库普查、迁移集校验、组合后的迁移预检、部署、
-> 状态检查与漂移检查。那道预检会拦下任何拿不出「本迁移集已过评审」证据的树：私有
-> 仓库用自己的评审记录作为这份证据，发布克隆则携带签名的 `release-authority.json`，
-> 由树内 tracked 的 Ed25519 `release-authority.pub` 验证。没有带上有效 attestation 的
-> 导出会停下来，而不是默认为可信。`--existing` 是另一条独立的拒绝：在它依赖的「已验证
-> 备份」attestation 生产者合入之前，它停在 `oss-d-interface-unavailable`，因此本
-> 版本不支持迁移已经装着数据的安装。这些拒绝都不允许用「把预检从已发布路径里拿掉」
-> 来绕过。完整流程见
-> [`docs/release/v0.1.0-developer-preview.md`](docs/release/v0.1.0-developer-preview.md)；
-> 每个停止条件的细节与 attestation 的 provision 步骤见
-> [`docs/release/v0.1.0-migration-and-recovery.md`](docs/release/v0.1.0-migration-and-recovery.md)。
-> 打包、公证和自动更新同样不属于本发布候选范围。
+`npm run db:migrate` 就是 `prisma migrate dev`，**只用于开发**；它只在
+`CONTRIBUTING.md` 中作为开发命令说明，不是安装命令。上面的有闸发布路径运行
+`npm run db:migrate:release -- --fresh`。该命令在读取 schema 状态前取得排他维护锁，
+并在有闸迁移全程持有它。没有有效 `release-authority.json` attestation 的导出会停下，
+不会默认为可信。`--existing` 另行停在 `oss-d-interface-unavailable`，因此本版本不支持
+迁移已有数据的安装。完整流程与拒绝条件见发布 quickstart 和迁移指南。打包、公证与自动
+更新同样不属于本发布候选范围。
 
 `npm run setup:local` 会一次性生成权限 0600 的 `.env`：互不相同的 operator 与 runner
 token、session cookie secret、base64 编码的 32 字节加密密钥，以及同时写入
-`POSTGRES_PASSWORD` 与 `DATABASE_URL` 的同一个数据库口令。它只输出状态类别
-（`configuration-created`、`configuration-valid`、`configuration-raced`），从不输出
-任何值；已存在的文件既不覆盖也不修改，且没有轮换开关。`.env.example` 只是键位说明
+`POSTGRES_PASSWORD` 与 `DATABASE_URL` 的同一个数据库口令。它只输出状态类别，从不
+输出任何值。`--upgrade` 会保留所有已有 assignment，只补可在本机安全生成的缺键，且
+不会自动轮换弱凭据；它没有 overwrite 或 rotation 开关。`.env.example` 只是键位说明
 文档，不是用来复制的文件。
 
 ## 以当前代码为依据的架构
