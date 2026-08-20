@@ -42,6 +42,25 @@ export const CANONICAL_TEMPLATE_STEPS = [
   { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
 ] as const;
 
+/**
+ * The Direct tier: no spec or plan phase, and no mechanical merge — the
+ * integrator's bidirectional binding admits only step 12 of the twelve-step
+ * template, so a direct chain ends at its human pull-request gate and the
+ * human merges. Implementation is senior-dev, not the executioner, whose
+ * contract presumes an existing reviewed plan.
+ */
+export const DIRECT_TEMPLATE_NAME = "direct-engineer-workflow";
+
+export const DIRECT_TEMPLATE_STEPS = [
+  { stepIndex: 1, agentName: "senior-dev", outputKind: "implementation", approvalGate: false, opensPullRequest: true, attachmentsFromPrevious: false },
+  { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  // Blind review must persist its own report before reading step 2.
+  { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: false },
+  { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 5, agentName: "review-coordinator-opus", outputKind: "regression-verification", approvalGate: false, opensPullRequest: false, attachmentsFromPrevious: true },
+  { stepIndex: 6, agentName: null, outputKind: "approval", approvalGate: true, opensPullRequest: false, attachmentsFromPrevious: true },
+] as const;
+
 export const IMPLEMENTATION_PLAN_OUTPUT_KINDS = ["plan", "revised-plan"] as const;
 
 export const catalogRunnerForModel = (raw: string): RunnerPreference | null => {

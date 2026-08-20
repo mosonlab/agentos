@@ -1,6 +1,6 @@
 import { AssigneeType, Prisma, PrismaClient } from "@prisma/client";
 
-import { CANONICAL_TEMPLATE_STEPS } from "../src/agent-contract.js";
+import { CANONICAL_TEMPLATE_STEPS, DIRECT_TEMPLATE_NAME, DIRECT_TEMPLATE_STEPS } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
   INTEGRATOR_AGENT_NAME,
@@ -184,7 +184,43 @@ const main = async (): Promise<void> => {
     });
   }
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents and the twelve-step feature template.`);
+  const directTemplate = await prisma.taskTemplate.upsert({
+    where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
+    update: {
+      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, regression verification, and human pull-request review. No spec or plan phase and no mechanical merge.",
+      variables: ["branchName"],
+    },
+    create: {
+      projectId: project.id,
+      name: DIRECT_TEMPLATE_NAME,
+      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, regression verification, and human pull-request review. No spec or plan phase and no mechanical merge.",
+      variables: ["branchName"],
+    },
+  });
+  const directStep = (stepIndex: number) => {
+    const step = DIRECT_TEMPLATE_STEPS.find((candidate) => candidate.stepIndex === stepIndex);
+    if (!step) throw new Error(`Missing direct template step ${stepIndex}`);
+    return step;
+  };
+  const directSteps = [
+    [1, "Implementation", directStep(1).agentName, AssigneeType.AGENT, null, directStep(1).approvalGate, directStep(1).outputKind, "Implement this task on {{branchName}} directly from the feature brief below — a direct chain carries no spec or plan phase, so the brief is the specification of record. Copy the brief verbatim to `.chain/{{branchName}}/spec.md` on {{branchName}} before implementing, so every later reviewer reads the same authority. Run the suites touching your changes and the end-to-end tests, and record the implementation range — the base commit you started from and the final head — in your task output; leave publication of the branch to the runner. Complete when the brief's behavior is demonstrably delivered and tests are green at the recorded head.", null, directStep(1).opensPullRequest],
+    [2, "Code review (Sol)", directStep(2).agentName, AssigneeType.AGENT, null, directStep(2).approvalGate, directStep(2).outputKind, "Review the complete integrated implementation diff from the frozen pre-implementation base through the delivered head. Persist stable evidence-backed findings as the task output.", null, directStep(2).opensPullRequest],
+    [3, "Code review and adjudication (Opus)", directStep(3).agentName, AssigneeType.AGENT, null, directStep(3).approvalGate, directStep(3).outputKind, "Blind-review the complete integrated implementation diff and persist independent findings before reading the first review. Then apply the canonical merge matrix and persist the closed must-fix list.", null, directStep(3).opensPullRequest],
+    [4, "Apply review fixes", directStep(4).agentName, AssigneeType.AGENT, null, directStep(4).approvalGate, directStep(4).outputKind, "Apply the complete closed must-fix list and rerun every affected regression.", null, directStep(4).opensPullRequest],
+    [5, "Regression verification", directStep(5).agentName, AssigneeType.AGENT, null, directStep(5).approvalGate, directStep(5).outputKind, "Review the full fix diff as one unit, account for every must-fix ID, rerun relevant regressions, and bind the verdict to the exact fixed head for human review.", null, directStep(5).opensPullRequest],
+    [6, "Human PR review", directStep(6).agentName, AssigneeType.HUMAN, null, directStep(6).approvalGate, directStep(6).outputKind, "Review the pull request for {{branchName}} at the exact head approved by regression verification. A direct chain has no mechanical merge step: approving this gate authorizes you to merge the pull request yourself.", null, directStep(6).opensPullRequest],
+  ] as const;
+  for (const [stepIndex, name, agentName, assigneeType, runner, approvalGate, outputKind, prompt, spawnPolicy, opensPullRequest] of directSteps) {
+    const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
+    if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
+    await prisma.taskTemplateStep.upsert({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: directTemplate.id, stepIndex } },
+      update: { name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: directStep(stepIndex).attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: directTemplate.id, stepIndex, name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: directStep(stepIndex).attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+    });
+  }
+
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the six-step direct template.`);
 };
 
 try {

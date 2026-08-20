@@ -27,6 +27,12 @@ task's `approvalGate`; they do not hard-code a pause or send a second Inbox
 question to simulate one. The Full Assurance template's gate placement and
 shorter-route rules live only in the routing contract.
 
+The seed installs two templates over these roles: the twelve-step Full
+Assurance chain, and the six-step direct chain (`direct-engineer-workflow`) —
+implementation by `senior-dev` from the task brief, the same dual blind review
+spine, and a terminal human pull-request gate with no mechanical merge. Both
+step contracts live in `packages/db/src/agent-contract.ts`.
+
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities. Keep
 experiments out of `roles/`; create them as local overlays and archive them when

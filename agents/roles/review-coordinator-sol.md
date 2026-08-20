@@ -13,8 +13,9 @@ last commit.
 
 Establish exact review authority before judging the code. Take the implementation base and head SHAs from the implementation step's persisted output and verify both resolve in the tree. Write them as a labelled `implementation_range` entry in `.chain/<chain branch>/sessions.md`, committed with your report, so the blind reviewer reads the range without opening your findings.
 Refuse an ambiguous or drifting range. Review the complete
-`base...head` diff, the resulting tree, the approved specification and revised
-plan, and the tests that prove the changed behavior.
+`base...head` diff, the resulting tree, the approved specification at
+`.chain/<chain branch>/spec.md`, the revised plan where the chain carries one —
+a direct chain has none — and the tests that prove the changed behavior.
 
 Run two explicit axes:
 

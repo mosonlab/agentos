@@ -19,6 +19,8 @@ import {
   CANONICAL_AGENT_DEFAULTS,
   CANONICAL_TEMPLATE_STEPS,
   catalogRunnerForModel,
+  DIRECT_TEMPLATE_NAME,
+  DIRECT_TEMPLATE_STEPS,
 } from "../src/agent-contract.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
@@ -70,8 +72,8 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   const blindWrite = finalReview.indexOf("reviews/opus-blind-findings.md");
   const firstReportRead = finalReview.indexOf("reviews/sol-findings.md", blindWrite);
   assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
-  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/`/u);
-  assert.match(finalReview, /both are reachable in the tree at `head`/u);
+  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/slices\/` where the chain carries one/u);
+  assert.match(finalReview, /reachable in the tree at `head`/u);
   assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
   assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
   assert.match(finalReview, /stop in this step, and use Inbox to present both\s+bodies of evidence to the human/u);
@@ -119,6 +121,38 @@ test("only implementation opens a pull request, and the integrator is not a mode
   // string, so `assertCanonicalAgentSources`' runner/model mismatch check
   // cannot fire on it and nothing maps it onto a real adapter.
   assert.equal(catalogRunnerForModel(sentinel.model), null);
+});
+
+test("the direct template keeps the review spine, drops planning, and ends at the human gate", () => {
+  assert.deepEqual(
+    DIRECT_TEMPLATE_STEPS.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    [
+      { stepIndex: 1, agentName: "senior-dev", outputKind: "implementation" },
+      { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
+      { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
+      { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 5, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
+      { stepIndex: 6, agentName: null, outputKind: "approval" },
+    ],
+  );
+  // Only implementation opens the chain's pull request; the blind review
+  // starts blind; regression verification reads the fix diff.
+  assert.deepEqual(DIRECT_TEMPLATE_STEPS.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
+  assert.equal(DIRECT_TEMPLATE_STEPS.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
+  assert.equal(DIRECT_TEMPLATE_STEPS.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
+  // The human pull-request gate is the terminal step: the integrator's
+  // bidirectional binding admits no mechanical merge outside the twelve-step
+  // template, so no direct step may bind the sentinel.
+  const last = DIRECT_TEMPLATE_STEPS.at(-1)!;
+  assert.equal(last.approvalGate, true);
+  assert.equal(last.agentName, null);
+  for (const step of DIRECT_TEMPLATE_STEPS) {
+    assert.notEqual(step.agentName, INTEGRATOR_AGENT_NAME);
+    assert.equal(
+      integratorBindingValid(step.agentName, { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: DIRECT_TEMPLATE_NAME } }),
+      true,
+    );
+  }
 });
 
 test("the sentinel may bind only step 12, and step 12 only the sentinel", () => {
