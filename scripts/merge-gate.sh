@@ -328,10 +328,11 @@ node_modules_targets() {
 }
 
 node_modules_target_allowed() {
-  local wanted="$1" candidate=""
+  local wanted="$1" candidate="" targets=""
+  targets="$(cd "${REPO_ROOT}" && node_modules_targets)" || return 1
   while IFS= read -r candidate; do
     [ "${candidate}" = "${wanted}" ] && return 0
-  done < <(cd "${REPO_ROOT}" && node_modules_targets)
+  done <<< "${targets}"
   return 1
 }
 
@@ -621,7 +622,7 @@ workspace_names_with_script() {
 # mutable output. Unit suites write fixtures under mktemp; they only read the
 # completed dist tree. Logs are replayed in stable workspace order.
 run_workspace_script_parallel() {
-  local script="$1" ignore_lifecycle="${2:-0}" test_concurrency="${3:-}" workspace="" safe="" log=""
+  local script="$1" ignore_lifecycle="${2:-0}" workspace="" safe="" log=""
   local index=0 next_wait=0 failed=0 max_jobs=1
   local -a workspaces=() logs=() pids=() statuses=()
   max_jobs="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / 2))))')"
@@ -632,10 +633,7 @@ run_workspace_script_parallel() {
     log="${GATE_TMP}/parallel-${script}-${safe}.log"
     workspaces+=("${workspace}")
     logs+=("${log}")
-    if [ -n "${test_concurrency}" ]; then
-      (cd "${REPO_ROOT}" && npm run --ignore-scripts "${script}" -w "${workspace}" -- \
-        --test-concurrency="${test_concurrency}") >"${log}" 2>&1 &
-    elif [ "${ignore_lifecycle}" -eq 1 ]; then
+    if [ "${ignore_lifecycle}" -eq 1 ]; then
       (cd "${REPO_ROOT}" && npm run --ignore-scripts "${script}" -w "${workspace}") >"${log}" 2>&1 &
     else
       (cd "${REPO_ROOT}" && npm run "${script}" -w "${workspace}") >"${log}" 2>&1 &
@@ -665,7 +663,7 @@ parallel_unit_tests() {
   # every run, then suppress only those redundant lifecycle hooks. If any hook
   # gains another responsibility, this check fails instead of skipping it.
   verify_build_only_lifecycle_hooks pretest || return 1
-  run_workspace_script_parallel test 1 1
+  run_workspace_script_parallel test 1
 }
 
 verify_build_only_lifecycle_hooks() {
