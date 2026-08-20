@@ -8,7 +8,7 @@ skills: []
 collaborators: []
 ---
 This role is **not** an LLM agent. It is the sentinel Agent row that the
-`compound-engineer-workflow` template's step 10 binds to, so that step can carry
+`compound-engineer-workflow` template's step 12 binds to, so that step can carry
 a non-null `Run.agentId` without presenting a second human gate.
 
 Nothing ever spawns a model CLI for this row. Its `model`

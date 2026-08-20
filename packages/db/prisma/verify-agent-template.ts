@@ -59,7 +59,7 @@ const main = async (): Promise<void> => {
     if (step.approvalGate !== expected.approvalGate) {
       throw new Error(`template step ${step.stepIndex} approval gate must be ${expected.approvalGate}; found ${step.approvalGate}`);
     }
-    if (step.stepIndex <= 8 && !isTemplateRunnerInherited(step.runner)) {
+    if (step.stepIndex < INTEGRATOR_STEP_INDEX && !isTemplateRunnerInherited(step.runner)) {
       throw new Error(`template step ${step.stepIndex} must inherit its Agent runner; found ${step.runner}`);
     }
     if (step.spawnPolicy !== null) throw new Error(`template step ${step.stepIndex} must not claim an unimplemented spawn policy`);
@@ -69,9 +69,9 @@ const main = async (): Promise<void> => {
   }
 
   // The integrator step, asserted explicitly rather than only through the
-  // generic loop. The `stepIndex <= 8` runner-inheritance bound above protects
-  // steps 1-8 from a template-pinned runner that would override the Agent's own;
-  // step 10 has no Agent runner to inherit at all, because nothing spawns for
+  // generic loop. The pre-integrator runner-inheritance bound above protects
+  // business steps from a template-pinned runner that would override the Agent's own;
+  // step 12 has no Agent runner to inherit at all, because nothing spawns for
   // it. These assertions are what stands in for that protection: an LLM model on
   // this row, or a `true` opensPullRequest, would mean a model CLI could be
   // handed the merge step or the merge step could publish.

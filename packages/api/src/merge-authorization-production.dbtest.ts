@@ -167,8 +167,8 @@ test("N5 an unfilled card refuses the PATCH channel too, leaving the gate untouc
   assert.equal((await authorizationsFor(chain.gateTask.id)).length, 0);
 });
 
-test("an ordinary nine-step gate approval writes no merge record on either channel", async () => {
-  const chain = await seedIntegratorChain(db, { label: "nine-step-auth", tenStep: false });
+test("an ordinary gate approval writes no merge record on either channel", async () => {
+  const chain = await seedIntegratorChain(db, { label: "ordinary-gate-auth", withIntegrator: false });
   const card = await db.$transaction(
     (tx) => gateQuestion(tx, chain.gateTask.id, chain.gateRun.id, null),
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },

@@ -4,7 +4,7 @@
  *
  * It used to live inside `prisma/seed.ts`, reachable only by running that seed —
  * which creates the internal multi-role installation, every skill, every
- * collaboration edge and the ten-step template. OSS-B0's first-run onboarding
+ * collaboration edge and the twelve-step template. OSS-B0's first-run onboarding
  * needs exactly one of those roles, the canonical `default` starter, created
  * inside one API transaction that must never run the internal seed (plan Fixed
  * Decision 4). So the loader moved here, `seed.ts` consumes it unchanged, and

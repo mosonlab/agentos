@@ -1,5 +1,5 @@
 /**
- * Step 7 / SF-3 — the seeded ten-step template, and the verifier that guards it.
+ * Step 7 / SF-3 — the seeded twelve-step template, and the verifier that guards it.
  *
  * The prior plan left this as "edit the seed wherever it is" and relied on
  * `verify-agent-template.ts` to catch a mistake. That is circular: the verifier
@@ -61,39 +61,38 @@ const integratorStep = async () => db.taskTemplateStep.findFirstOrThrow({
 
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes a ten-step template whose step 10 publishes nothing", async () => {
+test("a fresh seed writes a twelve-step template whose step 12 is mechanical", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
   // Read directly. Not through the verifier, not through the contract module —
   // this is the assertion the verifier's own correctness is allowed to rest on.
   const step = await integratorStep();
-  assert.equal(step.taskTemplate.steps.length, 10, "the template has ten steps");
-  assert.equal(step.opensPullRequest, false, "SF-3: the seeded step-10 row must not open a pull request");
+  assert.equal(step.taskTemplate.steps.length, 12, "the template has twelve steps");
+  assert.equal(step.opensPullRequest, false, "SF-3: the seeded step-12 row must not open a pull request");
   assert.equal(step.approvalGate, false);
   assert.equal(step.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.equal(step.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(step.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
   assert.equal(step.spawnPolicy, null);
 
-  // And the nine steps before it are unchanged in the property SF-3 is about.
-  const others = step.taskTemplate.steps.filter((candidate) => candidate.stepIndex !== INTEGRATOR_STEP_INDEX);
-  assert.deepEqual([...new Set(others.map((candidate) => candidate.opensPullRequest))], [true]);
+  const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
+  assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
 });
 
 test("the verifier passes on a freshly seeded database, and says how many steps it saw", async () => {
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /10 steps/u);
+  assert.match(verified.output, /12 steps/u);
 });
 
-test("re-seeding is idempotent and does not flip step 10 back", async () => {
+test("re-seeding is idempotent and does not flip step 12 back", async () => {
   assert.equal((await seed()).code, 0);
   assert.equal((await seed()).code, 0);
   const step = await integratorStep();
   assert.equal(step.opensPullRequest, false, "the update branch of the upsert sets it too, not only create");
-  assert.equal(step.taskTemplate.steps.length, 10);
+  assert.equal(step.taskTemplate.steps.length, 12);
 });
 
 /* ------------------------------------------------------- the verifier negatives */
@@ -103,7 +102,7 @@ test("re-seeding is idempotent and does not flip step 10 back", async () => {
  *  verifier. */
 const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegExp }> = [
   {
-    name: "step 10 opening a pull request",
+    name: "step 12 opening a pull request",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.update({ where: { id: step.id }, data: { opensPullRequest: true } });
@@ -118,7 +117,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     expect: /model|runner/iu,
   },
   {
-    name: "a non-null spawn policy on step 10",
+    name: "a non-null spawn policy on step 12",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.update({ where: { id: step.id }, data: { spawnPolicy: { maxChildren: 1 } } });
@@ -126,7 +125,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     expect: /spawnPolicy/u,
   },
   {
-    name: "a nine-step template",
+    name: "an eleven-step template",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.delete({ where: { id: step.id } });
@@ -134,7 +133,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     expect: /step/iu,
   },
   {
-    name: "an eleventh step",
+    name: "a thirteenth step",
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.create({ data: {
@@ -160,19 +159,19 @@ for (const negative of negatives) {
 
 /* ---------------------------------------------------------- A4: in-flight chains */
 
-test("a chain instantiated before the tenth step exists keeps its nine tasks", async () => {
+test("a chain instantiated before the twelfth step exists keeps its eleven tasks", async () => {
   assert.equal((await seed()).code, 0);
   const step = await integratorStep();
   const templateId = step.taskTemplateId;
   const projectId = step.taskTemplate.projectId;
 
-  // Stand the world back up as it was before this change: a nine-step template.
+  // Remove only the mechanical continuation, leaving the eleven business stages.
   await db.taskTemplateStep.delete({ where: { id: step.id } });
-  const nineStepSteps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" } });
-  assert.equal(nineStepSteps.length, 9);
+  const businessSteps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" } });
+  assert.equal(businessSteps.length, 11);
 
   const chainId = `in-flight-${process.pid}`;
-  for (const templateStep of nineStepSteps) {
+  for (const templateStep of businessSteps) {
     await db.task.create({ data: {
       projectId, templateId, templateStepId: templateStep.id, name: templateStep.name,
       description: templateStep.prompt, assigneeType: templateStep.assigneeType,
@@ -182,15 +181,15 @@ test("a chain instantiated before the tenth step exists keeps its nine tasks", a
   }
   const before = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
 
-  // Now seed the ten-step template on top, exactly as an upgrade would.
+  // Re-seeding restores the mechanical continuation without mutating the chain.
   assert.equal((await seed()).code, 0);
-  assert.equal((await db.taskTemplateStep.count({ where: { taskTemplateId: templateId } })), 10);
+  assert.equal((await db.taskTemplateStep.count({ where: { taskTemplateId: templateId } })), 12);
 
   // `templates.ts` materializes task rows at creation time and the task row is
   // the runtime authority, so an in-flight chain is not rewritten by a template
   // that grew a step under it.
   const after = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
-  assert.equal(after.length, 9, "the in-flight chain still has nine tasks");
+  assert.equal(after.length, 11, "the in-flight chain still has eleven tasks");
   assert.deepEqual(
     after.map((task) => ({ index: task.chainIndex, step: task.templateStepId, opens: task.opensPullRequest })),
     before.map((task) => ({ index: task.chainIndex, step: task.templateStepId, opens: task.opensPullRequest })),

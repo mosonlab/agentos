@@ -45,9 +45,9 @@ const snapshot = (): PullRequestSnapshot => ({
 });
 
 /**
- * The step-10 run holding a live session token. The gate approval already
+ * The step-12 run holding a live session token. The gate approval already
  * activated the successor and enqueued its run, so this adopts that row rather
- * than creating a second one — a step-10 task with two runs would be a fixture
+ * than creating a second one — a step-12 task with two runs would be a fixture
  * artefact the production path never produces.
  */
 const seedIntegratorSession = async (chain: IntegratorChain) => {
@@ -98,7 +98,7 @@ const operatorPost = async (path: string, body: unknown): Promise<{ status: numb
   }
 };
 
-/** A chain approved through the real inbox channel, with a live step-10 session. */
+/** A chain approved through the real inbox channel, with a live step-12 session. */
 const approvedChain = async (label: string) => {
   const chain = await seedIntegratorChain(db, { label });
   const card = await db.$transaction(
