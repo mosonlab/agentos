@@ -30,6 +30,10 @@ An independent build inspired by Danny Postma's video 'How I Built My Own
 AgentOS on Claude's Agent SDK (So You Can Too)' (2026) — built from scratch
 from the ideas in the video.
 
+![Task board: a twelve-step template chain in flight, with per-run status and cost on each card](docs/media/tasks-board.png)
+
+![Agents: each role with its model, reasoning effort, runner and inbox access](docs/media/agents.png)
+
 ## Release-candidate evidence status
 
 The labels below describe the evidence recorded in this repository; they are
