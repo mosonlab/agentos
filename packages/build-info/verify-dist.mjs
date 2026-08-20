@@ -11,7 +11,7 @@
 // a clean worktree, and is the package it was supposed to be. Anything else is
 // a non-zero exit and a named reason.
 //
-// This is the check; `deploy/restart.sh` is the entry point that makes it
+// This is the check; the operator's deployment entry point is what makes it
 // binding. Running this by hand answers the question, but a restart that is not
 // routed through the script can still ignore the answer — which is why the
 // runbook restarts nothing directly.
