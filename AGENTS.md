@@ -41,8 +41,10 @@ the machine that will merge, say so in the pull request.
 ## Records that do not change
 
 `docs/reviews/`, `docs/merge-notes/`, `docs/briefs/` and `docs/plans/archive/`
-are dated records of finished work: append-only, and never current authority. A
-plan whose batch ships moves into `docs/plans/archive/`.
+are dated records of finished work: append-only, and never current authority.
+They are not kept here. They live in this project's private operator
+repository, and nothing in this repository is meant to be read against them.
+
 `scripts/check-frozen-docs.sh` runs in the gate and enforces exactly three
 things, no more: a file merged into one of those four directories is neither
 modified nor deleted; a file added to one is named `YYYY-MM-DD-…`; and any line in a tracked `*.md` file that begins
@@ -50,7 +52,9 @@ modified nor deleted; a file added to one is named `YYYY-MM-DD-…`; and any lin
 `> Superseded by <repository-root-relative path> (YYYY-MM-DD)`, appears once,
 and names a path the commit tracks. A record merged under a wrong name can be
 corrected only by a byte-identical rename inside its own directory to a dated
-name — nothing else about a merged record may change.
+name — nothing else about a merged record may change. The first two rules have
+nothing to act on while those directories are absent from this repository; the
+third applies to every tracked `*.md`, and is why the check stays in the gate.
 
 What the gate cannot decide is whether a document that *should* carry a
 supersession marker does: no diff says "this stopped being authority". That half
