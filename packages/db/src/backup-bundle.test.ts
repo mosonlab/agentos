@@ -15,6 +15,7 @@ import {
   ATTESTATION_MAX_AGE_MS,
   ATTESTATION_MAX_SKEW_MS,
   parseAttestation,
+  QUIESCENCE_TOKEN_V1,
   validateBackupBundle,
   type BundleFacts,
 } from "./backup-bundle.js";
@@ -30,7 +31,7 @@ const attestation = (overrides: Record<string, unknown> = {}): string => JSON.st
   archive: { bytes: 1024, sha256: SHA },
   targetFingerprint: TARGET,
   walFingerprint: WAL,
-  quiescence: "exclusive-maintenance-lock-held-for-the-whole-dump",
+  quiescence: QUIESCENCE_TOKEN_V1,
   ...overrides,
 });
 
@@ -119,13 +120,23 @@ describe("parseAttestation", () => {
       [{ archive: { bytes: 1024, sha256: SHA.slice(0, 63) } }, "attestation-is-malformed"],
       [{ targetFingerprint: "0123" }, "attestation-is-malformed"],
       [{ walFingerprint: 42 }, "attestation-is-malformed"],
-      [{ quiescence: "" }, "attestation-is-malformed"],
+      [{ quiescence: "" }, "attestation-quiescence-is-unsupported"],
     ];
     for (const [overrides, reason] of cases) {
       const result = parseAttestation(attestation(overrides));
       assert.equal(result.ok, false, JSON.stringify(overrides));
       assert.equal(result.ok === false && result.reason, reason, JSON.stringify(overrides));
     }
+  });
+
+  it("accepts only the versioned quiescence authority token", () => {
+    for (const value of ["not-locked", "locked", "exclusive-maintenance-lock-held", 1, null]) {
+      const result = parseAttestation(attestation({ quiescence: value }));
+      assert.deepEqual(result, { ok: false, reason: "attestation-quiescence-is-unsupported" });
+    }
+    const accepted = parseAttestation(attestation({ quiescence: QUIESCENCE_TOKEN_V1 }));
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.ok && accepted.attestation.quiescence, QUIESCENCE_TOKEN_V1);
   });
 
   it("refuses text that is not a JSON object at all", () => {
