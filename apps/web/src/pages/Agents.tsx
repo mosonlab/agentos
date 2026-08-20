@@ -103,13 +103,30 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
   );
 };
 
+export type AgentsListTab = "active" | "archived";
+
+export const filterAgentsByTab = (agents: readonly Agent[], tab: AgentsListTab): Agent[] =>
+  agents.filter((agent) => tab === "archived" ? agent.archivedAt !== null : agent.archivedAt === null);
+
+export const AgentsListTabs = ({ value, onChange }: {
+  value: AgentsListTab;
+  onChange: (value: AgentsListTab) => void;
+}): ReactNode => {
+  const t = useT();
+  return <Segmented options={[
+    { value: "active", label: t("agents.segmented.yours") },
+    { value: "archived", label: t("tasks.tab.archived") },
+  ]} value={value} onChange={onChange} />;
+};
+
 export const AgentsPage = (): ReactNode => {
   const { projectId, project } = useProjectScope();
   const { data, loading, error, reload } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 5_000);
   const [creating, setCreating] = useState(false);
+  const [listTab, setListTab] = useState<AgentsListTab>("active");
   const { error: actionError, run } = useAction();
   const t = useT();
-  const agents = data ?? [];
+  const agents = filterAgentsByTab(data ?? [], listTab);
 
   const remove = (agent: Agent): void => {
     if (!window.confirm(t("agents.confirm.delete", { name: agent.name }))) return;
@@ -134,7 +151,7 @@ export const AgentsPage = (): ReactNode => {
         </div>
       </div>
 
-      <Segmented options={[{ value: "yours", label: t("agents.segmented.yours") }]} value="yours" onChange={() => undefined} />
+      <AgentsListTabs value={listTab} onChange={setListTab} />
 
       <div className={cn(STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
@@ -161,7 +178,7 @@ export const AgentsPage = (): ReactNode => {
               ))}
             </TableBody>
           </Table>
-          {agents.length === 0 ? <EmptyState>{t(loading ? "common.loading" : "agents.empty")}</EmptyState> : null}
+          {agents.length === 0 ? <EmptyState>{t(loading ? "common.loading" : listTab === "archived" ? "archived.empty" : "agents.empty")}</EmptyState> : null}
         </Card>
       </div>
 
