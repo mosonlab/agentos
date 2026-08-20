@@ -53,8 +53,8 @@ execFileSync("git", [
 // The recorded authority evidence, so these cases stop on the condition they are
 // about rather than on `authority`. The preflight checks both the signed
 // attestation content and that its commits are ancestors of HEAD.
-const MASTER_SHA = "485fb118db96e3977006a2edc866a38b751ff0e2";
-const CONTROL_PLANE_A_SHA = "c671439831b075568420b92f4494227fa7fc392b";
+const MASTER_SHA = "29aac967f373ec6fd96f52b8289724f76eb4721f";
+const CONTROL_PLANE_A_SHA = "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d";
 
 /**
  * The scratch server, proven scratch before anything connects. 5432 is where
