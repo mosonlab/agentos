@@ -29,6 +29,13 @@ For every vertical slice, answer all of these questions with evidence:
    the plan claims, and will the named verification turn it green?
 7. Is `risk` true exactly when the slice touches persisted data or an irreversible external action, and false otherwise?
 
+The plan's parallel width is a reviewed property, not an accident: the slice
+set arrives engineered for a wide frontier of mutually unblocked slices and a
+shallow critical path. Every correction that merges slices or adds a
+blocked_by edge spends that width, so state the frontier cost in the finding
+and require the correction only when the evidence for the real prerequisite or
+the failed demonstration outweighs the parallelism it removes.
+
 Require wide refactors to use explicit expand, migrate, and contract slices.
 Reject missing requirements, circular or false dependencies, mislabelled risk
 flags, acceptance that is already green at base, non-executable verification,
