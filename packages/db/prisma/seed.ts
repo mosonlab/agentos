@@ -2,6 +2,12 @@ import { AssigneeType, Prisma, PrismaClient } from "@prisma/client";
 
 import { CANONICAL_TEMPLATE_STEPS } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
+import {
+  INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_OUTPUT_KIND,
+  INTEGRATOR_TEMPLATE_NAME,
+  legacyTenStepTemplateName,
+} from "../src/merge-integrator.js";
 
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
 // so that OSS-B0's first-run onboarding can read the same `agents/` contract
@@ -92,18 +98,42 @@ const main = async (): Promise<void> => {
       });
     }
   }
-  const template = await prisma.taskTemplate.upsert({
-    where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } },
-    update: {
-      description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
-      variables: ["branchName"],
-    },
-    create: {
-      projectId: project.id,
-      name: "compound-engineer-workflow",
-      description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
-      variables: ["branchName"],
-    },
+  const template = await prisma.$transaction(async (tx) => {
+    const existing = await tx.taskTemplate.findUnique({
+      where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
+      include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
+    });
+    const historicalIntegrator = existing?.steps.find((step) => step.stepIndex === 10);
+    const isHistoricalTenStepTemplate = existing?.steps.length === 10
+      && existing.steps.every((step, index) => step.stepIndex === index + 1)
+      && historicalIntegrator?.outputKind === INTEGRATOR_OUTPUT_KIND
+      && historicalIntegrator.assigneeAgent?.name === INTEGRATOR_AGENT_NAME;
+
+    // A 10-row template cannot be rewritten in place: its in-flight tasks keep
+    // foreign keys to rows 6-10, whose meanings changed in the 12-row routing
+    // contract. Preserve that entire template under a seed-minted legacy
+    // identity; then the canonical upsert below creates a new template for new
+    // Runs. Runtime recognition accepts only this deterministic legacy marker.
+    if (existing && isHistoricalTenStepTemplate) {
+      await tx.taskTemplate.update({
+        where: { id: existing.id },
+        data: { name: legacyTenStepTemplateName(existing.id) },
+      });
+    }
+
+    return tx.taskTemplate.upsert({
+      where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
+      update: {
+        description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
+        variables: ["branchName"],
+      },
+      create: {
+        projectId: project.id,
+        name: INTEGRATOR_TEMPLATE_NAME,
+        description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
+        variables: ["branchName"],
+      },
+    });
   });
   const canonicalStep = (stepIndex: number) => {
     const step = CANONICAL_TEMPLATE_STEPS.find((candidate) => candidate.stepIndex === stepIndex);
@@ -116,7 +146,7 @@ const main = async (): Promise<void> => {
   const steps = [
     [1, "Write a spec", canonicalStep(1).agentName, AssigneeType.AGENT, null, canonicalStep(1).approvalGate, canonicalStep(1).outputKind, "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null, canonicalStep(1).opensPullRequest],
     [2, "Plan", canonicalStep(2).agentName, AssigneeType.AGENT, null, canonicalStep(2).approvalGate, canonicalStep(2).outputKind, "Turn the approved spec into a concrete ordered implementation plan.", null, canonicalStep(2).opensPullRequest],
-    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, canonicalStep(3).approvalGate, canonicalStep(3).outputKind, "Review the plan through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null, canonicalStep(3).opensPullRequest],
+    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, canonicalStep(3).approvalGate, canonicalStep(3).outputKind, "Review every vertical slice against the approved specification and frozen base: standalone demonstration, layer coverage and context size, true blocked_by prerequisites, merge or split decisions, expand-migrate-contract staging for wide refactors, and acceptance criteria that fail at base and turn green under the named verification.", null, canonicalStep(3).opensPullRequest],
     [4, "Revise plan", canonicalStep(4).agentName, AssigneeType.AGENT, null, canonicalStep(4).approvalGate, canonicalStep(4).outputKind, "Revise the plan using every must-fix plan-review finding and persist the implementation-authority artifact.", null, canonicalStep(4).opensPullRequest],
     [5, "Implementation", canonicalStep(5).agentName, AssigneeType.AGENT, null, canonicalStep(5).approvalGate, canonicalStep(5).outputKind, "Implement the approved plan on {{branchName}} and run end-to-end tests.", null, canonicalStep(5).opensPullRequest],
     [6, "Code review (Sol)", canonicalStep(6).agentName, AssigneeType.AGENT, null, canonicalStep(6).approvalGate, canonicalStep(6).outputKind, "Review the complete integrated implementation diff from the frozen pre-implementation base through the delivered head. Persist stable evidence-backed findings as the task output.", null, canonicalStep(6).opensPullRequest],
@@ -132,8 +162,8 @@ const main = async (): Promise<void> => {
     if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
     await prisma.taskTemplateStep.upsert({
       where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex } },
-      update: { name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: stepIndex > 1, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: stepIndex > 1, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      update: { name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: canonicalStep(stepIndex).attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: canonicalStep(stepIndex).attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
     });
   }
 

@@ -22,7 +22,7 @@ skills: [plan-mode]       # AgentSkill rows, by skill slug
 collaborators: []         # AgentCollaboration rows, by agent name
 ```
 
-Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `implementation-plan-executioner`).
+Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `implementation-plan-executioner`, `review-coordinator-opus`).
 
 Approval is task metadata, not an Agent personality. Roles read the current
 task's `approvalGate`; they do not hard-code a pause or send a second Inbox

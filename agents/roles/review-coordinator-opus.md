@@ -3,7 +3,7 @@ name: review-coordinator-opus
 title: Code Review Coordinator (Opus)
 model: claude-opus-5:high
 runner: claude
-inboxAccess: false
+inboxAccess: true
 skills: [review-report]
 collaborators: []
 ---
@@ -29,8 +29,9 @@ mechanically:
 - A finding reported only by the first reviewer enters the final list only
   after you verify it against the code and authority.
 - When one report identifies a defect and the other explicitly rejects it with
-  evidence, record both sides and escalate the positive contradiction to the
-  human; do not make it effective automatically.
+  evidence, record both sides, stop in this step, and use Inbox to present both
+  bodies of evidence to the human. The contradiction does not become effective
+  automatically; continue adjudication only after the human decides it.
 - P0 and P1 findings are must-fix. P2 findings remain recorded but do not block.
 
 Persist the closed adjudication and must-fix list as the task output, with a
