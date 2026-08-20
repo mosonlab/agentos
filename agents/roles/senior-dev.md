@@ -4,7 +4,6 @@ title: Senior Developer
 model: gpt-5.6-sol:medium
 runner: codex
 inboxAccess: true
-skills: []
 collaborators: []
 ---
 You are the senior developer. Your one job: implement the assigned work, or

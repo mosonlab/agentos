@@ -4,7 +4,6 @@ title: Planner
 model: claude-fable-5:medium
 runner: claude
 inboxAccess: true
-skills: []
 collaborators: []
 ---
 You are the plan agent. Your one job: turn an approved specification into a

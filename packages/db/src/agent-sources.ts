@@ -3,8 +3,8 @@
  * agent prompt, model and runner.
  *
  * It used to live inside `prisma/seed.ts`, reachable only by running that seed —
- * which creates the internal multi-role installation, every skill, every
- * collaboration edge and the twelve-step template. OSS-B0's first-run onboarding
+ * which creates the internal multi-role installation, every collaboration edge
+ * and the twelve-step template. OSS-B0's first-run onboarding
  * needs exactly one of those roles, the canonical `default` starter, created
  * inside one API transaction that must never run the internal seed (plan Fixed
  * Decision 4). So the loader moved here, `seed.ts` consumes it unchanged, and
@@ -19,7 +19,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { RunnerPreference, SkillKind } from "@prisma/client";
+import { RunnerPreference } from "@prisma/client";
 
 import { assertCanonicalAgentSources, CANONICAL_AGENT_DEFAULTS } from "./agent-contract.js";
 
@@ -32,12 +32,10 @@ export type RoleSource = {
   model: string;
   runnerPreference: RunnerPreference;
   inboxAccess: boolean;
-  skills: string[];
   collaborators: string[];
   rolePrompt: string;
 };
-export type SkillSource = { name: string; slug: string; kind: SkillKind; body: string };
-export type AgentSources = { foundationalPrompt: string; roles: RoleSource[]; skills: SkillSource[] };
+export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
 
 const parseDocument = (source: string, filePath: string): FrontmatterDocument => {
   const normalized = source.replace(/\r\n/g, "\n");
@@ -89,30 +87,12 @@ export const loadAgentSources = async (): Promise<AgentSources> => {
       model: required(document, "model", filePath),
       runnerPreference: runnerPreference(required(document, "runner", filePath), filePath),
       inboxAccess: inboxAccess === "true",
-      skills: parseList(document.attributes.skills, filePath, "skills"),
       collaborators: parseList(document.attributes.collaborators, filePath, "collaborators"),
       rolePrompt: document.body,
     });
   }
   assertCanonicalAgentSources(roles);
-
-  const skillDirectory = `${agentsRoot}skills`;
-  const skillFiles = (await readdir(skillDirectory)).filter((name) => name.endsWith(".md")).sort();
-  const skills: SkillSource[] = [];
-  for (const filename of skillFiles) {
-    const filePath = `${skillDirectory}/${filename}`;
-    const document = parseDocument(await readFile(filePath, "utf8"), filePath);
-    const kind = required(document, "kind", filePath).toUpperCase();
-    if (!(kind in SkillKind)) throw new Error(`${filePath} has unsupported skill kind ${kind}`);
-    skills.push({
-      name: required(document, "name", filePath),
-      slug: required(document, "slug", filePath),
-      kind: SkillKind[kind as keyof typeof SkillKind],
-      body: document.body,
-    });
-  }
-  if (skills.length !== 1) throw new Error(`agents/ contract requires 1 skill; found ${skills.length}`);
-  return { foundationalPrompt, roles, skills };
+  return { foundationalPrompt, roles };
 };
 
 /**

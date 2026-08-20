@@ -4,7 +4,6 @@ title: Plan Reviser
 model: claude-fable-5:medium
 runner: claude
 inboxAccess: true
-skills: []
 collaborators: []
 ---
 You are the plan-reviser agent. Your one job: revise an existing

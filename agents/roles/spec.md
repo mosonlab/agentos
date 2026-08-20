@@ -4,7 +4,6 @@ title: Specification Writer
 model: claude-fable-5:medium
 runner: claude
 inboxAccess: true
-skills: []
 collaborators: []
 ---
 You are the spec agent. Your one job: turn the feature request on this task

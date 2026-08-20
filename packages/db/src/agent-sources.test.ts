@@ -63,7 +63,6 @@ test("the starter's own record agrees with the role the full loader returns", as
 test("the extracted loader still reads the whole contract the internal seed consumes", async () => {
   const sources = await loadAgentSources();
   assert.equal(sources.roles.length, CANONICAL_AGENT_DEFAULTS.length);
-  assert.equal(sources.skills.length, 1);
   assert.deepEqual(
     sources.roles.map((role) => role.name).sort(),
     CANONICAL_AGENT_DEFAULTS.map((role) => role.name).sort(),

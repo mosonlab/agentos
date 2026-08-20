@@ -1,6 +1,6 @@
-# agents/ — Agent role prompts and skills
+# agents/ — Agent role prompts
 
-Source-of-truth files for the canonical agents, the mechanical merge sentinel, and their skills. The seed script imports these into the `Agent` / `Skill` / `AgentSkill` tables; `packages/db/prisma/seed.ts` is the consumer.
+Source-of-truth files for the canonical agents and the mechanical merge sentinel. The seed script imports these into the `Agent` table and its join tables; `packages/db/prisma/seed.ts` is the consumer. Skills remain an API-managed concept (`Skill` / `AgentSkill`), but no canonical skill is seeded from this directory.
 
 All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from Danny Postma's talk); none are his verbatim files.
 
@@ -8,7 +8,6 @@ All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from 
 
 - `foundational.md` — the shared foundational prompt. Body maps to `Agent.foundationalPrompt` for every agent.
 - `roles/<name>.md` — one file per agent. Frontmatter maps to `Agent` columns and join tables; markdown body maps to `Agent.rolePrompt`.
-- `skills/<slug>.md` — one file per skill. Frontmatter maps to `Skill` columns; markdown body maps to `Skill.body` (`kind: prompt`).
 
 ## Role frontmatter
 
@@ -18,7 +17,6 @@ title: Planner            # Agent.title
 model: claude-fable-5:medium # Agent.model, including its default reasoning effort
 runner: claude               # Agent.runnerPreference (claude | codex | pi)
 inboxAccess: true         # Agent.inboxAccess
-skills: []                # AgentSkill rows, by skill slug (e.g. [review-report])
 collaborators: []         # AgentCollaboration rows, by agent name
 ```
 
@@ -40,11 +38,3 @@ first integrated-diff review. `review-coordinator-opus` performs the blind final
 review, must-fix adjudication, and post-fix exact-head regression verification.
 Legacy reviewer roles remain only as archived database history and must not be
 assigned to new tasks or templates.
-
-## Skill frontmatter
-
-```yaml
-name: Review Report       # Skill.name
-slug: review-report       # Skill.slug (unique per project)
-kind: prompt              # Skill.kind
-```

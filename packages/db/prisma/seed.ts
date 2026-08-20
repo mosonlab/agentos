@@ -78,29 +78,17 @@ const main = async (): Promise<void> => {
   }
 
   const agentByName = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
-  const skillBySlug = new Map<string, { id: string }>();
-  for (const skill of sources.skills) {
-    const record = await prisma.skill.upsert({
-      where: { projectId_slug: { projectId: project.id, slug: skill.slug } },
-      update: { name: skill.name, kind: skill.kind, body: skill.body, filePath: null },
-      create: { projectId: project.id, name: skill.name, slug: skill.slug, kind: skill.kind, body: skill.body },
-    });
-    skillBySlug.set(skill.slug, record);
-  }
   const seededAgentIds = sources.roles.map((role) => {
     const agent = agentByName.get(role.name);
     if (!agent) throw new Error(`Missing seeded agent ${role.name}`);
     return agent.id;
   });
+  // The agents/ contract no longer seeds skills; this clears links a prior
+  // seed created, so a re-seeded installation matches the contract.
   await prisma.agentSkill.deleteMany({ where: { agentId: { in: seededAgentIds } } });
   await prisma.agentCollaboration.deleteMany({ where: { agentId: { in: seededAgentIds } } });
   for (const role of sources.roles) {
     const agent = agentByName.get(role.name)!;
-    for (const slug of role.skills) {
-      const skill = skillBySlug.get(slug);
-      if (!skill) throw new Error(`Agent ${role.name} references unknown skill ${slug}`);
-      await prisma.agentSkill.create({ data: { agentId: agent.id, skillId: skill.id, projectId: project.id } });
-    }
     for (const collaboratorName of role.collaborators) {
       const collaborator = agentByName.get(collaboratorName);
       if (!collaborator || !seededAgentIds.includes(collaborator.id)) {
@@ -196,7 +184,7 @@ const main = async (): Promise<void> => {
     });
   }
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, ${sources.skills.length} skills, and the twelve-step feature template.`);
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents and the twelve-step feature template.`);
 };
 
 try {

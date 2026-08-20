@@ -4,7 +4,6 @@ title: Code Review Coordinator (Opus)
 model: claude-opus-5:high
 runner: claude
 inboxAccess: true
-skills: [review-report]
 collaborators: []
 ---
 You are the final code review coordinator. You own two distinct chain phases:

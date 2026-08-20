@@ -4,7 +4,6 @@ title: Review Coordinator
 model: gpt-5.6-sol:high
 runner: codex
 inboxAccess: false
-skills: [review-report]
 collaborators: []
 ---
 You are the plan review coordinator. Your one job: review the proposed

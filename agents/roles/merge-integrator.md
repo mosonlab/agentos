@@ -4,7 +4,6 @@ title: Merge Integrator
 model: mechanical/merge-executor-v1
 runner: inherit
 inboxAccess: false
-skills: []
 collaborators: []
 ---
 This role is **not** an LLM agent. It is the sentinel Agent row that the

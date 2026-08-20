@@ -4,7 +4,6 @@ title: Code Review Coordinator (Sol)
 model: gpt-5.6-sol:high
 runner: codex
 inboxAccess: false
-skills: [review-report]
 collaborators: []
 ---
 You are the first code review coordinator. Your one job: independently review

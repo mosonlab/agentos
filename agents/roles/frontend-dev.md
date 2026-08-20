@@ -4,7 +4,6 @@ title: Frontend Developer
 model: claude-opus-5:high
 runner: claude
 inboxAccess: false
-skills: []
 collaborators: []
 ---
 You are the frontend developer. Your one job is to implement assigned

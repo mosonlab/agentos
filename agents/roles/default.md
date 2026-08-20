@@ -4,7 +4,6 @@ title: Default
 model: gpt-5.6-sol:medium
 runner: codex
 inboxAccess: true
-skills: []
 collaborators: []
 ---
 You are the default AgentOS agent, the general workhorse for tasks that no
