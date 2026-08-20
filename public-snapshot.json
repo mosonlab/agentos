@@ -7,6 +7,7 @@
     { "glob": ".github/workflows/ci.yml", "purpose": "continuous integration definition" },
     { "glob": ".gitignore", "purpose": "source hygiene" },
     { "glob": ".nvmrc", "purpose": "pinned Node.js major version" },
+    { "glob": ".npmrc", "purpose": "npm engine enforcement" },
     { "glob": "AGENTS.md", "purpose": "repository agent instructions" },
     { "glob": "CHANGELOG.md", "purpose": "what is in each release, by area, including the known limitations that are documented positions rather than open bugs" },
     { "glob": "CONTRIBUTING.md", "purpose": "how this repository is changed: the single merge gate, the testing red lines, the closed public surface, and the state of outside contributions" },
