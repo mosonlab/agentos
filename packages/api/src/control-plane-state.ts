@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, realpath, statfs } from "node:fs/promises";
+import { lstat, mkdir, realpath, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+
+import { BoundDirectory, openPersistentFile } from "./control-plane-directory.js";
 
 export const controlPlaneLockFilename = "ownership.lock";
 export const controlPlaneIdFilename = "control-plane-id.json";
@@ -79,6 +80,8 @@ export interface PreparedControlPlaneState {
   device: bigint;
   uid: number;
   mode: number;
+  baseDirectory: BoundDirectory;
+  entryDirectory: BoundDirectory;
 }
 
 export interface CanonicalFilesRoot {
@@ -124,43 +127,38 @@ export const prepareControlPlaneState = async (
     : (await statfs(basePath, { bigint: true })).type;
   const filesystem = classifyControlStateFilesystem(rawType);
   const digest = controlStateDigest(options.canonicalWorkspaceRoot);
+  const baseDirectory = BoundDirectory.open(basePath);
+  baseDirectory.assertPathIdentity(basePath, "control-state-base-path-replaced");
   const entryPath = join(basePath, digest);
-  let created = false;
   try {
-    await mkdir(entryPath, { mode: 0o700 });
-    created = true;
+    baseDirectory.mkdir(digest, 0o700);
   } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      baseDirectory.close();
+      throw error;
+    }
   }
-  if (created) await chmod(entryPath, 0o700);
-  await assertProtectedDirectory(entryPath);
-  const info = await lstat(basePath, { bigint: true });
-  return { basePath, entryPath, digest, filesystem, device: info.dev, uid: currentUid(), mode: modeBits(Number(info.mode)) };
+  let entryDirectory: BoundDirectory;
+  try {
+    entryDirectory = baseDirectory.openDirectory(digest);
+    entryDirectory.assertPathIdentity(entryPath, "control-state-entry-path-replaced");
+  } catch (error: unknown) {
+    baseDirectory.close();
+    throw error;
+  }
+  return {
+    basePath,
+    entryPath,
+    digest,
+    filesystem,
+    device: baseDirectory.device,
+    uid: baseDirectory.uid,
+    mode: baseDirectory.mode,
+    baseDirectory,
+    entryDirectory,
+  };
 };
 
-export const openPersistentLockFile = async (entryPath: string) => {
-  const path = join(entryPath, controlPlaneLockFilename);
-  let existed = true;
-  try {
-    await lstat(path);
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    existed = false;
-  }
-  const handle = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
-  if (!existed) await handle.chmod(0o600);
-  const [descriptor, authoritative] = await Promise.all([handle.stat({ bigint: true }), lstat(path, { bigint: true })]);
-  if (!descriptor.isFile() || !authoritative.isFile() || authoritative.isSymbolicLink()) {
-    await handle.close();
-    throw new Error("control-state-lock-not-regular");
-  }
-  if (descriptor.uid !== BigInt(currentUid()) || (Number(descriptor.mode) & 0o777) !== 0o600) {
-    await handle.close();
-    throw new Error("control-state-lock-owner-or-mode-mismatch");
-  }
-  if (descriptor.dev !== authoritative.dev || descriptor.ino !== authoritative.ino) {
-    await handle.close();
-    throw new Error("control-state-lock-path-replaced");
-  }
-  return { handle, path, device: descriptor.dev, inode: descriptor.ino };
-};
+export const openPersistentLockFile = (entryDirectory: BoundDirectory) => (
+  openPersistentFile(entryDirectory, controlPlaneLockFilename)
+);
