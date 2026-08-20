@@ -19,6 +19,10 @@ AgentOS orchestrates the official Codex CLI and Claude Code installed and
 authenticated on the user's Mac, bundles or resells no subscription, and
 provider terms and plan limits apply.
 
+An independent build inspired by Danny Postma's video 'How I Built My Own
+AgentOS on Claude's Agent SDK (So You Can Too)' (2026) — built from scratch
+from the ideas in the video.
+
 ## Release-candidate evidence status
 
 The labels below describe the evidence recorded in this repository; they are

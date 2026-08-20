@@ -80,10 +80,12 @@ snapshot:scan` checks this, and it requires a clean worktree matching `HEAD`.
 ### Records that do not change
 
 `docs/reviews/`, `docs/merge-notes/`, `docs/briefs/` and `docs/plans/archive/`
-are dated records of finished work: append-only, and never current authority. A
-file merged into one of them is neither modified nor deleted, and a file added to
-one is named `YYYY-MM-DD-…`. `scripts/check-frozen-docs.sh` enforces that in the
-gate.
+are dated records of finished work: append-only, and never current authority.
+They are not kept here — they live in this project's private operator
+repository — so nothing you contribute needs to read them.
+`scripts/check-frozen-docs.sh` still runs in the gate: it would enforce those
+directories if they appeared, and it enforces the `> Superseded by ` marker
+shape on every tracked `*.md`.
 
 ### Style
 
