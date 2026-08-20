@@ -64,7 +64,8 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
   assert.match(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
-  assert.match(firstReview, /codex exec review --base <implementation base>/u);
+  assert.match(firstReview, /codex exec review -m gpt-5\.6-sol -c model_reasoning_effort=high/u);
+  assert.match(firstReview, /review the changes from <implementation base sha> to <delivered head sha>/u);
 
   const blindWrite = finalReview.indexOf("reviews/opus-blind-findings.md");
   const firstReportRead = finalReview.indexOf("reviews/sol-findings.md", blindWrite);

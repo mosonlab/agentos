@@ -18,7 +18,7 @@ title: Planner            # Agent.title
 model: claude-fable-5:medium # Agent.model, including its default reasoning effort
 runner: claude               # Agent.runnerPreference (claude | codex | pi)
 inboxAccess: true         # Agent.inboxAccess
-skills: [plan-mode]       # AgentSkill rows, by skill slug
+skills: []                # AgentSkill rows, by skill slug (e.g. [review-report])
 collaborators: []         # AgentCollaboration rows, by agent name
 ```
 
@@ -44,7 +44,7 @@ assigned to new tasks or templates.
 ## Skill frontmatter
 
 ```yaml
-name: Plan Mode           # Skill.name
-slug: plan-mode           # Skill.slug (unique per project)
+name: Review Report       # Skill.name
+slug: review-report       # Skill.slug (unique per project)
 kind: prompt              # Skill.kind
 ```

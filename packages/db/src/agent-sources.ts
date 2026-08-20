@@ -111,7 +111,7 @@ export const loadAgentSources = async (): Promise<AgentSources> => {
       body: document.body,
     });
   }
-  if (skills.length !== 2) throw new Error(`agents/ contract requires 2 skills; found ${skills.length}`);
+  if (skills.length !== 1) throw new Error(`agents/ contract requires 1 skill; found ${skills.length}`);
   return { foundationalPrompt, roles, skills };
 };
 
