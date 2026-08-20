@@ -41,8 +41,7 @@ const stableRecordSchema = z.object({
   controlStateDigest: z.string().regex(/^[0-9a-f]{64}$/u),
 }).strict();
 
-const ownerRecordSchema = z.object({
-  formatVersion: z.literal(1),
+const ownerRecordFields = {
   state: z.enum(["owned", "released"]),
   controlPlaneId: z.string().uuid(),
   incarnationId: z.string().uuid(),
@@ -50,16 +49,36 @@ const ownerRecordSchema = z.object({
   hostname: z.string().min(1),
   canonicalWorkspaceRoot: z.string().min(1),
   controlStateDigest: z.string().regex(/^[0-9a-f]{64}$/u),
-  workspaceRootDevice: z.string().regex(/^\d+$/u),
   workspaceRootInode: z.string().regex(/^\d+$/u),
-  lockDevice: z.string().regex(/^\d+$/u),
   lockInode: z.string().regex(/^\d+$/u),
   acquiredAt: z.string().datetime(),
   releasedAt: z.string().datetime().optional(),
-}).strict().superRefine((record, context) => {
+} as const;
+
+const refineOwnerRecord = (
+  record: { state: "owned" | "released"; releasedAt?: string | undefined },
+  context: z.RefinementCtx,
+) => {
   if (record.state === "released" && !record.releasedAt) context.addIssue({ code: "custom", message: "releasedAt required" });
   if (record.state === "owned" && record.releasedAt) context.addIssue({ code: "custom", message: "releasedAt forbidden" });
-});
+};
+
+// v1 persisted device numbers. A mount can receive a different device number
+// after reboot, so v1 remains readable for one safe upgrade but those fields
+// are deliberately excluded from cross-incarnation identity checks.
+const legacyOwnerRecordSchema = z.object({
+  formatVersion: z.literal(1),
+  ...ownerRecordFields,
+  workspaceRootDevice: z.string().regex(/^\d+$/u),
+  lockDevice: z.string().regex(/^\d+$/u),
+}).strict().superRefine(refineOwnerRecord);
+
+const currentOwnerRecordSchema = z.object({
+  formatVersion: z.literal(2),
+  ...ownerRecordFields,
+}).strict().superRefine(refineOwnerRecord);
+
+const ownerRecordSchema = z.union([legacyOwnerRecordSchema, currentOwnerRecordSchema]);
 
 export type StableControlPlaneRecord = z.infer<typeof stableRecordSchema>;
 export type ControlPlaneOwnerRecord = z.infer<typeof ownerRecordSchema>;
@@ -148,15 +167,13 @@ const recordsMatch = (
   owner: ControlPlaneOwnerRecord,
   workspace: CanonicalWorkspaceRoot,
   digest: string,
-  lockIdentity: { device: bigint; inode: bigint },
+  lockIdentity: { inode: bigint },
 ): boolean => stable.controlPlaneId === owner.controlPlaneId
   && stable.canonicalWorkspaceRoot === workspace.canonicalPath
   && owner.canonicalWorkspaceRoot === workspace.canonicalPath
   && stable.controlStateDigest === digest
   && owner.controlStateDigest === digest
-  && owner.workspaceRootDevice === workspace.device.toString()
   && owner.workspaceRootInode === workspace.inode.toString()
-  && owner.lockDevice === lockIdentity.device.toString()
   && owner.lockInode === lockIdentity.inode.toString();
 
 export interface AcquireControlPlaneOwnershipOptions {
@@ -287,7 +304,7 @@ export const acquireControlPlaneOwnership = async (
     if (stable.absent) await atomicWriteJson(state.entryPath, controlPlaneIdFilename, incarnationId, stableValue);
     const acquiredAt = (options.now ?? (() => new Date()))().toISOString();
     const ownerValue: ControlPlaneOwnerRecord = {
-      formatVersion: 1,
+      formatVersion: 2,
       state: "owned",
       controlPlaneId: stableValue.controlPlaneId,
       incarnationId,
@@ -295,9 +312,7 @@ export const acquireControlPlaneOwnership = async (
       hostname: options.hostname ?? hostname(),
       canonicalWorkspaceRoot: workspace.canonicalPath,
       controlStateDigest: state.digest,
-      workspaceRootDevice: workspace.device.toString(),
       workspaceRootInode: workspace.inode.toString(),
-      lockDevice: lock.device.toString(),
       lockInode: lock.inode.toString(),
       acquiredAt,
     };
