@@ -7,16 +7,8 @@ import ts from "typescript";
 import { loadAgentSources } from "../src/agent-sources.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "../src/merge-integrator.js";
 
-const STEP_INDEXES = [2, 4, 5] as const;
-const ROLE_NAMES = [
-  "implementation-plan-executioner",
-  "review-coordinator-sol",
-  "review-coordinator-opus",
-  "plan",
-  "plan-reviser",
-  "review-coordinator",
-] as const;
-
+// Every step the seed states a prompt for, and every role under agents/, is
+// synced. A hand-kept subset is how a prompt edit silently misses production.
 const loadStepPrompts = async (): Promise<Map<number, string>> => {
   const seedPath = fileURLToPath(new URL("./seed.ts", import.meta.url));
   const sourceText = await readFile(seedPath, "utf8");
@@ -43,21 +35,16 @@ const loadStepPrompts = async (): Promise<Map<number, string>> => {
     const indexNode = element.elements[0];
     const promptNode = element.elements[7];
     if (!indexNode || !ts.isNumericLiteral(indexNode) || !promptNode || !ts.isStringLiteral(promptNode)) continue;
-    const stepIndex = Number(indexNode.text);
-    if (STEP_INDEXES.includes(stepIndex as (typeof STEP_INDEXES)[number])) prompts.set(stepIndex, promptNode.text);
+    prompts.set(Number(indexNode.text), promptNode.text);
   }
-  for (const stepIndex of STEP_INDEXES) {
-    if (!prompts.has(stepIndex)) throw new Error(`Canonical prompt for template step ${stepIndex} was not found in prisma/seed.ts`);
-  }
+  if (prompts.size === 0) throw new Error("No template step prompts were found in prisma/seed.ts");
   return prompts;
 };
 
 const main = async (): Promise<void> => {
   const [stepPrompts, sources] = await Promise.all([loadStepPrompts(), loadAgentSources()]);
   const rolePrompts = new Map(sources.roles.map((role) => [role.name, role.rolePrompt]));
-  for (const name of ROLE_NAMES) {
-    if (!rolePrompts.has(name)) throw new Error(`Canonical role source ${name} was not found under agents/roles`);
-  }
+  const roleNames = [...rolePrompts.keys()];
 
   const prisma = new PrismaClient();
   try {
@@ -69,7 +56,7 @@ const main = async (): Promise<void> => {
       if (templates.length === 0) throw new Error(`Template ${INTEGRATOR_TEMPLATE_NAME} was not found`);
       const templateIds = templates.map((template) => template.id);
       const updatedSteps: Record<number, number> = {};
-      for (const stepIndex of STEP_INDEXES) {
+      for (const stepIndex of [...stepPrompts.keys()].sort((left, right) => left - right)) {
         const prompt = stepPrompts.get(stepIndex)!;
         const present = await tx.taskTemplateStep.count({
           where: { taskTemplateId: { in: templateIds }, stepIndex },
@@ -84,15 +71,15 @@ const main = async (): Promise<void> => {
       }
 
       const presentAgents = await tx.agent.findMany({
-        where: { name: { in: [...ROLE_NAMES] } },
+        where: { name: { in: roleNames } },
         select: { name: true },
       });
       const presentRoleNames = new Set(presentAgents.map((agent) => agent.name));
-      for (const name of ROLE_NAMES) {
+      for (const name of roleNames) {
         if (!presentRoleNames.has(name)) throw new Error(`Agent ${name} was not found`);
       }
       const updatedRoles: Record<string, number> = {};
-      for (const name of ROLE_NAMES) {
+      for (const name of roleNames) {
         const rolePrompt = rolePrompts.get(name)!;
         updatedRoles[name] = (await tx.agent.updateMany({
           where: { name, rolePrompt: { not: rolePrompt } },
