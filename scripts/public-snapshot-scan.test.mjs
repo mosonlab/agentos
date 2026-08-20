@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -214,12 +214,12 @@ test("the checked-out tree is fully classified", () => {
 
 test("a credential on the published surface is red whatever disposition it carries", () => {
   // The published half of the scoped check, proven on real bytes rather than a
-  // fabricated report: `release-authority.json` is a minted snapshot input, so
-  // it is on the published surface without being tracked, and a token planted
-  // in it is a credential the export would carry.
+  // fabricated report: `release-authority.json` is on the published surface, so
+  // a token planted in it is a credential the export would carry. It is a
+  // tracked file, so this test puts its bytes back rather than deleting it.
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const artifact = resolve(root, "release-authority.json");
-  assert.equal(existsSync(artifact), false, "this test owns the artifact path");
+  const original = readFileSync(artifact);
 
   try {
     writeFileSync(artifact, JSON.stringify({ token: `ghp_${"A".repeat(24)}` }, null, 2));
@@ -247,7 +247,7 @@ test("a credential on the published surface is red whatever disposition it carri
       "approving a credential into the snapshot must not clear it",
     );
   } finally {
-    rmSync(artifact, { force: true });
+    writeFileSync(artifact, original);
   }
 });
 
@@ -279,39 +279,6 @@ test("an undecided credential off the published surface is still red", () => {
     findings: [{ ...undecided.findings[0], disposition: "later-release-follow-up" }],
   };
   assert.deepEqual(credentialsOutOfScope(decided, ["LICENSE"]), []);
-});
-
-test("a minted snapshot artifact is scanned and listed, not merely allowed by a glob", () => {
-  // `release-authority.json` is generated per export and `.gitignore`d, so
-  // `git ls-files` cannot see it. A manifest rule that only says it *may* be
-  // published would leave its bytes unread by every scan. This asserts the
-  // scanner actually takes it as input.
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const artifact = resolve(root, "release-authority.json");
-  assert.equal(existsSync(artifact), false, "this test owns the artifact path");
-
-  const tracked = execFileSync("git", ["ls-files", "release-authority.json"], { cwd: root }).toString("utf8");
-  assert.equal(tracked, "", "the artifact must not be tracked; it belongs to one export");
-
-  try {
-    writeFileSync(artifact, JSON.stringify({ schemaVersion: 2, note: "fixture" }, null, 2));
-    const clean = scanRepository(undefined, { requireClean: false });
-    assert.equal(clean.includedPaths.includes("release-authority.json"), true, "the minted artifact must be listed");
-    assert.equal(clean.report.scope.mintedFiles, 1);
-    assert.equal(clean.report.source, "clean-tracked-worktree+minted-artifacts");
-
-    // And its bytes are read: a credential planted in it is a blocker, which
-    // can only happen if the scanner opened the file.
-    writeFileSync(artifact, JSON.stringify({ token: `ghp_${"A".repeat(24)}` }, null, 2));
-    const dirty = scanRepository(undefined, { requireClean: false });
-    const finding = dirty.report.findings.find((entry) => entry.path === "release-authority.json");
-    assert.ok(finding, "the artifact's bytes must be scanned");
-    assert.equal(finding.category, "credential");
-    assert.equal(finding.disposition, "blocker");
-    assert.equal(JSON.stringify(dirty.report).includes("ghp_"), false, "no matched value may be emitted");
-  } finally {
-    rmSync(artifact, { force: true });
-  }
 });
 
 /**

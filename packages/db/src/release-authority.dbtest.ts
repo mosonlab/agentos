@@ -623,9 +623,13 @@ describe("the private evidence digest, where the file is present", () => {
 });
 
 describe("the attestation and the tree it was minted from", () => {
-  it("is gitignored in this repository, so it never becomes a tracked file", () => {
-    const ignored = spawnSync("git", ["check-ignore", "--quiet", RELEASE_AUTHORITY_FILE], { cwd: repositoryRoot });
-    assert.equal(ignored.status, 0, `${RELEASE_AUTHORITY_FILE} must be ignored: it is minted per export, at one commit`);
+  it("is tracked in this repository, which is both where it is minted and where it is released from", () => {
+    // It was ignored while a separate private repository was the development
+    // one and this was only ever an export target. Since the single-repository
+    // cutover there is one tree, so the attestation is reviewed and gated like
+    // the key that verifies it, and is re-signed when the migration set moves.
+    const tracked = execFileSync("git", ["ls-files", RELEASE_AUTHORITY_FILE], { cwd: repositoryRoot, encoding: "utf8" });
+    assert.equal(tracked.trim(), RELEASE_AUTHORITY_FILE, `${RELEASE_AUTHORITY_FILE} must be a tracked file`);
   });
 
   it("names the public key as a release-path file, so the anchor is bound too", () => {
@@ -633,9 +637,9 @@ describe("the attestation and the tree it was minted from", () => {
     assert.equal(publicKeyFingerprint(generateKeyPairSync(RELEASE_AUTHORITY_ALGORITHM).publicKey).length, 64);
   });
 
-  it("is tracked in this repository, unlike the attestation it verifies", () => {
-    // The asymmetry the second authority path rests on: the anchor goes through
-    // review and the merge gate, the attestation is generated per export.
+  it("is tracked in this repository, as the anchor the attestation is verified against", () => {
+    // The anchor goes through review and the merge gate. The attestation is
+    // generated, and only worth something because this key is not.
     const tracked = execFileSync("git", ["ls-files", RELEASE_AUTHORITY_PUBLIC_KEY], { cwd: repositoryRoot, encoding: "utf8" });
     assert.equal(tracked.trim(), RELEASE_AUTHORITY_PUBLIC_KEY, `${RELEASE_AUTHORITY_PUBLIC_KEY} must be a tracked file`);
   });

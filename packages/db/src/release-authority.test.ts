@@ -404,10 +404,11 @@ describe("the snapshot manifest", () => {
     }
   });
 
-  it("declares the attestation as a minted input, so the scan actually reads it", () => {
-    // An include glob alone would only say the file *may* be published. The
-    // artifact is gitignored, so without this the scanner would never open it.
-    assert.deepEqual(snapshot.mintedArtifacts, [RELEASE_AUTHORITY_FILE]);
+  it("does not declare the attestation as a minted input, because it is tracked", () => {
+    // `mintedArtifacts` is for a snapshot input the scanner would otherwise
+    // never open, because `git ls-files` cannot see it. The attestation is
+    // tracked, so the include glob above is what puts it in front of the scan.
+    assert.equal(snapshot.mintedArtifacts.includes(RELEASE_AUTHORITY_FILE), false);
   });
 });
 
