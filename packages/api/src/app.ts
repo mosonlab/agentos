@@ -112,6 +112,7 @@ import { publishReclaimIntents, recordReclaimOutcomes } from "./workspace-reclai
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
+import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate } from "./templates.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
@@ -125,6 +126,7 @@ type AppEnvironment = { Variables: { principal: Principal } };
 
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
+  onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
 }
 
 const id = z.string().min(1);
@@ -1051,6 +1053,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/onboarding", async (context) => {
     if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
     const input = await readJson(context.req.raw, onboardingInput);
+    try {
+      await (options.onboardingRepositoryPreflight ?? preflightOnboardingRepository)(input);
+    } catch (error: unknown) {
+      if (error instanceof RepositoryPreflightError) {
+        return context.json({ error: "Repository preflight failed", code: "repository-preflight-failed", reason: error.reason }, 422);
+      }
+      throw error;
+    }
     const result = await createStarterInstallation(db, input);
     // 409, not 400 or a silent success: the request was well formed, the state of
     // the target is what refuses it, and the caller recovers by reading GET

@@ -5,6 +5,7 @@ import type { PrismaClient } from "@agentos/db";
 
 import { createApp as createLiveApp } from "./app.js";
 import { defaultControlPlaneStateDir } from "./control-plane-state.js";
+import type { preflightOnboardingRepository } from "./onboarding-preflight.js";
 import { defaultWorkspaceRoot } from "./workspace-root.js";
 
 // Symlink aliases (/tmp vs /private/tmp, a symlinked home) must not slip a
@@ -71,7 +72,10 @@ const assertRootIsDisposable = (root: string): string => {
  * with a no-op ownership stub; one dbtest with a scratch database swept the
  * entire live workspace root.)
  */
-export const createApp = (db: PrismaClient, options: { workspaceRoot?: string } = {}) => {
+export const createApp = (db: PrismaClient, options: {
+  workspaceRoot?: string;
+  onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
+} = {}) => {
   const configured = options.workspaceRoot ?? process.env.RUNNER_WORKSPACE_ROOT;
   if (!configured) {
     throw new Error(
@@ -84,6 +88,7 @@ export const createApp = (db: PrismaClient, options: { workspaceRoot?: string } 
   // fail loudly instead of quietly, and it is cheap.
   return createLiveApp(db, {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
+    onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
   });
 };
 
