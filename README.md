@@ -98,12 +98,7 @@ git checkout v0.1.0
 npm ci
 npm run setup:local
 npm run build
-docker compose up -d postgres
-until docker compose exec -T postgres \
-  sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-do
-  sleep 1
-done
+docker compose up -d --wait --wait-timeout 60 postgres
 export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
 export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
 npm run db:migrate:release -- --fresh
