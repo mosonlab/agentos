@@ -348,6 +348,8 @@ test("the docs surface is closed and named one file at a time", () => {
   // Publishing user documentation must not become a reason to publish plans,
   // reviews, specifications or runbooks alongside it.
   assert.deepEqual(docs.sort(), [
+    "docs/demos/templates-release-demo.md",
+    "docs/demos/templates-release-evidence.schema.json",
     "docs/public-snapshot.md",
     "docs/release/fixtures/oss-b0-smoke-task.json",
     "docs/release/v0.1.0-developer-preview.md",

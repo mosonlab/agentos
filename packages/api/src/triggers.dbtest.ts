@@ -104,6 +104,45 @@ test("supplied variables win over the template defaults", async () => {
   assert.match(task.description, /PROJ-42/);
 });
 
+test("blank manual variables use a usable default and otherwise remain unresolved", async () => {
+  const defaulted = await seedTrigger("fire-blank-default");
+  const accepted = await call("POST", `/task-templates/${defaulted.template.id}/fire`, {
+    variables: { ticket: "   " },
+  });
+  assert.equal(accepted.status, 201);
+  assert.match((await db.task.findFirstOrThrow()).description, /unlabelled/);
+
+  await resetTestDb(db);
+  const required = await seedTrigger("fire-blank-required", {
+    template: { webhookPayloadMapping: { map: {} } },
+  });
+  const rejected = await call("POST", `/task-templates/${required.template.id}/fire`, {
+    variables: { ticket: "\t" },
+  });
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.body.error, /Unresolved template variables: ticket/);
+  assert.equal(await db.task.count(), 0);
+  assert.equal(await db.run.count(), 0);
+  assert.equal(await db.triggerFire.count(), 0);
+});
+
+test("an invalid manual branch is a client refusal with no fire ledger or chain", async () => {
+  const { template } = await seedTrigger("fire-invalid-branch", {
+    template: {
+      variables: ["branchName"],
+      webhookPayloadMapping: { map: {}, defaults: { branchName: "agentos/default" } },
+    },
+  });
+  const response = await call("POST", `/task-templates/${template.id}/fire`, {
+    variables: { branchName: "bad..branch" },
+  });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error, /Invalid template branch name/);
+  assert.equal(await db.task.count(), 0);
+  assert.equal(await db.run.count(), 0);
+  assert.equal(await db.triggerFire.count(), 0);
+});
+
 test("an unresolved variable names itself in the error prose and writes nothing", async () => {
   const { template } = await seedTrigger("fire-unresolved", {
     template: { variables: ["repoUrl", "issueId"], webhookPayloadMapping: { map: {} } },

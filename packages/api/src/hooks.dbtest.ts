@@ -84,12 +84,38 @@ test("two webhook fires create two independent chains", async () => {
   assert.equal(await db.task.count(), 2);
 });
 
-test("empty-string webhook scalars instantiate successfully", async () => {
+test("empty-string webhook scalars are unresolved and write nothing", async () => {
   const { template } = await seedWebhook();
   const response = await fire(template.id, { issue: { title: "" } });
+  assert.equal(response.status, 400);
+  assert.equal(await db.task.count(), 0);
+  assert.equal(await db.run.count(), 0);
+  assert.equal(await db.triggerFire.count(), 0);
+});
+
+test("a blank webhook scalar uses a nonblank configured default", async () => {
+  const { template } = await seedWebhook();
+  await db.taskTemplate.update({
+    where: { id: template.id },
+    data: { webhookPayloadMapping: { map: { ticket: "issue.title" }, defaults: { ticket: "fallback" } } },
+  });
+  const response = await fire(template.id, { issue: { title: "   " } });
   assert.equal(response.status, 201);
-  assert.equal(await db.task.count(), 1);
-  assert.equal(await db.run.count(), 1);
+  assert.match((await db.task.findFirstOrThrow()).description, /fallback/);
+});
+
+test("an invalid webhook branch is a client refusal with no durable rows", async () => {
+  const { template } = await seedWebhook();
+  await db.taskTemplate.update({
+    where: { id: template.id },
+    data: { variables: ["branchName"], webhookPayloadMapping: { map: { branchName: "issue.title" } } },
+  });
+  const response = await fire(template.id, { issue: { title: "bad..branch" } });
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /Invalid template branch name/);
+  assert.equal(await db.task.count(), 0);
+  assert.equal(await db.run.count(), 0);
+  assert.equal(await db.triggerFire.count(), 0);
 });
 
 test("concurrent webhook fires retry serialization conflicts and create independent chains", async () => {
