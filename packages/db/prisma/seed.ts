@@ -95,13 +95,13 @@ const main = async (): Promise<void> => {
   const template = await prisma.taskTemplate.upsert({
     where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } },
     update: {
-      description: "Ten-step Full Assurance workflow with spec, reviewed-plan implementation, PR approval gates, and mechanical merge execution.",
+      description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
       variables: ["branchName"],
     },
     create: {
       projectId: project.id,
       name: "compound-engineer-workflow",
-      description: "Ten-step Full Assurance workflow with spec, reviewed-plan implementation, PR approval gates, and mechanical merge execution.",
+      description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
       variables: ["branchName"],
     },
   });
@@ -110,23 +110,22 @@ const main = async (): Promise<void> => {
     if (!step) throw new Error(`Missing canonical template step ${stepIndex}`);
     return step;
   };
-  // The tuple carries `opensPullRequest` as its tenth element and BOTH branches
-  // of the upsert below set it. Before this change the field appeared in neither
-  // branch, so every seeded row silently took `schema.prisma`'s default `true` —
-  // which `templates.ts` then copies onto every materialized task row. For step
-  // 10 that default is wrong and load-bearing, so it is written explicitly here
-  // rather than inherited.
+  // The tuple carries `opensPullRequest` as its tenth element and both branches
+  // of the upsert set it. `templates.ts` copies the value onto every materialized
+  // task row. Only implementation creates the chain PR; every later row reuses it.
   const steps = [
     [1, "Write a spec", canonicalStep(1).agentName, AssigneeType.AGENT, null, canonicalStep(1).approvalGate, canonicalStep(1).outputKind, "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null, canonicalStep(1).opensPullRequest],
     [2, "Plan", canonicalStep(2).agentName, AssigneeType.AGENT, null, canonicalStep(2).approvalGate, canonicalStep(2).outputKind, "Turn the approved spec into a concrete ordered implementation plan.", null, canonicalStep(2).opensPullRequest],
     [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, canonicalStep(3).approvalGate, canonicalStep(3).outputKind, "Review the plan through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null, canonicalStep(3).opensPullRequest],
     [4, "Revise plan", canonicalStep(4).agentName, AssigneeType.AGENT, null, canonicalStep(4).approvalGate, canonicalStep(4).outputKind, "Revise the plan using every must-fix plan-review finding and persist the implementation-authority artifact.", null, canonicalStep(4).opensPullRequest],
     [5, "Implementation", canonicalStep(5).agentName, AssigneeType.AGENT, null, canonicalStep(5).approvalGate, canonicalStep(5).outputKind, "Implement the approved plan on {{branchName}} and run end-to-end tests.", null, canonicalStep(5).opensPullRequest],
-    [6, "Code review", canonicalStep(6).agentName, AssigneeType.AGENT, null, canonicalStep(6).approvalGate, canonicalStep(6).outputKind, "Review the implementation through feasibility, scope, coherence, security, and a distinct risk-focused verification pass; consolidate must-fix and should-fix findings.", null, canonicalStep(6).opensPullRequest],
-    [7, "Apply review fixes", canonicalStep(7).agentName, AssigneeType.AGENT, null, canonicalStep(7).approvalGate, canonicalStep(7).outputKind, "Apply all must-fix review findings and rerun end-to-end tests.", null, canonicalStep(7).opensPullRequest],
-    [8, "Librarian", canonicalStep(8).agentName, AssigneeType.AGENT, null, canonicalStep(8).approvalGate, canonicalStep(8).outputKind, "Update internal documentation to match the delivered code.", null, canonicalStep(8).opensPullRequest],
-    [9, "Human PR review", canonicalStep(9).agentName, AssigneeType.HUMAN, null, canonicalStep(9).approvalGate, canonicalStep(9).outputKind, "Review the pull request for {{branchName}} and authorize its merge against the evidence presented in the approval card.", null, canonicalStep(9).opensPullRequest],
-    [10, "Merge execution", canonicalStep(10).agentName, AssigneeType.AGENT, null, canonicalStep(10).approvalGate, canonicalStep(10).outputKind, "Execute the authorized merge mechanically. No model runs this step: @agentos/merge-executor claims it, re-verifies every precondition against the live pull request, and merges only under the step-9 human authorization for that exact head.", null, canonicalStep(10).opensPullRequest],
+    [6, "Code review (Sol)", canonicalStep(6).agentName, AssigneeType.AGENT, null, canonicalStep(6).approvalGate, canonicalStep(6).outputKind, "Review the complete integrated implementation diff from the frozen pre-implementation base through the delivered head. Persist stable evidence-backed findings as the task output.", null, canonicalStep(6).opensPullRequest],
+    [7, "Code review and adjudication (Opus)", canonicalStep(7).agentName, AssigneeType.AGENT, null, canonicalStep(7).approvalGate, canonicalStep(7).outputKind, "Blind-review the complete integrated implementation diff and persist independent findings before reading the first review. Then apply the canonical merge matrix and persist the closed must-fix list.", null, canonicalStep(7).opensPullRequest],
+    [8, "Apply review fixes", canonicalStep(8).agentName, AssigneeType.AGENT, null, canonicalStep(8).approvalGate, canonicalStep(8).outputKind, "Apply the complete closed must-fix list and rerun every affected regression.", null, canonicalStep(8).opensPullRequest],
+    [9, "Regression verification", canonicalStep(9).agentName, AssigneeType.AGENT, null, canonicalStep(9).approvalGate, canonicalStep(9).outputKind, "Review the full fix diff as one unit, account for every must-fix ID, rerun relevant regressions, and bind the verdict to the exact fixed head for human review.", null, canonicalStep(9).opensPullRequest],
+    [10, "Librarian", canonicalStep(10).agentName, AssigneeType.AGENT, null, canonicalStep(10).approvalGate, canonicalStep(10).outputKind, "Update internal documentation to match the delivered code.", null, canonicalStep(10).opensPullRequest],
+    [11, "Human PR review", canonicalStep(11).agentName, AssigneeType.HUMAN, null, canonicalStep(11).approvalGate, canonicalStep(11).outputKind, "Review the pull request for {{branchName}} at the exact head approved by regression verification and authorize its merge against the evidence presented in the approval card.", null, canonicalStep(11).opensPullRequest],
+    [12, "Merge execution", canonicalStep(12).agentName, AssigneeType.AGENT, null, canonicalStep(12).approvalGate, canonicalStep(12).outputKind, "Execute the authorized merge mechanically. No model runs this step: @agentos/merge-executor claims it, re-verifies every precondition against the live pull request, and merges only under the step-11 human authorization for that exact head.", null, canonicalStep(12).opensPullRequest],
   ] as const;
   for (const [stepIndex, name, agentName, assigneeType, runner, approvalGate, outputKind, prompt, spawnPolicy, opensPullRequest] of steps) {
     const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
@@ -138,7 +137,7 @@ const main = async (): Promise<void> => {
     });
   }
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, ${sources.skills.length} skills, and the ten-step feature template.`);
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, ${sources.skills.length} skills, and the twelve-step feature template.`);
 };
 
 try {

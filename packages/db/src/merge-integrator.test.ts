@@ -7,6 +7,7 @@ import {
   EVIDENCE_PLACEHOLDER_BODY,
   EVIDENCE_UNAVAILABLE_MARKER,
   INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_STEP_INDEX,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   STOP_CHOICES,
@@ -229,22 +230,22 @@ test("an unrelated activity is neither counted nor refused", () => {
 
 // --- §D-P4 the binding invariant -----------------------------------------
 
-const integratorStep = { stepIndex: 10, outputKind: "merge-result", taskTemplate: { name: "compound-engineer-workflow" } };
+const integratorStep = { stepIndex: INTEGRATOR_STEP_INDEX, outputKind: "merge-result", taskTemplate: { name: "compound-engineer-workflow" } };
 
 test("the binding predicate holds in both directions", () => {
   assert.ok(isIntegratorStep(integratorStep));
   assert.ok(integratorBindingValid(INTEGRATOR_AGENT_NAME, integratorStep));
   assert.ok(integratorBindingValid("senior-dev", { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }));
-  // The sentinel on an ordinary step, and an ordinary agent on step 10.
+  // The sentinel on an ordinary step, and an ordinary agent on step 12.
   assert.ok(!integratorBindingValid(INTEGRATOR_AGENT_NAME, null));
   assert.ok(!integratorBindingValid(INTEGRATOR_AGENT_NAME, { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }));
   assert.ok(!integratorBindingValid("senior-dev", integratorStep));
 });
 
 test("a lookalike step in another template or with another output kind is not the integrator step", () => {
-  assert.ok(!isIntegratorStep({ stepIndex: 10, outputKind: "merge-result", taskTemplate: { name: "some-other-template" } }));
-  assert.ok(!isIntegratorStep({ stepIndex: 10, outputKind: "result", taskTemplate: { name: "compound-engineer-workflow" } }));
-  assert.ok(!isIntegratorStep({ stepIndex: 9, outputKind: "merge-result", taskTemplate: { name: "compound-engineer-workflow" } }));
+  assert.ok(!isIntegratorStep({ stepIndex: INTEGRATOR_STEP_INDEX, outputKind: "merge-result", taskTemplate: { name: "some-other-template" } }));
+  assert.ok(!isIntegratorStep({ stepIndex: INTEGRATOR_STEP_INDEX, outputKind: "result", taskTemplate: { name: "compound-engineer-workflow" } }));
+  assert.ok(!isIntegratorStep({ stepIndex: INTEGRATOR_STEP_INDEX - 1, outputKind: "merge-result", taskTemplate: { name: "compound-engineer-workflow" } }));
 });
 
 // --- §D-P7 the disposition machine ---------------------------------------

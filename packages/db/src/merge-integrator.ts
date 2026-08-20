@@ -27,7 +27,7 @@ export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 /** v1.1 pins exactly one merge method (SPEC D4). */
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
-export const INTEGRATOR_STEP_INDEX = 10;
+export const INTEGRATOR_STEP_INDEX = 12;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
 export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
@@ -49,9 +49,9 @@ const templateNameOf = (step: NonNullable<IntegratorStepShape>): string | null =
   step.taskTemplate?.name ?? step.taskTemplateName ?? null;
 
 /**
- * The canonical step-10 shape. All four facts are required: an outputKind alone
+ * The canonical step-12 shape. All four facts are required: an outputKind alone
  * is client-influenceable through a doctored template, and a stepIndex alone
- * collides with any other template that happens to have ten steps.
+ * collides with any other template that happens to use the same step index.
  */
 export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
   if (!step) return false;
@@ -63,7 +63,7 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
 /**
  * Bidirectional: the sentinel Agent may bind only the integrator step, and the
  * integrator step may bind only the sentinel Agent. One direction alone leaves
- * a hole — the sentinel dispatchable as an ordinary model agent, or step 10
+ * a hole — the sentinel dispatchable as an ordinary model agent, or step 12
  * executable by a real LLM.
  */
 export const integratorBindingValid = (
@@ -400,7 +400,7 @@ export const selectAuthorization = (
     if (parsed.status === "malformed") { nearMatchCount += 1; continue; }
     const payload = parsed.payload;
     const decision = decisionById.get(payload.decision.inboxDecisionId);
-    // Rule 2: the decision must exist and belong to *this* chain's step-9 gate,
+    // Rule 2: the decision must exist and belong to *this* chain's step-11 gate,
     // resolved from the caller's own chain and never from the payload.
     if (!decision) { ignoredCount += 1; continue; }
     const card = cardById.get(decision.inboxMessageId);

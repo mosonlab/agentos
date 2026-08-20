@@ -1,8 +1,8 @@
 # Canonical agent review package
 
-Status: current as of 2026-08-17.
+Status: current as of 2026-08-19.
 
-The canonical roster contains nine roles:
+The canonical roster contains eleven LLM roles and one mechanical sentinel:
 
 - `default`
 - `spec`
@@ -12,15 +12,26 @@ The canonical roster contains nine roles:
 - `implementation-plan-executioner`
 - `senior-dev`
 - `review-coordinator`
+- `review-coordinator-sol`
+- `review-coordinator-opus`
 - `librarian`
+- `merge-integrator` (mechanical sentinel)
 
 ## Review role decision
 
-`review-coordinator` is the single canonical reviewer. The same Agent reviews
-specifications, plans, and implementation diffs. It performs four independent
-lenses—feasibility, scope, coherence, and security—then one risk-focused
-verification pass. It writes one consolidated report using the
-`review-report` skill and never modifies the artifact it reviews.
+`review-coordinator` reviews plans only. It checks vertical-slice
+demonstrability, slice size, dependency edges, merge/split decisions, explicit
+expand/migrate/contract sequencing, and whether every acceptance criterion is
+red at the frozen base.
+
+`review-coordinator-sol` performs the first implementation review over the
+complete integrated diff from the frozen pre-implementation base. It persists
+stable findings as its committed task output.
+
+`review-coordinator-opus` first persists an independent blind review, then reads
+the first report and applies the canonical merge matrix to close the must-fix
+list. After fixes it owns one whole-diff regression verification over every
+must-fix and binds its verdict to the exact head eligible for human review.
 
 Security and risk-focused verification follow an evidence ladder: inspect the
 implementation and existing tests, run the narrow named regressions, and report
@@ -38,21 +49,27 @@ their final assigned chain reaches its human-review gate.
 
 ## Runtime authority
 
-Role frontmatter and `packages/db/prisma/agent-contract.ts` jointly define the
+Role frontmatter and `packages/db/src/agent-contract.ts` jointly define the
 canonical model and runner defaults. `packages/db/prisma/seed.ts` imports the
-role sources and binds both plan review and code review to
-`review-coordinator` in the Full Assurance template.
+role sources and binds the three review phases to their distinct canonical
+roles in the Full Assurance template.
 
 Existing task rows keep the assignee captured when their chain was created.
 Roster convergence does not rewrite or interrupt an active chain.
 
 ## Acceptance
 
-- Exactly nine role files pass the canonical source contract.
-- Full Assurance steps 3 and 6 both bind `review-coordinator`.
+- Exactly twelve role files pass the canonical source contract, including the
+  mechanical merge sentinel.
+- Full Assurance step 3 binds `review-coordinator`; steps 6, 7, and 9 bind the
+  first reviewer and final reviewer as specified by the canonical contract.
+- The first report is durable before the final reviewer reads it.
+- The closed must-fix list follows the canonical merge matrix and the post-fix
+  verdict accounts for every must-fix at one exact head.
 - The review prompt requires repository evidence for every finding.
 - The security lens derives applicable trust boundaries and negative tests;
   it does not emit generic checklist findings.
 - Security verification prefers existing named regressions; custom destructive
   reproduction is contract-bound, isolated, minimal, and checkpointed first.
+- Only implementation step 5 opens the pull request; all other steps reuse it.
 - Retired Agent records cannot be assigned to new tasks after archival.

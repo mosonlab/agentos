@@ -190,7 +190,7 @@ test("a later chain step runs on the chain's shared branch so the chain lands in
         repo: { id: "repo-1", defaultBranch: "main" }, templateStep: { runner: null },
       }),
       // §D-P7's stop-state guard reads the task with its template step before
-      // queueing. This one is not a chain's step-10 task, so it is a no-op.
+      // queueing. This one is not a chain's step-12 task, so it is a no-op.
       findUnique: async () => ({ id: "task-2", templateStep: { runner: null } }),
     },
     run: { create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1", ...data }; } },

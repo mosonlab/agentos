@@ -23,6 +23,8 @@ import {
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 
+const roleSource = (name: string): Promise<string> => readFile(`${rolesRoot}${name}.md`, "utf8");
+
 const frontmatterValue = (source: string, key: string): string => {
   const match = source.match(new RegExp(`^${key}:\\s*(.+)$`, "mu"));
   assert.ok(match, `role source must declare ${key}`);
@@ -46,8 +48,31 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
 });
 
-test("the canonical ten-step template routes both review passes through Review Coordinator", () => {
-  assert.equal(CANONICAL_TEMPLATE_STEPS.length, 10);
+test("the split review prompts enforce frozen-range, blind-order, adjudication, and regression contracts", async () => {
+  const [planReview, firstReview, finalReview] = await Promise.all([
+    roleSource("review-coordinator"),
+    roleSource("review-coordinator-sol"),
+    roleSource("review-coordinator-opus"),
+  ]);
+
+  assert.match(planReview, /never review implementation\s+diffs/u);
+  assert.match(planReview, /acceptance criterion fail at the frozen base commit/u);
+
+  assert.match(firstReview, /frozen immediately before implementation began/u);
+  assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
+  assert.match(firstReview, /Persist the complete report as the task output/u);
+  assert.match(firstReview, /quote the exact governing\s+specification text/u);
+
+  const blindWrite = finalReview.indexOf("persisted and committed as your task output");
+  const firstReportRead = finalReview.indexOf("read the first reviewer's report attachment");
+  assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
+  assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
+  assert.match(finalReview, /entire fix diff as one\s+unit/u);
+  assert.match(finalReview, /exact fixed head/u);
+});
+
+test("the canonical twelve-step template splits code review and preserves mechanical merge", () => {
+  assert.equal(CANONICAL_TEMPLATE_STEPS.length, 12);
   assert.deepEqual(
     CANONICAL_TEMPLATE_STEPS.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
     [
@@ -56,19 +81,21 @@ test("the canonical ten-step template routes both review passes through Review C
       { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review" },
       { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
       { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
-      { stepIndex: 6, agentName: "review-coordinator", outputKind: "code-review" },
-      { stepIndex: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 8, agentName: "librarian", outputKind: "documentation" },
-      { stepIndex: 9, agentName: null, outputKind: "approval" },
-      { stepIndex: 10, agentName: "merge-integrator", outputKind: "merge-result" },
+      { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
+      { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix" },
+      { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 9, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
+      { stepIndex: 10, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 11, agentName: null, outputKind: "approval" },
+      { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   assert.equal(CANONICAL_TEMPLATE_STEPS.some((step) => step.agentName === "code-reviewer"), false);
 });
 
-test("the integrator row is the only step that publishes nothing, and it is not a model row", () => {
-  const publishing = CANONICAL_TEMPLATE_STEPS.filter((step) => !step.opensPullRequest).map((step) => step.stepIndex);
-  assert.deepEqual(publishing, [INTEGRATOR_STEP_INDEX]);
+test("only implementation opens a pull request, and the integrator is not a model row", () => {
+  const opening = CANONICAL_TEMPLATE_STEPS.filter((step) => step.opensPullRequest).map((step) => step.stepIndex);
+  assert.deepEqual(opening, [5]);
   const integrator = CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX)!;
   assert.equal(integrator.agentName, INTEGRATOR_AGENT_NAME);
   assert.equal(integrator.outputKind, INTEGRATOR_OUTPUT_KIND);
@@ -82,12 +109,12 @@ test("the integrator row is the only step that publishes nothing, and it is not 
   assert.equal(catalogRunnerForModel(sentinel.model), null);
 });
 
-test("the sentinel may bind only step 10, and step 10 only the sentinel", () => {
-  const step10 = { stepIndex: 10, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } };
+test("the sentinel may bind only step 12, and step 12 only the sentinel", () => {
+  const step12 = { stepIndex: INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } };
   const step5 = { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } };
-  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step10), true);
+  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step12), true);
   assert.equal(integratorBindingValid("senior-dev", step5), true);
   assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step5), false);
-  assert.equal(integratorBindingValid("senior-dev", step10), false);
+  assert.equal(integratorBindingValid("senior-dev", step12), false);
   assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, null), false);
 });
