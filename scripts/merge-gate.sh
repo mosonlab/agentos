@@ -339,12 +339,14 @@ publish_dependency_snapshot() {
   staging="$(mktemp -d "${CACHE_ROOT}/.node-modules.${key}.XXXXXXXX")"
   if cp -c -R "${REPO_ROOT}/node_modules" "${staging}/node_modules"; then
     if printf '%s\n' "${key}" > "${staging}/READY" \
-      && chmod -R a-w "${staging}" \
-      && mv "${staging}" "${entry}"; then
+      && chmod -R a-w "${staging}/node_modules" "${staging}/READY" \
+      && mv "${staging}" "${entry}" \
+      && chmod a-w "${entry}"; then
       note "dependency cache stored: ${key}"
     else
       chmod -R u+w "${staging}" 2>/dev/null || true
-      rm -rf -- "${staging}"
+      chmod -R u+w "${entry}" 2>/dev/null || true
+      rm -rf -- "${staging}" "${entry}"
       note "dependency snapshot could not be published; this run keeps fresh npm-ci state"
     fi
   else
@@ -430,10 +432,12 @@ publish_build_snapshot() {
     }
   done
   if ! printf '%s\n' "${key}" > "${staging}/READY" \
-    || ! chmod -R a-w "${staging}" \
-    || ! mv "${staging}" "${entry}"; then
+    || ! chmod -R a-w "${staging}/tree" "${staging}/READY" \
+    || ! mv "${staging}" "${entry}" \
+    || ! chmod a-w "${entry}"; then
     chmod -R u+w "${staging}" 2>/dev/null || true
-    rm -rf -- "${staging}" "${lock}"
+    chmod -R u+w "${entry}" 2>/dev/null || true
+    rm -rf -- "${staging}" "${entry}" "${lock}"
     note "build snapshot could not be published; this run keeps fresh build output"
     return 0
   fi
