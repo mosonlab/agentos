@@ -63,6 +63,7 @@ const git = (...args: string[]): { ok: boolean; out: string } => {
 const gitProbe: GitProbe = {
   commitExists: (sha) => git("cat-file", "-e", `${sha}^{commit}`).ok,
   isAncestor: (ancestor, descendant) => git("merge-base", "--is-ancestor", ancestor, descendant).ok,
+  treeOf: (sha) => { const result = git("rev-parse", `${sha}^{tree}`); return result.ok ? result.out : null; },
   blobAt: (path) => { const result = git("rev-parse", `HEAD:${path}`); return result.ok ? result.out : null; },
 };
 
