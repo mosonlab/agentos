@@ -5,7 +5,7 @@
 #   bash scripts/merge-gate.sh                       # gate the current HEAD
 #   bash scripts/merge-gate.sh --expect-head <oid>   # gate exactly that commit
 #   npm run merge-gate -- --expect-head <oid>        # same, through npm
-#   bash scripts/merge-gate.sh --master <oid>        # state the authoritative master
+#   bash scripts/merge-gate.sh --master <oid>        # state the baseline commit
 #   bash scripts/merge-gate.sh --keep-postgres       # diagnosis: never authoritative
 #
 # Exit codes are the verdict and nothing else returns 0:
@@ -46,12 +46,14 @@
 # installed and nothing running, and a branch that rewrites history should hear
 # that instead of a preflight failure about a daemon it never needed.
 #
-# Those rules are about what is already on master, so the gate has to know which
-# commit master is, and it establishes that rather than assuming it, in this
-# order: --master <oid>, AGENTOS_MASTER_OID, `git ls-remote origin` when there
-# is an origin to ask, and otherwise this repository's own master refs — which
-# is the gate worker, a worktree of a bare mirror with no credential and no
-# route to GitHub, whose refs are verbatim copies of the operator's own push.
+# Those rules are about what is already on the branch being merged into, so the
+# gate has to know which commit that is, and it establishes that rather than
+# assuming it, in this order: --master <oid>, AGENTOS_MASTER_OID, `git ls-remote
+# --symref origin HEAD` when there is an origin to ask, and otherwise this
+# repository's own refs for the default branch — which is the gate worker, a
+# worktree of a bare mirror with no credential and no route to GitHub, whose
+# refs are verbatim copies of the operator's own push. The branch's name is read
+# the same way and is not written down here: this repository's is `main`.
 # Whichever it is, the oid and where it came from are printed in the preflight
 # and the frozen check is bound to it. When the two local refs disagree the
 # descendant wins, because a later baseline can only ever refuse more.
@@ -71,7 +73,7 @@ EXIT_NOT_AUTHORITATIVE=3
 usage() {
   # No gate ran, so the EXIT trap must not print a verdict.
   trap - EXIT
-  sed -n '2,59p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,61p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -304,26 +306,36 @@ note "repository: ${REPO_ROOT}"
 note "gating:     ${GATED_HEAD}${EXPECT_HEAD:+ (matches --expect-head)}"
 note "worktree:   clean"
 
-# --- the authoritative master ----------------------------------------------
+# --- the authoritative default branch ---------------------------------------
 
-# Which commit master is, established rather than assumed. A local
+# Which commit the branch being merged into is, established rather than
+# assumed — including which branch that is. This repository's default branch is
+# `main` and the gate worker's mirror may carry another name, so the name is
+# read from whoever is authoritative rather than written down here. A local
 # remote-tracking ref is a cache of an answer someone once got; if it is stale,
-# a frozen record that master already carries looks like a new file to the
-# append-only check and the modification is waved through. So: what the caller
-# stated, or else what origin says right now. Never a ref found lying around.
-FAILED_STEP="authoritative master"
+# a frozen record the default branch already carries looks like a new file to
+# the append-only check and the modification is waved through. So: what the
+# caller stated, or else what origin says right now. Never a ref found lying
+# around.
+FAILED_STEP="authoritative default branch"
 if [ -n "${MASTER_OID}" ]; then
   [[ "${MASTER_OID}" =~ ^[0-9a-f]{40}$ ]] \
     || die "--master needs a full 40-character object id, got: ${MASTER_OID}"
   MASTER_SOURCE="stated by the caller"
 elif git -C "${REPO_ROOT}" remote get-url origin >/dev/null 2>&1; then
+  # One question, two answers: `--symref ... HEAD` says which branch origin's
+  # HEAD points at and what that branch is at, so the name and the oid cannot
+  # come from two different moments.
   # GIT_TERMINAL_PROMPT=0: a gate must fail, not sit waiting for a password.
-  master_ref="$(GIT_TERMINAL_PROMPT=0 git -C "${REPO_ROOT}" ls-remote origin refs/heads/master 2>/dev/null)" \
-    || die "could not read refs/heads/master from origin; pass --master <oid> to state it"
-  MASTER_OID="$(printf '%s\n' "${master_ref}" | awk 'NR==1 {print $1}')"
+  symref="$(GIT_TERMINAL_PROMPT=0 git -C "${REPO_ROOT}" ls-remote --symref origin HEAD 2>/dev/null)" \
+    || die "could not read HEAD from origin; pass --master <oid> to state it"
+  DEFAULT_REF="$(printf '%s\n' "${symref}" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
+  [ -n "${DEFAULT_REF}" ] \
+    || die "origin did not say which branch its HEAD points at; pass --master <oid> to state it"
+  MASTER_OID="$(printf '%s\n' "${symref}" | awk '$2 == "HEAD" {print $1; exit}')"
   [[ "${MASTER_OID}" =~ ^[0-9a-f]{40}$ ]] \
-    || die "origin answered with no usable master oid; pass --master <oid> to state it"
-  MASTER_SOURCE="read from origin"
+    || die "origin answered with no usable oid for ${DEFAULT_REF}; pass --master <oid> to state it"
+  MASTER_SOURCE="read from origin (${DEFAULT_REF})"
 else
   # No remote to ask. On the gate worker that is not a broken checkout, it is
   # the design: a worktree of a bare mirror that holds no credential and never
@@ -338,28 +350,50 @@ else
   # descendant is the later master, and a later baseline can only ever refuse
   # more. A checkout whose local master trails its remote-tracking ref is the
   # ordinary case and must not be the stricter answer's loser.
-  origin_master="$(git -C "${REPO_ROOT}" rev-parse --verify --quiet "refs/remotes/origin/master^{commit}" || true)"
-  local_master="$(git -C "${REPO_ROOT}" rev-parse --verify --quiet "refs/heads/master^{commit}" || true)"
+  #
+  # The name, with no origin to ask: `refs/remotes/origin/HEAD` where a clone
+  # recorded it, and otherwise the one branch of the two conventional names
+  # this repository actually has. Two candidates present is not a preference to
+  # resolve quietly, and none is not a default to invent.
+  default_branch=""
+  default_ref="$(git -C "${REPO_ROOT}" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [ -n "${default_ref}" ]; then
+    default_branch="${default_ref#refs/remotes/origin/}"
+  else
+    for candidate in main master; do
+      if git -C "${REPO_ROOT}" rev-parse --verify --quiet "refs/heads/${candidate}^{commit}" >/dev/null \
+        || git -C "${REPO_ROOT}" rev-parse --verify --quiet "refs/remotes/origin/${candidate}^{commit}" >/dev/null; then
+        [ -z "${default_branch}" ] \
+          || die "no origin remote to ask, and this repository has both main and master; pass --master <oid>"
+        default_branch="${candidate}"
+      fi
+    done
+  fi
+  [ -n "${default_branch}" ] \
+    || die "no origin remote to ask and no default branch in this repository; pass --master <oid>"
+
+  origin_master="$(git -C "${REPO_ROOT}" rev-parse --verify --quiet "refs/remotes/origin/${default_branch}^{commit}" || true)"
+  local_master="$(git -C "${REPO_ROOT}" rev-parse --verify --quiet "refs/heads/${default_branch}^{commit}" || true)"
   if [ -n "${origin_master}" ] && [ -n "${local_master}" ] && [ "${origin_master}" != "${local_master}" ]; then
     if git -C "${REPO_ROOT}" merge-base --is-ancestor "${origin_master}" "${local_master}"; then
-      MASTER_OID="${local_master}"; MASTER_SOURCE="refs/heads/master, ahead of origin/master; no origin to ask"
+      MASTER_OID="${local_master}"; MASTER_SOURCE="refs/heads/${default_branch}, ahead of origin/${default_branch}; no origin to ask"
     elif git -C "${REPO_ROOT}" merge-base --is-ancestor "${local_master}" "${origin_master}"; then
-      MASTER_OID="${origin_master}"; MASTER_SOURCE="refs/remotes/origin/master, ahead of master; no origin to ask"
+      MASTER_OID="${origin_master}"; MASTER_SOURCE="refs/remotes/origin/${default_branch}, ahead of ${default_branch}; no origin to ask"
     else
-      die "no origin remote to ask, and this repository's two master refs have diverged (${origin_master} / ${local_master}); pass --master <oid>"
+      die "no origin remote to ask, and this repository's two ${default_branch} refs have diverged (${origin_master} / ${local_master}); pass --master <oid>"
     fi
   elif [ -n "${origin_master}" ]; then
-    MASTER_OID="${origin_master}"; MASTER_SOURCE="refs/remotes/origin/master; no origin to ask"
+    MASTER_OID="${origin_master}"; MASTER_SOURCE="refs/remotes/origin/${default_branch}; no origin to ask"
   elif [ -n "${local_master}" ]; then
-    MASTER_OID="${local_master}"; MASTER_SOURCE="refs/heads/master; no origin to ask"
+    MASTER_OID="${local_master}"; MASTER_SOURCE="refs/heads/${default_branch}; no origin to ask"
   else
-    die "no origin remote to ask and no master ref in this repository; pass --master <oid>"
+    die "no origin remote to ask and no ${default_branch} ref in this repository; pass --master <oid>"
   fi
 fi
 git -C "${REPO_ROOT}" cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null \
-  || die "master ${MASTER_OID} is not in this repository; run: git fetch origin master"
+  || die "${MASTER_OID} is not in this repository; run: git fetch origin"
 FAILED_STEP=""
-note "master:     ${MASTER_OID} (${MASTER_SOURCE})"
+note "baseline:   ${MASTER_OID} (${MASTER_SOURCE})"
 
 # --- the record rules ------------------------------------------------------
 

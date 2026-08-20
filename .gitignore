@@ -11,7 +11,3 @@ dist/
 packages/db/generated/
 docs/reference/danny-agentos-video/frames/
 
-# Minted by `npm run snapshot:authority` for a snapshot export, at an exact
-# commit. Tracking it would leave a stale attestation on master the moment the
-# migration set moves.
-release-authority.json

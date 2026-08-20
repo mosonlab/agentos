@@ -230,28 +230,20 @@ describe("verifying an attestation against a tree", () => {
     assert.match(failures[0] ?? "", /records a different docs\/reviews/u);
   });
 
-  it("checks the commit and tree object ids wherever there is history", () => {
-    const git: GitProbe = { commitExists: () => true, isAncestor: () => true, treeOf: () => TREE, blobAt: committed };
-    assert.deepEqual(verify({ git }), []);
-    assert.match(
-      verify({ git: { ...git, treeOf: () => "9".repeat(40) } })[0] ?? "",
-      /does not have the attested tree/u,
-    );
-    assert.match(verify({ git: { ...git, isAncestor: () => false } }).join("\n"), /is not an ancestor of the current HEAD/u);
-    assert.match(
-      verify({ git: { ...git, isAncestor: (ancestor) => ancestor !== MASTER } }).join("\n"),
-      /the recorded master .* is not an ancestor of the attested commit/u,
-    );
+  it("does not care whether the attested commit is in this checkout's history", () => {
+    // The attested commit is from the pre-cutover assembly lineage. A checkout
+    // that still holds those objects and a fresh clone that does not are the
+    // same tree, and are verified by the same rule.
+    const holdsThem: GitProbe = { commitExists: () => true, isAncestor: () => false, blobAt: committed };
+    const doesNot: GitProbe = { commitExists: () => false, isAncestor: () => false, blobAt: committed };
+    assert.deepEqual(verify({ git: holdsThem }), []);
+    assert.deepEqual(verify({ git: doesNot }), []);
   });
 
-  it("asks a different lineage the question it can answer: is this release path committed here", () => {
-    // A published snapshot is the export committed into a fresh repository. It
-    // has history, but none of the attested commits — so the ancestry questions
-    // are unanswerable there and the committed-tree question replaces them.
+  it("asks every checkout with history the question it can answer: is this release path committed here", () => {
     const published: GitProbe = {
       commitExists: () => false,
       isAncestor: () => false,
-      treeOf: () => null,
       blobAt: committed,
     };
     assert.deepEqual(verify({ git: published }), []);
@@ -268,11 +260,10 @@ describe("verifying an attestation against a tree", () => {
     }
   });
 
-  it("does not let a different lineage skip anything the minting lineage is asked", () => {
+  it("does not let the committed-tree question stand in for anything else", () => {
     // The substitution is only of the ancestry questions. Everything else —
-    // signature, declaration, manifest, migration set — refuses the same way in
-    // a lineage that has none of the attested commits.
-    const published: GitProbe = { commitExists: () => false, isAncestor: () => false, treeOf: () => null, blobAt: committed };
+    // signature, declaration, manifest, migration set — refuses the same way.
+    const published: GitProbe = { commitExists: () => false, isAncestor: () => false, blobAt: committed };
     assert.match(verify({ git: published, publicKey: null }).join("\n"), /cannot be checked/u);
     assert.match(verify({ git: published, masterSha: "9".repeat(40) }).join("\n"), /not the declared/u);
     assert.match(
@@ -285,16 +276,16 @@ describe("verifying an attestation against a tree", () => {
     );
   });
 
-  it("names which of the three object-id bindings a checkout can carry", () => {
-    const git: GitProbe = { commitExists: () => true, isAncestor: () => true, treeOf: () => TREE, blobAt: committed };
+  it("names which of the two object-id bindings a checkout can carry", () => {
+    const git: GitProbe = { commitExists: () => true, isAncestor: () => true, blobAt: committed };
     assert.equal(bindingOf(sealed(), null), "signature-and-content");
-    assert.equal(bindingOf(sealed(), git), "signature-content-and-history");
-    assert.equal(bindingOf(sealed(), { ...git, commitExists: () => false }), "signature-content-and-published-tree");
+    assert.equal(bindingOf(sealed(), git), "signature-content-and-committed-tree");
+    assert.equal(bindingOf(sealed(), { ...git, commitExists: () => false }), "signature-content-and-committed-tree");
   });
 });
 
 describe("verifying the private revalidation document", () => {
-  const git: GitProbe = { commitExists: () => true, isAncestor: () => true, treeOf: () => TREE, blobAt: committed };
+  const git: GitProbe = { commitExists: () => true, isAncestor: () => true, blobAt: committed };
   const document = `master ${MASTER} and control-plane A ${CONTROL_PLANE_A}`;
 
   it("accepts the document that records both declared SHAs", () => {
@@ -404,10 +395,11 @@ describe("the snapshot manifest", () => {
     }
   });
 
-  it("declares the attestation as a minted input, so the scan actually reads it", () => {
-    // An include glob alone would only say the file *may* be published. The
-    // artifact is gitignored, so without this the scanner would never open it.
-    assert.deepEqual(snapshot.mintedArtifacts, [RELEASE_AUTHORITY_FILE]);
+  it("does not declare the attestation as a minted input, because it is tracked", () => {
+    // `mintedArtifacts` is for a snapshot input the scanner would otherwise
+    // never open, because `git ls-files` cannot see it. The attestation is
+    // tracked, so the include glob above is what puts it in front of the scan.
+    assert.equal(snapshot.mintedArtifacts.includes(RELEASE_AUTHORITY_FILE), false);
   });
 });
 
