@@ -1,0 +1,95 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-background: var(--background); --color-foreground: var(--foreground);
+  --color-card: var(--card); --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover); --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary); --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary); --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted); --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent); --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive); --color-border: var(--border);
+  --color-input: var(--input); --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar); --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary); --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent); --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border); --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px); --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius); --radius-xl: var(--radius-card); --font-mono: var(--mono);
+}
+
+/* AgentOS web — visual language copied from design-reference/ (Danny Postma's
+   AgentOS): warm-olive near-black, a single yellow accent, mono everywhere.
+   Token names follow design-reference/ui-notes.md §0. */
+
+:root {
+  --background:#f6f2e7; --foreground:#252116; --card:#fffdf7; --card-foreground:#252116;
+  --popover:#fffaf0; --popover-foreground:#252116; --primary:#7d5d00; --primary-foreground:#fffaf0;
+  --secondary:#e9e1cf; --secondary-foreground:#403a2b; --muted:#e9e1cf; --muted-foreground:#5f5748;
+  --accent:#ded3ba; --accent-foreground:#252116; --destructive:#b4232a; --border:#cfc4aa; --input:#cfc4aa; --ring:#7d5d00;
+  --sidebar:#eee7d8; --sidebar-foreground:#252116; --sidebar-primary:#7d5d00; --sidebar-primary-foreground:#fffaf0;
+  --sidebar-accent:#ded3ba; --sidebar-accent-foreground:#252116; --sidebar-border:#d8cfba; --sidebar-ring:#7d5d00;
+  --surface-input:#fffaf0; --surface-run-detail:#f4ecdc; --border-soft:#ded6c3; --faint:#6b6252; --primary-hover:#755700; --primary-soft:#f1df9b;
+  --destructive-fg:#8f1720; --destructive-bg:#f9dfe0; --destructive-line:#dba6a9;
+  --status-green-fg:#27683a; --status-green-bg:#dceee0; --status-green-line:#9bc5a6;
+  --status-amber-fg:#795000; --status-amber-bg:#f7e8c5; --status-amber-line:#d8b96c;
+  --status-violet-fg:#59469a; --status-violet-bg:#e9e2fa; --status-violet-line:#bdb0df; --link:#3659b7;
+  --scrollbar:#b9ad90; --border-hover:#a99b79; --code-background:#eee7d8; --danger-button:#b4232a;
+  --danger-button-hover:#9b1d24; --danger-button-foreground:#fff7f7; --toggle-background:#bdb39b;
+  --toggle-knob:#fffdf7; --toggle-knob-active:#4c3b00; --check-border:#9a8c68; --row-hover:#eee6d5;
+  --primary-badge-background:#f1df9b; --event-line:#ddd3bd; --badge-foreground:#ffffff; --radio-border:#9a8c68;
+  --scrim:rgba(37,33,22,.45); --modal-shadow:rgba(37,33,22,.25);
+  --radius:8px; --radius-card:10px;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+}
+
+.dark {
+  --background:#0b0a07; --foreground:#f1efe4; --card:#201d12; --card-foreground:#f1efe4;
+  --popover:#191710; --popover-foreground:#f1efe4; --primary:#e9c64a; --primary-foreground:#1a1608;
+  --secondary:#272316; --secondary-foreground:#cbc7b6; --muted:#272316; --muted-foreground:#8d8874;
+  --accent:#2f2a19; --accent-foreground:#f1efe4; --destructive:#e5484d; --border:#2e2919; --input:#2e2919; --ring:#e9c64a;
+  --sidebar:#131109; --sidebar-foreground:#f1efe4; --sidebar-primary:#e9c64a; --sidebar-primary-foreground:#1a1608;
+  --sidebar-accent:#2f2a19; --sidebar-accent-foreground:#f1efe4; --sidebar-border:#241f13; --sidebar-ring:#e9c64a;
+  --surface-input:#191710; --surface-run-detail:#1b1810; --border-soft:#241f13; --faint:#6b6655; --primary-hover:#f2d264; --primary-soft:#4a3d13;
+  --destructive-fg:#ff9ba0; --destructive-bg:#2d1416; --destructive-line:#5e2a2e;
+  --status-green-fg:#77cf8d; --status-green-bg:#16281a; --status-green-line:#2f5233;
+  --status-amber-fg:#e9b04a; --status-amber-bg:#2b2110; --status-amber-line:#5b4519;
+  --status-violet-fg:#b3a5f0; --status-violet-bg:#221e36; --status-violet-line:#3b3457; --link:#8fa7ff;
+  --scrollbar:#3a3421; --border-hover:#3f381f; --code-background:#15130c; --danger-button:#e0575c;
+  --danger-button-hover:#ea686d; --danger-button-foreground:#200c0d; --toggle-background:#3a3524;
+  --toggle-knob:#d9d4c2; --toggle-knob-active:#2a2208; --check-border:#4a4429; --row-hover:#221e13;
+  --primary-badge-background:#362c10; --event-line:#1e1b11; --badge-foreground:#ffffff; --radio-border:#56502f;
+  --scrim:rgba(4,4,2,.68); --modal-shadow:rgba(0,0,0,.55);
+}
+
+/* Everything the retired stylesheet did that was not a class rule, moved into
+   `@layer base` so that Tailwind utilities now win against it. Written after
+   `@import "tailwindcss"`, so it appends to the existing `base` layer and still
+   beats preflight on source order.
+
+   `html`, not `:root`: `styles.test.tsx` reads the light token block with
+   /:root\s*\{...\}/ and must keep latching onto the block above. `.dark` is set
+   on document.documentElement (lib/theme.tsx), i.e. the same element either way.
+
+   `font-size: 13px` is unchanged on purpose — it is what makes Tailwind's
+   spacing unit 3.25px, so changing it would rescale every utility in the app at
+   once. The alias variables the retired rule declared (--fg, --ink-0, --blue, …)
+   are gone; their canonical names are used directly. */
+
+@layer base {
+  html { font-family: var(--mono); font-size: 13px; line-height: 1.5;
+         color: var(--foreground); background: var(--background);
+         font-synthesis: none; -webkit-font-smoothing: antialiased;
+         text-rendering: optimizeLegibility; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--background); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: var(--link); text-decoration: none; }
+  h1, h2, h3, h4 { margin: 0; font-weight: 700; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 8px;
+                              background: var(--scrollbar); background-clip: content-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+}

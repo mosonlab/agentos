@@ -1,0 +1,312 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { FAILURE_ENVELOPE_VERSION, FailureClass, type FailureEnvelope } from "@agentos/db";
+
+import { classifyEnvelope, externalFailure, failureIsRetryable } from "./execution.js";
+
+const envelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelope => ({
+  version: FAILURE_ENVELOPE_VERSION,
+  phase: "EXECUTE",
+  runnerClass: null,
+  exitCode: 1,
+  signal: null,
+  terminationReason: null,
+  terminalEventSeen: true,
+  terminalSuccess: false,
+  agentExited: true,
+  providerError: null,
+  stderrSummary: null,
+  stdoutSummary: null,
+  timedOut: false,
+  transient: false,
+  timeoutMs: null,
+  ...overrides,
+});
+
+test("the agent's own stdout is never a verdict, whatever the runner guessed", () => {
+  // The shape of the 2026-08-17 misclassification: a task *about* rate limiting
+  // fails, its stdout is full of the phrase, and the old runner-side grep read
+  // stdout. Nothing on a verdict channel says anything happened to the
+  // environment, so this is an ordinary failed attempt.
+  const verdict = classifyEnvelope(envelope({
+    runnerClass: FailureClass.RATE_LIMITED,
+    stdoutSummary: "implemented the 429 rate limit backoff; quota headers parsed",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, false);
+});
+
+test("the same wording on stderr is a verdict", () => {
+  const verdict = classifyEnvelope(envelope({ stderrSummary: "HTTP 429: rate limit exceeded" }));
+  assert.equal(verdict.failureClass, FailureClass.RATE_LIMITED);
+  assert.equal(verdict.retryable, true);
+});
+
+test("auth in the agent's output is content; auth on the provider error is a verdict", () => {
+  const content = classifyEnvelope(envelope({ stdoutSummary: "returns 401 when the caller is not logged in" }));
+  assert.equal(content.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(content.externalFailure, false, "an ordinary failed attempt must spend the attempt");
+
+  const real = classifyEnvelope(envelope({ providerError: "authentication_failed" }));
+  assert.equal(real.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(real.retryable, false);
+  assert.equal(real.externalFailure, true, "the operator has to fix this; the task must not pay for it");
+});
+
+test("auth outranks transience so a lockout is not retried into", () => {
+  const verdict = classifyEnvelope(envelope({ providerError: "connection lost after authentication_failed" }));
+  assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(verdict.retryable, false);
+});
+
+test("a typed command timeout outranks the text around it", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "DELIVER",
+    timedOut: true,
+    timeoutMs: 20_000,
+    stderrSummary: "git push timed out after 20000ms; its process group was killed",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+});
+
+test("git's auth vocabulary is read in the delivery phase, the CLI's in execution", () => {
+  const push = envelope({ phase: "DELIVER", stderrSummary: "remote: Permission denied to repo (403)" });
+  assert.equal(classifyEnvelope(push).failureClass, FailureClass.AUTH_REQUIRED);
+  // "permission denied" out of an agent CLI is a filesystem error, not a
+  // credential one, and must not be reported to an operator as "go log in".
+  const agent = envelope({ phase: "EXECUTE", stderrSummary: "open /etc/hosts: permission denied" });
+  assert.equal(classifyEnvelope(agent).failureClass, FailureClass.TASK_FAILED);
+});
+
+test("BUDGET_EXCEEDED can never buy the ceiling it just hit", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "PROVISION",
+    agentExited: false,
+    runnerClass: FailureClass.BUDGET_EXCEEDED,
+    exitCode: null,
+    terminationReason: "max-runs budget exceeded",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.BUDGET_EXCEEDED);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, false, "raising the ceiling for exceeding it is an unbounded loop");
+});
+
+test("a killed-by-budget run stays BUDGET_EXCEEDED despite the signal", () => {
+  const verdict = classifyEnvelope(envelope({
+    runnerClass: FailureClass.BUDGET_EXCEEDED,
+    signal: "SIGKILL",
+    terminationReason: "walltime: exceeded 120 minutes",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.BUDGET_EXCEEDED);
+  assert.equal(verdict.externalFailure, false);
+  // The pre-envelope helper reached the opposite answer off the same facts: an
+  // unexpected signal, so external, so the ceiling goes up by one — for a run
+  // killed precisely because it had run out of ceiling.
+  assert.equal(
+    externalFailure({ succeeded: false, signal: "SIGKILL", reported: false, failureClass: FailureClass.BUDGET_EXCEEDED }),
+    true,
+  );
+});
+
+test("a failure outside the agent's own phase does not spend the task's budget", () => {
+  const delivery = classifyEnvelope(envelope({ phase: "DELIVER", exitCode: 0, terminalSuccess: true, stderrSummary: "fatal: unable to access remote" }));
+  assert.equal(delivery.externalFailure, true, "the agent finished; the push is the runner's plumbing");
+  const provisioning = classifyEnvelope(envelope({ phase: "PROVISION", agentExited: false, exitCode: 127 }));
+  assert.equal(provisioning.failureClass, FailureClass.BINARY_NOT_FOUND);
+  assert.equal(provisioning.externalFailure, true);
+});
+
+test("an exception in runner code is never charged to the agent", () => {
+  // agentExited is false even though the phase says EXECUTE: control reached
+  // the completion through the runner's own catch, so the agent never got to
+  // report a verdict of its own.
+  const verdict = classifyEnvelope(envelope({ phase: "EXECUTE", agentExited: false, terminationReason: "runner exception" }));
+  assert.equal(verdict.externalFailure, true);
+  // This used to answer CANCELLED_OR_TIMED_OUT, from `terminationReason` alone.
+  // The runner stamps `"runner exception"` on *every* escaped error, so that
+  // rule read the runner's own crash as a deliberately cancelled session and
+  // made the whole class of them unretryable — which is how a lost TLS
+  // connection during clone came to be refunded and then parked in REVIEW for a
+  // human. A termination reason now only means what it says when there was a
+  // session to terminate.
+  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED, "no session was cancelled; nothing here says transience either");
+  assert.equal(verdict.retryable, false);
+});
+
+test("a clone that lost its connection is retried, and a clone that cannot succeed is not", () => {
+  // Both come out of `runner.ts`'s catch-all, so both carry the same
+  // `"runner exception"`; the runner's typed network predicate is the only
+  // thing that differs. `packages/runner/src/provision-failure.test.ts` proves
+  // these two shapes are what a real `executeClaim` produces.
+  const lostTls = classifyEnvelope(envelope({
+    phase: "PROVISION", agentExited: false, terminationReason: "runner exception", exitCode: 1, transient: true,
+    stderrSummary: "git failed (128): fatal: unable to access 'https://example.test/repo.git/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL",
+  }));
+  assert.equal(lostTls.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(lostTls.retryable, true, "the whole point of #113: this attempt is retried, not parked");
+  assert.equal(lostTls.externalFailure, true);
+
+  const missingRepo = classifyEnvelope(envelope({
+    phase: "PROVISION", agentExited: false, terminationReason: "runner exception", exitCode: 1,
+    stderrSummary: "git failed (128): fatal: repository '/nonexistent/repo.git' does not exist",
+  }));
+  // Refunded, because no agent decided anything — but not retried, because
+  // retrying a repository that is not there is the same failure again. The two
+  // questions are separate and this envelope answers them differently.
+  assert.equal(missingRepo.externalFailure, true);
+  assert.equal(missingRepo.retryable, false);
+});
+
+test("a budget kill still reads as a cancelled session, because there was one", () => {
+  // The rule the guard above must not have broken: a walltime or stall kill
+  // comes through the normal completion path with `agentExited: true`.
+  const verdict = classifyEnvelope(envelope({
+    phase: "EXECUTE", agentExited: true, terminationReason: "walltime: exceeded 120 minutes", signal: "SIGTERM",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.CANCELLED_OR_TIMED_OUT);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, false, "a kill the session's own budget ordered is not an external failure");
+});
+
+test("a clean exit without a terminal event is protocol drift, and retryable", () => {
+  const verdict = classifyEnvelope(envelope({ exitCode: 0, terminalEventSeen: false, terminalSuccess: false }));
+  assert.equal(verdict.failureClass, FailureClass.PROTOCOL_ERROR);
+  assert.equal(verdict.retryable, true);
+});
+
+test("a tool failure may be read off stdout because it can change no decision", () => {
+  const verdict = classifyEnvelope(envelope({ stdoutSummary: '{"type":"result","isError": true}' }));
+  assert.equal(verdict.failureClass, FailureClass.TOOL_FAILED);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, false);
+});
+
+test("every class the API can reach agrees with the retry whitelist", () => {
+  // The whitelist stopped being reachable once the route preferred the runner's
+  // `retryable`; classifyEnvelope is what makes it authoritative again.
+  for (const stored of [
+    envelope({ stderrSummary: "HTTP 429" }),
+    envelope({ providerError: "server_error" }),
+    envelope({ exitCode: 0, terminalEventSeen: false }),
+    envelope({ stdoutSummary: "nothing interesting" }),
+    envelope({ providerError: "authentication_failed" }),
+  ]) {
+    const verdict = classifyEnvelope(stored);
+    assert.equal(verdict.retryable, failureIsRetryable(verdict.failureClass));
+  }
+});
+
+/**
+ * Copied verbatim from the `"a hung push arrives at the API as a typed timeout"`
+ * test in packages/runner/src/delivery.test.ts, which asserts this exact object
+ * as the output of a real `deliverWorkspace` hitting a real per-command
+ * timeout. If that test's literal changes, change this one — the pair is the
+ * only thing that ties the two halves of the chain together across a package
+ * boundary the runner deliberately does not cross.
+ */
+const HUNG_PUSH_ENVELOPE: FailureEnvelope = {
+  version: 1,
+  phase: "DELIVER",
+  runnerClass: FailureClass.TOOL_FAILED,
+  exitCode: 0,
+  signal: null,
+  terminationReason: null,
+  terminalEventSeen: true,
+  terminalSuccess: true,
+  agentExited: true,
+  providerError: null,
+  stderrSummary: "git push timed out after 6000ms; its process group was killed",
+  stdoutSummary: null,
+  timedOut: true,
+  transient: true,
+  timeoutMs: 6000,
+};
+
+test("the envelope a real hung push produces is classified as retryable transience", () => {
+  const verdict = classifyEnvelope(HUNG_PUSH_ENVELOPE);
+  // Before delivery kept its failure structured, this arrived with the agent's
+  // channels and no typed markers, and came out TASK_FAILED / non-retryable —
+  // #124's CommandTimeoutError existed but never reached the decision.
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, true, "the agent finished; a hung push is not its fault");
+  // The runner's own guess was TOOL_FAILED, which is neither.
+  assert.notEqual(verdict.failureClass, HUNG_PUSH_ENVELOPE.runnerClass);
+});
+
+/**
+ * Every phrase `packages/runner/src/network-retry.ts` treats as transient, and
+ * every phrase it vetoes. This list is the contract between the two files:
+ * `adapters.ts classifyError` reached that predicate through
+ * `isTransientNetworkError`, so relocating the authority here without the
+ * vocabulary would have quietly made these failures final.
+ */
+const TRANSIENT_PHRASES = [
+  "SSL_ERROR_SYSCALL: connection failed",
+  "fatal: the remote end hung up unexpectedly: unexpected EOF",
+  "connection reset by peer",
+  "connection closed by remote host",
+  "connection timed out",
+  "read ECONNRESET",
+  "connect ETIMEDOUT 140.82.121.4:443",
+  "getaddrinfo EAI_AGAIN github.com",
+  "HTTP 503 from the provider",
+  "status code 502",
+  "502 Bad Gateway",
+  "503 Service Unavailable",
+  "504 Gateway Timeout",
+];
+
+for (const phrase of TRANSIENT_PHRASES) {
+  test(`stderr saying "${phrase}" stays retryable transience`, () => {
+    const verdict = classifyEnvelope(envelope({ stderrSummary: phrase }));
+    assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+    assert.equal(verdict.retryable, true);
+  });
+}
+
+/**
+ * The veto half. These are deterministic access failures; a message that also
+ * mentions a dropped connection must not be retried into a lockout. Each is
+ * paired with the class it must land on instead — AUTH_REQUIRED where the
+ * phase's auth vocabulary recognises it, and a plain non-retryable failure
+ * where it does not.
+ */
+const VETOED_PHRASES: Array<{ phrase: string; phase: FailureEnvelope["phase"]; expected: FailureClass }> = [
+  { phrase: "remote: Authentication failed; connection reset by peer", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
+  { phrase: "could not read Username for 'https://github.com': connection timed out", phase: "DELIVER", expected: FailureClass.TASK_FAILED },
+  { phrase: "remote: Permission denied; ECONNRESET", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
+  { phrase: "403 Forbidden after ECONNRESET", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
+  { phrase: "Bad credentials; connection closed", phase: "EXECUTE", expected: FailureClass.TASK_FAILED },
+  { phrase: "HTTP 401 then ETIMEDOUT", phase: "EXECUTE", expected: FailureClass.AUTH_REQUIRED },
+];
+
+for (const { phrase, phase, expected } of VETOED_PHRASES) {
+  test(`"${phrase}" is never retried as transience`, () => {
+    const verdict = classifyEnvelope(envelope({ phase, stderrSummary: phrase, agentExited: phase === "EXECUTE" }));
+    assert.equal(verdict.failureClass, expected);
+    assert.equal(verdict.retryable, false);
+  });
+}
+
+test("the one transient semantic deliberately dropped is stdout", () => {
+  // The runner fed `stderr + stdout` to the same predicate. An agent writing a
+  // network retry loop has every one of these tokens in its output, and that
+  // is the misclassification this ticket exists to end — so the vocabulary
+  // moved and the channel did not.
+  for (const phrase of TRANSIENT_PHRASES) {
+    const verdict = classifyEnvelope(envelope({ stdoutSummary: phrase }));
+    assert.equal(verdict.failureClass, FailureClass.TASK_FAILED, `stdout "${phrase}" must not be a verdict`);
+    assert.equal(verdict.retryable, false);
+  }
+});
+
+test("a dropped connection outranks a rate limit named in the same provider error", () => {
+  // adapters.ts checked this pair before the rate-limit rule, and the order
+  // matters: a rate-limit verdict backs off for the rate-limit interval.
+  const verdict = classifyEnvelope(envelope({ providerError: "connection lost while reporting 429 rate limit" }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+});

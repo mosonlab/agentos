@@ -1,0 +1,30 @@
+{
+  "$comment": "Frozen public fixture for the v0.1.0 Developer Preview smoke task. Every field is the exact value the quickstart tells an operator to enter, so a check can compare what the console sends against this file rather than against prose. It contains no credential, no identifier from any installation, and nothing host-specific. Changing a value here changes what the release claims to have proved.",
+  "fixtureVersion": 1,
+  "task": {
+    "name": "OSS-B0 v0.1.0 deterministic smoke",
+    "description": "Create exactly one new file at the repository root, named agentos-smoke.txt, whose entire contents are the UTF-8 bytes `OSS-B0 v0.1.0 smoke` followed by a single newline. Change nothing else: no other file may be added, modified, renamed or deleted, and no dependency may be installed. Commit that one file with the commit subject `oss-b0: add deterministic smoke marker` and nothing after it on the subject line. Do not open a pull request.",
+    "assigneeType": "AGENT",
+    "targetBranch": "main",
+    "opensPullRequest": false,
+    "approvalGate": false,
+    "maxDurationMin": 15,
+    "stallTimeoutMin": 5,
+    "maxSessionsPerTask": 1
+  },
+  "expected": {
+    "pushedBranch": "agentos/<created-task-id>/run-1",
+    "parent": "the disposable repository's recorded seed commit",
+    "treeDiffersOnlyBy": "agentos-smoke.txt",
+    "fileBytesUtf8": "OSS-B0 v0.1.0 smoke\n",
+    "commitSubject": "oss-b0: add deterministic smoke marker",
+    "pullRequestUrl": null,
+    "delivery": "push reported as successful, with no pull request opened",
+    "failureModes": [
+      "the run hits the 15-minute wall clock or the 5-minute stall timeout",
+      "the pushed tree differs from the expected tree by anything other than agentos-smoke.txt",
+      "the file bytes or the commit subject do not match exactly",
+      "delivery reports a pull request URL"
+    ]
+  }
+}

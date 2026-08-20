@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d1117" />
+    <script>
+      (() => {
+        let preference;
+        try { preference = localStorage.getItem("agentos.theme"); } catch {}
+        if (preference === "light") document.documentElement.classList.remove("dark");
+        else if (preference !== "dark") {
+          try {
+            if (typeof window.matchMedia === "function" && window.matchMedia("(prefers-color-scheme: light)").matches) {
+              document.documentElement.classList.remove("dark");
+            }
+          } catch {}
+        }
+      })();
+    </script>
+    <title>AgentOS</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

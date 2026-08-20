@@ -1,0 +1,60 @@
+{
+  "name": "@agentos/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./merge-integrator": {
+      "types": "./src/merge-integrator.ts",
+      "import": "./dist/merge-integrator.js"
+    },
+    "./service-lock": {
+      "types": "./src/service-maintenance-lock.ts",
+      "import": "./dist/service-maintenance-lock.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck:cli",
+    "typecheck:cli": "tsc -p tsconfig.cli.json --noEmit",
+    "test": "node --import tsx --test prisma/*.test.ts src/*.test.ts",
+    "pretest:db": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/runner",
+    "test:db": "node --import tsx --test --test-concurrency=1 src/*.dbtest.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "dotenv -e ../../.env -- prisma migrate dev",
+    "db:migrate:release": "tsx prisma/release-migrate.ts",
+    "db:migrate-status": "dotenv -e ../../.env -- prisma migrate status",
+    "db:drift-check": "node scripts/check-drift.mjs",
+    "db:preflight-goal-execution": "dotenv -e ../../.env -- tsx prisma/preflight-goal-execution.ts",
+    "db:migrate-goal-execution": "npm run db:preflight-goal-execution && dotenv -e ../../.env -- prisma migrate deploy",
+    "db:verify-starter-onboarding": "dotenv -e ../../.env -- tsx prisma/verify-starter-onboarding.ts",
+    "db:verify-goal-execution": "dotenv -e ../../.env -- tsx prisma/verify-goal-execution.ts",
+    "db:export-goal-lineage": "dotenv -e ../../.env -- tsx prisma/export-goal-lineage.ts",
+    "db:files-precheck": "dotenv -e ../../.env -- tsx prisma/precheck-files.ts",
+    "db:backfill-session-usage": "dotenv -e ../../.env -- tsx prisma/backfill-session-usage.ts",
+    "db:backfill-task-source": "dotenv -e ../../.env -- tsx prisma/backfill-task-source.ts",
+    "db:verify-agent-template": "dotenv -e ../../.env -- tsx prisma/verify-agent-template.ts",
+    "db:validate": "dotenv -e ../../.env -- prisma validate",
+    "db:seed": "dotenv -e ../../.env -- prisma db seed",
+    "db:fixture": "dotenv -e ../../.env -- tsx prisma/acceptance-fixture.ts",
+    "snapshot:authority": "node --import tsx prisma/write-release-authority.ts",
+    "snapshot:authority-keygen": "node --import tsx prisma/keygen-release-authority.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.0"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^11.0.0",
+    "prisma": "6.19.0",
+    "tsx": "^4.20.6"
+  }
+}

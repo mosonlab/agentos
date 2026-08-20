@@ -1,0 +1,244 @@
+{
+  "version": 1,
+  "policy": "developer-preview-loopback-http-origin",
+  "documentation": [
+    "One table, two implementations. `apps/web/src/lib/local-origin.ts` validates WEB_API_URL",
+    "before the Vite dev/preview proxy exists, and `packages/runner/src/local-origin.ts`",
+    "validates RUNNER_API_URL before the runner builds a client. Neither may drift, so both",
+    "suites drive their own parser with the cases below and compare the exact reason code.",
+    "In Developer Preview the only accepted destination is the exact numeric IPv4 loopback",
+    "HTTP origin `http://127.0.0.1:<port>`: lowercase scheme, literal host 127.0.0.1, an",
+    "explicit port in 1-65535 with no leading zero, and no userinfo, path (not even a bare",
+    "`/`), query or fragment. Surrounding whitespace is stripped first, because an .env",
+    "reader already does that and indentation is not a policy difference.",
+    "Everything else is Unsupported and refused. The reason codes are diagnostic only: the",
+    "accept decision is a single anchored regex, and classification runs in the fixed",
+    "precedence below so that one value always yields one reason in both implementations."
+  ],
+  "reasonPrecedence": [
+    "destination-empty",
+    "destination-unparsable",
+    "scheme-not-http",
+    "userinfo-present",
+    "host-not-numeric-loopback",
+    "port-missing",
+    "port-invalid",
+    "path-present",
+    "query-present",
+    "fragment-present"
+  ],
+  "accepted": [
+    {
+      "description": "the generated default: the API on the loopback literal",
+      "value": "http://127.0.0.1:3000",
+      "port": 3000
+    },
+    {
+      "description": "any explicit port inside the valid range",
+      "value": "http://127.0.0.1:5432",
+      "port": 5432
+    },
+    {
+      "description": "the highest valid port",
+      "value": "http://127.0.0.1:65535",
+      "port": 65535
+    },
+    {
+      "description": "the lowest valid port",
+      "value": "http://127.0.0.1:1",
+      "port": 1
+    },
+    {
+      "description": "surrounding whitespace is stripped, not treated as a different policy",
+      "value": "  http://127.0.0.1:3000  ",
+      "port": 3000
+    }
+  ],
+  "rejected": [
+    {
+      "description": "unset destination",
+      "value": null,
+      "reason": "destination-empty"
+    },
+    {
+      "description": "empty destination",
+      "value": "",
+      "reason": "destination-empty"
+    },
+    {
+      "description": "whitespace-only destination",
+      "value": "   ",
+      "reason": "destination-empty"
+    },
+    {
+      "description": "not a URL at all",
+      "value": "not a url",
+      "reason": "destination-unparsable"
+    },
+    {
+      "description": "no scheme, so nothing says which transport this is",
+      "value": "127.0.0.1:3000",
+      "reason": "destination-unparsable"
+    },
+    {
+      "description": "scheme-relative destination",
+      "value": "//127.0.0.1:3000",
+      "reason": "destination-unparsable"
+    },
+    {
+      "description": "no authority at all, so no host is stated",
+      "value": "http://",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "HTTPS is not served by the local control plane",
+      "value": "https://127.0.0.1:3000",
+      "reason": "scheme-not-http"
+    },
+    {
+      "description": "a non-HTTP scheme",
+      "value": "ws://127.0.0.1:3000",
+      "reason": "scheme-not-http"
+    },
+    {
+      "description": "a scheme that reads a local file instead of a socket",
+      "value": "file:///etc/hosts",
+      "reason": "scheme-not-http"
+    },
+    {
+      "description": "the scheme must be lowercase; case folding is not part of the accepted form",
+      "value": "HTTP://127.0.0.1:3000",
+      "reason": "scheme-not-http"
+    },
+    {
+      "description": "userinfo would put a credential in a URL",
+      "value": "http://operator:token@127.0.0.1:3000",
+      "reason": "userinfo-present"
+    },
+    {
+      "description": "empty userinfo is still userinfo",
+      "value": "http://@127.0.0.1:3000",
+      "reason": "userinfo-present"
+    },
+    {
+      "description": "the loopback literal is the userinfo and the real host is remote",
+      "value": "http://127.0.0.1:3000@remote.agentos.test",
+      "reason": "userinfo-present"
+    },
+    {
+      "description": "`localhost` resolves through DNS and may not be 127.0.0.1",
+      "value": "http://localhost:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "a hostname alias that a hosts file or DNS controls",
+      "value": "http://local.agentos.test:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "an alternate 127/8 address is not the accepted literal",
+      "value": "http://127.0.0.2:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "a short-form spelling of the loopback address",
+      "value": "http://127.1:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "a zero-padded spelling of the loopback address",
+      "value": "http://127.0.0.001:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "the decimal spelling of 127.0.0.1",
+      "value": "http://2130706433:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "IPv6 loopback",
+      "value": "http://[::1]:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "IPv4-mapped IPv6 loopback",
+      "value": "http://[::ffff:127.0.0.1]:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "the wildcard address is a listener spelling, never a destination",
+      "value": "http://0.0.0.0:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "a remote host",
+      "value": "http://198.51.100.7:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "a remote name",
+      "value": "http://api.example.com:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "a private LAN address",
+      "value": "http://192.168.1.10:3000",
+      "reason": "host-not-numeric-loopback"
+    },
+    {
+      "description": "the port is implied by the scheme, and an implied port is not stated",
+      "value": "http://127.0.0.1",
+      "reason": "port-missing"
+    },
+    {
+      "description": "an empty port",
+      "value": "http://127.0.0.1:",
+      "reason": "port-missing"
+    },
+    {
+      "description": "port zero",
+      "value": "http://127.0.0.1:0",
+      "reason": "port-invalid"
+    },
+    {
+      "description": "a port above the valid range",
+      "value": "http://127.0.0.1:70000",
+      "reason": "port-invalid"
+    },
+    {
+      "description": "a zero-padded port",
+      "value": "http://127.0.0.1:03000",
+      "reason": "port-invalid"
+    },
+    {
+      "description": "a non-numeric port",
+      "value": "http://127.0.0.1:port",
+      "reason": "port-invalid"
+    },
+    {
+      "description": "a bare trailing slash is a path; the accepted form has none",
+      "value": "http://127.0.0.1:3000/",
+      "reason": "path-present"
+    },
+    {
+      "description": "a path prefix",
+      "value": "http://127.0.0.1:3000/api",
+      "reason": "path-present"
+    },
+    {
+      "description": "a path that walks out of the origin",
+      "value": "http://127.0.0.1:3000/../admin",
+      "reason": "path-present"
+    },
+    {
+      "description": "a query string",
+      "value": "http://127.0.0.1:3000?token=1",
+      "reason": "query-present"
+    },
+    {
+      "description": "a fragment",
+      "value": "http://127.0.0.1:3000#fragment",
+      "reason": "fragment-present"
+    }
+  ]
+}

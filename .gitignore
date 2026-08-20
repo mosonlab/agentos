@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.merge-gate.lock/
+.env
+# `npm run setup:local` writes the complete bytes of an unpublished .env to a
+# same-directory temporary file before it links them into place. An interrupted
+# run leaves one behind, holding every generated credential.
+.env.setup-local.*
+.DS_Store
+*.log
+packages/db/generated/
+docs/reference/danny-agentos-video/frames/
+
+# Minted by `npm run snapshot:authority` for a snapshot export, at an exact
+# commit. Tracking it would leave a stale attestation on master the moment the
+# migration set moves.
+release-authority.json

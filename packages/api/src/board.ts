@@ -1,0 +1,138 @@
+import { createHash } from "node:crypto";
+
+import { projectMergeOutcome, runOwnsMergeOutcome, type MergeOutcomeProjection, type ScheduleKind, type TaskSource, type TaskStatus } from "@agentos/db";
+
+import type { ChainProgress } from "./chain.js";
+
+/**
+ * The Tasks board's own wire shape.
+ *
+ * `GET /tasks` returns the whole Task row plus `assigneeAgent`, `repo` and the
+ * latest `Run` *with its Session* — 1.58 MB for 112 cards, of which the board
+ * renders about 5%. Every 2.5s poll downloaded, decoded and compared all of it.
+ *
+ * A projection rather than a second endpoint: the board's card is a *view* of
+ * the same list the full response serves, and two routes would let the two
+ * drift. `?view=board` is the caller saying which fields it will actually read.
+ *
+ * Every field here is rendered by `TaskCard`. Adding one is a deliberate act:
+ * the point of the shape is that its cost is legible.
+ */
+export type BoardCard = {
+  id: string;
+  name: string;
+  status: TaskStatus;
+  /** Full text, not a truncation: the card clamps it to three lines but the
+   *  card menu's `Copy error` hands the operator the whole thing. */
+  failureReason: string | null;
+  scheduleKind: ScheduleKind;
+  runAt: Date | null;
+  cron: string | null;
+  timezone: string | null;
+  approvalGate: boolean;
+  templateId: string | null;
+  source: TaskSource;
+  chainId: string | null;
+  chainIndex: number | null;
+  updatedAt: Date;
+  assigneeAgent: { id: string; title: string } | null;
+  chainProgress: (ChainProgress & { position: number | null }) | null;
+  latestRun: { id: string; runNumber: number; status: string; costUsd: string | null } | null;
+  /**
+   * §SF-1. Parsed server-side from the task's persisted `merge-result` output,
+   * and null for every non-integrator task. A mechanical merge that stopped ends
+   * its run SUCCEEDED — correctly, because it executed its contract — so a
+   * run-centric card that reads only the protocol status renders a stop or a
+   * post-merge incident as a green Done. This is what the card renders instead.
+   */
+  mergeOutcome: MergeOutcomeProjection | null;
+};
+
+/** The Prisma row shape `boardCard` needs — declared structurally so the route
+ *  can `select` exactly these columns and nothing else. */
+export type BoardRow = {
+  id: string;
+  name: string;
+  status: TaskStatus;
+  failureReason: string | null;
+  scheduleKind: ScheduleKind;
+  runAt: Date | null;
+  cron: string | null;
+  timezone: string | null;
+  approvalGate: boolean;
+  templateId: string | null;
+  source: TaskSource;
+  chainId: string | null;
+  chainIndex: number | null;
+  updatedAt: Date;
+  assigneeAgent: { id: string; title: string } | null;
+  runs: Array<{
+    id: string;
+    runNumber: number;
+    status: string;
+    session: { costUsd: unknown } | null;
+  }>;
+  stepOutput?: { kind: string; body: string; runId: string | null } | null;
+};
+
+/** Decimal columns arrive as Prisma.Decimal; the web client reads them as the
+ *  strings JSON already turns them into, so the projection states that. */
+const decimal = (value: unknown): string | null =>
+  (value === null || value === undefined ? null : String(value));
+
+export const boardCard = (
+  row: BoardRow,
+  chainProgress: (ChainProgress & { position: number | null }) | null,
+): BoardCard => {
+  const run = row.runs[0];
+  return {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    failureReason: row.failureReason,
+    scheduleKind: row.scheduleKind,
+    runAt: row.runAt,
+    cron: row.cron,
+    timezone: row.timezone,
+    approvalGate: row.approvalGate,
+    templateId: row.templateId,
+    source: row.source,
+    chainId: row.chainId,
+    chainIndex: row.chainIndex,
+    updatedAt: row.updatedAt,
+    assigneeAgent: row.assigneeAgent === null
+      ? null
+      : { id: row.assigneeAgent.id, title: row.assigneeAgent.title },
+    chainProgress,
+    latestRun: run === undefined
+      ? null
+      : { id: run.id, runNumber: run.runNumber, status: run.status, costUsd: decimal(run.session?.costUsd) },
+    // Bound to the run the card actually shows: a stop recorded by run 1 is not
+    // run 2's outcome, and the card's only run line is the newest run's.
+    mergeOutcome: run !== undefined && runOwnsMergeOutcome(row.stepOutput, run.id, run.id)
+      ? projectMergeOutcome(row.stepOutput)
+      : null,
+  };
+};
+
+/**
+ * A weak ETag over the serialized body.
+ *
+ * Weak because it is a hash of the representation this process just produced,
+ * not a durable resource version: two processes serializing the same rows agree,
+ * and nothing downstream may treat it as a byte-range validator.
+ *
+ * The idle board is the case this exists for. Nothing changed for a minute means
+ * 24 polls that each moved 1.58 MB; with a validator they move a header.
+ */
+export const etagFor = (body: string): string =>
+  `W/"${createHash("sha1").update(body).digest("base64url")}"`;
+
+/** RFC 9110 §13.1.2: `If-None-Match` is a list, and `*` matches any current
+ *  representation. Compared verbatim otherwise — this route only ever mints weak
+ *  tags, so there is no strong/weak normalisation to do. */
+export const etagMatches = (header: string | undefined, tag: string): boolean => {
+  if (header === undefined) return false;
+  const candidates = header.split(",").map((value) => value.trim()).filter((value) => value.length > 0);
+  return candidates.includes("*") || candidates.includes(tag);
+};

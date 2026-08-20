@@ -1,0 +1,192 @@
+import assert from "node:assert/strict";
+import { join } from "node:path";
+import test from "node:test";
+
+import { RunStatus, type PrismaClient } from "@agentos/db";
+
+import { publishReclaimIntents, terminalRunStatuses, workspaceKeepStatuses } from "./workspace-reclaim.js";
+
+type Row = {
+  id: string;
+  runnerId: string | null;
+  workspacePath: string | null;
+  status: RunStatus;
+  workspaceRetained: boolean;
+  endedAt: Date | null;
+  workspaceReclaimAt: Date | null;
+  workspaceReclaimedAt: Date | null;
+};
+
+const row = (id: string, overrides: Partial<Row> = {}): Row => ({
+  id,
+  runnerId: "runner-1",
+  workspacePath: null,
+  status: RunStatus.SUCCEEDED,
+  workspaceRetained: false,
+  endedAt: new Date("2026-08-18T00:00:00.000Z"),
+  workspaceReclaimAt: null,
+  workspaceReclaimedAt: null,
+  ...overrides,
+});
+
+type Write = { ids: string[]; data: Record<string, unknown> };
+
+const fakeDb = (rows: Row[], openIntents: Row[] = []) => {
+  const runUpdates: Write[] = [];
+  const byId = new Map(rows.map((entry) => [entry.id, entry] as const));
+  const db = {
+    run: {
+      findMany: async ({ where }: {
+        where: { id?: { in?: string[]; notIn?: string[] }; runnerId?: string };
+      }) => {
+        // Two callers: the inventory lookup (`id.in`) and the open-intent
+        // settlement query (`runnerId` + `id.notIn`).
+        if (where.id?.in) return where.id.in.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
+        const excluded = new Set(where.id?.notIn ?? []);
+        return openIntents.filter((run) => run.runnerId === where.runnerId && !excluded.has(run.id));
+      },
+      updateMany: async ({ where, data }: { where: { id: { in: string[] } }; data: Record<string, unknown> }) => {
+        runUpdates.push({ ids: where.id.in, data });
+        return { count: where.id.in.length };
+      },
+      count: async () => 0,
+    },
+  } as unknown as PrismaClient;
+  return { db, runUpdates };
+};
+
+const root = "/scratch/runs";
+const inventory = (directories: string[], runnerId = "runner-1") => ({ runnerId, workspaceRoot: root, directories });
+
+test("the control plane offers a finished run's directory and publishes the intent", async () => {
+  const { db, runUpdates } = fakeDb([row("done")]);
+  const plan = await publishReclaimIntents(db, inventory(["done"]), 2);
+  assert.deepEqual(plan.reclaim, [{ runId: "done", workspacePath: null }]);
+  assert.deepEqual(runUpdates.map(({ ids }) => ids), [["done"]]);
+  assert.ok(runUpdates[0]!.data.workspaceReclaimAt instanceof Date);
+});
+
+test("a directory the database has never heard of is kept, never offered", async () => {
+  // The 2026-08-18 incident shape: a scratch database knows nothing about the
+  // directories under the root. Under API-side GC that emptiness deleted them.
+  const { db, runUpdates } = fakeDb([]);
+  const plan = await publishReclaimIntents(db, inventory(["live-workspace-a", "live-workspace-b"]), 2);
+  assert.deepEqual(plan.reclaim, []);
+  assert.deepEqual(plan.keep, [
+    { directory: "live-workspace-a", reason: "unknown-run" },
+    { directory: "live-workspace-b", reason: "unknown-run" },
+  ]);
+  assert.deepEqual(runUpdates, []);
+});
+
+test("one known in-root run does not license offering unknown siblings", async () => {
+  const { db } = fakeDb([row("known", { status: RunStatus.RUNNING, workspacePath: join(root, "known") })]);
+  const plan = await publishReclaimIntents(db, inventory(["known", "live-a", "live-b"]), 2);
+  assert.deepEqual(plan.reclaim, []);
+  assert.deepEqual(plan.keep.map(({ reason }) => reason), ["active-run", "unknown-run", "unknown-run"]);
+});
+
+test("every status whose workspace is still in use is kept", async () => {
+  for (const status of workspaceKeepStatuses) {
+    const { db } = fakeDb([row("live", { status, endedAt: null })]);
+    const plan = await publishReclaimIntents(db, inventory(["live"]), 2);
+    assert.deepEqual(plan.reclaim, [], `${status} must never be offered for reclaim`);
+  }
+});
+
+test("the keep list and the terminal list partition every run status", async () => {
+  // The predicate offers a directory only when the status is terminal, so a
+  // status in neither list keeps its workspace. This asserts there is no such
+  // status *today*, which is what makes the keep list an accurate description
+  // rather than a stale one — and if a status is added later, this is the test
+  // that says so instead of a workspace quietly becoming undeletable.
+  const covered = new Set<string>([...workspaceKeepStatuses, ...terminalRunStatuses]);
+  assert.equal(covered.size, workspaceKeepStatuses.length + terminalRunStatuses.length, "the two lists overlap");
+  assert.deepEqual([...Object.values(RunStatus)].filter((status) => !covered.has(status)), []);
+});
+
+test("retained failures keep the newest N and offer the rest", async () => {
+  const now = Date.now();
+  const { db, runUpdates } = fakeDb([
+    row("new-failure", { status: RunStatus.FAILED, workspaceRetained: true, endedAt: new Date(now) }),
+    row("mid-failure", { status: RunStatus.FAILED, workspaceRetained: true, endedAt: new Date(now - 1_000) }),
+    row("old-failure", { status: RunStatus.FAILED, workspaceRetained: true, endedAt: new Date(now - 2_000) }),
+  ]);
+  const plan = await publishReclaimIntents(db, inventory(["new-failure", "mid-failure", "old-failure"]), 2);
+  assert.deepEqual(plan.reclaim.map(({ runId }) => runId), ["old-failure"]);
+  // Retention expiring is recorded when the intent is published, because
+  // `workspaceRetained` is what an operator reads to know a workspace is held.
+  assert.deepEqual(runUpdates.find(({ data }) => data.workspaceRetained === false)?.ids, ["old-failure"]);
+});
+
+test("an active retained run never consumes the retention quota", async () => {
+  const now = Date.now();
+  const { db } = fakeDb([
+    row("active", { status: RunStatus.RUNNING, workspaceRetained: true, endedAt: new Date(now) }),
+    row("failed", { status: RunStatus.FAILED, workspaceRetained: true, endedAt: new Date(now - 1_000) }),
+  ]);
+  const plan = await publishReclaimIntents(db, inventory(["active", "failed"]), 1);
+  assert.deepEqual(plan.reclaim, []);
+});
+
+test("a workspacePath that disagrees with the run's own directory is kept, not offered", async () => {
+  const { db } = fakeDb([row("done", { workspacePath: join(root, "victim") })]);
+  const plan = await publishReclaimIntents(db, inventory(["done"]), 2);
+  assert.deepEqual(plan.reclaim, []);
+  assert.deepEqual(plan.keep, [{ directory: "done", reason: "noncanonical-workspace-path" }]);
+});
+
+test("a run claimed by another runner is not offered to this one", async () => {
+  const { db } = fakeDb([row("someone-elses", { runnerId: "runner-2", workspacePath: "/other/root/someone-elses" })]);
+  const plan = await publishReclaimIntents(db, inventory(["someone-elses"]), 2);
+  assert.deepEqual(plan.reclaim, []);
+  assert.deepEqual(plan.keep, [{ directory: "someone-elses", reason: "foreign-runner" }]);
+});
+
+test("a run whose recorded runnerId is not the caller is never offered, whatever root it names", async () => {
+  // The whole ownership rule. A directory sitting in the caller's own root, or
+  // a run with no runner at all, is still not the caller's to remove: the shared
+  // RUNNER_TOKEN authenticates a runner class, so `runnerId` is the only
+  // identity in this exchange and a self-reported root cannot stand in for it.
+  for (const owner of ["runner-before-restart", null]) {
+    const { db, runUpdates } = fakeDb([row("orphan", { runnerId: owner, workspacePath: join(root, "orphan") })]);
+    const plan = await publishReclaimIntents(db, inventory(["orphan"], "runner-after-restart"), 2);
+    assert.deepEqual(plan.reclaim, [], `runnerId ${String(owner)} must not be reclaimable by another caller`);
+    assert.deepEqual(plan.keep, [{ directory: "orphan", reason: "foreign-runner" }]);
+    assert.deepEqual(runUpdates, []);
+  }
+});
+
+test("still-open intents whose directories are absent come back for settlement", async () => {
+  // The delete-then-report crash: the directory is gone, so no inventory can
+  // mention it again, and only this list can ever close the intent.
+  const { db } = fakeDb(
+    [row("present")],
+    [row("vanished", { workspaceReclaimAt: new Date(), workspacePath: join(root, "vanished") })],
+  );
+  const plan = await publishReclaimIntents(db, inventory(["present"]), 2);
+  assert.deepEqual(plan.verify, [{ runId: "vanished", workspacePath: join(root, "vanished") }]);
+});
+
+test("an empty inventory still returns the open intents that need settling", async () => {
+  const { db } = fakeDb([], [row("vanished", { workspaceReclaimAt: new Date(), workspacePath: null })]);
+  const plan = await publishReclaimIntents(db, inventory([]), 2);
+  assert.deepEqual(plan.reclaim, []);
+  assert.deepEqual(plan.verify, [{ runId: "vanished", workspacePath: null }]);
+});
+
+test("another runner's open intents are not offered for settlement either", async () => {
+  const { db } = fakeDb([], [row("theirs", { runnerId: "runner-2", workspaceReclaimAt: new Date() })]);
+  const plan = await publishReclaimIntents(db, inventory([]), 2);
+  assert.deepEqual(plan.verify, []);
+});
+
+test("an intent the owner already answered is not offered again", async () => {
+  const { db } = fakeDb([row("answered", {
+    workspaceReclaimAt: new Date("2026-08-18T01:00:00.000Z"),
+    workspaceReclaimedAt: new Date("2026-08-18T01:00:01.000Z"),
+  })]);
+  const plan = await publishReclaimIntents(db, inventory(["answered"]), 2);
+  assert.deepEqual(plan.reclaim, []);
+  assert.deepEqual(plan.keep, [{ directory: "answered", reason: "intent-closed" }]);
+});

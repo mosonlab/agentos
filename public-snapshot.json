@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 2,
+  "source": "git-tracked-files+minted-artifacts",
+  "defaultDisposition": "blocker",
+  "include": [
+    { "glob": ".env.example", "purpose": "safe configuration template" },
+    { "glob": ".github/workflows/ci.yml", "purpose": "continuous integration definition" },
+    { "glob": ".gitignore", "purpose": "source hygiene" },
+    { "glob": ".nvmrc", "purpose": "pinned Node.js major version" },
+    { "glob": "AGENTS.md", "purpose": "repository agent instructions" },
+    { "glob": "CHANGELOG.md", "purpose": "what is in each release, by area, including the known limitations that are documented positions rather than open bugs" },
+    { "glob": "CONTRIBUTING.md", "purpose": "how this repository is changed: the single merge gate, the testing red lines, the closed public surface, and the state of outside contributions" },
+    { "glob": "LICENSE", "purpose": "license grant" },
+    { "glob": "README.md", "purpose": "project documentation" },
+    { "glob": "README.zh-CN.md", "purpose": "Chinese project documentation" },
+    { "glob": "SECURITY.md", "purpose": "supported versions, what is in and out of scope for a security report, and the private reporting channel" },
+    { "glob": "SUPPORT.md", "purpose": "what is supported, where to ask, and what to expect" },
+    { "glob": "THIRD_PARTY_NOTICES.md", "purpose": "third-party notices: the vendored shadcn/ui grant and the license index for declared dependencies" },
+    { "glob": "agents/*.md", "purpose": "reviewed agent documentation" },
+    { "glob": "agents/roles/*.md", "purpose": "reviewed agent role definitions" },
+    { "glob": "agents/skills/*.md", "purpose": "reviewed agent skill definitions" },
+    { "glob": "apps/web/components.json", "purpose": "web component configuration" },
+    { "glob": "apps/web/index.html", "purpose": "web application entry document" },
+    { "glob": "apps/web/package.json", "purpose": "web package definition" },
+    { "glob": "apps/web/src/**/*.css", "purpose": "web styles" },
+    { "glob": "apps/web/src/**/*.ts", "purpose": "web TypeScript source and tests" },
+    { "glob": "apps/web/src/**/*.tsx", "purpose": "web TSX source and tests" },
+    { "glob": "apps/web/src/tests/fixtures/tc-ux-browser-server.mjs", "purpose": "disposable browser server for the task-console regression tests" },
+    { "glob": "apps/web/src/tests/fixtures/tc-ux-v1-prompts.json", "purpose": "reviewed prompt fixture for the task-console regression tests" },
+    { "glob": "apps/web/src/tests/fixtures/tc-ux-v1-prompts.provenance.json", "purpose": "provenance record for the task-console prompt fixture" },
+    { "glob": "apps/web/tsconfig.app.json", "purpose": "web TypeScript configuration" },
+    { "glob": "apps/web/tsconfig.json", "purpose": "web TypeScript configuration" },
+    { "glob": "apps/web/tsconfig.node.json", "purpose": "web tooling TypeScript configuration" },
+    { "glob": "apps/web/vite.config.ts", "purpose": "web build configuration" },
+    { "glob": "biome.jsonc", "purpose": "lint gate rule set" },
+    { "glob": "docker-compose.yml", "purpose": "local development services" },
+    { "glob": "eslint.config.mjs", "purpose": "type-aware lint gate rule" },
+    { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
+    { "glob": "docs/release/fixtures/oss-b0-smoke-task.json", "purpose": "the frozen, non-secret smoke-task fixture the published UI and API parity tests read" },
+    { "glob": "docs/release/v0.1.0-developer-preview.md", "purpose": "the install sequence for the supported platform, step by step, with what each refusal means" },
+    { "glob": "docs/release/v0.1.0-license-and-assets.md", "purpose": "file-level license and provenance accounting for everything the snapshot publishes" },
+    { "glob": "docs/release/v0.1.0-migration-and-recovery.md", "purpose": "which migration paths run the migration preflight, which bypass it, and what recovery is and is not" },
+    { "glob": "docs/release/v0.1.0-release-notes.md", "purpose": "the release notes for v0.1.0, and the source text for the GitHub Release body of the same tag" },
+    { "glob": "docs/release/v0.1.0-security.md", "purpose": "the loopback, secret, host-authority and known-gap boundaries of a v0.1.0 install" },
+    { "glob": "docs/release/v0.1.0-support-matrix.md", "purpose": "the authoritative support statement: what is Verified, Maintainer-verified, Experimental, Unverified and Unsupported, with the evidence boundary for each row" },
+    { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
+    { "glob": "package.json", "purpose": "workspace definition" },
+    { "glob": "packages/api/package.json", "purpose": "API package definition" },
+    { "glob": "packages/api/scripts/dbtest-preamble.mjs", "purpose": "database-test preamble: hands each test file the database and roots the run planned for it, and refuses a file that plan does not name" },
+    { "glob": "packages/api/scripts/dbtest.mjs", "purpose": "database-test runner: the process behind npm run test:db, which migrates one template, gives every test file a copy of it, and drops what it made" },
+    { "glob": "packages/api/src/**/*.ts", "purpose": "API TypeScript source and tests" },
+    { "glob": "packages/api/tsconfig.json", "purpose": "API TypeScript configuration" },
+    { "glob": "packages/build-info/*.d.ts", "purpose": "build provenance type declarations" },
+    { "glob": "packages/build-info/*.mjs", "purpose": "build provenance stamping, reading and deployment reconciliation" },
+    { "glob": "packages/build-info/package.json", "purpose": "build provenance package definition" },
+    { "glob": "packages/cli/package.json", "purpose": "CLI package definition" },
+    { "glob": "packages/cli/src/**/*.ts", "purpose": "CLI TypeScript source" },
+    { "glob": "packages/cli/tsconfig.json", "purpose": "CLI TypeScript configuration" },
+    { "glob": "packages/db/package.json", "purpose": "database package definition" },
+    { "glob": "packages/db/prisma/**/*.sql", "purpose": "reviewed database migrations" },
+    { "glob": "packages/db/prisma/**/*.toml", "purpose": "Prisma migration configuration" },
+    { "glob": "packages/db/prisma/**/*.ts", "purpose": "database maintenance source" },
+    { "glob": "packages/db/prisma/schema.prisma", "purpose": "database schema" },
+    { "glob": "packages/db/scripts/**/*.mjs", "purpose": "database verification scripts" },
+    { "glob": "packages/db/src/**/*.ts", "purpose": "database TypeScript source" },
+    { "glob": "packages/db/tsconfig.cli.json", "purpose": "database CLI entrypoint TypeScript configuration" },
+    { "glob": "packages/db/tsconfig.json", "purpose": "database TypeScript configuration" },
+    { "glob": "packages/github-client/package.json", "purpose": "shared GitHub client package definition" },
+    { "glob": "packages/github-client/src/**/*.ts", "purpose": "shared idempotent GitHub write layer source and tests" },
+    { "glob": "packages/github-client/tsconfig.json", "purpose": "shared GitHub client TypeScript configuration" },
+    { "glob": "packages/inbox/package.json", "purpose": "Inbox package definition" },
+    { "glob": "packages/inbox/src/**/*.ts", "purpose": "Inbox TypeScript source and tests" },
+    { "glob": "packages/inbox/tsconfig.json", "purpose": "Inbox TypeScript configuration" },
+    { "glob": "packages/merge-executor/package.json", "purpose": "merge executor package definition" },
+    { "glob": "packages/merge-executor/src/**/*.ts", "purpose": "merge executor TypeScript source and tests" },
+    { "glob": "packages/merge-executor/tsconfig.json", "purpose": "merge executor TypeScript configuration" },
+    { "glob": "packages/runner/assets/**/*.ts", "purpose": "runner extension source" },
+    { "glob": "packages/runner/package.json", "purpose": "runner package definition" },
+    { "glob": "packages/runner/src/**/*.ts", "purpose": "runner TypeScript source and tests" },
+    { "glob": "packages/runner/tsconfig.json", "purpose": "runner TypeScript configuration" },
+    { "glob": "public-snapshot.json", "purpose": "closed snapshot scope" },
+    { "glob": "release-authority.pub", "purpose": "release authority trust anchor: the Ed25519 public key the migration preflight verifies release-authority.json against. Public key material, tracked and reviewed on purpose — the attestation it verifies is generated, and that asymmetry is what makes it worth anything." },
+    { "glob": "release-authority.json", "purpose": "release authority attestation: the migration set's internal-review record, minted at an exact commit by `npm run snapshot:authority` because the snapshot excludes docs/reviews. It names two public commit object IDs and a content digest; it carries no review text." },
+    { "glob": "scripts/check-frozen-docs.sh", "purpose": "frozen-record append-only gate check" },
+    { "glob": "scripts/check-frozen-docs.test.mjs", "purpose": "frozen-record gate check fixtures" },
+    { "glob": "scripts/compose-binding.mjs", "purpose": "resolved Compose publication reader" },
+    { "glob": "scripts/compose-binding.test.mjs", "purpose": "Compose loopback publication tests" },
+    { "glob": "scripts/fixtures/local-api-origin-cases.json", "purpose": "shared local API destination policy table" },
+    { "glob": "scripts/fixtures/onboarding-remote-cases.json", "purpose": "shared repository remote policy table" },
+    { "glob": "scripts/goal-5a0-dependency-gate.sh", "purpose": "migration dependency-gate supervisor" },
+    { "glob": "scripts/goal-5a0-dependency-gate.test.mjs", "purpose": "migration dependency-gate regression tests" },
+    { "glob": "scripts/goal-5a0-evidence-destination.sh", "purpose": "migration evidence destination containment" },
+    { "glob": "scripts/goal-5a0-handoff-preimage.mjs", "purpose": "migration authorization preimage and recovery" },
+    { "glob": "scripts/goal-5a0-handoff-preimage.test.mjs", "purpose": "migration preimage recovery tests" },
+    { "glob": "scripts/merge-gate.sh", "purpose": "merge gate, the repository's only CI" },
+    { "glob": "scripts/os-isolation/patch-runner-plists.sh", "purpose": "OS isolation: launchd RUNNER_RUN_AS_PREFIX wiring" },
+    { "glob": "scripts/os-isolation/provision.sh", "purpose": "OS isolation: runner accounts, workspace root, sudoers grant" },
+    { "glob": "scripts/os-isolation/reclaim-orphan-workspaces.sh", "purpose": "OS isolation: fail-closed operator reclamation of orphaned run workspaces" },
+    { "glob": "scripts/os-isolation/rollback.sh", "purpose": "OS isolation: account and sudoers rollback" },
+    { "glob": "scripts/os-isolation/verify.sh", "purpose": "OS isolation: read-only posture check and containment probe" },
+    { "glob": "scripts/public-snapshot-scan.mjs", "purpose": "redacted safety scan" },
+    { "glob": "scripts/public-snapshot-scan.test.mjs", "purpose": "scanner regression tests" },
+    { "glob": "scripts/setup-local.mjs", "purpose": "atomic local configuration generator" },
+    { "glob": "scripts/setup-local.test.mjs", "purpose": "local configuration generator regression tests" },
+    { "glob": "scripts/verify-secret-hygiene.mjs", "purpose": "bundle and tracked-file secret hygiene scan" },
+    { "glob": "scripts/verify-secret-hygiene.test.mjs", "purpose": "secret hygiene scan regression tests" },
+    { "glob": "tsconfig.base.json", "purpose": "shared TypeScript configuration" }
+  ],
+  "deny": [
+    { "glob": "**/private/**", "category": "internal-only-artifact", "reason": "private path classes are closed by default repository-wide" },
+    { "glob": "**/.private/**", "category": "internal-only-artifact", "reason": "private path classes are closed by default repository-wide" },
+    { "glob": "**/generated/**", "category": "generated-runtime-data", "reason": "generated path classes are closed by default repository-wide" },
+    { "glob": "**/coverage/**", "category": "generated-runtime-data", "reason": "coverage output is generated data and closed by default repository-wide" },
+    { "glob": "**/dump/**", "category": "generated-runtime-data", "reason": "dump output is runtime data and closed by default repository-wide" },
+    { "glob": "**/dumps/**", "category": "generated-runtime-data", "reason": "dump output is runtime data and closed by default repository-wide" },
+    { "glob": "**/capture/**", "category": "generated-runtime-data", "reason": "captured output is runtime data and closed by default repository-wide" },
+    { "glob": "**/captures/**", "category": "generated-runtime-data", "reason": "captured output is runtime data and closed by default repository-wide" },
+    { "glob": "**/runtime/**", "category": "generated-runtime-data", "reason": "runtime path classes are closed by default repository-wide" },
+    { "glob": "**/artifacts/**", "category": "generated-runtime-data", "reason": "generated artifacts are closed by default repository-wide" },
+    { "glob": "**/dist/**", "category": "generated-runtime-data", "reason": "generated build output is closed by default repository-wide" },
+    { "glob": "**/build/**", "category": "generated-runtime-data", "reason": "generated build output is closed by default repository-wide" },
+    { "glob": "**/node_modules/**", "category": "generated-runtime-data", "reason": "installed dependencies are closed by default repository-wide" },
+    { "glob": "**/.cache/**", "category": "generated-runtime-data", "reason": "generated cache data is closed by default repository-wide" },
+    { "glob": "**/*.dump", "category": "generated-runtime-data", "reason": "dump output is runtime data and closed by default repository-wide" },
+    { "glob": "**/*.log", "category": "generated-runtime-data", "reason": "runtime logs are closed by default repository-wide" },
+    { "glob": "**/*.pid", "category": "generated-runtime-data", "reason": "runtime process data is closed by default repository-wide" },
+    { "glob": "**/*.stderr", "category": "generated-runtime-data", "reason": "captured stderr is runtime data and closed by default repository-wide" },
+    { "glob": "**/*.stdout", "category": "generated-runtime-data", "reason": "captured stdout is runtime data and closed by default repository-wide" }
+  ],
+  "exclude": [
+    {
+      "glob": "BLUEPRINT.md",
+      "disposition": "later-release-follow-up",
+      "reason": "private upstream product requirements require a separate publication decision"
+    },
+    {
+      "glob": "CLAUDE.md",
+      "disposition": "later-release-follow-up",
+      "reason": "symlink to AGENTS.md, skipped to avoid divergent copies: the snapshot's file list is what an exporter copies, and an exporter that dereferences it would publish the same instructions twice as two real files that can be edited apart. AGENTS.md is published as the one truth; republishing the link is a decision to make when a snapshot tool can carry a symlink as a symlink."
+    },
+    {
+      "glob": "DECISIONS.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal decision history requires a separate publication decision"
+    },
+    {
+      "glob": "GRILLING-STATE.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal planning state is not needed to build or run the product"
+    },
+    {
+      "glob": "deploy/**",
+      "disposition": "later-release-follow-up",
+      "reason": "host-specific deployment material requires environment and path review"
+    },
+    {
+      "glob": "design-reference/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal design references and image provenance require separate review"
+    },
+    {
+      "glob": "docs/BACKLOG*.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal backlog material is outside the first clean snapshot"
+    },
+    {
+      "glob": "docs/briefs/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal implementation briefs require separate publication review"
+    },
+    {
+      "glob": "docs/governance/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal governance for how this repository's own agents are routed and reviewed; it describes the operating process, not the product, and requires a separate publication decision"
+    },
+    {
+      "glob": "docs/merge-notes/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal merge records are not needed to build or run the product"
+    },
+    {
+      "glob": "docs/phase1-verify.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal phase verification material requires separate publication review"
+    },
+    {
+      "glob": "docs/plans/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal plans and generated baseline images require separate review"
+    },
+    {
+      "glob": "docs/reference/**",
+      "disposition": "later-release-follow-up",
+      "reason": "third-party research records and provenance require separate review"
+    },
+    {
+      "glob": "docs/release/private/**",
+      "disposition": "later-release-follow-up",
+      "reason": "the private OSS-F0 release evidence matrix: dependency authority SHAs, named operators, review-ledger state and product-owner decisions. It is evidence *about* the snapshot and names private surfaces, so it is never part of one; `npm run verify:oss-f0 -- authority` refuses if this exclusion is removed"
+    },
+    {
+      "glob": "docs/release/v0.1.0-evidence-template.md",
+      "disposition": "later-release-follow-up",
+      "reason": "the maintainer's own evidence form, filled at Step 10 from a rehearsal on one machine; it is not part of the install path a reader follows"
+    },
+    {
+      "glob": "docs/reviews/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal review records require a separate publication decision"
+    },
+    {
+      "glob": "docs/runbooks/**",
+      "disposition": "later-release-follow-up",
+      "reason": "production and operator runbooks require environment review"
+    },
+    {
+      "glob": "docs/specs/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal product specifications require a separate publication decision"
+    },
+    {
+      "glob": "docs/wiki/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal implementation wiki material requires separate publication review"
+    },
+    {
+      "glob": "scripts/gate-worker/**",
+      "disposition": "later-release-follow-up",
+      "reason": "host-specific merge-gate worker provisioning and drivers, the same class as deploy/**: they encode one operator's server, account and paths and require environment review"
+    },
+    {
+      "glob": "scripts/merge-integrator-evidence.md",
+      "disposition": "later-release-follow-up",
+      "reason": "internal acceptance-evidence procedure, and it documents only the two harnesses below"
+    },
+    {
+      "glob": "scripts/merge-integrator-real-checks.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "one-off acceptance-evidence harness that runs against private scratch infrastructure and writes into the excluded review records"
+    },
+    {
+      "glob": "scripts/merge-integrator-system-test.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "one-off acceptance-evidence harness that runs against private scratch infrastructure and writes into the excluded review records"
+    },
+    {
+      "glob": "scripts/verify-oss-b0.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "maintainer release-acceptance harness; Step 7 owns the decision to publish release scripts"
+    },
+    {
+      "glob": "scripts/verify-oss-b0.test.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "tests for the maintainer release-acceptance harness, published or withheld with it"
+    },
+    {
+      "glob": "scripts/verify-oss-b0-review.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "structure checker for the Step 9 review ledger, which lives in the excluded docs/reviews records; published or withheld with the acceptance harness it is invoked by"
+    },
+    {
+      "glob": "scripts/verify-oss-f0.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "maintainer release-chain harness for the private OSS-F0 cutover; it reads the excluded private evidence matrix and gates a process, not the product"
+    },
+    {
+      "glob": "scripts/verify-oss-f0.test.mjs",
+      "disposition": "later-release-follow-up",
+      "reason": "tests for the release-chain harness, published or withheld with it"
+    },
+    {
+      "glob": "scripts/watch-chains.py",
+      "disposition": "later-release-follow-up",
+      "reason": "private operations helper is outside the product runtime"
+    },
+    {
+      "glob": "spikes/**",
+      "disposition": "later-release-follow-up",
+      "reason": "experiments and captured CLI runtime output are not release source"
+    }
+  ],
+  "approvedFindings": [
+    {
+      "category": "credential-placeholder",
+      "glob": ".env.example",
+      "reason": "documented empty or non-secret development placeholders"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": ".github/workflows/ci.yml",
+      "reason": "localhost-only CI database connection fixtures"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "scripts/merge-gate.sh",
+      "reason": "loopback-only throwaway gate database connection fixtures"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": "packages/merge-executor/src/preconditions.test.ts",
+      "reason": "macOS home of the merge executor's own service account, not a private user identity"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": "apps/web/src/tests/sessions.test.tsx",
+      "reason": "synthetic file-path fixtures used by rendering tests"
+    },
+    {
+      "category": "private-absolute-path",
+      "glob": "scripts/os-isolation/*.sh",
+      "reason": "macOS DirectoryService node paths under the dscl Users node, not private filesystem locations"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/testdb.ts",
+      "reason": "localhost-only test database connection fixture"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/control-plane-ownership.test.ts",
+      "reason": "unreachable localhost database URL used to prove ownership precedes database access"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/testdb.test.ts",
+      "reason": "synthetic loopback scratch-database URLs used by harness guard tests"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "packages/api/src/startup-config.test.ts",
+      "reason": "synthetic loopback database URLs used to prove startup validation refuses placeholder and inconsistent configuration"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/build-info/stamp.test.mjs",
+      "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by Leo on 2026-08-19"
+    }
+  ],
+  "mintedArtifacts": [
+    "release-authority.json"
+  ],
+  "generatedRuntimePatterns": [
+    "docs/plans/baseline-screenshots/**",
+    "spikes/**/events/**",
+    "spikes/**/*.meta.json",
+    "spikes/**/*.stderr",
+    "spikes/**/*.stdout"
+  ]
+}

@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
+import test from "node:test";
+
+import { claimRequestBody, heartbeat, runnerTelemetryBody, type ClaimedTask } from "./api.js";
+import { loadRunnerConfig } from "./config.js";
+
+const require = createRequire(import.meta.url);
+const packageVersion = (require("../package.json") as { version: string }).version;
+
+test("claim and heartbeat telemetry carry the exact package version", async () => {
+  const config = loadRunnerConfig();
+  const stats = async (): Promise<{ bavail: number; bsize: number }> => ({ bavail: 12, bsize: 4_096 });
+  const claim = await claimRequestBody(config, stats);
+  const heartbeat = await runnerTelemetryBody(config, stats);
+  assert.equal(claim.daemonVersion, packageVersion);
+  assert.equal(heartbeat.daemonVersion, packageVersion);
+  assert.equal(claim.daemonVersion, heartbeat.daemonVersion);
+  assert.deepEqual(claim, {
+    runnerId: config.runnerId,
+    leaseSeconds: config.leaseSeconds,
+    daemonVersion: packageVersion,
+    diskFreeBytes: 49_152,
+    pollIntervalMs: config.pollIntervalMs,
+    workspaceRoot: config.workspaceRoot,
+  });
+});
+
+test("a statfs failure omits disk telemetry without blocking a claim", async () => {
+  const config = loadRunnerConfig();
+  const claim = await claimRequestBody(config, async () => { throw new Error("unmounted"); });
+  assert.equal(Object.hasOwn(claim, "diskFreeBytes"), false);
+  assert.equal(claim.runnerId, config.runnerId);
+  assert.equal(claim.leaseSeconds, config.leaseSeconds);
+});
+
+test("the claim telemetry stays inside the API schema bounds", async () => {
+  const config = loadRunnerConfig();
+  const body = await claimRequestBody(config, async () => ({ bavail: 1, bsize: 4_096 }));
+  assert.ok(typeof body.daemonVersion === "string" && body.daemonVersion.length <= 40);
+  assert.ok(Number.isSafeInteger(body.diskFreeBytes) && Number(body.diskFreeBytes) >= 0);
+  assert.ok(Number.isSafeInteger(body.pollIntervalMs) && Number(body.pollIntervalMs) > 0 && Number(body.pollIntervalMs) <= 3_600_000);
+  assert.ok(typeof body.workspaceRoot === "string" && body.workspaceRoot.length <= 500);
+});
+
+test("a control-plane call that connects but never answers fails instead of holding the lease", async () => {
+  // The gap the per-command timeout does not cover: heartbeat and completeRun
+  // are plain fetches. A hung heartbeat stops renewing the lease, and a hung
+  // completion loses a finished run to reconciliation — both without ever
+  // reaching any of the command-level budgets.
+  const server = createServer(() => { /* accept the request, answer nothing */ });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  const config = {
+    ...loadRunnerConfig(),
+    apiUrl: `http://127.0.0.1:${address.port}`,
+    apiTimeoutMs: 300,
+  };
+  const claim = { run: { id: "run-1" }, fencingToken: 1 } as unknown as ClaimedTask;
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      heartbeat(config, claim, { processAlive: true, lastProgressEventAt: null, inFlightTool: null }),
+      /timed out after 300ms/,
+    );
+    assert.ok(Date.now() - started < 5_000, "the request was not abandoned near its ceiling");
+  } finally {
+    await new Promise<void>((resolve) => { server.close(() => resolve()); });
+  }
+});

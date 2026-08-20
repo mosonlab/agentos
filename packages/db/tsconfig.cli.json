@@ -1,0 +1,26 @@
+{
+  // The compiler boundary for the thin Prisma entrypoints.
+  //
+  // `tsconfig.json` compiles `src/**` into `dist/`, and deliberately does not
+  // include `prisma/**`: those files are run by tsx, never built, and pulling
+  // them into the emitting project would put maintenance scripts in the
+  // published package. The cost was that they were type-checked by nothing at
+  // all — a broken entrypoint surfaced only when an operator ran it against a
+  // real database. This project closes that gap without emitting anything:
+  // `npm run typecheck:cli -w @agentos/db`.
+  //
+  // Only entrypoints belong here. Each one owns a client and a disconnect and
+  // delegates every decision to `src/`, so this list stays short and the logic
+  // it calls is checked by `tsconfig.json` anyway.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "prisma/preflight-goal-execution.ts",
+    "prisma/release-migrate.ts",
+    "prisma/keygen-release-authority.ts",
+    "prisma/write-release-authority.ts",
+    "prisma/verify-starter-onboarding.ts"
+  ]
+}

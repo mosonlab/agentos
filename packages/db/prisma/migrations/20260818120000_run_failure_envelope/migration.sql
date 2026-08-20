@@ -1,0 +1,13 @@
+-- Structured failure evidence — additive only: one nullable JSONB column.
+-- `ADD COLUMN` with no default and no NOT NULL is a catalog-only change on
+-- PostgreSQL; it rewrites no table and takes only a brief ACCESS EXCLUSIVE lock,
+-- so it is safe to deploy against a live control plane.
+--
+-- NULL is meaningful and is not backfilled. It means "this run was reported by
+-- a runner that sends no envelope", which is true of every row that exists when
+-- this migration lands, and is exactly the condition the complete route falls
+-- back on to keep classifying such completions the old way. Backfilling a
+-- synthesised envelope onto historical rows would assert evidence nobody
+-- collected, and the whole point of this column is that the stored evidence is
+-- what was observed.
+ALTER TABLE "Run" ADD COLUMN "failureEnvelope" JSONB;

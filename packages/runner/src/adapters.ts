@@ -1,0 +1,821 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import type { ClaimedTask, FailureClass } from "./api.js";
+import type { RunnerConfig, RunnerKind } from "./config.js";
+import type { InFlightTool } from "./budget.js";
+import { isTransientNetworkError } from "./network-retry.js";
+import { workspaceEnvironment, type AgentScratch } from "./workspace.js";
+
+export const ADAPTER_VERSION = "2.0.0";
+
+// The seat manual tells the agent to use the AgentOS tools; the manifest has to
+// name them, or the agent has no way to know what it was actually granted.
+const toolManifest = (claim: ClaimedTask): string[] => [
+  "",
+  claim.runner === "PI"
+    ? "AgentOS tools attached to this session (pi extension tools):"
+    : "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+  "- task_activity_log(body): record notable progress in the task activity log. Routine channel; never interrupts a human.",
+  "- task_output(kind, body): persist this step's deliverable as the task output. Later steps and the approval gate read it.",
+  "- task_status(): read the current task and run status, budget, branch, and whether an output exists.",
+  "- inbox_ask(body, choices?): ask the human. Suspends this session until they answer; you resume in place with the reply.",
+  "- files_list(dir): list one Files Root directory non-recursively. Empty dir means the root.",
+  "- files_read(path): read one file; binary content comes back with encoding base64.",
+  "- files_write(path, content, encoding?): write one file, creating parent directories as needed.",
+  "- files_delete(path): delete one file or empty directory.",
+  // The four files_* tools are advertised to every session and authorized server-side per
+  // request: without a matching FilesystemGrant they return 403. They are named here
+  // anyway, and unconditionally, because the manifest is the only place a session learns
+  // what exists -- discovering a capability by having a tool call fail is worse than
+  // seeing a tool that may be denied.
+  "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
+];
+
+export const buildPrompt = (claim: ClaimedTask): string => [
+  claim.agent.foundationalPrompt,
+  "",
+  `Role (${claim.agent.name}): ${claim.agent.rolePrompt}`,
+  ...toolManifest(claim),
+  "",
+  `Task: ${claim.task.name}`,
+  claim.task.description,
+  ...(claim.priorOutputs.length > 0 ? [
+    "",
+    "Persisted outputs from prior template steps:",
+    ...claim.priorOutputs.map((output) => `\n## ${output.task.name} (${output.kind})\n${output.body}`),
+  ] : []),
+].join("\n");
+
+export const buildChildEnvironment = (
+  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run">,
+  scratch: AgentScratch,
+): NodeJS.ProcessEnv => ({
+  ...claim.secrets,
+  ...workspaceEnvironment(config),
+  AGENTOS_API_URL: config.apiUrl,
+  AGENTOS_SESSION_TOKEN: claim.sessionToken,
+  AGENTOS_RUN_ID: claim.run.id,
+  AGENTOS_FENCING_TOKEN: claim.fencingToken,
+  // Last on purpose, so no task secret can point a session back at the
+  // production roots. See provisionAgentScratch for why this containment has
+  // to live in the runner rather than in the run's checkout.
+  RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,
+  CONTROL_PLANE_STATE_DIR: scratch.stateDir,
+});
+
+const isolationVariables = ["RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR"] as const;
+
+/**
+ * The command line for a session, re-asserting the isolation variables on the
+ * far side of RUNNER_RUN_AS_PREFIX.
+ *
+ * The prefix is an arbitrary launcher, and a launcher is free to scrub the
+ * environment it was handed. #117's shipped example is `sudo -u _agentos1 -E
+ * --`, where everything the session inherits rests on that `-E`: without it
+ * sudo's env_reset strips the lot. Putting the two roots only in the
+ * environment we pass to the *launcher* is therefore not a guarantee.
+ *
+ * Losing them is also the one failure that is both silent and catastrophic: an
+ * old base falls back to the production default and sweeps it, which is #125.
+ * Everything else a scrubbing launcher drops — PATH, HOME,
+ * AGENTOS_SESSION_TOKEN — fails loudly and immediately instead.
+ *
+ * So the isolation variables are set again by `/usr/bin/env`, which runs after
+ * the launcher and immediately before the CLI. That also makes the contract
+ * fail-closed: a launcher that will not exec `/usr/bin/env` cannot start the
+ * session at all, rather than starting it pointed at production.
+ */
+export const launchArgv = (
+  config: Pick<RunnerConfig, "runAsPrefix" | "binaries">,
+  runner: RunnerKind,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): { executable: string; args: string[] } => {
+  const binary = config.binaries[runner];
+  if (config.runAsPrefix.length === 0) return { executable: binary, args };
+  const assignments = isolationVariables.flatMap((name) => env[name] !== undefined ? [`${name}=${env[name]}`] : []);
+  return {
+    executable: config.runAsPrefix[0]!,
+    args: [
+      ...config.runAsPrefix.slice(1),
+      ...(assignments.length > 0 ? ["/usr/bin/env", ...assignments] : []),
+      binary,
+      ...args,
+    ],
+  };
+};
+
+// Resolved from the package root so it works from dist/ (launchd) and src/ (tsx).
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+
+export const mcpServerPath = (): string => process.env.RUNNER_MCP_SERVER_PATH ?? join(packageRoot, "dist", "mcp-server.js");
+export const piExtensionPath = (): string => process.env.RUNNER_PI_EXTENSION_PATH ?? join(packageRoot, "assets", "pi-agentos-extension.ts");
+
+/**
+ * The interpreter the CLI is told to run the MCP server with.
+ *
+ * The default is this daemon's own `process.execPath`, which is a resolved real
+ * path — typically a Homebrew Cellar or version-manager directory, not the
+ * symlink in `RUNNER_PATH`. Under a run-as prefix the CLI is a different account
+ * that may not be able to traverse it, and the failure surfaces as an MCP
+ * startup error inside the session rather than as a deployment error. The
+ * override exists so a deployment can name an interpreter both principals can
+ * execute, and `runtimeDescriptor()` publishes whichever one is in force so it
+ * can be checked from outside the process.
+ */
+export const nodeBinaryPath = (): string => process.env.RUNNER_NODE_BINARY ?? process.execPath;
+
+/**
+ * One machine-readable line naming every path the agent's session depends on and
+ * that a different OS principal has to be able to reach. Printed at startup so
+ * `scripts/os-isolation/verify.sh` can test the paths the daemon actually uses
+ * instead of whatever the operator's own shell happens to resolve.
+ */
+export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): string => JSON.stringify({
+  runtime: "agentos-runner",
+  runnerId,
+  nodeBinary: nodeBinaryPath(),
+  nodeExecPath: process.execPath,
+  mcpServerPath: mcpServerPath(),
+  piExtensionPath: piExtensionPath(),
+  runAsPrefix: runAsPrefix.join(" "),
+});
+
+/**
+ * The AgentOS MCP server the agent's CLI session spawns for itself. It carries
+ * no credentials: they reach the server through the inherited child environment,
+ * so nothing secret ends up in a command line other processes can read.
+ */
+const mcpServerArgs = (credentialsPath: string): string[] => [mcpServerPath(), "--credentials", credentialsPath];
+
+export const mcpConfig = (credentialsPath: string): { mcpServers: Record<string, { type: string; command: string; args: string[] }> } => ({
+  mcpServers: { agentos: { type: "stdio", command: nodeBinaryPath(), args: mcpServerArgs(credentialsPath) } },
+});
+
+export type AdapterEvent = {
+  source: "RUNNER" | "CLAUDE" | "CODEX" | "PI";
+  type: string;
+  providerEventId?: string | null;
+  toolCallId?: string | null;
+  payload: Record<string, unknown>;
+};
+
+export type SessionEventSink = (event: AdapterEvent) => void;
+
+export type ExitEvidence = {
+  exitCode: number | null;
+  signal: string | null;
+  terminalEventSeen: boolean;
+  terminalSuccess: boolean;
+  terminationReason: string | null;
+  finalOutput: string | null;
+  providerError: string | null;
+  stdout: string;
+  stderr: string;
+};
+
+export type ClassifiedFailure = {
+  failureClass: FailureClass;
+  retryable: boolean;
+  operatorAction?: string;
+};
+
+export type HeartbeatSnapshot = {
+  processAlive: boolean;
+  lastProcessAliveAt: Date;
+  lastProgressEventAt: Date;
+  inFlightTool: InFlightTool | null;
+};
+
+export type RuntimeHandle = {
+  runner: RunnerKind;
+  child: ChildProcess;
+  pid: number | null;
+  startedAt: Date;
+  lastProcessAliveAt: Date;
+  lastProgressEventAt: Date;
+  inFlightTool: InFlightTool | null;
+  providerConversationId: string | null;
+  terminalEventSeen: boolean;
+  terminalSuccess: boolean;
+  terminationReason: string | null;
+  sawError: boolean;
+  providerError: string | null;
+  piTurnCompleted: boolean;
+  finalOutput: string | null;
+  stdout: string;
+  stderr: string;
+  exit: Promise<ExitEvidence>;
+};
+
+export type PreflightSpec = {
+  config: RunnerConfig;
+  runner: RunnerKind;
+  model: string;
+  env: NodeJS.ProcessEnv;
+};
+
+export type PreflightResult = {
+  ok: boolean;
+  cliVersion: string | null;
+  authMode: string | null;
+  capabilities: Record<string, unknown>;
+  error?: string;
+};
+
+export type RunSpec = {
+  config: RunnerConfig;
+  claim: ClaimedTask;
+  workingDirectory: string;
+  env: NodeJS.ProcessEnv;
+  prompt: string;
+  /** 0600 file the AgentOS MCP server reads its session credentials from. */
+  credentialsPath: string;
+};
+
+export type ResumeSpec = RunSpec & { providerConversationId: string; input: string };
+
+export type KillResult = { signal: "SIGTERM" | "SIGKILL" | null; processAlive: boolean };
+
+export interface CliAdapter {
+  preflight(spec: PreflightSpec): Promise<PreflightResult>;
+  start(spec: RunSpec, sink: SessionEventSink): Promise<RuntimeHandle>;
+  resume(spec: ResumeSpec, sink: SessionEventSink): Promise<RuntimeHandle>;
+  kill(handle: RuntimeHandle, reason: string): Promise<KillResult>;
+  heartbeat(handle: RuntimeHandle): Promise<HeartbeatSnapshot>;
+  classifyError(evidence: ExitEvidence): ClassifiedFailure;
+}
+
+const cap = (value: string, limit = 1_000_000): string => value.length <= limit ? value : value.slice(value.length - limit);
+
+const sourceFor = (runner: RunnerKind): AdapterEvent["source"] => runner;
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+const stringField = (object: Record<string, unknown> | null, field: string): string | null =>
+  typeof object?.[field] === "string" ? object[field] as string : null;
+
+const eventErrorMessage = (event: Record<string, unknown>): string | null =>
+  stringField(event, "message")
+  ?? stringField(event, "error")
+  ?? stringField(asRecord(event.error), "message");
+
+const emit = (handle: RuntimeHandle, sink: SessionEventSink, type: string, payload: Record<string, unknown>, toolCallId?: string | null): void => {
+  handle.lastProgressEventAt = new Date();
+  sink({ source: sourceFor(handle.runner), type, payload, ...(toolCallId !== undefined ? { toolCallId } : {}) });
+};
+
+const markInFlightToolProgress = (handle: RuntimeHandle): void => {
+  if (handle.inFlightTool) handle.inFlightTool.lastProgressAt = new Date();
+};
+
+const parseClaude = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
+  const type = stringField(event, "type");
+  if (type === "system") {
+    handle.providerConversationId = stringField(event, "session_id") ?? handle.providerConversationId;
+    emit(handle, sink, "MODEL_STARTED", event);
+  } else if (type === "assistant") {
+    const message = asRecord(event.message);
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const item of content) {
+      const part = asRecord(item);
+      if (stringField(part, "type") === "tool_use") {
+        const toolId = stringField(part, "id") ?? "unknown";
+        const now = new Date();
+        handle.inFlightTool = { id: toolId, name: stringField(part, "name") ?? "tool", startedAt: now, lastProgressAt: now };
+        emit(handle, sink, "TOOL_STARTED", part ?? {}, toolId);
+      }
+    }
+    emit(handle, sink, "MODEL_DELTA", event);
+  } else if (type === "user") {
+    const message = asRecord(event.message);
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const item of content) {
+      const part = asRecord(item);
+      if (stringField(part, "type") === "tool_result") {
+        const toolId = stringField(part, "tool_use_id");
+        handle.inFlightTool = null;
+        emit(handle, sink, "TOOL_COMPLETED", part ?? {}, toolId);
+      }
+    }
+  } else if (type === "result") {
+    handle.terminalEventSeen = true;
+    handle.terminalSuccess = event.is_error === false && event.terminal_reason === "completed";
+    if (!handle.terminalSuccess) handle.sawError = true;
+    // An is_error result is the provider's own account of why the run died.
+    // Without it, classifyError falls back to grepping the agent's stdout,
+    // where task content (a literal "401" in code under edit) once turned a
+    // dropped connection into AUTH_REQUIRED.
+    if (event.is_error === true) handle.providerError = stringField(event, "result") ?? handle.providerError;
+    handle.finalOutput = stringField(event, "result") ?? handle.finalOutput;
+    emit(handle, sink, "FINAL_OUTPUT", event);
+  } else {
+    emit(handle, sink, "PROVIDER_STATUS", event);
+  }
+};
+
+const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
+  const type = stringField(event, "type");
+  if (type === "thread.started") {
+    handle.providerConversationId = stringField(event, "thread_id") ?? handle.providerConversationId;
+    emit(handle, sink, "MODEL_STARTED", event);
+  } else if (type === "item.started") {
+    const item = asRecord(event.item);
+    if (stringField(item, "type") === "command_execution") {
+      const toolId = stringField(item, "id") ?? "unknown";
+      const now = new Date();
+      handle.inFlightTool = { id: toolId, name: "command_execution", startedAt: now, lastProgressAt: now };
+      emit(handle, sink, "TOOL_STARTED", item ?? {}, toolId);
+    } else emit(handle, sink, "MODEL_DELTA", event);
+  } else if (type === "item.completed") {
+    const item = asRecord(event.item);
+    if (stringField(item, "type") === "command_execution") {
+      handle.inFlightTool = null;
+      emit(handle, sink, "TOOL_COMPLETED", item ?? {}, stringField(item, "id"));
+    } else {
+      if (item && stringField(item, "type") === "agent_message") {
+        // Codex may report an agent progress message while a long-running
+        // command_execution remains open. That structured message is the only
+        // positive evidence here that the tool is still advancing. Raw stderr
+        // deliberately does not reach this path: background CLI warnings must
+        // not keep a genuinely stuck command alive.
+        markInFlightToolProgress(handle);
+        handle.finalOutput = stringField(item, "text") ?? handle.finalOutput;
+      }
+      emit(handle, sink, "MODEL_DELTA", event);
+    }
+    // A nonzero shell command inside the session (status "failed") is normal
+    // agent behavior, not a run failure; only item-level errors count.
+    if (item?.error) handle.sawError = true;
+  } else if (type === "error") {
+    handle.sawError = true;
+    handle.providerError = eventErrorMessage(event) ?? handle.providerError;
+    emit(handle, sink, "ADAPTER_ERROR", event);
+  } else if (type === "turn.completed") {
+    handle.terminalEventSeen = true;
+    handle.terminalSuccess = !handle.sawError;
+    emit(handle, sink, "FINAL_OUTPUT", event);
+  } else emit(handle, sink, "PROVIDER_STATUS", event);
+};
+
+const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
+  const type = stringField(event, "type");
+  if (type === "session") {
+    handle.providerConversationId = stringField(event, "id") ?? handle.providerConversationId;
+    emit(handle, sink, "MODEL_STARTED", event);
+  } else if (type === "tool_execution_start") {
+    const toolId = stringField(event, "toolCallId") ?? "unknown";
+    const now = new Date();
+    handle.inFlightTool = { id: toolId, name: stringField(event, "toolName") ?? "tool", startedAt: now, lastProgressAt: now };
+    emit(handle, sink, "TOOL_STARTED", event, toolId);
+  } else if (type === "tool_execution_update") {
+    if (handle.inFlightTool) handle.inFlightTool.lastProgressAt = new Date();
+    emit(handle, sink, "TOOL_PROGRESS", event, stringField(event, "toolCallId"));
+  } else if (type === "tool_execution_end") {
+    handle.inFlightTool = null;
+    // Tool errors mid-session are recoverable; the terminal events decide.
+    emit(handle, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
+  } else if (type === "turn_end" || type === "message_end") {
+    handle.piTurnCompleted = true;
+    const message = asRecord(event.message);
+    if (message && stringField(message, "role") === "assistant" && Array.isArray(message.content)) {
+      const text = message.content
+        .map((part) => stringField(asRecord(part) ?? {}, "text"))
+        .filter((part): part is string => part !== null)
+        .join("\n");
+      if (text) handle.finalOutput = text;
+    }
+    emit(handle, sink, "MODEL_COMPLETED", event);
+  } else if (type === "agent_end") {
+    if (event.willRetry === true) handle.sawError = true;
+    emit(handle, sink, "PROVIDER_STATUS", event);
+  } else if (type === "agent_settled") {
+    handle.terminalEventSeen = true;
+    handle.terminalSuccess = handle.piTurnCompleted && !handle.sawError;
+    emit(handle, sink, "FINAL_OUTPUT", event);
+  } else {
+    if (type?.includes("error")) handle.sawError = true;
+    emit(handle, sink, type?.includes("message") ? "MODEL_DELTA" : "PROVIDER_STATUS", event);
+  }
+};
+
+const processLine = (handle: RuntimeHandle, line: string, sink: SessionEventSink): void => {
+  if (!line.trim()) return;
+  let event: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    event = asRecord(parsed) ?? { value: parsed };
+  } catch {
+    handle.sawError = true;
+    emit(handle, sink, "ADAPTER_ERROR", { error: "invalid-json", line });
+    return;
+  }
+  sink({ source: sourceFor(handle.runner), type: "PROVIDER_RAW", payload: event });
+  if (handle.runner === "CLAUDE") parseClaude(handle, event, sink);
+  else if (handle.runner === "CODEX") parseCodex(handle, event, sink);
+  else parsePi(handle, event, sink);
+};
+
+// Run.model carries an optional reasoning-effort suffix: "<model>[:<effort>]".
+const modelSpec = (raw: string): { model: string; effort: string | null } => {
+  const at = raw.lastIndexOf(":");
+  return at > 0 ? { model: raw.slice(0, at), effort: raw.slice(at + 1) } : { model: raw, effort: null };
+};
+
+// Each CLI takes the AgentOS tool surface through a different door: claude has a
+// native MCP config flag, codex takes MCP servers as config overrides, and pi
+// ships no MCP client at all, so it gets the same four tools as an extension.
+const codexMcpArgs = (credentialsPath: string): string[] => [
+  "-c", `mcp_servers.agentos.command=${JSON.stringify(nodeBinaryPath())}`,
+  "-c", `mcp_servers.agentos.args=${JSON.stringify(mcpServerArgs(credentialsPath))}`,
+  "-c", "mcp_servers.agentos.startup_timeout_sec=30",
+];
+
+type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
+const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
+const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
+  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
+  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
+};
+const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
+  BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit",
+};
+
+const denyArgs = (runner: "CLAUDE" | "PI", disabledTools: string[]): string[] => {
+  const denied = new Set(disabledTools);
+  const names = TOOL_ORDER.flatMap((tool) => {
+    if (!denied.has(tool)) return [];
+    const name = runner === "CLAUDE" ? CLAUDE_TOOL_NAMES[tool] : PI_TOOL_NAMES[tool];
+    return name ? [name] : [];
+  });
+  if (names.length === 0) return [];
+  return [runner === "CLAUDE" ? "--disallowedTools" : "--exclude-tools", names.join(",")];
+};
+
+/**
+ * What the session is actually asked to do: a fresh prompt, or the resume input.
+ *
+ * It never appears in argv. A claim carries the chain's persisted prior outputs
+ * verbatim, each capped at 500k by the write endpoint, so a nine-step chain's
+ * cumulative prompt is measured in megabytes — past Linux's 128 KiB per-argument
+ * MAX_ARG_STRLEN and past macOS's ~1 MiB total argument block. As an argv
+ * element that is E2BIG: `spawn` fails before the provider ever starts, and no
+ * amount of retrying fixes it.
+ *
+ * Every runner reads it from stdin instead, on a documented path of its own:
+ * `claude -p` with no prompt argument, `codex exec -` and `codex exec resume
+ * <id> -` (`-` means "read the instructions from stdin"), and pi, which
+ * prepends piped stdin to the initial message in every non-RPC mode. Resume ids,
+ * MCP wiring and deny flags stay on argv, where they are small and stable.
+ *
+ * The prompt also stops being visible in every `ps` on the box, which is where
+ * a task description and its predecessors' outputs used to sit in the clear.
+ */
+export const inputForRunner = (spec: RunSpec, resume?: ResumeSpec): string => resume?.input ?? spec.prompt;
+
+export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
+  const { model, effort } = modelSpec(spec.claim.run.model);
+  if (runner === "CLAUDE") return [
+    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
+    // Model must be pinned explicitly; the CLI otherwise inherits the
+    // operator's personal default, which is reserved quota.
+    "--model", model, "--effort", effort ?? "high",
+    ...denyArgs("CLAUDE", spec.claim.agent.disabledTools),
+    // strict keeps the operator's personal MCP servers out of an agent session:
+    // the manifest is supposed to be the whole tool surface.
+    "--mcp-config", JSON.stringify(mcpConfig(spec.credentialsPath)), "--strict-mcp-config",
+    ...(resume ? ["--resume", resume.providerConversationId] : []),
+  ];
+  if (runner === "CODEX") return resume
+    ? ["exec", "resume", ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, "-"]
+    : [
+      "exec", "--json", "-m", model,
+      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      ...codexMcpArgs(spec.credentialsPath),
+      "--dangerously-bypass-approvals-and-sandbox", "-",
+    ];
+  return [
+    "-p", "--mode", "json", "--session-dir", join(spec.workingDirectory, ".agentos-pi"),
+    "--model", model,
+    ...(effort ? ["--thinking", effort] : []),
+    ...denyArgs("PI", spec.claim.agent.disabledTools),
+    "--extension", piExtensionPath(),
+    ...(resume ? ["--session", resume.providerConversationId] : []),
+  ];
+};
+
+const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink, resume?: ResumeSpec): RuntimeHandle => {
+  const binary = spec.config.binaries[runner];
+  const args = argsForRunner(runner, spec, resume);
+  const input = inputForRunner(spec, resume);
+  const { executable, args: fullArgs } = launchArgv(spec.config, runner, args, spec.env);
+  const startedAt = new Date();
+  const child = spawn(executable, fullArgs, {
+    cwd: spec.workingDirectory,
+    env: spec.env,
+    // stdin is the prompt channel (see inputForRunner); stdout stays the
+    // structured event protocol every parser below reads.
+    detached: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const handle: RuntimeHandle = {
+    runner,
+    child,
+    pid: child.pid ?? null,
+    startedAt,
+    lastProcessAliveAt: startedAt,
+    lastProgressEventAt: startedAt,
+    inFlightTool: null,
+    providerConversationId: null,
+    terminalEventSeen: false,
+    terminalSuccess: false,
+    terminationReason: null,
+    sawError: false,
+    providerError: null,
+    piTurnCompleted: false,
+    finalOutput: null,
+    stdout: "",
+    stderr: "",
+    exit: Promise.resolve({} as ExitEvidence),
+  };
+  let buffer = "";
+  child.stdout!.setEncoding("utf8");
+  child.stderr!.setEncoding("utf8");
+  child.stdout!.on("data", (chunk: string) => {
+    handle.stdout = cap(handle.stdout + chunk);
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/u);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) processLine(handle, line, sink);
+  });
+  child.stderr!.on("data", (chunk: string) => {
+    handle.stderr = cap(handle.stderr + chunk);
+    sink({ source: sourceFor(runner), type: "STDERR", payload: { text: chunk } });
+  });
+  handle.exit = new Promise<ExitEvidence>((resolvePromise) => {
+    let settled = false;
+    const finish = (exitCode: number | null, signal: string | null): void => {
+      if (settled) return;
+      settled = true;
+      if (buffer.trim()) processLine(handle, buffer, sink);
+      resolvePromise({
+        exitCode,
+        signal,
+        terminalEventSeen: handle.terminalEventSeen,
+        terminalSuccess: handle.terminalSuccess,
+        terminationReason: handle.terminationReason,
+        finalOutput: handle.finalOutput,
+        providerError: handle.providerError,
+        stdout: handle.stdout,
+        stderr: handle.stderr,
+      });
+    };
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      handle.sawError = true;
+      handle.stderr = cap(`${handle.stderr}\n${error.message}`);
+      finish(error.code === "ENOENT" ? 127 : 1, null);
+    });
+    child.once("close", (code, signal) => finish(code, signal));
+  });
+  // A CLI that dies before it drains a multi-megabyte prompt (missing binary,
+  // failed auth) closes the pipe under us. That EPIPE is a symptom, never the
+  // diagnosis, so it is recorded as its own event and deliberately kept out of
+  // stderr: the CLI's own exit evidence is what classifies the run.
+  child.stdin!.on("error", (error: NodeJS.ErrnoException) => {
+    sink({
+      source: "RUNNER",
+      type: "PROMPT_DELIVERY_FAILED",
+      payload: { message: error.message, code: error.code ?? null },
+    });
+  });
+  child.stdin!.end(input);
+  sink({ source: "RUNNER", type: "PROCESS_STARTED", payload: {
+    pid: handle.pid,
+    binary,
+    // argv no longer carries the prompt, so this stays safe to persist and read.
+    args,
+    promptTransport: "stdin",
+    promptBytes: Buffer.byteLength(input),
+    promptHash: spec.claim.run.promptHash,
+  } });
+  return handle;
+};
+
+const capture = async (config: RunnerConfig, runner: RunnerKind, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> =>
+  new Promise((resolvePromise) => {
+    const launch = launchArgv(config, runner, args, env);
+    const child = spawn(launch.executable, launch.args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (code: number | null, extra = ""): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise({ code, stdout, stderr: `${stderr}${extra}` });
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(1, "\npreflight timed out after 15 seconds");
+    }, 15_000);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", (error: NodeJS.ErrnoException) => finish(error.code === "ENOENT" ? 127 : 1, `\n${error.message}`));
+    child.once("close", (code) => finish(code));
+  });
+
+/**
+ * What a failed preflight is allowed to say about itself.
+ *
+ * A preflight failure used to report the CLI's own stdout and stderr verbatim.
+ * That text is persisted as `RunnerBackendState.circuitReason`, returned by
+ * `GET /runners`, and rendered — so whatever an unauthenticated `codex login
+ * status` happened to print, including an environment variable, a remote URL
+ * with a password in it or a home-directory path, became telemetry and then
+ * became a screenshot. Nothing about that channel is bounded, so nothing about
+ * it can be sanitised; the fix is not to carry it.
+ *
+ * What is carried instead is a class: a fixed phrase this file authors, one per
+ * way a preflight can fail, plus the exit code, which is a number. The CLI's own
+ * account of the failure stays where the operator can already read it — their
+ * terminal, running the same official command the guidance names.
+ */
+export const PREFLIGHT_CLASS = {
+  cliMissing: "cli-missing",
+  notAuthenticated: "not-authenticated",
+  unsupportedModel: "unsupported-model",
+} as const;
+
+export const PREFLIGHT_REASONS = {
+  cliMissing: `${PREFLIGHT_CLASS.cliMissing}: the CLI did not answer --version`,
+  notAuthenticated: `${PREFLIGHT_CLASS.notAuthenticated}: the CLI's own login check did not pass`,
+  unsupportedModel: `${PREFLIGHT_CLASS.unsupportedModel}: an explicit provider/model is required`,
+} as const;
+
+const preflightFailure = (reason: string, code: number | null): string =>
+  code === null ? reason : `${reason} (exit ${code})`;
+
+const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
+  const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
+  if (spec.runner === "PI" && !spec.model.includes("/")) {
+    return {
+      ok: false,
+      cliVersion: null,
+      authMode: null,
+      capabilities,
+      error: PREFLIGHT_REASONS.unsupportedModel,
+    };
+  }
+  const version = await capture(spec.config, spec.runner, ["--version"], spec.env);
+  if (version.code !== 0) {
+    return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
+  }
+  const authArgs = spec.runner === "CLAUDE" ? ["auth", "status"]
+    : spec.runner === "CODEX" ? ["login", "status"]
+      : ["auth", "check", "--provider", spec.model.split("/")[0] ?? "openai-codex"];
+  const auth = await capture(spec.config, spec.runner, authArgs, spec.env);
+  const text = `${auth.stdout}\n${auth.stderr}`;
+  const ok = auth.code === 0 && (spec.runner !== "CLAUDE" || /"loggedIn"\s*:\s*true/u.test(text));
+  return {
+    ok,
+    cliVersion: version.stdout.trim() || version.stderr.trim(),
+    authMode: spec.runner === "CLAUDE" ? (/"authMethod"\s*:\s*"([^"]+)"/u.exec(text)?.[1] ?? null)
+      : spec.runner === "CODEX" ? (text.includes("ChatGPT") ? "chatgpt" : null) : spec.model.split("/")[0] ?? null,
+    capabilities,
+    // `text` is read for the two verdicts above and never forwarded: what the
+    // CLI printed is the operator's to read in their own terminal.
+    ...(!ok ? { error: preflightFailure(PREFLIGHT_REASONS.notAuthenticated, auth.code) } : {}),
+  };
+};
+
+export const adapterExecutionSucceeded = (evidence: ExitEvidence): boolean =>
+  evidence.exitCode === 0
+  && evidence.signal === null
+  && evidence.terminationReason === null
+  && evidence.terminalEventSeen
+  && evidence.terminalSuccess;
+
+/**
+ * The tail of what a run produced: the agent's own final output when it emitted
+ * one, otherwise its stdout. Capped at 500k because it is sent on the wire and
+ * stored whole (`Run.output`); the *tail* is kept rather than the head because
+ * the end of a run is where its account of itself is.
+ *
+ * One definition, because two call sites in runner.ts send it: the ordinary
+ * completion, and the exception path, which reports a run whose agent had
+ * already finished when the runner's own plumbing failed.
+ */
+export const outputTail = (evidence: ExitEvidence): string | null =>
+  (evidence.finalOutput ?? evidence.stdout).trim().slice(-500_000) || null;
+
+export const failureReasonFromEvidence = (evidence: ExitEvidence): string =>
+  evidence.providerError?.trim()
+  || evidence.stderr.trim()
+  || `CLI exited with code ${evidence.exitCode}`;
+
+const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
+  const text = evidence.providerError?.trim()
+    ? `${evidence.providerError}\n${evidence.stderr}`
+    : `${evidence.stderr}\n${evidence.stdout}`;
+  // Auth verdicts must never be read out of stdout: stdout is the agent's
+  // working output, and a task that edits auth code contains "401"/"not
+  // logged in" as content (run cmsy26f2s0ibqmpmx8t6gyltg was classified
+  // AUTH_REQUIRED off a literal 401 in the code it was writing). Provider
+  // error and stderr are the only channels the CLI reports auth trouble on.
+  const authEvidence = `${evidence.providerError ?? ""}\n${evidence.stderr}`;
+  if (evidence.terminationReason) return { failureClass: "CANCELLED_OR_TIMED_OUT", retryable: false };
+  if (evidence.exitCode === 127) {
+    return { failureClass: "BINARY_NOT_FOUND", retryable: false, operatorAction: "Install the configured CLI or repair RUNNER_PATH" };
+  }
+  // Auth outranks transient: a providerError that names an auth failure must
+  // not be retried into a lockout just because the same message also mentions
+  // a dropped connection or server_error.
+  // `not-authenticated` is this file's own preflight class, not CLI text: the
+  // preflight stopped forwarding the CLI's words (they are unbounded and end up
+  // in telemetry), so the classifier recognises the class instead.
+  if (new RegExp(`authentication_failed|\\b401\\b|Missing authentication|No API key found|not logged in|${PREFLIGHT_CLASS.notAuthenticated}`, "iu").test(authEvidence)) {
+    return { failureClass: "AUTH_REQUIRED", retryable: false, operatorAction: "Log the runner account into the CLI" };
+  }
+  if (/connection lost|server_error/iu.test(`${evidence.providerError ?? ""}`)) {
+    return { failureClass: "TRANSIENT_PROVIDER", retryable: true };
+  }
+  if (/\b429\b|rate.?limit|usage.?limit|quota/iu.test(text)) return { failureClass: "RATE_LIMITED", retryable: true };
+  if (isTransientNetworkError(text) || /\b5\d\d\b|provider outage/iu.test(text)) {
+    return { failureClass: "TRANSIENT_PROVIDER", retryable: true };
+  }
+  if (/"isError"\s*:\s*true|"command_execution"[\s\S]{0,500}"status"\s*:\s*"failed"/u.test(text)) {
+    return { failureClass: "TOOL_FAILED", retryable: false };
+  }
+  if (evidence.exitCode === 0 && (!evidence.terminalEventSeen || !evidence.terminalSuccess)) {
+    return { failureClass: "PROTOCOL_ERROR", retryable: true, operatorAction: "Check CLI protocol/version drift" };
+  }
+  return { failureClass: "TASK_FAILED", retryable: false };
+};
+
+const kill = async (handle: RuntimeHandle, reason: string): Promise<KillResult> => {
+  handle.terminationReason = reason;
+  const pid = handle.pid;
+  if (!pid || handle.child.exitCode !== null || handle.child.signalCode !== null) return { signal: null, processAlive: false };
+  try { process.kill(-pid, "SIGTERM"); } catch { return { signal: null, processAlive: false }; }
+  const closed = await Promise.race([
+    handle.exit.then(() => true),
+    new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 5_000)),
+  ]);
+  if (closed) return { signal: "SIGTERM", processAlive: false };
+  try { process.kill(-pid, "SIGKILL"); } catch { return { signal: "SIGTERM", processAlive: false }; }
+  await handle.exit;
+  return { signal: "SIGKILL", processAlive: false };
+};
+
+const heartbeat = async (handle: RuntimeHandle): Promise<HeartbeatSnapshot> => {
+  const processAlive = handle.child.exitCode === null && handle.child.signalCode === null;
+  if (processAlive) handle.lastProcessAliveAt = new Date();
+  return {
+    processAlive,
+    lastProcessAliveAt: handle.lastProcessAliveAt,
+    lastProgressEventAt: handle.lastProgressEventAt,
+    inFlightTool: handle.inFlightTool,
+  };
+};
+
+const makeAdapter = (runner: RunnerKind): CliAdapter => ({
+  preflight: (spec) => preflight({ ...spec, runner }),
+  start: async (spec, sink) => spawnRuntime(runner, spec, sink),
+  resume: async (spec, sink) => spawnRuntime(runner, spec, sink, spec),
+  kill,
+  heartbeat,
+  classifyError,
+});
+
+export const adapters: Record<RunnerKind, CliAdapter> = {
+  CLAUDE: makeAdapter("CLAUDE"),
+  CODEX: makeAdapter("CODEX"),
+  PI: makeAdapter("PI"),
+};
+
+export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
+  adapterVersion: ADAPTER_VERSION,
+  runner: spec.claim.runner,
+  binary: spec.config.binaries[spec.claim.runner],
+  runAsPrefix: spec.config.runAsPrefix,
+  model: spec.claim.run.model,
+  promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
+  promptTransport: "stdin",
+  structuredEvents: true,
+  // What the seat manual promises the agent, and how it was actually injected.
+  agentosTools: {
+    transport: spec.claim.runner === "PI" ? "pi-extension" : "mcp-stdio",
+    entrypoint: spec.claim.runner === "PI" ? piExtensionPath() : mcpServerPath(),
+    tools: ["task_activity_log", "task_output", "task_status", "inbox_ask"],
+  },
+});

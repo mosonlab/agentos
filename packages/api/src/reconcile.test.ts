@@ -1,0 +1,207 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { CleanupStatus, RunStatus, SessionExecutionStatus, TaskStatus, type PrismaClient } from "@agentos/db";
+
+import {
+  createArchivedRunNoticeScheduler,
+  noteArchivedQueuedRuns,
+  reconcileAtStartup,
+  reconcileDatabaseRuns,
+} from "./reconcile.js";
+
+test("database reconciliation active status query remains limited to three execution states", async () => {
+  let statuses: unknown;
+  const database = {
+    run: { findMany: async ({ where }: { where: { status: RunStatus | { in: unknown } } }) => {
+      if (typeof where.status === "object") statuses = where.status.in;
+      return [];
+    } },
+  } as unknown as PrismaClient;
+  assert.equal(await reconcileDatabaseRuns(database), 0);
+  assert.deepEqual(statuses, [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING]);
+});
+
+test("four concurrent archived-run sweeps use one deterministic idempotency key", async () => {
+  const archivedAt = new Date("2026-08-16T06:00:00.000Z");
+  const ids = new Set<string>();
+  const inserted: Record<string, unknown>[] = [];
+  const database = {
+    run: {
+      findMany: async () => [{
+        id: "run-7",
+        taskId: "task-7",
+        runNumber: 7,
+        agent: { name: "Archived Agent", archivedAt },
+      }],
+    },
+    taskActivity: {
+      createMany: async ({ data, skipDuplicates }: { data: Record<string, unknown>[]; skipDuplicates: boolean }) => {
+        assert.equal(skipDuplicates, true);
+        let count = 0;
+        for (const row of data) {
+          const id = String(row.id);
+          if (ids.has(id)) continue;
+          ids.add(id);
+          inserted.push(row);
+          count += 1;
+        }
+        return { count };
+      },
+    },
+  } as unknown as PrismaClient;
+  assert.deepEqual(await Promise.all(Array.from({ length: 4 }, () => noteArchivedQueuedRuns(database))), [1, 0, 0, 0]);
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0]?.id, "archived-skip:run-7:2026-08-16T06:00:00.000Z");
+});
+
+test("archived-run sweep paginates without capping eventual coverage and supports agentId", async () => {
+  const archivedAt = new Date("2026-08-16T06:00:00.000Z");
+  const seenQueries: Array<Record<string, unknown>> = [];
+  const seeded = [
+    ...Array.from({ length: 101 }, (_, index) => ({
+      id: `queued-${String(index).padStart(3, "0")}`, taskId: `task-${index}`, runNumber: 1,
+      status: RunStatus.QUEUED, agentId: "archived-agent", agent: { name: "Archived", archivedAt },
+    })),
+    { id: "running-1", taskId: "task-2", runNumber: 1, status: RunStatus.RUNNING, agentId: "archived-agent", agent: { name: "Archived", archivedAt } },
+    { id: "active-1", taskId: "task-3", runNumber: 1, status: RunStatus.QUEUED, agentId: "active-agent", agent: { name: "Active", archivedAt: null } },
+  ];
+  const database = {
+    run: {
+      findMany: async (query: { where: Record<string, unknown>; take: number; cursor?: { id: string }; skip?: number }) => {
+        seenQueries.push(query as unknown as Record<string, unknown>);
+        const matching = seeded.filter((run) => (
+          run.status === query.where.status
+          && run.agent.archivedAt !== null
+          && (!query.where.agentId || run.agentId === query.where.agentId)
+        ));
+        const start = query.cursor ? matching.findIndex((run) => run.id === query.cursor?.id) + (query.skip ?? 0) : 0;
+        return matching.slice(start, start + query.take);
+      },
+    },
+    taskActivity: { createMany: async ({ data }: { data: unknown[] }) => ({ count: data.length }) },
+  } as unknown as PrismaClient;
+  assert.equal(await noteArchivedQueuedRuns(database), 101);
+  assert.equal(await noteArchivedQueuedRuns(database, { agentId: "active-agent" }), 0);
+  assert.deepEqual(seenQueries[0]?.where, {
+    status: RunStatus.QUEUED,
+    taskId: { not: null },
+    agent: { archivedAt: { not: null } },
+  });
+  assert.equal((seenQueries.at(-1)?.where as Record<string, unknown>)?.agentId, "active-agent");
+  assert.equal(seenQueries[0]?.take, 100);
+  assert.deepEqual(seenQueries[1]?.cursor, { id: "queued-099" });
+});
+
+test("claim-time archived-run scheduler coalesces polls and sweeps again after its interval", async () => {
+  let sweeps = 0;
+  let release: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const database = {
+    run: { findMany: async () => { sweeps += 1; await blocked; return []; } },
+  } as unknown as PrismaClient;
+  const schedule = createArchivedRunNoticeScheduler(database, 1_000);
+  const first = schedule(new Date(1_000));
+  const concurrent = schedule(new Date(1_001));
+  release?.();
+  assert.deepEqual(await Promise.all([first, concurrent]), [0, 0]);
+  assert.equal(sweeps, 1);
+  assert.equal(await schedule(new Date(1_999)), 0);
+  assert.equal(sweeps, 1);
+  assert.equal(await schedule(new Date(2_000)), 0);
+  assert.equal(sweeps, 2);
+});
+
+test("database reconciliation times out expired Inbox waits and makes retained workspace quota-managed", async () => {
+  const now = new Date("2026-08-16T07:00:00.000Z");
+  const writes: Array<{ target: string; data: Record<string, unknown> }> = [];
+  const database = {
+    run: {
+      findMany: async ({ where }: { where: {
+        status: RunStatus | { in: RunStatus[] };
+        session?: { is: { resumableUntil: { lt: Date } } };
+      } }) => {
+        if (where.status !== RunStatus.WAITING_INBOX) return [];
+        assert.equal(where.session?.is.resumableUntil.lt, now);
+        return [{ id: "waiting-1", taskId: "task-1", session: { id: "session-1", waitingOnMessageId: "message-1" } }];
+      },
+    },
+    $transaction: async (operation: (tx: any) => Promise<unknown>) => operation({
+      run: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "run", data }); return { count: 1 }; } },
+      session: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "session", data }); return { count: 1 }; } },
+      inboxMessage: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "message", data }); return { count: 1 }; } },
+      task: { update: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "task", data }); return {}; } },
+      taskActivity: { create: async () => ({}) },
+    }),
+  } as unknown as PrismaClient;
+  assert.equal(await reconcileDatabaseRuns(database, now), 1);
+  assert.equal(writes.find((write) => write.target === "run")?.data.status, RunStatus.TIMED_OUT);
+  assert.equal(writes.find((write) => write.target === "session")?.data.executionStatus, SessionExecutionStatus.TIMED_OUT);
+  assert.equal(writes.find((write) => write.target === "session")?.data.cleanupStatus, CleanupStatus.RETAINED);
+  assert.equal(writes.find((write) => write.target === "task")?.data.status, TaskStatus.REVIEW);
+  assert.equal(writes.find((write) => write.target === "message")?.data.status, "CLOSED");
+});
+
+test("startup reconciliation does not fail when archived notice persistence fails", async () => {
+  const database = {
+    run: {
+      findMany: async ({ where }: { where: { status: RunStatus | { in: RunStatus[] } } }) => {
+        if (where.status === RunStatus.QUEUED) throw new Error("audit unavailable");
+        return [];
+      },
+      count: async () => 0,
+    },
+  } as unknown as PrismaClient;
+  const originalError = console.error;
+  let logged = "";
+  console.error = (...args: unknown[]) => { logged = args.map(String).join(" "); };
+  try {
+    const result = await reconcileAtStartup(database);
+    assert.deepEqual(result, { runs: 0, openReclaimIntents: 0, archivedNotices: 0 });
+    assert.match(logged, /Archived-run startup notice failed.*audit unavailable/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("lease-loss requeue for an archived agent becomes visible through the sweep", async () => {
+  const now = new Date("2026-08-16T06:00:00.000Z");
+  let queued: Record<string, unknown> | undefined;
+  const activities: Record<string, unknown>[] = [];
+  const candidate = {
+    id: "lost-1", heartbeatAt: new Date(now.getTime() - 20 * 60_000), projectId: "project-1",
+    taskId: "task-1", goalId: null, agentId: "agent-1", repoId: "repo-1", runNumber: 1,
+    runner: "CLAUDE", model: "model", targetBranch: "main", promptHash: "hash",
+    maxDurationMin: 120, stallTimeoutMin: 10, maxRunsPerTask: 3,
+  };
+  const database = {
+    run: {
+      findMany: async ({ where }: { where: { status: unknown } }) => typeof where.status === "object" && where.status !== null && "in" in where.status
+        ? [candidate]
+        : queued ? [{ id: "retry-2", taskId: "task-1", runNumber: 2, agent: { name: "Archived", archivedAt: now } }] : [],
+    },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
+      run: {
+        updateMany: async () => ({ count: 1 }),
+        create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
+      },
+      session: { updateMany: async () => ({ count: 1 }) },
+      // The requeue loads the task to decide whether to recompute a chain
+      // step's branches; a null row keeps the lost run's fields verbatim.
+      task: {
+        update: async () => ({}),
+        findUnique: async () => null,
+        findUniqueOrThrow: async () => ({ id: "task-1", archivedAt: null }),
+      },
+      taskActivity: { create: async () => ({}) },
+      inboxMessage: { create: async () => ({}) },
+    }),
+    taskActivity: {
+      createMany: async ({ data }: { data: Record<string, unknown>[] }) => { activities.push(...data); return { count: data.length }; },
+    },
+  } as unknown as PrismaClient;
+  assert.equal(await reconcileDatabaseRuns(database, now), 1);
+  assert.equal(await noteArchivedQueuedRuns(database), 1);
+  assert.match(String(activities[0]?.body), /Archived.*run 2/);
+});

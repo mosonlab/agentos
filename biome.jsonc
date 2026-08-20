@@ -1,0 +1,119 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+
+  // The minimum lint gate (#143). Two properties matter more than coverage:
+  //
+  //   1. It never reformats. The formatter and the assist actions are off, so
+  //      no run of this config can produce a whole-repository reflow that
+  //      washes out blame and conflicts with every in-flight PR. Formatting is
+  //      per-file and by hand, and it is not part of the merge gate.
+  //   2. Every rule below is error level and the repository is clean at each
+  //      one today, so a red gate always means the change under review
+  //      introduced the violation. Nothing here is a warning, because a warning
+  //      in a gate is a rule nobody ever fixes.
+  //
+  // The preset is "none": rules are opt-in one at a time, each with the reason
+  // it earns its place. Growing this list is a deliberate act, not a Biome
+  // upgrade side effect.
+  //
+  // `no-floating-promises` is NOT gated here — see eslint.config.mjs for why
+  // the type-aware pass lives in typescript-eslint. Biome's own
+  // nursery/noFloatingPromises stays on below as a second, cheaper net.
+
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+
+  "files": {
+    "includes": [
+      "**/*.ts",
+      "**/*.tsx",
+      "**/*.mts",
+      "**/*.cts",
+      "**/*.js",
+      "**/*.mjs",
+      "**/*.cjs",
+      "!**/dist/**",
+      // Prisma's generated client: machine output, and .gitignore'd anyway.
+      "!packages/db/generated/**"
+    ]
+  },
+
+  // Off on purpose. See note 1 above.
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "none",
+
+      "correctness": {
+        // A condition that can only go one way means the other branch is dead.
+        "noConstantCondition": "error",
+        // Reading a `let`/`const` before its declaration throws at runtime.
+        "noInvalidUseBeforeDeclaration": "error",
+        // A numeric literal the double cannot hold is silently a different number.
+        "noPrecisionLoss": "error",
+        // `x = x` is always a mistyped target.
+        "noSelfAssign": "error",
+        // A declaration in one `case` is in scope, uninitialised, in the others.
+        "noSwitchDeclarations": "error",
+        // Statements after a `return`/`throw`/`break` never run.
+        "noUnreachable": "error",
+        // Returning a value from something typed `void` means the caller's
+        // contract and the implementation disagree.
+        "noVoidTypeReturn": "error",
+        // `typeof x === "strng"` is always false, and tsc does not catch it.
+        "useValidTypeof": "error"
+      },
+
+      "security": {
+        // The one React escape hatch that turns a data bug into stored XSS.
+        "noDangerouslySetInnerHtml": "error",
+        // `eval` on anything reachable from a request body is remote execution.
+        "noGlobalEval": "error"
+      },
+
+      "suspicious": {
+        // A literal control character in a regex is an escaping mistake, not intent.
+        "noControlCharactersInRegex": "error",
+        // A `debugger` that ships halts whoever has devtools open.
+        "noDebugger": "error",
+        // `==` coerces: `0 == ""`, `null == undefined`, `"1" == 1` all hold.
+        "noDoubleEquals": "error",
+        // The second duplicate `case` is unreachable.
+        "noDuplicateCase": "error",
+        // The last duplicate class member silently wins.
+        "noDuplicateClassMembers": "error",
+        // The last duplicate object key silently wins; the earlier field is dropped.
+        "noDuplicateObjectKeys": "error",
+        // Duplicate parameters bind the last one; the earlier argument is unreachable.
+        "noDuplicateParameters": "error",
+        // A character class split across a surrogate pair matches the wrong things.
+        "noMisleadingCharacterClass": "error",
+        // `a =- b` is an assignment of `-b`, not the `a -= b` that was meant.
+        "noMisrefactoredShorthandAssign": "error",
+        // `x === x` is a tautology except for NaN, so it is never the check intended.
+        "noSelfCompare": "error",
+        // Shadowing `undefined`/`NaN`/`Infinity` makes every later test lie.
+        "noShadowRestrictedNames": "error",
+        // `[1, , 2]` has a hole that `map` skips and `length` counts.
+        "noSparseArray": "error",
+        // An object with a `then` property is awaited as a thenable and resolves
+        // to something other than itself.
+        "noThenProperty": "error",
+        // `!a in b` negates `a` before the `in`, so it tests the key "false".
+        "noUnsafeNegation": "error"
+      },
+
+      "nursery": {
+        // Biome's own floating-promise rule. It only infers types within a
+        // package, so it misses every `prisma.*()` and every cross-workspace
+        // call — typescript-eslint owns that job. It is kept on because it is
+        // the only floating-promise check that reaches scripts/*.mjs, which no
+        // tsconfig includes. Nursery: it may change shape on a Biome upgrade,
+        // which is survivable precisely because it is the second net, not the first.
+        "noFloatingPromises": "error"
+      }
+    }
+  }
+}
