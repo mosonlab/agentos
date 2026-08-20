@@ -59,6 +59,25 @@
 # descendant wins, because a later baseline can only ever refuse more.
 #
 # Anything the gate cannot establish is a FAIL, never a skip.
+#
+# Two content-addressed caches change latency, never the question the gate asks.
+# The dependency snapshot key covers every package manifest, package-lock.json,
+# npm configuration, the Prisma schema consumed by postinstall, and the exact
+# Node/npm/macOS toolchain tuple. A miss runs npm ci; a hit replaces node_modules
+# with an APFS clone of the immutable completed snapshot. The clone is copy-on-
+# write, so the later Prisma generation can mutate this worktree without changing
+# the cache. This is equivalent to npm ci's delete-and-repopulate guarantee under
+# the exclusive worktree lock: neither path can inherit node_modules state from
+# this or another gate, and a doubtful/incomplete snapshot is always a miss.
+#
+# The build snapshot adds the pinned git tree plus every environment input read
+# by the web build to that dependency key. It contains only dist outputs from a
+# successful full build, is published atomically, and is never executed in place.
+# On a hit those outputs are cloned into an empty destination and the two dated
+# provenance files are regenerated for this run. No test result or test verdict
+# is cached: every lint, typecheck, unit test, migration and database test still
+# executes. Cache entries are write-once; a malformed entry falls back to the
+# original slow command rather than being repaired or guessed at.
 
 set -euo pipefail
 
@@ -66,6 +85,7 @@ KEEP_POSTGRES=0
 EXPECT_HEAD=""
 MASTER_OID="${AGENTOS_MASTER_OID:-}"
 POSTGRES_IMAGE="${AGENTOS_GATE_POSTGRES_IMAGE:-postgres:16-alpine}"
+CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/agentos-merge-gate"
 
 EXIT_FAIL=1
 EXIT_NOT_AUTHORITATIVE=3
@@ -256,6 +276,314 @@ step() {
   FAILED_STEP=""
 }
 
+sha256() { shasum -a 256 | awk '{print $1}'; }
+
+# The key names inputs as well as hashing their bytes, so adding/removing a
+# manifest or npm configuration file cannot collide with merely changing one.
+dependency_cache_key() {
+  {
+    printf 'node=%s\nnpm=%s\nplatform=%s\n' \
+      "$(node --version)" "$(npm --version)" "$(uname -sm)"
+    git -C "${REPO_ROOT}" ls-files \
+      'package.json' 'package-lock.json' 'apps/*/package.json' 'packages/*/package.json' \
+      '.npmrc' 'apps/*/.npmrc' 'packages/*/.npmrc' 'packages/db/prisma/schema.prisma' \
+      | LC_ALL=C sort | while IFS= read -r input; do
+        printf 'file=%s\n' "${input}"
+        shasum -a 256 "${REPO_ROOT}/${input}"
+      done
+    # npm configuration can change platform packages and lifecycle behaviour.
+    # It is fed only into the digest; credentials are never printed or stored.
+    npm config list --json
+    env | LC_ALL=C sort | awk -F= '
+      /^(CI|NODE_[^=]*|NPM_CONFIG_[^=]*|npm_config_[^=]*|PRISMA_[^=]*)=/ { print }
+    '
+  } | sha256
+}
+
+take_cache_writer_lock() {
+  local lock="$1" holder=""
+  if mkdir "${lock}" 2>/dev/null; then
+    printf '%s\n' "$$" > "${lock}/pid"
+    return 0
+  fi
+  holder="$(cat "${lock}/pid" 2>/dev/null || true)"
+  if [ -n "${holder}" ] && kill -0 "${holder}" 2>/dev/null; then return 1; fi
+  rm -rf -- "${lock}"
+  mkdir "${lock}" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "${lock}/pid"
+}
+
+dependency_cache_entry_valid() {
+  local entry="$1" key="$2"
+  [ -d "${entry}" ] && [ ! -L "${entry}" ] \
+    && [ -d "${entry}/node_modules" ] && [ ! -L "${entry}/node_modules" ] \
+    && [ -f "${entry}/READY" ] && [ ! -L "${entry}/READY" ] \
+    && [ "$(cat "${entry}/READY" 2>/dev/null || true)" = "${key}" ]
+}
+
+publish_dependency_snapshot() {
+  local entry="$1" key="$2" lock="${entry}.writer" staging=""
+  take_cache_writer_lock "${lock}" || return 0
+  if dependency_cache_entry_valid "${entry}" "${key}"; then
+    rm -rf -- "${lock}"
+    return 0
+  fi
+  # A named but invalid entry is doubtful state. Never overwrite or repair it
+  # in place: this run already has fresh npm-ci output and future runs stay on
+  # the slow path until an operator deliberately clears the suspect entry.
+  if [ -e "${entry}" ]; then
+    note "dependency cache entry ${key} is incomplete; leaving it unused"
+    rm -rf -- "${lock}"
+    return 0
+  fi
+  staging="$(mktemp -d "${CACHE_ROOT}/.node-modules.${key}.XXXXXXXX")"
+  if cp -c -R "${REPO_ROOT}/node_modules" "${staging}/node_modules"; then
+    if printf '%s\n' "${key}" > "${staging}/READY" \
+      && chmod -R a-w "${staging}" \
+      && mv "${staging}" "${entry}"; then
+      note "dependency cache stored: ${key}"
+    else
+      chmod -R u+w "${staging}" 2>/dev/null || true
+      rm -rf -- "${staging}"
+      note "dependency snapshot could not be published; this run keeps fresh npm-ci state"
+    fi
+  else
+    rm -rf -- "${staging}"
+    note "dependency snapshot could not be cloned; this run keeps fresh npm-ci state"
+  fi
+  rm -rf -- "${lock}"
+}
+
+install_dependencies() {
+  local entry="" dependency_key=""
+  mkdir -p "${CACHE_ROOT}/node-modules" || return 1
+  dependency_key="$(dependency_cache_key)" || return 1
+  entry="${CACHE_ROOT}/node-modules/${dependency_key}"
+  if dependency_cache_entry_valid "${entry}" "${dependency_key}"; then
+    rm -rf -- "${REPO_ROOT}/node_modules"
+    if cp -c -R "${entry}/node_modules" "${REPO_ROOT}/node_modules" \
+      && chmod -R u+w "${REPO_ROOT}/node_modules"; then
+      # Snapshot permissions enforce write-once storage. The APFS clone is this
+      # worktree's private COW materialisation and Prisma may update it.
+      note "dependency cache hit: ${dependency_key} (APFS clone)"
+      return 0
+    fi
+    note "dependency cache clone failed; falling back to npm ci"
+    rm -rf -- "${REPO_ROOT}/node_modules"
+  else
+    note "dependency cache miss: ${dependency_key}"
+  fi
+  npm ci --prefer-offline --no-audit --no-fund || return 1
+  publish_dependency_snapshot "${entry}" "${dependency_key}" \
+    || note "dependency cache publication failed; this run keeps fresh npm-ci state"
+  return 0
+}
+
+BUILD_OUTPUTS=(
+  packages/github-client/dist packages/db/dist packages/api/dist packages/runner/dist
+  packages/inbox/dist packages/merge-executor/dist packages/cli/dist apps/web/dist
+)
+
+build_cache_key() {
+  {
+    printf 'commit=%s\ndependencies=%s\n' "${GATED_HEAD}" "$(dependency_cache_key)"
+    for name in NODE_ENV API_PORT WEB_API_URL OPERATOR_TOKEN; do
+      printf '%s=%s\n' "${name}" "${!name-}"
+    done
+    for input in .env .env.local .env.production .env.production.local; do
+      printf 'file=%s\n' "${input}"
+      if [ -f "${REPO_ROOT}/${input}" ]; then shasum -a 256 "${REPO_ROOT}/${input}"; else printf 'absent\n'; fi
+    done
+  } | sha256
+}
+
+build_cache_entry_valid() {
+  local entry="$1" key="$2" output=""
+  [ -d "${entry}" ] && [ ! -L "${entry}" ] \
+    && [ -f "${entry}/READY" ] && [ ! -L "${entry}/READY" ] \
+    && [ "$(cat "${entry}/READY" 2>/dev/null || true)" = "${key}" ] || return 1
+  for output in "${BUILD_OUTPUTS[@]}"; do
+    [ -d "${entry}/tree/${output}" ] && [ ! -L "${entry}/tree/${output}" ] || return 1
+  done
+}
+
+clear_build_outputs() {
+  local output=""
+  for output in "${BUILD_OUTPUTS[@]}"; do rm -rf -- "${REPO_ROOT}/${output}" || return 1; done
+}
+
+publish_build_snapshot() {
+  local entry="$1" key="$2" lock="${entry}.writer" staging="" output=""
+  take_cache_writer_lock "${lock}" || return 0
+  if build_cache_entry_valid "${entry}" "${key}" || [ -e "${entry}" ]; then
+    rm -rf -- "${lock}"
+    return 0
+  fi
+  staging="$(mktemp -d "${CACHE_ROOT}/.build.${key}.XXXXXXXX")"
+  mkdir -p "${staging}/tree"
+  for output in "${BUILD_OUTPUTS[@]}"; do
+    mkdir -p "${staging}/tree/$(dirname "${output}")"
+    cp -c -R "${REPO_ROOT}/${output}" "${staging}/tree/${output}" || {
+      rm -rf -- "${staging}" "${lock}"
+      note "build snapshot could not be cloned; this run keeps fresh build output"
+      return 0
+    }
+  done
+  if ! printf '%s\n' "${key}" > "${staging}/READY" \
+    || ! chmod -R a-w "${staging}" \
+    || ! mv "${staging}" "${entry}"; then
+    chmod -R u+w "${staging}" 2>/dev/null || true
+    rm -rf -- "${staging}" "${lock}"
+    note "build snapshot could not be published; this run keeps fresh build output"
+    return 0
+  fi
+  rm -rf -- "${lock}"
+  note "build cache stored: ${key}"
+}
+
+build_all() {
+  local key entry output
+  mkdir -p "${CACHE_ROOT}/builds" || return 1
+  key="$(build_cache_key)" || return 1
+  entry="${CACHE_ROOT}/builds/${key}"
+  if build_cache_entry_valid "${entry}" "${key}"; then
+    clear_build_outputs || return 1
+    for output in "${BUILD_OUTPUTS[@]}"; do
+      mkdir -p "${REPO_ROOT}/$(dirname "${output}")" || return 1
+      cp -c -R "${entry}/tree/${output}" "${REPO_ROOT}/${output}" || {
+        note "build cache clone failed at ${output}; falling back to a clean full build"
+        clear_build_outputs || return 1
+        npm run build || return 1
+        return 0
+      }
+      chmod -R u+w "${REPO_ROOT}/${output}" || {
+        note "build cache permissions could not be materialized at ${output}; falling back to a clean full build"
+        clear_build_outputs || return 1
+        npm run build || return 1
+        return 0
+      }
+    done
+    # These are intentionally time-varying. Recreate them rather than letting a
+    # cached builtAt claim that this materialisation happened on an earlier run.
+    (cd "${REPO_ROOT}/packages/api" && node ../build-info/stamp.mjs dist) || return 1
+    (cd "${REPO_ROOT}/packages/runner" && node ../build-info/stamp.mjs dist) || return 1
+    note "build cache hit: ${key} (APFS clones, provenance restamped)"
+    return 0
+  fi
+  note "build cache miss: ${key}"
+  clear_build_outputs || return 1
+  npm run build || return 1
+  publish_build_snapshot "${entry}" "${key}" \
+    || note "build cache publication failed; this run keeps fresh build output"
+  return 0
+}
+
+workspace_names_with_script() {
+  node -e '
+    const fs = require("node:fs");
+    const script = process.argv[1];
+    for (const parent of ["apps", "packages"]) {
+      for (const child of fs.readdirSync(parent).sort()) {
+        const file = `${parent}/${child}/package.json`;
+        if (!fs.existsSync(file)) continue;
+        const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (manifest.scripts?.[script]) process.stdout.write(`${manifest.name}\n`);
+      }
+    }
+  ' "$1"
+}
+
+# Each workspace gets its own process and log. Typechecks are noEmit (the web
+# project writes only its own node_modules/.tmp tsbuildinfo), so they share no
+# mutable output. Unit suites write fixtures under mktemp; they only read the
+# completed dist tree. Logs are replayed in stable workspace order.
+run_workspace_script_parallel() {
+  local script="$1" ignore_lifecycle="${2:-0}" workspace="" safe="" log="" index=0 failed=0
+  local -a workspaces=() logs=() pids=()
+  while IFS= read -r workspace; do
+    [ -n "${workspace}" ] || continue
+    safe="$(printf '%s' "${workspace}" | tr '/@' '__')"
+    log="${GATE_TMP}/parallel-${script}-${safe}.log"
+    workspaces+=("${workspace}")
+    logs+=("${log}")
+    if [ "${ignore_lifecycle}" -eq 1 ]; then
+      (cd "${REPO_ROOT}" && npm run --ignore-scripts "${script}" -w "${workspace}") >"${log}" 2>&1 &
+    else
+      (cd "${REPO_ROOT}" && npm run "${script}" -w "${workspace}") >"${log}" 2>&1 &
+    fi
+    pids+=("$!")
+  done < <(cd "${REPO_ROOT}" && workspace_names_with_script "${script}")
+  [ "${#pids[@]}" -gt 0 ] || { printf 'no workspaces define %s\n' "${script}" >&2; return 1; }
+  for ((index=0; index<${#pids[@]}; index++)); do
+    wait "${pids[index]}" || failed=1
+    printf '\n--- %s: %s ---\n' "${script}" "${workspaces[index]}"
+    cat "${logs[index]}" || failed=1
+  done
+  return "${failed}"
+}
+
+parallel_unit_tests() {
+  # npm's current pretest hooks are only duplicate builds of workspaces already
+  # covered by the immediately preceding full build. Prove that contract on
+  # every run, then suppress only those redundant lifecycle hooks. If any hook
+  # gains another responsibility, this check fails instead of skipping it.
+  verify_build_only_lifecycle_hooks pretest || return 1
+  run_workspace_script_parallel test 1
+}
+
+verify_build_only_lifecycle_hooks() {
+  local hook="$1"
+  node -e '
+    const fs = require("node:fs");
+    const hook = process.argv[1];
+    const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const built = new Set([...root.scripts.build.matchAll(/npm run build -w ([^ &]+)/g)].map((m) => m[1]));
+    for (const parent of ["apps", "packages"]) for (const child of fs.readdirSync(parent).sort()) {
+      const file = `${parent}/${child}/package.json`;
+      if (!fs.existsSync(file)) continue;
+      const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+      const lifecycle = manifest.scripts?.[hook];
+      if (!lifecycle) continue;
+      const commands = lifecycle.split("&&").map((part) => part.trim());
+      for (const command of commands) {
+        const match = /^npm run build -w ([^ ]+)$/.exec(command);
+        if (!match || !built.has(match[1])) throw new Error(`${manifest.name} ${hook} is not covered by the full build: ${command}`);
+      }
+    }
+  ' "${hook}"
+}
+
+run_database_preflight_tests() {
+  verify_build_only_lifecycle_hooks pretest:db || return 1
+  local suite_root="${GATE_TMP}/db-package-roots"
+  mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
+  RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
+  CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
+  FILES_ROOT="${suite_root}/files" \
+    node --import tsx packages/api/scripts/dbtest.mjs packages/db/src/*.dbtest.ts
+}
+
+run_api_database_tests() {
+  verify_build_only_lifecycle_hooks pretest:db || return 1
+  local suite_root="${GATE_TMP}/api-dbtest-roots"
+  mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
+  RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
+  CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
+  FILES_ROOT="${suite_root}/files" \
+    node --import tsx packages/api/scripts/dbtest.mjs
+}
+
+parallel_lint() {
+  local biome="${GATE_TMP}/lint-biome.log" types="${GATE_TMP}/lint-types.log" biome_pid types_pid failed=0
+  (cd "${REPO_ROOT}" && npm run lint:biome) >"${biome}" 2>&1 & biome_pid=$!
+  (cd "${REPO_ROOT}" && npm run lint:types) >"${types}" 2>&1 & types_pid=$!
+  wait "${biome_pid}" || failed=1
+  wait "${types_pid}" || failed=1
+  printf '\n--- biome ---\n'; cat "${biome}"
+  printf '\n--- typescript-eslint ---\n'; cat "${types}"
+  return "${failed}"
+}
+
 # True when either path is the other or contains it.
 overlaps() {
   case "$1" in "$2"|"$2"/*) return 0 ;; esac
@@ -406,8 +734,6 @@ step "frozen records append-only" bash scripts/check-frozen-docs.sh --master "${
 # The checker is a gate rule, so it is gated too: PR #156 shipped one whose
 # date-prefix rule was unreachable by construction, and nothing ran to say so.
 step "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs
-step "release documentation executable contract" npm run test:release-docs
-step "templates release-demo harness" npm run test:demo-templates
 
 # --- docker ----------------------------------------------------------------
 
@@ -478,6 +804,8 @@ fi
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
+DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, availableParallelism() - 1)))')"
+export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=agentos \
   -e POSTGRES_DB=agentos_gate \
@@ -503,6 +831,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
+note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (available cores minus one, via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -546,28 +875,37 @@ verify_tree_did_not_drift() {
 # change *which* versions land: `npm ci` installs the closed set in
 # `package-lock.json` and fails rather than resolving anything, and a cached
 # tarball is keyed by the integrity hash the lockfile records — a cache hit is
-# therefore a hit on exactly the bytes the lockfile names. The saving is install
-# time on the gate worker, nothing else. Deliberately not cached: `node_modules`
-# itself, which `npm ci` must keep deleting and repopulating.
-step "npm ci" npm ci --prefer-offline --no-audit --no-fund
+# therefore a hit on exactly the bytes the lockfile names. The immutable
+# node_modules snapshot preserves the delete-and-repopulate boundary while APFS
+# clone-on-write avoids paying to recreate those same bytes on every clean run.
+step "npm ci" install_dependencies
+# These execute project binaries, so they belong after dependencies. Keeping
+# them among the install-free frozen checks made a fresh clone fail on `tsx`
+# before npm ci had a chance to establish the dependency state being gated.
+step "release documentation executable contract" npm run test:release-docs
+step "templates release-demo harness" npm run test:demo-templates
 step "prisma generate" npm run db:generate
-step "typecheck (all workspaces)" npm run typecheck
+step "typecheck (all workspaces)" run_workspace_script_parallel typecheck
 # The minimum lint gate (#143): Biome's opt-in safety rules, then the one
 # type-aware rule (no-floating-promises) through typescript-eslint. Both are
 # npm dependencies and nothing here shells out, so the remote gate worker runs
 # it unchanged. It sits after typecheck because a type error makes the
 # type-aware pass report nonsense, and before build because it needs no dist.
 # Formatting is deliberately not checked — see biome.jsonc.
-step "lint (biome + type-aware no-floating-promises)" npm run lint
+step "lint (biome + type-aware no-floating-promises)" parallel_lint
 # apps/web's CSS regression test reads the built stylesheet out of apps/web/dist,
 # and the dbtests spawn the real API out of packages/api/dist.
-step "build (all workspaces)" npm run build
-step "unit tests (all workspaces)" npm run test --workspaces --if-present
+step "build (all workspaces)" build_all
+step "unit tests (all workspaces)" parallel_unit_tests
 # prisma resolves its schema from the working directory, so this has to run
 # inside packages/db rather than at the repository root.
 step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deploy'
 # The Goal 5a0 preflight's first-run boundary, against this throwaway server: the
 # only evidence that an empty target passes and a non-empty one still refuses.
-step "database preflight tests" npm run test:db -w @agentos/db
-step "api database tests" npm run test:db -w @agentos/api
+# Both packages' pretest:db hooks only rebuild subsets of the full build that
+# just passed. Invoke the shared DBTEST runner directly so each file receives a
+# cloned database and private host roots, including the four packages/db files
+# that the old package script forced onto one shared schema serially.
+step "database preflight tests" run_database_preflight_tests
+step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift

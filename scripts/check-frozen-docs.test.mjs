@@ -13,10 +13,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(new URL("./check-frozen-docs.sh", import.meta.url));
+
+// Every case owns a fresh mktemp repository and a private shim when it needs
+// one. Running those repositories concurrently changes no fixture state and
+// preserves every real-git assertion while avoiding a serial process tax.
+const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
 // No global or system git configuration, and fixed identities and dates: the
 // operator's own config must not be able to change what these tests prove. The
