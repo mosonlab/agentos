@@ -63,17 +63,22 @@
 # Two content-addressed caches change latency, never the question the gate asks.
 # The dependency snapshot key covers every package manifest, package-lock.json,
 # npm configuration, the Prisma schema consumed by postinstall, and the exact
-# Node/npm/macOS toolchain tuple. A miss runs npm ci; a hit replaces node_modules
-# with an APFS clone of the immutable completed snapshot. The clone is copy-on-
-# write, so the later Prisma generation can mutate this worktree without changing
-# the cache. This is equivalent to npm ci's delete-and-repopulate guarantee under
-# the exclusive worktree lock: neither path can inherit node_modules state from
-# this or another gate, and a doubtful/incomplete snapshot is always a miss.
+# Node/npm/macOS toolchain tuple. A miss runs npm ci; a hit first deletes, then
+# restores with APFS clones, every node_modules tree npm ci can create at the root
+# and directly below apps/* and packages/*. The entry carries an exact manifest
+# of those trees. The clones are copy-on-write, so later tools can mutate this
+# worktree without changing the cache. This is equivalent to npm ci's delete-and-
+# repopulate guarantee under the exclusive worktree lock: neither path can inherit
+# root or nested node_modules state from this or another gate, and a doubtful or
+# incomplete snapshot is always a miss.
 #
 # The build snapshot adds the pinned git tree plus every environment input read
 # by the web build to that dependency key. It contains only dist outputs from a
 # successful full build, is published atomically, and is never executed in place.
-# On a hit those outputs are cloned into an empty destination and the two dated
+# A miss is first captured in this run's private temp directory; it is not made
+# globally visible until the final HEAD/worktree drift check passes. Thus outputs
+# built from a mid-run edit can never be published under the pinned clean OID.
+# On a hit outputs are cloned into an empty destination and the two dated
 # provenance files are regenerated for this run. No test result or test verdict
 # is cached: every lint, typecheck, unit test, migration and database test still
 # executes. Cache entries are write-once; a malformed entry falls back to the
@@ -155,6 +160,10 @@ discard_gate_tmp() {
   case "${GATE_TMP}" in
     */agentos-merge-gate.????????)
       [ -d "${GATE_TMP}" ] || return 0
+      # Deferred snapshots are deliberately read-only until publication. Restore
+      # owner write permission only inside this run's validated temp root so the
+      # normal cleanup can remove them after either PASS or FAIL.
+      chmod -R u+w "${GATE_TMP}" || return 1
       rm -rf -- "${GATE_TMP}"
       ;;
     *)
@@ -282,6 +291,7 @@ sha256() { shasum -a 256 | awk '{print $1}'; }
 # manifest or npm configuration file cannot collide with merely changing one.
 dependency_cache_key() {
   {
+    printf 'format=all-workspace-node-modules-v2\n'
     printf 'node=%s\nnpm=%s\nplatform=%s\n' \
       "$(node --version)" "$(npm --version)" "$(uname -sm)"
     git -C "${REPO_ROOT}" ls-files \
@@ -300,6 +310,61 @@ dependency_cache_key() {
   } | sha256
 }
 
+# npm workspaces may install a dependency tree at the repository root or at an
+# immediate app/package workspace. The outer tree covers anything nested inside
+# it, so pruning at the first node_modules makes this the complete output set.
+node_modules_targets() {
+  node -e '
+    const fs = require("node:fs");
+    process.stdout.write("node_modules\n");
+    for (const parent of ["apps", "packages"]) {
+      for (const child of fs.readdirSync(parent).sort()) {
+        if (fs.statSync(`${parent}/${child}`).isDirectory()) {
+          process.stdout.write(`${parent}/${child}/node_modules\n`);
+        }
+      }
+    }
+  '
+}
+
+node_modules_target_allowed() {
+  local wanted="$1" candidate=""
+  while IFS= read -r candidate; do
+    [ "${candidate}" = "${wanted}" ] && return 0
+  done < <(cd "${REPO_ROOT}" && node_modules_targets)
+  return 1
+}
+
+clear_all_node_modules() {
+  local target=""
+  while IFS= read -r target; do
+    [ -n "${target}" ] || continue
+    rm -rf -- "${REPO_ROOT}/${target}" || return 1
+  done < <(cd "${REPO_ROOT}" && node_modules_targets)
+}
+
+# Record exactly which candidate trees npm ci produced, then independently scan
+# the workspace parents. An unexpected outer node_modules means our model is no
+# longer complete, so publication is refused and future runs stay on npm ci.
+write_node_modules_manifest() {
+  local manifest="$1" target="" absolute="" relative=""
+  : > "${manifest}" || return 1
+  while IFS= read -r target; do
+    [ -n "${target}" ] || continue
+    [ -d "${REPO_ROOT}/${target}" ] && printf '%s\n' "${target}" >> "${manifest}"
+  done < <(cd "${REPO_ROOT}" && node_modules_targets)
+  LC_ALL=C sort -u -o "${manifest}" "${manifest}" || return 1
+  grep -Fxq 'node_modules' "${manifest}" || return 1
+
+  while IFS= read -r absolute; do
+    relative="${absolute#${REPO_ROOT}/}"
+    grep -Fxq "${relative}" "${manifest}" || {
+      note "dependency snapshot refused unexpected tree: ${relative}"
+      return 1
+    }
+  done < <(find "${REPO_ROOT}/apps" "${REPO_ROOT}/packages" -type d -name node_modules -prune -print)
+}
+
 take_cache_writer_lock() {
   local lock="$1" holder=""
   if mkdir "${lock}" 2>/dev/null; then
@@ -314,11 +379,20 @@ take_cache_writer_lock() {
 }
 
 dependency_cache_entry_valid() {
-  local entry="$1" key="$2"
+  local entry="$1" key="$2" target="" saw_root=0
   [ -d "${entry}" ] && [ ! -L "${entry}" ] \
-    && [ -d "${entry}/node_modules" ] && [ ! -L "${entry}/node_modules" ] \
+    && [ -d "${entry}/tree" ] && [ ! -L "${entry}/tree" ] \
+    && [ -f "${entry}/NODE_MODULES" ] && [ ! -L "${entry}/NODE_MODULES" ] \
     && [ -f "${entry}/READY" ] && [ ! -L "${entry}/READY" ] \
-    && [ "$(cat "${entry}/READY" 2>/dev/null || true)" = "${key}" ]
+    && [ "$(cat "${entry}/READY" 2>/dev/null || true)" = "${key}" ] || return 1
+  [ "$(LC_ALL=C sort -u "${entry}/NODE_MODULES")" = "$(cat "${entry}/NODE_MODULES")" ] || return 1
+  while IFS= read -r target; do
+    [ -n "${target}" ] || return 1
+    node_modules_target_allowed "${target}" || return 1
+    [ -d "${entry}/tree/${target}" ] && [ ! -L "${entry}/tree/${target}" ] || return 1
+    [ "${target}" = node_modules ] && saw_root=1
+  done < "${entry}/NODE_MODULES"
+  [ "${saw_root}" -eq 1 ]
 }
 
 publish_dependency_snapshot() {
@@ -337,9 +411,16 @@ publish_dependency_snapshot() {
     return 0
   fi
   staging="$(mktemp -d "${CACHE_ROOT}/.node-modules.${key}.XXXXXXXX")"
-  if cp -c -R "${REPO_ROOT}/node_modules" "${staging}/node_modules"; then
-    if printf '%s\n' "${key}" > "${staging}/READY" \
-      && chmod -R a-w "${staging}/node_modules" "${staging}/READY" \
+  mkdir -p "${staging}/tree"
+  if write_node_modules_manifest "${staging}/NODE_MODULES"; then
+    while IFS= read -r target; do
+      mkdir -p "${staging}/tree/$(dirname "${target}")" || break
+      cp -c -R "${REPO_ROOT}/${target}" "${staging}/tree/${target}" || break
+    done < "${staging}/NODE_MODULES"
+    if [ "$(find "${staging}/tree" -type d -name node_modules -prune | wc -l | tr -d ' ')" \
+         = "$(wc -l < "${staging}/NODE_MODULES" | tr -d ' ')" ] \
+      && printf '%s\n' "${key}" > "${staging}/READY" \
+      && chmod -R a-w "${staging}/tree" "${staging}/NODE_MODULES" "${staging}/READY" \
       && mv "${staging}" "${entry}" \
       && chmod a-w "${entry}"; then
       note "dependency cache stored: ${key}"
@@ -357,24 +438,31 @@ publish_dependency_snapshot() {
 }
 
 install_dependencies() {
-  local entry="" dependency_key=""
+  local entry="" dependency_key="" target="" clone_failed=0
   mkdir -p "${CACHE_ROOT}/node-modules" || return 1
   dependency_key="$(dependency_cache_key)" || return 1
   entry="${CACHE_ROOT}/node-modules/${dependency_key}"
   if dependency_cache_entry_valid "${entry}" "${dependency_key}"; then
-    rm -rf -- "${REPO_ROOT}/node_modules"
-    if cp -c -R "${entry}/node_modules" "${REPO_ROOT}/node_modules" \
-      && chmod -R u+w "${REPO_ROOT}/node_modules"; then
+    clear_all_node_modules || return 1
+    while IFS= read -r target; do
+      mkdir -p "${REPO_ROOT}/$(dirname "${target}")" || { clone_failed=1; break; }
+      cp -c -R "${entry}/tree/${target}" "${REPO_ROOT}/${target}" \
+        || { clone_failed=1; break; }
+      chmod -R u+w "${REPO_ROOT}/${target}" || { clone_failed=1; break; }
+    done < "${entry}/NODE_MODULES"
+    if [ "${clone_failed}" -eq 0 ]; then
       # Snapshot permissions enforce write-once storage. The APFS clone is this
       # worktree's private COW materialisation and Prisma may update it.
       note "dependency cache hit: ${dependency_key} (APFS clone)"
       return 0
     fi
     note "dependency cache clone failed; falling back to npm ci"
-    rm -rf -- "${REPO_ROOT}/node_modules"
+    clear_all_node_modules || return 1
   else
     note "dependency cache miss: ${dependency_key}"
   fi
+  # Match npm ci's clean boundary even after a failed cache materialisation.
+  clear_all_node_modules || return 1
   npm ci --prefer-offline --no-audit --no-fund || return 1
   publish_dependency_snapshot "${entry}" "${dependency_key}" \
     || note "dependency cache publication failed; this run keeps fresh npm-ci state"
@@ -415,7 +503,7 @@ clear_build_outputs() {
 }
 
 publish_build_snapshot() {
-  local entry="$1" key="$2" lock="${entry}.writer" staging="" output=""
+  local entry="$1" key="$2" source_tree="$3" lock="${entry}.writer" staging="" output=""
   take_cache_writer_lock "${lock}" || return 0
   if build_cache_entry_valid "${entry}" "${key}" || [ -e "${entry}" ]; then
     rm -rf -- "${lock}"
@@ -425,7 +513,7 @@ publish_build_snapshot() {
   mkdir -p "${staging}/tree"
   for output in "${BUILD_OUTPUTS[@]}"; do
     mkdir -p "${staging}/tree/$(dirname "${output}")"
-    cp -c -R "${REPO_ROOT}/${output}" "${staging}/tree/${output}" || {
+    cp -c -R "${source_tree}/${output}" "${staging}/tree/${output}" || {
       rm -rf -- "${staging}" "${lock}"
       note "build snapshot could not be cloned; this run keeps fresh build output"
       return 0
@@ -443,6 +531,37 @@ publish_build_snapshot() {
   fi
   rm -rf -- "${lock}"
   note "build cache stored: ${key}"
+}
+
+prepare_deferred_build_snapshot() {
+  local key="$1" output="" snapshot="${GATE_TMP}/deferred-build-snapshot"
+  rm -rf -- "${snapshot}"
+  mkdir -p "${snapshot}/tree" || return 1
+  for output in "${BUILD_OUTPUTS[@]}"; do
+    mkdir -p "${snapshot}/tree/$(dirname "${output}")" || return 1
+    cp -c -R "${REPO_ROOT}/${output}" "${snapshot}/tree/${output}" || return 1
+  done
+  printf '%s\n' "${key}" > "${snapshot}/READY" || return 1
+  chmod -R a-w "${snapshot}/tree" "${snapshot}/READY" || return 1
+  # step() runs commands in a subshell. Persist the publication intent inside
+  # this run's private temp root so the parent can read it after the drift check.
+  printf '%s\n' "${key}" > "${GATE_TMP}/deferred-build-key" || return 1
+}
+
+# This is called only after verify_tree_did_not_drift succeeds. Until then the
+# completed build exists solely under this gate run's private temporary root and
+# no later run can observe it under the pinned-OID cache key.
+publish_deferred_build_snapshot() {
+  local entry="" key="" snapshot="${GATE_TMP}/deferred-build-snapshot"
+  [ -f "${GATE_TMP}/deferred-build-key" ] && [ ! -L "${GATE_TMP}/deferred-build-key" ] || return 0
+  key="$(cat "${GATE_TMP}/deferred-build-key" 2>/dev/null || true)"
+  [ -n "${key}" ] && [ "$(cat "${snapshot}/READY" 2>/dev/null || true)" = "${key}" ] || {
+    note "deferred build snapshot is incomplete; leaving the global cache untouched"
+    return 0
+  }
+  entry="${CACHE_ROOT}/builds/${key}"
+  publish_build_snapshot "${entry}" "${key}" "${snapshot}/tree" \
+    || note "build cache publication failed; this run keeps fresh build output"
 }
 
 build_all() {
@@ -477,8 +596,8 @@ build_all() {
   note "build cache miss: ${key}"
   clear_build_outputs || return 1
   npm run build || return 1
-  publish_build_snapshot "${entry}" "${key}" \
-    || note "build cache publication failed; this run keeps fresh build output"
+  prepare_deferred_build_snapshot "${key}" \
+    || note "build snapshot could not be staged; this run keeps fresh build output"
   return 0
 }
 
@@ -502,24 +621,38 @@ workspace_names_with_script() {
 # mutable output. Unit suites write fixtures under mktemp; they only read the
 # completed dist tree. Logs are replayed in stable workspace order.
 run_workspace_script_parallel() {
-  local script="$1" ignore_lifecycle="${2:-0}" workspace="" safe="" log="" index=0 failed=0
-  local -a workspaces=() logs=() pids=()
+  local script="$1" ignore_lifecycle="${2:-0}" test_concurrency="${3:-}" workspace="" safe="" log=""
+  local index=0 next_wait=0 failed=0 max_jobs=1
+  local -a workspaces=() logs=() pids=() statuses=()
+  max_jobs="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / 2))))')"
+  note "workspace ${script}: at most ${max_jobs} concurrent jobs"
   while IFS= read -r workspace; do
     [ -n "${workspace}" ] || continue
     safe="$(printf '%s' "${workspace}" | tr '/@' '__')"
     log="${GATE_TMP}/parallel-${script}-${safe}.log"
     workspaces+=("${workspace}")
     logs+=("${log}")
-    if [ "${ignore_lifecycle}" -eq 1 ]; then
+    if [ -n "${test_concurrency}" ]; then
+      (cd "${REPO_ROOT}" && npm run --ignore-scripts "${script}" -w "${workspace}" -- \
+        --test-concurrency="${test_concurrency}") >"${log}" 2>&1 &
+    elif [ "${ignore_lifecycle}" -eq 1 ]; then
       (cd "${REPO_ROOT}" && npm run --ignore-scripts "${script}" -w "${workspace}") >"${log}" 2>&1 &
     else
       (cd "${REPO_ROOT}" && npm run "${script}" -w "${workspace}") >"${log}" 2>&1 &
     fi
     pids+=("$!")
+    if [ "$(( ${#pids[@]} - next_wait ))" -ge "${max_jobs}" ]; then
+      if wait "${pids[next_wait]}"; then statuses[next_wait]=0; else statuses[next_wait]=1; fi
+      next_wait=$((next_wait + 1))
+    fi
   done < <(cd "${REPO_ROOT}" && workspace_names_with_script "${script}")
   [ "${#pids[@]}" -gt 0 ] || { printf 'no workspaces define %s\n' "${script}" >&2; return 1; }
+  while [ "${next_wait}" -lt "${#pids[@]}" ]; do
+    if wait "${pids[next_wait]}"; then statuses[next_wait]=0; else statuses[next_wait]=1; fi
+    next_wait=$((next_wait + 1))
+  done
   for ((index=0; index<${#pids[@]}; index++)); do
-    wait "${pids[index]}" || failed=1
+    [ "${statuses[index]}" -eq 0 ] || failed=1
     printf '\n--- %s: %s ---\n' "${script}" "${workspaces[index]}"
     cat "${logs[index]}" || failed=1
   done
@@ -532,7 +665,7 @@ parallel_unit_tests() {
   # every run, then suppress only those redundant lifecycle hooks. If any hook
   # gains another responsibility, this check fails instead of skipping it.
   verify_build_only_lifecycle_hooks pretest || return 1
-  run_workspace_script_parallel test 1
+  run_workspace_script_parallel test 1 1
 }
 
 verify_build_only_lifecycle_hooks() {
@@ -861,7 +994,7 @@ fi
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
-DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, availableParallelism() - 1)))')"
+DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 4))))')"
 export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=agentos \
@@ -889,7 +1022,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (available cores minus one, via the per-file DBTEST plan)"
+note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, measured safe ceiling 4), via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -968,3 +1101,4 @@ parallel_two_steps \
   "database preflight tests" run_database_preflight_tests
 step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift
+publish_deferred_build_snapshot
