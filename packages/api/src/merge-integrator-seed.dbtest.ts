@@ -28,6 +28,7 @@ import {
   INTEGRATOR_SENTINEL_MODEL,
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
+  legacyNineStepTemplateName,
   legacyTenStepTemplateName,
   PrismaClient,
   type Task,
@@ -268,4 +269,108 @@ test("re-seeding a historical ten-step template preserves and queues its in-flig
   const queued = await db.run.findFirst({ where: { taskId: oldIntegrator.id }, orderBy: { runNumber: "desc" } });
   assert.ok(queued, "the historical integrator receives a run after re-seed");
   assert.equal(queued.status, "QUEUED");
+});
+
+/* ---------------------------------------------- 9 -> 12: foreign-key preservation */
+
+test("re-seeding a historical nine-step template preserves its in-flight task semantics", async () => {
+  assert.equal((await seed()).code, 0);
+  const fresh = await integratorStep();
+  const templateId = fresh.taskTemplateId;
+  const projectId = fresh.taskTemplate.projectId;
+  const agents = new Map((await db.agent.findMany({ where: { projectId } })).map((agent) => [agent.name, agent]));
+
+  await db.taskTemplateStep.deleteMany({
+    where: { taskTemplateId: templateId, stepIndex: { in: [10, 11, 12] } },
+  });
+  const historicalContract = [
+    [1, "Write a spec", "spec", AssigneeType.AGENT, "spec", true],
+    [2, "Plan", "plan", AssigneeType.AGENT, "plan", false],
+    [3, "Plan review", "review-coordinator", AssigneeType.AGENT, "plan-review", false],
+    [4, "Revise plan", "plan-reviser", AssigneeType.AGENT, "revised-plan", true],
+    [5, "Implementation", "implementation-plan-executioner", AssigneeType.AGENT, "implementation", false],
+    [6, "Code review", "review-coordinator", AssigneeType.AGENT, "code-review", false],
+    [7, "Apply review fixes", "senior-dev", AssigneeType.AGENT, "fixed-implementation", false],
+    [8, "Librarian", "librarian", AssigneeType.AGENT, "documentation", false],
+    [9, "Human PR review", null, AssigneeType.HUMAN, "approval", true],
+  ] as const;
+  for (const [stepIndex, name, agentName, assigneeType, outputKind, approvalGate] of historicalContract) {
+    await db.taskTemplateStep.update({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: templateId, stepIndex } },
+      data: {
+        name,
+        assigneeType,
+        assigneeAgentId: agentName ? agents.get(agentName)!.id : null,
+        approvalGate,
+        outputKind,
+      },
+    });
+  }
+  const historicalSteps = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: templateId }, orderBy: { stepIndex: "asc" },
+  });
+  assert.deepEqual(historicalSteps.map((step) => step.stepIndex), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const beforeSemantics = historicalSteps.map((step) => ({
+    id: step.id,
+    stepIndex: step.stepIndex,
+    name: step.name,
+    assigneeType: step.assigneeType,
+    assigneeAgentId: step.assigneeAgentId,
+    approvalGate: step.approvalGate,
+    outputKind: step.outputKind,
+  }));
+
+  const reviewStep = historicalSteps[5]!;
+  const repo = await db.repo.create({ data: {
+    projectId, name: "legacy-nine-upgrade", remoteUrl: "https://github.com/acme/legacy-nine-upgrade.git",
+    mountPath: "/scratch/legacy-nine-upgrade", defaultBranch: "main",
+  } });
+  const inFlight = await db.task.create({ data: {
+    projectId, repoId: repo.id, templateId, templateStepId: reviewStep.id,
+    name: reviewStep.name, description: reviewStep.prompt,
+    assigneeType: reviewStep.assigneeType, assigneeAgentId: reviewStep.assigneeAgentId,
+    approvalGate: reviewStep.approvalGate, opensPullRequest: reviewStep.opensPullRequest,
+    chainId: `in-flight-nine-${process.pid}`, chainIndex: reviewStep.stepIndex,
+    status: TaskStatus.DOING, targetBranch: "agentos/chain/legacy-nine-upgrade",
+  } });
+  await db.taskStepOutput.create({ data: {
+    taskId: inFlight.id, kind: reviewStep.outputKind, body: "historical review",
+  } });
+
+  assert.equal((await seed()).code, 0);
+  const legacy = await db.taskTemplate.findUniqueOrThrow({
+    where: { id: templateId }, include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(legacy.name, legacyNineStepTemplateName(templateId));
+  assert.deepEqual(legacy.steps.map((step) => ({
+    id: step.id,
+    stepIndex: step.stepIndex,
+    name: step.name,
+    assigneeType: step.assigneeType,
+    assigneeAgentId: step.assigneeAgentId,
+    approvalGate: step.approvalGate,
+    outputKind: step.outputKind,
+  })), beforeSemantics);
+
+  const canonical = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: true },
+  });
+  assert.notEqual(canonical.id, templateId);
+  assert.equal(canonical.steps.length, 12);
+
+  const preserved = await db.task.findUniqueOrThrow({
+    where: { id: inFlight.id },
+    include: {
+      stepOutput: true,
+      templateStep: { include: { assigneeAgent: true, taskTemplate: true } },
+    },
+  });
+  assert.equal(preserved.templateId, templateId);
+  assert.equal(preserved.templateStepId, reviewStep.id);
+  assert.equal(preserved.templateStep?.taskTemplate.name, legacyNineStepTemplateName(templateId));
+  assert.equal(preserved.templateStep?.name, "Code review");
+  assert.equal(preserved.templateStep?.assigneeAgent?.name, "review-coordinator");
+  assert.equal(preserved.templateStep?.outputKind, "code-review");
+  assert.equal(preserved.stepOutput?.kind, "code-review");
 });

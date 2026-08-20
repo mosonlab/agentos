@@ -6,6 +6,7 @@ import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_TEMPLATE_NAME,
+  legacyNineStepTemplateName,
   legacyTenStepTemplateName,
 } from "../src/merge-integrator.js";
 
@@ -14,6 +15,18 @@ import {
 // without running this seed, which creates the internal multi-role
 // installation. Nothing this file seeds changed with the move.
 const prisma = new PrismaClient();
+
+const HISTORICAL_NINE_STEP_CONTRACT = [
+  [1, "spec", AssigneeType.AGENT, "spec", true],
+  [2, "plan", AssigneeType.AGENT, "plan", false],
+  [3, "review-coordinator", AssigneeType.AGENT, "plan-review", false],
+  [4, "plan-reviser", AssigneeType.AGENT, "revised-plan", true],
+  [5, "implementation-plan-executioner", AssigneeType.AGENT, "implementation", false],
+  [6, "review-coordinator", AssigneeType.AGENT, "code-review", false],
+  [7, "senior-dev", AssigneeType.AGENT, "fixed-implementation", false],
+  [8, "librarian", AssigneeType.AGENT, "documentation", false],
+  [9, null, AssigneeType.HUMAN, "approval", true],
+] as const;
 
 const main = async (): Promise<void> => {
   const sources = await loadAgentSources();
@@ -104,20 +117,36 @@ const main = async (): Promise<void> => {
       include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
     });
     const historicalIntegrator = existing?.steps.find((step) => step.stepIndex === 10);
+    const isHistoricalNineStepTemplate = existing?.steps.length === HISTORICAL_NINE_STEP_CONTRACT.length
+      && HISTORICAL_NINE_STEP_CONTRACT.every(([stepIndex, agentName, assigneeType, outputKind, approvalGate], index) => {
+        const step = existing.steps[index];
+        return step?.stepIndex === stepIndex
+          && (step.assigneeAgent?.name ?? null) === agentName
+          && step.assigneeType === assigneeType
+          && step.outputKind === outputKind
+          && step.approvalGate === approvalGate;
+      });
     const isHistoricalTenStepTemplate = existing?.steps.length === 10
       && existing.steps.every((step, index) => step.stepIndex === index + 1)
       && historicalIntegrator?.outputKind === INTEGRATOR_OUTPUT_KIND
       && historicalIntegrator.assigneeAgent?.name === INTEGRATOR_AGENT_NAME;
 
-    // A 10-row template cannot be rewritten in place: its in-flight tasks keep
-    // foreign keys to rows 6-10, whose meanings changed in the 12-row routing
-    // contract. Preserve that entire template under a seed-minted legacy
-    // identity; then the canonical upsert below creates a new template for new
-    // Runs. Runtime recognition accepts only this deterministic legacy marker.
-    if (existing && isHistoricalTenStepTemplate) {
+    // A historical 9- or 10-row template cannot be rewritten in place: its
+    // in-flight tasks keep foreign keys to rows 6-10, whose meanings changed in
+    // the 12-row routing contract. Preserve the entire template under a
+    // seed-minted legacy identity; then the canonical upsert below creates a
+    // new template for new Runs. Runtime mechanical recognition remains
+    // limited to the marked 10-row shape, because the 9-row shape had no
+    // integrator.
+    const legacyName = existing && isHistoricalNineStepTemplate
+      ? legacyNineStepTemplateName(existing.id)
+      : existing && isHistoricalTenStepTemplate
+        ? legacyTenStepTemplateName(existing.id)
+        : null;
+    if (existing && legacyName) {
       await tx.taskTemplate.update({
         where: { id: existing.id },
-        data: { name: legacyTenStepTemplateName(existing.id) },
+        data: { name: legacyName },
       });
     }
 
