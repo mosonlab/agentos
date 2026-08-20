@@ -17,7 +17,7 @@ bundles no subscription, resells no capacity, never logs you into a provider and
 never reads a credential store; your provider account, its plan limits and its
 availability remain yours.
 
-Supported target: macOS on Apple Silicon, Node.js `^20.19.0 || >=22.12.0` with
+Supported target: macOS on Apple Silicon, Node.js `^20.19.0 || ^22.13.0 || >=24` with
 npm 10.9.2 or newer, Docker with Compose, and Git. Linux is unverified. Windows
 is unsupported — the runner relies on POSIX process-group, path and command
 behaviour.

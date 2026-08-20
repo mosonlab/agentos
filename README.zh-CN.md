@@ -66,8 +66,8 @@ Provider CLI、账号、认证、订阅、用量、速率限制、模型和 prov
 ## 本地启动
 
 Developer Preview 只面向一个平台：Apple Silicon Mac。本版本应使用 `.nvmrc`
-记录的 Node.js `22.17.0`；顶层检查接受的更宽范围并没有被每个锁定的开发依赖覆盖。
-此外还需要
+记录的 Node.js `22.17.0`。安装会强制要求 Node.js 满足 `^20.19.0 || ^22.13.0 || >=24`，
+即锁定工具链共同支持的范围；Node 22.12.x 与 23 会被拒绝。此外还需要
 
 - npm 10.9.2 或更高；
 - Docker 与 Docker Compose，用于仓库内定义的 PostgreSQL 服务；
