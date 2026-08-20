@@ -80,7 +80,7 @@ export default defineConfig(({ mode }) => {
     resolve: { alias: { "@": sourceRoot } },
     // The loopback literal, not `0.0.0.0` and not a name: this server holds the
     // operator token, so it answers on one address and only that one.
-    server: { host: LOOPBACK_HOST, port: WEB_DEV_PORT, proxy },
-    preview: { host: LOOPBACK_HOST, port: WEB_PREVIEW_PORT, proxy },
+    server: { host: LOOPBACK_HOST, port: WEB_DEV_PORT, strictPort: true, proxy },
+    preview: { host: LOOPBACK_HOST, port: WEB_PREVIEW_PORT, strictPort: true, proxy },
   };
 });
