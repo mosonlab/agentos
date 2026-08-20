@@ -16,8 +16,11 @@
  *     npm run test:db -w @agentos/db
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 
@@ -32,11 +35,24 @@ import {
 } from "./schema-census.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
+const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const isolatedCheckout = mkdtempSync(join(tmpdir(), "agentos-public-lineage-"));
+const currentBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
+  cwd: repositoryRoot,
+  encoding: "utf8",
+}).trim();
+
+// Linked worktrees can share private objects with this public lineage. Clone
+// only the current branch so the preflight sees the history a standalone public
+// clone sees, without weakening the production authority checks.
+execFileSync("git", [
+  "clone", "--quiet", "--no-local", "--no-checkout", "--single-branch",
+  "--branch", currentBranch, repositoryRoot, isolatedCheckout,
+]);
 
 // The recorded authority evidence, so these cases stop on the condition they are
-// about rather than on `authority`. They are the SHAs in
-// docs/reviews/goal-5a0-current-master-revalidation.md; the preflight checks
-// both that the document records them and that they are ancestors of HEAD.
+// about rather than on `authority`. The preflight checks both the signed
+// attestation content and that its commits are ancestors of HEAD.
 const MASTER_SHA = "485fb118db96e3977006a2edc866a38b751ff0e2";
 const CONTROL_PLANE_A_SHA = "c671439831b075568420b92f4494227fa7fc392b";
 
@@ -83,6 +99,8 @@ const runPreflight = (schema: string, extra: Record<string, string> = {}): Outco
       DATABASE_URL: urlFor(schema),
       GOAL5A0_MASTER_SHA: MASTER_SHA,
       GOAL5A0_CONTROL_PLANE_A_SHA: CONTROL_PLANE_A_SHA,
+      GIT_DIR: join(isolatedCheckout, ".git"),
+      GIT_WORK_TREE: repositoryRoot,
       ...extra,
     },
   });
@@ -118,6 +136,7 @@ before(async () => {
 after(async () => {
   for (const schema of schemas) await sql(`DROP SCHEMA IF EXISTS ${quoted(schema)} CASCADE`);
   await admin.$disconnect();
+  rmSync(isolatedCheckout, { recursive: true, force: true });
 });
 
 describe("first run: declared and confirmed empty", () => {
