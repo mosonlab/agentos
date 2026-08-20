@@ -114,9 +114,11 @@ Prisma client——因此**不支持 `--ignore-scripts`**。Inbox 服务可选�
 `CONTRIBUTING.md` 中作为开发命令说明，不是安装命令。上面的有闸发布路径运行
 `npm run db:migrate:release -- --fresh`。该命令在读取 schema 状态前取得排他维护锁，
 并在有闸迁移全程持有它。没有有效 `release-authority.json` attestation 的导出会停下，
-不会默认为可信。`--existing` 另行停在 `oss-d-interface-unavailable`，因此本版本不支持
-迁移已有数据的安装。完整流程与拒绝条件见发布 quickstart 和迁移指南。打包、公证与自动
-更新同样不属于本发布候选范围。
+不会默认为可信。`--existing` 已实现 verified-bundle consumer，但本仓库不交付用于生成
+合规 bundle 的 backup producer。因此受支持的发布流程仍只有 fresh；`--existing` 不会
+发出虚构的 “interface unavailable” refusal，也不能被视为受支持的端到端迁移路径。实际
+实现的完整流程与拒绝条件见发布 quickstart 和迁移指南。打包、公证与自动更新同样不属于
+本发布候选范围。
 
 `npm run setup:local` 会一次性生成权限 0600 的 `.env`：互不相同的 operator 与 runner
 token、session cookie secret、base64 编码的 32 字节加密密钥，以及同时写入
