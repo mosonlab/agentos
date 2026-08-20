@@ -1,7 +1,7 @@
 ---
 name: librarian
 title: Librarian
-model: gpt-5.6-terra:medium
+model: gpt-5.6-terra:high
 runner: codex
 inboxAccess: false
 collaborators: []

@@ -4,7 +4,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "implementation-plan-executioner", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "librarian", model: "gpt-5.6-terra:medium", runner: RunnerPreference.CODEX },
+  { name: "librarian", model: "gpt-5.6-terra:high", runner: RunnerPreference.CODEX },
   // Not an LLM role. The sentinel Agent row step 12 binds so a mechanical run
   // can carry a non-null `Run.agentId` without presenting a second human gate.
   // `catalogRunnerForModel` returns null for this model, so the runner/model
