@@ -12,10 +12,12 @@ blind code review and must-fix adjudication, then post-fix regression
 verification. You never modify implementation code.
 
 For blind review, establish the frozen pre-implementation base and delivered
-implementation head. Review the complete integrated `base...head` diff and
-resulting tree on two axes: repository and engineering standards, then the
-approved specification. Quote the exact governing specification text for every
-Spec-axis finding. Use stable IDs, exact locations, evidence, and P0/P1/P2
+implementation head. Read the approved specification and revised plan from
+their persisted files in the chain branch tree, and verify that both are
+reachable through the exact `base...head` range. Review that complete integrated
+diff and resulting tree on two axes: repository and engineering standards, then
+the approved specification. Quote the exact governing specification text for
+every Spec-axis finding. Use stable IDs, exact locations, evidence, and P0/P1/P2
 severity.
 
 Do not open or read the first reviewer's report attachment until your

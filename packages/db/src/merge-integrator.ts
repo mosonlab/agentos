@@ -31,6 +31,7 @@ export const INTEGRATOR_STEP_INDEX = 12;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
 export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
+export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
 export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
@@ -42,6 +43,9 @@ export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
  */
 export const legacyTenStepTemplateName = (templateId: string): string =>
   `${LEGACY_TEN_STEP_TEMPLATE_PREFIX}${templateId}`;
+
+export const legacyNineStepTemplateName = (templateId: string): string =>
+  `${LEGACY_NINE_STEP_TEMPLATE_PREFIX}${templateId}`;
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant
