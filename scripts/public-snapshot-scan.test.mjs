@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +21,60 @@ import {
   scanTextFindings,
   scopeFor,
 } from "./public-snapshot-scan.mjs";
+
+function baseManifest({ include = [], exclude = [], approvedFindings = [], mintedArtifacts = [] } = {}) {
+  return {
+    schemaVersion: 2,
+    source: "git-tracked-files+minted-artifacts",
+    defaultDisposition: "blocker",
+    include: include.map((glob) => ({ glob, reason: "test public input" })),
+    deny: [],
+    exclude: exclude.map((glob) => ({
+      glob,
+      disposition: "later-release-follow-up",
+      reason: "test excluded input",
+    })),
+    approvedFindings,
+    mintedArtifacts,
+    generatedRuntimePatterns: [],
+  };
+}
+
+function createRepositoryFixture({ files = {}, manifest, symlinks = {}, copyScanner = false }) {
+  const root = mkdtempSync(join(tmpdir(), "agentos-snapshot-scan-"));
+  for (const [path, bytes] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), bytes);
+  }
+  for (const [path, target] of Object.entries(symlinks)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    symlinkSync(target, join(root, path));
+  }
+  if (copyScanner) {
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    copyFileSync(fileURLToPath(new URL("./public-snapshot-scan.mjs", import.meta.url)), join(root, "scripts/public-snapshot-scan.mjs"));
+  }
+  writeFileSync(join(root, "public-snapshot.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  execFileSync("git", ["init", "-b", "main"], { cwd: root });
+  const trackedPaths = [
+    ...Object.keys(files),
+    ...Object.keys(symlinks),
+    ...(copyScanner ? ["scripts/public-snapshot-scan.mjs"] : []),
+    "public-snapshot.json",
+  ];
+  execFileSync("git", ["add", "--", ...trackedPaths], { cwd: root });
+  execFileSync("git", ["commit", "-m", "test: create snapshot fixture"], { cwd: root });
+  return root;
+}
+
+function withRepositoryFixture(options, callback) {
+  const root = createRepositoryFixture(options);
+  try {
+    return callback(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 test("glob matching keeps the allowlist bounded", () => {
   assert.equal(globToRegExp("apps/**").test("apps/web/src/App.tsx"), true);
@@ -131,47 +195,115 @@ test("the checked-out tree is fully classified", () => {
   assert.equal(includedPaths.includes("public-snapshot.json"), true);
 });
 
-test("a credential on the published surface is red whatever disposition it carries", () => {
-  // The published half of the scoped check, proven on real bytes rather than a
-  // fabricated report: `release-authority.json` is on the published surface, so
-  // a token planted in it is a credential the export would carry. It is a
-  // tracked file, so this test puts its bytes back rather than deleting it.
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const artifact = resolve(root, "release-authority.json");
-  const original = readFileSync(artifact);
+test("an approved credential on the published surface is always a blocker", () => {
+  const credential = `ghp_${"A".repeat(24)}`;
+  withRepositoryFixture({
+    files: { "published.txt": `token=${credential}\n` },
+    manifest: baseManifest({
+      include: ["published.txt"],
+      exclude: ["public-snapshot.json", "scripts/**"],
+      approvedFindings: [{
+        category: "credential",
+        glob: "published.txt",
+        reason: "an approval must not make this safe",
+      }],
+    }),
+    copyScanner: true,
+  }, (root) => {
+    const { report } = scanRepository(root, { requireClean: true });
+    const flagged = report.findings.filter((finding) => finding.category === "credential");
+    assert.equal(report.summary.countsByDisposition.blocker, 1);
+    assert.deepEqual(flagged.map((finding) => finding.disposition), ["blocker"]);
+    assert.equal(JSON.stringify(report).includes(credential), false, "no matched value may be emitted");
 
-  try {
-    writeFileSync(artifact, JSON.stringify({ token: `ghp_${"A".repeat(24)}` }, null, 2));
-    const { report, includedPaths } = scanRepository(undefined, { requireClean: false });
-    assert.equal(includedPaths.includes("release-authority.json"), true, "the plant must be on the published surface");
-    const flagged = report.findings.filter(
-      (finding) => finding.category === "credential" && includedPaths.includes(finding.path),
-    );
-    assert.deepEqual(
-      flagged.map((finding) => finding.path),
-      ["release-authority.json"],
-      "a credential on a published path must be reported out of scope",
-    );
-    assert.equal(JSON.stringify(flagged).includes("ghp_"), false, "no matched value may be emitted");
+    const cli = spawnSync(process.execPath, ["scripts/public-snapshot-scan.mjs"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.equal(cli.stdout.includes(credential), false);
+    assert.equal(cli.stderr.includes(credential), false);
+  });
+});
 
-    // And the published clause does not consult the disposition: relabelling
-    // the same finding the way an `approvedFindings` entry would still fails.
-    const approved = {
-      ...report,
-      findings: report.findings.map((finding) =>
-        finding.category === "credential" ? { ...finding, disposition: "approved-public-material" } : finding,
-      ),
-    };
-    assert.equal(
-      approved.findings.filter(
-        (finding) => finding.category === "credential" && includedPaths.includes(finding.path),
-      ).length,
-      1,
-      "approving a credential into the snapshot must not clear it",
-    );
-  } finally {
-    writeFileSync(artifact, original);
+test("manifest paths reject traversal, absolute, non-normalized, NUL, and duplicate entries", () => {
+  const cases = [
+    ["../outside.txt"],
+    ["/absolute.txt"],
+    ["nested/../outside.txt"],
+    ["bad\0path"],
+    ["same.txt", "same.txt"],
+  ];
+  for (const mintedArtifacts of cases) {
+    withRepositoryFixture({
+      manifest: baseManifest({ exclude: ["public-snapshot.json"], mintedArtifacts }),
+    }, (root) => {
+      assert.throws(() => scanRepository(root, { requireClean: true }), /manifest minted artifact/);
+    });
   }
+});
+
+test("tracked and minted paths cannot escape or resolve through symlinks", () => {
+  withRepositoryFixture({
+    symlinks: { "published-link": "public-snapshot.json" },
+    manifest: baseManifest({ include: ["published-link"], exclude: ["public-snapshot.json"] }),
+  }, (root) => {
+    assert.throws(
+      () => scanRepository(root, { requireClean: true }),
+      /included tracked path must be a regular Git file/,
+    );
+  });
+
+  const outside = mkdtempSync(join(tmpdir(), "agentos-snapshot-outside-"));
+  const secret = `ghp_${"B".repeat(24)}`;
+  writeFileSync(join(outside, "secret.txt"), secret);
+  try {
+    withRepositoryFixture({
+      manifest: baseManifest({
+        exclude: ["public-snapshot.json"],
+        mintedArtifacts: ["minted/secret.txt"],
+      }),
+    }, (root) => {
+      mkdirSync(join(root, "minted"));
+      symlinkSync(join(outside, "secret.txt"), join(root, "minted/secret.txt"));
+      assert.throws(() => scanRepository(root, { requireClean: true }), /regular file/);
+      const cliScanner = fileURLToPath(new URL("./public-snapshot-scan.mjs", import.meta.url));
+      const cli = spawnSync(process.execPath, ["-e", [
+        `import(${JSON.stringify(new URL(`file://${cliScanner}`).href)})`,
+        `.then(({scanRepository}) => scanRepository(${JSON.stringify(root)}, {requireClean:true}))`,
+      ].join("")], { encoding: "utf8" });
+      assert.notEqual(cli.status, 0);
+      assert.equal(`${cli.stdout}${cli.stderr}`.includes(secret), false, "outside bytes must not be emitted");
+    });
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("tracked bytes come from the reported commit even when the worktree changes", () => {
+  withRepositoryFixture({
+    files: { "published.txt": "safe text\n" },
+    manifest: baseManifest({ include: ["published.txt"], exclude: ["public-snapshot.json"] }),
+  }, (root) => {
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    writeFileSync(join(root, "published.txt"), `ghp_${"C".repeat(24)}\n`);
+    const { report } = scanRepository(root, { requireClean: false });
+    assert.equal(report.commit, commit);
+    assert.equal(report.source, "git-objects");
+    assert.equal(report.summary.countsByCategory.credential, 0);
+    assert.throws(() => scanRepository(root, { requireClean: true }), /tracked worktree must match HEAD/);
+  });
+});
+
+test("binary detection examines bytes after the first 8192", () => {
+  withRepositoryFixture({
+    files: { "late-binary.dat": Buffer.concat([Buffer.alloc(8192, 65), Buffer.from([0, 1, 2])]) },
+    manifest: baseManifest({ include: ["late-binary.dat"], exclude: ["public-snapshot.json"] }),
+  }, (root) => {
+    const { report } = scanRepository(root, { requireClean: true });
+    assert.equal(report.summary.countsByCategory["binary-material"], 1);
+    assert.equal(report.summary.countsByDisposition.blocker, 1);
+  });
 });
 
 /**
