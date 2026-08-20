@@ -564,6 +564,7 @@ run_database_preflight_tests() {
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
+  AGENTOS_DBTEST_CONCURRENCY="${DB_PREFLIGHT_CONCURRENCY}" \
     node --import tsx packages/api/scripts/dbtest.mjs packages/db/src/*.dbtest.ts
 }
 
@@ -574,7 +575,60 @@ run_api_database_tests() {
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
+  AGENTOS_DBTEST_CONCURRENCY="${API_DBTEST_CONCURRENCY}" \
     node --import tsx packages/api/scripts/dbtest.mjs
+}
+
+# The two runners share only the scratch PostgreSQL process. Their managers own
+# disjoint databases (PID/run-id names), their test files receive private clones,
+# and the wrappers above give the packages disjoint host-root subtrees. Running
+# them together therefore preserves both suites while spending the cores they
+# previously made each other wait for. Each label retains its own log, duration
+# and failure result; one failure cannot be hidden by the other suite passing.
+parallel_database_steps() {
+  local started preflight_pid api_pid preflight_rc api_rc preflight_end api_end
+  local preflight_log="${GATE_TMP}/database-preflight-tests.log"
+  local api_log="${GATE_TMP}/api-database-tests.log"
+  local preflight_done="${GATE_TMP}/database-preflight-tests.done"
+  local api_done="${GATE_TMP}/api-database-tests.done"
+  started="$(date +%s)"
+  say "database preflight tests (parallel, ${DB_PREFLIGHT_CONCURRENCY} workers)"
+  note "shares only throwaway PostgreSQL with the API database tests"
+  say "api database tests (parallel, ${API_DBTEST_CONCURRENCY} workers)"
+  note "aggregate DBTEST concurrency: ${DBTEST_CONCURRENCY}"
+  FAILED_STEP="database tests"
+
+  (
+    if cd "${REPO_ROOT}" && run_database_preflight_tests; then rc=0; else rc=$?; fi
+    date +%s > "${preflight_done}"
+    exit "${rc}"
+  ) >"${preflight_log}" 2>&1 & preflight_pid=$!
+  (
+    if cd "${REPO_ROOT}" && run_api_database_tests; then rc=0; else rc=$?; fi
+    date +%s > "${api_done}"
+    exit "${rc}"
+  ) >"${api_log}" 2>&1 & api_pid=$!
+
+  if wait "${preflight_pid}"; then preflight_rc=0; else preflight_rc=$?; fi
+  if wait "${api_pid}"; then api_rc=0; else api_rc=$?; fi
+  preflight_end="$(cat "${preflight_done}" 2>/dev/null || date +%s)"
+  api_end="$(cat "${api_done}" 2>/dev/null || date +%s)"
+  printf '\n--- database preflight tests ---\n'; cat "${preflight_log}" || preflight_rc=1
+  printf '\n--- api database tests ---\n'; cat "${api_log}" || api_rc=1
+
+  if [ "${preflight_rc}" -eq 0 ]; then
+    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "database preflight tests" "$((preflight_end - started))")")
+  else
+    STEP_REPORT+=("FAIL  database preflight tests")
+  fi
+  if [ "${api_rc}" -eq 0 ]; then
+    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "api database tests" "$((api_end - started))")")
+  else
+    STEP_REPORT+=("FAIL  api database tests")
+  fi
+  if [ "${preflight_rc}" -ne 0 ]; then FAILED_STEP="database preflight tests"; return 1; fi
+  if [ "${api_rc}" -ne 0 ]; then FAILED_STEP="api database tests"; return 1; fi
+  FAILED_STEP=""
 }
 
 parallel_lint() {
@@ -809,7 +863,17 @@ fi
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
 DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, availableParallelism() - 1)))')"
-export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
+if [ "${DBTEST_CONCURRENCY}" -gt 4 ]; then
+  DB_PREFLIGHT_CONCURRENCY=4
+  API_DBTEST_CONCURRENCY="$((DBTEST_CONCURRENCY - DB_PREFLIGHT_CONCURRENCY))"
+elif [ "${DBTEST_CONCURRENCY}" -gt 1 ]; then
+  DB_PREFLIGHT_CONCURRENCY="$((DBTEST_CONCURRENCY / 2))"
+  API_DBTEST_CONCURRENCY="$((DBTEST_CONCURRENCY - DB_PREFLIGHT_CONCURRENCY))"
+else
+  DB_PREFLIGHT_CONCURRENCY=1
+  API_DBTEST_CONCURRENCY=1
+fi
+export DBTEST_CONCURRENCY DB_PREFLIGHT_CONCURRENCY API_DBTEST_CONCURRENCY
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=agentos \
   -e POSTGRES_DB=agentos_gate \
@@ -819,6 +883,7 @@ docker run -d --rm --name "${CONTAINER}" \
   -c fsync=off \
   -c synchronous_commit=off \
   -c full_page_writes=off \
+  -c max_connections=200 \
   -c max_wal_size=256MB >/dev/null \
   || die "could not start ${POSTGRES_IMAGE}"
 POSTGRES_STARTED=1
@@ -835,7 +900,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (available cores minus one, via the per-file DBTEST plan)"
+note "dbtest concurrency: ${DBTEST_CONCURRENCY} total (${DB_PREFLIGHT_CONCURRENCY} preflight + ${API_DBTEST_CONCURRENCY} API), available cores minus one"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -910,6 +975,10 @@ step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deplo
 # just passed. Invoke the shared DBTEST runner directly so each file receives a
 # cloned database and private host roots, including the four packages/db files
 # that the old package script forced onto one shared schema serially.
-step "database preflight tests" run_database_preflight_tests
-step "api database tests" run_api_database_tests
+if [ "${DBTEST_CONCURRENCY}" -eq 1 ]; then
+  step "database preflight tests" run_database_preflight_tests
+  step "api database tests" run_api_database_tests
+else
+  parallel_database_steps
+fi
 step "verify the gated commit did not drift" verify_tree_did_not_drift
