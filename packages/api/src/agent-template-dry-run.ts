@@ -43,7 +43,11 @@ const main = async (): Promise<void> => {
     include: { runs: true, assigneeAgent: true },
   });
   const run = first.runs[0];
-  if (result.tasks.length !== 9 || !run || run.runner !== "CLAUDE"
+  const integrator = await db.task.findFirstOrThrow({
+    where: { chainId: result.chainId, chainIndex: 10 },
+    include: { assigneeAgent: true, runs: true },
+  });
+  if (result.tasks.length !== 10 || !run || run.runner !== "CLAUDE"
     || run.model !== "claude-fable-5:medium" || first.assigneeAgent?.name !== "spec") {
     throw new Error(`Unexpected dry-run result: ${JSON.stringify({
       taskCount: result.tasks.length,
@@ -51,6 +55,9 @@ const main = async (): Promise<void> => {
       runner: run?.runner,
       model: run?.model,
     })}`);
+  }
+  if (integrator.assigneeAgent?.name !== "merge-integrator" || integrator.opensPullRequest || integrator.runs.length !== 0) {
+    throw new Error("Canonical step 10 must be an unqueued, no-PR mechanical merge-integrator task");
   }
   process.stdout.write(`Dry-run instantiated ${result.tasks.length} steps; first Run=${run.runner}/${run.model}.\n`);
 };

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mosonlab/agentos/docs/demos/templates-release-evidence.schema.json",
+  "title": "AgentOS templates release demo verification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "runId", "chainId", "positions", "evidenceDigest"],
+  "properties": {
+    "verdict": { "enum": ["PASS", "REHEARSAL_ONLY"] },
+    "runId": { "type": "string", "pattern": "^oss-c0-demo-[0-9]{3}$" },
+    "chainId": { "type": "string", "minLength": 1 },
+    "positions": {
+      "type": "array",
+      "prefixItems": [
+        { "const": 1 }, { "const": 2 }, { "const": 3 }, { "const": 4 }, { "const": 5 },
+        { "const": 6 }, { "const": 7 }, { "const": 8 }, { "const": 9 }, { "const": 10 }
+      ],
+      "items": false,
+      "minItems": 10,
+      "maxItems": 10
+    },
+    "evidenceDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

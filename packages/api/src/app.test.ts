@@ -922,6 +922,31 @@ test("template instantiate route maps an archived step agent to a named 400", as
   });
 });
 
+test("template instantiate route rejects blank variables and invalid Git refs before database access", async () => {
+  await withTokens(async () => {
+    const database = new Proxy({}, {
+      get: () => { throw new Error("database must not be read for invalid input"); },
+    }) as unknown as PrismaClient;
+    const cases = [
+      { branchName: "" },
+      { branchName: "   " },
+      { branchName: "bad..branch" },
+      { branchName: "refs/heads/main" },
+      { branchName: "feature/.hidden" },
+      { branchName: "feature/main.lock" },
+      { branchName: "bad\nbranch" },
+    ];
+    for (const variables of cases) {
+      const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ repoId: "repo-1", variables }),
+      });
+      assert.equal(response.status, 400, JSON.stringify(variables));
+    }
+  });
+});
+
 test("claim query filters archived agents before take so active work cannot starve", async () => {
   await withTokens(async () => {
     const completePriorOutput = `schema-start\n${"x".repeat(50_000)}\nstate-machine-end`;

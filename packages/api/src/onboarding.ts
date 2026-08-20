@@ -40,6 +40,10 @@ import {
 } from "@agentos/db";
 import { z } from "zod";
 
+import { isValidBranchName } from "./branch-name.js";
+
+export { isValidBranchName } from "./branch-name.js";
+
 /** The Environment every first-run installation gets. Named, not chosen: the
  *  wizard discloses what this Environment is, and a name field would invite a
  *  fresh user to believe the name selects a policy. */
@@ -170,21 +174,6 @@ export const parseRepoRemote = (raw: string): RemoteVerdict => {
  * refused rather than quietly rewritten.
  */
 export const isStarterMountPath = (value: string): boolean => value === STARTER_MOUNT_PATH;
-
-const BRANCH_FORBIDDEN = /[\s~^:?*[\\]/u;
-
-/** `git check-ref-format --branch`, spelled out for the subset a wizard can
- *  produce. A branch name reaches a command line, so a rejected name here is
- *  one that could not have been created later anyway. */
-export const isValidBranchName = (value: string): boolean => {
-  if (value.length === 0 || value.length > 255) return false;
-  if (hasControlCharacter(value) || BRANCH_FORBIDDEN.test(value)) return false;
-  if (value.startsWith("-") || value.endsWith(".")) return false;
-  if (value.includes("..") || value.includes("@{")) return false;
-  return value.split("/").every((segment) => (
-    segment.length > 0 && !segment.startsWith(".") && !segment.endsWith(".lock")
-  ));
-};
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 
