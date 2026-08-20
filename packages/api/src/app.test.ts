@@ -12,6 +12,7 @@ import { createApp as createLiveApp } from "./app.js";
 import { LOOPBACK_BROWSER_ORIGINS } from "./local-origin.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
 import { isStarterMountPath, isValidBranchName, onboardingInput, parseRepoRemote, slugify } from "./onboarding.js";
+import { RepositoryPreflightError } from "./onboarding-preflight.js";
 import { noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
 
 const withTokens = async (callback: () => Promise<void>): Promise<void> => {
@@ -1716,6 +1717,24 @@ test("onboarding refuses a credential-bearing remote, an illegal mount and an il
       // string is the one most likely to hold a token.
       assert.equal(JSON.stringify(payload).includes("token@github.com"), false);
     }
+  });
+});
+
+test("onboarding reports a repository preflight refusal before any database write", async () => {
+  await withTokens(async () => {
+    const response = await createApp(untouchableDatabase(), {
+      onboardingRepositoryPreflight: async () => { throw new RepositoryPreflightError("push-not-authorized"); },
+    }).request("/onboarding", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: onboardingBody(),
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      error: "Repository preflight failed",
+      code: "repository-preflight-failed",
+      reason: "push-not-authorized",
+    });
   });
 });
 

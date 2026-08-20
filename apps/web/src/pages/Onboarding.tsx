@@ -209,7 +209,15 @@ export const OnboardingPage = ({ onInstalled, recoverCompleted = true }: {
       // that were accepted. Retrying is safe either way — the control plane
       // answers a second installation with 409, not a second write.
       const unanswered = !(reason instanceof ApiError) || reason.status === 0;
-      setError(t(unanswered ? "onboarding.error.unreachable" : "onboarding.error.refused"));
+      const repositoryReason = reason instanceof ApiError && reason.code === "repository-preflight-failed"
+        ? reason.reason : null;
+      const knownRepositoryReasons = new Set([
+        "git-unavailable", "git-identity-missing", "remote-unreachable",
+        "default-branch-missing", "push-not-authorized", "command-timeout",
+      ]);
+      setError(t(repositoryReason !== null && knownRepositoryReasons.has(repositoryReason)
+        ? `onboarding.error.repository.${repositoryReason}`
+        : unanswered ? "onboarding.error.unreachable" : "onboarding.error.refused"));
     }
   }, [draft, onInstalled, runners.data, t]);
 
