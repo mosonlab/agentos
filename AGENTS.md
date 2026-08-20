@@ -30,6 +30,13 @@ the machine that will merge, say so in the pull request.
   and give each worktree its own `?schema=` so parallel runs stay apart. Never
   point them at a database whose contents you would miss: `npm run test:db`
   drops and recreates what it is given.
+- The API entrypoint loads the repository root `.env` itself, and dotenv never
+  overwrites a variable that is already set. So a test that spawns the real
+  entrypoint cannot remove a variable by omitting it — the child refills it
+  from `.env` and fails validation on a value the test never chose, with an
+  error that looks nothing like the behaviour under test. Spawn through
+  `packages/api/src/test-startup-environment.ts`, which pins the credential
+  variables by deriving them from the URL the test hands it.
 - A running installation's API, its configuration directory, its service
   definitions, and its built output belong to whoever is running it. Work in a
   separate worktree, not in a checkout something is serving from. A fresh
