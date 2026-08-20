@@ -64,10 +64,10 @@ test("the split review prompts enforce frozen-range, blind-order, adjudication, 
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
 
   const blindWrite = finalReview.indexOf("persisted and committed as your task output");
-  const firstReportRead = finalReview.indexOf("read the first reviewer's report attachment");
+  const firstReportRead = finalReview.indexOf("read the first reviewer's report attachment", blindWrite);
   assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
   assert.match(finalReview, /approved specification and revised plan from\s+their persisted files in the chain branch tree/iu);
-  assert.match(finalReview, /both are\s+reachable through the exact `base\.\.\.head` range/iu);
+  assert.match(finalReview, /both are\s+reachable in the tree at `head`/iu);
   assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
   assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
   assert.match(finalReview, /stop in this step, and use Inbox to present both\s+bodies of evidence to the human/u);

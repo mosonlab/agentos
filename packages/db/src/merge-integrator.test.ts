@@ -26,6 +26,7 @@ import {
   integratorBindingValid,
   isIncidentCondition,
   isIntegratorStep,
+  legacyNineStepTemplateName,
   legacyTenStepTemplateName,
   isTerminalDisposition,
   parseEvidence,
@@ -265,6 +266,11 @@ test("seed-marked legacy step 10 stays mechanical without widening new-template 
     stepIndex: 10,
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: `${INTEGRATOR_TEMPLATE_NAME}-legacy-lookalike` },
+  }), false);
+  assert.equal(isIntegratorStep({
+    stepIndex: 10,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: legacyNineStepTemplateName("template-old") },
   }), false);
 });
 
