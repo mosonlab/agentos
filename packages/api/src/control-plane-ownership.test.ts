@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -169,7 +169,7 @@ test("UT-OWN-STATE-MATRIX refuses malformed and mismatched pairs byte-for-byte",
   }
 });
 
-test("UT-OWN-STATE-MATRIX recovers only an ESRCH owner and refuses a present PID unchanged", async (t) => {
+test("UT-OWN-STATE-MATRIX recovers a free lock across hostname drift and PID reuse", async (t) => {
   const paths = await fixture();
   t.after(() => rm(paths.container, { recursive: true, force: true }));
   const first = await acquire(paths);
@@ -178,21 +178,159 @@ test("UT-OWN-STATE-MATRIX recovers only an ESRCH owner and refuses a present PID
   const stale = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
   delete stale.releasedAt;
   stale.state = "owned";
-  stale.pid = 2_147_483_000;
+  stale.pid = process.pid;
+  stale.hostname = "hostname-before-reboot";
   await writeFile(ownerPath, `${JSON.stringify(stale)}\n`, { mode: 0o600 });
-  const recovered = await acquire(paths, { livenessProbe: () => { throw Object.assign(new Error("dead"), { code: "ESRCH" }); } });
+  const recovered = await acquire(paths, { hostname: "hostname-after-reboot" });
   assert.equal(recovered.ownership.controlPlaneId, first.ownership.controlPlaneId);
   assert.match(recovered.markers.join("\n"), /CONTROL_PLANE_OWNERSHIP_RECOVERED/u);
+  const current = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+  assert.equal(current.hostname, "hostname-after-reboot");
+  assert.notEqual(current.incarnationId, stale.incarnationId);
   await recovered.ownership.release();
+});
 
-  const ambiguous = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
-  delete ambiguous.releasedAt;
-  ambiguous.state = "owned";
-  ambiguous.pid = process.pid;
-  await writeFile(ownerPath, `${JSON.stringify(ambiguous)}\n`, { mode: 0o600 });
-  const before = await readFile(ownerPath);
-  await assert.rejects(acquire(paths), /pid-present-owner-identity-ambiguous/u);
-  assert.deepEqual(await readFile(ownerPath), before);
+test("UT-OWN-RECOVERY publishes recovery only after the new owner record is durable", async (t) => {
+  const paths = await fixture();
+  t.after(() => rm(paths.container, { recursive: true, force: true }));
+  const first = await acquire(paths);
+  await first.ownership.release();
+  const ownerPath = join(first.ownership.controlStateEntryPath, controlPlaneOwnerFilename);
+  const stale = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+  delete stale.releasedAt;
+  stale.state = "owned";
+  await writeFile(ownerPath, `${JSON.stringify(stale)}\n`, { mode: 0o600 });
+
+  let durableIncarnation: string | undefined;
+  const recovered = await acquire(paths, {
+    markerWriter: async (line) => {
+      if (!line.startsWith("CONTROL_PLANE_OWNERSHIP_RECOVERED")) return;
+      const durable = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+      assert.equal(durable.state, "owned");
+      assert.notEqual(durable.incarnationId, stale.incarnationId);
+      durableIncarnation = durable.incarnationId;
+    },
+  });
+  assert.equal(durableIncarnation, recovered.ownership.incarnationId);
+  await recovered.ownership.release();
+});
+
+test("UT-OWN-RECOVERY write, rename, and directory-sync failures never emit false recovery", async (t) => {
+  for (const phase of ["before-write", "before-rename", "before-directory-sync"] as const) {
+    await t.test(phase, async () => {
+      const paths = await fixture();
+      t.after(() => rm(paths.container, { recursive: true, force: true }));
+      const first = await acquire(paths);
+      await first.ownership.release();
+      const ownerPath = join(first.ownership.controlStateEntryPath, controlPlaneOwnerFilename);
+      const stale = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+      delete stale.releasedAt;
+      stale.state = "owned";
+      await writeFile(ownerPath, `${JSON.stringify(stale)}\n`, { mode: 0o600 });
+      const markers: string[] = [];
+      await assert.rejects(acquire(paths, {
+        markerWriter: (line) => { markers.push(line); },
+        stateMutationHook: (operation, currentPhase) => {
+          if (operation === "write-owner" && currentPhase === phase) throw new Error(`injected-${phase}`);
+        },
+      }), new RegExp(`injected-${phase}`, "u"));
+      assert.doesNotMatch(markers.join("\n"), /CONTROL_PLANE_OWNERSHIP_RECOVERED/u);
+      const durable = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+      assert.equal(durable.state, "owned");
+      if (phase === "before-directory-sync") assert.notEqual(durable.incarnationId, stale.incarnationId);
+      else assert.equal(durable.incarnationId, stale.incarnationId);
+      const successor = await acquire(paths);
+      await successor.ownership.release();
+    });
+  }
+});
+
+test("UT-OWN-REFUSAL preserves exit 75 and secondary marker failures without recursion", async (t) => {
+  const cases = [
+    ["closed-stdout", () => { throw Object.assign(new Error("closed stdout"), { code: "ERR_STREAM_DESTROYED" }); }],
+    ["epipe", () => { throw Object.assign(new Error("broken pipe"), { code: "EPIPE" }); }],
+    ["sync-throw", () => { throw new Error("synchronous marker failure"); }],
+    ["rejected-promise", () => Promise.reject(new Error("rejected marker promise"))],
+  ] as const;
+  for (const [label, markerWriter] of cases) {
+    await t.test(label, async () => {
+      const paths = await fixture();
+      t.after(() => rm(paths.container, { recursive: true, force: true }));
+      let calls = 0;
+      await assert.rejects(acquire(paths, {
+        cloexecProbe: () => false,
+        markerWriter: () => {
+          calls += 1;
+          return markerWriter();
+        },
+      }), (error: unknown) => {
+        assert.ok(error instanceof ControlPlaneOwnershipStartupError);
+        assert.equal(error.exitCode, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
+        assert.equal(error.reason, "lock-descriptor-missing-cloexec");
+        assert.equal(error.secondaryFailures.length, 1);
+        return true;
+      });
+      assert.equal(calls, 1);
+      const successor = await acquire(paths);
+      await successor.ownership.release();
+    });
+  }
+});
+
+test("UT-OWN-REFUSAL a failed recovery marker is not retried and leaves valid evidence", async (t) => {
+  const paths = await fixture();
+  t.after(() => rm(paths.container, { recursive: true, force: true }));
+  const first = await acquire(paths);
+  await first.ownership.release();
+  const ownerPath = join(first.ownership.controlStateEntryPath, controlPlaneOwnerFilename);
+  const stale = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+  delete stale.releasedAt;
+  stale.state = "owned";
+  await writeFile(ownerPath, `${JSON.stringify(stale)}\n`, { mode: 0o600 });
+  let calls = 0;
+  await assert.rejects(acquire(paths, {
+    markerWriter: () => {
+      calls += 1;
+      throw Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+    },
+  }), (error: unknown) => {
+    assert.ok(error instanceof ControlPlaneOwnershipStartupError);
+    assert.equal(error.reason, "marker-transport-failure");
+    assert.equal(error.secondaryFailures.length, 1);
+    return true;
+  });
+  assert.equal(calls, 1);
+  const durable = JSON.parse(await readFile(ownerPath, "utf8")) as ControlPlaneOwnerRecord;
+  assert.notEqual(durable.incarnationId, stale.incarnationId);
+  const successor = await acquire(paths);
+  await successor.ownership.release();
+});
+
+test("RP-OWN-REPLACE base and entry replacement cannot redirect bound state operations", async (t) => {
+  for (const shape of ["base", "entry"] as const) {
+    await t.test(shape, async () => {
+      const paths = await fixture();
+      t.after(() => rm(paths.container, { recursive: true, force: true }));
+      let replaced = false;
+      let displaced = "";
+      await assert.rejects(acquire(paths, {
+        stateOperationHook: async (operation, entryPath) => {
+          if (operation !== "write-owner" || replaced) return;
+          replaced = true;
+          const target = shape === "base" ? dirname(entryPath) : entryPath;
+          displaced = `${target}-displaced`;
+          await rename(target, displaced);
+          await mkdir(target, { mode: 0o700 });
+        },
+      }), new RegExp(`control-state-${shape}-path-replaced`, "u"));
+      assert.equal(replaced, true);
+      assert.deepEqual(await readdir(shape === "base" ? paths.state : join(paths.state, (await readdir(paths.state))[0] as string)), []);
+      const displacedEntry = shape === "base"
+        ? join(displaced, (await readdir(displaced))[0] as string)
+        : displaced;
+      assert.deepEqual((await readdir(displacedEntry)).sort(), [controlPlaneIdFilename, "ownership.lock"].sort());
+    });
+  }
 });
 
 test("UT-OWN-INTEGRITY refuses unsupported filesystems and missing FD_CLOEXEC", async (t) => {
@@ -284,7 +422,7 @@ test("RP-OWN-FILES-ALIAS production entrypoint refuses Files/state alias before 
   let output = "";
   child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
-  assert.equal((await waitForExit(child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
+  assert.equal((await waitForExit(child)).code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE, output);
   assert.match(output, /CONTROL_PLANE_OWNERSHIP_REFUSED.*control-state-overlaps-files-root/u);
   assert.doesNotMatch(output, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening|PrismaClient/u);
   assert.deepEqual(await readdir(paths.state), []);
@@ -339,7 +477,7 @@ test("RP-OWN-SAME-ALIAS production loser exits 75 before database import, reconc
   loser.stdout?.on("data", (chunk: Buffer) => { loserOutput += chunk.toString("utf8"); });
   loser.stderr?.on("data", (chunk: Buffer) => { loserOutput += chunk.toString("utf8"); });
   const result = await waitForExit(loser);
-  assert.equal(result.code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE);
+  assert.equal(result.code, CONTROL_PLANE_OWNERSHIP_EXIT_CODE, loserOutput);
   assert.match(loserOutput, /CONTROL_PLANE_OWNERSHIP_CONFLICT/u);
   assert.doesNotMatch(loserOutput, /CONTROL_PLANE_OWNERSHIP_ACQUIRED|Startup reconciliation|listening/u);
   owner.kill("SIGTERM");

@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { lstat, open, readdir, realpath, rename, rm } from "node:fs/promises";
+import { closeSync, constants as fsConstants, fstatSync } from "node:fs";
+import { lstat, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
 
 import { constants as fsExtConstants, fcntlSync, flock } from "fs-ext";
 import { z } from "zod";
@@ -14,9 +13,17 @@ import {
   controlPlaneOwnerFilename,
   openPersistentLockFile,
   prepareControlPlaneState,
+  type PreparedControlPlaneState,
   type PrepareControlPlaneStateOptions,
   type SupportedFilesystem,
 } from "./control-plane-state.js";
+import {
+  assertNamedFileIdentity,
+  type AtomicWritePhase,
+  atomicWriteJson,
+  type BoundDirectory,
+  readOptionalFile,
+} from "./control-plane-directory.js";
 import { canonicalizeWorkspaceRoot, type CanonicalWorkspaceRoot } from "./workspace-root.js";
 
 export const CONTROL_PLANE_OWNERSHIP_EXIT_CODE = 75;
@@ -85,7 +92,11 @@ export type ControlPlaneOwnerRecord = z.infer<typeof ownerRecordSchema>;
 
 export class ControlPlaneOwnershipStartupError extends Error {
   readonly exitCode = CONTROL_PLANE_OWNERSHIP_EXIT_CODE;
-  constructor(readonly reason: string, readonly marker: "CONTROL_PLANE_OWNERSHIP_CONFLICT" | "CONTROL_PLANE_OWNERSHIP_REFUSED") {
+  constructor(
+    readonly reason: string,
+    readonly marker: "CONTROL_PLANE_OWNERSHIP_CONFLICT" | "CONTROL_PLANE_OWNERSHIP_REFUSED",
+    readonly secondaryFailures: readonly unknown[] = [],
+  ) {
     super(`Control-plane ownership ${marker === "CONTROL_PLANE_OWNERSHIP_CONFLICT" ? "conflict" : "refused"}: ${reason}`);
     this.name = "ControlPlaneOwnershipStartupError";
   }
@@ -96,27 +107,6 @@ const lockAsync = (fd: number, operation: "exnb" | "un"): Promise<void> => new P
 });
 
 const markerLine = (marker: OwnershipMarker, fields: Record<string, unknown>): string => `${marker} ${JSON.stringify(fields)}`;
-
-const readOptional = async (path: string): Promise<Buffer | null> => {
-  let handle;
-  try {
-    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  try {
-    const [descriptor, authoritative] = await Promise.all([handle.stat({ bigint: true }), lstat(path, { bigint: true })]);
-    if (!descriptor.isFile() || !authoritative.isFile() || authoritative.isSymbolicLink()) throw new Error("durable-record-not-regular");
-    if (descriptor.uid !== BigInt(process.geteuid?.() ?? -1) || (Number(descriptor.mode) & 0o777) !== 0o600) {
-      throw new Error("durable-record-owner-or-mode-mismatch");
-    }
-    if (descriptor.dev !== authoritative.dev || descriptor.ino !== authoritative.ino) throw new Error("durable-record-path-replaced");
-    return await handle.readFile();
-  } finally {
-    await handle.close();
-  }
-};
 
 const parseRecord = <T>(buffer: Buffer | null, schema: z.ZodType<T>): { absent: true } | { absent: false; value: T } => {
   if (buffer === null) return { absent: true };
@@ -131,36 +121,50 @@ const parseRecord = <T>(buffer: Buffer | null, schema: z.ZodType<T>): { absent: 
   return { absent: false, value: parsed.data };
 };
 
-const atomicWriteJson = async (entryPath: string, destination: string, incarnationId: string, value: unknown): Promise<void> => {
-  const temporary = join(entryPath, `.${destination}.tmp-${process.pid}-${incarnationId}`);
-  const handle = await open(temporary, "wx", 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await rename(temporary, join(entryPath, destination));
-  const directory = await open(entryPath, "r");
-  try { await directory.sync(); } finally { await directory.close(); }
-};
-
 const tempPattern = /^\.(control-plane-id\.json|owner\.json)\.tmp-\d+-[0-9a-f]{8}-[0-9a-f-]{27}$/u;
 
-const inventoryEntry = async (entryPath: string): Promise<string[]> => {
+const inventoryEntry = (entryDirectory: BoundDirectory): string[] => {
   const safeTemps: string[] = [];
-  for (const name of await readdir(entryPath)) {
+  for (const name of entryDirectory.list()) {
     if ([controlPlaneLockFilename, controlPlaneIdFilename, controlPlaneOwnerFilename].includes(name)) continue;
     if (!tempPattern.test(name)) throw new Error(`unexpected-control-state-entry:${name}`);
-    const path = join(entryPath, name);
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.geteuid?.() || (info.mode & 0o777) !== 0o600) {
-      throw new Error(`unsafe-control-state-temp:${name}`);
+    const fd = entryDirectory.openFile(name, fsConstants.O_RDONLY);
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.uid !== process.geteuid?.() || (info.mode & 0o777) !== 0o600) {
+        throw new Error(`unsafe-control-state-temp:${name}`);
+      }
+    } finally {
+      closeSync(fd);
     }
-    safeTemps.push(path);
+    safeTemps.push(name);
   }
   return safeTemps;
 };
+
+const assertBoundState = (state: PreparedControlPlaneState): void => {
+  state.baseDirectory.assertPathIdentity(state.basePath, "control-state-base-path-replaced");
+  let currentEntry: BoundDirectory;
+  try {
+    currentEntry = state.baseDirectory.openDirectory(state.digest);
+  } catch {
+    throw new Error("control-state-entry-path-replaced");
+  }
+  try {
+    if (currentEntry.device !== state.entryDirectory.device || currentEntry.inode !== state.entryDirectory.inode) {
+      throw new Error("control-state-entry-path-replaced");
+    }
+  } finally {
+    currentEntry.close();
+  }
+};
+
+class MarkerTransportFailure extends Error {
+  constructor(readonly failure: unknown) {
+    super("marker-transport-failure");
+    this.name = "MarkerTransportFailure";
+  }
+}
 
 const recordsMatch = (
   stable: StableControlPlaneRecord,
@@ -182,10 +186,11 @@ export interface AcquireControlPlaneOwnershipOptions {
   stateDir?: string;
   filesystemTypeProbe?: PrepareControlPlaneStateOptions["filesystemTypeProbe"];
   cloexecProbe?: (fd: number) => boolean;
-  livenessProbe?: (pid: number) => void;
   markerWriter?: MarkerWriter;
   now?: () => Date;
   hostname?: string;
+  stateOperationHook?: (operation: string, entryPath: string) => void | Promise<void>;
+  stateMutationHook?: (operation: "write-stable" | "write-owner" | "release-owner", phase: AtomicWritePhase) => void;
 }
 
 export interface ControlPlaneOwnership {
@@ -209,38 +214,98 @@ export const acquireControlPlaneOwnership = async (
 ): Promise<ControlPlaneOwnership> => {
   const writer = options.markerWriter ?? defaultMarkerWriter;
   let workspace: CanonicalWorkspaceRoot | undefined;
+  let state: PreparedControlPlaneState | undefined;
   let lock: Awaited<ReturnType<typeof openPersistentLockFile>> | undefined;
   let locked = false;
+  let lockClosed = false;
+  let directoriesClosed = false;
   let diagnosticOwner: Record<string, string | number> = {};
-  const refuse = async (reason: string, marker: "CONTROL_PLANE_OWNERSHIP_CONFLICT" | "CONTROL_PLANE_OWNERSHIP_REFUSED" = "CONTROL_PLANE_OWNERSHIP_REFUSED"): Promise<never> => {
-    if (locked && lock) await lockAsync(lock.handle.fd, "un").catch(() => undefined);
-    if (lock) await lock.handle.close().catch(() => undefined);
-    await writer(markerLine(marker, { reason, canonicalWorkspaceRoot: workspace?.canonicalPath ?? null, pid: process.pid, ...diagnosticOwner }));
-    throw new ControlPlaneOwnershipStartupError(reason, marker);
+  const closeResources = async (): Promise<unknown[]> => {
+    const failures: unknown[] = [];
+    if (locked && lock) {
+      locked = false;
+      try { await lockAsync(lock.fd, "un"); } catch (error: unknown) { failures.push(error); }
+    }
+    if (lock && !lockClosed) {
+      lockClosed = true;
+      try { closeSync(lock.fd); } catch (error: unknown) { failures.push(error); }
+    }
+    if (state && !directoriesClosed) {
+      directoriesClosed = true;
+      try { state.entryDirectory.close(); } catch (error: unknown) { failures.push(error); }
+      try { state.baseDirectory.close(); } catch (error: unknown) { failures.push(error); }
+    }
+    return failures;
+  };
+  const refuse = async (
+    reason: string,
+    marker: "CONTROL_PLANE_OWNERSHIP_CONFLICT" | "CONTROL_PLANE_OWNERSHIP_REFUSED" = "CONTROL_PLANE_OWNERSHIP_REFUSED",
+    markerFailure?: unknown,
+  ): Promise<never> => {
+    const secondaryFailures = await closeResources();
+    if (markerFailure !== undefined) {
+      secondaryFailures.push(markerFailure);
+    } else {
+      try {
+        await writer(markerLine(marker, { reason, canonicalWorkspaceRoot: workspace?.canonicalPath ?? null, pid: process.pid, ...diagnosticOwner }));
+      } catch (error: unknown) {
+        secondaryFailures.push(error);
+      }
+    }
+    throw new ControlPlaneOwnershipStartupError(reason, marker, secondaryFailures);
+  };
+  const emitMarker = async (line: string): Promise<void> => {
+    try { await writer(line); } catch (error: unknown) { throw new MarkerTransportFailure(error); }
+  };
+  const stateOperation = async <T>(operation: string, action: () => T | Promise<T>): Promise<T> => {
+    if (!state) throw new Error("control-state-not-bound");
+    await options.stateOperationHook?.(operation, state.entryPath);
+    assertBoundState(state);
+    const result = await action();
+    assertBoundState(state);
+    return result;
+  };
+  const writeStateJson = (
+    operation: "write-stable" | "write-owner" | "release-owner",
+    destination: string,
+    incarnationId: string,
+    value: unknown,
+  ): void => {
+    atomicWriteJson(
+      state!.entryDirectory,
+      destination,
+      incarnationId,
+      value,
+      (phase) => options.stateMutationHook?.(operation, phase),
+    );
   };
 
   try {
     workspace = await canonicalizeWorkspaceRoot(options.workspaceRoot);
     const filesRoot = options.filesRoot ? await canonicalizeFilesRoot(options.filesRoot) : undefined;
-    const state = await prepareControlPlaneState({
+    state = await prepareControlPlaneState({
       canonicalWorkspaceRoot: workspace.canonicalPath,
       ...(options.stateDir ? { configuredStateDir: options.stateDir } : {}),
       ...(filesRoot ? { canonicalFilesRoot: filesRoot.canonicalPath } : {}),
       ...(options.filesystemTypeProbe ? { filesystemTypeProbe: options.filesystemTypeProbe } : {}),
     });
-    lock = await openPersistentLockFile(state.entryPath);
+    await stateOperation("open-lock", () => { lock = openPersistentLockFile(state!.entryDirectory); });
+    if (!lock) throw new Error("control-state-lock-not-opened");
+    const activeLock = lock;
     const hasCloseOnExec = options.cloexecProbe
-      ? options.cloexecProbe(lock.handle.fd)
-      : (fcntlSync(lock.handle.fd, "getfd") & fsExtConstants.FD_CLOEXEC) !== 0;
+      ? options.cloexecProbe(activeLock.fd)
+      : (fcntlSync(activeLock.fd, "getfd") & fsExtConstants.FD_CLOEXEC) !== 0;
     if (!hasCloseOnExec) return await refuse("lock-descriptor-missing-cloexec");
     try {
-      await lockAsync(lock.handle.fd, "exnb");
+      await lockAsync(activeLock.fd, "exnb");
       locked = true;
     } catch (error: unknown) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "EWOULDBLOCK" || code === "EAGAIN") {
         try {
-          const diagnostic = parseRecord(await readOptional(join(state.entryPath, controlPlaneOwnerFilename)), ownerRecordSchema);
+          const diagnostic = parseRecord(await stateOperation("read-conflict-owner", () => (
+            readOptionalFile(state!.entryDirectory, controlPlaneOwnerFilename)
+          )), ownerRecordSchema);
           if (!diagnostic.absent) diagnosticOwner = {
             ownerControlPlaneId: diagnostic.value.controlPlaneId,
             ownerIncarnationId: diagnostic.value.incarnationId,
@@ -253,10 +318,12 @@ export const acquireControlPlaneOwnership = async (
       return await refuse(`ownership-lock-failure:${code ?? "unknown"}`);
     }
 
-    const safeTemps = await inventoryEntry(state.entryPath).catch(async (error: unknown) => refuse((error as Error).message));
-    const stablePath = join(state.entryPath, controlPlaneIdFilename);
-    const ownerPath = join(state.entryPath, controlPlaneOwnerFilename);
-    const [stableBytes, ownerBytes] = await Promise.all([readOptional(stablePath), readOptional(ownerPath)]);
+    const safeTemps = await stateOperation("inventory", () => inventoryEntry(state!.entryDirectory))
+      .catch(async (error: unknown) => refuse((error as Error).message));
+    const [stableBytes, ownerBytes] = await stateOperation("read-records", () => ([
+      readOptionalFile(state!.entryDirectory, controlPlaneIdFilename),
+      readOptionalFile(state!.entryDirectory, controlPlaneOwnerFilename),
+    ] as const));
     let stable: ReturnType<typeof parseRecord<StableControlPlaneRecord>>;
     let priorOwner: ReturnType<typeof parseRecord<ControlPlaneOwnerRecord>>;
     try {
@@ -285,23 +352,19 @@ export const acquireControlPlaneOwnership = async (
     }
 
     if (!priorOwner.absent) {
-      if (!recordsMatch(stableValue, priorOwner.value, workspace, state.digest, lock)) return await refuse("owner-record-identity-mismatch");
+      if (!recordsMatch(stableValue, priorOwner.value, workspace, state.digest, activeLock)) return await refuse("owner-record-identity-mismatch");
       if (priorOwner.value.state === "owned") {
-        if (priorOwner.value.hostname !== (options.hostname ?? hostname())) return await refuse("foreign-host-owner");
-        let pidPresent = false;
-        try {
-          (options.livenessProbe ?? ((pid: number) => process.kill(pid, 0)))(priorOwner.value.pid);
-          pidPresent = true;
-        } catch (error: unknown) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") return await refuse(`owner-liveness-ambiguous:${(error as NodeJS.ErrnoException).code ?? "unknown"}`);
-          recoveredFrom = priorOwner.value;
-        }
-        if (pidPresent) return await refuse("pid-present-owner-identity-ambiguous");
+        // The exclusive lock is the liveness authority. Once this process holds
+        // the same inode recorded by the prior owner, neither a mutable hostname
+        // nor a reused PID can prove that the prior incarnation is still alive.
+        recoveredFrom = priorOwner.value;
       }
     }
 
-    for (const path of safeTemps) await rm(path);
-    if (stable.absent) await atomicWriteJson(state.entryPath, controlPlaneIdFilename, incarnationId, stableValue);
+    for (const name of safeTemps) await stateOperation(`remove-temp:${name}`, () => state!.entryDirectory.unlink(name));
+    if (stable.absent) await stateOperation("write-stable", () => (
+      writeStateJson("write-stable", controlPlaneIdFilename, incarnationId, stableValue)
+    ));
     const acquiredAt = (options.now ?? (() => new Date()))().toISOString();
     const ownerValue: ControlPlaneOwnerRecord = {
       formatVersion: 2,
@@ -313,11 +376,14 @@ export const acquireControlPlaneOwnership = async (
       canonicalWorkspaceRoot: workspace.canonicalPath,
       controlStateDigest: state.digest,
       workspaceRootInode: workspace.inode.toString(),
-      lockInode: lock.inode.toString(),
+      lockInode: activeLock.inode.toString(),
       acquiredAt,
     };
+    await stateOperation("write-owner", () => (
+      writeStateJson("write-owner", controlPlaneOwnerFilename, incarnationId, ownerValue)
+    ));
     if (recoveredFrom) {
-      await writer(markerLine("CONTROL_PLANE_OWNERSHIP_RECOVERED", {
+      await emitMarker(markerLine("CONTROL_PLANE_OWNERSHIP_RECOVERED", {
         canonicalWorkspaceRoot: workspace.canonicalPath,
         controlPlaneId: stableValue.controlPlaneId,
         priorIncarnationId: recoveredFrom.incarnationId,
@@ -326,8 +392,7 @@ export const acquireControlPlaneOwnership = async (
         pid: process.pid,
       }));
     }
-    await atomicWriteJson(state.entryPath, controlPlaneOwnerFilename, incarnationId, ownerValue);
-    await writer(markerLine("CONTROL_PLANE_OWNERSHIP_ACQUIRED", {
+    await emitMarker(markerLine("CONTROL_PLANE_OWNERSHIP_ACQUIRED", {
       canonicalWorkspaceRoot: workspace.canonicalPath,
       controlPlaneId: stableValue.controlPlaneId,
       incarnationId,
@@ -337,8 +402,8 @@ export const acquireControlPlaneOwnership = async (
       stateDevice: state.device.toString(),
       stateUid: state.uid,
       stateMode: state.mode.toString(8),
-      lockDevice: lock.device.toString(),
-      lockInode: lock.inode.toString(),
+      lockDevice: activeLock.device.toString(),
+      lockInode: activeLock.inode.toString(),
     }));
 
     let poisonedReason: string | null = null;
@@ -347,16 +412,16 @@ export const acquireControlPlaneOwnership = async (
       if (released) throw new Error("control-plane-ownership-released");
       if (poisonedReason) throw new Error(`control-plane-ownership-poisoned:${poisonedReason}`);
       try {
-        const [descriptor, authoritative, configuredCanonical, rootIdentity, configuredFilesCanonical, filesIdentity] = await Promise.all([
-          lock!.handle.stat({ bigint: true }),
-          lstat(lock!.path, { bigint: true }),
+        const [descriptor, configuredCanonical, rootIdentity, configuredFilesCanonical, filesIdentity] = await Promise.all([
+          Promise.resolve(fstatSync(activeLock.fd, { bigint: true })),
           realpath(workspace!.configuredPath),
           lstat(workspace!.canonicalPath, { bigint: true }),
           filesRoot ? realpath(filesRoot.configuredPath) : Promise.resolve(undefined),
           filesRoot ? lstat(filesRoot.canonicalPath, { bigint: true }) : Promise.resolve(undefined),
         ]);
-        if (descriptor.dev !== authoritative.dev || descriptor.ino !== authoritative.ino) throw new Error("lock-path-identity-drift");
-        if (descriptor.dev !== lock!.device || descriptor.ino !== lock!.inode) throw new Error("lock-descriptor-identity-drift");
+        if (descriptor.dev !== activeLock.device || descriptor.ino !== activeLock.inode) throw new Error("lock-descriptor-identity-drift");
+        assertBoundState(state!);
+        assertNamedFileIdentity(state!.entryDirectory, controlPlaneLockFilename, activeLock, "lock-path-identity-drift");
         if (configuredCanonical !== workspace!.canonicalPath) throw new Error("workspace-root-retargeted");
         if (rootIdentity.dev !== workspace!.device || rootIdentity.ino !== workspace!.inode) throw new Error("workspace-root-identity-drift");
         if (filesRoot && configuredFilesCanonical !== filesRoot.canonicalPath) throw new Error("files-root-retargeted");
@@ -377,28 +442,31 @@ export const acquireControlPlaneOwnership = async (
           released = false;
           await assertHeld();
           released = true;
-          await atomicWriteJson(state.entryPath, controlPlaneOwnerFilename, incarnationId, {
+          await stateOperation("release-owner", () => writeStateJson("release-owner", controlPlaneOwnerFilename, incarnationId, {
             ...ownerValue,
             state: "released",
             releasedAt: (options.now ?? (() => new Date()))().toISOString(),
-          });
+          }));
           clean = true;
         } catch (error: unknown) {
           poisonedReason = poisonedReason ?? (error as Error).message;
           released = true;
         }
       }
-      await lockAsync(lock!.handle.fd, "un").catch(() => undefined);
-      await lock!.handle.close().catch(() => undefined);
+      const cleanupFailures = await closeResources();
+      if (cleanupFailures.length > 0) {
+        poisonedReason = poisonedReason ?? "ownership-resource-cleanup-failed";
+        clean = false;
+      }
       if (clean) {
-        await writer(markerLine("CONTROL_PLANE_OWNERSHIP_RELEASED", {
+        await emitMarker(markerLine("CONTROL_PLANE_OWNERSHIP_RELEASED", {
           canonicalWorkspaceRoot: workspace!.canonicalPath,
           controlPlaneId: stableValue.controlPlaneId,
           incarnationId,
           pid: process.pid,
         }));
       } else {
-        await writer(markerLine("CONTROL_PLANE_OWNERSHIP_REFUSED", {
+        await emitMarker(markerLine("CONTROL_PLANE_OWNERSHIP_REFUSED", {
           reason: `unclean-release:${poisonedReason ?? "integrity-unknown"}`,
           canonicalWorkspaceRoot: workspace!.canonicalPath,
           controlPlaneId: stableValue.controlPlaneId,
@@ -418,13 +486,14 @@ export const acquireControlPlaneOwnership = async (
       controlStateDigest: state.digest,
       controlStateEntryPath: state.entryPath,
       controlStateFilesystem: state.filesystem,
-      lockDevice: lock.device,
-      lockInode: lock.inode,
+      lockDevice: activeLock.device,
+      lockInode: activeLock.inode,
       assertHeld,
       release,
     };
   } catch (error: unknown) {
     if (error instanceof ControlPlaneOwnershipStartupError) throw error;
+    if (error instanceof MarkerTransportFailure) return await refuse("marker-transport-failure", "CONTROL_PLANE_OWNERSHIP_REFUSED", error.failure);
     return await refuse((error as NodeJS.ErrnoException).code
       ? `${(error as NodeJS.ErrnoException).code}:${(error as Error).message}`
       : (error as Error).message);
