@@ -1,6 +1,6 @@
 {
   "name": "@agentos/api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,9 +14,9 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@agentos/build-info": "0.1.0",
-    "@agentos/db": "0.1.0",
-    "@agentos/github-client": "0.1.0",
+    "@agentos/build-info": "0.2.0",
+    "@agentos/db": "0.2.0",
+    "@agentos/github-client": "0.2.0",
     "@hono/node-server": "^1.19.6",
     "cron-parser": "^5.10.0",
     "dotenv": "^17.2.3",
@@ -25,7 +25,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@agentos/runner": "0.1.0",
+    "@agentos/runner": "0.2.0",
     "@types/fs-ext": "^2.0.3",
     "@types/node": "^24.10.1",
     "tsx": "^4.20.6"

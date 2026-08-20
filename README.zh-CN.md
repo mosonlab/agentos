@@ -2,10 +2,10 @@
 
 [English](README.md)
 
-> **AgentOS v0.1.0 — Developer Preview（开发者预览）。** 这是一个早期预览版：
+> **AgentOS v0.2.0 — Developer Preview 2（开发者预览）。** 这是一个早期预览版：
 > 接口、配置与已存数据的形状都可能在预览版之间发生变动，且预览版之间除了全新
 > 安装以外没有升级路径。安装前请先读
-> [`docs/release/v0.1.0-release-notes.md`](docs/release/v0.1.0-release-notes.md)；
+> [`docs/release/v0.2.0-release-notes.md`](docs/release/v0.2.0-release-notes.md)；
 > 支持范围与各自的证据边界见
 > [`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md)。
 
@@ -88,13 +88,13 @@ AgentOS 从不替你登录 provider，也从不读取任何凭据存储。
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.1.0
+git checkout v0.2.0
 npm ci
 npm run setup:local
 npm run build
 docker compose up -d --wait --wait-timeout 60 postgres
-export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
-export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
+export GOAL5A0_MASTER_SHA=8d69ee8544196a3310b3d63caf8ce5ec9a0e023b
+export GOAL5A0_CONTROL_PLANE_A_SHA=29f8dd354cb99d671c2e2e4e9e23716fd8004f3d
 npm run db:migrate:release -- --fresh
 ```
 
@@ -176,8 +176,8 @@ Web 控制台 / phase-0 CLI
    `opensPullRequest` 设置控制交付时是否还尝试创建 pull request。有审批关卡的任务
    进入 review 等待人工决定；无关卡且成功的任务可以结束。
 
-> **待完成（OSS-C）：公开 demo 证据。** OSS-C 证据关卡完成前，本 README 不包含
-> 任何截图、视频、耗时、benchmark 或端到端 demo 声明。
+> **待完成（OSS-C）：公开 demo 证据。** 上文截图仅用于展示界面。OSS-C 证据
+> 关卡完成前，本 README 不包含任何视频、耗时、benchmark 或端到端 demo 声明。
 
 ## 安全默认与限制
 

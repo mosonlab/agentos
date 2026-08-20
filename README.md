@@ -2,10 +2,10 @@
 
 [简体中文](README.zh-CN.md)
 
-> **AgentOS v0.1.0 — Developer Preview.** This is an early preview. Interfaces,
+> **AgentOS v0.2.0 — Developer Preview 2.** This is an early preview. Interfaces,
 > configuration and stored data shapes may change between preview releases, and
 > there is no upgrade path between them other than a fresh install. Read
-> [`docs/release/v0.1.0-release-notes.md`](docs/release/v0.1.0-release-notes.md)
+> [`docs/release/v0.2.0-release-notes.md`](docs/release/v0.2.0-release-notes.md)
 > before installing, and
 > [`docs/release/v0.1.0-support-matrix.md`](docs/release/v0.1.0-support-matrix.md)
 > for what is supported and on what evidence.
@@ -98,13 +98,13 @@ into a provider and never reads a credential store.
 ```sh
 git clone https://github.com/mosonlab/agentos.git
 cd agentos
-git checkout v0.1.0
+git checkout v0.2.0
 npm ci
 npm run setup:local
 npm run build
 docker compose up -d --wait --wait-timeout 60 postgres
-export GOAL5A0_MASTER_SHA=485fb118db96e3977006a2edc866a38b751ff0e2
-export GOAL5A0_CONTROL_PLANE_A_SHA=c671439831b075568420b92f4494227fa7fc392b
+export GOAL5A0_MASTER_SHA=8d69ee8544196a3310b3d63caf8ce5ec9a0e023b
+export GOAL5A0_CONTROL_PLANE_A_SHA=29f8dd354cb99d671c2e2e4e9e23716fd8004f3d
 npm run db:migrate:release -- --fresh
 ```
 
@@ -199,9 +199,9 @@ Local runner -----> ephemeral git workspace
    controls whether delivery also attempts to open a pull request. A gated task
    moves to review for a human decision; an ungated successful task can finish.
 
-> **Pending (OSS-C): public demo evidence.** No screenshot, video, timing,
-> benchmark, or end-to-end demo claim is part of this README until the OSS-C
-> evidence gate is complete.
+> **Pending (OSS-C): public demo evidence.** The screenshots above illustrate
+> the interface only. No video, timing, benchmark, or end-to-end demo claim is
+> part of this README until the OSS-C evidence gate is complete.
 
 ## Security defaults and limits
 

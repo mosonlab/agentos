@@ -5,6 +5,69 @@ Entries group changes by the part of the product they touch. Versions follow
 Semantic Versioning; before 1.0.0 a minor version may change behaviour, and this
 file says so where it does.
 
+## v0.2.0 — Developer Preview 2
+
+The second preview. The headline is the task-chain overhaul: the twelve-step
+template now plans for parallelism and implements in parallel waves, its code
+review runs as two independent blind paths, and the whole chain has been
+exercised end-to-end on an isolated rehearsal stack before this release. As
+with every 0.x minor, behaviour changes below are breaking-eligible and there
+is no upgrade path between previews other than a fresh install.
+
+### Task chain and canonical agents
+
+- The full-assurance code review step is now a dual-path blind review: an
+  independent review on the Codex side, a blind review and final adjudication
+  on the Claude side, and a regression verification of the applied fixes.
+  Legacy nine-step templates are preserved and pinned rather than migrated.
+- The twelve-step chain prompts were rewritten end to end. Planning cuts
+  tracer-bullet slices engineered for parallel execution; implementation
+  schedules those slices in dependency waves, one isolated git worktree and one
+  background subprocess per slice, merging serially at each wave barrier; the
+  review prompts drive the native `codex exec review` harness in two passes
+  with the review range declared in the prompt. Plan review now prices every
+  merge and added dependency edge against the frontier width the plan was
+  engineered for.
+- Chain artifacts (spec, slices, session labels, review findings) live under
+  `.chain/<branch>/` on the chain branch.
+- The task-claim API now honours a step's `attachmentsFromPrevious=false`, so
+  the blind review step really does start blind instead of receiving prior
+  step outputs.
+- `npm run db:sync-canonical-prompts -w @agentos/db` synchronises every
+  canonical step prompt and role prompt from the repository into an existing
+  installation, idempotently.
+- Seeded skills are retired. The runner never injected them, so the `agents/`
+  contract drops the skills pipeline entirely; skills remain an API-managed
+  concept.
+- The librarian role runs at a higher reasoning tier.
+
+### Control plane and API
+
+- Control-plane ownership recovery is hardened, and ownership tolerates device
+  identity drift across restarts.
+- The shared maintenance lock recovers its sessions after the lock backend is
+  lost, and retains itself across connection-pool recycling.
+- Onboarding validates its prerequisites, local service startup is bounded, and
+  toolchain and runner identity are enforced.
+- Backup quiescence attestations are validated before an existing-mode
+  migration will accept them.
+- The default session budget is 240 minutes.
+
+### Web
+
+- Agents page: archived agents move to their own tab.
+
+### Development and operations
+
+- The merge gate is substantially faster: independent checks overlap, isolated
+  database suites run concurrently, lint workers stop oversubscribing the
+  machine, and gate caches publish atomically with their integrity preserved.
+- Sanitized operational harnesses are published in-repo.
+- `npm run setup:local` can repair an existing local configuration safely.
+- Public snapshot scanning is hardened, template release gaps are closed, and
+  the v0.1.0 install guidance corrections are folded into the released docs.
+- The README shows the task board and agents screens.
+
 ## v0.1.0 — Developer Preview
 
 The first release of AgentOS: a local, single-operator control plane for handing
