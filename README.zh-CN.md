@@ -17,6 +17,9 @@ AgentOS 是面向单一操作者的本地控制平面，用于把有明确权限
 AgentOS 编排安装在用户 Mac 上且已完成认证的官方 Codex CLI 和 Claude Code；
 AgentOS 不捆绑或转售任何订阅，provider 条款和套餐限制仍然适用。
 
+本项目是受 Danny Postma 的视频 'How I Built My Own AgentOS on Claude's Agent
+SDK (So You Can Too)'（2026）启发的独立实现，从视频中的想法出发从零构建。
+
 ## 发布候选证据状态
 
 以下标签描述本仓库内记录的证据，不是 CLI provider 作出的兼容性承诺。
