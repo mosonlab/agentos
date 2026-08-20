@@ -20,12 +20,16 @@ export const apiBase = "/api";
 export class ApiError extends Error {
   readonly status: number;
   readonly path: string;
+  readonly code: string | null;
+  readonly reason: string | null;
 
-  constructor(status: number, path: string, message: string) {
+  constructor(status: number, path: string, message: string, code: string | null = null, reason: string | null = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.path = path;
+    this.code = code;
+    this.reason = reason;
   }
 
   /** The endpoint is not implemented yet — pages degrade instead of erroring. */
@@ -41,13 +45,17 @@ export class ApiError extends Error {
 const parseError = async (response: Response, path: string): Promise<ApiError> => {
   const text = await response.text().catch(() => "");
   let detail = text;
+  let code: string | null = null;
+  let reason: string | null = null;
   try {
-    const parsed = JSON.parse(text) as { error?: string; issues?: unknown };
+    const parsed = JSON.parse(text) as { error?: string; code?: unknown; reason?: unknown; issues?: unknown };
     if (typeof parsed.error === "string") detail = parsed.error;
+    if (typeof parsed.code === "string") code = parsed.code;
+    if (typeof parsed.reason === "string") reason = parsed.reason;
   } catch {
     // Non-JSON error bodies (proxy failures, HTML) are surfaced verbatim.
   }
-  return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`);
+  return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`, code, reason);
 };
 
 const requestRaw = async (path: string, init?: RequestInit): Promise<Response> => {

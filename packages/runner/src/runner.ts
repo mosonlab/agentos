@@ -8,6 +8,7 @@ import {
   manifestFor,
   outputTail,
   PREFLIGHT_CLASS,
+  CODEX_STARTER_MODEL,
   type AdapterEvent,
   type ExitEvidence,
   type RuntimeHandle,
@@ -493,7 +494,8 @@ export const runStartupPreflight = async (
   const results = {} as Record<RunnerKind, boolean>;
   const env = workspaceEnvironment(config);
   for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
-    const model = runner === "PI" ? "openai-codex/gpt-5.6-luna" : runner.toLowerCase();
+    const model = runner === "PI" ? "openai-codex/gpt-5.6-luna"
+      : runner === "CODEX" ? CODEX_STARTER_MODEL : runner.toLowerCase();
     const result = await adapters[runner].preflight({ config, runner, model, env });
     results[runner] = result.ok;
     await reportPreflightWithRetry(config, runner, result, retryOptions);

@@ -165,6 +165,10 @@ const codexStub = (log: string, authFails = false): string => [
   `echo "$@" >> ${log}`,
   'case "$1" in',
   '  --version) echo "codex-cli 0.147.0"; exit 0 ;;',
+  '  exec)',
+  '    if [ "$2" = "--help" ]; then echo "resume --json --model --config --dangerously-bypass-approvals-and-sandbox"; exit 0; fi',
+  '    if [ "$2" = "resume" ] && [ "$3" = "--help" ]; then echo "SESSION_ID --json --model --config --dangerously-bypass-approvals-and-sandbox read from stdin"; exit 0; fi',
+  '    ;;',
   authFails
     ? `  login) echo "${SECRETS[0]}"; echo "${SECRETS[1]}" 1>&2; echo "${SECRETS[2]}" 1>&2; exit 1 ;;`
     : '  login) echo "Logged in using ChatGPT"; exit 0 ;;',
@@ -228,12 +232,44 @@ test("startup reports Claude and Pi blocked, keeps their telemetry, and passes C
     // The two official checks, in order, and nothing else — no `login --api-key`,
     // no credential file read, no attempt to authenticate on the operator's
     // behalf.
-    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), ["--version", "login status"]);
+    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
+      "--version", "exec --help", "exec resume --help", "login status",
+    ]);
     // What is reported about a blocked backend is a verdict and a message, never
     // an environment or a credential.
     const claude = posts.find((post) => post.body.runner === "CLAUDE")!;
     assert.equal(claude.body.ok, false);
     assert.deepEqual(Object.keys(claude.body).sort(), ["authMode", "capabilities", "cliVersion", "error", "ok", "runner"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startup blocks a Codex CLI that lacks the exec protocol AgentOS invokes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-incompatible-"));
+  try {
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "codex-cli 0.1.0"; exit 0; fi',
+      'if [ "$1" = "exec" ]; then echo "legacy exec help"; exit 0; fi',
+      'if [ "$1" = "login" ]; then echo "Logged in using ChatGPT"; exit 0; fi',
+      "exit 1",
+    ].join("\n"));
+    await chmod(binary, 0o755);
+    const posts: Array<{ body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    assert.deepEqual(
+      await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary)),
+      { CLAUDE: false, CODEX: false, PI: false },
+    );
+    const codex = posts.find((post) => post.body.runner === "CODEX")!;
+    assert.equal(codex.body.error, "cli-incompatible: the CLI does not expose the required AgentOS exec protocol");
+    assert.equal(codex.body.cliVersion, "codex-cli 0.1.0");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -270,7 +306,9 @@ test("startup retries a temporarily unavailable API without rerunning CLI probes
       { runner: "CLAUDE", attempt: 2, attempts: 5 },
     ]);
     assert.deepEqual(posts.map((post) => post.body.runner), ["CLAUDE", "CODEX", "PI"]);
-    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), ["--version", "login status"]);
+    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
+      "--version", "exec --help", "exec resume --help", "login status",
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -397,7 +435,9 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     const wire = JSON.stringify(posts);
     for (const secret of SECRETS) assert.ok(!wire.includes(secret), `${secret} reached the control plane`);
     // And the login check itself is still the official one, unchanged.
-    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n").slice(0, 2), ["--version", "login status"]);
+    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n").slice(0, 4), [
+      "--version", "exec --help", "exec resume --help", "login status",
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
