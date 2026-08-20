@@ -28,7 +28,7 @@ import {
   type PlanInputs,
   type ServerIdentity,
 } from "./local-release-target.js";
-import { ARCHIVE_MEMBER, ATTESTATION_MEMBER, type BundleFacts } from "./backup-bundle.js";
+import { ARCHIVE_MEMBER, ATTESTATION_MEMBER, QUIESCENCE_TOKEN_V1, type BundleFacts } from "./backup-bundle.js";
 import {
   DRIFT_CHECK_COMMAND,
   FILES_PRECHECK_COMMAND,
@@ -121,7 +121,7 @@ const attestationText = (overrides: Record<string, unknown> = {}): string => JSO
   archive: { bytes: ARCHIVE_BYTES, sha256: ARCHIVE_SHA256 },
   targetFingerprint: TARGET_FINGERPRINT,
   walFingerprint: WAL_FINGERPRINT,
-  quiescence: "exclusive-maintenance-lock-held-for-the-whole-dump",
+  quiescence: QUIESCENCE_TOKEN_V1,
   ...overrides,
 });
 
@@ -895,6 +895,8 @@ describe("releaseMigrate --existing", () => {
         "archive-digest-disagrees-with-the-attestation"],
       [{ attestationText: "{" }, "attestation-is-not-json"],
       [{ attestationText: attestationText({ version: 2 }) }, "attestation-version-is-unsupported"],
+      [{ attestationText: attestationText({ quiescence: "attacker-controlled-lock-claim" }) },
+        "attestation-quiescence-is-unsupported"],
       [{ attestationText: attestationText({ walFingerprint: "short" }) }, "attestation-is-malformed"],
       [{ attestationText: attestationText({ createdAt: "yesterday" }) }, "attestation-created-at-is-unparsable"],
       [{ attestationText: attestationText({ createdAt: new Date(NOW_MS - 16 * 60_000).toISOString() }) },

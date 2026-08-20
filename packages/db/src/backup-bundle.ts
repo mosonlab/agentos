@@ -48,6 +48,8 @@ export const ATTESTATION_MEMBER = "attestation.json";
 /** The first five bytes of every PostgreSQL custom-format dump. */
 export const CUSTOM_FORMAT_MAGIC = "PGDMP";
 export const ATTESTATION_VERSION = 1;
+/** Version-1 proof that the exclusive maintenance lock covered the whole dump. */
+export const QUIESCENCE_TOKEN_V1 = "exclusive-maintenance-lock-held-for-the-whole-dump";
 
 export type BundleEntryKind = "file" | "directory" | "symlink" | "other";
 
@@ -80,7 +82,7 @@ export interface BackupAttestation {
   archiveSha256: string;
   targetFingerprint: string;
   walFingerprint: string;
-  quiescence: string;
+  quiescence: typeof QUIESCENCE_TOKEN_V1;
 }
 
 export type BundleResolution =
@@ -133,7 +135,7 @@ export const parseAttestation = (text: string): { ok: true; attestation: BackupA
   if (typeof walFingerprint !== "string" || !HEX_32.test(walFingerprint)) {
     return { ok: false, reason: "attestation-is-malformed" };
   }
-  if (typeof quiescence !== "string" || quiescence === "") return { ok: false, reason: "attestation-is-malformed" };
+  if (quiescence !== QUIESCENCE_TOKEN_V1) return { ok: false, reason: "attestation-quiescence-is-unsupported" };
 
   return {
     ok: true,
@@ -144,7 +146,7 @@ export const parseAttestation = (text: string): { ok: true; attestation: BackupA
       archiveSha256: sha256,
       targetFingerprint,
       walFingerprint,
-      quiescence,
+      quiescence: QUIESCENCE_TOKEN_V1,
     },
   };
 };
