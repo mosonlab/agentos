@@ -535,6 +535,10 @@ parallel_unit_tests() {
   run_workspace_script_parallel test 1
 }
 
+run_workspace_script_parallel_typecheck() {
+  run_workspace_script_parallel typecheck
+}
+
 verify_build_only_lifecycle_hooks() {
   local hook="$1"
   node -e '
@@ -564,7 +568,6 @@ run_database_preflight_tests() {
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
-  AGENTOS_DBTEST_CONCURRENCY="${DB_PREFLIGHT_CONCURRENCY}" \
     node --import tsx packages/api/scripts/dbtest.mjs packages/db/src/*.dbtest.ts
 }
 
@@ -575,59 +578,59 @@ run_api_database_tests() {
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
-  AGENTOS_DBTEST_CONCURRENCY="${API_DBTEST_CONCURRENCY}" \
     node --import tsx packages/api/scripts/dbtest.mjs
 }
 
-# The two runners share only the scratch PostgreSQL process. Their managers own
-# disjoint databases (PID/run-id names), their test files receive private clones,
-# and the wrappers above give the packages disjoint host-root subtrees. Running
-# them together therefore preserves both suites while spending the cores they
-# previously made each other wait for. Each label retains its own log, duration
-# and failure result; one failure cannot be hidden by the other suite passing.
-parallel_database_steps() {
-  local started preflight_pid api_pid preflight_rc api_rc preflight_end api_end
-  local preflight_log="${GATE_TMP}/database-preflight-tests.log"
-  local api_log="${GATE_TMP}/api-database-tests.log"
-  local preflight_done="${GATE_TMP}/database-preflight-tests.done"
-  local api_done="${GATE_TMP}/api-database-tests.done"
+# Runs two verdict steps whose mutable state is disjoint, while retaining each
+# step's own stable log, duration and failure. Both complete even when one fails,
+# but the gate fails under the first label that did; parallelism can never turn a
+# red step green. Callers below pair only read-only validation, or unit fixtures
+# under mktemp with a DBTEST runner that owns private databases and host roots.
+parallel_two_steps() {
+  local first_label="$1" first_command="$2" second_label="$3" second_command="$4"
+  local started first_pid second_pid first_rc second_rc first_end second_end
+  local first_safe second_safe first_log second_log first_done second_done
+  first_safe="$(printf '%s' "${first_label}" | tr ' /' '__')"
+  second_safe="$(printf '%s' "${second_label}" | tr ' /' '__')"
+  first_log="${GATE_TMP}/${first_safe}.log"
+  second_log="${GATE_TMP}/${second_safe}.log"
+  first_done="${GATE_TMP}/${first_safe}.done"
+  second_done="${GATE_TMP}/${second_safe}.done"
   started="$(date +%s)"
-  say "database preflight tests (parallel, ${DB_PREFLIGHT_CONCURRENCY} workers)"
-  note "shares only throwaway PostgreSQL with the API database tests"
-  say "api database tests (parallel, ${API_DBTEST_CONCURRENCY} workers)"
-  note "aggregate DBTEST concurrency: ${DBTEST_CONCURRENCY}"
-  FAILED_STEP="database tests"
+  say "${first_label} (parallel)"
+  say "${second_label} (parallel)"
+  FAILED_STEP="${first_label} / ${second_label}"
 
   (
-    if cd "${REPO_ROOT}" && run_database_preflight_tests; then rc=0; else rc=$?; fi
-    date +%s > "${preflight_done}"
+    if cd "${REPO_ROOT}" && "${first_command}"; then rc=0; else rc=$?; fi
+    date +%s > "${first_done}"
     exit "${rc}"
-  ) >"${preflight_log}" 2>&1 & preflight_pid=$!
+  ) >"${first_log}" 2>&1 & first_pid=$!
   (
-    if cd "${REPO_ROOT}" && run_api_database_tests; then rc=0; else rc=$?; fi
-    date +%s > "${api_done}"
+    if cd "${REPO_ROOT}" && "${second_command}"; then rc=0; else rc=$?; fi
+    date +%s > "${second_done}"
     exit "${rc}"
-  ) >"${api_log}" 2>&1 & api_pid=$!
+  ) >"${second_log}" 2>&1 & second_pid=$!
 
-  if wait "${preflight_pid}"; then preflight_rc=0; else preflight_rc=$?; fi
-  if wait "${api_pid}"; then api_rc=0; else api_rc=$?; fi
-  preflight_end="$(cat "${preflight_done}" 2>/dev/null || date +%s)"
-  api_end="$(cat "${api_done}" 2>/dev/null || date +%s)"
-  printf '\n--- database preflight tests ---\n'; cat "${preflight_log}" || preflight_rc=1
-  printf '\n--- api database tests ---\n'; cat "${api_log}" || api_rc=1
+  if wait "${first_pid}"; then first_rc=0; else first_rc=$?; fi
+  if wait "${second_pid}"; then second_rc=0; else second_rc=$?; fi
+  first_end="$(cat "${first_done}" 2>/dev/null || date +%s)"
+  second_end="$(cat "${second_done}" 2>/dev/null || date +%s)"
+  printf '\n--- %s ---\n' "${first_label}"; cat "${first_log}" || first_rc=1
+  printf '\n--- %s ---\n' "${second_label}"; cat "${second_log}" || second_rc=1
 
-  if [ "${preflight_rc}" -eq 0 ]; then
-    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "database preflight tests" "$((preflight_end - started))")")
+  if [ "${first_rc}" -eq 0 ]; then
+    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${first_label}" "$((first_end - started))")")
   else
-    STEP_REPORT+=("FAIL  database preflight tests")
+    STEP_REPORT+=("FAIL  ${first_label}")
   fi
-  if [ "${api_rc}" -eq 0 ]; then
-    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "api database tests" "$((api_end - started))")")
+  if [ "${second_rc}" -eq 0 ]; then
+    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${second_label}" "$((second_end - started))")")
   else
-    STEP_REPORT+=("FAIL  api database tests")
+    STEP_REPORT+=("FAIL  ${second_label}")
   fi
-  if [ "${preflight_rc}" -ne 0 ]; then FAILED_STEP="database preflight tests"; return 1; fi
-  if [ "${api_rc}" -ne 0 ]; then FAILED_STEP="api database tests"; return 1; fi
+  if [ "${first_rc}" -ne 0 ]; then FAILED_STEP="${first_label}"; return 1; fi
+  if [ "${second_rc}" -ne 0 ]; then FAILED_STEP="${second_label}"; return 1; fi
   FAILED_STEP=""
 }
 
@@ -863,17 +866,7 @@ fi
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
 DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, availableParallelism() - 1)))')"
-if [ "${DBTEST_CONCURRENCY}" -gt 4 ]; then
-  DB_PREFLIGHT_CONCURRENCY=4
-  API_DBTEST_CONCURRENCY="$((DBTEST_CONCURRENCY - DB_PREFLIGHT_CONCURRENCY))"
-elif [ "${DBTEST_CONCURRENCY}" -gt 1 ]; then
-  DB_PREFLIGHT_CONCURRENCY="$((DBTEST_CONCURRENCY / 2))"
-  API_DBTEST_CONCURRENCY="$((DBTEST_CONCURRENCY - DB_PREFLIGHT_CONCURRENCY))"
-else
-  DB_PREFLIGHT_CONCURRENCY=1
-  API_DBTEST_CONCURRENCY=1
-fi
-export DBTEST_CONCURRENCY DB_PREFLIGHT_CONCURRENCY API_DBTEST_CONCURRENCY
+export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=agentos \
   -e POSTGRES_DB=agentos_gate \
@@ -900,7 +893,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${DBTEST_CONCURRENCY} total (${DB_PREFLIGHT_CONCURRENCY} preflight + ${API_DBTEST_CONCURRENCY} API), available cores minus one"
+note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (available cores minus one, via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -954,18 +947,19 @@ step "npm ci" install_dependencies
 step "release documentation executable contract" npm run test:release-docs
 step "templates release-demo harness" npm run test:demo-templates
 step "prisma generate" npm run db:generate
-step "typecheck (all workspaces)" run_workspace_script_parallel typecheck
 # The minimum lint gate (#143): Biome's opt-in safety rules, then the one
 # type-aware rule (no-floating-promises) through typescript-eslint. Both are
 # npm dependencies and nothing here shells out, so the remote gate worker runs
-# it unchanged. It sits after typecheck because a type error makes the
-# type-aware pass report nonsense, and before build because it needs no dist.
-# Formatting is deliberately not checked — see biome.jsonc.
-step "lint (biome + type-aware no-floating-promises)" parallel_lint
+# it unchanged. Typecheck and lint are read-only and both must finish green;
+# running them together changes only which diagnostic arrives first on a red
+# tree. Both finish before build, and formatting is deliberately not checked —
+# see biome.jsonc.
+parallel_two_steps \
+  "typecheck (all workspaces)" run_workspace_script_parallel_typecheck \
+  "lint (biome + type-aware no-floating-promises)" parallel_lint
 # apps/web's CSS regression test reads the built stylesheet out of apps/web/dist,
 # and the dbtests spawn the real API out of packages/api/dist.
 step "build (all workspaces)" build_all
-step "unit tests (all workspaces)" parallel_unit_tests
 # prisma resolves its schema from the working directory, so this has to run
 # inside packages/db rather than at the repository root.
 step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deploy'
@@ -975,10 +969,8 @@ step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deplo
 # just passed. Invoke the shared DBTEST runner directly so each file receives a
 # cloned database and private host roots, including the four packages/db files
 # that the old package script forced onto one shared schema serially.
-if [ "${DBTEST_CONCURRENCY}" -eq 1 ]; then
-  step "database preflight tests" run_database_preflight_tests
-  step "api database tests" run_api_database_tests
-else
-  parallel_database_steps
-fi
+parallel_two_steps \
+  "unit tests (all workspaces)" parallel_unit_tests \
+  "database preflight tests" run_database_preflight_tests
+step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift
