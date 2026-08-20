@@ -25,17 +25,15 @@
  *     tree it is standing in and requires the sets to be equal — no missing
  *     entry, no extra entry, no differing digest. An attestation minted for a
  *     different tree does not verify against this one.
- *  3. **The commit and tree object ids are hard inputs wherever they can be
- *     checked.** In the lineage it was minted in, the attested commit must
- *     exist, its root tree must equal the attested tree, it must be an ancestor
- *     of HEAD, and the declared master must be an ancestor of it. A published
- *     snapshot is a *different* lineage — the export committed into a fresh
- *     repository — where none of those commits exist to be asked about; there
- *     the question becomes whether that repository committed the release path
- *     it is standing on, every file at the attested bytes. With no history at
- *     all, both object ids remain covered by the signature, so they are
- *     attested rather than merely asserted. See `AuthorityBinding`: the
- *     preflight prints which of the three answered, so the log says what was
+ *  3. **The release path is required to be committed, at the attested bytes.**
+ *     The attested commit and tree ids belong to the pre-cutover assembly
+ *     lineage and are covered by the signature, so they are attested rather
+ *     than merely asserted; they are not looked for in this repository's
+ *     history, which no longer contains them. What a checkout with history is
+ *     asked instead is whether it committed the release path it is standing
+ *     on, every file at the attested bytes. With no history at all — an export,
+ *     a tarball — even that cannot be asked. See `AuthorityBinding`: the
+ *     preflight prints which of the two answered, so the log says what was
  *     proved rather than leaving it to be assumed.
  *
  * Parsing is closed: unknown fields at any level are a refusal, not something
@@ -327,35 +325,27 @@ export const readPublicKey = (pem: string): PublicKeyResult => {
 export interface GitProbe {
   commitExists(sha: string): boolean;
   isAncestor(ancestor: string, descendant: string): boolean;
-  treeOf(sha: string): string | null;
   /** The blob object id `HEAD` holds at a path, or null if it holds none. */
   blobAt(path: string): string | null;
 }
 
 /**
- * Which of the three questions about object ids this checkout can be asked.
+ * Which of the two questions about object ids this checkout can be asked.
  *
  * `signature-and-content` — no history at all: an export, a tarball, a copied
  * directory. Only the signature attests the commit and tree ids.
  *
- * `signature-content-and-history` — the minting lineage: this checkout has the
- * attested commit, so its tree, its ancestry to HEAD, and the recorded master's
- * ancestry to it are all real questions with real answers.
- *
- * `signature-content-and-published-tree` — a different lineage. A published
- * snapshot is the export committed into a fresh repository, and none of the
- * private commits exist there to be asked about. What that repository *can*
- * answer is whether it committed the release path it is standing on.
+ * `signature-content-and-committed-tree` — a checkout with history, which since
+ * the single-repository cutover is the only other case. The attested commit is
+ * from the pre-cutover assembly lineage and is not asked about; what a checkout
+ * can answer is whether it committed the release path it is standing on.
  */
 export type AuthorityBinding =
   | "signature-and-content"
-  | "signature-content-and-history"
-  | "signature-content-and-published-tree";
+  | "signature-content-and-committed-tree";
 
-export const bindingOf = (authority: ReleaseAuthority, git: GitProbe | null): AuthorityBinding => {
-  if (git === null) return "signature-and-content";
-  return git.commitExists(authority.commit) ? "signature-content-and-history" : "signature-content-and-published-tree";
-};
+export const bindingOf = (_authority: ReleaseAuthority, git: GitProbe | null): AuthorityBinding =>
+  git === null ? "signature-and-content" : "signature-content-and-committed-tree";
 
 /**
  * The first path, in one place: the private revalidation document records both
@@ -490,41 +480,35 @@ export const verifyReleaseAuthority = (input: VerifyInput): string[] => {
     }
   }
 
-  // 6. The object ids, against whichever lineage this checkout stands in.
+  // 6. The object ids, against the tree this checkout has actually committed.
+  //
+  // The attested commit belongs to the private assembly lineage this project
+  // was built in. Since the single-repository cutover that lineage is not this
+  // repository's history, and asking whether it is present decides nothing
+  // about the tree: an operator checkout that still holds those objects would
+  // be verified by a different rule than the fresh clone standing on the same
+  // commit. So the attested commit and tree are attested by the signature
+  // alone, and what is required here is the question every checkout can answer
+  // — every release-path file is *committed here*, at `HEAD`, with the bytes
+  // hashed above. A tree whose release path is loose on disk, or committed as
+  // something else, does not pass on the strength of an attestation minted
+  // somewhere else.
+  //
+  // Short term: the attestation still names the pre-cutover commit, which is
+  // why the ancestry questions cannot be asked at all. It is re-signed against
+  // this repository's own history in v0.1.1, and they can come back with it.
   const history = input.git;
   if (history !== null) {
-    if (history.commitExists(authority.commit)) {
-      // The minting lineage. Every question can be asked here, so every
-      // question is asked here.
-      if (history.treeOf(authority.commit) !== authority.tree) {
-        failures.push(`the attested commit ${authority.commit} does not have the attested tree ${authority.tree}`);
-      }
-      if (!history.isAncestor(authority.commit, "HEAD")) {
-        failures.push(`the attested commit ${authority.commit} is not an ancestor of the current HEAD`);
-      }
-      if (!history.isAncestor(input.masterSha, authority.commit)) {
-        failures.push(`the recorded master ${input.masterSha} is not an ancestor of the attested commit ${authority.commit}`);
-      }
-    } else {
-      // A different lineage — which is what a published snapshot is. The export
-      // is committed into a fresh repository, and none of the private commits
-      // exist there, so the private ancestry is not a question this checkout
-      // can answer at all. It is replaced, not dropped, by the strongest one it
-      // can: every release-path file must be *committed here*, at `HEAD`, with
-      // the bytes hashed above. A tree whose release path is loose on disk, or
-      // committed as something else, does not pass on the strength of an
-      // attestation minted somewhere else.
-      const loose = input.manifest.entries
-        .filter((entry) => history.blobAt(entry.path) !== entry.blob)
-        .map((entry) => entry.path)
-        .sort();
-      if (loose.length > 0) {
-        failures.push(
-          `this checkout's HEAD does not hold the attested bytes for: ${describeSet(loose)}`
-          + " — a published snapshot must commit the release path it stands on,"
-          + " and an exported tree must not sit inside an unrelated checkout",
-        );
-      }
+    const loose = input.manifest.entries
+      .filter((entry) => history.blobAt(entry.path) !== entry.blob)
+      .map((entry) => entry.path)
+      .sort();
+    if (loose.length > 0) {
+      failures.push(
+        `this checkout's HEAD does not hold the attested bytes for: ${describeSet(loose)}`
+        + " — a checkout must commit the release path it stands on,"
+        + " and an exported tree must not sit inside an unrelated checkout",
+      );
     }
   }
 

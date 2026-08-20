@@ -95,39 +95,33 @@ npm run snapshot:scan
 node scripts/public-snapshot-scan.mjs --list-included
 ```
 
-The manifest declares it under `mintedArtifacts`, and the scanner takes those
-files as input alongside `git ls-files` — reading their bytes, classifying them
-against the same include rules, and listing them in `--list-included`. An
-include glob on its own would only say the file *may* be published; because the
-artifact is `.gitignore`d, nothing tracked would ever have opened it. The report
-counts minted files separately from tracked ones, and its `source` says which
-kinds it read.
+The attestation is a tracked file, so `git ls-files` sees it and the scanner
+reads its bytes and classifies it against the same include rules as everything
+else. `mintedArtifacts` is the manifest's mechanism for a snapshot input that is
+generated rather than tracked, and it is empty: nothing this repository
+publishes is minted-and-untracked today.
 
-**Then publish, and force-add the attestation.** `.gitignore` is itself part of
-the published surface and it names `release-authority.json`, so committing the
-export into the public repository skips the attestation unless you say
-otherwise:
+**Then commit the attestation.** It is tracked, so it is reviewed and gated like
+the key that verifies it, and re-signing it is a commit like any other:
 
 ```sh
-git add --all
-git add --force release-authority.json
+git add release-authority.json
 ```
 
-Miss that line and the public repository carries the trust anchor with nothing
-for it to verify, and every reader of it stops at `authority`.
+An attestation left stale after the migration set moves is refused by the
+preflight rather than ignored, so a release whose authority was not re-signed
+stops at `authority`.
 
-**What the published repository proves, and what it cannot.** A public snapshot
-is this export committed into a fresh repository, so it has history — its own.
-None of the private commits the attestation names exist there, which means the
-preflight cannot ask that repository about the private ancestry at all. It asks
-the strongest question that lineage can answer instead: every release-path file
-must be committed there, at `HEAD`, with the bytes the attestation was minted
-over. The run prints which of the three bindings answered:
+**What a checkout proves, and what it cannot.** The attested commit belongs to
+the pre-cutover assembly lineage, and no current checkout has it, so the
+preflight does not ask about it: the commit and tree ids stay covered by the
+signature. What a checkout with history is asked is whether every release-path
+file is committed there, at `HEAD`, with the bytes the attestation was minted
+over. The run prints which of the two bindings answered:
 
 ```text
-preflight authority=attestation binding=signature-content-and-published-tree
+preflight authority=attestation binding=signature-content-and-committed-tree
 preflight authority=attestation binding=signature-and-content
-preflight authority=revalidation-document+attestation binding=signature-content-and-history
 ```
 
 Nothing else is relaxed there. Signature, trust anchor, closed file manifest,
