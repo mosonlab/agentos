@@ -13,6 +13,7 @@ beforeEach(async () => { await resetTestDb(db); });
 after(async () => { await db.$disconnect(); });
 
 const OPERATOR = "operator-db-token";
+const RUNNER = "runner-db-token";
 
 const asOperator = async <T>(operation: () => T | Promise<T>): Promise<T> => {
   const prior = process.env.OPERATOR_TOKEN;
@@ -21,6 +22,16 @@ const asOperator = async <T>(operation: () => T | Promise<T>): Promise<T> => {
     return await operation();
   } finally {
     if (prior === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+const asRunner = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = RUNNER;
+  try {
+    return await operation();
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = prior;
   }
 };
 
@@ -173,6 +184,59 @@ test("repo-grant revocation and manual start serialize without an unclaimable Ru
   const grants = await db.agentRepoAccess.count({ where: { agentId: context.agent.id, repoId: context.repo.id } });
   assert.equal(runs, start!.status === 201 ? 1 : 0);
   assert.equal(grants, runs === 1 ? 1 : 0, `runs=${runs} grants=${grants}`);
+});
+
+test("repo-grant revocation and template instantiation serialize across future steps", { timeout: 20_000 }, async () => {
+  const context = await seedTask("grant-template-race", { status: "DONE" });
+  const template = await seedTemplate(context);
+  const app = createApp(db);
+  const [instantiate, revoke] = await asOperator(() => synchronised([
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ repoId: context.repo.id, variables: {} }),
+      });
+    },
+    async (release, gate) => {
+      release();
+      await gate;
+      return app.request(`/agents/${context.agent.id}/repos/${context.repo.id}/access`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${OPERATOR}` },
+      });
+    },
+  ]));
+  assert.ok(
+    instantiate!.status === 201 && revoke!.status === 409
+      || instantiate!.status === 400 && revoke!.status === 204,
+    `instantiate=${instantiate!.status} revoke=${revoke!.status}`,
+  );
+  const chainTasks = await db.task.count({ where: { templateId: template.id } });
+  const grants = await db.agentRepoAccess.count({ where: { agentId: context.agent.id, repoId: context.repo.id } });
+  assert.equal(chainTasks, instantiate!.status === 201 ? 2 : 0);
+  assert.equal(grants, chainTasks > 0 ? 1 : 0);
+});
+
+test("claim turns a legacy queued run with a missing grant into an actionable failure", async () => {
+  const context = await seedTask("claim-missing-grant");
+  await seedRun(context, 1, "QUEUED");
+  await db.agentRepoAccess.delete({ where: { agentId_repoId: { agentId: context.agent.id, repoId: context.repo.id } } });
+  const response = await asRunner(() => createApp(db).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "grant-repair-runner", leaseSeconds: 60 }),
+  }));
+  assert.equal(response.status, 204);
+  const run = await db.run.findFirstOrThrow({ where: { taskId: context.task.id } });
+  const task = await db.task.findUniqueOrThrow({ where: { id: context.task.id } });
+  assert.equal(run.status, "FAILED");
+  assert.match(run.failureReason ?? "", /restore the agent Repo grant/);
+  assert.equal(task.status, "BACKLOG");
+  assert.match(task.failureReason ?? "", /repository-grant-missing/);
+  assert.equal(await db.taskActivity.count({ where: { taskId: task.id, body: { contains: "restore the grant and retry" } } }), 1);
 });
 
 test("a second start press is 409, not a second run", async () => {

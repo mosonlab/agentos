@@ -4,6 +4,7 @@ import {
   AssigneeType,
   enqueueTaskRun,
   integratorBindingRefusal,
+  lockAgentRepoGrant,
   lockAgentRows,
   Prisma,
   type PrismaClient,
@@ -11,6 +12,8 @@ import {
   TaskStatus,
   type TriggerFireSource,
 } from "@agentos/db";
+
+import { isValidBranchName } from "./branch-name.js";
 
 export type InstantiateTemplateInput = {
   repoId: string;
@@ -42,6 +45,10 @@ const interpolate = (source: string, variables: Record<string, string>): string 
   (_match, name: string) => variables[name] ?? `{{${name}}}`,
 );
 
+export const isUsableTemplateVariable = (value: string | undefined): value is string => (
+  value !== undefined && value.trim().length > 0
+);
+
 export const instantiateTemplate = async (
   db: PrismaClient,
   projectId: string,
@@ -67,12 +74,13 @@ export const instantiateTemplate = async (
   if (!template) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
   if (template.steps.length === 0) throw new Error("Template has no steps");
-  const missing = template.variables.filter((variable) => (
-    !Object.prototype.hasOwnProperty.call(input.variables, variable) || input.variables[variable] === undefined
-  ));
+  const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
   if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
   if (unknown.length > 0) throw new Error(`Unknown template variables: ${unknown.join(", ")}`);
+  if (input.variables.branchName !== undefined && !isValidBranchName(input.variables.branchName)) {
+    throw new Error("Invalid template branch name");
+  }
   for (const step of template.steps) {
     // §D-P4, before any task row exists. A doctored template — the sentinel on
     // an ordinary step, or a model agent on the integrator step — fails
@@ -116,6 +124,16 @@ export const instantiateTemplate = async (
           }
           if (lockedAgents.get(step.assigneeAgentId)) {
             throw new Error(`Template step ${step.name} agent ${step.assigneeAgent?.name ?? step.assigneeAgentId} is archived`);
+          }
+        }
+        const grantedAgentIds = [...new Set(template.steps.flatMap((step) => (
+          step.assigneeAgentId ? [step.assigneeAgentId] : []
+        )))].sort();
+        for (const agentId of grantedAgentIds) {
+          const granted = await lockAgentRepoGrant(tx, { projectId, agentId, repoId: repo.id });
+          if (!granted) {
+            const agentName = template.steps.find((step) => step.assigneeAgentId === agentId)?.assigneeAgent?.name ?? agentId;
+            throw new Error(`Agent ${agentName} has no grant for Repo ${repo.name}`);
           }
         }
         const tasks = [];

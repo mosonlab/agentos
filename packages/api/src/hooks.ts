@@ -22,7 +22,7 @@ const scalar = (value: unknown): value is string | number | boolean => (
  * cannot drift apart.
  */
 export const usableDefault = (value: unknown): value is string | number | boolean => (
-  scalar(value) && String(value) !== ""
+  scalar(value) && String(value).trim() !== ""
 );
 
 const atPath = (payload: Record<string, unknown>, path: string): unknown => {
@@ -47,7 +47,7 @@ export const resolvePayloadVariables = (
     const path = typeof mapping.map?.[name] === "string" ? mapping.map[name] : undefined;
     const resolved = path ? atPath(payload, path) : undefined;
     const fallback = mapping.defaults?.[name];
-    const value = scalar(resolved) ? resolved : usableDefault(fallback) ? fallback : undefined;
+    const value = usableDefault(resolved) ? resolved : usableDefault(fallback) ? fallback : undefined;
     if (value === undefined) unresolved.push(name);
     else variables[name] = String(value);
   }

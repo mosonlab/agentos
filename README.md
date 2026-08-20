@@ -245,6 +245,17 @@ write inside the Files Root.
 of these limits and what is and is not checked; read it before pointing this at
 anything you care about.
 
+## Templates release demo
+
+`npm run demo:templates -- preflight|setup|instantiate|capture|verify|reset`
+drives the guarded evidence workflow for the canonical ten-step template. The
+current contract and exact commands are in
+[`docs/demos/templates-release-demo.md`](docs/demos/templates-release-demo.md).
+It proves one serial execution at named AgentOS and target SHAs. OSS-B separately
+authorizes any fresh-install claim, and CP-A separately authorizes the named
+provider path; a rehearsal or one provider run proves neither universal provider
+compatibility nor a fresh install.
+
 ## Verification
 
 The repository defines these checks, in this order:

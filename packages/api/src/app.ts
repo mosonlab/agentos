@@ -80,6 +80,7 @@ import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
 import { boardCard, etagFor, etagMatches } from "./board.js";
+import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
@@ -113,7 +114,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
-import { instantiateTemplate } from "./templates.js";
+import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
@@ -496,10 +497,19 @@ const inboxQuestionInput = z.object({
 });
 const instantiateTemplateInput = z.object({
   repoId: id,
-  variables: z.record(z.string(), z.string().min(1)),
+  variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
+}).superRefine((value, context) => {
+  const branchName = value.variables.branchName;
+  if (branchName !== undefined && !isValidBranchName(branchName)) {
+    context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
+  }
 });
+const isTemplateInputError = (error: unknown): error is Error => (
+  error instanceof Error
+  && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
+);
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -968,6 +978,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
         return context.json({ error: "Webhook instantiation is busy; retry later" }, 503);
       }
+      if (isTemplateInputError(error)) return context.json({ error: error.message }, 400);
       throw error;
     }
   });
@@ -1526,6 +1537,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       const active = await tx.run.count({ where: { agentId, repoId, status: { in: ACTIVE_RUN_STATUSES } } });
       if (active > 0) return { error: "Cannot revoke repo access while the agent has an active run on this Repo", code: 409 as const };
+      const dependentSteps = await tx.task.count({ where: {
+        projectId: grant.projectId,
+        repoId,
+        assigneeAgentId: agentId,
+        chainId: { not: null },
+        archivedAt: null,
+        status: { in: [TaskStatus.BACKLOG, TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
+      } });
+      if (dependentSteps > 0) {
+        return {
+          error: "Cannot revoke repo access while a nonterminal chain step depends on this grant",
+          code: 409 as const,
+        };
+      }
       await tx.agentRepoAccess.delete({ where: { agentId_repoId: { agentId, repoId } } });
       return { ok: true as const };
     });
@@ -1819,7 +1844,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await readJson(context.req.raw, instantiateTemplateInput),
       ), 201);
     } catch (error: unknown) {
-      if (error instanceof Error && /(not found|has no|is archived|Missing template|Unknown template|must be agent)/i.test(error.message)) {
+      if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }
       throw error;
@@ -2008,7 +2033,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const fallback = mapping.defaults[name];
       // Same `usableDefault` the webhook path uses, so an empty-string default
       // does not resolve here while the UI badges the variable `required`.
-      const value = supplied !== undefined ? supplied
+      const value = isUsableTemplateVariable(supplied) ? supplied
         : usableDefault(fallback) ? String(fallback)
         : undefined;
       if (value === undefined) unresolved.push(name); else variables[name] = value;
@@ -2030,7 +2055,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
     } catch (error: unknown) {
-      if (error instanceof Error && /(not found|has no|is archived|Missing template|Unknown template|must be agent)/i.test(error.message)) {
+      if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }
       throw error;
@@ -3301,7 +3326,34 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const executorRunnerIds = mergeExecutorRunnerIds();
       for (const candidate of candidates) {
         if (!candidate.task || !candidate.repo) continue;
-        if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) continue;
+        if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
+          const reason = "repository-grant-missing: restore the agent Repo grant, then retry this run";
+          const stranded = await tx.run.updateMany({
+            where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+            data: {
+              status: RunStatus.FAILED,
+              failureClass: FailureClass.TASK_FAILED,
+              failureReason: reason,
+              retryable: false,
+              endedAt: now,
+            },
+          });
+          if (stranded.count === 1) {
+            await tx.task.update({
+              where: { id: candidate.task.id },
+              data: { status: TaskStatus.BACKLOG, failureReason: reason },
+            });
+            await tx.taskActivity.create({
+              data: {
+                taskId: candidate.task.id,
+                actorType: "control-plane",
+                body: "Queued run stopped because its repository grant is missing; restore the grant and retry",
+                metadata: { runId: candidate.id, condition: "repository-grant-missing" },
+              },
+            });
+          }
+          continue;
+        }
         // §D-P4. A candidate whose (agent, step) binding is invalid is *skipped*,
         // not claimed: a mis-bound step-10 row must never be handed to anything,
         // and the sentinel Agent on an ordinary step must never reach an adapter.
