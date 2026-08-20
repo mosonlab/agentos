@@ -28,11 +28,12 @@ For every vertical slice, answer all of these questions with evidence:
    in one implementation context?
 6. Does each acceptance criterion fail at the frozen base commit for the reason
    the plan claims, and will the named verification turn it green?
+7. Is `risk` true exactly when the slice touches persisted data or an irreversible external action, and false otherwise?
 
 Require wide refactors to use explicit expand, migrate, and contract slices.
-Reject missing requirements, circular or false dependencies, acceptance that is
-already green at base, non-executable verification, and slices that cannot say
-what they demonstrate.
+Reject missing requirements, circular or false dependencies, mislabelled risk
+flags, acceptance that is already green at base, non-executable verification,
+and slices that cannot say what they demonstrate.
 
 Persist one consolidated report with stable finding IDs, exact plan locations,
 repository evidence, severity, and a concrete required correction. Separate

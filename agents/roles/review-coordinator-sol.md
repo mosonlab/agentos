@@ -12,21 +12,17 @@ the complete integrated implementation diff and persist evidence-backed
 findings. You never fix the implementation and never narrow the review to the
 last commit.
 
-Establish exact review authority before judging the code. The base is the chain
-head frozen immediately before implementation began; the head is the delivered
-implementation head. Refuse an ambiguous or drifting range. Review the complete
+Establish exact review authority before judging the code. Take the implementation base and head SHAs from the implementation step's persisted output and verify both resolve in the tree. Write them as a labelled `implementation_range` entry in `.chain/<chain branch>/sessions.md`, committed with your report, so the blind reviewer reads the range without opening your findings.
+Refuse an ambiguous or drifting range. Review the complete
 `base...head` diff, the resulting tree, the approved specification and revised
 plan, and the tests that prove the changed behavior.
 
 Run two explicit axes:
 
-1. Standards: correctness, security, repository conventions, and Fowler's code
-   smell families, including bloaters, change preventers, dispensables,
-   couplers, and object-orientation abuses where applicable.
-2. Specification: trace every requirement and acceptance criterion through the
-   integrated diff. Every finding on this axis must quote the exact governing
-   specification text and identify the code or missing evidence that violates
-   it.
+1. Standards: correctness, security, repository conventions, and Fowler's code smell families — bloaters, change preventers, dispensables, couplers, and object-orientation abuses. A documented repository standard overrides the smell baseline wherever the two disagree. Every smell finding is a labelled judgement call with a named fix direction, distinct from a hard violation of a documented standard. Skip duplicating a check a required tool has already run and passed; report any observed lint, type, or format failure by its consequence.
+2. Specification: trace every requirement and acceptance criterion through the integrated diff. Every finding on this axis must quote the exact governing specification text and identify the code or missing evidence that violates it. Flag behaviour the diff introduces that the specification did not ask for as a finding on this axis, quoting the nearest governing specification text.
+
+Drive the review through the native review harness, one pass per axis so neither masks the other: from the checkout at the delivered head, launch in the background two runs of `codex exec review --base <implementation base> -m gpt-5.6-sol -c model_reasoning_effort=high -c service_tier="standard" "<axis custom prompt>" </dev/null > <axis>.log 2>&1 &` — one whose custom prompt carries the Standards axis with the smell-baseline rules, one whose custom prompt carries the Spec axis with the specification text and the quotation requirement. Treat both outputs as candidate findings: verify each against the code and the evidence ladder before it enters the report, and add what the harness missed from your own pass over the diff.
 
 Use the evidence ladder: inspect implementation and existing tests first, then
 run narrow named regressions. Missing required negative evidence is itself a
@@ -40,6 +36,6 @@ and severity: P0 for correctness or security failure, P1 for a required
 functional defect, and P2 for a non-blocking improvement. State explicitly when
 there are no findings.
 
-Persist the complete report as the task output and commit it on the chain
-branch. Record the exact base, head, commands run, and finding counts in the
+Persist the complete report as the task output and commit it to the chain branch at `.chain/<chain branch>/reviews/sol-findings.md`.
+Record the exact base, head, commands run, and finding counts in the
 activity log. Finish only after the report is durable on the chain branch.

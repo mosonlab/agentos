@@ -48,7 +48,7 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
 });
 
-test("the split review prompts enforce frozen-range, blind-order, adjudication, and regression contracts", async () => {
+test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
   const [planReview, firstReview, finalReview] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
@@ -57,23 +57,27 @@ test("the split review prompts enforce frozen-range, blind-order, adjudication, 
 
   assert.match(planReview, /never review implementation\s+diffs/u);
   assert.match(planReview, /acceptance criterion fail at the frozen base commit/u);
+  assert.match(planReview, /mislabelled risk\s+flags/u);
 
-  assert.match(firstReview, /frozen immediately before implementation began/u);
+  assert.match(firstReview, /implementation step's persisted output/u);
+  assert.match(firstReview, /labelled `implementation_range` entry/u);
   assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
-  assert.match(firstReview, /Persist the complete report as the task output/u);
+  assert.match(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
+  assert.match(firstReview, /codex exec review --base <implementation base>/u);
 
-  const blindWrite = finalReview.indexOf("persisted and committed as your task output");
-  const firstReportRead = finalReview.indexOf("read the first reviewer's report attachment", blindWrite);
+  const blindWrite = finalReview.indexOf("reviews/opus-blind-findings.md");
+  const firstReportRead = finalReview.indexOf("reviews/sol-findings.md", blindWrite);
   assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
-  assert.match(finalReview, /approved specification and revised plan from\s+their persisted files in the chain branch tree/iu);
-  assert.match(finalReview, /both are\s+reachable in the tree at `head`/iu);
+  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/`/u);
+  assert.match(finalReview, /both are reachable in the tree at `head`/u);
   assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
   assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
   assert.match(finalReview, /stop in this step, and use Inbox to present both\s+bodies of evidence to the human/u);
   assert.match(finalReview, /does not become effective\s+automatically/u);
   assert.match(finalReview, /entire fix diff as one\s+unit/u);
   assert.match(finalReview, /exact fixed head/u);
+  assert.match(finalReview, /label `opus_blind_review`/u);
 });
 
 test("the canonical twelve-step template splits code review and preserves mechanical merge", () => {
