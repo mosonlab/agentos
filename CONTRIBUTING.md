@@ -69,6 +69,13 @@ something outside the checkout.
   needs `npm install && npm run db:generate && npm run build -w @agentos/db`
   before anything else works.
 
+### Development database bootstrap
+
+`npm run db:migrate` is `prisma migrate dev`. It bypasses the release migration
+preflight and may create or rewrite development migration history. Use it only
+against a disposable developer database. It is never an installation or upgrade
+command; the release install path is `npm run db:migrate:release -- --fresh`.
+
 ### The public surface is closed by default
 
 `public-snapshot.json` names what may be published. Every tracked file must be
