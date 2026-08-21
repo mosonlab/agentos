@@ -13,3 +13,12 @@
 - coordinator run: `cmt2fud9q073tmp45y82mixoc`
 - standards harness session: `01a0228d-6992-7932-a729-117c6a8bc1c4`
 - specification harness session: `01a0228d-69a8-78b3-b178-f58932ee6998`
+
+## opus_blind_review
+
+- coordinator run: `cmt2gd12x08vkmp45aocvq44u`
+- blind findings commit: `7ed6749` (committed before `sol-findings.md` was opened)
+- reports adjudicated: `reviews/sol-findings.md` (report A),
+  `reviews/opus-blind-findings.md` (report B)
+- closed adjudication: `reviews/adjudication.md`
+- resume this session id for post-fix regression verification; never select by recency
