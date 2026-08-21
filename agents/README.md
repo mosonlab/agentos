@@ -36,7 +36,7 @@ spawnPolicy: null                      # null or an inline JSON object
 
 The `compound-engineer-workflow` directory contains exactly twelve files and `direct-engineer-workflow` exactly six, each with contiguous indexes. The filename prefix must match `stepIndex`, and only these structural keys are accepted. Step display names remain seed-owned presentation metadata; all execution structure and prompt text live in the Markdown sources.
 
-Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `implementation-plan-executioner`, `review-coordinator-opus`).
+Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `senior-dev-luna`, `implementation-plan-executioner`, `review-coordinator-opus`).
 
 Approval is task metadata, not an Agent personality. Roles read the current
 task's `approvalGate`; they do not hard-code a pause or send a second Inbox
@@ -45,7 +45,7 @@ shorter-route rules live only in the routing contract.
 
 The seed installs two templates over these roles: the twelve-step Full
 Assurance chain, and the six-step direct chain (`direct-engineer-workflow`) —
-implementation by `senior-dev` from the task brief, the same dual blind review
+implementation by `senior-dev-luna` from the task brief, the same dual blind review
 spine, and a terminal human pull-request gate with no mechanical merge. Both
 step contracts live in their Markdown directories under `templates/`.
 

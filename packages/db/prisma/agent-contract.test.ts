@@ -147,7 +147,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.deepEqual(
     directTemplateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
     [
-      { stepIndex: 1, agentName: "senior-dev", outputKind: "implementation" },
+      { stepIndex: 1, agentName: "senior-dev-luna", outputKind: "implementation" },
       { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
