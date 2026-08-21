@@ -80,6 +80,12 @@ export type ClaimedTask = {
     maxRunsPerTask: number;
     model: string;
     targetBranch: string | null;
+    /** Exact commit selected by baseFromStepIndex. Null means ordinary branch
+     * provisioning; a value means fetch-only detached provisioning. */
+    pinnedBaseSha: string | null;
+    /** Immutable review range exposed without revealing predecessor outputs. */
+    implementationBaseSha: string | null;
+    implementationHeadSha: string | null;
     promptHash: string;
     workspacePath: string | null;
     branch: string | null;
@@ -362,5 +368,15 @@ export const reportPreflight = async (
   await request(config, "/runner/preflight", {
     method: "POST",
     body: JSON.stringify({ runner, ...result }),
+  });
+};
+
+export const reportCliAvailability = async (
+  config: RunnerConfig,
+  availability: { runner: RunnerKind; binary: string; available: boolean; resolvedPath: string | null },
+): Promise<void> => {
+  await request(config, "/runner/availability", {
+    method: "POST",
+    body: JSON.stringify(availability),
   });
 };

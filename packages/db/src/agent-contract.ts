@@ -17,6 +17,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "review-coordinator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "senior-dev", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
+  { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
   { name: "spec", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
 ] as const;
 
@@ -24,7 +25,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
  * The Direct tier: no spec or plan phase, and no mechanical merge — the
  * integrator's bidirectional binding admits only step 12 of the twelve-step
  * template, so a direct chain ends at its human pull-request gate and the
- * human merges. Implementation is senior-dev, not the executioner, whose
+ * human merges. Implementation is senior-dev-luna, not the executioner, whose
  * contract presumes an existing reviewed plan.
  */
 export const DIRECT_TEMPLATE_NAME = "direct-engineer-workflow";

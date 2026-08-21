@@ -18,6 +18,7 @@ export * from "./merge-integrator.js";
 export * from "./merge-integrator-db.js";
 export * from "./workflow.js";
 export * from "./usage.js";
+export * from "./cost.js";
 export * from "./task-source.js";
 export * from "./failure-envelope.js";
 export * from "./agent-sources.js";

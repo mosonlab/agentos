@@ -14,7 +14,7 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // one of them being stale while the other was current (issue #140).
 console.log(`AgentOS runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
-const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight }, { reclaimWorkspaces }] = await Promise.all([
+const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }] = await Promise.all([
   import("./config.js"),
   import("./adapters.js"),
   import("./runner.js"),
@@ -74,6 +74,7 @@ const sharedLock = await holdSharedServiceMaintenanceLock({
 
 const preflight = await runStartupPreflight(config);
 console.log(`CLI preflight: ${Object.entries(preflight).map(([runner, ok]) => `${runner.toLowerCase()}=${ok ? "ok" : "blocked"}`).join(" ")}`);
+const availabilityMonitor = startCliAvailabilityMonitor(config);
 const stop = (signal: string): void => {
   console.log(`Received ${signal}; stopping local runner after the current task`);
   stopping = true;
@@ -114,5 +115,6 @@ while (!stopping) {
 
 // The lock outlives the loop and nothing else: released here, on the ordinary
 // stop path, so the key is free the moment this runner is no longer polling.
+availabilityMonitor.stop();
 await sharedLock.release();
 if (stopExitCode !== 0) process.exitCode = stopExitCode;

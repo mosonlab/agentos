@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 
 import { api } from "../lib/api";
-import { compactTokens, duration, formatDateTime, money, repoWebUrl, sha, timeAgo, titleCase } from "../lib/format";
+import { compactTokens, duration, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
@@ -97,7 +97,7 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
             11.5px never reached it. The four `.small` spans that survive as
             `text-[11.5px]` all sit in KeyValue lists, outside any table. */}
         <TableCell>{sha(run.baseSha)} → {sha(run.headSha)}</TableCell>
-        <TableCell>{money(run.session?.costUsd ?? null)}</TableCell>
+        <TableCell>{usageCostLabel(run.session?.usageCost)}</TableCell>
         <TableCell>{compactTokens(run.session?.totalTokens ?? null)}</TableCell>
         <TableCell>{run.failureClass === null ? "—" : <Pill tone="red">{t(`status.failure.${run.failureClass}`)}</Pill>}</TableCell>
       </TableRow>
@@ -289,7 +289,6 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
     });
   };
   const runs = task.runs;
-  const totalCost = runs.reduce((sum, item) => sum + Number(item.session?.costUsd ?? 0), 0);
   // `—`, never `0`: a task whose sessions all predate the usage columns has an
   // unknown token count, not a zero one (spec §4.6.5).
   const counted = runs.map((item) => item.session?.totalTokens).filter((value): value is number => typeof value === "number");
@@ -334,7 +333,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         <div className={STAT_PILLS}>
           <span className={STAT_PILL}>{t("taskDetail.stats.runs", { n: runs.length })}</span>
-          <span className={STAT_PILL}>{t("taskDetail.stats.spend", { amount: money(totalCost === 0 ? null : totalCost) })}</span>
+          <span className={STAT_PILL}>{t("taskDetail.stats.spend", { amount: usageCostLabel(task.taskCost) })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.tokens", { n: compactTokens(totalTokens) })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.wallClock", { n: task.maxDurationMin })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.stall", { n: task.stallTimeoutMin })}</span>

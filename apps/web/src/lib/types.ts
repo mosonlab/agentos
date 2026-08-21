@@ -170,6 +170,7 @@ export type Session = {
   outputTokens: number | null;
   cachedInputTokens: number | null;
   totalTokens: number | null;
+  usageCost?: UsageCost | null;
   failureReason: string | null;
   /** Relations GET /sessions and GET /sessions/:id include; absent on the
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
@@ -283,6 +284,7 @@ export type Task = {
   assigneeAgent: Agent | null;
   repo: Repo | null;
   runs: Run[];
+  taskCost?: UsageCost | null;
   chainId: string | null;
   chainIndex: number | null;
   source: TaskSource;
@@ -307,7 +309,7 @@ export type Task = {
  * (packages/api/src/board.ts).
  *
  * A projection of `Task`, not a subset type of it: the board reads one run and
- * two agent fields, so the wire shape says exactly that rather than shipping the
+ * the agent identity and model, so the wire shape says exactly that rather than shipping the
  * whole `Run`, its `Session` and the `Repo` for every card. Measured on the live
  * board, the full shape is 1,581,550 bytes for 112 tasks and this one is 76,947.
  *
@@ -317,6 +319,7 @@ export type Task = {
 export type BoardTask = {
   id: string;
   name: string;
+  displayName: string;
   status: TaskStatus;
   failureReason: string | null;
   scheduleKind: "NOW" | "AT" | "CRON";
@@ -328,13 +331,30 @@ export type BoardTask = {
   source: TaskSource;
   chainId: string | null;
   chainIndex: number | null;
+  chainName: string | null;
   updatedAt: string;
-  assigneeAgent: { id: string; title: string } | null;
+  assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: ChainProgress | null;
-  latestRun: { id: string; runNumber: number; status: RunStatus; costUsd: string | null } | null;
+  latestRun: {
+    id: string;
+    runNumber: number;
+    status: RunStatus;
+    costUsd: string | null;
+    startedAt: string | null;
+    endedAt: string | null;
+  } | null;
+  taskCost: UsageCost | null;
   /** §SF-1, bound to `latestRun`: null whenever the newest run is not the run
    *  that recorded the outcome. */
   mergeOutcome?: MergeOutcome | null;
+};
+
+export type UsageCost = {
+  costUsd: string | null;
+  estimated: boolean;
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
 };
 
 export type TaskStartability = {
@@ -362,11 +382,7 @@ export type ChainProgress = {
   total: number;
   activeStepName: string;
   activeStatus: string;
-  /** This task's 1-based ordinal within its chain, which spec §5.2 requires the
-   *  list response to carry. Nothing on the web side renders it — the board
-   *  marker shows `done/total`, and the chain card gets its own positions from
-   *  `GET /tasks/:id/chain`. Typed rather than silently dropped so the field is
-   *  discoverable here instead of only by reading the API. */
+  /** This task's 1-based ordinal within its chain. */
   position: number | null;
 };
 
@@ -462,6 +478,7 @@ export type TaskActivity = {
   actorType: string;
   actorId: string | null;
   body: string;
+  commitSha: string | null;
   metadata: unknown;
   createdAt: string;
 };
@@ -484,6 +501,7 @@ export type TaskTemplateStep = {
   prompt: string;
   approvalGate: boolean;
   outputKind: string;
+  baseFromStepIndex: number | null;
   runner: RunnerKind | null;
   assigneeAgentId: string | null;
   assigneeAgent: Agent | null;

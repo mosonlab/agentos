@@ -70,9 +70,9 @@ export const timeAgo = (value: string | null | undefined): string => {
   return days < 30 ? formatT("format.daysAgo", { n: days }) : formatDate(value);
 };
 
-export const duration = (from: string | null | undefined, to: string | null | undefined): string => {
+export const duration = (from: string | null | undefined, to: string | null | undefined, now = Date.now()): string => {
   if (!from) return "—";
-  const end = to ? new Date(to).getTime() : Date.now();
+  const end = to ? new Date(to).getTime() : now;
   const seconds = Math.max(0, Math.round((end - new Date(from).getTime()) / 1000));
   if (seconds < 60) return formatT("format.seconds", { n: seconds });
   const minutes = Math.floor(seconds / 60);
@@ -125,6 +125,32 @@ export const compactTokens = (value: number | null | undefined): string => {
   if (Math.abs(value) >= 999_950) return short(value / 1_000_000, "M");
   if (Math.abs(value) >= 999.95) return short(value / 1_000, "K");
   return String(value);
+};
+
+/** Usage estimates routinely land below one cent. Keep ordinary amounts on the
+ * familiar two decimals, but retain enough precision that a positive amount is
+ * never presented as zero. */
+const usageMoney = (value: string | number): string => {
+  const amount = Number(value);
+  if (amount === 0 || Math.abs(amount) >= 0.005 || !Number.isFinite(amount)) return money(value);
+  const decimals = Math.min(8, Math.max(3, Math.ceil(-Math.log10(Math.abs(amount))) + 2));
+  const fixed = amount.toFixed(decimals).replace(/0+$/u, "").replace(/\.$/u, "");
+  if (Number(fixed) !== 0) return `$${fixed}`;
+  return `$${amount.toExponential(2)}`;
+};
+
+export const usageCostLabel = (value: import("./types").UsageCost | null | undefined): string => {
+  if (value?.costUsd !== null && value?.costUsd !== undefined) {
+    const amount = usageMoney(value.costUsd);
+    return value.estimated ? formatT("format.usageCost.estimated", { amount }) : amount;
+  }
+  if (!value) return "—";
+  const parts = [
+    value.inputTokens === null ? null : formatT("format.usageCost.input", { n: compactTokens(value.inputTokens) }),
+    value.cachedInputTokens === null ? null : formatT("format.usageCost.cachedInput", { n: compactTokens(value.cachedInputTokens) }),
+    value.outputTokens === null ? null : formatT("format.usageCost.output", { n: compactTokens(value.outputTokens) }),
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? "—" : parts.join(" · ");
 };
 
 /** A repo remote as a browsable GitHub URL, or `null` when it is anything else.

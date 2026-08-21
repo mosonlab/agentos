@@ -8,7 +8,7 @@ import { afterEach, test } from "node:test";
 import { adapters } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { executeClaim, runStartupPreflight } from "./runner.js";
+import { executeClaim, reportCliAvailabilityHeartbeat, runStartupPreflight } from "./runner.js";
 
 const config = (workspaceRoot: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
@@ -61,6 +61,9 @@ const mechanicalClaim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "mechanical/merge-executor-v1",
     targetBranch: "master",
+    pinnedBaseSha: null,
+    implementationBaseSha: null,
+    implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
     branch: null,
@@ -218,14 +221,26 @@ test("startup reports Claude and Pi blocked, keeps their telemetry, and passes C
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
 
-    const results = await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary));
+    const availability: Array<{ runner: string; available: boolean; resolvedPath: string | null }> = [];
+    const results = await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary), {
+      onAvailability: (probe) => { availability.push(probe); },
+    });
 
     assert.deepEqual(results, { CLAUDE: false, CODEX: true, PI: false });
     // Telemetry for the absent backends is not dropped: someone does use them,
     // and a silent gap is worse than a reported failure.
-    assert.deepEqual(posts.map((post) => post.body.runner), ["CLAUDE", "CODEX", "PI"]);
-    assert.deepEqual(posts.map((post) => post.path), Array<string>(3).fill("http://api.invalid/runner/preflight"));
-    const codex = posts.find((post) => post.body.runner === "CODEX")!;
+    assert.deepEqual(availability.map(({ runner, available }) => ({ runner, available })), [
+      { runner: "CLAUDE", available: false },
+      { runner: "CODEX", available: true },
+      { runner: "PI", available: false },
+    ]);
+    assert.equal(availability[1]?.resolvedPath, binary);
+    assert.deepEqual(posts.map((post) => post.body.runner), ["CLAUDE", "CODEX", "PI", "CODEX"]);
+    assert.deepEqual(posts.map((post) => post.path), [
+      ...Array<string>(3).fill("http://api.invalid/runner/availability"),
+      "http://api.invalid/runner/preflight",
+    ]);
+    const codex = posts.find((post) => post.path.endsWith("/preflight") && post.body.runner === "CODEX")!;
     assert.equal(codex.body.ok, true);
     assert.equal(codex.body.cliVersion, "codex-cli 0.147.0");
     assert.equal(codex.body.authMode, "chatgpt");
@@ -237,9 +252,10 @@ test("startup reports Claude and Pi blocked, keeps their telemetry, and passes C
     ]);
     // What is reported about a blocked backend is a verdict and a message, never
     // an environment or a credential.
-    const claude = posts.find((post) => post.body.runner === "CLAUDE")!;
-    assert.equal(claude.body.ok, false);
-    assert.deepEqual(Object.keys(claude.body).sort(), ["authMode", "capabilities", "cliVersion", "error", "ok", "runner"]);
+    const claude = posts.find((post) => post.path.endsWith("/availability") && post.body.runner === "CLAUDE")!;
+    assert.equal(claude.body.available, false);
+    assert.equal(claude.body.binary, join(root, "no-claude-here"));
+    assert.equal(claude.body.resolvedPath, null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -267,7 +283,7 @@ test("startup blocks a Codex CLI that lacks the exec protocol AgentOS invokes", 
       await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary)),
       { CLAUDE: false, CODEX: false, PI: false },
     );
-    const codex = posts.find((post) => post.body.runner === "CODEX")!;
+    const codex = posts.find((post) => post.body.runner === "CODEX" && "error" in post.body)!;
     assert.equal(codex.body.error, "cli-incompatible: the CLI does not expose the required AgentOS exec protocol");
     assert.equal(codex.body.cliVersion, "codex-cli 0.1.0");
   } finally {
@@ -299,13 +315,13 @@ test("startup retries a temporarily unavailable API without rerunning CLI probes
     });
 
     assert.deepEqual(results, { CLAUDE: false, CODEX: true, PI: false });
-    assert.equal(calls, 5, "two failed sends plus one successful report per backend");
+    assert.equal(calls, 6, "two failed sends plus availability for each backend and one Codex preflight");
     assert.deepEqual(waits, [1, 2]);
     assert.deepEqual(retries, [
       { runner: "CLAUDE", attempt: 1, attempts: 5 },
       { runner: "CLAUDE", attempt: 2, attempts: 5 },
     ]);
-    assert.deepEqual(posts.map((post) => post.body.runner), ["CLAUDE", "CODEX", "PI"]);
+    assert.deepEqual(posts.map((post) => post.body.runner), ["CLAUDE", "CODEX", "PI", "CODEX"]);
     assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
       "--version", "exec --help", "exec resume --help", "login status",
     ]);
@@ -408,7 +424,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
 
     const configured = codexOnly(join(root, "workspaces"), root, binary);
     assert.deepEqual(await runStartupPreflight(configured), { CLAUDE: false, CODEX: false, PI: false });
-    const codex = posts.find((post) => post.body.runner === "CODEX")!;
+    const codex = posts.find((post) => post.path.endsWith("/preflight") && post.body.runner === "CODEX")!;
     assert.equal(codex.body.ok, false);
     assert.equal(codex.body.error, "not-authenticated: the CLI's own login check did not pass (exit 1)");
     // The version was read before the login check and is this repository's own
@@ -455,11 +471,10 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
 
     const configured = codexOnly(join(root, "workspaces"), root, join(root, "no-codex-here"));
     assert.deepEqual(await runStartupPreflight(configured), { CLAUDE: false, CODEX: false, PI: false });
-    const codex = posts.find((post) => post.body.runner === "CODEX")!;
-    assert.equal(codex.body.error, "cli-missing: the CLI did not answer --version (exit 127)");
-    // The spawn error's own wording — a path, an errno — is not the message any
-    // more, so the missing-binary verdict is now read from the class instead.
-    assert.equal(codex.body.cliVersion, null);
+    const codex = posts.find((post) => post.path.endsWith("/availability") && post.body.runner === "CODEX")!;
+    assert.equal(codex.body.available, false);
+    assert.equal(codex.body.binary, join(root, "no-codex-here"));
+    assert.equal(codex.body.resolvedPath, null);
 
     await executeClaim(configured, {
       ...mechanicalClaim,
@@ -472,6 +487,31 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
     assert.equal(completion.body.failureClass, "BINARY_NOT_FOUND");
     assert.ok(!JSON.stringify(posts).includes("ENOENT"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an availability heartbeat reports a CLI recovery without restarting the runner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cli-recovery-"));
+  try {
+    const binary = join(root, "codex");
+    const configured = codexOnly(join(root, "workspaces"), root, binary);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await reportCliAvailabilityHeartbeat(configured);
+    await writeFile(binary, "#!/bin/sh\nexit 0\n");
+    await chmod(binary, 0o755);
+    await reportCliAvailabilityHeartbeat(configured);
+
+    const codexReports = posts.filter((post) => post.body.runner === "CODEX");
+    assert.deepEqual(codexReports.map((post) => post.body.available), [false, true]);
+    assert.deepEqual(codexReports.map((post) => post.body.resolvedPath), [null, binary]);
+    assert.ok(posts.every((post) => post.path === "http://api.invalid/runner/availability"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
