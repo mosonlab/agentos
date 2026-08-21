@@ -46,6 +46,19 @@ export const archiveDoneNotice = (result: { archived: number; skipped: number })
     ? formatT("tasks.archiveDone.some", result)
     : formatT("tasks.archiveDone.all", result));
 
+export const tasksForChain = (tasks: readonly BoardTask[], chainId: string | null): BoardTask[] =>
+  (chainId === null ? [...tasks] : tasks.filter((task) => task.chainId === chainId));
+
+export const ChainFilterControl = ({ name, onClear }: { name: string; onClear: () => void }): ReactNode => {
+  const t = useT();
+  return <div className="flex items-center gap-[8px] text-[12px] text-muted-foreground">
+    <span>{t("tasks.filter.chain", { name })}</span>
+    <Button type="button" variant="legacy" size="legacySmall" onClick={onClear}>
+      {t("tasks.filter.clear")}
+    </Button>
+  </div>;
+};
+
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
 export const moveAction = (origin: "drop" | "menu", status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
@@ -164,9 +177,11 @@ export const TasksPage = (): ReactNode => {
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [chainFilter, setChainFilter] = useState<{ id: string; name: string } | null>(null);
   const { error: actionError, run } = useAction();
   const t = useT();
-  const tasks = useStableRows(useMemo(() => data ?? [], [data]));
+  const allTasks = useStableRows(useMemo(() => data ?? [], [data]));
+  const tasks = useMemo(() => tasksForChain(allTasks, chainFilter?.id ?? null), [allTasks, chainFilter]);
 
   // One DOM or the other, never both: rendering five columns *and* a phone list
   // would put 112 cards on the page twice and hand the poll twice the work to
@@ -219,6 +234,7 @@ export const TasksPage = (): ReactNode => {
     if (seenProject.current === projectId) return;
     seenProject.current = projectId;
     setChosen(null);
+    setChainFilter(null);
     settled.current = false;
     replace("/tasks");
   }, [projectId]);
@@ -310,6 +326,9 @@ export const TasksPage = (): ReactNode => {
     onArchive: archive,
     onDelete: remove,
     onCopyError: copyError,
+    onFilterChain: (task) => {
+      if (task.chainId !== null) setChainFilter({ id: task.chainId, name: task.chainName ?? task.chainId });
+    },
   }), [move, retry, archive, remove, copyError]);
 
   /** `api.post` is called for its payload, which `useAction.run` discards — but
@@ -347,6 +366,7 @@ export const TasksPage = (): ReactNode => {
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         {notice === null ? null : <InfoNotice message={notice} onDismiss={() => setNotice(null)} />}
+        {chainFilter === null ? null : <ChainFilterControl name={chainFilter.name} onClear={() => setChainFilter(null)} />}
 
         {/* Status changes are announced here whether they came from the menu or
             from a drag, because neither one is visible to a screen reader. */}

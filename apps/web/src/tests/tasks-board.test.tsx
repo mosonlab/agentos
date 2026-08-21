@@ -6,10 +6,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { InfoNotice } from "../components/ui";
 import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
-import { TaskCard } from "../components/task-card";
+import { cardTime, cardTitle, TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
-import { BOARD_PAGE, archiveDoneNotice, moveAction, stableRows, useTaskStartConfirmation } from "../pages/Tasks";
+import { BOARD_PAGE, ChainFilterControl, archiveDoneNotice, moveAction, stableRows, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
 import { installDom, reactDom } from "./dom-harness";
 
@@ -19,12 +19,12 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", status: "TODO", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
-  updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null,
+  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null,
   ...overrides,
 });
 
 const noop = (): void => undefined;
-const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, onCopyError: noop };
+const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, onCopyError: noop, onFilterChain: noop };
 
 const card = (overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
   <TaskCard task={task(overrides)} actions={ACTIONS} />,
@@ -197,9 +197,42 @@ test("every column head is the same height, whatever it offers", () => {
 
 /* ---------------------------------------------------------------- the card */
 
-test("a chain card carries the marker and a chain-less card carries no placeholder", () => {
-  assert.match(card({ chainProgress: progress(), chainId: "c1", chainIndex: 4 }), /3\/9 · Implementation · doing/);
+test("cards in one chain render their own positions and never the active-step name", () => {
+  const first = card({ chainProgress: progress({ position: 1 }), chainId: "c1", chainIndex: 0, chainName: "Release" });
+  const fourth = card({ chainProgress: progress({ position: 4 }), chainId: "c1", chainIndex: 4, chainName: "Release" });
+  assert.match(first, /step 1\/9/);
+  assert.match(fourth, /step 4\/9/);
+  assert.doesNotMatch(first + fourth, /Implementation · doing/);
   assert.doesNotMatch(card(), /·/);
+});
+
+test("chain badges filter to one chain, can be cleared, and titles drop the shared prefix", () => {
+  const alpha = task({ id: "a", name: "Release: Implementation", chainId: "c1", chainName: "Release", chainProgress: progress() });
+  const review = task({ id: "b", name: "Release: Review", chainId: "c1", chainName: "Release", chainProgress: progress({ position: 5 }) });
+  const other = task({ id: "c", name: "Other: Review", chainId: "c2", chainName: "Other", chainProgress: progress({ chainId: "c2" }) });
+  assert.deepEqual(tasksForChain([alpha, review, other], "c1").map(({ id }) => id), ["a", "b"]);
+  assert.deepEqual(tasksForChain([alpha, review, other], null).map(({ id }) => id), ["a", "b", "c"]);
+  assert.equal(cardTitle(alpha), "Implementation");
+  const markup = card(alpha);
+  assert.match(markup, /aria-label="Show only chain Release"/);
+  assert.doesNotMatch(markup, />Release: Implementation<\/a>/);
+  const control = renderToStaticMarkup(<ChainFilterControl name="Release" onClear={noop} />);
+  assert.match(control, /Showing chain Release/);
+  assert.match(control, />Clear filter<\/button>/);
+});
+
+test("running, ended, and absent runs render only durations their timestamps prove", () => {
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
+  try {
+    const t = (key: string, vars?: Record<string, string | number>): string => key === "tasks.card.runningDuration" ? `running ${vars?.duration}` : key;
+    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null } }), t), "running 12m 0s");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" } }), t), "8m 0s · 3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" }), t), "3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("cron and webhook tasks are badged and manual ones are not", () => {
@@ -263,9 +296,10 @@ test("Copy error is offered only when there is an error to copy", () => {
 test("the assignee is one line with a keyboard-reachable way to see the rest", () => {
   // 59 of 112 cards truncated this name with no reveal at all: `title` is a
   // hover affordance, which is none on touch and none from the keyboard.
-  const markup = card({ assigneeAgent: { id: "a1", title: "Implementation Plan Executioner" } });
+  const markup = card({ assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" } });
   assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>Implementation Plan Executioner<\/button>/);
   assert.match(markup, /title="Implementation Plan Executioner"/);
+  assert.match(markup, /gpt-5\.6-sol:medium/);
 });
 
 test("a card with no assignee still says so", () => {

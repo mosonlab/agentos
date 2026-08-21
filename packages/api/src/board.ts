@@ -34,10 +34,18 @@ export type BoardCard = {
   source: TaskSource;
   chainId: string | null;
   chainIndex: number | null;
+  chainName: string | null;
   updatedAt: Date;
-  assigneeAgent: { id: string; title: string } | null;
+  assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: (ChainProgress & { position: number | null }) | null;
-  latestRun: { id: string; runNumber: number; status: string; costUsd: string | null } | null;
+  latestRun: {
+    id: string;
+    runNumber: number;
+    status: string;
+    costUsd: string | null;
+    startedAt: Date | null;
+    endedAt: Date | null;
+  } | null;
   /**
    * §SF-1. Parsed server-side from the task's persisted `merge-result` output,
    * and null for every non-integrator task. A mechanical merge that stopped ends
@@ -65,12 +73,13 @@ export type BoardRow = {
   chainId: string | null;
   chainIndex: number | null;
   updatedAt: Date;
-  assigneeAgent: { id: string; title: string } | null;
+  assigneeAgent: { id: string; title: string; model: string } | null;
+  templateStep: { name: string } | null;
   runs: Array<{
     id: string;
     runNumber: number;
     status: string;
-    session: { costUsd: unknown } | null;
+    session: { costUsd: unknown; startedAt: Date | null; endedAt: Date | null } | null;
   }>;
   stepOutput?: { kind: string; body: string; runId: string | null } | null;
 };
@@ -79,6 +88,25 @@ export type BoardRow = {
  *  strings JSON already turns them into, so the projection states that. */
 const decimal = (value: unknown): string | null =>
   (value === null || value === undefined ? null : String(value));
+
+/** The instantiated chain name is persisted as the prefix of every task name.
+ * The template step is the lossless delimiter: only remove a suffix we can
+ * prove was added by instantiation, never guess from punctuation in a manual
+ * task name. */
+export const taskChainName = (row: Pick<BoardRow, "name" | "chainId" | "templateStep">): string | null => {
+  if (row.chainId === null || row.templateStep === null) return null;
+  const suffix = `: ${row.templateStep.name}`;
+  return row.name.endsWith(suffix) ? row.name.slice(0, -suffix.length) : null;
+};
+
+type ActivityRow = { id: string; updatedAt: Date };
+
+/** Stable newest-activity-first ordering shared by both task-list shapes. */
+export const byLatestRunActivity = <T extends ActivityRow>(rows: T[], activityByTask: ReadonlyMap<string, Date>): T[] => [...rows].sort((left, right) => {
+  const leftAt = activityByTask.get(left.id) ?? left.updatedAt;
+  const rightAt = activityByTask.get(right.id) ?? right.updatedAt;
+  return rightAt.getTime() - leftAt.getTime() || left.id.localeCompare(right.id);
+});
 
 export const boardCard = (
   row: BoardRow,
@@ -99,14 +127,22 @@ export const boardCard = (
     source: row.source,
     chainId: row.chainId,
     chainIndex: row.chainIndex,
+    chainName: taskChainName(row),
     updatedAt: row.updatedAt,
     assigneeAgent: row.assigneeAgent === null
       ? null
-      : { id: row.assigneeAgent.id, title: row.assigneeAgent.title },
+      : { id: row.assigneeAgent.id, title: row.assigneeAgent.title, model: row.assigneeAgent.model },
     chainProgress,
     latestRun: run === undefined
       ? null
-      : { id: run.id, runNumber: run.runNumber, status: run.status, costUsd: decimal(run.session?.costUsd) },
+      : {
+          id: run.id,
+          runNumber: run.runNumber,
+          status: run.status,
+          costUsd: decimal(run.session?.costUsd),
+          startedAt: run.session?.startedAt ?? null,
+          endedAt: run.session?.endedAt ?? null,
+        },
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
     // run 2's outcome, and the card's only run line is the newest run's.
     mergeOutcome: run !== undefined && runOwnsMergeOutcome(row.stepOutput, run.id, run.id)

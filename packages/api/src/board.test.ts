@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type BoardRow, boardCard, etagFor, etagMatches } from "./board.js";
+import { type BoardRow, boardCard, byLatestRunActivity, etagFor, etagMatches, taskChainName } from "./board.js";
 
 const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   id: "t1",
@@ -18,6 +18,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainId: null,
   chainIndex: null,
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
+  templateStep: null,
   assigneeAgent: null,
   runs: [],
   ...overrides,
@@ -29,7 +30,7 @@ test("the board card carries every field the board renders and nothing else", ()
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
-    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainProgress", "cron",
+    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainName", "chainProgress", "cron",
     "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status",
     "templateId", "timezone", "updatedAt",
   ]);
@@ -55,10 +56,13 @@ test("the projection drops the Run and Session columns the board never reads", (
     runs: [{
       id: "r1", runNumber: 3, status: "FAILED",
       // The real row carries ~45 more columns; only these four survive.
-      session: { costUsd: "1.25" },
+      session: { costUsd: "1.25", startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z") },
     }],
   }), null);
-  assert.deepEqual(card.latestRun, { id: "r1", runNumber: 3, status: "FAILED", costUsd: "1.25" });
+  assert.deepEqual(card.latestRun, {
+    id: "r1", runNumber: 3, status: "FAILED", costUsd: "1.25",
+    startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"),
+  });
 });
 
 test("a task with no runs reports no latest run rather than an empty one", () => {
@@ -75,14 +79,31 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
   // Prisma hands back a Decimal instance, not a string, and `JSON.stringify`
   // of one is `{"s":1,"e":0,...}` unless it is stringified on the way out.
   const decimal = { toString: () => "0.42" };
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: decimal } }] }), null);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: decimal, startedAt: null, endedAt: null } }] }), null);
   assert.equal(card.latestRun?.costUsd, "0.42");
   assert.match(JSON.stringify(card), /"costUsd":"0\.42"/);
 });
 
-test("the assignee is narrowed to the two fields the card shows", () => {
-  const card = boardCard(row({ assigneeAgent: { id: "a1", title: "Frontend Developer (Opus)" } }), null);
-  assert.deepEqual(card.assigneeAgent, { id: "a1", title: "Frontend Developer (Opus)" });
+test("the assignee carries the model spec the card shows", () => {
+  const card = boardCard(row({ assigneeAgent: { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" } }), null);
+  assert.deepEqual(card.assigneeAgent, { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" });
+});
+
+test("chain names are derived only from the exact persisted template-step suffix", () => {
+  assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review", templateStep: { name: "Review" } })), "Release");
+  assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review notes", templateStep: { name: "Review" } })), null);
+  assert.equal(taskChainName(row({ chainId: null, name: "Release: Review", templateStep: { name: "Review" } })), null);
+});
+
+test("tasks sort newest run-event activity first with an updatedAt fallback and stable ties", () => {
+  const at = (value: string) => new Date(value);
+  const rows = [
+    row({ id: "later-created", status: "DONE", updatedAt: at("2026-08-16T12:00:00Z") }),
+    row({ id: "earlier-created-later-finish", status: "DONE", updatedAt: at("2026-08-16T08:00:00Z") }),
+    row({ id: "no-runs", updatedAt: at("2026-08-16T15:00:00Z"), runs: [] }),
+  ];
+  const activity = new Map([["later-created", at("2026-08-16T13:00:00Z")], ["earlier-created-later-finish", at("2026-08-16T14:00:00Z")]]);
+  assert.deepEqual(byLatestRunActivity(rows, activity).map(({ id }) => id), ["no-runs", "earlier-created-later-finish", "later-created"]);
 });
 
 test("chainProgress is passed through, not recomputed", () => {
@@ -105,8 +126,8 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   // bar is a 250KB initial payload, so a card has ~2.2KB to spend and uses far
   // less than that whenever the task did not fail.
   const card = boardCard(row({
-    assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner" },
-    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", session: { costUsd: "0.42" } }],
+    assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" },
+    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", session: { costUsd: "0.42", startedAt: null, endedAt: null } }],
   }), null);
   assert.ok(Buffer.byteLength(JSON.stringify(card)) < 700, "a clean card must stay well inside its budget");
 });

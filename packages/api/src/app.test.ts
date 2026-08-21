@@ -1438,10 +1438,16 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
  *  page, the chain-progress page, and the recurring groupBy the full shape adds. */
 const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
   let call = 0;
+  const taskRows = rows.map(({ runActivity: _runActivity, ...row }) => row);
   return {
     task: {
-      findMany: async () => (call++ === 0 ? rows : []),
+      findMany: async () => (call++ === 0 ? taskRows : []),
       groupBy: async () => [],
+    },
+    run: {
+      findMany: async () => rows.flatMap((row) => (row.runActivity as Array<{ at: Date }> | undefined ?? []).map((event) => ({
+        taskId: row.id, events: [event],
+      }))),
     },
   } as unknown as PrismaClient;
 };
@@ -1451,8 +1457,8 @@ const taskRow = (overrides: Record<string, unknown> = {}): Record<string, unknow
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false,
   templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
-  assigneeAgent: { id: "a1", title: "Senior Developer" },
-  runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: "0.42" } }],
+  assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium" },
+  runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: "0.42", startedAt: null, endedAt: null } }],
   ...overrides,
 });
 
@@ -1469,10 +1475,30 @@ test("GET /tasks?view=board answers with the card projection, not the whole row"
     assert.equal(body.length, 1);
     // The fields the board reads survive...
     assert.equal(body[0]!.name, "Ship the thing");
-    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: "0.42" });
+    assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: "0.42", startedAt: null, endedAt: null });
     // ...and the ones it does not are gone, which is the entire point.
     for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
       assert.equal(dropped in body[0]!, false, `${dropped} must not ride along`);
+    }
+  });
+});
+
+test("board and full task views order every status by newest run activity", async () => {
+  await withTokens(async () => {
+    const event = (value: string) => ({ at: new Date(value) });
+    const rows = [
+      taskRow({ id: "newer-created", status: "DONE", updatedAt: new Date("2026-08-16T12:00:00Z"), runActivity: [event("2026-08-16T13:00:00Z")] }),
+      taskRow({ id: "later-finished", status: "DONE", updatedAt: new Date("2026-08-16T08:00:00Z"), runActivity: [event("2026-08-16T14:00:00Z")] }),
+      taskRow({ id: "todo-old", status: "TODO", updatedAt: new Date("2026-08-16T09:00:00Z"), runs: [] }),
+      taskRow({ id: "todo-new", status: "TODO", updatedAt: new Date("2026-08-16T10:00:00Z"), runs: [] }),
+    ];
+    for (const query of ["?view=board", ""]) {
+      const response = await getTasks(boardDatabase(rows), query);
+      assert.equal(response.status, 200);
+      const body = await response.json() as Array<{ id: string; status: string; runs?: Array<Record<string, unknown>> }>;
+      assert.deepEqual(body.filter(({ status }) => status === "DONE").map(({ id }) => id), ["later-finished", "newer-created"]);
+      assert.deepEqual(body.filter(({ status }) => status === "TODO").map(({ id }) => id), ["todo-new", "todo-old"]);
+      assert.equal("runActivity" in body[0]!, false, "test-only sorting evidence must not leak into the wire shape");
     }
   });
 });

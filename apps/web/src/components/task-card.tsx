@@ -1,7 +1,7 @@
 import { type DragEvent, type MouseEvent, type ReactNode, memo, useState } from "react";
 
-import { chainMarker } from "../lib/chain";
-import { money, timeAgo } from "../lib/format";
+import { chainPositionMarker } from "../lib/chain";
+import { duration, money, timeAgo } from "../lib/format";
 import { moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -97,6 +97,7 @@ export type CardActions = {
   onArchive: (task: BoardTask) => void;
   onDelete: (task: BoardTask) => void;
   onCopyError: (task: BoardTask) => void;
+  onFilterChain: (task: BoardTask) => void;
 };
 
 export type CardProps = {
@@ -122,6 +123,24 @@ const opensTask = (event: MouseEvent<HTMLElement>): boolean => {
   return (window.getSelection()?.toString() ?? "") === "";
 };
 
+export const cardTitle = (task: BoardTask): string => {
+  if (task.chainName === null) return task.name;
+  const prefix = `${task.chainName}: `;
+  return task.name.startsWith(prefix) ? task.name.slice(prefix.length) : task.name;
+};
+
+export const cardTime = (task: BoardTask, t: Translate): string => {
+  const run = task.latestRun;
+  if (!run) return timeAgo(task.updatedAt);
+  if (run.status === "RUNNING" && run.startedAt !== null) {
+    return t("tasks.card.runningDuration", { duration: duration(run.startedAt, null) });
+  }
+  if (run.startedAt !== null && run.endedAt !== null) {
+    return `${duration(run.startedAt, run.endedAt)} · ${timeAgo(task.updatedAt)}`;
+  }
+  return timeAgo(task.updatedAt);
+};
+
 const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => [
   ...(retryable(task, task.latestRun) ? [{ label: t("common.retry"), onSelect: () => actions.onRetry(task) }] : []),
   // Only where there is an error to copy, and it copies the whole of it — the
@@ -140,6 +159,9 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
   const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  const title = cardTitle(task);
+  const chainName = task.chainName ?? (task.chainId === null ? null : task.chainId.slice(0, 8));
+  const chainTitle = task.chainName ?? task.chainId;
   return <article
     data-card={task.id}
     className={TASK_CARD}
@@ -152,7 +174,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           keyboard, opens in a new tab on the modifier click every operator
           tries, and gives the card an accessible name it did not have. */}
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
-        <a data-card-title="" href={`#/tasks/${task.id}`} className={TASK_TITLE}>{task.name}</a>
+        <a data-card-title="" href={`#/tasks/${task.id}`} className={TASK_TITLE}>{title}</a>
       </h3>
       <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
@@ -173,7 +195,18 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       {/* No placeholder for a chain-less card (K4). */}
       {task.chainProgress ? (
         <div className={cn(TASK_META_ROW, "overflow-hidden text-ellipsis whitespace-nowrap")}>
-          {chainMarker(task.chainProgress)}
+          {chainName === null ? null : (
+            <button
+              type="button"
+              className="max-w-full overflow-hidden text-ellipsis rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
+              title={chainTitle ?? chainName}
+              aria-label={t("tasks.card.filterChain", { name: chainName })}
+              onClick={(event) => { event.stopPropagation(); actions.onFilterChain(task); }}
+            >
+              {chainName}
+            </button>
+          )}
+          <span>{chainPositionMarker(task.chainProgress)}</span>
         </div>
       ) : null}
       <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
@@ -183,10 +216,11 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <span className={cn(ROW, "min-w-0 gap-[6px]")}>
         <IconRobot />
         <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
+        {task.assigneeAgent === null ? null : <span className="truncate text-[color:var(--faint)]">{task.assigneeAgent.model}</span>}
       </span>
       <span className="flex-1" />
       {task.latestRun?.costUsd ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span> : null}
-      <span className="whitespace-nowrap">{timeAgo(task.updatedAt)}</span>
+      <span className="whitespace-nowrap">{cardTime(task, t)}</span>
     </div>
   </article>;
 };
