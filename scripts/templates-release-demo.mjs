@@ -340,6 +340,7 @@ export async function runInstantiate(options, request = apiRequest) {
   const result = await request(config, "POST", `/projects/${setup.project.id}/task-templates/${setup.template.id}/instantiate`, {
     repoId: setup.repo.id,
     variables: { branchName: config.branch },
+    autoStart: true,
     name: `OSS-C0 template demo ${config.runId.slice(-3)}`,
     description: CHANGE_REQUEST,
   });

@@ -233,6 +233,29 @@ export type RunBranchTask = {
 };
 
 /**
+ * Template step ① keeps the repository default in `targetBranch`, because that
+ * is the base it must clone. The shared head is persisted on every later step,
+ * so a deferred first start can recover the same branch an immediate start
+ * uses without needing a placeholder Run at instantiation time.
+ */
+const templateChainBranch = async (tx: Tx, task: RunBranchTask): Promise<string | null> => {
+  if (task.targetBranch && task.targetBranch !== task.repo.defaultBranch) return task.targetBranch;
+  if (!task.chainId || !task.templateId) return null;
+  const sibling = await tx.task.findFirst({
+    where: {
+      projectId: task.projectId,
+      repoId: task.repoId,
+      chainId: task.chainId,
+      templateId: task.templateId,
+      targetBranch: { not: task.repo.defaultBranch },
+    },
+    orderBy: { chainIndex: "asc" },
+    select: { targetBranch: true },
+  });
+  return sibling?.targetBranch ?? null;
+};
+
+/**
  * The base a retry may inherit from its prior run, or null when nothing that run
  * left behind is known to exist on the remote.
  *
@@ -329,16 +352,12 @@ export const resolveRunBranches = async (
   prior: { branch: string | null } | null,
 ): Promise<{ branch: string | null; targetBranch: string }> => {
   // Template chains are frozen: nothing after this point runs for a template
-  // task. The head expression is the pre-existing one, byte for byte; the base
-  // gained the publication check (see `inheritedBase`) and nothing else, so a
-  // template step whose prior run never pushed no longer clones a missing ref.
-  // `targetBranch !== defaultBranch` is what keeps a template's step ① — whose
-  // targetBranch *is* the default (templates.ts) — from trying to clone a
-  // branch that does not exist yet.
+  // task. Step ① keeps the repository default as its base while recovering the
+  // shared head from a sibling task; later steps carry that head directly.
+  // This is deliberately independent of a prior Run, because autoStart:false
+  // materializes an inert chain whose first Run is created only by POST /start.
   if (task.templateId) {
-    const chainBranch = task.targetBranch && task.targetBranch !== task.repo.defaultBranch
-      ? task.targetBranch
-      : null;
+    const chainBranch = await templateChainBranch(tx, task);
     return {
       branch: prior?.branch ?? chainBranch,
       targetBranch: (await inheritedBase(tx, task, prior)) ?? task.targetBranch ?? task.repo.defaultBranch,

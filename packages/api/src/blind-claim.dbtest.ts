@@ -69,6 +69,7 @@ const queueCanonicalStep = async (
   const chain = await instantiateTemplate(db, template.projectId, template.id, {
     repoId,
     variables: { branchName: `blind-claim-step-${stepIndex}` },
+    autoStart: true,
   });
   await db.run.deleteMany({ where: { taskId: { in: chain.tasks.map((task) => task.id) } } });
   const priorTasks = chain.tasks.filter((task) => task.chainIndex !== null && task.chainIndex < stepIndex);

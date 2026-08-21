@@ -114,6 +114,48 @@ export type StartableRow = {
   hasRepoGrant: boolean;
 };
 
+export type StartabilityChecklist = {
+  repoBound: boolean;
+  agentAssignee: boolean;
+  repoAccessGrant: boolean;
+  budgetRemaining: boolean;
+  noActiveRun: boolean;
+  predecessorsDone: boolean;
+};
+
+export type TaskStartability = {
+  startable: boolean;
+  checklist: StartabilityChecklist;
+};
+
+/** One verdict shared by every read surface and the authoritative start guard.
+ *  The checklist is intentionally the operator-configurable subset requested by
+ *  the board contract; task archive/status and archived-agent guards still
+ *  participate in `startable` without pretending to be configuration items. */
+export const taskStartability = (
+  row: StartableRow,
+  facts: RunFacts,
+  maxSessionsPerTask: number,
+  predecessorsDone = true,
+): TaskStartability => {
+  const checklist = {
+    repoBound: row.repoId !== null,
+    agentAssignee: row.assigneeType === AssigneeType.AGENT && row.assigneeAgentId !== null,
+    repoAccessGrant: row.hasRepoGrant,
+    budgetRemaining: facts.total < runBudgetCeiling(maxSessionsPerTask, facts.budgetGrants),
+    noActiveRun: !facts.active,
+    predecessorsDone,
+  };
+  return {
+    checklist,
+    startable: Object.values(checklist).every(Boolean)
+      && row.assigneeAgent?.archivedAt !== undefined
+      && row.assigneeAgent?.archivedAt === null
+      && row.archivedAt === null
+      && (row.status === TaskStatus.TODO || row.status === TaskStatus.BACKLOG),
+  };
+};
+
 /**
  * May the operator press `Start now` on this step?
  *
@@ -122,22 +164,7 @@ export type StartableRow = {
  * disagree. "Active run" is `ACTIVE_RUN_STATUSES`, which includes WAITING_INBOX.
  */
 export const startable = (row: StartableRow, facts: RunFacts, maxSessionsPerTask: number): boolean => {
-  if (row.assigneeType !== AssigneeType.AGENT) return false;
-  if (!row.assigneeAgentId || !row.repoId) return false;
-  if (!row.hasRepoGrant) return false;
-  if (row.assigneeAgent?.archivedAt) return false;
-  if (row.archivedAt !== null) return false;
-  if (row.status !== TaskStatus.TODO && row.status !== TaskStatus.BACKLOG) return false;
-  if (facts.active) return false;
-  // Against the configured budget plus what has been granted on top of it, not
-  // the budget alone: a run that failed while provisioning bought the task an
-  // attempt instead of spending one, and this predicate drives both the API
-  // guard and the web app's Start button. `total < budget + grants` is exactly
-  // `attempts the agent actually got < budget`, because grants rise by one for
-  // each of the runs the count includes but the budget never paid for. Lowering
-  // `maxSessionsPerTask` still bites immediately, which is why this reads the
-  // grant rather than a historical ceiling. See `runBudgetCeiling`.
-  return facts.total < runBudgetCeiling(maxSessionsPerTask, facts.budgetGrants);
+  return taskStartability(row, facts, maxSessionsPerTask).startable;
 };
 
 export type ChainDecisionRow = ChainRow & StartableRow & { maxSessionsPerTask: number };
@@ -179,7 +206,7 @@ export const chainStartDecisions = (
   return new Map(ordered.map((row) => {
     const facts = factsByTask.get(row.id) ?? { total: 0, active: false };
     const isCandidate = first?.id === row.id;
-    const allowed = isCandidate && startable(row, facts, row.maxSessionsPerTask);
+    const allowed = taskStartability(row, facts, row.maxSessionsPerTask, isCandidate).startable;
     const predecessor = blockingPredecessor(ordered, row.id);
     return [row.id, {
       startable: allowed,

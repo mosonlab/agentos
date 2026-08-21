@@ -36,6 +36,7 @@ const main = async (): Promise<void> => {
   const result = await instantiateTemplate(db, project.id, template.id, {
     repoId: repo.id,
     variables: { branchName: "codex/w1-contract-dry-run" },
+    autoStart: true,
     name: "W1 contract dry-run",
   });
   const first = await db.task.findFirstOrThrow({

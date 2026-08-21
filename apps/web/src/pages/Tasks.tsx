@@ -8,13 +8,14 @@ import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { replace, useQuery } from "../lib/router";
 import { storage } from "../lib/storage";
-import type { BoardTask, TaskStatus } from "../lib/types";
+import type { BoardTask, TaskStartability, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { DesktopBoard } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
 import { TasksPageHead } from "../components/tasks-tabs";
 import { type CardActions } from "../components/task-card";
-import { EmptyState, ErrorNotice, InfoNotice, Page, STACK } from "../components/ui";
+import { EmptyState, ErrorNotice, InfoNotice, KeyValue, Modal, Page, STACK } from "../components/ui";
+import { Button } from "../components/ui/button";
 
 export { COLUMNS } from "../lib/board";
 
@@ -47,6 +48,10 @@ export const archiveDoneNotice = (result: { archived: number; skipped: number })
 
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
+export const moveAction = (origin: "drop" | "menu", status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
+  origin === "drop" && status === "DOING" && startable ? "confirm-start" : "patch"
+);
+
 /** Keeps the previous object for every row whose serialization is unchanged.
  *
  *  `usePoll` already drops an identical *payload*; this handles the case where
@@ -74,6 +79,79 @@ const useStableRows = (rows: readonly BoardTask[]): BoardTask[] => {
     held.current = result.held;
     return result.rows;
   }, [rows]);
+};
+
+export const StartTaskDialog = ({ request, pending, error, onCancel, onConfirm }: {
+  request: TaskStartability;
+  pending: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): ReactNode => {
+  const t = useT();
+  if (!request.task.agent || !request.task.repo || !request.task.targetBranch) {
+    throw new Error("Startable task response is missing agent, repository, or target branch");
+  }
+  return (
+    <Modal title={t("tasks.startDialog.title")} onClose={onCancel} footer={(
+      <>
+        <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={onCancel}>{t("common.cancel")}</Button>
+        <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending} onClick={onConfirm}>{t("tasks.startDialog.confirm")}</Button>
+      </>
+    )}>
+      <div className="text-[13px] font-bold text-foreground">{request.task.name}</div>
+      <KeyValue items={[
+        { k: t("tasks.startDialog.agent"), v: request.task.agent.title },
+        { k: t("tasks.startDialog.repo"), v: request.task.repo.name },
+        { k: t("tasks.startDialog.targetBranch"), v: request.task.targetBranch },
+      ]} />
+      {error === null ? null : <ErrorNotice message={error} />}
+    </Modal>
+  );
+};
+
+export const useTaskStartConfirmation = (reload: () => void): {
+  request: TaskStartability | null;
+  pending: boolean;
+  error: string | null;
+  requestForDrop: (taskId: string) => Promise<boolean>;
+  confirm: () => Promise<void>;
+  cancel: () => void;
+} => {
+  const [request, setRequest] = useState<TaskStartability | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const requestForDrop = useCallback(async (taskId: string): Promise<boolean> => {
+    const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
+    if (moveAction("drop", "DOING", verdict.startable) === "patch") return false;
+    setError(null);
+    setRequest(verdict);
+    return true;
+  }, []);
+
+  const confirm = useCallback(async (): Promise<void> => {
+    if (!request) return;
+    setPending(true);
+    setError(null);
+    try {
+      await api.post(`/tasks/${request.task.id}/start`, {});
+      setRequest(null);
+      reload();
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setPending(false);
+    }
+  }, [request, reload]);
+
+  const cancel = useCallback((): void => {
+    if (pending) return;
+    setRequest(null);
+    setError(null);
+  }, [pending]);
+
+  return { request, pending, error, requestForDrop, confirm, cancel };
 };
 
 export const TasksPage = (): ReactNode => {
@@ -157,20 +235,38 @@ export const TasksPage = (): ReactNode => {
   const pendingFocus = useRef<{ id: string; before: string[] } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
+  const start = useTaskStartConfirmation(reload);
+
+  const recordMove = useCallback((task: BoardTask, status: TaskStatus): void => {
+    pendingFocus.current = {
+      id: task.id,
+      before: latest.current.filter((candidate) => candidate.status === task.status).map((candidate) => candidate.id),
+    };
+    setAnnouncement(t("tasks.announcement.moved", { name: task.name, status: statusLabel(status) }));
+  }, [t]);
 
   const move = useCallback((taskId: string, status: TaskStatus): void => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
-    pendingFocus.current = {
-      id: taskId,
-      before: latest.current.filter((candidate) => candidate.status === task.status).map((candidate) => candidate.id),
-    };
-    // Announced rather than left to be noticed: on a phone the card leaves the
-    // list entirely, and on the desktop board it lands in a column that may be
-    // off screen.
-    setAnnouncement(t("tasks.announcement.moved", { name: task.name, status: statusLabel(status) }));
-    void run(async () => { await api.patch(`/tasks/${taskId}`, { status }); reload(); });
-  }, [run, reload, t]);
+    void run(async () => {
+      recordMove(task, status);
+      await api.patch(`/tasks/${taskId}`, { status });
+      reload();
+    });
+  }, [run, reload, recordMove]);
+
+  const drop = useCallback((taskId: string, status: TaskStatus): void => {
+    const task = latest.current.find((candidate) => candidate.id === taskId);
+    if (!task || task.status === status) return;
+    if (status !== "DOING") { move(taskId, status); return; }
+    void run(async () => {
+      if (!await start.requestForDrop(taskId)) {
+        recordMove(task, status);
+        await api.patch(`/tasks/${taskId}`, { status });
+        reload();
+      }
+    });
+  }, [move, run, recordMove, reload, start]);
 
   // Focus follows the card. It runs when a payload lands, which is when the move
   // has actually taken effect — `move` itself only sends the request.
@@ -236,6 +332,15 @@ export const TasksPage = (): ReactNode => {
 
   return (
     <Page className={cn("text-foreground", BOARD_PAGE)}>
+      {start.request === null ? null : (
+        <StartTaskDialog
+          request={start.request}
+          pending={start.pending}
+          error={start.error}
+          onCancel={start.cancel}
+          onConfirm={() => void start.confirm()}
+        />
+      )}
       <TasksPageHead active="tasks" onCreated={reload} />
 
       <div className={cn(STACK, BOARD_STACK, "mt-4")}>
@@ -264,7 +369,7 @@ export const TasksPage = (): ReactNode => {
             loading={loading}
             dragOver={dragOver}
             setDragOver={setDragOver}
-            onMove={move}
+            onMove={drop}
             onArchiveDone={() => void archiveDone()}
             actions={actions}
             boardRef={boardRef}

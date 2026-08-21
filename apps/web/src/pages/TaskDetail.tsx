@@ -7,7 +7,7 @@ import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStepOutput, TaskStatus } from "../lib/types";
+import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList } from "../components/chain-list";
@@ -51,6 +51,33 @@ const BranchCell = ({ remoteUrl, branch }: { remoteUrl: string | null | undefine
   // The row toggles on click; opening the branch must not also expand it.
   return href === null ? <>{branch}</> : (
     <a href={href} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>{branch}</a>
+  );
+};
+
+export const StartabilityChecklist = ({ verdict }: { verdict: TaskStartability }): ReactNode => {
+  const t = useT();
+  const items = [
+    ["repoBound", "taskDetail.startability.repoBound"],
+    ["agentAssignee", "taskDetail.startability.agentAssignee"],
+    ["repoAccessGrant", "taskDetail.startability.repoAccessGrant"],
+    ["budgetRemaining", "taskDetail.startability.budgetRemaining"],
+    ["noActiveRun", "taskDetail.startability.noActiveRun"],
+    ["predecessorsDone", "taskDetail.startability.predecessorsDone"],
+  ] as const;
+  return (
+    <div className="mt-[16px] border-t border-[color:var(--border-soft)] pt-[14px]">
+      <div className="mb-[9px] text-[12px] font-bold text-foreground">{t("taskDetail.startability.title")}</div>
+      <ul className="grid gap-[7px] sm:grid-cols-2">
+        {items.map(([key, label]) => (
+          <li key={key} className="flex items-center justify-between gap-[12px] text-[11.5px]">
+            <span>{t(label)}</span>
+            <span className={verdict.checklist[key] ? "text-[color:var(--status-green-fg)]" : "text-[color:var(--destructive-fg)]"}>
+              {t(verdict.checklist[key] ? "taskDetail.startability.satisfied" : "taskDetail.startability.missing")}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 };
 
@@ -229,6 +256,7 @@ const STATUSES: TaskStatus[] = ["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"];
 const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const { data: task, error, reload } = usePoll<Task>(`/tasks/${taskId}`);
   const output = usePoll<TaskStepOutput>(`/tasks/${taskId}/output`, 10_000);
+  const startability = usePoll<TaskStartability>(`/tasks/${taskId}/startability`);
   // No new cadence: the chain rides the page's default poll.
   const chain = usePoll<Chain>(`/tasks/${taskId}/chain`);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -343,6 +371,11 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             },
             { k: t("taskDetail.details.created"), v: formatDateTime(task.createdAt) },
           ]} />
+          {startability.data
+            ? <StartabilityChecklist verdict={startability.data} />
+            : startability.error
+              ? <ErrorNotice message={startability.error.message} onRetry={startability.reload} />
+              : <EmptyState>{t("common.loading")}</EmptyState>}
         </Card>
 
         {task.chainId === null ? null

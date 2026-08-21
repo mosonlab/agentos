@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { InfoNotice } from "../components/ui";
@@ -8,8 +9,9 @@ import { MobileTaskList } from "../components/mobile-task-list";
 import { TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
-import { BOARD_PAGE, archiveDoneNotice, stableRows } from "../pages/Tasks";
+import { BOARD_PAGE, archiveDoneNotice, moveAction, stableRows, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
+import { installDom, reactDom } from "./dom-harness";
 
 const en = (key: string): string => translate("en", key);
 
@@ -64,6 +66,101 @@ test("the board has five columns, in order, with Backlog first", () => {
   for (const { status, labelKey } of COLUMNS) {
     assert.match(column(status), new RegExp(`${en(labelKey)}<span[^>]*>0</span>`));
   }
+});
+
+test("only a startable desktop drop onto Doing asks for start confirmation", () => {
+  for (const { status } of COLUMNS) {
+    assert.equal(moveAction("drop", status, true), status === "DOING" ? "confirm-start" : "patch");
+    assert.equal(moveAction("drop", status, false), "patch");
+    assert.equal(moveAction("menu", status, true), "patch");
+  }
+});
+
+type BoardRequest = { method: string; path: string; body: unknown };
+
+const StartFlowHarness = (): ReactNode => {
+  const start = useTaskStartConfirmation(() => undefined);
+  return <div>
+    <button type="button" onClick={() => void start.requestForDrop("t1")}>Drop to Doing</button>
+    {start.request === null ? null : <section data-confirmation="">
+      <span>{start.request.task.name}</span>
+      {start.error === null ? null : <div role="alert">{start.error}</div>}
+      <button type="button" onClick={start.cancel}>Cancel</button>
+      <button type="button" onClick={() => void start.confirm()}>Start task</button>
+    </section>}
+  </div>;
+};
+
+const withStartFlow = async (walk: (flow: {
+  dom: ReturnType<typeof installDom>["dom"];
+  requests: BoardRequest[];
+  press: (label: string) => Promise<void>;
+}) => Promise<void>, startStatus = 201): Promise<void> => {
+  const { dom, container } = installDom();
+  const requests: BoardRequest[] = [];
+  const originalFetch = globalThis.fetch;
+  const startability = {
+    startable: true,
+    checklist: {
+      repoBound: true, agentAssignee: true, repoAccessGrant: true,
+      budgetRemaining: true, noActiveRun: true, predecessorsDone: true,
+    },
+    task: {
+      id: "t1", name: "Ship the thing", agent: { id: "a1", title: "Senior dev" },
+      repo: { id: "r1", name: "product" }, targetBranch: "main",
+    },
+  };
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (url: string, init?: RequestInit) => {
+    const path = String(url);
+    const method = init?.method ?? "GET";
+    requests.push({ method, path, body: init?.body === undefined ? null : JSON.parse(String(init.body)) });
+    if (path === "/api/tasks/t1/startability") return Response.json(startability);
+    if (path === "/api/tasks/t1/start" && method === "POST") {
+      return startStatus === 201
+        ? Response.json({ runId: "run-1", runNumber: 1 }, { status: 201 })
+        : Response.json({ error: "Run budget was exhausted by another operator." }, { status: startStatus });
+    }
+    return Response.json([], { status: 404 });
+  } });
+  const root = (await reactDom()).createRoot(container);
+  const settle = async (): Promise<void> => {
+    for (let round = 0; round < 3; round += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    }
+  };
+  const press = async (label: string): Promise<void> => {
+    const found = [...dom.window.document.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent?.trim() === label || candidate.getAttribute("aria-label") === label);
+    assert.ok(found, `no button labelled ${label}`);
+    await act(async () => found.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    await settle();
+  };
+  try {
+    await act(async () => root.render(<StartFlowHarness />));
+    await settle();
+    await walk({ dom, requests, press });
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+};
+
+test("drop confirmation decline is inert and a failed POST stays visible in its active surface", async () => {
+  await withStartFlow(async ({ dom, requests, press }) => {
+    await press("Drop to Doing");
+    assert.match(dom.window.document.body.innerHTML, /data-confirmation/);
+    await press("Cancel");
+    assert.equal(requests.some(({ method }) => method === "POST" || method === "PATCH"), false);
+
+    await press("Drop to Doing");
+    await press("Start task");
+    assert.equal(requests.filter(({ method, path }) => method === "POST" && path === "/api/tasks/t1/start").length, 1);
+    assert.equal(requests.some(({ method, path }) => method === "PATCH" && path === "/api/tasks/t1"), false);
+    const surface = dom.window.document.querySelector("[data-confirmation]");
+    assert.ok(surface);
+    assert.match(surface.textContent ?? "", /Run budget was exhausted by another operator\./);
+  }, 409);
 });
 
 test("a BACKLOG task lands in the first column and nowhere else", () => {

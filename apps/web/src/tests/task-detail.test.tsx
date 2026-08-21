@@ -5,9 +5,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { StepOutput, TaskPrompt, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
+import { StartabilityChecklist, StepOutput, TaskPrompt, branchUrl, pullRequestLabel } from "../pages/TaskDetail";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { TaskStepOutput } from "../lib/types";
+import type { TaskStartability, TaskStepOutput } from "../lib/types";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 import provenance from "./fixtures/tc-ux-v1-prompts.provenance.json";
 
@@ -16,6 +16,28 @@ const source = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx", imp
 const output = (body: string): TaskStepOutput => ({
   id: "o1", taskId: "t1", runId: "r1", kind: "review", body,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
+});
+
+test("the Details checklist renders every server verdict as satisfied or missing", () => {
+  const verdict: TaskStartability = {
+    startable: false,
+    checklist: {
+      repoBound: true,
+      agentAssignee: false,
+      repoAccessGrant: true,
+      budgetRemaining: false,
+      noActiveRun: true,
+      predecessorsDone: false,
+    },
+    task: { id: "t1", name: "Task", agent: null, repo: null, targetBranch: null },
+  };
+  const markup = renderToStaticMarkup(<StartabilityChecklist verdict={verdict} />);
+  assert.equal((markup.match(/Satisfied/g) ?? []).length, 3);
+  assert.equal((markup.match(/Missing/g) ?? []).length, 3);
+  for (const label of [
+    "Repository bound", "Agent assigned", "Repository access granted",
+    "Run budget remaining", "No active run", "Predecessors done",
+  ]) assert.match(markup, new RegExp(label));
 });
 
 /* ------------------------------------------------------------ link builders */

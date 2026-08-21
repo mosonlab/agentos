@@ -337,6 +337,25 @@ export type BoardTask = {
   mergeOutcome?: MergeOutcome | null;
 };
 
+export type TaskStartability = {
+  startable: boolean;
+  checklist: {
+    repoBound: boolean;
+    agentAssignee: boolean;
+    repoAccessGrant: boolean;
+    budgetRemaining: boolean;
+    noActiveRun: boolean;
+    predecessorsDone: boolean;
+  };
+  task: {
+    id: string;
+    name: string;
+    agent: { id: string; title: string } | null;
+    repo: { id: string; name: string } | null;
+    targetBranch: string | null;
+  };
+};
+
 export type ChainProgress = {
   chainId: string;
   done: number;

@@ -141,7 +141,7 @@ test("instantiating a doctored template is refused, not silently mis-bound", asy
     data: { assigneeAgentId: chain.agent.id },
   });
   await assert.rejects(
-    () => instantiateTemplate(db, chain.project.id, chain.template.id, { variables: {} } as any),
+    () => instantiateTemplate(db, chain.project.id, chain.template.id, { variables: {}, autoStart: false } as any),
     (error: unknown) => error instanceof Error && new RegExp(INTEGRATOR_AGENT_NAME).test(error.message),
   );
 
@@ -155,7 +155,7 @@ test("instantiating a doctored template is refused, not silently mis-bound", asy
     data: { assigneeAgentId: chain.integratorAgent.id },
   });
   await assert.rejects(
-    () => instantiateTemplate(db, chain.project.id, chain.template.id, { variables: {} } as any),
+    () => instantiateTemplate(db, chain.project.id, chain.template.id, { variables: {}, autoStart: false } as any),
     (error: unknown) => error instanceof Error && new RegExp(INTEGRATOR_AGENT_NAME).test(error.message),
   );
 });

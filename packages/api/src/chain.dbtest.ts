@@ -817,7 +817,7 @@ const seedTemplateChain = async (label: string, stepCount = 3) => {
       prompt: `do step ${index + 1}`,
     })) },
   } });
-  const chain = await instantiateTemplate(db, project.id, template.id, { repoId: repo.id, variables: {} });
+  const chain = await instantiateTemplate(db, project.id, template.id, { repoId: repo.id, variables: {}, autoStart: true });
   return { project, agent, repo, template, chain };
 };
 
