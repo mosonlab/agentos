@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { adapters } from "./adapters.js";
@@ -29,6 +29,11 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   runAsPrefix: [],
   binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
 });
+
+const testSession = (root: string): ClaimedTask["session"] => ({ id: `test-${basename(root)}` });
+const cleanupTestSession = async (root: string): Promise<void> => {
+  await rm(join(tmpdir(), "agentos-session-config", testSession(root).id), { recursive: true, force: true });
+};
 
 const mechanicalClaim: ClaimedTask = {
   executionMode: "mechanical",
@@ -709,6 +714,7 @@ test("default failed-workspace retention still salvages and records the exact du
     await writeFile(binary, failingCodexStub(log, 'printf "work\\n" > recovered.txt'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
@@ -720,6 +726,7 @@ test("default failed-workspace retention still salvages and records the exact du
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
@@ -736,6 +743,7 @@ test("default failed-workspace retention still salvages and records the exact du
     assert.match(git(root, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
     await access(join(workspaces, "run-10", "recovered.txt"));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -749,6 +757,7 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
     await writeFile(binary, failingCodexStub(log, 'printf "work\\n" > recovered.txt'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     let started = false;
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -766,6 +775,7 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
@@ -777,6 +787,7 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
     assert.match(git(root, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
     await assert.rejects(access(join(workspaces, "run-10")));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -790,6 +801,7 @@ test("a clean failed run records that there is nothing to salvage before cleanup
     await writeFile(binary, failingCodexStub(log));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
@@ -801,6 +813,7 @@ test("a clean failed run records that there is nothing to salvage before cleanup
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
@@ -814,6 +827,7 @@ test("a clean failed run records that there is nothing to salvage before cleanup
     assert.equal(completion?.body.workspaceRetained, false);
     await assert.rejects(access(join(workspaces, "run-10")));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -829,6 +843,7 @@ test("a failed salvage keeps the workspace and reports cleanup failure", async (
       `printf "work\\n" > recovered.txt; git remote set-url origin ${missingRemote}`));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
@@ -840,6 +855,7 @@ test("a failed salvage keeps the workspace and reports cleanup failure", async (
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
@@ -851,6 +867,7 @@ test("a failed salvage keeps the workspace and reports cleanup failure", async (
     assert.match(String(completion?.body.cleanupFailureReason), /WIP salvage failed/u);
     await access(join(workspaces, "run-10", "recovered.txt"));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -864,6 +881,7 @@ test("successful execution with failed delivery salvages before removing the wor
     await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > recovered.txt'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const hook = join(remote, "hooks", "pre-receive");
     await writeFile(hook, [
       "#!/bin/sh",
@@ -883,6 +901,7 @@ test("successful execution with failed delivery salvages before removing the wor
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
@@ -903,6 +922,7 @@ test("successful execution with failed delivery salvages before removing the wor
     assert.match(git(root, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
     await assert.rejects(access(join(workspaces, "run-10")));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -916,6 +936,7 @@ test("a successful pinned review never publishes its dirty detached checkout", a
     await writeFile(binary, successfulCodexMutationStub(log, 'printf "review scratch\\n" > review.txt'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const pinned = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master");
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -926,6 +947,7 @@ test("a successful pinned review never publishes its dirty detached checkout", a
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
@@ -942,6 +964,7 @@ test("a successful pinned review never publishes its dirty detached checkout", a
     assert.throws(() => git(root, `--git-dir=${remote}`, "show-ref", "refs/heads/agentos/task-10/run-1"));
     await assert.rejects(access(join(workspaces, "run-10")));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -955,6 +978,7 @@ test("a failed pinned review reports failure without publishing its dirty detach
     await writeFile(binary, failingCodexStub(log, 'printf "review scratch\\n" > review.txt'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const pinned = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master");
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -966,6 +990,7 @@ test("a failed pinned review reports failure without publishing its dirty detach
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
@@ -986,6 +1011,7 @@ test("a failed pinned review reports failure without publishing its dirty detach
     assert.throws(() => git(root, `--git-dir=${remote}`, "show-ref", "refs/heads/agentos/task-10/run-1"));
     await assert.rejects(access(join(workspaces, "run-10")));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -999,6 +1025,7 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
     await writeFile(binary, failingCodexStub(log, 'printf "work\\n" > recovered.txt'));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const hook = join(remote, "hooks", "pre-receive");
     await writeFile(hook, "#!/bin/sh\nexit 1\n");
     await chmod(hook, 0o755);
@@ -1017,6 +1044,7 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CODEX",
+      session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
@@ -1028,6 +1056,7 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
     assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
     await access(join(workspaces, "run-10", "recovered.txt"));
   } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });
