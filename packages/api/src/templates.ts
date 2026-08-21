@@ -170,8 +170,7 @@ export const instantiateTemplate = async (
         const first = tasks[0]!;
         if (first.assigneeType !== AssigneeType.AGENT) throw new Error("The first template step must be agent-executable");
         if (input.autoStart ?? false) {
-          const run = await enqueueTaskRun(tx, first.id);
-          await tx.run.update({ where: { id: run.id }, data: { branch: branchName } });
+          await enqueueTaskRun(tx, first.id);
         }
         await tx.taskActivity.createMany({ data: tasks.map((task, index) => ({
           taskId: task.id,

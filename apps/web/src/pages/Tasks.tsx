@@ -48,8 +48,8 @@ export const archiveDoneNotice = (result: { archived: number; skipped: number })
 
 export type HeldRows = Map<string, { key: string; row: BoardTask }>;
 
-export const dropAction = (status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
-  status === "DOING" && startable ? "confirm-start" : "patch"
+export const moveAction = (origin: "drop" | "menu", status: TaskStatus, startable: boolean): "confirm-start" | "patch" => (
+  origin === "drop" && status === "DOING" && startable ? "confirm-start" : "patch"
 );
 
 /** Keeps the previous object for every row whose serialization is unchanged.
@@ -81,9 +81,10 @@ const useStableRows = (rows: readonly BoardTask[]): BoardTask[] => {
   }, [rows]);
 };
 
-export const StartTaskDialog = ({ request, pending, onCancel, onConfirm }: {
+export const StartTaskDialog = ({ request, pending, error, onCancel, onConfirm }: {
   request: TaskStartability;
   pending: boolean;
+  error: string | null;
   onCancel: () => void;
   onConfirm: () => void;
 }): ReactNode => {
@@ -104,8 +105,53 @@ export const StartTaskDialog = ({ request, pending, onCancel, onConfirm }: {
         { k: t("tasks.startDialog.repo"), v: request.task.repo.name },
         { k: t("tasks.startDialog.targetBranch"), v: request.task.targetBranch },
       ]} />
+      {error === null ? null : <ErrorNotice message={error} />}
     </Modal>
   );
+};
+
+export const useTaskStartConfirmation = (reload: () => void): {
+  request: TaskStartability | null;
+  pending: boolean;
+  error: string | null;
+  requestForDrop: (taskId: string) => Promise<boolean>;
+  confirm: () => Promise<void>;
+  cancel: () => void;
+} => {
+  const [request, setRequest] = useState<TaskStartability | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const requestForDrop = useCallback(async (taskId: string): Promise<boolean> => {
+    const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
+    if (moveAction("drop", "DOING", verdict.startable) === "patch") return false;
+    setError(null);
+    setRequest(verdict);
+    return true;
+  }, []);
+
+  const confirm = useCallback(async (): Promise<void> => {
+    if (!request) return;
+    setPending(true);
+    setError(null);
+    try {
+      await api.post(`/tasks/${request.task.id}/start`, {});
+      setRequest(null);
+      reload();
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setPending(false);
+    }
+  }, [request, reload]);
+
+  const cancel = useCallback((): void => {
+    if (pending) return;
+    setRequest(null);
+    setError(null);
+  }, [pending]);
+
+  return { request, pending, error, requestForDrop, confirm, cancel };
 };
 
 export const TasksPage = (): ReactNode => {
@@ -118,9 +164,6 @@ export const TasksPage = (): ReactNode => {
   const [dragOver, setDragOver] = useState<TaskStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
-  const [startRequest, setStartRequest] = useState<TaskStartability | null>(null);
-  const [startPending, setStartPending] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
   const { error: actionError, run } = useAction();
   const t = useT();
   const tasks = useStableRows(useMemo(() => data ?? [], [data]));
@@ -192,6 +235,7 @@ export const TasksPage = (): ReactNode => {
   const pendingFocus = useRef<{ id: string; before: string[] } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
+  const start = useTaskStartConfirmation(reload);
 
   const recordMove = useCallback((task: BoardTask, status: TaskStatus): void => {
     pendingFocus.current = {
@@ -205,42 +249,24 @@ export const TasksPage = (): ReactNode => {
     const task = latest.current.find((candidate) => candidate.id === taskId);
     if (!task || task.status === status) return;
     void run(async () => {
-      if (status === "DOING") {
-        const verdict = await api.get<TaskStartability>(`/tasks/${taskId}/startability`);
-        if (dropAction(status, verdict.startable) === "confirm-start") {
-          setStartRequest(verdict);
-          return;
-        }
-      }
       recordMove(task, status);
       await api.patch(`/tasks/${taskId}`, { status });
       reload();
     });
   }, [run, reload, recordMove]);
 
-  const confirmStart = useCallback((): void => {
-    if (!startRequest) return;
-    const taskId = startRequest.task.id;
-    setStartPending(true);
-    setStartError(null);
-    void (async () => {
-      try {
-        await api.post(`/tasks/${taskId}/start`, {});
-        setStartRequest(null);
+  const drop = useCallback((taskId: string, status: TaskStatus): void => {
+    const task = latest.current.find((candidate) => candidate.id === taskId);
+    if (!task || task.status === status) return;
+    if (status !== "DOING") { move(taskId, status); return; }
+    void run(async () => {
+      if (!await start.requestForDrop(taskId)) {
+        recordMove(task, status);
+        await api.patch(`/tasks/${taskId}`, { status });
         reload();
-      } catch (reason: unknown) {
-        setStartError(reason instanceof Error ? reason.message : String(reason));
-      } finally {
-        setStartPending(false);
       }
-    })();
-  }, [startRequest, reload]);
-
-  const cancelStart = useCallback((): void => {
-    if (startPending) return;
-    setStartRequest(null);
-    setStartError(null);
-  }, [startPending]);
+    });
+  }, [move, run, recordMove, reload, start]);
 
   // Focus follows the card. It runs when a payload lands, which is when the move
   // has actually taken effect — `move` itself only sends the request.
@@ -306,12 +332,13 @@ export const TasksPage = (): ReactNode => {
 
   return (
     <Page className={cn("text-foreground", BOARD_PAGE)}>
-      {startRequest === null ? null : (
+      {start.request === null ? null : (
         <StartTaskDialog
-          request={startRequest}
-          pending={startPending}
-          onCancel={cancelStart}
-          onConfirm={confirmStart}
+          request={start.request}
+          pending={start.pending}
+          error={start.error}
+          onCancel={start.cancel}
+          onConfirm={() => void start.confirm()}
         />
       )}
       <TasksPageHead active="tasks" onCreated={reload} />
@@ -319,7 +346,6 @@ export const TasksPage = (): ReactNode => {
       <div className={cn(STACK, BOARD_STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
-        {startError === null ? null : <ErrorNotice message={startError} />}
         {notice === null ? null : <InfoNotice message={notice} onDismiss={() => setNotice(null)} />}
 
         {/* Status changes are announced here whether they came from the menu or
@@ -343,7 +369,7 @@ export const TasksPage = (): ReactNode => {
             loading={loading}
             dragOver={dragOver}
             setDragOver={setDragOver}
-            onMove={move}
+            onMove={drop}
             onArchiveDone={() => void archiveDone()}
             actions={actions}
             boardRef={boardRef}

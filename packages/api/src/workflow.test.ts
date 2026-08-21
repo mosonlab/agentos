@@ -509,7 +509,7 @@ test("an Inbox-resumed queued run for an archived agent is surfaced by the sweep
 // this task ever pushed".
 const branchTx = (rows: Array<{
   taskId: string; chainId: string | null; repoId: string; runNumber: number; pushedBranch: string;
-}>) => ({
+}>, templateBranch: string | null = null) => ({
   run: {
     findFirst: async ({ where, orderBy }: any) => {
       const scoped = rows.filter((row) => row.repoId === where.repoId
@@ -523,6 +523,7 @@ const branchTx = (rows: Array<{
       return [...scoped].sort((a, b) => b.runNumber - a.runNumber)[0] ?? null;
     },
   },
+  task: { findFirst: async () => templateBranch === null ? null : { targetBranch: templateBranch } },
   taskActivity: { create: async () => ({}) },
 } as any);
 
@@ -591,6 +592,15 @@ test("a template retry falls back to its own targetBranch but still honours a si
     templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
   }, { branch: "agentos/chain-1" }), {
     branch: "agentos/chain-1", targetBranch: "agentos/chain-1",
+  });
+});
+
+test("a deferred template first run recovers its shared head from a later step", async () => {
+  assert.deepEqual(await resolveRunBranches(branchTx([], "custom/template-head"), {
+    id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 0,
+    templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
+  }, null), {
+    branch: "custom/template-head", targetBranch: "main",
   });
 });
 

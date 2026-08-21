@@ -158,6 +158,11 @@
   ],
   "exclude": [
     {
+      "glob": ".chain/**",
+      "disposition": "later-release-follow-up",
+      "reason": "internal agent-chain specifications, session identifiers, plans, and review records are operator workflow state rather than product source"
+    },
+    {
       "glob": "BLUEPRINT.md",
       "disposition": "later-release-follow-up",
       "reason": "private upstream product requirements require a separate publication decision"

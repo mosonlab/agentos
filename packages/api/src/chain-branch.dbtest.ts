@@ -352,6 +352,35 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
   assert.equal(customRun.branch, "custom/branch");
 });
 
+test("T6b: a deferred template start preserves its custom head and successor base", async () => {
+  const seed = await seedProject("t6b");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "deferred-template", description: "t", variables: ["branchName"],
+    steps: { create: [0, 1].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
+      assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, {
+    repoId: seed.repo.id, variables: { branchName: "custom/deferred" }, autoStart: false,
+  });
+  assert.equal(await db.run.count({ where: { task: { chainId: chain.chainId } } }), 0);
+
+  const firstRun = await startStep(chain.tasks[0]!.id);
+  assert.equal(firstRun.branch, "custom/deferred");
+  assert.equal(firstRun.targetBranch, seed.repo.defaultBranch);
+
+  const claim = await claimRun(firstRun.id);
+  const publication = await publishViaRoute(claim, "custom/deferred");
+  assert.equal(publication.status, 200);
+  const completion = await completeRunViaRoute(claim);
+  assert.equal(completion.status, 200);
+
+  const secondRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[1]!.id } });
+  assert.equal(secondRun.branch, "custom/deferred");
+  assert.equal(secondRun.targetBranch, "custom/deferred");
+});
+
 test("T7: an operator's targetBranch on a chain step is ignored, and the run says so once", async () => {
   const seed = await seedProject("t7");
   const chainId = `chain-${Date.now()}`;
