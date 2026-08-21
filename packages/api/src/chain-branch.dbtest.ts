@@ -671,6 +671,41 @@ test("T12b: an operator retry bases on the WIP salvage the failed run did publis
 
 // --- WI-6: the automatic retry inside the completion transaction -------------
 
+test("a template chain automatic retry keeps its chain head through publication", async () => {
+  const seed = await seedProject("template-retry");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "retry-template", description: "t", variables: [],
+    steps: { create: [0, 1].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
+      assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, {
+    repoId: seed.repo.id, variables: {}, autoStart: true,
+  });
+  const chainBranch = `agentos/${chain.chainId}`;
+  const firstTask = chain.tasks[0]!;
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: firstTask.id, runNumber: 1 } });
+  const failedClaim = await claimRun(firstRun.id);
+  const salvageBranch = `agentos/${firstTask.id}/run-1`;
+  const failed = await completeRunViaRoute(failedClaim, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    branch: chainBranch, pushStatus: "SUCCEEDED", pushedBranch: salvageBranch,
+  });
+  assert.equal(failed.status, 200);
+
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: firstTask.id, runNumber: 2 } });
+  assert.equal(retry.branch, chainBranch, "the retry publishes where its successor will clone");
+  assert.equal(retry.targetBranch, salvageBranch, "same-transaction WIP evidence still decides the base");
+
+  await db.run.update({ where: { id: retry.id }, data: { readyAt: new Date(0) } });
+  const retryClaim = await claimRun(retry.id);
+  assert.equal((await publishViaRoute(retryClaim, chainBranch)).status, 200);
+  assert.equal((await completeRunViaRoute(retryClaim)).status, 200);
+  const publishedRetry = await db.run.findUniqueOrThrow({ where: { id: retry.id } });
+  assert.equal(publishedRetry.pushedBranch, chainBranch);
+});
+
 test("T13: an automatic retry of a chain step stays on the shared branch", async () => {
   const seed = await seedProject("t13");
   const chainId = `chain-${Date.now()}`;
