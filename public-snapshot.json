@@ -313,6 +313,11 @@
       "reason": "loopback-only throwaway gate database connection fixtures"
     },
     {
+      "category": "credential-placeholder",
+      "glob": "scripts/deploy/quiet-window-deploy.test.mjs",
+      "reason": "loopback-only synthetic database connection fixtures used by the deployment harness"
+    },
+    {
       "category": "private-absolute-path",
       "glob": "packages/merge-executor/src/preconditions.test.ts",
       "reason": "macOS home of the merge executor's own service account, not a private user identity"

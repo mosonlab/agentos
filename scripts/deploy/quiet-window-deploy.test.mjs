@@ -32,7 +32,14 @@ import {
   verifyBackupConfiguration,
   verifyRenderedToolchain,
 } from "./install-launchd.mjs";
-import { acquireProcessLock, blockingRunsStatement, DEPLOY_ARTIFACT_PATHS, inspectGitPreflight, publishDirectories } from "./quiet-window-adapters.mjs";
+import {
+  acquireProcessLock,
+  blockingRunsStatement,
+  deployArtifactPaths,
+  inspectGitPreflight,
+  publishDirectories,
+  workspaceDependencyPaths,
+} from "./quiet-window-adapters.mjs";
 import {
   backupConfigurationFromEnvironment,
   writePgDumpBackup,
@@ -95,9 +102,20 @@ test("production host factory refuses a missing mechanism", () => {
   assert.throws(() => createProductionHost({}), /production-host-adapter-missing:fastForward/u);
 });
 
-test("published artifact includes the generated runtime dependency tree", () => {
-  assert.equal(DEPLOY_ARTIFACT_PATHS.at(-1), "node_modules");
-  assert.ok(DEPLOY_ARTIFACT_PATHS.includes("packages/api/dist"));
+test("published artifacts derive every workspace dependency tree from the target manifest", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-workspaces-"));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["apps/*", "packages/*"] }));
+  for (const workspace of ["apps/web", "packages/api", "packages/runner"]) {
+    mkdirSync(join(root, workspace), { recursive: true });
+    writeFileSync(join(root, workspace, "package.json"), JSON.stringify({ name: workspace }));
+  }
+  const nested = workspaceDependencyPaths(root);
+  assert.deepEqual(nested, ["apps/web/node_modules", "packages/api/node_modules", "packages/runner/node_modules"]);
+  const artifacts = deployArtifactPaths(root);
+  assert.equal(artifacts.at(-1), "node_modules");
+  assert.ok(artifacts.includes("packages/api/dist"));
+  for (const path of nested) assert.ok(artifacts.includes(path));
+  rmSync(root, { recursive: true, force: true });
 });
 
 test("git preflight names dirty and non-fast-forward refusals", () => {
@@ -329,6 +347,31 @@ test("real directory publication restores previous bytes after a partial swap", 
   rmSync(root, { recursive: true, force: true });
 });
 
+test("publication replaces or removes every workspace-local dependency tree transactionally", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-workspace-publish-"));
+  const stage = join(root, "stage");
+  const previous = join(root, "previous");
+  for (const path of ["packages/api/node_modules", "packages/runner/node_modules"]) {
+    mkdirSync(join(root, path), { recursive: true });
+    writeFileSync(join(root, path, "value"), `old-${path}`);
+  }
+  mkdirSync(join(stage, "packages/api/node_modules"), { recursive: true });
+  writeFileSync(join(stage, "packages/api/node_modules/value"), "new-api");
+  const publication = publishDirectories({
+    root,
+    stage,
+    previousDirectory: previous,
+    paths: ["packages/api/node_modules", "packages/runner/node_modules"],
+    optionalMissingPaths: ["packages/api/node_modules", "packages/runner/node_modules"],
+  });
+  assert.equal(readFileSync(join(root, "packages/api/node_modules/value"), "utf8"), "new-api");
+  assert.equal(existsSync(join(root, "packages/runner/node_modules")), false);
+  await publication.rollback();
+  assert.equal(readFileSync(join(root, "packages/api/node_modules/value"), "utf8"), "old-packages/api/node_modules");
+  assert.equal(readFileSync(join(root, "packages/runner/node_modules/value"), "utf8"), "old-packages/runner/node_modules");
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("dry-run reads every decision surface and invokes no mutation", async () => {
   const calls = [];
   const result = await dryRunDecision({
@@ -508,18 +551,18 @@ test("container backup preserves pg_dump arguments and writes host output atomic
       container: "agentos-postgres-1",
       pgDumpBinary: "/usr/local/bin/pg_dump",
     },
-    databaseUrl: "postgresql://alice:s3cr%40t@db.internal:5544/agentos",
+    databaseUrl: "postgresql://fixture:placeholder%40value@127.0.0.1:5544/agentos",
     output,
     env: { ...process.env, FAKE_DOCKER_LOG: logPath },
   });
   const flow = readFileSync(logPath, "utf8").split("\n");
   assert.deepEqual(flow.slice(0, 13), [
     "exec", "--env", "PGPASSWORD", "agentos-postgres-1", "/usr/local/bin/pg_dump",
-    "-Fc", "--host", "db.internal", "--port", "5544", "--username", "alice", "--dbname",
+    "-Fc", "--host", "127.0.0.1", "--port", "5544", "--username", "fixture", "--dbname",
   ]);
   assert.equal(flow[13], "agentos");
-  assert.equal(flow[14], "password=s3cr@t");
-  assert.equal(flow.some((value) => value.includes("s3cr@t") && !value.startsWith("password=")), false);
+  assert.equal(flow[14], "password=placeholder@value");
+  assert.equal(flow.some((value) => value.includes("placeholder@value") && !value.startsWith("password=")), false);
   assert.equal(readFileSync(output, "utf8"), "PGDUMP-CUSTOM-FIXTURE");
   assert.equal(statSync(output).mode & 0o777, 0o600);
   assert.deepEqual(readdirSync(root).filter((name) => name.includes(".partial-")), []);

@@ -6,6 +6,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   unlinkSync,
@@ -15,7 +16,7 @@ import { dirname, join } from "node:path";
 
 import { BLOCKING_RUN_STATUSES, DeployFailure, gitPreflightFailure } from "./quiet-window-lib.mjs";
 
-export const DEPLOY_ARTIFACT_PATHS = Object.freeze([
+export const DEPLOY_REQUIRED_ARTIFACT_PATHS = Object.freeze([
   "packages/github-client/dist",
   "packages/db/dist",
   "packages/api/dist",
@@ -24,6 +25,43 @@ export const DEPLOY_ARTIFACT_PATHS = Object.freeze([
   "packages/merge-executor/dist",
   "packages/cli/dist",
   "apps/web/dist",
+  "node_modules",
+]);
+
+export const workspaceDependencyPaths = (root) => {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  } catch (error) {
+    throw new DeployFailure("workspace-layout-invalid", error?.code ?? "package-json-unreadable");
+  }
+  if (!Array.isArray(manifest.workspaces) || manifest.workspaces.length === 0) {
+    throw new DeployFailure("workspace-layout-invalid", "workspaces-must-be-a-nonempty-array");
+  }
+  const paths = [];
+  for (const pattern of manifest.workspaces) {
+    if (typeof pattern !== "string" || !pattern.endsWith("/*") || pattern.slice(0, -2).includes("*")) {
+      throw new DeployFailure("workspace-layout-invalid", `unsupported-workspace-pattern-${String(pattern)}`);
+    }
+    const parent = pattern.slice(0, -2);
+    let entries;
+    try {
+      entries = readdirSync(join(root, parent), { withFileTypes: true });
+    } catch (error) {
+      throw new DeployFailure("workspace-layout-invalid", `${parent}-${error?.code ?? "unreadable"}`);
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && existsSync(join(root, parent, entry.name, "package.json"))) {
+        paths.push(`${parent}/${entry.name}/node_modules`);
+      }
+    }
+  }
+  return Object.freeze([...new Set(paths)].sort());
+};
+
+export const deployArtifactPaths = (root) => Object.freeze([
+  ...DEPLOY_REQUIRED_ARTIFACT_PATHS.slice(0, -1),
+  ...workspaceDependencyPaths(root),
   "node_modules",
 ]);
 
@@ -105,8 +143,9 @@ export const acquireProcessLock = ({ path, stateDir = dirname(path), pid = proce
 };
 
 /** Real dist publication transaction, injectable by root and path list. */
-export const publishDirectories = ({ root, stage, previousDirectory, paths }) => {
+export const publishDirectories = ({ root, stage, previousDirectory, paths, optionalMissingPaths = [] }) => {
   mkdirSync(previousDirectory, { recursive: true, mode: 0o700 });
+  const optional = new Set(optionalMissingPaths);
   const moved = [];
   try {
     for (const path of paths) {
@@ -117,8 +156,12 @@ export const publishDirectories = ({ root, stage, previousDirectory, paths }) =>
       const entry = { live, prior, staged, hadPrior: existsSync(live), published: false };
       if (entry.hadPrior) renameSync(live, prior);
       moved.push(entry);
-      renameSync(staged, live);
-      entry.published = true;
+      if (existsSync(staged)) {
+        renameSync(staged, live);
+        entry.published = true;
+      } else if (!optional.has(path)) {
+        throw Object.assign(new Error(`missing staged artifact: ${path}`), { code: "ENOENT" });
+      }
     }
   } catch (error) {
     for (const entry of moved.reverse()) {
