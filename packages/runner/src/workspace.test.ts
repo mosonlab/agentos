@@ -405,13 +405,17 @@ test("a distinct run-as uid can create and read its Codex config root", {
     sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
   } as unknown as RunnerConfig;
   const scratch = await provisionAgentScratch(config, "session-codex-distinct-uid");
+  const configParent = dirname(scratch.configRoot);
   try {
     await provisionSessionConfig(config, "CODEX", scratch);
     assert.equal((await stat(scratch.configRoot)).uid, targetUid);
     assert.equal((await stat(join(scratch.configRoot, "auth.json"))).uid, targetUid);
     assert.equal(execFileSync("/usr/bin/sudo", ["-n", "-u", targetUser, "--", "/bin/cat", join(scratch.configRoot, "auth.json")], { encoding: "utf8" }), '{"tokens":"target-only"}\n');
-  } finally {
     await cleanupAgentScratch(config, scratch);
+    for (const removed of [scratch.configRoot, configParent, scratch.workspaceRoot, scratch.stateDir, scratch.base]) {
+      await assert.rejects(stat(removed), /ENOENT/u);
+    }
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

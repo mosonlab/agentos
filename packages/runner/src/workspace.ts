@@ -159,10 +159,24 @@ export const cleanupAgentScratch = async (
 ): Promise<void> => {
   const configParent = dirname(scratch.configRoot);
   if (config.runAsPrefix.length > 0) {
-    await command(config, "/bin/rm", [
-      "-rf", "--", scratch.workspaceRoot, scratch.stateDir,
+    const targetOwnedRoots = [
+      scratch.workspaceRoot,
+      scratch.stateDir,
       ...(options.retainConfigRoot ? [] : [scratch.configRoot]),
-    ], await realpath(tmpdir()), workspaceEnvironment(config));
+    ];
+    await command(
+      config,
+      "/bin/sh",
+      [
+        "-c",
+        'for root do [ ! -e "$root" ] || find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; done',
+        "agentos-cleanup",
+        ...targetOwnedRoots,
+      ],
+      await realpath(tmpdir()),
+      workspaceEnvironment(config),
+    );
+    await Promise.all(targetOwnedRoots.map((root) => rm(root, { recursive: true, force: true })));
     if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   } else {
     await Promise.all([
