@@ -1,5 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import type { Prisma } from "@prisma/client";
 
@@ -34,6 +36,35 @@ export type TemplateStepSource = {
   prompt: string;
 };
 
+export type PersistedTemplateStepStructure = {
+  assigneeAgent: { name: string } | null;
+  assigneeType: string;
+  approvalGate: boolean;
+  outputKind: string;
+  attachmentsFromPrevious: boolean;
+  opensPullRequest: boolean;
+  spawnPolicy: Prisma.JsonValue;
+};
+
+export const templateStepStructureDifferences = (
+  actual: PersistedTemplateStepStructure,
+  expected: TemplateStepSource,
+): string[] => {
+  const expectedAssigneeType = expected.agentName === null ? "HUMAN" : "AGENT";
+  const fields = [
+    ["agent", actual.assigneeAgent?.name ?? null, expected.agentName],
+    ["assigneeType", actual.assigneeType, expectedAssigneeType],
+    ["approvalGate", actual.approvalGate, expected.approvalGate],
+    ["outputKind", actual.outputKind, expected.outputKind],
+    ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
+    ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
+    ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
+  ] as const;
+  return fields
+    .filter(([, actualValue, expectedValue]) => !isDeepStrictEqual(actualValue, expectedValue))
+    .map(([field]) => field);
+};
+
 const parseBoolean = (value: string, filePath: string, key: string): boolean => {
   if (value !== "true" && value !== "false") throw new Error(`${filePath} ${key} must be true or false`);
   return value === "true";
@@ -62,17 +93,18 @@ const parseSpawnPolicy = (value: string, filePath: string): Prisma.InputJsonObje
 
 export const loadTemplateStepSources = async (
   templateName: CanonicalTemplateName = INTEGRATOR_TEMPLATE_NAME,
+  sourceRoot: string = templatesRoot,
 ): Promise<TemplateStepSource[]> => {
   const sourceSpec = CANONICAL_TEMPLATE_SOURCE_SPECS.find((candidate) => candidate.name === templateName);
   if (!sourceSpec) throw new Error(`Unknown canonical template source ${templateName}`);
-  const templateRoot = `${templatesRoot}${templateName}/`;
+  const templateRoot = join(sourceRoot, templateName);
   const files = (await readdir(templateRoot)).sort();
   const steps: TemplateStepSource[] = [];
   for (const filename of files) {
     if (!/^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(filename)) {
-      throw new Error(`${templateRoot}${filename} must be named <NN>-<slug>.md`);
+      throw new Error(`${join(templateRoot, filename)} must be named <NN>-<slug>.md`);
     }
-    const filePath = `${templateRoot}${filename}`;
+    const filePath = join(templateRoot, filename);
     const document = parsePromptDocument(await readFile(filePath, "utf8"), filePath);
     const keys = Object.keys(document.attributes).sort();
     const expectedKeys = [...STRUCTURAL_FIELDS].sort();
@@ -106,9 +138,21 @@ export const loadTemplateStepSources = async (
   return steps;
 };
 
-export const loadAllTemplateStepSources = async (): Promise<Map<CanonicalTemplateName, TemplateStepSource[]>> => {
+export const loadAllTemplateStepSources = async (
+  sourceRoot: string = templatesRoot,
+): Promise<Map<CanonicalTemplateName, TemplateStepSource[]>> => {
+  const rootEntries = await readdir(sourceRoot, { withFileTypes: true });
+  const nonDirectories = rootEntries.filter((entry) => !entry.isDirectory()).map((entry) => entry.name).sort();
+  if (nonDirectories.length > 0) {
+    throw new Error(`${sourceRoot} must contain only canonical template directories; found ${nonDirectories.join(", ")}`);
+  }
+  const actualNames = rootEntries.map((entry) => entry.name).sort();
+  const expectedNames = CANONICAL_TEMPLATE_SOURCE_SPECS.map(({ name }) => name).sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+    throw new Error(`${sourceRoot} canonical template inventory must be exactly ${expectedNames.join(", ")}; found ${actualNames.join(", ")}`);
+  }
   const entries = await Promise.all(CANONICAL_TEMPLATE_SOURCE_SPECS.map(async ({ name }) => (
-    [name, await loadTemplateStepSources(name)] as const
+    [name, await loadTemplateStepSources(name, sourceRoot)] as const
   )));
   return new Map(entries);
 };

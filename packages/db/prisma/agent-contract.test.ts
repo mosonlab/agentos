@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +22,12 @@ import {
   catalogRunnerForModel,
   DIRECT_TEMPLATE_NAME,
 } from "../src/agent-contract.js";
-import { loadAllTemplateStepSources, loadTemplateStepSources } from "../src/template-sources.js";
+import {
+  CANONICAL_TEMPLATE_SOURCE_SPECS,
+  loadAllTemplateStepSources,
+  loadTemplateStepSources,
+  templateStepStructureDifferences,
+} from "../src/template-sources.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 
@@ -169,6 +176,38 @@ test("the complete template source inventory contains only the twelve-step and d
   assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
   assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
   assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 6);
+});
+
+test("the complete template source inventory rejects an unregistered workflow directory", async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), "agentos-template-sources-"));
+  try {
+    await Promise.all(CANONICAL_TEMPLATE_SOURCE_SPECS.map(({ name }) => mkdir(join(sourceRoot, name))));
+    await mkdir(join(sourceRoot, "unregistered-workflow"));
+    await assert.rejects(
+      loadAllTemplateStepSources(sourceRoot),
+      /canonical template inventory must be exactly/u,
+    );
+  } finally {
+    await rm(sourceRoot, { recursive: true, force: true });
+  }
+});
+
+test("canonical prompt sync can detect every Markdown-owned structural field", async () => {
+  const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
+  const persisted = {
+    assigneeAgent: { name: expected.agentName! },
+    assigneeType: "AGENT",
+    approvalGate: expected.approvalGate,
+    outputKind: expected.outputKind,
+    attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    opensPullRequest: expected.opensPullRequest,
+    spawnPolicy: expected.spawnPolicy,
+  };
+  assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
+  assert.deepEqual(
+    templateStepStructureDifferences({ ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }, expected),
+    ["attachmentsFromPrevious"],
+  );
 });
 
 test("the sentinel may bind only step 12, and step 12 only the sentinel", () => {

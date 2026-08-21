@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 
 import { loadAgentSources } from "../src/agent-sources.js";
-import { loadAllTemplateStepSources } from "../src/template-sources.js";
+import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
 
 // Every canonical template, every step of each, and every role under agents/
 // is synced. Omitting any source here would let a prompt edit silently miss
@@ -32,11 +32,27 @@ const main = async (): Promise<void> => {
 
         const updated: Record<number, number> = {};
         for (const step of steps) {
-          const stepCount = await tx.taskTemplateStep.count({
+          const persistedSteps = await tx.taskTemplateStep.findMany({
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex },
+            select: {
+              taskTemplateId: true,
+              assigneeAgent: { select: { name: true } },
+              assigneeType: true,
+              approvalGate: true,
+              outputKind: true,
+              attachmentsFromPrevious: true,
+              opensPullRequest: true,
+              spawnPolicy: true,
+            },
           });
-          if (stepCount !== templates.length) {
-            throw new Error(`Expected step ${step.stepIndex} on ${templates.length} ${templateName} templates; found ${stepCount}`);
+          if (persistedSteps.length !== templates.length) {
+            throw new Error(`Expected step ${step.stepIndex} on ${templates.length} ${templateName} templates; found ${persistedSteps.length}`);
+          }
+          for (const persisted of persistedSteps) {
+            const differences = templateStepStructureDifferences(persisted, step);
+            if (differences.length > 0) {
+              throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
+            }
           }
           updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex, prompt: { not: step.prompt } },
