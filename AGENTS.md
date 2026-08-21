@@ -25,6 +25,12 @@ first free slot — this machine, then one of the offshore worker's two — and
 blocks until a slot frees up. `docs/runbooks/gate-worker.md` is the worker's
 runbook, including what a remote PASS is and is not worth.
 
+## Dispatching chains
+
+Instantiating a direct chain: the `description` you pass is the chain's
+specification of record — write it as a feature brief per
+`docs/BRIEF-TEMPLATE.md` before instantiating.
+
 ## Testing red lines
 
 - `export RUNNER_WORKSPACE_ROOT=$(mktemp -d)` before any test run. The runner's
