@@ -37,18 +37,17 @@ import {
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const isolatedCheckout = mkdtempSync(join(tmpdir(), "agentos-public-lineage-"));
-const currentBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
-  cwd: repositoryRoot,
-  encoding: "utf8",
-}).trim();
 
-// Linked worktrees can share private objects with this public lineage. Clone
-// only the current branch so the preflight sees the history a standalone public
-// clone sees, without weakening the production authority checks.
-execFileSync("git", [
-  "clone", "--quiet", "--no-local", "--no-checkout", "--single-branch",
-  "--branch", currentBranch, repositoryRoot, isolatedCheckout,
-]);
+// Linked worktrees can share private objects with this public lineage. Build
+// the isolated history by fetching exactly what this repository's HEAD reaches,
+// so the preflight sees the history a standalone public clone sees, without
+// weakening the production authority checks. Fetching HEAD rather than a named
+// branch is what lets the gate worker's detached checkout run this file: both
+// resolve to the same lineage, and a branch name does not exist there.
+execFileSync("git", ["init", "--quiet", isolatedCheckout]);
+execFileSync("git", ["-C", isolatedCheckout, "fetch", "--quiet", repositoryRoot, "HEAD"]);
+execFileSync("git", ["-C", isolatedCheckout, "update-ref", "refs/heads/public-lineage", "FETCH_HEAD"]);
+execFileSync("git", ["-C", isolatedCheckout, "symbolic-ref", "HEAD", "refs/heads/public-lineage"]);
 
 // The recorded authority evidence, so these cases stop on the condition they are
 // about rather than on `authority`. The preflight checks both the signed
