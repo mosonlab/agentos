@@ -298,6 +298,21 @@ test("the run-as prefix keeps the launcher's own login identity out of the launc
   assert.equal(workspaceEnvironment({ ...base, runAsPrefix: [] }).USER, process.env.USER);
 });
 
+test("workspace and Git commands receive the platform-owned proxy environment", () => {
+  const proxyEnvironment = {
+    HTTP_PROXY: "http://runner-proxy.invalid:7897",
+    http_proxy: "http://runner-proxy.invalid:7897",
+    HTTPS_PROXY: "http://runner-proxy.invalid:7897",
+    https_proxy: "http://runner-proxy.invalid:7897",
+    NO_PROXY: "localhost",
+    no_proxy: "localhost",
+  };
+  const launched = workspaceEnvironment({
+    path: "/bin", home: "/runner", runAsPrefix: [], proxyEnvironment,
+  });
+  for (const [name, value] of Object.entries(proxyEnvironment)) assert.equal(launched[name], value);
+});
+
 test("a run-as workspace is provisioned by the launched account and cannot be enumerated by its siblings", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-prefix-"));
   try {

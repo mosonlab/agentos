@@ -95,7 +95,6 @@ export const buildChildEnvironment = (
 
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME",
-  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 
 /**
@@ -113,10 +112,17 @@ const isolationVariables = [
  * Everything else a scrubbing launcher drops — PATH, HOME,
  * AGENTOS_SESSION_TOKEN — fails loudly and immediately instead.
  *
- * So the isolation variables are set again by `/usr/bin/env`, which runs after
+ * So the containment variables are set again by `/usr/bin/env`, which runs after
  * the launcher and immediately before the CLI. That also makes the contract
  * fail-closed: a launcher that will not exec `/usr/bin/env` cannot start the
  * session at all, rather than starting it pointed at production.
+ *
+ * Proxy values deliberately stay in the inherited environment instead of this
+ * argv: proxy URLs may contain credentials, and argv is readable through `ps`.
+ * A configured RUNNER_RUN_AS_PREFIX therefore has to preserve the environment
+ * it receives (the shipped sudo prefix uses `-E`). This is the same channel the
+ * runner's Git and workspace commands use, so a prefix that scrubs it cannot
+ * provide the platform-wide proxy contract.
  */
 export const launchArgv = (
   config: Pick<RunnerConfig, "runAsPrefix" | "binaries">,

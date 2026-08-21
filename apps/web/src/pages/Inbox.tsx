@@ -145,8 +145,22 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
     });
   };
 
+  const closeNotification = (): void => {
+    void run(async () => {
+      await api.post(`/inbox/messages/${message.id}/close`, { requestId: `${message.id}:close` });
+      reload();
+    });
+  };
+
   const choices = message.choices ?? [];
   const open = message.status === "OPEN";
+  const detachedNotification = message.from === "AGENT"
+    && message.kind === "TEXT"
+    && message.taskId === null
+    && message.goalId === null
+    && message.sessionId === null
+    && message.gateTaskId === null
+    && message.replyToMessageId === null;
 
   return (
     <Page>
@@ -209,8 +223,10 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
         {open ? (
           <Card>
             <div className={STACK}>
-              <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />{t("inbox.waiting")}</div>
-              {choices.length > 0 ? (
+              <div className="flex items-center gap-[10px] rounded-lg border border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] px-[14px] py-[11px] text-[12.5px] text-[color:var(--status-amber-fg)]"><IconQuestion />{t(detachedNotification ? "inbox.notification" : "inbox.waiting")}</div>
+              {detachedNotification ? (
+                <div className={ROW}><span className="flex-1" /><Button type="button" variant="legacyPrimary" size="legacy" className="shadow-none" disabled={pending} onClick={closeNotification}>{t("inbox.close")}</Button></div>
+              ) : choices.length > 0 ? (
                 <div className={LIST}>
                   {choices.map((option) => (
                     <button type="button" key={option.id} className={CHOICE} disabled={pending} onClick={() => decide(option.id)}>
