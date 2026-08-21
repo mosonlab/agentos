@@ -1,8 +1,8 @@
 # Adjudicated review — template chain retry branch
 
-Status: **OPEN — one contradiction is with the human.** Every other finding from
-both reports already has a disposition below. Adjudication of the contradicted
-item does not become effective until Leo rules on it.
+Closed. Every finding from both reports has a disposition below; nothing here is
+an open-ended instruction to review further. The one contradiction was put to
+Leo with both bodies of evidence and ruled on — see "Human ruling" below.
 
 ## Range and identities
 
@@ -24,7 +24,8 @@ item does not become effective until Leo rules on it.
 
 | Final ID | Report A | Report B | Rule | Severity |
 | --- | --- | --- | --- | --- |
-| MFX-01 | SOL-001 (P1) | explicitly rejected in B's "checked and cleared" | **contradiction — with Leo** | proposed **P1** |
+| MFX-01 | SOL-001 (P1) | explicitly rejected in B's "checked and cleared" | contradiction → verified against the code, escalated, **ruled by Leo**: adopted for the multi-step / upgrade-state case | **P1** |
+| REC-08 | SOL-001 (P1), single-step half | explicitly rejected in B | same contradiction, **ruled by Leo**: recorded, not blocking | P2 |
 | REC-01 | — | OPUS-1 (P2) | B retained by default | P2 |
 | REC-02 | — | OPUS-2 (P2) | B retained by default | P2 |
 | REC-03 | — | OPUS-3 (P2) | B retained, **rationale corrected** (see below) | P2 |
@@ -40,7 +41,21 @@ to B's OPUS-4, which survives on the narrower documentation ground (REC-04).
 
 ---
 
-## The contradiction — MFX-01 / SOL-001
+## Human ruling on the contradiction
+
+Asked through the Inbox with both reports' positions, the reproduction below,
+and three options. Leo chose **`adopt-p1-case-b`**:
+
+> P1 must-fix for the multi-step / upgrade-state case only; single-step recorded
+> as P2; chain returns to the fix phase.
+
+Applied: **MFX-01** (P1, must-fix) is the multi-step / upgrade-state case.
+**REC-08** (P2, recorded, non-blocking) is the single-step case. The blind
+report's rejection of SOL-001 is withdrawn in both halves — it was refuted on
+the facts before the ruling; the ruling settles severity and scope, not the
+mechanism.
+
+## The contradiction as it stood — MFX-01 / REC-08 / SOL-001
 
 ### What A says
 
@@ -119,10 +134,10 @@ with `branch === targetBranch === agentos/<taskId>/run-1`. That is precisely the
 `packages/db/src/workflow.ts:320-324` and guards against — and the template arm
 of `resolveRunBranches` has no such guard, so template chains now bypass it.
 
-### Why this still needs a human ruling
+### The scope question that was put to Leo
 
-The evidence settles the mechanism. It does not settle scope, and the two
-plausible readings produce different work:
+The evidence settled the mechanism. It did not settle scope, and the two
+plausible readings produced different work:
 
 1. `spec.md`'s headline sentence is unconditional — "An automatic retry of a
    template chain step runs on the chain branch" — and the incident that
@@ -135,12 +150,73 @@ plausible readings produce different work:
    along, the delivered change is a correct partial step, and MFX-01 should be
    recorded as a follow-up rather than block this head.
 
-The coordinator's recommendation is reading 1 for Case B and P2 for Case A: a
+The coordinator recommended reading 1 for Case B and P2 for Case A: a
 single-step template chain has no chain branch and no successor, so the
 consequence there is cosmetic, whereas Case B is the incident's own population
-and the feature does not repair it.
+and the feature does not repair it. Leo ruled that way.
 
 ---
+
+## Must-fix (P1) — the fix phase closes this one item
+
+### MFX-01 — P1 — a multi-step template chain retry keeps the failed run's workspace branch, so an already-stranded chain stays stranded
+
+Sources: `SOL-001` (P1, Report A) and `OPUS-7` (P2, Report B, test half),
+adopted at P1 by Leo's ruling.
+
+Location: trigger `packages/api/src/app.ts:4158` (`currentTask.templateId ? run
+: null`); head selection `packages/db/src/workflow.ts:362`
+(`branch: prior?.branch ?? chainBranch`); the value that gets inherited is
+written by `packages/api/src/app.ts:3573` (`branch: body.branch ?? null` in
+`POST /runner/runs/:runId/start`) from `packages/runner/src/workspace.ts:160`.
+
+Governing specification, `.chain/template-chain-retry-branch/spec.md`:
+
+> An automatic retry of a template chain step runs on the chain branch, so a
+> step that succeeds on retry publishes where its successor will clone.
+
+and, from Changes 1:
+
+> the retry keeps the chain branch as its head while base resolution still
+> honors publication evidence
+
+Defect: `resolveRunBranches`'s template arm prefers `prior.branch` over the
+resolved chain head, and `prior.branch` is the failed run's *workspace* branch,
+not a chain head. For a multi-step template chain that value is the chain branch
+in the ordinary case — but not for a run that started with `branch: null`, which
+is exactly what the pre-fix automatic retry produced. Reproduced at head (Case B
+above): the retry is created with
+`branch = targetBranch = agentos/<taskId>/run-1` while the chain branch is
+`agentos/<chainId>`, so the step publishes where its successor will not look and
+the 2026-08-21 incident's own chains are not repaired by the change that exists
+to repair them. `branch === targetBranch` is additionally the poisoned shape
+`resolveRequeueBase` guards against at `packages/db/src/workflow.ts:320-324`;
+the template arm has no equivalent guard, and template chains now bypass the one
+that existed.
+
+Fix direction: in the template arm, let a resolved chain head win over the prior
+run's workspace branch, and keep `prior` for base evidence only — i.e. the head
+becomes the chain branch whenever `templateChainBranch` yields one, falling back
+to `prior?.branch` only when it does not (which is REC-08's case and stays as it
+is today). The change may land in `packages/db/src/workflow.ts`'s template arm or
+at the `app.ts` call site, whichever preserves the other four callers.
+`packages/runner/src/workspace.ts` stays untouched — `spec.md` puts its fallback
+naming out of scope, and this defect is fixable entirely in branch resolution.
+
+Behaviours the fix must not regress (all green at head, so a break is
+attributable): `T6` (a template chain still uses `agentos/<chainId>`, and a
+`branchName` override still wins), `T6b` (a deferred template start preserves its
+custom head and successor base), `T10` (an operator retry lands on the shared
+branch), `T13`/`T14`/`T14a` (the non-template automatic-retry behaviour
+`spec.md` acceptance 2 protects), and the test added by this batch.
+
+Required regression: instantiate a multi-step template chain, put a run into the
+upgrade state (`branch: null`), drive it through the real claim → start →
+complete routes so the per-run fallback is persisted the way production
+persists it, fail it retryably, and assert the next run's `branch` is the chain
+branch — plus that its `targetBranch` still answers to the salvage the same
+transaction recorded. Case B above is the exact scenario, and it currently
+produces the wrong value, so the test falsifies the head as it stands.
 
 ## Recorded, non-blocking (P2)
 
@@ -181,6 +257,13 @@ summarised here with their dispositions.
   never carried branch forward; that asymmetry is preserved" now describes a
   route that does carry `branch` forward. The assertion is still right; the
   sentence is not. Fix: scope it to the non-chain case.
+- **REC-08 / SOL-001, single-step half** — `packages/db/src/workflow.ts:241-255,
+  362`. A single-step template chain has no sibling task carrying a non-default
+  `targetBranch`, so `templateChainBranch` yields no chain head and the retry
+  inherits the per-run fallback (Case A above). Ruled P2 by Leo: such a chain has
+  no chain branch to run on and no successor to clone, so the consequence is
+  cosmetic. Recorded so it is not rediscovered as new. No fix required on this
+  head; MFX-01's fix direction deliberately leaves this case as it is.
 
 ---
 
