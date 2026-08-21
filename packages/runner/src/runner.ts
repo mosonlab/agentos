@@ -79,6 +79,10 @@ const cleanup = async (
 }> => {
   if (!workspace) return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage: null };
   let salvage: Awaited<ReturnType<typeof deliverFailedWorkspace>> = null;
+  // A pinned review/verification checkout is disposable by contract. It may
+  // be intentionally stale and dirty, but it never owns a publishable branch:
+  // neither success nor failure may turn its scratch state into chain
+  // publication evidence.
   if (!alreadyDurable && !workspace.pinnedBaseSha) {
     let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
     try {

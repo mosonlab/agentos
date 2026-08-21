@@ -946,6 +946,50 @@ test("a successful pinned review never publishes its dirty detached checkout", a
   }
 });
 
+test("a failed pinned review reports failure without publishing its dirty detached checkout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-failed-pinned-no-salvage-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, failingCodexStub(log, 'printf "review scratch\\n" > review.txt'));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    const pinned = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master");
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: {
+        ...mechanicalClaim.run,
+        model: "gpt-5.6-sol",
+        targetBranch: pinned,
+        pinnedBaseSha: pinned,
+        implementationBaseSha: pinned,
+        implementationHeadSha: pinned,
+      },
+    });
+
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.equal(completion?.body.terminalSuccess, false);
+    assert.match(String(completion?.body.failureReason), /agent execution failed/u);
+    assert.equal(completion?.body.pushedBranch, undefined);
+    assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
+    assert.throws(() => git(root, `--git-dir=${remote}`, "show-ref", "refs/heads/agentos/task-10/run-1"));
+    await assert.rejects(access(join(workspaces, "run-10")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a dead-lease salvage failure is durably reported and retains the workspace", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dead-lease-salvage-failure-"));
   try {
