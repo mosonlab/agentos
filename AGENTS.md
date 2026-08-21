@@ -27,9 +27,23 @@ runbook, including what a remote PASS is and is not worth.
 
 ## Dispatching chains
 
+Choosing a template: work that fits a single implementation context window
+goes through the direct chain — the discussion that produces its brief is the
+spec phase, done off the board. Work too large for one window, or that
+decomposes into independently demonstrable slices worth executing in
+parallel, goes through the full assurance chain, whose spec and plan steps
+perform that decomposition under human approval gates. Trivial chores stay
+off the board entirely.
+
 Instantiating a direct chain: the `description` you pass is the chain's
 specification of record — write it as a feature brief per
 `docs/BRIEF-TEMPLATE.md` before instantiating.
+
+A backlog card leaves the board the moment its content is taken over, and by
+whoever takes it over: dispatching a chain from a card, or recording the
+decisions that settle a discussion card, ends with archiving that card (with
+an activity pointing at the chain or brief) in the same action. Cards with
+genuinely open questions stay — that is what the backlog is for.
 
 ## Testing red lines
 
