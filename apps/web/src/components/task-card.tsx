@@ -1,7 +1,7 @@
 import { type DragEvent, type MouseEvent, type ReactNode, memo, useState } from "react";
 
 import { chainMarker } from "../lib/chain";
-import { money, timeAgo } from "../lib/format";
+import { timeAgo, usageCostLabel } from "../lib/format";
 import { moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -185,7 +185,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
       </span>
       <span className="flex-1" />
-      {task.latestRun?.costUsd ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span> : null}
+      {task.taskCost === null ? null : <span className="whitespace-nowrap">{usageCostLabel(task.taskCost)}</span>}
       <span className="whitespace-nowrap">{timeAgo(task.updatedAt)}</span>
     </div>
   </article>;

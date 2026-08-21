@@ -127,6 +127,19 @@ export const compactTokens = (value: number | null | undefined): string => {
   return String(value);
 };
 
+export const usageCostLabel = (value: import("./types").UsageCost | null | undefined): string => {
+  if (value?.costUsd !== null && value?.costUsd !== undefined) {
+    return `${money(value.costUsd)}${value.estimated ? " est." : ""}`;
+  }
+  if (!value) return "—";
+  const parts = [
+    value.inputTokens === null ? null : `${compactTokens(value.inputTokens)} input`,
+    value.cachedInputTokens === null ? null : `${compactTokens(value.cachedInputTokens)} cached`,
+    value.outputTokens === null ? null : `${compactTokens(value.outputTokens)} output`,
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? "—" : parts.join(" · ");
+};
+
 /** A repo remote as a browsable GitHub URL, or `null` when it is anything else.
  *  No other forge is recognised: a wrong guess would render a broken link. */
 export const repoWebUrl = (remoteUrl: string | null | undefined): string | null => {

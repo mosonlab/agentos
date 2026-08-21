@@ -170,6 +170,7 @@ export type Session = {
   outputTokens: number | null;
   cachedInputTokens: number | null;
   totalTokens: number | null;
+  usageCost?: UsageCost | null;
   failureReason: string | null;
   /** Relations GET /sessions and GET /sessions/:id include; absent on the
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
@@ -283,6 +284,7 @@ export type Task = {
   assigneeAgent: Agent | null;
   repo: Repo | null;
   runs: Run[];
+  taskCost?: UsageCost | null;
   chainId: string | null;
   chainIndex: number | null;
   source: TaskSource;
@@ -331,10 +333,19 @@ export type BoardTask = {
   updatedAt: string;
   assigneeAgent: { id: string; title: string } | null;
   chainProgress: ChainProgress | null;
-  latestRun: { id: string; runNumber: number; status: RunStatus; costUsd: string | null } | null;
+  latestRun: { id: string; runNumber: number; status: RunStatus } | null;
+  taskCost: UsageCost | null;
   /** §SF-1, bound to `latestRun`: null whenever the newest run is not the run
    *  that recorded the outcome. */
   mergeOutcome?: MergeOutcome | null;
+};
+
+export type UsageCost = {
+  costUsd: string | null;
+  estimated: boolean;
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
 };
 
 export type TaskStartability = {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { projectMergeOutcome, runOwnsMergeOutcome, type MergeOutcomeProjection, type ScheduleKind, type TaskSource, type TaskStatus } from "@agentos/db";
+import { projectMergeOutcome, runOwnsMergeOutcome, sessionUsageCost, sumUsageCosts, type MergeOutcomeProjection, type ScheduleKind, type TaskSource, type TaskStatus, type UsageCost } from "@agentos/db";
 
 import type { ChainProgress } from "./chain.js";
 
@@ -37,7 +37,8 @@ export type BoardCard = {
   updatedAt: Date;
   assigneeAgent: { id: string; title: string } | null;
   chainProgress: (ChainProgress & { position: number | null }) | null;
-  latestRun: { id: string; runNumber: number; status: string; costUsd: string | null } | null;
+  latestRun: { id: string; runNumber: number; status: string } | null;
+  taskCost: SerializedUsageCost | null;
   /**
    * §SF-1. Parsed server-side from the task's persisted `merge-result` output,
    * and null for every non-integrator task. A mechanical merge that stopped ends
@@ -70,7 +71,13 @@ export type BoardRow = {
     id: string;
     runNumber: number;
     status: string;
-    session: { costUsd: unknown } | null;
+    model: string;
+    session: {
+      costUsd: Parameters<typeof sessionUsageCost>[1]["costUsd"];
+      inputTokens: number | null;
+      cachedInputTokens: number | null;
+      outputTokens: number | null;
+    } | null;
   }>;
   stepOutput?: { kind: string; body: string; runId: string | null } | null;
 };
@@ -80,11 +87,19 @@ export type BoardRow = {
 const decimal = (value: unknown): string | null =>
   (value === null || value === undefined ? null : String(value));
 
+export type SerializedUsageCost = Omit<UsageCost, "costUsd"> & { costUsd: string | null };
+
+export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
+  cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
+
 export const boardCard = (
   row: BoardRow,
   chainProgress: (ChainProgress & { position: number | null }) | null,
 ): BoardCard => {
   const run = row.runs[0];
+  const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
+    ? []
+    : [sessionUsageCost(item.model, item.session)]));
   return {
     id: row.id,
     name: row.name,
@@ -106,7 +121,8 @@ export const boardCard = (
     chainProgress,
     latestRun: run === undefined
       ? null
-      : { id: run.id, runNumber: run.runNumber, status: run.status, costUsd: decimal(run.session?.costUsd) },
+      : { id: run.id, runNumber: run.runNumber, status: run.status },
+    taskCost: serializeUsageCost(taskCost),
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
     // run 2's outcome, and the card's only run line is the newest run's.
     mergeOutcome: run !== undefined && runOwnsMergeOutcome(row.stepOutput, run.id, run.id)

@@ -35,6 +35,8 @@ import {
   recomputeSessionUsage,
   resolveRequeueBase,
   resolveRunBranches,
+  sessionUsageCost,
+  sumUsageCosts,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -79,7 +81,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, etagFor, etagMatches } from "./board.js";
+import { boardCard, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
@@ -2173,8 +2175,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           assigneeAgent: { select: { id: true, title: true } },
           templateStep: { select: { name: true } },
           runs: {
-            orderBy: { runNumber: "desc" }, take: 1,
-            select: { id: true, runNumber: true, status: true, session: { select: { costUsd: true } } },
+            orderBy: { runNumber: "desc" },
+            select: {
+              id: true, runNumber: true, status: true, model: true,
+              session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true } },
+            },
           },
           // §SF-1: the card's run line reads the merge outcome, not only the
           // protocol status, so a stopped mechanical merge is not shown as Done.
@@ -2319,11 +2324,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // is where an operator reads a run's fate, and the header pill is not.
     const latestRunId = task.runs[0]?.id ?? null;
     const mergeOutcome = projectMergeOutcome(task.stepOutput);
+    const usageCosts = task.runs.map((run) => run.session === null
+      ? null
+      : sessionUsageCost(run.model, run.session));
     return context.json({
       ...task,
+      taskCost: serializeUsageCost(sumUsageCosts(usageCosts.filter((cost) => cost !== null))),
       mergeOutcome,
-      runs: task.runs.map((run) => ({
+      runs: task.runs.map((run, index) => ({
         ...run,
+        session: run.session === null ? null : {
+          ...run.session,
+          usageCost: serializeUsageCost(usageCosts[index] ?? null),
+        },
         mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
       })),
     });

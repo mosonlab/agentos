@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { Prisma } from "@agentos/db";
+
 import { type BoardRow, boardCard, etagFor, etagMatches } from "./board.js";
+
+const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
+  costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, ...overrides,
+});
 
 const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   id: "t1",
@@ -30,14 +36,14 @@ test("the board card carries every field the board renders and nothing else", ()
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
     "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainProgress", "cron",
-    "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status",
+    "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status", "taskCost",
     "templateId", "timezone", "updatedAt",
   ]);
 });
 
 test("the card's merge outcome is bound to the run it shows, and is null everywhere else", () => {
   const merged = JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) });
-  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED", session: null };
+  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "gpt-5.6-sol", session: null };
   // §SF-1: an ordinary step's output is not a malformed merge result, it is not
   // a merge result at all, and 112 board cards must not each carry a marker.
   assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "code-review", body: "fine", runId: "r1" } }), null).mergeOutcome, null);
@@ -53,12 +59,13 @@ test("the card's merge outcome is bound to the run it shows, and is null everywh
 test("the projection drops the Run and Session columns the board never reads", () => {
   const card = boardCard(row({
     runs: [{
-      id: "r1", runNumber: 3, status: "FAILED",
-      // The real row carries ~45 more columns; only these four survive.
-      session: { costUsd: "1.25" },
+      id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5",
+      // The real row carries ~45 more columns; only these fields survive.
+      session: session({ costUsd: "1.25" }),
     }],
   }), null);
-  assert.deepEqual(card.latestRun, { id: "r1", runNumber: 3, status: "FAILED", costUsd: "1.25" });
+  assert.deepEqual(card.latestRun, { id: "r1", runNumber: 3, status: "FAILED" });
+  assert.equal(card.taskCost?.costUsd, "1.25");
 });
 
 test("a task with no runs reports no latest run rather than an empty one", () => {
@@ -67,17 +74,27 @@ test("a task with no runs reports no latest run rather than an empty one", () =>
 
 test("a run with no session reports a null cost, not a zero one", () => {
   // `0` would read as "this run spent nothing"; the runner simply never said.
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", session: null }] }), null);
-  assert.equal(card.latestRun?.costUsd, null);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", session: null }] }), null);
+  assert.equal(card.taskCost, null);
 });
 
 test("a Decimal cost is serialised as the string the web client reads", () => {
   // Prisma hands back a Decimal instance, not a string, and `JSON.stringify`
   // of one is `{"s":1,"e":0,...}` unless it is stringified on the way out.
-  const decimal = { toString: () => "0.42" };
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", session: { costUsd: decimal } }] }), null);
-  assert.equal(card.latestRun?.costUsd, "0.42");
+  const decimal = new Prisma.Decimal("0.42");
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: decimal }) }] }), null);
+  assert.equal(card.taskCost?.costUsd, "0.42");
   assert.match(JSON.stringify(card), /"costUsd":"0\.42"/);
+});
+
+test("task cost sums every run including failures and marks an estimated summand", () => {
+  const card = boardCard(row({ runs: [
+    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", session: session({ inputTokens: 1_000_000 }) },
+    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", session: session({ costUsd: "1.25" }) },
+  ] }), null);
+  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED" });
+  assert.equal(card.taskCost?.costUsd, "1.45");
+  assert.equal(card.taskCost?.estimated, true);
 });
 
 test("the assignee is narrowed to the two fields the card shows", () => {
@@ -106,7 +123,7 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   // less than that whenever the task did not fail.
   const card = boardCard(row({
     assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner" },
-    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", session: { costUsd: "0.42" } }],
+    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "0.42" }) }],
   }), null);
   assert.ok(Buffer.byteLength(JSON.stringify(card)) < 700, "a clean card must stay well inside its budget");
 });

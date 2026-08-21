@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { afterEach, mock } from "node:test";
 
 import {
-  compactTokens, duration, formatDate, formatDateTime, money, setFormatLocale, sha, timeAgo,
+  compactTokens, duration, formatDate, formatDateTime, money, setFormatLocale, sha, timeAgo, usageCostLabel,
 } from "../lib/format";
 import { translate } from "../lib/i18n-core";
 import { cronProse, nextRunLabel } from "../lib/schedule";
@@ -112,6 +112,15 @@ test("money, compactTokens and sha are locale-invariant", () => {
   asLocale("zh");
   assert.deepEqual(sample(), english);
   assert.deepEqual(english, ["$12.50", "—", "1.3M", "—", "abcdef1"]);
+});
+
+test("usage cost labels distinguish estimates and never show partial dollars", () => {
+  assert.equal(usageCostLabel({
+    costUsd: "0.42", estimated: true, inputTokens: 10, cachedInputTokens: 2, outputTokens: 3,
+  }), "$0.42 est.");
+  assert.equal(usageCostLabel({
+    costUsd: null, estimated: false, inputTokens: 10, cachedInputTokens: 2, outputTokens: 3,
+  }), "10 input · 2 cached · 3 output");
 });
 
 /* -------------------------------------------------------------- schedule.ts */
