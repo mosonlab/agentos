@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .merge-gate.lock/
+.agentos-deploy/
 .env
 # `npm run setup:local` writes the complete bytes of an unpublished .env to a
 # same-directory temporary file before it links them into place. An interrupted
@@ -10,4 +11,3 @@ dist/
 *.log
 packages/db/generated/
 docs/reference/danny-agentos-video/frames/
-
