@@ -35,6 +35,7 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
+import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -881,6 +882,27 @@ export const activateChainSuccessor = async (
       return { nextTaskId: current.id, gated: false };
     }
     successor = current;
+  }
+
+  const successorStep = successor.templateStepId
+    ? await tx.taskTemplateStep.findUnique({
+      where: { id: successor.templateStepId },
+      select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+    })
+    : null;
+  if (isMergeReadinessStep(successorStep)) {
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor ${task.name} completed; server-side merge readiness queued`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.readiness,
+        schemaVersion: 1,
+        state: "queued",
+        sourceRunId: options.sourceRunId ?? null,
+      },
+    } });
+    return { nextTaskId: successor.id, gated: false };
   }
 
   if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {

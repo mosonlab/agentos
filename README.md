@@ -252,7 +252,7 @@ anything you care about.
 ## Templates release demo
 
 `npm run demo:templates -- preflight|setup|instantiate|capture|verify|reset`
-drives the guarded evidence workflow for the canonical ten-step template. The
+drives the guarded evidence workflow for the canonical twelve-step template. The
 current contract and exact commands are in
 [`docs/demos/templates-release-demo.md`](docs/demos/templates-release-demo.md).
 It proves one serial execution at named AgentOS and target SHAs. OSS-B separately

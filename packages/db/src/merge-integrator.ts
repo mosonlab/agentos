@@ -28,11 +28,14 @@ export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
 export const INTEGRATOR_STEP_INDEX = 12;
+export const DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
 export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
+export const DIRECT_INTEGRATOR_TEMPLATE_NAME = "direct-engineer-workflow";
 export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
 export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
+export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-human-12-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 
@@ -46,6 +49,9 @@ export const legacyTenStepTemplateName = (templateId: string): string =>
 
 export const legacyNineStepTemplateName = (templateId: string): string =>
   `${LEGACY_NINE_STEP_TEMPLATE_PREFIX}${templateId}`;
+
+export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
+  `${LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX}${templateId}`;
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant
@@ -68,9 +74,10 @@ const templateNameOf = (step: NonNullable<IntegratorStepShape>): string | null =
  */
 export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean => {
   if (!step) return false;
-  return step.stepIndex === INTEGRATOR_STEP_INDEX
-    && step.outputKind === INTEGRATOR_OUTPUT_KIND
-    && templateNameOf(step) === INTEGRATOR_TEMPLATE_NAME;
+  if (step.outputKind !== INTEGRATOR_OUTPUT_KIND) return false;
+  const templateName = templateNameOf(step);
+  return (step.stepIndex === INTEGRATOR_STEP_INDEX && templateName === INTEGRATOR_TEMPLATE_NAME)
+    || (step.stepIndex === DIRECT_INTEGRATOR_STEP_INDEX && templateName === DIRECT_INTEGRATOR_TEMPLATE_NAME);
 };
 
 /**
@@ -82,6 +89,9 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
   if (!step) return false;
   const templateName = templateNameOf(step);
   return isCanonicalIntegratorStep(step)
+    || (step.stepIndex === INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX) === true)
     || (step.stepIndex === 10
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);
@@ -110,8 +120,8 @@ export const canonicalIntegratorBindingRefusal = (
 ): string | null => {
   if (canonicalIntegratorBindingValid(agentName, step)) return null;
   return agentName === INTEGRATOR_AGENT_NAME
-    ? `Agent ${INTEGRATOR_AGENT_NAME} may bind only step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME}`
-    : `Step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME} may bind only agent ${INTEGRATOR_AGENT_NAME}`;
+    ? `Agent ${INTEGRATOR_AGENT_NAME} may bind only a canonical merge-execution step`
+    : `A canonical merge-execution step may bind only agent ${INTEGRATOR_AGENT_NAME}`;
 };
 
 export const integratorBindingRefusal = (
@@ -120,8 +130,8 @@ export const integratorBindingRefusal = (
 ): string | null => {
   if (integratorBindingValid(agentName, step)) return null;
   return agentName === INTEGRATOR_AGENT_NAME
-    ? `Agent ${INTEGRATOR_AGENT_NAME} may bind only step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME}`
-    : `Step ${INTEGRATOR_STEP_INDEX} of ${INTEGRATOR_TEMPLATE_NAME} may bind only agent ${INTEGRATOR_AGENT_NAME}`;
+    ? `Agent ${INTEGRATOR_AGENT_NAME} may bind only a merge-execution step`
+    : `A merge-execution step may bind only agent ${INTEGRATOR_AGENT_NAME}`;
 };
 
 /**
@@ -271,7 +281,7 @@ export const evidenceEquals = (left: MergeEvidence, right: MergeEvidence): boole
 // §8.1 / §D-P2 — the authorization payload
 // ---------------------------------------------------------------------------
 
-export type DecisionChannel = "inbox" | "patch";
+export type DecisionChannel = "inbox" | "patch" | "mechanical";
 
 export type DecisionBinding = {
   channel: DecisionChannel;
@@ -312,7 +322,7 @@ export const parseAuthorizationMetadata = (metadata: unknown): AuthorizationPars
   const decision = value.decision;
   if (typeof decision !== "object" || decision === null) return { status: "malformed", reason: "missing decision binding" };
   const binding = decision as Record<string, unknown>;
-  if (binding.channel !== "inbox" && binding.channel !== "patch") {
+  if (binding.channel !== "inbox" && binding.channel !== "patch" && binding.channel !== "mechanical") {
     return { status: "malformed", reason: "unknown decision channel" };
   }
   if (typeof binding.inboxDecisionId !== "string" || binding.inboxDecisionId.length === 0) {
@@ -439,9 +449,21 @@ export const selectAuthorization = (
     // Rule 1: the discriminator matched, so from here on the row is *claiming*
     // to be an authorization and silence is not an option — it is either valid,
     // ignored for a structural reason, or a near-match worth escalating.
-    if (candidate.actorType !== "operator") { ignoredCount += 1; continue; }
     if (parsed.status === "malformed") { nearMatchCount += 1; continue; }
     const payload = parsed.payload;
+    if (payload.decision.channel === "mechanical") {
+      const binding = `mechanical:${chainStep9TaskId}`;
+      if (candidate.actorType !== "control-plane"
+        || payload.decision.inboxDecisionId !== binding
+        || payload.decision.inboxMessageId !== binding
+        || (decisionUse.get(binding) ?? 0) > 1) {
+        ignoredCount += 1;
+        continue;
+      }
+      valid.push({ ...payload, activityId: candidate.id, createdAt: candidate.createdAt });
+      continue;
+    }
+    if (candidate.actorType !== "operator") { ignoredCount += 1; continue; }
     const decision = decisionById.get(payload.decision.inboxDecisionId);
     // Rule 2: the decision must exist and belong to *this* chain's step-11 gate,
     // resolved from the caller's own chain and never from the payload.

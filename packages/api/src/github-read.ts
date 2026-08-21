@@ -22,6 +22,7 @@
  */
 
 import { isDeterministicRefusal } from "@agentos/github-client";
+import type { ChangedFile } from "@agentos/db";
 
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
@@ -92,6 +93,17 @@ export type GitHubReader = {
     baseRef: string,
     signal: AbortSignal,
   ) => Promise<PullRequestSnapshot>;
+  compareCommits?: (
+    repository: string,
+    baseSha: string,
+    headSha: string,
+    signal: AbortSignal,
+  ) => Promise<{
+    status: "ahead" | "behind" | "diverged" | "identical";
+    behindBy: number;
+    filesComplete: boolean;
+    files: ChangedFile[];
+  }>;
 };
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
@@ -224,6 +236,19 @@ export const createGitHubReader = (
   fetchImpl: typeof fetch = fetch,
 ): GitHubReader | null => {
   if (!token) return null;
+  const request = async (url: string, init: RequestInit): Promise<Response> => {
+    let response: Response;
+    try {
+      response = await fetchImpl(url, init);
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === "AbortError") throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
+      const message = error instanceof Error ? error.message : "unknown";
+      throw new GitHubReadError(`GitHub read failed: ${message}`, isDeterministicRefusal(error) ? "permission" : "transport");
+    }
+    if (response.status === 401 || response.status === 403) throw new GitHubReadError(`GitHub read refused with ${response.status}`, "permission");
+    if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
+    return response;
+  };
   return {
     readPullRequest: async (repository, prNumber, baseRef, signal) => {
       const [owner, name] = repository.split("/");
@@ -258,6 +283,46 @@ export const createGitHubReader = (
       }
       if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
       return parsePullRequestResponse(repository, baseRef, await response.json(), new Date().toISOString());
+    },
+    compareCommits: async (repository, baseSha, headSha, signal) => {
+      const [owner, name, ...rest] = repository.split("/");
+      if (!owner || !name || rest.length > 0) throw new GitHubReadError(`malformed repository ${repository}`, "response");
+      const response = await request(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/compare/${baseSha}...${headSha}`,
+        {
+          method: "GET",
+          signal,
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+        },
+      );
+      const payload = asObject(await response.json());
+      const status = payload?.status;
+      const behindBy = payload?.behind_by;
+      if (status !== "ahead" && status !== "behind" && status !== "diverged" && status !== "identical") {
+        throw new GitHubReadError("comparison response has an invalid status", "response");
+      }
+      if (typeof behindBy !== "number" || !Number.isInteger(behindBy) || behindBy < 0) {
+        throw new GitHubReadError("comparison response has an invalid behind_by", "response");
+      }
+      if (!Array.isArray(payload?.files)) throw new GitHubReadError("comparison response has no files array", "response");
+      const files = payload.files.map((raw) => {
+        const entry = asObject(raw);
+        if (!entry || typeof entry.filename !== "string") {
+          throw new GitHubReadError("comparison response has a malformed file entry", "response");
+        }
+        if (entry.status === "renamed" && typeof entry.previous_filename !== "string") {
+          throw new GitHubReadError("renamed comparison entry has no previous_filename", "response");
+        }
+        return {
+          filename: entry.filename,
+          previousFilename: typeof entry.previous_filename === "string" ? entry.previous_filename : null,
+          patch: typeof entry.patch === "string" ? entry.patch : null,
+        };
+      });
+      // GitHub exposes at most 300 changed files and does not expose later file
+      // pages. Exactly 300 is therefore ambiguous and must not be read as a
+      // complete benign diff.
+      return { status, behindBy, filesComplete: files.length < 300, files };
     },
   };
 };

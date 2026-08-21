@@ -7,23 +7,20 @@
  *
  * The component suites prove their pieces and nothing else. This composes them
  * once, against a real scratch repository and a non-production AgentOS
- * deployment, and asserts the thing the pieces cannot: that a human approval on
- * a card whose evidence a worker filled becomes a merge commit whose parents are
- * the two SHAs the human was shown, executed by a different OS principal, with
+ * deployment, and asserts the thing the pieces cannot: that a server-issued
+ * exact-head authorization becomes a merge commit whose parents are the two
+ * bound SHAs, executed by a different OS principal, with
  * no publication side effect anywhere.
  *
  * The eight phases, in order:
  *
  *   1. instantiate the twelve-step chain; drive steps 1-10 with stub outputs so
  *      step 11 activates with a real PR delivered by step 5 on the scratch repository
- *   2. assert the step-11 card is created as a placeholder, that the evidence
- *      worker fills it with the live head SHA, base SHA and check conclusions,
- *      and that only then is it delivered
- *   3. approve through a real channel — the Web decision route, and a second
- *      pass through `processFeishuEvent` in the actual @agentos/inbox process
- *   4. assert the authorization activity and the InboxDecision landed
- *      atomically, that the payload equals the displayed block byte for byte,
- *      and that step 12 activated as `executionMode: "mechanical"`
+ *   2. assert step 11 recomputes defense-list and exact-head evidence from the
+ *      live pull request, then emits the mechanical authorization
+ *   3. assert no HUMAN task or Inbox decision appears on the merge path
+ *   4. assert the authorization is bound to the live head and base and that
+ *      step 12 activates as `executionMode: "mechanical"`
  *   5. start the merge executor as its dedicated OS user; it claims, merges,
  *      and persists the fenced `merge-result` output
  *   6. assert the control plane lands the task DONE
@@ -181,7 +178,7 @@ const poll = async (what, attempts, intervalMs, probe) => {
 
 /* --------------------------------------------------- phase 1: drive the chain */
 
-const driveToGate = async (api, config) => {
+const driveToGate = async (api, github, config) => {
   const record = phase(1, "instantiate the chain and drive steps 1-10 with stub outputs");
   const prNumber = Number(requiredEnv(
     "MERGE_SYSTEM_TEST_PR_NUMBER",
@@ -198,8 +195,21 @@ const driveToGate = async (api, config) => {
   const chain = await api("GET", `/tasks?chainId=${chainId}`);
   const tasks = (chain.body ?? []).slice().sort((left, right) => (left.chainIndex ?? 0) - (right.chainIndex ?? 0));
   if (tasks.length !== 12) record.fail(`expected a twelve-step chain, observed ${tasks.length} tasks — is the twelve-step template seeded?`);
+  const livePullRequest = await github("GET", `/repos/${config.owner}/${config.name}/pulls/${prNumber}`);
+  const headSha = livePullRequest.body?.head?.sha;
+  const baseSha = livePullRequest.body?.base?.sha;
+  if (livePullRequest.status !== 200 || !/^[0-9a-f]{40}$/u.test(headSha ?? "") || !/^[0-9a-f]{40}$/u.test(baseSha ?? "")) {
+    record.fail(`pull request #${prNumber} did not expose a usable exact head and base`);
+  }
   for (const task of tasks.filter((candidate) => (candidate.chainIndex ?? 0) <= 10)) {
-    await api("PUT", `/tasks/${task.id}/output`, { kind: task.templateStep?.outputKind ?? "notes", body: `stub output for ${task.name}` });
+    const regression = (task.chainIndex ?? 0) === 9;
+    await api("PUT", `/tasks/${task.id}/output`, regression
+      ? {
+        kind: "regression-verification",
+        body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha, baseHeadSha: baseSha, gateVerdict: "PASS" }),
+        commitSha: headSha,
+      }
+      : { kind: task.templateStep?.outputKind ?? "notes", body: `stub output for ${task.name}` });
     // The delivering step carries the real PR number the target identity is
     // derived from; the rest are inert stubs.
     if ((task.chainIndex ?? 0) === 5) {
@@ -236,88 +246,33 @@ const driveToGate = async (api, config) => {
   return { chainId, gate, integrator, prNumber };
 };
 
-/* -------------------------------------- phase 2: the two-phase evidence protocol */
+/* --------------------------------------- phases 2-4: mechanical readiness */
 
-const observeEvidence = async (api, chain) => {
-  const record = phase(2, "the gate card is a placeholder first, filled by the worker, delivered only then");
-  const messages = await api("GET", `/inbox/messages?gateTaskId=${chain.gate.id}`);
-  const card = (messages.body ?? [])[0];
-  if (!card) record.fail("no gate card was created for step 11");
-  record.note(`card ${card.id} created with delivery status ${card.deliveryStatus}`);
-  if (!/agentos-merge-evidence/u.test(card.body ?? "")) {
-    // The placeholder is the honest intermediate state; what must never happen
-    // is a human being shown an empty card and it counting as an approval.
-    record.note("card body at first read carries no evidence block yet (placeholder state)");
-  }
-  const filled = await poll("the evidence worker to fill the card", 30, 2_000, async () => {
-    const again = await api("GET", `/inbox/messages/${card.id}`);
-    const body = again.body?.body ?? "";
-    return /```agentos-merge-evidence[\s\S]*headSha[\s\S]*baseSha/u.test(body) ? again.body : null;
+const observeAuthorization = async (api, chain) => {
+  const record = phase(2, "server-side readiness emits exact-head authorization");
+  const authorization = await poll("step 11 mechanical authorization", 30, 2_000, async () => {
+    const activities = await api("GET", `/tasks/${chain.gate.id}/activity`);
+    return (activities.body ?? []).find((activity) => activity.metadata?.kind === "mergeIntegrator.authorization") ?? null;
   });
-  const block = filled.body.match(/```agentos-merge-evidence\n([\s\S]*?)```/u)?.[1] ?? "";
-  const evidence = JSON.parse(block);
-  if (!/^[0-9a-f]{40}$/u.test(evidence.headSha ?? "")) record.fail("the filled card has no well-formed head SHA");
-  if (!/^[0-9a-f]{40}$/u.test(evidence.baseSha ?? "")) record.fail("the filled card has no well-formed base SHA");
+  const evidence = authorization.metadata;
+  if (!/^[0-9a-f]{40}$/u.test(evidence.headSha ?? "")) record.fail("the authorization has no well-formed head SHA");
+  if (!/^[0-9a-f]{40}$/u.test(evidence.baseSha ?? "")) record.fail("the authorization has no well-formed base SHA");
+  if (evidence.decision?.channel !== "mechanical") record.fail("the authorization is not server-owned mechanical evidence");
+  record.note(`authorization activity ${authorization.id}: ${authorization.body}`);
   record.note(`headSha ${evidence.headSha}`);
   record.note(`baseSha ${evidence.baseSha}`);
-  record.note(`checks ${JSON.stringify(evidence.checks ?? evidence.requiredChecks ?? null)}`);
-  record.pass("the card a human is shown carries the live head SHA, base SHA and check conclusions");
-  return { card: filled, evidence, block };
-};
+  record.pass("readiness emitted a live head/base-bound mechanical authorization");
 
-/* ------------------------------------------- phase 3+4: approve, atomically */
+  const noHuman = phase(3, "the merge path contains no human approval");
+  const messages = await api("GET", `/inbox/messages?gateTaskId=${chain.gate.id}`);
+  if ((messages.body ?? []).length !== 0) noHuman.fail("step 11 created an Inbox gate card");
+  const gateTask = await api("GET", `/tasks/${chain.gate.id}`);
+  if (gateTask.body?.assigneeType === "HUMAN" || gateTask.body?.approvalGate === true) {
+    noHuman.fail("step 11 retained a HUMAN assignee or approval gate");
+  }
+  noHuman.pass("no HUMAN task, approval gate, or Inbox decision exists on the merge path");
 
-const approve = async (api, chain, gateCard) => {
-  const record = phase(3, "approve through a real channel and observe the durable decision");
-  const channel = process.env.MERGE_SYSTEM_TEST_CHANNEL?.trim() || "web";
-  if (channel !== "web" && channel !== "feishu") record.fail(`MERGE_SYSTEM_TEST_CHANNEL must be web or feishu, got ${channel}`);
-  if (channel === "web") {
-    const approveChoice = (gateCard.card.choices ?? []).find((choice) => /approve/iu.test(choice.id ?? choice.label ?? ""));
-    if (!approveChoice) record.fail("the gate card offers no approve choice");
-    const decided = await api("POST", `/inbox/messages/${gateCard.card.id}/decision`, {
-      decision: approveChoice.id, requestId: `system-test-${Date.now()}`,
-    });
-    if (decided.status !== 200 && decided.status !== 201) record.fail(`the decision route returned HTTP ${decided.status}`);
-    record.note(`POST /inbox/messages/${gateCard.card.id}/decision -> ${decided.status}`);
-  } else {
-    // NOT IMPLEMENTED. The Feishu pass has to drive `processFeishuEvent` inside
-    // the running @agentos/inbox process, and this script contains no code that
-    // does so — nor will it reach into another process's module graph and call
-    // it, because that would not be the cross-process protocol the direction is
-    // about. Driving it means posting a real Feishu card-action callback at the
-    // deployment's inbox webhook, which needs a Feishu app bound to this
-    // non-production deployment.
-    record.notImplemented(
-      "the Feishu channel is not implemented in this script. It requires a real card-action callback delivered to the running "
-      + "@agentos/inbox process by a Feishu app bound to this deployment; nothing here approximates it, and nothing here is waiting "
-      + "on infrastructure to make it run",
-    );
-  }
-
-  const atomic = phase(4, "the authorization activity and the InboxDecision landed together, byte for byte");
-  const activities = await api("GET", `/tasks/${chain.gate.id}/activity`);
-  // The discriminator lives in `metadata.kind` (packages/db/src/workflow.ts —
-  // `authorizationMetadata`); the activity *body* is the human sentence "Merge
-  // authorized for PR #N at <sha> onto <ref>". Matching on the body was
-  // matching on a string production never writes.
-  const authorization = (activities.body ?? []).find(
-    (activity) => activity.metadata?.kind === "mergeIntegrator.authorization",
-  );
-  if (!authorization) {
-    atomic.fail(
-      `no activity with metadata.kind "mergeIntegrator.authorization" was written (observed kinds: `
-      + `${JSON.stringify((activities.body ?? []).map((activity) => activity.metadata?.kind ?? null))})`,
-    );
-  }
-  // And the payload is the metadata itself, which is what the executor reads —
-  // not a fenced block re-parsed out of prose.
-  const payload = JSON.stringify(authorization.metadata);
-  atomic.note(`authorization activity ${authorization.id}: ${authorization.body}`);
-  // Presented equals recorded *by identity*: the card body block IS the payload
-  // source, so this is a byte comparison and not a field-by-field re-derivation.
-  if (!payload.includes(gateCard.evidence.headSha) || !payload.includes(gateCard.evidence.baseSha)) {
-    atomic.fail("the recorded authorization does not carry the SHAs the card displayed");
-  }
+  const atomic = phase(4, "authorization activates the mechanical executor");
   const successor = await poll("step 12 to activate", 30, 2_000, async () => {
     const task = await api("GET", `/tasks/${chain.integrator.id}`);
     return ["TODO", "DOING"].includes(task.body?.status) ? task.body : null;
@@ -336,9 +291,8 @@ const approve = async (api, chain, gateCard) => {
       + "queued is not the one only the merge executor may claim",
     );
   }
-  atomic.pass("the decision, the authorization and the step-12 activation are one durable transition, and step 12 queued a mechanical run");
-  record.pass(`approved through the ${channel} channel`);
-  return { authorization, payload };
+  atomic.pass("the exact-head authorization and step-12 activation are one durable transition, and step 12 queued a mechanical run");
+  return { authorization, evidence, payload: JSON.stringify(evidence) };
 };
 
 /* ----------------------------------- phase 5: the executor, as its own principal */
@@ -453,9 +407,8 @@ const main = async () => {
     const config = preflight();
     const api = makeControlPlane(config);
     const github = makeGitHub(config);
-    const chain = await driveToGate(api, config);
-    const gateCard = await observeEvidence(api, chain);
-    await approve(api, chain, gateCard);
+    const chain = await driveToGate(api, github, config);
+    const gateCard = await observeAuthorization(api, chain);
     executor = await runExecutor(config);
     result = await verifyOutcome(api, github, { ...config, ...chain }, chain, gateCard, executor);
   } catch (error) {

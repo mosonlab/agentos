@@ -323,9 +323,12 @@ const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
   return { root, head };
 };
 
-const dispatch = (t, repo, args, env = {}) => {
+const dispatch = (t, repo, args, env = {}, busySlots = []) => {
   const cache = join(scratch(t), "cache");
   mkdirSync(cache, { recursive: true });
+  const slots = join(cache, "gate-dispatch");
+  mkdirSync(slots, { recursive: true });
+  for (const slot of busySlots) writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
   return spawnSync("bash", [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), ...args], {
     cwd: repo.root,
     encoding: "utf8",
@@ -335,7 +338,7 @@ const dispatch = (t, repo, args, env = {}) => {
 
 test("a local PASS comes back as 0 with the gate's own verdict line", (t) => {
   const repo = fixtureRepo(t, {});
-  const result = dispatch(t, repo, [repo.head]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
 });
@@ -344,7 +347,7 @@ test("a local FAIL comes back as 1, unchanged", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: FAIL (stub)\\n"; exit 1',
   });
-  const result = dispatch(t, repo, [repo.head]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
 });
@@ -353,7 +356,7 @@ test("NOT AUTHORITATIVE keeps its own code", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: NOT AUTHORITATIVE\\n"; exit 3',
   });
-  const result = dispatch(t, repo, [repo.head]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
   assert.equal(result.status, 3);
 });
 
@@ -371,6 +374,30 @@ test("a failed mirror push is 76 and not a FAIL", (t) => {
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /^GATE NOT RUN: /m);
   assert.doesNotMatch(result.stdout, /MERGE GATE: FAIL/);
+});
+
+test("dispatch tries a remote slot before an eligible local slot", (t) => {
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "LOCAL SHOULD NOT RUN\\n"; exit 1',
+    remoteGate: 'printf "MERGE GATE: PASS remote-first\\n"; exit 0',
+  });
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /remote-first/);
+  assert.doesNotMatch(result.stdout, /LOCAL SHOULD NOT RUN/);
+  assert.match(result.stderr, /remote-1/);
+});
+
+test("dispatch uses local only when both remote slots are busy", (t) => {
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "MERGE GATE: PASS local-spillover\\n"; exit 0',
+    remoteGate: 'printf "REMOTE SHOULD NOT RUN\\n"; exit 1',
+  });
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /local-spillover/);
+  assert.doesNotMatch(result.stdout, /REMOTE SHOULD NOT RUN/);
+  assert.match(result.stderr, /local slot/);
 });
 
 test("the remote path's exit code is passed through unchanged", (t) => {
@@ -513,7 +540,7 @@ test("a gate killed by SIGKILL comes back as 137 with no verdict line", (t) => {
   // sees no MERGE GATE line and must read the silence as "no verdict", never as
   // a pass, and never as the FAIL that a rewritten code would have implied.
   const repo = fixtureRepo(t, { mergeGate: "kill -9 $$" });
-  const result = dispatch(t, repo, [repo.head]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
   assert.equal(result.status, 137);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
 });
@@ -528,8 +555,8 @@ test("the dispatcher releases its slot when the gate ends", (t) => {
     { cwd: repo.root, encoding: "utf8", env: { ...GIT_ENV, XDG_CACHE_HOME: cache } },
   );
   assert.equal(result.status, 0, result.stderr);
-  const check = spawnSync("test", ["-e", join(cache, "gate-dispatch", "local.slot")]);
-  assert.notEqual(check.status, 0, "the local slot was not released");
+  const check = spawnSync("test", ["-e", join(cache, "gate-dispatch", "remote-1.slot")]);
+  assert.notEqual(check.status, 0, "the remote slot was not released");
 });
 
 test("a destination that is not an ssh destination is refused before anything is sent", (t) => {

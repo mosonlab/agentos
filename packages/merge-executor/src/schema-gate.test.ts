@@ -22,7 +22,7 @@ import { test } from "node:test";
 
 /** Every type.field this executor binds, and the enum values it classifies. */
 export const BOUND_FIELDS: Record<string, string[]> = {
-  Repository: ["mergeQueue", "branchProtectionRules", "ref", "pullRequest"],
+  Repository: ["id", "mergeQueue", "branchProtectionRules", "ref", "pullRequest"],
   BranchProtectionRule: ["pattern", "requiresStatusChecks", "requiresStrictStatusChecks", "requiredStatusCheckContexts"],
   PullRequest: [
     "id", "number", "state", "isDraft", "merged", "mergedAt", "mergeable", "mergeStateStatus",
@@ -35,7 +35,9 @@ export const BOUND_FIELDS: Record<string, string[]> = {
   StatusCheckRollup: ["state", "contexts"],
   CheckRun: ["name", "conclusion", "status"],
   StatusContext: ["context", "state"],
-  Mutation: ["disablePullRequestAutoMerge", "dequeuePullRequest"],
+  Mutation: ["disablePullRequestAutoMerge", "dequeuePullRequest", "updateRefs"],
+  UpdateRefsInput: ["repositoryId", "refUpdates"],
+  RefUpdate: ["name", "beforeOid", "afterOid", "force"],
 };
 
 /**
@@ -58,6 +60,7 @@ export const BOUND_ENUMS: Record<string, string[]> = {
 const INTROSPECTION = `query { __schema { types {
   name kind
   fields(includeDeprecated: true) { name }
+  inputFields(includeDeprecated: true) { name }
   enumValues(includeDeprecated: true) { name }
 } } }`;
 
@@ -65,6 +68,7 @@ type SchemaType = {
   name: string | null;
   kind: string;
   fields: Array<{ name: string }> | null;
+  inputFields: Array<{ name: string }> | null;
   enumValues: Array<{ name: string }> | null;
 };
 
@@ -102,7 +106,7 @@ test("§D-P6 — every bound GraphQL type, field and enum value still exists, an
   for (const [typeName, fields] of Object.entries(BOUND_FIELDS)) {
     const type = types.get(typeName);
     assert.ok(type, `type ${typeName} is absent from the live schema`);
-    const live = new Set((type.fields ?? []).map((field) => field.name));
+    const live = new Set([...(type.fields ?? []), ...(type.inputFields ?? [])].map((field) => field.name));
     for (const field of fields) assert.ok(live.has(field), `${typeName}.${field} is absent or renamed`);
   }
 

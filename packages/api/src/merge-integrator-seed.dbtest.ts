@@ -77,7 +77,7 @@ const directTemplate = async () => db.taskTemplate.findUniqueOrThrow({
 
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes the twelve-step mechanical template and six-step direct template", async () => {
+test("a fresh seed writes the twelve-step and seven-step autonomous merge templates", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
@@ -102,22 +102,26 @@ test("a fresh seed writes the twelve-step mechanical template and six-step direc
   assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
 
   const direct = await directTemplate();
-  assert.equal(direct.steps.length, 6);
+  assert.equal(direct.steps.length, 7);
   assert.equal(direct.steps[0]?.assigneeAgent?.name, "senior-dev-luna");
   assert.equal(direct.steps[0]?.opensPullRequest, true);
   assert.match(direct.steps[0]?.prompt ?? "", /brief is the specification of record/u);
   assert.equal(direct.steps[2]?.attachmentsFromPrevious, false);
-  assert.equal(direct.steps[5]?.assigneeType, AssigneeType.HUMAN);
-  assert.equal(direct.steps[5]?.approvalGate, true);
-  assert.match(direct.steps[5]?.prompt ?? "", /no mechanical merge step/u);
-  assert.equal(direct.steps.some((candidate) => candidate.assigneeAgent?.name === INTEGRATOR_AGENT_NAME), false);
+  assert.equal(direct.steps[5]?.assigneeType, AssigneeType.AGENT);
+  assert.equal(direct.steps[5]?.approvalGate, false);
+  assert.equal(direct.steps[5]?.outputKind, "merge-authorization");
+  assert.equal(direct.steps[6]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
+  assert.equal(direct.steps[6]?.outputKind, INTEGRATOR_OUTPUT_KIND);
+  const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
+  assert.equal(resolver.model, "gpt-5.6-sol:high");
+  assert.equal(resolver.runnerPreference, "CODEX");
 });
 
 test("the verifier passes on a freshly seeded database, and says how many steps it saw", async () => {
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /18 steps across 2 templates/u);
+  assert.match(verified.output, /19 steps across 2 templates/u);
 });
 
 test("re-seeding is idempotent and does not flip step 12 back", async () => {
@@ -128,11 +132,11 @@ test("re-seeding is idempotent and does not flip step 12 back", async () => {
   assert.equal(step.taskTemplate.steps.length, 12);
 });
 
-test("canonical sync restores step, role, and foundational prompts when structure matches", async () => {
+test("canonical sync restores step, merge-resolver role, and foundational prompts when structure matches", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
   const step = direct.steps[0]!;
-  const agent = await db.agent.findFirstOrThrow({ where: { name: "default" } });
+  const agent = await db.agent.findFirstOrThrow({ where: { name: "merge-resolver" } });
   await Promise.all([
     db.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: "step prompt drift" } }),
     db.agent.update({ where: { id: agent.id }, data: { foundationalPrompt: "foundation drift", rolePrompt: "role drift" } }),
@@ -142,7 +146,7 @@ test("canonical sync restores step, role, and foundational prompts when structur
   assert.equal(synced.code, 0, synced.output);
   const expectedStep = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
   const sources = await loadAgentSources();
-  const expectedRole = sources.roles.find(({ name }) => name === "default")!;
+  const expectedRole = sources.roles.find(({ name }) => name === "merge-resolver")!;
   const [persistedStep, persistedAgent] = await Promise.all([
     db.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } }),
     db.agent.findUniqueOrThrow({ where: { id: agent.id } }),

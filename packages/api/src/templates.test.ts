@@ -109,7 +109,9 @@ test("instantiating the canonical feature template creates twelve tasks includin
   assert.equal(result.tasks.length, 12);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
   assert.equal(created[0]!.followUpTaskId, "task-2");
-  assert.equal(created[10]!.assigneeType, AssigneeType.HUMAN);
+  assert.equal(created[10]!.assigneeType, AssigneeType.AGENT);
+  assert.equal(created[10]!.approvalGate, false);
+  assert.equal(created[10]!.templateStep.outputKind, "merge-authorization");
   assert.equal(created[11]!.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(created[11]!.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
   assert.equal(created[11]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
@@ -119,7 +121,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runner, RunnerKind.CLAUDE);
   assert.equal(runs[0]!.branch, "feature/twelve-steps");
-  assert.equal(runs.some((run) => run.taskId === created[11]!.id), false, "step 12 waits for the human gate and never queues a model at instantiation");
+  assert.equal(runs.some((run) => run.taskId === created[11]!.id), false, "step 12 waits for server-side readiness and never queues at instantiation");
   assert.doesNotMatch(
     created[6]!.description,
     /Read the prior template steps' persisted outputs before working/u,

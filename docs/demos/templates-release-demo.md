@@ -1,10 +1,11 @@
 # Templates release demo
 
 This page is the current OSS-C release-demo authority. The canonical workflow
-has ten positions: agent steps 1-8, human approval at step 9, and the mechanical
-`merge-integrator` at step 10. Step 10 runs no model and does not open a pull
-request. Earlier nine-step planning text is historical and must not drive a new
-recording.
+has twelve positions: agent steps 1-10, server-side mechanical readiness at
+step 11, and the mechanical `merge-integrator` at step 12. Steps 11 and 12 run
+no model, carry no human approval gate, and step 12 does not open a pull
+request. Earlier human-gated planning text is historical and must not drive a
+new recording.
 
 The harness proves one serial template execution against exact AgentOS and
 synthetic-target commits. It does not prove fresh installation, universal
@@ -71,12 +72,12 @@ npm run demo:templates -- verify --run-id oss-c0-demo-001 --evidence-dir <dir>
 
 `setup` converges only before instantiation. It locates the seeded project and
 canonical template, registers the exact target Repo, and grants `GIT_WRITE` to
-the nine agent-backed positions, including the mechanical integrator.
+every agent-backed position, including readiness and the mechanical integrator.
 `instantiate` calls the ordinary API exactly once. `capture` is read-only and
 stores digests rather than output bodies or event payloads. `verify` requires
-positions 1-10, exact output kinds on agent steps 1-8 and mechanical step 10, a
-completed human step 9 with captured decision activity, and, in public mode, an
-automatic GitHub PR with no manual fallback.
+positions 1-12, exact output kinds on every step, server-side mechanical
+readiness at step 11, mechanical merge execution at step 12, and, in public
+mode, an automatic GitHub PR with no manual fallback.
 A successful rehearsal is labeled `REHEARSAL_ONLY`; it cannot be relabeled
 `PASS`.
 

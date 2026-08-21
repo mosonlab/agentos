@@ -51,6 +51,7 @@ export type Deps = {
   merge: (
     reference: { owner: string; name: string; number: number },
     expectedHeadSha: string,
+    expectedBase: { ref: string; sha: string; repositoryId: string },
   ) => Promise<MergeResponse>;
   disableAutoMerge: (pullRequestId: string) => Promise<import("./github.js").DisarmResult>;
   dequeuePullRequest: (entryId: string) => Promise<import("./github.js").DisarmResult>;
@@ -458,7 +459,11 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
         }
       }
       state.sends += 1;
-      const response = await deps.merge(reference, authorization.headSha);
+      const response = await deps.merge(
+        reference,
+        authorization.headSha,
+        { ref: authorization.baseRef, sha: authorization.baseSha, repositoryId: finalRead.snapshot.repositoryId },
+      );
       state.response = response;
       if (response.status === "merged") return { status: "applied", value: { via: "response", sha: response.sha } };
       // `unknown` is the only lost class the transport produces: a 5xx, a
@@ -547,7 +552,9 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
     }));
   }
   const landed = verify.snapshot.pullRequest.mergeCommit;
-  if (!landed || landed.parents.length < 2 || landed.parents[0] !== authorization.baseSha || landed.parents[1] !== authorization.headSha) {
+  if (verify.snapshot.baseRefOid !== mergeCommitSha
+    || (landed !== null && (landed.oid !== mergeCommitSha || landed.parents.length < 2
+      || landed.parents[0] !== authorization.baseSha || landed.parents[1] !== authorization.headSha))) {
     return stop("base-drift-post-merge", JSON.stringify({
       mergeCommitSha,
       landed,
