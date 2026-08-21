@@ -55,3 +55,38 @@ test("an unpriced token component suppresses a partial aggregate dollar amount",
   assert.equal(total?.inputTokens, 1_010);
   assert.equal(total?.outputTokens, 55);
 });
+
+test("incomplete priced token rows never produce a partial dollar estimate", () => {
+  const incomplete = [
+    { inputTokens: 10, cachedInputTokens: null, outputTokens: null },
+    { inputTokens: null, cachedInputTokens: 2, outputTokens: null },
+    { inputTokens: null, cachedInputTokens: null, outputTokens: 3 },
+    { inputTokens: null, cachedInputTokens: 2, outputTokens: 3 },
+    { inputTokens: 10, cachedInputTokens: null, outputTokens: 3 },
+    { inputTokens: 10, cachedInputTokens: 2, outputTokens: null },
+  ];
+
+  for (const tokens of incomplete) {
+    const cost = sessionUsageCost("gpt-5.6-sol", { costUsd: null, ...tokens });
+    assert.equal(cost.costUsd, null, JSON.stringify(tokens));
+    assert.equal(cost.estimated, false, JSON.stringify(tokens));
+    assert.deepEqual(
+      { inputTokens: cost.inputTokens, cachedInputTokens: cost.cachedInputTokens, outputTokens: cost.outputTokens },
+      tokens,
+    );
+  }
+});
+
+test("an incomplete priced session suppresses a partial aggregate dollar amount", () => {
+  const complete = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50,
+  });
+  const incomplete = sessionUsageCost("gpt-5.6-luna", {
+    costUsd: null, inputTokens: 10, cachedInputTokens: null, outputTokens: 5,
+  });
+  const total = sumUsageCosts([complete, incomplete]);
+  assert.equal(total?.costUsd, null);
+  assert.equal(total?.inputTokens, 1_010);
+  assert.equal(total?.cachedInputTokens, 100);
+  assert.equal(total?.outputTokens, 55);
+});

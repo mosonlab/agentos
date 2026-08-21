@@ -60,16 +60,18 @@ export const sessionUsageCost = (model: string, session: CostableSession): Usage
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
 
   const prices = MODEL_TOKEN_PRICES[modelNameForPricing(model)];
-  // Codex reports cached input as a subset of input. Refuse to manufacture a
-  // partial amount from an inconsistent row; the caller will render its tokens.
-  if (!prices || (session.inputTokens !== null && session.cachedInputTokens !== null
-    && session.cachedInputTokens > session.inputTokens)) {
+  // Every component is required for a complete estimate. Persisted null means
+  // the provider did not report that component, not that it was zero. Codex
+  // reports cached input as a subset of input, so inconsistent rows also fall
+  // back to their token columns instead of manufacturing a partial amount.
+  if (!prices || session.inputTokens === null || session.cachedInputTokens === null
+    || session.outputTokens === null || session.cachedInputTokens > session.inputTokens) {
     return { costUsd: null, estimated: false, ...tokens };
   }
 
-  const cached = session.cachedInputTokens ?? 0;
-  const uncached = session.inputTokens === null ? 0 : session.inputTokens - cached;
-  const output = session.outputTokens ?? 0;
+  const cached = session.cachedInputTokens;
+  const uncached = session.inputTokens - cached;
+  const output = session.outputTokens;
   const costUsd = new Prisma.Decimal(uncached).times(prices.inputPerMillionUsd)
     .plus(new Prisma.Decimal(cached).times(prices.cachedInputPerMillionUsd))
     .plus(new Prisma.Decimal(output).times(prices.outputPerMillionUsd))

@@ -89,7 +89,9 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
 
 test("task cost sums every run including failures and marks an estimated summand", () => {
   const card = boardCard(row({ runs: [
-    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", session: session({ inputTokens: 1_000_000 }) },
+    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", session: session({
+      inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0,
+    }) },
     { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", session: session({ costUsd: "1.25" }) },
   ] }), null);
   assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED" });

@@ -140,6 +140,8 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
   const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  const taskCostLabel = usageCostLabel(task.taskCost);
+  const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   return <article
     data-card={task.id}
     className={TASK_CARD}
@@ -185,9 +187,14 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
       </span>
       <span className="flex-1" />
-      {task.taskCost === null ? null : <span className="whitespace-nowrap">{usageCostLabel(task.taskCost)}</span>}
+      {task.taskCost === null || hasTokenFallback ? null : <span className="whitespace-nowrap">{taskCostLabel}</span>}
       <span className="whitespace-nowrap">{timeAgo(task.updatedAt)}</span>
     </div>
+    {hasTokenFallback ? (
+      <div data-task-cost-fallback="" className="mt-[6px] max-w-full whitespace-normal text-[11.5px] leading-[1.45] text-muted-foreground [overflow-wrap:anywhere]">
+        {taskCostLabel}
+      </div>
+    ) : null}
   </article>;
 };
 
