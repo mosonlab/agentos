@@ -192,6 +192,29 @@ export const cleanupAgentScratch = async (
 const codexBaselineFile = (config: RunnerConfig): string =>
   join(config.sessionConfigBaselineRoot ?? sessionConfigBaselineRoot(), "codex", "config.toml");
 
+const sessionConfigOwnerUid = async (config: RunnerConfig, cwd: string): Promise<number> => {
+  if (config.runAsPrefix.length > 0) {
+    const uidText = await command(config, "/usr/bin/id", ["-u"], cwd, workspaceEnvironment(config));
+    const uid = Number(uidText);
+    if (!Number.isSafeInteger(uid) || uid < 0) throw new Error(`run-as launcher returned an invalid uid: ${uidText}`);
+    return uid;
+  }
+
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new Error("runner process uid is unavailable");
+  return uid;
+};
+
+const validateSessionConfigRoot = async (configRoot: string, expectedOwnerUid: number): Promise<void> => {
+  const info = await lstat(configRoot);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`created path is not a real directory: ${configRoot}`);
+  }
+  if (info.uid !== expectedOwnerUid) {
+    throw new Error(`created directory ${configRoot} has uid ${info.uid}, expected ${expectedOwnerUid}`);
+  }
+};
+
 /**
  * Provision only the configuration Codex is allowed to see. The repository
  * baseline contributes config.toml; the runner host contributes auth.json and
@@ -219,20 +242,30 @@ export const provisionSessionConfig = async (
   const baseline = codexBaselineFile(config);
   const configParent = dirname(scratch.configRoot);
   try {
-    await mkdir(configParent, { mode: 0o733 });
-    await chmod(configParent, 0o733);
+    await mkdir(configParent, { mode: 0o711 });
+    await chmod(configParent, 0o711);
+    const expectedOwnerUid = await sessionConfigOwnerUid(config, configParent);
     if (config.runAsPrefix.length > 0) {
-      await command(
-        config,
-        "/bin/sh",
-        ["-c", 'umask 077; mkdir "$1"; cp "$2" "$1/config.toml"; chmod 700 "$1"; chmod 600 "$1/config.toml"', "agentos-codex-config", scratch.configRoot, baseline],
-        configParent,
-        workspaceEnvironment(config),
-      );
+      // Open the daemon-owned parent only for the one operation that needs it:
+      // creation by the target uid. A failed mkdir must stop provisioning, and
+      // the parent is made non-writable again before any baseline or auth copy.
+      await chmod(configParent, 0o733);
+      try {
+        await command(config, "/bin/mkdir", ["-m", "700", scratch.configRoot], configParent, workspaceEnvironment(config));
+      } finally {
+        await chmod(configParent, 0o711);
+      }
     } else {
       await mkdir(scratch.configRoot, { mode: 0o700 });
-      await copyFile(baseline, join(scratch.configRoot, "config.toml"));
       await chmod(scratch.configRoot, 0o700);
+    }
+
+    await validateSessionConfigRoot(scratch.configRoot, expectedOwnerUid);
+    if (config.runAsPrefix.length > 0) {
+      await command(config, "/bin/cp", [baseline, join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
+      await command(config, "/bin/chmod", ["600", join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
+    } else {
+      await copyFile(baseline, join(scratch.configRoot, "config.toml"));
       await chmod(join(scratch.configRoot, "config.toml"), 0o600);
     }
   } catch (error: unknown) {

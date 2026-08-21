@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -303,6 +303,73 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
     assert.match(String(completion.body.failureReason), /missing-baseline/u);
     await removeRetainedSessionConfig(completion);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex rejects a run-as config-root symlink in PROVISION without copying host auth", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-config-symlink-"));
+  const sessionId = `session-codex-config-symlink-${root.slice(-6)}`;
+  const sessionParent = join(await realpath(tmpdir()), "agentos-session-config", sessionId);
+  try {
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const plantedTarget = join(root, "planted-target");
+    await mkdir(plantedTarget);
+    const launcher = join(root, "run-as.sh");
+    await writeFile(launcher, [
+      "#!/bin/sh",
+      `planted_target=${JSON.stringify(plantedTarget)}`,
+      'if [ "$1" = "/bin/sh" ] && [ "$4" = "agentos-codex-config" ]; then',
+      '  ln -s "$planted_target" "$5"',
+      'elif [ "$1" = "/bin/mkdir" ] && [ "$2" = "-m" ] && [ "$3" = "700" ]; then',
+      '  case "$4" in */agentos-session-config/*/config) ln -s "$planted_target" "$4" ;; esac',
+      "fi",
+      'exec "$@"',
+    ].join("\n"));
+    await chmod(launcher, 0o755);
+    const workspaceRoot = join(root, "workspaces");
+    await mkdir(workspaceRoot);
+    const configured = {
+      ...codexOnly(workspaceRoot, root, join(root, "codex-must-not-start")),
+      runAsPrefix: [launcher],
+    };
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const originalPreflight = adapters.CODEX.preflight;
+    const originalStart = adapters.CODEX.start;
+    let preflightCalls = 0;
+    let startCalls = 0;
+    adapters.CODEX.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
+    adapters.CODEX.start = (async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); }) as typeof originalStart;
+    try {
+      await executeClaim(configured, {
+        ...mechanicalClaim,
+        executionMode: "agent",
+        runner: "CODEX",
+        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+        session: { id: sessionId },
+      });
+    } finally {
+      adapters.CODEX.preflight = originalPreflight;
+      adapters.CODEX.start = originalStart;
+    }
+    assert.equal(preflightCalls, 0);
+    assert.equal(startCalls, 0);
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    assert.match(String(completion.body.failureReason), /Unable to create session CLI config root/u);
+    assert.match(String(completion.body.failureReason), /mkdir/u);
+    assert.deepEqual(await readdir(plantedTarget), [], "neither baseline nor host auth may reach the symlink target");
+    assert.equal((await stat(sessionParent)).mode & 0o777, 0o711, "the writable parent window must close after mkdir fails");
+  } finally {
+    await rm(sessionParent, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
