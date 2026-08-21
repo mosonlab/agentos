@@ -388,10 +388,12 @@ export const recordReclaimOutcomes = async (
  * this narrow ACK after pushing the deterministic salvage ref and before it
  * deletes the directory; unlike run publication it is authorized by the open
  * reclaim intent and recorded runner ownership, not by an expired fence. */
+export type ReplacementRepair = "none" | "repaired" | "requeued" | "already-started";
+
 export const acknowledgeReclaimSalvage = async (
   db: PrismaClient,
   input: { runnerId: string; runId: string; pushedBranch: string },
-): Promise<boolean> => {
+): Promise<false | ReplacementRepair> => {
   return db.$transaction(async (tx) => {
     const run = await tx.run.findUnique({
       where: { id: input.runId },
@@ -416,12 +418,11 @@ export const acknowledgeReclaimSalvage = async (
       data: { pushedBranch: input.pushedBranch },
     });
     if (updated.count !== 1 || !run.taskId) return false;
-    await repairReplacementAfterSalvage(tx, {
+    return repairReplacementAfterSalvage(tx, {
       taskId: run.taskId,
       runNumber: run.runNumber,
       branch: run.branch,
     });
-    return true;
   });
 };
 
@@ -433,7 +434,7 @@ export const acknowledgeReclaimSalvage = async (
 export const repairReplacementAfterSalvage = async (
   tx: Prisma.TransactionClient,
   run: { taskId: string; runNumber: number; branch: string | null },
-): Promise<"none" | "repaired" | "requeued" | "already-started"> => {
+): Promise<ReplacementRepair> => {
   const replacement = await tx.run.findFirst({
     where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
     select: { id: true, status: true, startedAt: true },

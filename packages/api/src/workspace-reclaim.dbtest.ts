@@ -413,6 +413,44 @@ test("reclaim salvage acknowledgement rebases an already-queued retry", async ()
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, salvage);
 });
 
+test("reclaim salvage acknowledgement refuses cleanup after the replacement started", async () => {
+  const root = await scratchRoot("salvage-started-replacement");
+  const runnerId = "runner-salvage-started";
+  const seeded = await seedRun({ root, runnerId, status: "LOST", pushedBranch: null });
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: { workspaceReclaimAt: new Date(), leaseExpiresAt: null },
+  });
+  const replacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    runner: "CLAUDE",
+    runnerId: "replacement-runner",
+    fencingToken: `2:${seeded.task.id}:replacement`,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    model: "claude",
+    promptHash: "hash-2",
+    status: "RUNNING",
+    startedAt: new Date(),
+    targetBranch: seeded.repo.defaultBranch,
+    maxRunsPerTask: 5,
+  } });
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+
+  const response = await call(root, "/runner/workspaces/salvaged", {
+    runnerId, runId: seeded.run.id, pushedBranch: salvage,
+  });
+
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.match(String(response.body.error), /replacement already started/u);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, seeded.repo.defaultBranch);
+});
+
 test("a reconciled-lost run records lease-independent cleanup failure from its owning fence", async () => {
   const root = await scratchRoot("lease-cleanup");
   const runnerId = "runner-lease-cleanup";

@@ -33,7 +33,12 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 type Call = { path: string; body: Record<string, any> };
 
 /** Stands in for the control plane: answers the plan, records the report. */
-const stubApi = (plan: unknown, status = 200, addCompatibilityEvidence = true): Call[] => {
+const stubApi = (
+  plan: unknown,
+  status = 200,
+  addCompatibilityEvidence = true,
+  salvageStatus = 200,
+): Call[] => {
   const calls: Call[] = [];
   const compatiblePlan = plan && typeof plan === "object" && "reclaim" in plan
     ? {
@@ -49,6 +54,14 @@ const stubApi = (plan: unknown, status = 200, addCompatibilityEvidence = true): 
     if (path.endsWith("/runner/workspaces/reclaimable")) {
       return new Response(status === 200 ? JSON.stringify(compatiblePlan) : "no such route", {
         status, headers: { "content-type": status === 200 ? "application/json" : "text/plain" },
+      });
+    }
+    if (path.endsWith("/runner/workspaces/salvaged")) {
+      return new Response(JSON.stringify(salvageStatus === 200
+        ? { ok: true, replacementRepair: "none" }
+        : { error: "Salvage is durable, but the replacement already started from its prior base" }), {
+        status: salvageStatus,
+        headers: { "content-type": "application/json" },
       });
     }
     return new Response(JSON.stringify({ closed: 0, failed: 0 }), { status: 200, headers: { "content-type": "application/json" } });
@@ -116,6 +129,44 @@ test("a delayed reclaim salvages an unpublished retained workspace before deleti
   assert.equal(calls[1]!.path, "http://api.invalid/runner/workspaces/salvaged");
   assert.deepEqual(calls[1]!.body, { runnerId: "runner-1", runId: "run-1", pushedBranch: salvage });
   assert.deepEqual(calls[2]!.body.results, [{ runId: "run-1", outcome: "REMOVED" }]);
+});
+
+test("a delayed salvage ACK refusal retains the workspace after publishing its recovery ref", async () => {
+  const workspaceRoot = await root("salvage-started-replacement");
+  const remote = join(workspaceRoot, "origin.git");
+  const seed = join(workspaceRoot, "seed");
+  const runPath = join(workspaceRoot, "run-1");
+  git(workspaceRoot, "init", "--bare", "--initial-branch=master", remote);
+  git(workspaceRoot, "init", "--initial-branch=master", seed);
+  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.email", "runner@agentos.local");
+  await writeFile(join(seed, "base.txt"), "base\n");
+  git(seed, "add", "base.txt");
+  git(seed, "commit", "-m", "base");
+  git(seed, "remote", "add", "origin", remote);
+  git(seed, "push", "origin", "master");
+  git(workspaceRoot, "clone", "--branch", "master", remote, runPath);
+  const baseSha = git(runPath, "rev-parse", "HEAD");
+  await writeFile(join(runPath, "recovered.txt"), "keep\n");
+  const calls = stubApi({
+    reclaim: [{
+      runId: "run-1", workspacePath: runPath, taskId: "task-1", runNumber: 3,
+      baseSha, pushedBranch: null,
+    }],
+    verify: [], keep: [],
+  }, 200, true, 409);
+
+  const sweep = await reclaimWorkspaces(config(workspaceRoot), {
+    listDirectories: async () => ["run-1"],
+  });
+
+  assert.deepEqual(sweep, { offered: 1, removed: 0, refused: 0, failed: 1, settled: 0 });
+  await access(runPath);
+  const salvage = "agentos/task-1/run-3";
+  assert.match(git(workspaceRoot, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
+  assert.equal(calls[1]!.path, "http://api.invalid/runner/workspaces/salvaged");
+  assert.equal(calls[2]!.body.results[0].outcome, "FAILED");
+  assert.match(String(calls[2]!.body.results[0].failureReason), /replacement already started/u);
 });
 
 test("a pre-start workspace with no clone base is audited as nothing to salvage and removed", async () => {

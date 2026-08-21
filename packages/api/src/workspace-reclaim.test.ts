@@ -93,7 +93,7 @@ test("reclaim salvage ACK accepts only the owner's deterministic ref while the i
   }), false);
   assert.equal(await acknowledgeReclaimSalvage(db, {
     runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
-  }), true);
+  }), "none");
   assert.equal(written, "agentos/task-1/run-3");
 });
 

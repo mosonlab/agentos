@@ -3676,9 +3676,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.post("/runner/workspaces/salvaged", async (context) => {
     const body = await readJson(context.req.raw, reclaimSalvageInput);
-    return await acknowledgeReclaimSalvage(db, body)
-      ? context.json({ ok: true })
-      : context.json({ error: "Salvage publication is not authorized by an open reclaim intent" }, 409);
+    const repair = await acknowledgeReclaimSalvage(db, body);
+    return repair === false
+      ? context.json({ error: "Salvage publication is not authorized by an open reclaim intent" }, 409)
+      : repair === "already-started"
+        ? context.json({ error: "Salvage is durable, but the replacement already started from its prior base" }, 409)
+        : context.json({ ok: true, replacementRepair: repair });
   });
 
   app.post("/runner/tasks/claim", async (context) => {
