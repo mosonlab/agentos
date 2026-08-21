@@ -4138,9 +4138,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // The fifth run-creating path. Indexed chains already resolve their
         // branch here; template chains must do the same or a retry is created
         // with `branch: null` and workspace.ts silently moves it to a per-run
-        // branch. Pass the failed template run as the prior so its shared head
-        // survives while publication evidence — including WIP salvage written
-        // by this completion — still decides the retry's base. Non-template
+        // branch. Pass the failed template run as the prior so publication
+        // evidence — including WIP salvage written by this completion — still
+        // decides the retry's base; the resolved logical chain head wins over
+        // that run's workspace branch. Non-template
         // chains retain their existing no-prior resolution, and non-chain
         // retries retain the historical `branch: null` behavior.
         //
