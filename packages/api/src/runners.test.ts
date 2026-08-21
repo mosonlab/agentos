@@ -63,6 +63,7 @@ const makeDatabase = (candidates: Record<string, unknown>[] = []): PrismaClient 
   const tx = {
     run: {
       findMany: async () => candidates,
+      findFirst: async () => null,
       updateMany: async () => ({ count: 1 }),
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => ({ id: where.id, status: RunStatus.CLAIMED }),
     },

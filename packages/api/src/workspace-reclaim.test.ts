@@ -4,7 +4,9 @@ import test from "node:test";
 
 import { RunStatus, type PrismaClient } from "@agentos/db";
 
-import { publishReclaimIntents, terminalRunStatuses, workspaceKeepStatuses } from "./workspace-reclaim.js";
+import {
+  acknowledgeReclaimSalvage, publishReclaimIntents, terminalRunStatuses, workspaceKeepStatuses,
+} from "./workspace-reclaim.js";
 
 type Row = {
   id: string;
@@ -61,9 +63,38 @@ const inventory = (directories: string[], runnerId = "runner-1") => ({ runnerId,
 test("the control plane offers a finished run's directory and publishes the intent", async () => {
   const { db, runUpdates } = fakeDb([row("done")]);
   const plan = await publishReclaimIntents(db, inventory(["done"]), 2);
-  assert.deepEqual(plan.reclaim, [{ runId: "done", workspacePath: null }]);
+  assert.deepEqual(plan.reclaim, [{
+    runId: "done", workspacePath: null,
+    taskId: undefined, runNumber: undefined, baseSha: undefined, pushedBranch: undefined,
+  }]);
   assert.deepEqual(runUpdates.map(({ ids }) => ids), [["done"]]);
   assert.ok(runUpdates[0]!.data.workspaceReclaimAt instanceof Date);
+});
+
+test("reclaim salvage ACK accepts only the owner's deterministic ref while the intent is open", async () => {
+  let written: string | null = null;
+  const stored = {
+    id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+    status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null, pushedBranch: null,
+  };
+  const db: any = {
+    run: {
+      findUnique: async () => ({ ...stored, pushedBranch: written }),
+      findFirst: async () => null,
+      updateMany: async ({ data }: { data: { pushedBranch: string } }) => { written = data.pushedBranch; return { count: 1 }; },
+    },
+  };
+  db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
+  assert.equal(await acknowledgeReclaimSalvage(db, {
+    runnerId: "runner-2", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
+  }), false);
+  assert.equal(await acknowledgeReclaimSalvage(db, {
+    runnerId: "runner-1", runId: stored.id, pushedBranch: "arbitrary/head",
+  }), false);
+  assert.equal(await acknowledgeReclaimSalvage(db, {
+    runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
+  }), "none");
+  assert.equal(written, "agentos/task-1/run-3");
 });
 
 test("a directory the database has never heard of is kept, never offered", async () => {

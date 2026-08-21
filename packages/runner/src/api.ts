@@ -80,6 +80,9 @@ export type ClaimedTask = {
     maxRunsPerTask: number;
     model: string;
     targetBranch: string | null;
+    /** Whether targetBranch was selected from durable Run.pushedBranch evidence.
+     * When true, provisioning must not replace it with an older declared head. */
+    targetBranchPublished: boolean;
     /** Exact commit selected by baseFromStepIndex. Null means ordinary branch
      * provisioning; a value means fetch-only detached provisioning. */
     pinnedBaseSha: string | null;
@@ -226,6 +229,24 @@ export const recordPublishedBranch = async (
   });
 };
 
+/** Records cleanup after this runner has lost its live lease. The control plane
+ * accepts this only from the recorded runner/fence for an expired or terminal
+ * run; unlike completion, it carries no authority over run outcome. */
+export const recordLeaseIndependentCleanup = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  cleanup: { cleanupStatus: CleanupStatus; cleanupFailureReason?: string; workspaceRetained: boolean },
+): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/cleanup`, {
+    method: "POST",
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      ...cleanup,
+    }),
+  });
+};
+
 export const appendEvents = async (
   config: RunnerConfig,
   claim: ClaimedTask,
@@ -306,7 +327,14 @@ export const completeRun = async (config: RunnerConfig, claim: ClaimedTask, comp
   });
 };
 
-export type ReclaimOffer = { runId: string; workspacePath: string | null };
+export type ReclaimOffer = {
+  runId: string;
+  workspacePath: string | null;
+  taskId?: string | null;
+  runNumber?: number;
+  baseSha?: string | null;
+  pushedBranch?: string | null;
+};
 export type ReclaimPlan = {
   /** Directories in the reported inventory this runner may remove. */
   reclaim: ReclaimOffer[];
@@ -357,6 +385,16 @@ export const reportReclaimOutcomes = async (
   }).catch((error: unknown) => {
     if ((error as { status?: number }).status === 404) return null;
     throw error;
+  });
+};
+
+export const recordReclaimPublication = async (
+  config: RunnerConfig,
+  body: { runnerId: string; runId: string; pushedBranch: string },
+): Promise<void> => {
+  await request(config, "/runner/workspaces/salvaged", {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 };
 

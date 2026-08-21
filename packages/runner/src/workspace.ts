@@ -365,7 +365,7 @@ export const provisionWorkspace = async (
     // truth instead of the stale fallback base. Derived chain heads are unique
     // per project+chain, so this cannot accidentally adopt another chain.
     let cloneTarget = target;
-    if (branch !== target) {
+    if (branch !== target && !claim.run.targetBranchPublished) {
       try {
         await runWithNetworkRetry("git", ["ls-remote"],
           ({ timeoutMs }) => execute(config, "git", ["ls-remote", "--exit-code", "--heads", claim.repo.remoteUrl, `refs/heads/${branch}`], root, env, { timeoutMs }),

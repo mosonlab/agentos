@@ -15,6 +15,7 @@ import { PrismaClient } from "@agentos/db";
 import { reclaimWorkspaces } from "@agentos/runner/reclaim";
 import type { RunnerConfig } from "@agentos/runner/config";
 
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -109,6 +110,7 @@ const seedRun = async (options: {
   workspaceRetained?: boolean;
   workspacePath?: string | null;
   endedAt?: Date | null;
+  pushedBranch?: string | null;
 }) => {
   const suffix = `${Date.now()}-${seedCounter++}`;
   const project = await db.project.create({ data: { name: "Reclaim", slug: `reclaim-${suffix}` } });
@@ -131,6 +133,10 @@ const seedRun = async (options: {
     fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
     status, model: "claude", promptHash: "hash", maxRunsPerTask: 5,
     workspaceRetained: options.workspaceRetained ?? false,
+    // These ownership/retry fixtures predate terminal salvage and exercise a
+    // workspace whose normal delivery is already durable. Tests for an
+    // unpublished workspace opt back into null explicitly.
+    pushedBranch: options.pushedBranch === undefined ? "already/durable" : options.pushedBranch,
     ...(options.endedAt === undefined ? {} : { endedAt: options.endedAt }),
   } });
   // Written after create so a caller can ask for the canonical path without
@@ -374,4 +380,99 @@ test("an old runner that never asks leaves its workspaces in place, and nothing 
   const untouched = await db.run.findUniqueOrThrow({ where: { id: run.id } });
   assert.equal(untouched.workspaceReclaimAt, null);
   assert.equal(untouched.workspaceReclaimedAt, null);
+});
+
+test("reclaim salvage acknowledgement rebases an already-queued retry", async () => {
+  const root = await scratchRoot("salvage-repair");
+  const runnerId = "runner-salvage-repair";
+  const seeded = await seedRun({ root, runnerId, status: "LOST", pushedBranch: null });
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: { workspaceReclaimAt: new Date(), leaseExpiresAt: null },
+  });
+  const replacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "hash-2",
+    status: "QUEUED",
+    targetBranch: seeded.repo.defaultBranch,
+    maxRunsPerTask: 5,
+  } });
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+  const response = await call(root, "/runner/workspaces/salvaged", {
+    runnerId, runId: seeded.run.id, pushedBranch: salvage,
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, salvage);
+});
+
+test("reclaim salvage acknowledgement refuses cleanup after the replacement started", async () => {
+  const root = await scratchRoot("salvage-started-replacement");
+  const runnerId = "runner-salvage-started";
+  const seeded = await seedRun({ root, runnerId, status: "LOST", pushedBranch: null });
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: { workspaceReclaimAt: new Date(), leaseExpiresAt: null },
+  });
+  const replacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    runner: "CLAUDE",
+    runnerId: "replacement-runner",
+    fencingToken: `2:${seeded.task.id}:replacement`,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    model: "claude",
+    promptHash: "hash-2",
+    status: "RUNNING",
+    startedAt: new Date(),
+    targetBranch: seeded.repo.defaultBranch,
+    maxRunsPerTask: 5,
+  } });
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+
+  const response = await call(root, "/runner/workspaces/salvaged", {
+    runnerId, runId: seeded.run.id, pushedBranch: salvage,
+  });
+
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.match(String(response.body.error), /replacement already started/u);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, seeded.repo.defaultBranch);
+});
+
+test("a reconciled-lost run records lease-independent cleanup failure from its owning fence", async () => {
+  const root = await scratchRoot("lease-cleanup");
+  const runnerId = "runner-lease-cleanup";
+  const { run, fencingToken } = await seedRun({ root, runnerId, status: "RUNNING" });
+  await db.run.update({ where: { id: run.id }, data: { leaseExpiresAt: new Date(Date.now() - 60_000) } });
+  assert.ok(await reconcileDatabaseRuns(db, new Date()) > 0);
+  const lost = await db.run.findUniqueOrThrow({ where: { id: run.id }, include: { session: true } });
+  assert.equal(lost.status, "LOST");
+  assert.equal(lost.runnerId, runnerId);
+  assert.equal(lost.fencingToken, fencingToken);
+  assert.equal(lost.session?.cleanupStatus, "PENDING");
+  const response = await call(root, `/runner/runs/${run.id}/cleanup`, {
+    runnerId,
+    fencingToken,
+    cleanupStatus: "FAILED",
+    cleanupFailureReason: "WIP salvage failed after lease expiry",
+    workspaceRetained: true,
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  const storedRun = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  const session = await db.session.findUniqueOrThrow({ where: { runId: run.id } });
+  assert.equal(storedRun.workspaceRetained, true);
+  assert.equal(session.cleanupStatus, "FAILED");
+  assert.equal(session.cleanupFailureReason, "WIP salvage failed after lease expiry");
 });

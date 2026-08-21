@@ -124,6 +124,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     maxRunsPerTask: 1,
     model: "claude",
     targetBranch: "master",
+    targetBranchPublished: false,
     pinnedBaseSha: null,
     implementationBaseSha: null,
     implementationHeadSha: null,

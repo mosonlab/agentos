@@ -85,6 +85,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       },
       select: {
         heartbeatAt: true,
+        leaseExpiresAt: true,
         id: true,
         projectId: true,
         taskId: true,
@@ -124,6 +125,11 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
   if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
   await db.$transaction(async (tx) => {
     for (const run of orphans) {
+      const leaseLossReason = !run.leaseExpiresAt
+        ? "Platform lease missing during startup reconciliation; runner heartbeat authority was lost"
+        : run.heartbeatAt === null
+          ? `Platform lease expired at ${run.leaseExpiresAt.toISOString()} without a recorded runner heartbeat`
+          : `Runner heartbeat starved after ${run.heartbeatAt.toISOString()}; platform lease expired at ${run.leaseExpiresAt.toISOString()}`;
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
@@ -140,11 +146,11 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           endedAt: now,
           leaseExpiresAt: null,
           sessionTokenRevokedAt: now,
-          failureClass: FailureClass.TRANSIENT_PROVIDER,
+          failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
           retryable: true,
           maxRunsPerTask: budgetCeiling,
           budgetGrants,
-          failureReason: "Run orphaned or lease expired during startup reconciliation",
+          failureReason: leaseLossReason,
         },
       });
       if (lost.count !== 1) continue;
@@ -154,7 +160,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           executionStatus: SessionExecutionStatus.LOST,
           cleanupStatus: CleanupStatus.PENDING,
           endedAt: now,
-          failureReason: "Run orphaned or lease expired during startup reconciliation",
+          failureReason: leaseLossReason,
         },
       });
       if (!run.taskId) continue;

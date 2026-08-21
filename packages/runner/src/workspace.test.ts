@@ -64,6 +64,51 @@ test("provisioning trusts an already-published intended head after its database 
   }
 });
 
+test("a resolver-confirmed newer salvage base outranks an existing declared head", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-salvage-base-"));
+  try {
+    const remote = join(root, "origin.git");
+    const seed = join(root, "seed");
+    git(root, "init", "--bare", "--initial-branch=main", remote);
+    git(root, "init", "--initial-branch=main", seed);
+    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.email", "runner@agentos.local");
+    await writeFile(join(seed, "tree.txt"), "base\n");
+    git(seed, "add", "tree.txt");
+    git(seed, "commit", "-m", "base");
+    git(seed, "remote", "add", "origin", remote);
+    git(seed, "push", "-u", "origin", "main");
+    const declared = "agentos/chain/shared";
+    git(seed, "switch", "-c", declared);
+    await writeFile(join(seed, "tree.txt"), "older declared\n");
+    git(seed, "commit", "-am", "declared");
+    git(seed, "push", "origin", declared);
+    const salvage = "agentos/task-1/run-2";
+    await writeFile(join(seed, "tree.txt"), "newer salvage\n");
+    git(seed, "commit", "-am", "salvage");
+    git(seed, "push", "origin", `HEAD:${salvage}`);
+    const salvageSha = git(seed, "rev-parse", "HEAD");
+    const config = {
+      workspaceRoot: join(root, "workspaces"), runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin", home: process.env.HOME ?? root,
+    } as unknown as RunnerConfig;
+    const claim = {
+      task: { id: "task-1" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
+      run: {
+        id: "run-3", runNumber: 3, targetBranch: salvage,
+        targetBranchPublished: true, branch: declared,
+      },
+    } as ClaimedTask;
+    const workspace = await provisionWorkspace(config, claim);
+    assert.equal(workspace.branch, declared);
+    assert.equal(workspace.baseSha, salvageSha);
+    assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "newer salvage\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a pinned workspace fetches only the recorded commit and never creates the chain ref", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-pinned-"));
   try {
