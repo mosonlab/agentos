@@ -35,6 +35,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
   home: workspaceRoot,
+  proxyEnvironment: {},
   workspaceRoot,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,

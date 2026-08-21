@@ -1,0 +1,4 @@
+{
+  "provider": "openai-chatgpt-oauth",
+  "proxyEnvironment": ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+}

@@ -45,7 +45,7 @@ import {
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
 import {
   captureWorkspaceResult, cleanupAgentScratch, cleanupWorkspace, provisionAgentScratch, provisionWorkspace,
-  reuseWorkspace, workspaceEnvironment, writeSessionCredentials, type AgentScratch, type Workspace,
+  provisionSessionConfig, reuseWorkspace, workspaceEnvironment, writeSessionCredentials, type AgentScratch, type Workspace,
 } from "./workspace.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
@@ -87,7 +87,15 @@ const preflightEvidence = (message: string): ExitEvidence => ({
   stderr: message,
 });
 
-export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Promise<void> => {
+export type ExecuteClaimDependencies = {
+  provisionSessionConfig?: typeof provisionSessionConfig;
+};
+
+export const executeClaim = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  dependencies: ExecuteClaimDependencies = {},
+): Promise<void> => {
   const adapter = adapters[claim.runner];
   let workspace: Workspace | null = null;
   let scratch: AgentScratch | null = null;
@@ -98,6 +106,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
   let fencingRejected = false;
   let waitingInbox = false;
   let budgetReason: string | null = null;
+  let retainSessionConfig = false;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
   // agent's own work, everything else is this process's plumbing.
@@ -202,6 +211,8 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config);
+    retainSessionConfig = true;
+    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
     const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
@@ -217,7 +228,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       await completeRun(config, claim, {
         ...evidence,
         failureClass: classified.failureClass,
-        failureReason: preflight.error ?? "Preflight failed",
+        failureReason: `${preflight.error ?? "Preflight failed"}; session CLI config retained at ${scratch.configRoot}`,
         retryable: classified.retryable,
         externalFailure: true,
         failureEnvelope: buildFailureEnvelope({
@@ -363,6 +374,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       }
     }
     const succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
+    retainSessionConfig = !succeeded;
     const classified = succeeded ? null : delivery?.failureClass
       ? { failureClass: delivery.failureClass, retryable: false }
       : adapter.classifyError(evidence);
@@ -377,6 +389,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     lease.close();
+    phase = "COMPLETE";
     await completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: evidence.signal,
@@ -385,7 +398,9 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       terminationReason: budgetReason ?? evidence.terminationReason,
       ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
-      ...(!succeeded ? { failureReason: budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence) } : {}),
+      ...(!succeeded ? {
+        failureReason: `${budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence)}; session CLI config retained at ${scratch!.configRoot}`,
+      } : {}),
       output: outputTail(evidence),
       // Only a failure carries one: the envelope is the account of what went
       // wrong, and `executionSucceeded` decides which side of the agent/plumbing
@@ -413,6 +428,8 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       return;
     }
     const message = errorMessage(error);
+    if (scratch) retainSessionConfig = true;
+    const failureReason = scratch ? `${message}; session CLI config retained at ${scratch.configRoot}` : message;
     if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
     if (fencingRejected) {
       if (waitingInbox) return;
@@ -422,7 +439,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     const evidence = preflightEvidence(message);
     const classified = adapter.classifyError(evidence);
     const finishedCleanup = await cleanup(config, workspace, config.failedWorkspaceRetention > 0);
-    await appendActivity(config, claim, message, { stream: "stderr" }).catch(() => undefined);
+    await appendActivity(config, claim, failureReason, { stream: "stderr" }).catch(() => undefined);
     await completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: null,
@@ -430,7 +447,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       terminalSuccess: false,
       terminationReason: RUNNER_EXCEPTION_REASON,
       failureClass: classified.failureClass,
-      failureReason: message,
+      failureReason,
       retryable: classified.retryable,
       externalFailure: true,
       failureEnvelope: runnerExceptionEnvelope({ phase, evidence, runnerClass: classified.failureClass, error }),
@@ -445,9 +462,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     lease?.close();
-    // Throwaway by construction, so losing it costs nothing and leaving it
-    // behind would leak a directory per run.
-    if (scratch) await cleanupAgentScratch(config, scratch).catch(() => undefined);
+    if (scratch) await cleanupAgentScratch(config, scratch, { retainConfigRoot: retainSessionConfig }).catch(() => undefined);
   }
 };
 

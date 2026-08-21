@@ -1,0 +1,2 @@
+# AgentOS uses Codex's official OpenAI provider and injects the runner host's
+# proxy environment when it provisions this directory.

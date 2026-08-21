@@ -1,9 +1,10 @@
-import { appendFile, chmod, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, cp, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask } from "./api.js";
-import type { RunnerConfig } from "./config.js";
+import type { RunnerConfig, RunnerKind } from "./config.js";
 import { runCommand, type CommandOptions } from "./exec.js";
 import {
   CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
@@ -75,11 +76,15 @@ export const workspaceEnvironment = (config: Pick<RunnerConfig, "path" | "home" 
 });
 
 export type AgentScratch = {
-  /** The disposable directory both roots live in; removed when the run ends. */
+  /** The disposable directory all session-owned roots live in. */
   base: string;
   workspaceRoot: string;
   stateDir: string;
+  configRoot: string;
 };
+
+const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+export const sessionConfigBaselineRoot = (): string => join(packageRoot, "assets", "session-config-baseline");
 
 /**
  * A per-run disposable root for anything *inside* the run that resolves a
@@ -102,6 +107,9 @@ export const provisionAgentScratch = async (config: RunnerConfig): Promise<Agent
   const base = await realpath(await mkdtemp(join(tmpdir(), "agentos-run-scratch-")));
   const workspaceRoot = join(base, "workspaces");
   const stateDir = join(base, "control-plane");
+  // Deliberately named before it exists: if seeding fails, the catch path can
+  // still report the exact path it attempted and retain any partial directory.
+  const configRoot = join(base, "cli-config");
   if (config.runAsPrefix.length > 0) {
     // The session runs as another principal: it has to own what it writes, so
     // let it traverse the base and create both directories itself.
@@ -115,14 +123,72 @@ export const provisionAgentScratch = async (config: RunnerConfig): Promise<Agent
       await chmod(directory, 0o700);
     }
   }
-  return { base, workspaceRoot, stateDir };
+  return { base, workspaceRoot, stateDir, configRoot };
 };
 
-export const cleanupAgentScratch = async (config: RunnerConfig, scratch: AgentScratch): Promise<void> => {
+export const cleanupAgentScratch = async (
+  config: RunnerConfig,
+  scratch: AgentScratch,
+  options: { retainConfigRoot?: boolean } = {},
+): Promise<void> => {
   if (config.runAsPrefix.length > 0) {
     await command(config, "/bin/rm", ["-rf", "--", scratch.workspaceRoot, scratch.stateDir], scratch.base, workspaceEnvironment(config));
+  } else if (options.retainConfigRoot) {
+    await Promise.all([
+      rm(scratch.workspaceRoot, { recursive: true, force: true }),
+      rm(scratch.stateDir, { recursive: true, force: true }),
+    ]);
   }
+  if (options.retainConfigRoot) return;
   await rm(scratch.base, { recursive: true, force: true });
+};
+
+const baselineName = (runner: RunnerKind): string => runner.toLowerCase();
+
+/**
+ * Seed the selected CLI's entire user config directory from public repository
+ * bytes, then inject only the authentication material the brief permits.
+ * Creating through RUNNER_RUN_AS_PREFIX keeps the directory owned by the same
+ * account that will mutate it during the session.
+ */
+export const provisionSessionConfig = async (
+  config: RunnerConfig,
+  runner: RunnerKind,
+  scratch: AgentScratch,
+): Promise<void> => {
+  const baseline = join(sessionConfigBaselineRoot(), baselineName(runner));
+  try {
+    if (config.runAsPrefix.length > 0) {
+      await command(
+        config,
+        "/bin/sh",
+        ["-c", 'umask 077; mkdir "$1"; cp -R "$2"/. "$1"/; chmod -R u+rwX,go-rwx "$1"', "agentos-cli-config", scratch.configRoot, baseline],
+        scratch.base,
+        workspaceEnvironment(config),
+      );
+    } else {
+      await mkdir(scratch.configRoot, { mode: 0o700 });
+      await cp(baseline, scratch.configRoot, { recursive: true, force: false });
+      await chmod(scratch.configRoot, 0o700);
+    }
+  } catch (error: unknown) {
+    throw new Error(`Unable to create session CLI config root ${scratch.configRoot}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+
+  if (runner !== "CODEX") return;
+  const source = join(config.home, ".codex", "auth.json");
+  const destination = join(scratch.configRoot, "auth.json");
+  try {
+    if (config.runAsPrefix.length > 0) {
+      await command(config, "/bin/cp", [source, destination], scratch.base, workspaceEnvironment(config));
+      await command(config, "/bin/chmod", ["600", destination], scratch.base, workspaceEnvironment(config));
+    } else {
+      await copyFile(source, destination);
+      await chmod(destination, 0o600);
+    }
+  } catch (error: unknown) {
+    throw new Error(`Unable to establish Codex authentication in ${scratch.configRoot} from ${source}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 };
 
 export const provisionWorkspace = async (

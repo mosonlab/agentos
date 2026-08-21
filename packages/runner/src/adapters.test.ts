@@ -55,7 +55,12 @@ const claim: ClaimedTask = {
   priorOutputs: [],
 };
 
-const scratch = { base: "/scratch/run-1", workspaceRoot: "/scratch/run-1/workspaces", stateDir: "/scratch/run-1/control-plane" };
+const scratch = {
+  base: "/scratch/run-1",
+  workspaceRoot: "/scratch/run-1/workspaces",
+  stateDir: "/scratch/run-1/control-plane",
+  configRoot: "/scratch/run-1/cli-config",
+};
 const productionRoot = join(homedir(), ".agentos", "runs");
 
 const runSpec = (disabledTools: string[] = []) => ({
@@ -358,17 +363,39 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
 // the session's roots at throwaway directories itself. Both 2026-08-18
 // production wipes were old checkouts resolving the production default.
 test("agent session environment pins both roots inside the run's disposable scratch", () => {
-  const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
-    // A task secret must not be able to aim a session at the production root.
-    { ...claim, secrets: { ...claim.secrets, RUNNER_WORKSPACE_ROOT: productionRoot, CONTROL_PLANE_STATE_DIR: productionRoot } },
-    scratch,
-    "/work",
-  );
-  assert.equal(env.RUNNER_WORKSPACE_ROOT, scratch.workspaceRoot);
-  assert.equal(env.CONTROL_PLANE_STATE_DIR, scratch.stateDir);
-  assert.notEqual(env.RUNNER_WORKSPACE_ROOT, productionRoot);
-  assert.notEqual(env.CONTROL_PLANE_STATE_DIR, productionRoot);
+  const config = {
+    path: "/bin",
+    home: "/runner",
+    apiUrl: "http://api",
+    runAsPrefix: [],
+    proxyEnvironment: { HTTPS_PROXY: "http://platform-proxy:7897" },
+  };
+  const variables = { CLAUDE: "CLAUDE_CONFIG_DIR", CODEX: "CODEX_HOME", PI: "PI_CODING_AGENT_DIR" } as const;
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const env = buildChildEnvironment(
+      config,
+      // Task secrets must not be able to aim a session at production or host roots.
+      {
+        ...claim,
+        runner,
+        secrets: {
+          ...claim.secrets,
+          RUNNER_WORKSPACE_ROOT: productionRoot,
+          CONTROL_PLANE_STATE_DIR: productionRoot,
+          [variables[runner]]: "/runner/personal-config",
+          HTTPS_PROXY: "http://task-controlled-proxy",
+        },
+      },
+      scratch,
+      "/work",
+    );
+    assert.equal(env.RUNNER_WORKSPACE_ROOT, scratch.workspaceRoot);
+    assert.equal(env.CONTROL_PLANE_STATE_DIR, scratch.stateDir);
+    assert.equal(env[variables[runner]], scratch.configRoot);
+    assert.equal(env.HTTPS_PROXY, "http://platform-proxy:7897");
+    assert.notEqual(env.RUNNER_WORKSPACE_ROOT, productionRoot);
+    assert.notEqual(env.CONTROL_PLANE_STATE_DIR, productionRoot);
+  }
 });
 
 test("child environment is an explicit allowlist and excludes host variables", () => {
@@ -386,6 +413,54 @@ test("child environment is an explicit allowlist and excludes host variables", (
   }
 });
 
+test("Claude's host-owned OAuth fallback authenticates under the isolated config root", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "agentos-claude-oauth-"));
+  const binary = join(fixture, "claude-stub.sh");
+  await writeFile(binary, [
+    "#!/bin/sh",
+    'if [ "$1" = "--version" ]; then echo "claude-stub 1.0"; exit 0; fi',
+    'if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$CLAUDE_CODE_OAUTH_TOKEN" = "host-setup-token" ]; then',
+    '  printf \'{"loggedIn":true,"authMethod":"claudeAiOauth"}\\n\'',
+    "  exit 0",
+    "fi",
+    "exit 1",
+    "",
+  ].join("\n"));
+  await chmod(binary, 0o755);
+  try {
+    const config = {
+      binaries: { CLAUDE: binary, CODEX: binary, PI: binary },
+      runAsPrefix: [],
+      path: "/bin",
+      home: "/runner",
+      apiUrl: "http://api",
+      claudeCodeOAuthToken: "host-setup-token",
+    } as unknown as RunnerConfig;
+    const env = buildChildEnvironment(
+      config,
+      { ...claim, runner: "CLAUDE", secrets: { ...claim.secrets, CLAUDE_CODE_OAUTH_TOKEN: "task-token-must-not-win" } },
+      scratch,
+      fixture,
+    );
+    assert.equal(env.CLAUDE_CONFIG_DIR, scratch.configRoot);
+    assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "host-setup-token");
+    const result = await adapters.CLAUDE.preflight({ config, runner: "CLAUDE", model: "claude", env });
+    assert.equal(result.ok, true);
+    assert.equal(result.authMode, "claudeAiOauth");
+
+    const { claudeCodeOAuthToken: _hostToken, ...configWithoutHostToken } = config;
+    const withoutHostToken = buildChildEnvironment(
+      configWithoutHostToken,
+      { ...claim, runner: "CLAUDE", secrets: { ...claim.secrets, CLAUDE_CODE_OAUTH_TOKEN: "task-token-must-be-removed" } },
+      scratch,
+      fixture,
+    );
+    assert.equal(withoutHostToken.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 // The launcher named by RUNNER_RUN_AS_PREFIX is an arbitrary command that may
 // scrub the environment it was handed — `sudo` resets it by policy, and #126
 // wants OS isolation built on precisely this prefix. `/usr/bin/env -i` is that
@@ -398,7 +473,7 @@ const rootReportingStub = [
   "#!/bin/sh",
   // Drain the prompt so the parent never sees EPIPE instead of the report.
   "while read -r _line; do :; done",
-  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s"}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR"',
+  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","configRoot":"%s"}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-$PI_CODING_AGENT_DIR}}"',
   "",
 ].join("\n");
 
@@ -419,8 +494,8 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   } as unknown as RunnerConfig;
   const runScratch = await provisionAgentScratch(config);
   try {
-    const env = buildChildEnvironment(config, claim, runScratch, fixture);
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
+      const env = buildChildEnvironment(config, { ...claim, runner }, runScratch, fixture);
       const spec = {
         config,
         claim: { ...claim, runner },
@@ -442,9 +517,11 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         const report = JSON.parse(evidence.stdout.trim().split("\n").at(-1) ?? "{}") as {
           workspaceRoot?: string;
           stateDir?: string;
+          configRoot?: string;
         };
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
+        assert.equal(report.configRoot, runScratch.configRoot, `${runner} ${mode} lost its CLI config root across the launcher`);
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);

@@ -1,0 +1,4 @@
+{
+  "provider": "anthropic-subscription-oauth-via-CLAUDE_CODE_OAUTH_TOKEN",
+  "proxyEnvironment": ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+}

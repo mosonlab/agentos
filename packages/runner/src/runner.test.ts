@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { adapters } from "./adapters.js";
@@ -20,6 +20,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: workspaceRoot,
+  proxyEnvironment: {},
   workspaceRoot,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
@@ -200,10 +201,77 @@ const seedRemote = async (root: string): Promise<string> => {
   return remote;
 };
 
+const seedCodexAuth = async (root: string): Promise<void> => {
+  const directory = join(root, ".codex");
+  await mkdir(directory);
+  await writeFile(join(directory, "auth.json"), '{"tokens":"test-only"}\n', { mode: 0o600 });
+};
+
+const removeRetainedConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
+  const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
+  if (retained) await rm(dirname(retained), { recursive: true, force: true });
+};
+
+test("a session config creation failure completes in PROVISION without reaching a CLI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-config-provision-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const originalPreflight = adapters.CLAUDE.preflight;
+    const originalStart = adapters.CLAUDE.start;
+    adapters.CLAUDE.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
+    adapters.CLAUDE.start = (async () => { startCalls += 1; throw new Error("CLI must not spawn"); }) as typeof originalStart;
+    let configRoot = "";
+    try {
+      await executeClaim(
+        config(join(root, "workspaces")),
+        {
+          ...mechanicalClaim,
+          executionMode: "agent",
+          runner: "CLAUDE",
+          repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+          agent: { ...mechanicalClaim.agent, model: "claude" },
+          run: { ...mechanicalClaim.run, model: "claude", maxRunsPerTask: 3 },
+        },
+        {
+          provisionSessionConfig: async (_config, _runner, scratch) => {
+            configRoot = scratch.configRoot;
+            await mkdir(configRoot);
+            throw new Error("EACCES while seeding repository baseline");
+          },
+        },
+      );
+    } finally {
+      adapters.CLAUDE.preflight = originalPreflight;
+      adapters.CLAUDE.start = originalStart;
+    }
+
+    assert.equal(preflightCalls, 0);
+    assert.equal(startCalls, 0);
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    assert.match(String(completion.body.failureReason), /EACCES while seeding repository baseline/u);
+    assert.match(String(completion.body.failureReason), new RegExp(`${configRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u"));
+    assert.equal((await stat(configRoot)).isDirectory(), true);
+    await rm(dirname(configRoot), { recursive: true, force: true });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /** The config the two tests below share: a real Codex stub, and nothing at all
  *  where the other two CLIs would be. */
 const codexOnly = (workspaceRoot: string, root: string, codexBinary: string): RunnerConfig => ({
   ...config(workspaceRoot),
+  home: root,
   path: process.env.PATH ?? "/usr/bin:/bin",
   binaries: { CLAUDE: join(root, "no-claude-here"), CODEX: codexBinary, PI: join(root, "no-pi-here") },
 });
@@ -362,6 +430,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     await writeFile(binary, codexStub(log));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -416,6 +485,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     await writeFile(binary, codexStub(log, true));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -454,6 +524,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     assert.deepEqual((await readFile(log, "utf8")).trim().split("\n").slice(0, 4), [
       "--version", "exec --help", "exec resume --help", "login status",
     ]);
+    await removeRetainedConfig(completion);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -463,6 +534,7 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
   const root = await mkdtemp(join(tmpdir(), "runner-codex-absent-"));
   try {
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -487,6 +559,7 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
     assert.equal(completion.body.failureClass, "BINARY_NOT_FOUND");
     assert.ok(!JSON.stringify(posts).includes("ENOENT"));
+    await removeRetainedConfig(completion);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

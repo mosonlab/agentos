@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import test from "node:test";
@@ -9,7 +9,8 @@ import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { CLONE_COMMAND_TIMEOUT_MS, NETWORK_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import {
-  cleanupAgentScratch, provisionAgentScratch, provisionWorkspace, workspaceEnvironment, writeSessionCredentials,
+  cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
+  workspaceEnvironment, writeSessionCredentials,
   type WorkspaceCommandExecutor,
 } from "./workspace.js";
 
@@ -350,3 +351,46 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
     await assert.rejects(stat(scratch.base));
   });
 }
+
+test("each CLI config root is seeded from the repository baseline without personal instructions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-cli-config-"));
+  const home = join(root, "runner-home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await writeFile(join(home, ".codex", "auth.json"), '{"tokens":"host-auth"}\n', { mode: 0o600 });
+  try {
+    for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+      const config = {
+        workspaceRoot: join(root, "workspaces"),
+        runAsPrefix: [],
+        path: process.env.PATH ?? "/usr/bin:/bin",
+        home,
+      } as unknown as RunnerConfig;
+      const scratch = await provisionAgentScratch(config);
+      try {
+        await provisionSessionConfig(config, runner, scratch);
+        const baseline = join(sessionConfigBaselineRoot(), runner.toLowerCase());
+        for (const name of await readdir(baseline)) {
+          assert.equal(await readFile(join(scratch.configRoot, name), "utf8"), await readFile(join(baseline, name), "utf8"));
+        }
+        const files = await readdir(scratch.configRoot, { recursive: true });
+        assert.equal(files.some((name) => /(?:^|\/)(?:CLAUDE|AGENTS)\.md$/u.test(String(name))), false);
+        assert.equal((await stat(scratch.configRoot)).mode & 0o777, 0o700);
+        if (runner === "CODEX") {
+          assert.equal(await readFile(join(scratch.configRoot, "auth.json"), "utf8"), '{"tokens":"host-auth"}\n');
+          assert.equal((await stat(join(scratch.configRoot, "auth.json"))).mode & 0o777, 0o600);
+        } else {
+          assert.equal(files.includes("auth.json"), false, `${runner} must not copy a host auth file`);
+        }
+
+        const platform = join(scratch.configRoot, "platform.json");
+        const baselineBytes = await readFile(join(baseline, "platform.json"), "utf8");
+        await writeFile(platform, "session mutation\n");
+        assert.equal(await readFile(join(baseline, "platform.json"), "utf8"), baselineBytes);
+      } finally {
+        await cleanupAgentScratch(config, scratch);
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

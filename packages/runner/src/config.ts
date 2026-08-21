@@ -24,6 +24,9 @@ export type RunnerConfig = {
   heartbeatIntervalMs: number;
   path: string;
   home: string;
+  proxyEnvironment: NodeJS.ProcessEnv;
+  /** Host-owned fallback produced by `claude setup-token`; never task-controlled. */
+  claudeCodeOAuthToken?: string;
   workspaceRoot: string;
   failedWorkspaceRetention: number;
   workspaceReclaimIntervalMs: number;
@@ -32,6 +35,11 @@ export type RunnerConfig = {
   runAsPrefix: string[];
   binaries: Record<RunnerKind, string>;
 };
+
+const proxyEnvironment = (): NodeJS.ProcessEnv => Object.fromEntries(
+  ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+    .flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]!]]),
+);
 
 const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
 
@@ -59,6 +67,8 @@ export const loadRunnerConfig = (): RunnerConfig => {
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
     path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
+    proxyEnvironment: proxyEnvironment(),
+    ...(process.env.CLAUDE_CODE_OAUTH_TOKEN ? { claudeCodeOAuthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN } : {}),
     workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     // How often this runner asks the control plane which of its directories may

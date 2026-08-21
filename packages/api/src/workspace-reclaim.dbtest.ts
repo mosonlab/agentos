@@ -67,6 +67,7 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin",
   home: root,
+  proxyEnvironment: {},
   workspaceRoot: root,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,

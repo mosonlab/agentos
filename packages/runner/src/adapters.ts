@@ -56,13 +56,15 @@ export const buildPrompt = (claim: ClaimedTask): string => [
 ].join("\n");
 
 export const buildChildEnvironment = (
-  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run">,
+  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
+    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "claudeCodeOAuthToken">>,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner">,
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => ({
   ...claim.secrets,
   ...workspaceEnvironment(config),
+  ...config.proxyEnvironment,
   AGENTOS_API_URL: config.apiUrl,
   AGENTOS_SESSION_TOKEN: claim.sessionToken,
   AGENTOS_RUN_ID: claim.run.id,
@@ -73,9 +75,17 @@ export const buildChildEnvironment = (
   // to live in the runner rather than in the run's checkout.
   RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,
   CONTROL_PLANE_STATE_DIR: scratch.stateDir,
+  ...(claim.runner === "CLAUDE" ? { CLAUDE_CONFIG_DIR: scratch.configRoot } : {}),
+  // Explicitly undefined when the host did not configure the fallback, so a
+  // task secret cannot supply or replace the operator's subscription token.
+  ...(claim.runner === "CLAUDE" ? { CLAUDE_CODE_OAUTH_TOKEN: config.claudeCodeOAuthToken } : {}),
+  ...(claim.runner === "CODEX" ? { CODEX_HOME: scratch.configRoot } : {}),
+  ...(claim.runner === "PI" ? { PI_CODING_AGENT_DIR: scratch.configRoot } : {}),
 });
 
-const isolationVariables = ["RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR"] as const;
+const isolationVariables = [
+  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
+] as const;
 
 /**
  * The command line for a session, re-asserting the isolation variables on the
