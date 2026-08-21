@@ -190,7 +190,11 @@ done
 step "staged assets readable by every account"
 for i in $(seq 1 "$RUNNER_COUNT"); do
   account="$(account_for "$i")"
-  for asset in "$LIB_DIR/mcp-server.js" "$LIB_DIR/pi-agentos-extension.ts"; do
+  for asset in \
+    "$LIB_DIR/mcp-server.js" \
+    "$LIB_DIR/pi-agentos-extension.ts" \
+    "$LIB_DIR/claude-platform-settings.json" \
+    "$LIB_DIR/session-config-baseline/codex/config.toml"; do
     as_account "$account" /bin/test -r "$asset" 2>/dev/null \
       || fail "$account cannot read $asset"
   done
@@ -223,6 +227,8 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
   check_env "$file" "$label" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
   check_env "$file" "$label" RUNNER_MCP_SERVER_PATH "$LIB_DIR/mcp-server.js"
   check_env "$file" "$label" RUNNER_PI_EXTENSION_PATH "$LIB_DIR/pi-agentos-extension.ts"
+  check_env "$file" "$label" RUNNER_CLAUDE_SETTINGS_PATH "$LIB_DIR/claude-platform-settings.json"
+  check_env "$file" "$label" RUNNER_SESSION_CONFIG_BASELINE_ROOT "$LIB_DIR/session-config-baseline"
   if ! is_loaded "$label"; then
     if [ "$STAGED" = 1 ]; then
       warn "$label is not loaded (allowed by --staged; it proves nothing about the running system)"
@@ -292,7 +298,7 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
   if [ "$descriptor_prefix" != "$(expected_prefix "$account")" ]; then
     fail "$label reported runAsPrefix='${descriptor_prefix:-<empty>}', expected '$(expected_prefix "$account")' — this is the running process, not the plist"
   fi
-  for pair in "nodeBinary:x" "mcpServerPath:r" "piExtensionPath:r"; do
+  for pair in "nodeBinary:x" "mcpServerPath:r" "piExtensionPath:r" "claudeSettingsPath:r" "codexBaselinePath:r"; do
     path="$(field "${pair%%:*}")"
     [ -n "$path" ] || continue
     as_account "$account" "/bin/test" "-${pair##*:}" "$path" 2>/dev/null \

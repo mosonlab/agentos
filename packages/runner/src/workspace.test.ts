@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chown, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import test from "node:test";
@@ -9,7 +9,8 @@ import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { CLONE_COMMAND_TIMEOUT_MS, NETWORK_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import {
-  cleanupAgentScratch, provisionAgentScratch, provisionWorkspace, workspaceEnvironment, writeSessionCredentials,
+  cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
+  workspaceEnvironment, writeSessionCredentials,
   type WorkspaceCommandExecutor,
 } from "./workspace.js";
 
@@ -350,3 +351,98 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
     await assert.rejects(stat(scratch.base));
   });
 }
+
+test("Codex session config contains only the platform baseline and host auth, then deletes on success", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-codex-config-"));
+  const home = join(root, "runner-home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await writeFile(join(home, ".codex", "auth.json"), '{"tokens":"host-only"}\n', { mode: 0o600 });
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: [],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home,
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-codex-config");
+  try {
+    await provisionSessionConfig(config, "CODEX", scratch);
+    assert.equal(await readFile(join(scratch.configRoot, "config.toml"), "utf8"), await readFile(join(sessionConfigBaselineRoot(), "codex", "config.toml"), "utf8"));
+    assert.equal(await readFile(join(scratch.configRoot, "auth.json"), "utf8"), '{"tokens":"host-only"}\n');
+    assert.deepEqual((await readdir(scratch.configRoot)).sort(), ["auth.json", "config.toml"]);
+    assert.equal((await stat(scratch.configRoot)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(scratch.configRoot, "auth.json"))).mode & 0o777, 0o600);
+    assert.equal((await readdir(scratch.configRoot)).includes("AGENTS.md"), false);
+    await cleanupAgentScratch(config, scratch);
+    await assert.rejects(stat(scratch.configRoot), /ENOENT/u);
+  } finally {
+    await rm(scratch.configRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a distinct run-as uid can create and read its Codex config root", {
+  skip: typeof process.getuid !== "function" || process.getuid() !== 0
+    ? "requires root to exercise a genuinely distinct uid"
+    : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-codex-distinct-uid-"));
+  const targetUser = "daemon";
+  const targetUid = Number(execFileSync("id", ["-u", targetUser], { encoding: "utf8" }).trim());
+  const targetGid = Number(execFileSync("id", ["-g", targetUser], { encoding: "utf8" }).trim());
+  const home = join(root, "runner-home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await writeFile(join(home, ".codex", "auth.json"), '{"tokens":"target-only"}\n', { mode: 0o600 });
+  await chown(root, targetUid, targetGid);
+  await chown(home, targetUid, targetGid);
+  await chown(join(home, ".codex"), targetUid, targetGid);
+  await chown(join(home, ".codex", "auth.json"), targetUid, targetGid);
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: ["/usr/bin/sudo", "-n", "-u", targetUser, "--"],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home,
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-codex-distinct-uid");
+  const configParent = dirname(scratch.configRoot);
+  try {
+    await provisionSessionConfig(config, "CODEX", scratch);
+    assert.equal((await stat(scratch.configRoot)).uid, targetUid);
+    assert.equal((await stat(join(scratch.configRoot, "auth.json"))).uid, targetUid);
+    assert.equal(execFileSync("/usr/bin/sudo", ["-n", "-u", targetUser, "--", "/bin/cat", join(scratch.configRoot, "auth.json")], { encoding: "utf8" }), '{"tokens":"target-only"}\n');
+    await cleanupAgentScratch(config, scratch);
+    for (const removed of [scratch.configRoot, configParent, scratch.workspaceRoot, scratch.stateDir, scratch.base]) {
+      await assert.rejects(stat(removed), /ENOENT/u);
+    }
+  } finally {
+    await rm(scratch.base, { recursive: true, force: true });
+    await rm(configParent, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex auth provisioning fails loudly without touching the host config", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-codex-config-failure-"));
+  const home = join(root, "runner-home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: [],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home,
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-codex-config-failure");
+  try {
+    await assert.rejects(provisionSessionConfig(config, "CODEX", scratch), (error: unknown) =>
+      error instanceof Error
+      && error.message.includes("Unable to establish Codex authentication")
+      && error.message.includes(scratch.configRoot));
+    assert.equal((await stat(scratch.configRoot)).isDirectory(), true);
+    assert.equal(await readFile(join(scratch.configRoot, "config.toml"), "utf8"), await readFile(join(sessionConfigBaselineRoot(), "codex", "config.toml"), "utf8"));
+  } finally {
+    await cleanupAgentScratch(config, scratch, { retainConfigRoot: false });
+    await rm(root, { recursive: true, force: true });
+  }
+});

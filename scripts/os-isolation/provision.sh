@@ -94,13 +94,17 @@ staged_sources=(
   "$REPO_ROOT/packages/runner/dist/mcp-server.js"
   "$REPO_ROOT/packages/runner/assets/pi-agentos-extension.ts"
   "$REPO_ROOT/deploy/codex-with-proxy.sh"
+  "$REPO_ROOT/packages/runner/assets/claude-platform-settings.json"
+  "$REPO_ROOT/packages/runner/assets/session-config-baseline/codex/config.toml"
 )
 staged_dests=(
   "$LIB_DIR/mcp-server.js"
   "$LIB_DIR/pi-agentos-extension.ts"
   "$BIN_DIR/codex-with-proxy.sh"
+  "$LIB_DIR/claude-platform-settings.json"
+  "$LIB_DIR/session-config-baseline/codex/config.toml"
 )
-staged_modes=(644 644 755)
+staged_modes=(644 644 755 644 644)
 
 printf 'AgentOS OS isolation — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
 printf '  operator account : %s\n' "$LAUNCHER_USER"
@@ -153,7 +157,7 @@ done
 # Staged assets are checked here, not at the point of copying: a missing build
 # output used to warn and let the script finish with "Applied.", which left the
 # plists pointing at files that were never staged.
-for index in 0 1 2; do
+for index in "${!staged_sources[@]}"; do
   src="${staged_sources[$index]}"
   [ -f "$src" ] || fail "missing $src — build it first (npm run build -w @agentos/runner), then re-run"
 done
@@ -226,7 +230,8 @@ step "5. staged runner assets"
 # The CLI runs as a runner account and spawns these itself, so they cannot live
 # under the operator's home (mode 0700, not traversable). Root-owned copies here
 # are also not rewritable by an agent. They are copies: restage on every deploy.
-for index in 0 1 2; do
+run install -d -o root -g wheel -m 755 "$LIB_DIR/session-config-baseline" "$LIB_DIR/session-config-baseline/codex"
+for index in "${!staged_sources[@]}"; do
   src="${staged_sources[$index]}"
   dest="${staged_dests[$index]}"
   if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
@@ -304,7 +309,7 @@ if [ "$APPLY" = 1 ]; then
   expect "$WORKSPACE_ROOT owner" "$(stat -f '%Su' "$WORKSPACE_ROOT")" "$LAUNCHER_USER"
   expect "$WORKSPACE_ROOT group" "$(stat -f '%Sg' "$WORKSPACE_ROOT")" "$GROUP_NAME"
   expect "$MANIFEST_DIR owner" "$(stat -f '%Su' "$MANIFEST_DIR")" "$LAUNCHER_USER"
-  for index in 0 1 2; do
+  for index in "${!staged_sources[@]}"; do
     dest="${staged_dests[$index]}"
     if [ ! -f "$dest" ]; then
       fail "$dest was not staged"

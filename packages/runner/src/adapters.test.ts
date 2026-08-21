@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, failureReasonFromEvidence,
-  inputForRunner, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath, runtimeDescriptor, type ExitEvidence,
+  claudePlatformSettingsPath, inputForRunner, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
+  runtimeDescriptor, type ExitEvidence,
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -55,7 +56,12 @@ const claim: ClaimedTask = {
   priorOutputs: [],
 };
 
-const scratch = { base: "/scratch/run-1", workspaceRoot: "/scratch/run-1/workspaces", stateDir: "/scratch/run-1/control-plane" };
+const scratch = {
+  base: "/scratch/run-1",
+  workspaceRoot: "/scratch/run-1/workspaces",
+  stateDir: "/scratch/run-1/control-plane",
+  configRoot: "/scratch/run-1/codex-config",
+};
 const productionRoot = join(homedir(), ".agentos", "runs");
 
 const runSpec = (disabledTools: string[] = []) => ({
@@ -70,7 +76,8 @@ const runSpec = (disabledTools: string[] = []) => ({
 const stableArgv = (args: string[]): string[] => args.map((arg) => arg
   .replaceAll(process.execPath, "<NODE>")
   .replaceAll(mcpServerPath(), "<MCP_SERVER>")
-  .replaceAll(piExtensionPath(), "<PI_EXTENSION>"));
+  .replaceAll(piExtensionPath(), "<PI_EXTENSION>")
+  .replaceAll(claudePlatformSettingsPath(), "<CLAUDE_SETTINGS>"));
 
 test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
@@ -129,6 +136,56 @@ test("every CLI is launched with the AgentOS tool surface attached", () => {
   assert.match(resumed.join(" "), /mcp_servers\.agentos\.command=/);
 });
 
+test("Claude excludes host settings and auto-memory with the versioned platform settings file", async () => {
+  const spec = runSpec();
+  const claude = argsForRunner("CLAUDE", spec);
+  assert.deepEqual(claude.slice(claude.indexOf("--setting-sources"), claude.indexOf("--setting-sources") + 2), [
+    "--setting-sources", "project,local",
+  ]);
+  const settingsIndex = claude.indexOf("--settings");
+  assert.ok(settingsIndex >= 0);
+  assert.equal(claude[settingsIndex + 1], claudePlatformSettingsPath());
+  assert.deepEqual(JSON.parse(await readFile(claudePlatformSettingsPath(), "utf8")), { autoMemoryEnabled: false });
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    { ...claim, runner: "CLAUDE", secrets: { ...claim.secrets, CLAUDE_CONFIG_DIR: "/host/.claude" } },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.CLAUDE_CONFIG_DIR, undefined);
+  assert.equal(env.HOME, "/runner", "Claude keeps the runner's existing HOME/authentication path");
+});
+
+test("Claude's staged platform settings path is overridable and published", () => {
+  const previous = process.env.RUNNER_CLAUDE_SETTINGS_PATH;
+  try {
+    process.env.RUNNER_CLAUDE_SETTINGS_PATH = "/opt/agentos/lib/claude-platform-settings.json";
+    assert.equal(claudePlatformSettingsPath(), "/opt/agentos/lib/claude-platform-settings.json");
+    assert.equal(JSON.parse(runtimeDescriptor("runner-1", [])).claudeSettingsPath, "/opt/agentos/lib/claude-platform-settings.json");
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_CLAUDE_SETTINGS_PATH;
+    else process.env.RUNNER_CLAUDE_SETTINGS_PATH = previous;
+  }
+});
+
+test("runner proxy environment wins over task secrets for Claude and Codex", () => {
+  const config = {
+    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [],
+    proxyEnvironment: { HTTP_PROXY: "http://runner-http", HTTPS_PROXY: "http://runner-https", NO_PROXY: "localhost" },
+  };
+  for (const runner of ["CLAUDE", "CODEX"] as const) {
+    const env = buildChildEnvironment(
+      config,
+      { ...claim, runner, secrets: { ...claim.secrets, HTTP_PROXY: "http://task-http", HTTPS_PROXY: "http://task-https", NO_PROXY: "task" } },
+      scratch,
+      "/work",
+    );
+    assert.equal(env.HTTP_PROXY, "http://runner-http");
+    assert.equal(env.HTTPS_PROXY, "http://runner-https");
+    assert.equal(env.NO_PROXY, "localhost");
+  }
+});
+
 test("the interpreter the CLI is told to run the MCP server with is overridable and published", () => {
   // process.execPath is a *resolved* path — a Homebrew Cellar or nvm directory,
   // not the symlink on RUNNER_PATH. Under a run-as prefix the CLI is a different
@@ -156,6 +213,8 @@ test("the interpreter the CLI is told to run the MCP server with is overridable 
     assert.equal(descriptor.nodeExecPath, process.execPath);
     assert.equal(descriptor.mcpServerPath, mcpServerPath());
     assert.equal(descriptor.piExtensionPath, piExtensionPath());
+    assert.equal(descriptor.claudeSettingsPath, claudePlatformSettingsPath());
+    assert.match(descriptor.codexBaselinePath, /session-config-baseline\/codex\/config\.toml$/u);
     assert.equal(descriptor.runAsPrefix, "sudo -u _agentos1 -E --");
   } finally {
     if (previous === undefined) delete process.env.RUNNER_NODE_BINARY;
@@ -168,6 +227,7 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
   assert.deepEqual(stableArgv(argsForRunner("CLAUDE", spec)), [
     "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
     "--model", "codex", "--effort", "high",
+    "--setting-sources", "project,local", "--settings", "<CLAUDE_SETTINGS>",
     "--mcp-config", "{\"mcpServers\":{\"agentos\":{\"type\":\"stdio\",\"command\":\"<NODE>\",\"args\":[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]}}}",
     "--strict-mcp-config",
   ]);

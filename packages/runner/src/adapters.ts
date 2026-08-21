@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
-import type { RunnerConfig, RunnerKind } from "./config.js";
+import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import type { InFlightTool } from "./budget.js";
 import { isTransientNetworkError } from "./network-retry.js";
 import { workspaceEnvironment, type AgentScratch } from "./workspace.js";
@@ -56,26 +56,47 @@ export const buildPrompt = (claim: ClaimedTask): string => [
 ].join("\n");
 
 export const buildChildEnvironment = (
-  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run">,
+  config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
+    & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner">,
   scratch: AgentScratch,
   workspacePath: string,
-): NodeJS.ProcessEnv => ({
-  ...claim.secrets,
-  ...workspaceEnvironment(config),
-  AGENTOS_API_URL: config.apiUrl,
-  AGENTOS_SESSION_TOKEN: claim.sessionToken,
-  AGENTOS_RUN_ID: claim.run.id,
-  AGENTOS_FENCING_TOKEN: claim.fencingToken,
-  AGENTOS_WORKSPACE_PATH: workspacePath,
-  // Last on purpose, so no task secret can point a session back at the
-  // production roots. See provisionAgentScratch for why this containment has
-  // to live in the runner rather than in the run's checkout.
-  RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,
-  CONTROL_PLANE_STATE_DIR: scratch.stateDir,
-});
+): NodeJS.ProcessEnv => {
+  // These names are runner-owned. In particular, a task secret must never be
+  // able to reintroduce the host Codex home or the CLAUDE_CONFIG_DIR path that
+  // this chain deliberately does not use.
+  const {
+    CLAUDE_CONFIG_DIR: _claudeConfigDir,
+    CODEX_HOME: _codexHome,
+    HTTP_PROXY: _httpProxy,
+    HTTPS_PROXY: _httpsProxy,
+    NO_PROXY: _noProxy,
+    http_proxy: _httpProxyLower,
+    https_proxy: _httpsProxyLower,
+    no_proxy: _noProxyLower,
+    ...taskSecrets
+  } = claim.secrets;
+  return {
+    ...taskSecrets,
+    ...workspaceEnvironment(config),
+    AGENTOS_API_URL: config.apiUrl,
+    AGENTOS_SESSION_TOKEN: claim.sessionToken,
+    AGENTOS_RUN_ID: claim.run.id,
+    AGENTOS_FENCING_TOKEN: claim.fencingToken,
+    AGENTOS_WORKSPACE_PATH: workspacePath,
+    // Last on purpose, so no task secret can point a session back at the
+    // production roots. See provisionAgentScratch for why this containment has
+    // to live in the runner rather than in the run's checkout.
+    RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,
+    CONTROL_PLANE_STATE_DIR: scratch.stateDir,
+    ...(claim.runner === "CODEX" ? { CODEX_HOME: scratch.configRoot } : {}),
+  };
+};
 
-const isolationVariables = ["RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR"] as const;
+const isolationVariables = [
+  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+] as const;
 
 /**
  * The command line for a session, re-asserting the isolation variables on the
@@ -122,6 +143,14 @@ const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 
 export const mcpServerPath = (): string => process.env.RUNNER_MCP_SERVER_PATH ?? join(packageRoot, "dist", "mcp-server.js");
 export const piExtensionPath = (): string => process.env.RUNNER_PI_EXTENSION_PATH ?? join(packageRoot, "assets", "pi-agentos-extension.ts");
+export const claudePlatformSettingsPath = (): string =>
+  process.env.RUNNER_CLAUDE_SETTINGS_PATH ?? join(packageRoot, "assets", "claude-platform-settings.json");
+
+const codexPlatformBaselinePath = (): string => join(
+  process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
+  "codex",
+  "config.toml",
+);
 
 /**
  * The interpreter the CLI is told to run the MCP server with.
@@ -150,6 +179,8 @@ export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): stri
   nodeExecPath: process.execPath,
   mcpServerPath: mcpServerPath(),
   piExtensionPath: piExtensionPath(),
+  claudeSettingsPath: claudePlatformSettingsPath(),
+  codexBaselinePath: codexPlatformBaselinePath(),
   runAsPrefix: runAsPrefix.join(" "),
 });
 
@@ -494,6 +525,11 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     // operator's personal default, which is reserved quota.
     "--model", model, "--effort", effort ?? "high",
     ...denyArgs("CLAUDE", spec.claim.agent.disabledTools),
+    // Excluding the user source prevents host CLAUDE.md, settings, hooks,
+    // skills, plugins, and memory instructions from entering the session.
+    // Authentication remains the CLI's existing Keychain flow: no
+    // CLAUDE_CONFIG_DIR or HOME override is supplied here.
+    "--setting-sources", "project,local", "--settings", claudePlatformSettingsPath(),
     // strict keeps the operator's personal MCP servers out of an agent session:
     // the manifest is supposed to be the whole tool surface.
     "--mcp-config", JSON.stringify(mcpConfig(spec.credentialsPath)), "--strict-mcp-config",
