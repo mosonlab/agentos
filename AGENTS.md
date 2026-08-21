@@ -39,6 +39,20 @@ Instantiating a direct chain: the `description` you pass is the chain's
 specification of record — write it as a feature brief per
 `docs/BRIEF-TEMPLATE.md` before instantiating.
 
+Implementation-step tier (Leo ruling 2026-08-21, two tiers): the template
+default is `senior-dev-luna` (gpt-5.6-luna:max) and it stays for work whose
+brief enumerates its change points. Patch the step's assignee to
+`senior-dev-high` (gpt-5.6-sol:high) before starting the chain when any of
+these holds: the change touches persisted data (Prisma schema or
+migrations), it touches a defense-list path (merge gate, gate worker,
+migrations, release authority, merge-automation machinery), or the change
+surface is large or cross-cutting enough that the brief cannot enumerate its
+change points. When unsure, treat as met and upgrade. The apply-review-fixes
+step is never reassigned to Luna: it keeps `senior-dev` (Sol), upgraded to
+`senior-dev-high` under the same criteria. The chain's dual blind review,
+closed must-fix fix step, and head-bound regression gate are what license
+the Luna default; a task dispatched outside a chain does not inherit it.
+
 A backlog card leaves the board the moment its content is taken over, and by
 whoever takes it over: dispatching a chain from a card, or recording the
 decisions that settle a discussion card, ends with archiving that card (with

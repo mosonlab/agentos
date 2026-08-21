@@ -103,7 +103,7 @@ test("a fresh seed writes the twelve-step and seven-step autonomous merge templa
 
   const direct = await directTemplate();
   assert.equal(direct.steps.length, 7);
-  assert.equal(direct.steps[0]?.assigneeAgent?.name, "senior-dev");
+  assert.equal(direct.steps[0]?.assigneeAgent?.name, "senior-dev-luna");
   assert.equal(direct.steps[0]?.opensPullRequest, true);
   assert.match(direct.steps[0]?.prompt ?? "", /brief is the specification of record/u);
   assert.equal(direct.steps[2]?.attachmentsFromPrevious, false);

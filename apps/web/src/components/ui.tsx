@@ -509,7 +509,7 @@ const inline = (text: string, keyPrefix: string): ReactNode[] =>
  *  code) plus fenced code blocks and http/https links. Tables stay unsupported. */
 export const Markdown = ({ text }: { text: string }): ReactNode => {
   const blocks: ReactNode[] = [];
-  let list: { ordered: boolean; items: string[] } | null = null;
+  let list: { ordered: true; start: number; items: string[] } | { ordered: false; items: string[] } | null = null;
   let fence: { language: string; lines: string[] } | null = null;
   const flushFence = (): void => {
     if (!fence) return;
@@ -524,10 +524,11 @@ export const Markdown = ({ text }: { text: string }): ReactNode => {
   };
   const flush = (): void => {
     if (!list) return;
-    const { ordered, items } = list;
-    blocks.push(ordered
-      ? <ol key={`b${blocks.length}`} className={cn(MD_LIST, "list-decimal")}>{items.map((item, index) => <li key={index} className="my-[3px]">{inline(item, `l${index}`)}</li>)}</ol>
-      : <ul key={`b${blocks.length}`} className={cn(MD_LIST, "list-disc")}>{items.map((item, index) => <li key={index} className="my-[3px]">{inline(item, `l${index}`)}</li>)}</ul>);
+    if (list.ordered) {
+      blocks.push(<ol key={`b${blocks.length}`} start={list.start} className={cn(MD_LIST, "list-decimal")}>{list.items.map((item, index) => <li key={index} className="my-[3px]">{inline(item, `l${index}`)}</li>)}</ol>);
+    } else {
+      blocks.push(<ul key={`b${blocks.length}`} className={cn(MD_LIST, "list-disc")}>{list.items.map((item, index) => <li key={index} className="my-[3px]">{inline(item, `l${index}`)}</li>)}</ul>);
+    }
     list = null;
   };
   for (const line of text.split("\n")) {
@@ -540,16 +541,22 @@ export const Markdown = ({ text }: { text: string }): ReactNode => {
     // Inside a fence nothing is markdown: no bullets, no headings, no inline.
     if (fence) { fence.lines.push(line); continue; }
     const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    const ordered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    const ordered = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
     const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    const continuation = /^ {2,}\S.*$/.exec(line);
     if (bullet) {
       if (list && !list.ordered) list.items.push(bullet[1] ?? "");
       else { flush(); list = { ordered: false, items: [bullet[1] ?? ""] }; }
       continue;
     }
     if (ordered) {
-      if (list?.ordered) list.items.push(ordered[1] ?? "");
-      else { flush(); list = { ordered: true, items: [ordered[1] ?? ""] }; }
+      if (list?.ordered) list.items.push(ordered[2] ?? "");
+      else { flush(); list = { ordered: true, start: Number.parseInt(ordered[1] ?? "1", 10), items: [ordered[2] ?? ""] }; }
+      continue;
+    }
+    if (list && continuation && !heading) {
+      const lastIndex = list.items.length - 1;
+      list.items[lastIndex] = `${list.items[lastIndex]!} ${continuation[0].trim()}`;
       continue;
     }
     flush();
