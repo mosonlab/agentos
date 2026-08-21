@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_API_URL, loadRunnerConfig } from "./config.js";
+import { DEFAULT_API_URL, loadRunnerConfig, runnerProxyEnvironment } from "./config.js";
 import { LocalApiDestinationError } from "./local-origin.js";
 
 const require = createRequire(import.meta.url);
@@ -37,6 +37,43 @@ test("the default workspace root matches the API's definition of it", () => {
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
+});
+
+test("runner proxy configuration is opt-in and maps to child-standard names", () => {
+  assert.deepEqual(runnerProxyEnvironment({}), {});
+  assert.deepEqual(runnerProxyEnvironment({
+    RUNNER_HTTP_PROXY: "http://127.0.0.1:7897",
+    RUNNER_HTTPS_PROXY: "http://127.0.0.1:7897",
+    RUNNER_NO_PROXY: "127.0.0.1,localhost",
+  }), {
+    HTTP_PROXY: "http://127.0.0.1:7897",
+    http_proxy: "http://127.0.0.1:7897",
+    HTTPS_PROXY: "http://127.0.0.1:7897",
+    https_proxy: "http://127.0.0.1:7897",
+    NO_PROXY: "127.0.0.1,localhost",
+    no_proxy: "127.0.0.1,localhost",
+  });
+});
+
+test("runner proxy configuration ignores inherited conventional values", () => {
+  assert.deepEqual(runnerProxyEnvironment({
+    HTTP_PROXY: "http://inherited.invalid:8000",
+    HTTPS_PROXY: "http://inherited.invalid:8000",
+    NO_PROXY: "inherited.invalid",
+    RUNNER_HTTP_PROXY: "http://127.0.0.1:7897",
+    RUNNER_HTTPS_PROXY: "",
+    RUNNER_NO_PROXY: "localhost",
+  }), {
+    HTTP_PROXY: "http://127.0.0.1:7897",
+    http_proxy: "http://127.0.0.1:7897",
+    NO_PROXY: "localhost",
+    no_proxy: "localhost",
+  });
+  assert.deepEqual(runnerProxyEnvironment({
+    HTTP_PROXY: "http://legacy.invalid:7890",
+    HTTPS_PROXY: "http://legacy.invalid:7890",
+    NO_PROXY: "localhost",
+  }), {});
 });
 
 test("the tool inactivity deadline defaults to 30 minutes and rejects unsafe values", () => {
