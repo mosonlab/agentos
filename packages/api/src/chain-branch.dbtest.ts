@@ -590,6 +590,8 @@ test("an operator-retried template step publishes its declared head from the lat
   assert.equal(retried.status, 201, JSON.stringify(retried.body));
   assert.equal(retried.body.branch, declared);
   assert.equal(retried.body.targetBranch, salvage);
+  const retryRow = await db.run.findFirstOrThrow({ where: { taskId: task.id, runNumber: 2 } });
+  assert.equal((await claimRun(retryRow.id)).run.targetBranchPublished, true);
 });
 
 test("a successor first run clones the predecessor's salvage publication", async () => {
@@ -612,6 +614,7 @@ test("a successor first run clones the predecessor's salvage publication", async
   const successor = await db.run.findFirstOrThrow({ where: { taskId: second.id, runNumber: 1 } });
   assert.equal(successor.branch, `agentos/${chain.chainId}`);
   assert.equal(successor.targetBranch, salvage);
+  assert.equal((await claimRun(successor.id)).run.targetBranchPublished, true);
 });
 
 test("T11: a post-push publication ACK survives lease loss and bases the retry on the shared branch", async () => {
@@ -658,6 +661,35 @@ test("a lost run may ACK only its exact salvage ref after lease expiry", async (
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).pushedBranch, salvage);
   const repaired = await db.run.findUniqueOrThrow({ where: { id: queuedBeforeAck.id } });
   assert.equal(repaired.targetBranch, salvage);
+});
+
+test("late salvage revokes and repairs a replacement claimed before start", async () => {
+  const seed = await seedProject("late-salvage-vs-claim");
+  const task = await postTask(seed.project.id, {
+    name: "Lost", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const run = await db.run.findFirstOrThrow({ where: { taskId: task.body.id } });
+  const lostClaim = await claimRun(run.id);
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", leaseExpiresAt: new Date(Date.now() - 60_000), heartbeatAt: null,
+  } });
+  await reconcileDatabaseRuns(db, new Date());
+  const replacement = await db.run.findFirstOrThrow({ where: { taskId: task.body.id, runNumber: 2 } });
+  const staleClaim = await claimRun(replacement.id);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).status, "CLAIMED");
+
+  const salvage = `agentos/${task.body.id}/run-1`;
+  const accepted = await publishViaRoute(lostClaim, salvage);
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.replacementRepair, "requeued");
+  const invalidated = await db.run.findUniqueOrThrow({ where: { id: replacement.id } });
+  assert.equal(invalidated.status, "CANCELLED");
+  assert.equal(invalidated.runnerId, "runner-1", "the stale runner retains cleanup ownership for its distinct workspace");
+  const repaired = await db.run.findFirstOrThrow({ where: { taskId: task.body.id, runNumber: 3 } });
+  assert.equal(repaired.status, "QUEUED");
+  assert.equal(repaired.targetBranch, salvage);
+  assert.notEqual(repaired.id, replacement.id);
+  assert.equal((await startRunViaRoute(staleClaim, "stale/head")).status, 409, "the revoked claim must not start");
 });
 
 test("T12: a non-chain requeue is unchanged", async () => {

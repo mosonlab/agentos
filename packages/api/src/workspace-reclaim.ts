@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 
-import { CleanupStatus, RunStatus, type PrismaClient } from "@agentos/db";
+import {
+  CleanupStatus, enqueueTaskRun, FailureClass, resolveRunBranches, RunStatus, SessionExecutionStatus,
+  type Prisma, type PrismaClient,
+} from "@agentos/db";
 
 /**
  * Workspace GC ownership (issue #115).
@@ -389,29 +392,94 @@ export const acknowledgeReclaimSalvage = async (
   db: PrismaClient,
   input: { runnerId: string; runId: string; pushedBranch: string },
 ): Promise<boolean> => {
-  const run = await db.run.findUnique({
-    where: { id: input.runId },
-    select: {
-      id: true, runnerId: true, taskId: true, runNumber: true, status: true,
-      workspaceReclaimAt: true, workspaceReclaimedAt: true, pushedBranch: true,
-    },
+  return db.$transaction(async (tx) => {
+    const run = await tx.run.findUnique({
+      where: { id: input.runId },
+      select: {
+        id: true, runnerId: true, taskId: true, runNumber: true, status: true,
+        workspaceReclaimAt: true, workspaceReclaimedAt: true, pushedBranch: true, branch: true,
+      },
+    });
+    const expected = run?.taskId ? `agentos/${run.taskId}/run-${run.runNumber}` : null;
+    if (!run || !ownedByCaller(run, input.runnerId) || !isTerminal(run.status)
+      || !run.workspaceReclaimAt || run.workspaceReclaimedAt
+      || input.pushedBranch !== expected
+      || (run.pushedBranch !== null && run.pushedBranch !== input.pushedBranch)) return false;
+    const updated = await tx.run.updateMany({
+      where: {
+        id: run.id,
+        runnerId: input.runnerId,
+        workspaceReclaimAt: { not: null },
+        workspaceReclaimedAt: null,
+        OR: [{ pushedBranch: null }, { pushedBranch: input.pushedBranch }],
+      },
+      data: { pushedBranch: input.pushedBranch },
+    });
+    if (updated.count !== 1 || !run.taskId) return false;
+    await repairReplacementAfterSalvage(tx, {
+      taskId: run.taskId,
+      runNumber: run.runNumber,
+      branch: run.branch,
+    });
+    return true;
   });
-  const expected = run?.taskId ? `agentos/${run.taskId}/run-${run.runNumber}` : null;
-  if (!run || !ownedByCaller(run, input.runnerId) || !isTerminal(run.status)
-    || !run.workspaceReclaimAt || run.workspaceReclaimedAt
-    || input.pushedBranch !== expected
-    || (run.pushedBranch !== null && run.pushedBranch !== input.pushedBranch)) return false;
-  const updated = await db.run.updateMany({
-    where: {
-      id: run.id,
-      runnerId: input.runnerId,
-      workspaceReclaimAt: { not: null },
-      workspaceReclaimedAt: null,
-      OR: [{ pushedBranch: null }, { pushedBranch: input.pushedBranch }],
-    },
-    data: { pushedBranch: input.pushedBranch },
+};
+
+/** Recomputes the immediate replacement after a late salvage publication.
+ * A claimed row has not crossed /start yet, but reusing its id would let the old
+ * runner clean the same directory a new runner is provisioning. Terminate that
+ * row while preserving its cleanup ownership, refund the platform-caused
+ * attempt, and enqueue a fresh row with a distinct workspace id. */
+export const repairReplacementAfterSalvage = async (
+  tx: Prisma.TransactionClient,
+  run: { taskId: string; runNumber: number; branch: string | null },
+): Promise<"none" | "repaired" | "requeued" | "already-started"> => {
+  const replacement = await tx.run.findFirst({
+    where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
+    select: { id: true, status: true, startedAt: true },
   });
-  return updated.count === 1;
+  if (!replacement) return "none";
+  if (replacement.status === RunStatus.CLAIMED && replacement.startedAt === null) {
+    const revokedAt = new Date();
+    const revoked = await tx.run.updateMany({
+      where: { id: replacement.id, status: RunStatus.CLAIMED, startedAt: null },
+      data: {
+        status: RunStatus.CANCELLED,
+        endedAt: revokedAt,
+        leaseExpiresAt: null,
+        sessionTokenRevokedAt: revokedAt,
+        failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
+        failureReason: "Claim invalidated before start because late salvage changed its clone base",
+        retryable: true,
+        maxRunsPerTask: { increment: 1 },
+        budgetGrants: { increment: 1 },
+      },
+    });
+    if (revoked.count !== 1) return "already-started";
+    await tx.session.updateMany({
+      where: { runId: replacement.id },
+      data: {
+        executionStatus: SessionExecutionStatus.CANCELLED,
+        endedAt: revokedAt,
+        failureReason: "Claim invalidated before start because late salvage changed its clone base",
+      },
+    });
+    await enqueueTaskRun(tx, run.taskId, revokedAt);
+    return "requeued";
+  } else if (replacement.status !== RunStatus.QUEUED) {
+    return "already-started";
+  }
+  const task = await tx.task.findUnique({
+    where: { id: run.taskId },
+    include: { repo: true, templateStep: true },
+  });
+  if (!task?.repo) return "already-started";
+  const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch });
+  const repaired = await tx.run.updateMany({
+    where: { id: replacement.id, status: RunStatus.QUEUED },
+    data: { branch: branches.branch, targetBranch: branches.targetBranch },
+  });
+  return repaired.count === 1 ? "repaired" : "already-started";
 };
 
 /** How many published intents are still waiting for their owner to act. */

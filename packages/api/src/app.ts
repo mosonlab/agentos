@@ -123,7 +123,9 @@ import {
   runnerFor,
 } from "./execution.js";
 import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
-import { acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes } from "./workspace-reclaim.js";
+import {
+  acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
+} from "./workspace-reclaim.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
@@ -576,6 +578,13 @@ const publicationInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
   pushedBranch: z.string().trim().min(1).max(255),
+});
+const leaseIndependentCleanupInput = z.object({
+  runnerId: z.string().trim().min(1).max(120),
+  fencingToken: fence,
+  cleanupStatus: z.nativeEnum(CleanupStatus),
+  cleanupFailureReason: z.string().max(4000).optional(),
+  workspaceRetained: z.boolean(),
 });
 const startInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -3876,6 +3885,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             `Pinned run ${run.id} targets ${run.targetBranch ?? "no commit"}, but its source step now records ${implementationRange.implementationHeadSha}`,
           );
         }
+        const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
+          where: {
+            repoId: candidate.repo.id,
+            pushedBranch: run.targetBranch,
+            task: candidate.task.chainId && candidate.task.chainIndex !== null
+              ? {
+                projectId: candidate.task.projectId,
+                chainId: candidate.task.chainId,
+                chainIndex: { not: null },
+              }
+              : { id: candidate.task.id },
+          },
+          select: { id: true },
+        }) !== null;
         return {
           task: candidate.task,
           agent: candidate.agent,
@@ -3889,6 +3912,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           // from. Carry the first run's durable base separately for PR create.
           run: {
             ...run,
+            targetBranchPublished,
             pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch,
             pinnedBaseSha: candidate.task.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
             implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
@@ -4019,31 +4043,55 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
         data: { pushedBranch: body.pushedBranch },
       });
-      if (ack.count !== 1 || !salvage || !run?.taskId) return ack;
-      // Reconciliation may have queued the replacement between lease loss and
-      // this lease-independent salvage ACK. Repair that still-unclaimed row in
-      // the same transaction, with resolveRunBranches making the decision, so
-      // it does not clone the fallback while the durable salvage ref is known.
-      const queued = await tx.run.findFirst({
-        where: { taskId: run.taskId, runNumber: run.runNumber + 1, status: RunStatus.QUEUED },
-        select: { id: true },
+      if (ack.count !== 1 || !salvage || !run?.taskId) return { count: ack.count, repair: "none" as const };
+      const repair = await repairReplacementAfterSalvage(tx, {
+        taskId: run.taskId,
+        runNumber: run.runNumber,
+        branch: run.branch,
       });
-      if (!queued) return ack;
-      const task = await tx.task.findUnique({
-        where: { id: run.taskId },
-        include: { repo: true, templateStep: true },
-      });
-      if (!task?.repo) return ack;
-      const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch });
-      await tx.run.updateMany({
-        where: { id: queued.id, status: RunStatus.QUEUED },
-        data: { branch: branches.branch, targetBranch: branches.targetBranch },
-      });
-      return ack;
+      return { count: ack.count, repair };
     });
-    return updated.count === 1
-      ? context.json({ ok: true })
+    return updated.count === 1 && updated.repair !== "already-started"
+      ? context.json({ ok: true, replacementRepair: updated.repair })
+      : updated.count === 1
+        ? context.json({ error: "Salvage is durable, but the replacement already started from its prior base" }, 409)
       : context.json({ error: "Stale fencing token" }, 409);
+  });
+
+  // Cleanup is still runner-owned after the live lease is gone. This endpoint
+  // can update only cleanup bookkeeping for the exact runner/fence that owned
+  // an expired or terminal run; it cannot change the run outcome or publish a
+  // branch.
+  app.post("/runner/runs/:runId/cleanup", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const body = await readJson(context.req.raw, leaseIndependentCleanupInput);
+    const now = new Date();
+    const run = await db.run.findUnique({
+      where: { id: runId },
+      select: { runnerId: true, fencingToken: true, leaseExpiresAt: true, status: true },
+    });
+    const expiredOrTerminal = run && (
+      run.leaseExpiresAt === null || run.leaseExpiresAt <= now
+      || !activeRunStatuses.includes(run.status as typeof activeRunStatuses[number])
+    );
+    if (!run || run.runnerId !== body.runnerId || run.fencingToken !== body.fencingToken || !expiredOrTerminal) {
+      return context.json({ error: "Cleanup outcome is not authorized for a live or foreign run" }, 409);
+    }
+    await db.$transaction(async (tx) => {
+      await tx.run.update({
+        where: { id: runId },
+        data: { workspaceRetained: body.workspaceRetained },
+      });
+      await tx.session.updateMany({
+        where: { runId },
+        data: {
+          cleanupStatus: body.cleanupStatus,
+          cleanupEndedAt: now,
+          cleanupFailureReason: body.cleanupFailureReason ?? null,
+        },
+      });
+    });
+    return context.json({ ok: true });
   });
 
   app.post("/runner/runs/:runId/events", async (context) => {

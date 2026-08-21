@@ -77,12 +77,14 @@ test("reclaim salvage ACK accepts only the owner's deterministic ref while the i
     id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
     status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null, pushedBranch: null,
   };
-  const db = {
+  const db: any = {
     run: {
       findUnique: async () => ({ ...stored, pushedBranch: written }),
+      findFirst: async () => null,
       updateMany: async ({ data }: { data: { pushedBranch: string } }) => { written = data.pushedBranch; return { count: 1 }; },
     },
-  } as unknown as PrismaClient;
+  };
+  db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
   assert.equal(await acknowledgeReclaimSalvage(db, {
     runnerId: "runner-2", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
   }), false);

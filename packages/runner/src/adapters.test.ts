@@ -38,6 +38,7 @@ const claim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "codex",
     targetBranch: "main",
+    targetBranchPublished: false,
     pinnedBaseSha: null,
     implementationBaseSha: null,
     implementationHeadSha: null,

@@ -380,3 +380,54 @@ test("an old runner that never asks leaves its workspaces in place, and nothing 
   assert.equal(untouched.workspaceReclaimAt, null);
   assert.equal(untouched.workspaceReclaimedAt, null);
 });
+
+test("reclaim salvage acknowledgement rebases an already-queued retry", async () => {
+  const root = await scratchRoot("salvage-repair");
+  const runnerId = "runner-salvage-repair";
+  const seeded = await seedRun({ root, runnerId, status: "LOST", pushedBranch: null });
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: { workspaceReclaimAt: new Date(), leaseExpiresAt: null },
+  });
+  const replacement = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.task.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${seeded.task.id}:run:2`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "hash-2",
+    status: "QUEUED",
+    targetBranch: seeded.repo.defaultBranch,
+    maxRunsPerTask: 5,
+  } });
+  const salvage = `agentos/${seeded.task.id}/run-1`;
+  const response = await call(root, "/runner/workspaces/salvaged", {
+    runnerId, runId: seeded.run.id, pushedBranch: salvage,
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } })).pushedBranch, salvage);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, salvage);
+});
+
+test("an expired run records lease-independent cleanup failure from its owning fence", async () => {
+  const root = await scratchRoot("lease-cleanup");
+  const runnerId = "runner-lease-cleanup";
+  const { run, fencingToken } = await seedRun({ root, runnerId, status: "RUNNING" });
+  await db.run.update({ where: { id: run.id }, data: { leaseExpiresAt: new Date(Date.now() - 60_000) } });
+  const response = await call(root, `/runner/runs/${run.id}/cleanup`, {
+    runnerId,
+    fencingToken,
+    cleanupStatus: "FAILED",
+    cleanupFailureReason: "WIP salvage failed after lease expiry",
+    workspaceRetained: true,
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  const storedRun = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  const session = await db.session.findUniqueOrThrow({ where: { runId: run.id } });
+  assert.equal(storedRun.workspaceRetained, true);
+  assert.equal(session.cleanupStatus, "FAILED");
+  assert.equal(session.cleanupFailureReason, "WIP salvage failed after lease expiry");
+});

@@ -20,6 +20,7 @@ import {
   completeRun,
   heartbeat as sendHeartbeat,
   recordPublishedBranch,
+  recordLeaseIndependentCleanup,
   reportCliAvailability,
   reportPreflight,
   startRun,
@@ -291,7 +292,11 @@ export const executeClaim = async (
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      await cleanup(config, claim, workspace, false);
+      const cleaned = await cleanup(config, claim, workspace, false);
+      const { salvage: _salvage, ...cleanupOutcome } = cleaned;
+      await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+        console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
+      });
       return;
     }
     if (!preflight.ok) {
@@ -401,7 +406,11 @@ export const executeClaim = async (
     adoptLeaseVerdict(lease);
     if (fencingRejected) {
       if (waitingInbox) return;
-      await cleanup(config, claim, workspace, false);
+      const cleaned = await cleanup(config, claim, workspace, false);
+      const { salvage: _salvage, ...cleanupOutcome } = cleaned;
+      await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
+        console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(error)}`);
+      });
       return;
     }
     const executionSucceeded = adapterExecutionSucceeded(evidence);
@@ -538,7 +547,13 @@ export const executeClaim = async (
     if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
     if (fencingRejected) {
       if (waitingInbox) return;
-      if (workspace) await cleanup(config, claim, workspace, false);
+      if (workspace) {
+        const cleaned = await cleanup(config, claim, workspace, false);
+        const { salvage: _salvage, ...cleanupOutcome } = cleaned;
+        await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((reportError: unknown) => {
+          console.error(`Unable to record lease-independent cleanup outcome: ${errorMessage(reportError)}`);
+        });
+      }
       return;
     }
     const evidence = preflightEvidence(message);

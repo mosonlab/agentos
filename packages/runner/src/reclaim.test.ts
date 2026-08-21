@@ -33,15 +33,14 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 type Call = { path: string; body: Record<string, any> };
 
 /** Stands in for the control plane: answers the plan, records the report. */
-const stubApi = (plan: unknown, status = 200): Call[] => {
+const stubApi = (plan: unknown, status = 200, addCompatibilityEvidence = true): Call[] => {
   const calls: Call[] = [];
   const compatiblePlan = plan && typeof plan === "object" && "reclaim" in plan
     ? {
       ...plan,
-      reclaim: (plan as { reclaim: Array<Record<string, unknown>> }).reclaim.map((offer) => ({
-        pushedBranch: "already/durable",
-        ...offer,
-      })),
+      reclaim: (plan as { reclaim: Array<Record<string, unknown>> }).reclaim.map((offer) => addCompatibilityEvidence
+        ? { pushedBranch: "already/durable", ...offer }
+        : offer),
     }
     : plan;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -117,6 +116,36 @@ test("a delayed reclaim salvages an unpublished retained workspace before deleti
   assert.equal(calls[1]!.path, "http://api.invalid/runner/workspaces/salvaged");
   assert.deepEqual(calls[1]!.body, { runnerId: "runner-1", runId: "run-1", pushedBranch: salvage });
   assert.deepEqual(calls[2]!.body.results, [{ runId: "run-1", outcome: "REMOVED" }]);
+});
+
+test("a pre-start workspace with no clone base is audited as nothing to salvage and removed", async () => {
+  const workspaceRoot = await root("pre-start");
+  const runPath = join(workspaceRoot, "clone-died");
+  await mkdir(runPath);
+  const calls = stubApi({
+    reclaim: [{
+      runId: "clone-died", workspacePath: null, taskId: "task-1", runNumber: 1,
+      baseSha: null, pushedBranch: null,
+    }],
+    verify: [], keep: [],
+  });
+  const sweep = await reclaimWorkspaces(config(workspaceRoot));
+  assert.deepEqual(sweep, { offered: 1, removed: 1, refused: 0, failed: 0, settled: 0 });
+  await assert.rejects(access(runPath));
+  assert.deepEqual(calls[1]!.body.results, [{ runId: "clone-died", outcome: "REMOVED" }]);
+});
+
+test("a legacy reclaim offer without pushedBranch refuses deletion", async () => {
+  const workspaceRoot = await root("legacy-offer");
+  const runPath = join(workspaceRoot, "legacy-run");
+  await mkdir(runPath);
+  const calls = stubApi({
+    reclaim: [{ runId: "legacy-run", workspacePath: runPath }], verify: [], keep: [],
+  }, 200, false);
+  const sweep = await reclaimWorkspaces(config(workspaceRoot));
+  assert.deepEqual(sweep, { offered: 1, removed: 0, refused: 1, failed: 0, settled: 0 });
+  await access(runPath);
+  assert.match(String(calls[1]!.body.results[0].failureReason), /omitted salvage publication evidence/u);
 });
 
 test("refuses an offer that escapes the configured root and deletes nothing", async () => {

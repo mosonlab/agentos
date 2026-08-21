@@ -186,6 +186,10 @@ export const reclaimWorkspaces = async (
       results.push({ runId: offer.runId, outcome: "REMOVED" });
       continue;
     }
+    if (offer.pushedBranch === undefined) {
+      refuse(offer, "Reclaim offer omitted salvage publication evidence; refusing mixed-version deletion");
+      continue;
+    }
     try {
       let pushedBranch: string | undefined;
       // New control planes always include pushedBranch. Null means no durable
@@ -193,36 +197,46 @@ export const reclaimWorkspaces = async (
       // obligation as inline runner cleanup. An omitted field is accepted only
       // for compatibility with the pre-salvage reclaim protocol.
       if (offer.pushedBranch === null) {
-        if (!offer.taskId || offer.runNumber === undefined || !offer.baseSha) {
-          throw new Error("Salvage required before reclaim, but taskId, runNumber, or clone base is missing");
-        }
-        const workspace = {
-          path: authorized.path,
-          branch: "",
-          baseSha: offer.baseSha,
-        };
-        const gitResult = await captureWorkspaceResult(config, workspace);
-        const salvage = await salvageWorkspace(config, {
-          taskId: offer.taskId,
-          runId: offer.runId,
-          runNumber: offer.runNumber,
-        }, { ...workspace, branch: gitResult.branch });
-        if (salvage?.pushStatus === "FAILED") {
-          throw new Error(salvage.pushError ?? "WIP salvage failed before reclaim");
-        }
-        pushedBranch = salvage?.pushedBranch;
-        if (pushedBranch) {
-          await recordReclaimPublication(config, {
-            runnerId: config.runnerId,
-            runId: offer.runId,
-            pushedBranch,
-          });
-        }
-        if (!pushedBranch) {
+        // baseSha is written only after provisioning completes. Null therefore
+        // proves this run never had a cloned base against which local work could
+        // exist; audit that fact and reclaim the directory left by the failed
+        // clone. Identity fields are required only once a base exists.
+        if (offer.baseSha === null) {
           audit("nothing-to-salvage", {
             runId: offer.runId,
-            reason: "clean tree with no commits past the clone base",
+            reason: "run never completed provisioning and has no clone base",
           });
+        } else if (!offer.taskId || offer.runNumber === undefined || !offer.baseSha) {
+          throw new Error("Salvage required before reclaim, but taskId, runNumber, or clone base is missing");
+        } else {
+          const workspace = {
+            path: authorized.path,
+            branch: "",
+            baseSha: offer.baseSha,
+          };
+          const gitResult = await captureWorkspaceResult(config, workspace);
+          const salvage = await salvageWorkspace(config, {
+            taskId: offer.taskId,
+            runId: offer.runId,
+            runNumber: offer.runNumber,
+          }, { ...workspace, branch: gitResult.branch });
+          if (salvage?.pushStatus === "FAILED") {
+            throw new Error(salvage.pushError ?? "WIP salvage failed before reclaim");
+          }
+          pushedBranch = salvage?.pushedBranch;
+          if (pushedBranch) {
+            await recordReclaimPublication(config, {
+              runnerId: config.runnerId,
+              runId: offer.runId,
+              pushedBranch,
+            });
+          }
+          if (!pushedBranch) {
+            audit("nothing-to-salvage", {
+              runId: offer.runId,
+              reason: "clean tree with no commits past the clone base",
+            });
+          }
         }
       }
       await remove(config, authorized.path);
