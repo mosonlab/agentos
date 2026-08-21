@@ -17,3 +17,13 @@ opus_blind_review:
   adjudication: reviews/adjudication.md
   pre-fix head: 29f687921d12552fc8aacb3804b3003a41b21d12
   must-fix: SOL-STD-001, OPUS-1, OPUS-2 (all P1)
+
+regression_verification:
+  session: cmt2hbs5q0bz9mp458mwpaazx
+  note: exact resume of `opus_blind_review` (cmt2fswp706ytmp45vbi9hrmi) was
+    unavailable, so this is a new session that read the complete persisted
+    review package before judging the fix.
+  pre-fix head: 29f687921d12552fc8aacb3804b3003a41b21d12
+  fixed head: fc74a25226dab3af8f62a6f7ccb64f6bdaad9277
+  must-fix accounted for: MF-1/SOL-STD-001, MF-2/OPUS-1, MF-3/OPUS-2 - all closed
+  verdict: PASS at fc74a25226dab3af8f62a6f7ccb64f6bdaad9277
