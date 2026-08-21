@@ -17,6 +17,7 @@
  * form read the identical directory.
  */
 import { readdir, readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { RunnerPreference } from "@prisma/client";
@@ -36,6 +37,32 @@ export type RoleSource = {
   rolePrompt: string;
 };
 export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
+
+export type PersistedRoleStructure = {
+  title: string;
+  model: string;
+  runnerPreference: RunnerPreference;
+  inboxAccess: boolean;
+  collaborators: Array<{ allowedAgent: { name: string } }>;
+};
+
+export const roleSourceStructureDifferences = (
+  actual: PersistedRoleStructure,
+  expected: RoleSource,
+): string[] => {
+  const actualCollaborators = actual.collaborators.map(({ allowedAgent }) => allowedAgent.name).sort();
+  const expectedCollaborators = [...expected.collaborators].sort();
+  const fields = [
+    ["title", actual.title, expected.title],
+    ["model", actual.model, expected.model],
+    ["runnerPreference", actual.runnerPreference, expected.runnerPreference],
+    ["inboxAccess", actual.inboxAccess, expected.inboxAccess],
+    ["collaborators", actualCollaborators, expectedCollaborators],
+  ] as const;
+  return fields
+    .filter(([, actualValue, expectedValue]) => !isDeepStrictEqual(actualValue, expectedValue))
+    .map(([field]) => field);
+};
 
 const runnerPreference = (value: string, filePath: string): RunnerPreference => {
   const runner = value.toUpperCase();

@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 
-import { loadAgentSources } from "../src/agent-sources.js";
+import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
 
 // Every canonical template, every step of each, and every role under agents/
@@ -8,8 +8,8 @@ import { loadAllTemplateStepSources, templateStepStructureDifferences } from "..
 // production, so the loader owns the complete template inventory.
 const main = async (): Promise<void> => {
   const [templateSources, sources] = await Promise.all([loadAllTemplateStepSources(), loadAgentSources()]);
-  const rolePrompts = new Map(sources.roles.map((role) => [role.name, role.rolePrompt]));
-  const roleNames = [...rolePrompts.keys()];
+  const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+  const roleNames = [...rolesByName.keys()];
 
   const prisma = new PrismaClient();
   try {
@@ -64,18 +64,43 @@ const main = async (): Promise<void> => {
 
       const presentAgents = await tx.agent.findMany({
         where: { name: { in: roleNames } },
-        select: { name: true },
+        select: {
+          id: true,
+          name: true,
+          title: true,
+          model: true,
+          runnerPreference: true,
+          inboxAccess: true,
+          collaborators: { select: { allowedAgent: { select: { name: true } } } },
+        },
       });
-      const presentRoleNames = new Set(presentAgents.map((agent) => agent.name));
+      const agentsByName = new Map<string, typeof presentAgents>();
+      for (const agent of presentAgents) {
+        const matches = agentsByName.get(agent.name) ?? [];
+        matches.push(agent);
+        agentsByName.set(agent.name, matches);
+      }
       for (const name of roleNames) {
-        if (!presentRoleNames.has(name)) throw new Error(`Agent ${name} was not found`);
+        if (!agentsByName.has(name)) throw new Error(`Agent ${name} was not found`);
       }
       const updatedRoles: Record<string, number> = {};
       for (const name of roleNames) {
-        const rolePrompt = rolePrompts.get(name)!;
+        const role = rolesByName.get(name)!;
+        for (const agent of agentsByName.get(name)!) {
+          const differences = roleSourceStructureDifferences(agent, role);
+          if (differences.length > 0) {
+            throw new Error(`Agent ${name} (${agent.id}) differs from canonical Markdown structure: ${differences.join(", ")}`);
+          }
+        }
         updatedRoles[name] = (await tx.agent.updateMany({
-          where: { name, rolePrompt: { not: rolePrompt } },
-          data: { rolePrompt },
+          where: {
+            name,
+            OR: [
+              { foundationalPrompt: { not: sources.foundationalPrompt } },
+              { rolePrompt: { not: role.rolePrompt } },
+            ],
+          },
+          data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
         })).count;
       }
       return { templates: templateCount, updatedSteps, updatedRoles };

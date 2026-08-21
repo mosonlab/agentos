@@ -1,12 +1,12 @@
 import { AssigneeType, PrismaClient } from "@prisma/client";
 
 import {
-  CANONICAL_AGENT_DEFAULTS,
   DIRECT_TEMPLATE_NAME,
   IMPLEMENTATION_PLAN_OUTPUT_KINDS,
   catalogRunnerForModel,
   isTemplateRunnerInherited,
 } from "../src/agent-contract.js";
+import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -20,13 +20,14 @@ import { loadAllTemplateStepSources } from "../src/template-sources.js";
 const prisma = new PrismaClient();
 
 const main = async (): Promise<void> => {
-  const templateSources = await loadAllTemplateStepSources();
+  const [templateSources, agentSources] = await Promise.all([loadAllTemplateStepSources(), loadAgentSources()]);
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const activeAgents = await prisma.agent.findMany({
     where: { projectId: project.id, archivedAt: null },
+    include: { collaborators: { select: { allowedAgent: { select: { name: true } } } } },
     orderBy: { name: "asc" },
   });
-  const expectedByName = new Map(CANONICAL_AGENT_DEFAULTS.map((agent) => [agent.name, agent]));
+  const expectedByName = new Map(agentSources.roles.map((agent) => [agent.name, agent]));
   const actualNames = activeAgents.map((agent) => agent.name).sort();
   const expectedNames = [...expectedByName.keys()].sort();
   if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
@@ -34,8 +35,15 @@ const main = async (): Promise<void> => {
   }
   for (const agent of activeAgents) {
     const expected = expectedByName.get(agent.name)!;
-    if (agent.model !== expected.model || agent.runnerPreference !== expected.runner) {
-      throw new Error(`${agent.name} differs from canonical default: expected ${expected.runner}/${expected.model}; found ${agent.runnerPreference}/${agent.model}`);
+    const differences = roleSourceStructureDifferences(agent, expected);
+    if (differences.length > 0) {
+      throw new Error(`${agent.name} differs from canonical Markdown structure: ${differences.join(", ")}`);
+    }
+    if (agent.foundationalPrompt !== agentSources.foundationalPrompt) {
+      throw new Error(`${agent.name} foundational prompt differs from its canonical Markdown source`);
+    }
+    if (agent.rolePrompt !== expected.rolePrompt) {
+      throw new Error(`${agent.name} role prompt differs from its canonical Markdown source`);
     }
     const catalogRunner = catalogRunnerForModel(agent.model);
     if (catalogRunner && catalogRunner !== agent.runnerPreference) {

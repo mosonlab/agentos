@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,11 @@ import {
 } from "../src/merge-integrator.js";
 
 import {
+  loadAgentSources,
+  type PersistedRoleStructure,
+  roleSourceStructureDifferences,
+} from "../src/agent-sources.js";
+import {
   assertCanonicalAgentSources,
   CANONICAL_AGENT_DEFAULTS,
   catalogRunnerForModel,
@@ -26,6 +31,7 @@ import {
   CANONICAL_TEMPLATE_SOURCE_SPECS,
   loadAllTemplateStepSources,
   loadTemplateStepSources,
+  type PersistedTemplateStepStructure,
   templateStepStructureDifferences,
 } from "../src/template-sources.js";
 
@@ -192,9 +198,27 @@ test("the complete template source inventory rejects an unregistered workflow di
   }
 });
 
+test("the complete template source inventory rejects a missing workflow or non-directory entry", async () => {
+  const missingRoot = await mkdtemp(join(tmpdir(), "agentos-template-sources-missing-"));
+  const fileRoot = await mkdtemp(join(tmpdir(), "agentos-template-sources-file-"));
+  try {
+    await mkdir(join(missingRoot, INTEGRATOR_TEMPLATE_NAME));
+    await assert.rejects(loadAllTemplateStepSources(missingRoot), /canonical template inventory must be exactly/u);
+
+    await mkdir(join(fileRoot, INTEGRATOR_TEMPLATE_NAME));
+    await writeFile(join(fileRoot, DIRECT_TEMPLATE_NAME), "not a directory\n");
+    await assert.rejects(loadAllTemplateStepSources(fileRoot), /must contain only canonical template directories/u);
+  } finally {
+    await Promise.all([
+      rm(missingRoot, { recursive: true, force: true }),
+      rm(fileRoot, { recursive: true, force: true }),
+    ]);
+  }
+});
+
 test("canonical prompt sync can detect every Markdown-owned structural field", async () => {
   const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
-  const persisted = {
+  const persisted: PersistedTemplateStepStructure = {
     assigneeAgent: { name: expected.agentName! },
     assigneeType: "AGENT",
     approvalGate: expected.approvalGate,
@@ -204,10 +228,40 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     spawnPolicy: expected.spawnPolicy,
   };
   assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
-  assert.deepEqual(
-    templateStepStructureDifferences({ ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }, expected),
-    ["attachmentsFromPrevious"],
-  );
+  const mutations: Array<[string, PersistedTemplateStepStructure]> = [
+    ["agent", { ...persisted, assigneeAgent: { name: "different-agent" } }],
+    ["assigneeType", { ...persisted, assigneeType: "HUMAN" }],
+    ["approvalGate", { ...persisted, approvalGate: !persisted.approvalGate }],
+    ["outputKind", { ...persisted, outputKind: "different-output" }],
+    ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],
+    ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
+    ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],
+  ];
+  for (const [field, mutation] of mutations) {
+    assert.deepEqual(templateStepStructureDifferences(mutation, expected), [field]);
+  }
+});
+
+test("canonical prompt sync can detect every role frontmatter field", async () => {
+  const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian")!;
+  const persisted: PersistedRoleStructure = {
+    title: role.title,
+    model: role.model,
+    runnerPreference: role.runnerPreference,
+    inboxAccess: role.inboxAccess,
+    collaborators: role.collaborators.map((name) => ({ allowedAgent: { name } })),
+  };
+  assert.deepEqual(roleSourceStructureDifferences(persisted, role), []);
+  const mutations: Array<[string, PersistedRoleStructure]> = [
+    ["title", { ...persisted, title: "Different title" }],
+    ["model", { ...persisted, model: "different-model" }],
+    ["runnerPreference", { ...persisted, runnerPreference: RunnerPreference.CLAUDE }],
+    ["inboxAccess", { ...persisted, inboxAccess: !persisted.inboxAccess }],
+    ["collaborators", { ...persisted, collaborators: [{ allowedAgent: { name: "default" } }] }],
+  ];
+  for (const [field, mutation] of mutations) {
+    assert.deepEqual(roleSourceStructureDifferences(mutation, role), [field]);
+  }
 });
 
 test("the sentinel may bind only step 12, and step 12 only the sentinel", () => {
