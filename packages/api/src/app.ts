@@ -85,6 +85,12 @@ import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
+  nextStoredCliAvailability,
+  preserveCliAvailability,
+  readStoredCliAvailability,
+  storeCliAvailability,
+} from "./runner-cli-availability.js";
+import {
   chainKey,
   chainProgress,
   chainStartDecisions,
@@ -487,6 +493,16 @@ const preflightInput = z.object({
   authMode: z.string().nullable().optional(),
   capabilities: z.record(z.string(), z.unknown()),
   error: z.string().nullable().optional(),
+});
+const runnerAvailabilityInput = z.object({
+  runner: z.nativeEnum(RunnerKind),
+  binary: z.string().trim().min(1).max(500),
+  available: z.boolean(),
+  resolvedPath: z.string().trim().min(1).max(2000).nullable(),
+}).superRefine((body, context) => {
+  if (body.available !== (body.resolvedPath !== null)) {
+    context.addIssue({ code: "custom", message: "available and resolvedPath disagree" });
+  }
 });
 const inboxQuestionInput = z.object({
   fencingToken: fence,
@@ -920,9 +936,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }),
       backends: Object.values(RunnerKind).map((runner) => {
         const backend = backendsByRunner.get(runner);
+        const availability = readStoredCliAvailability(backend?.capabilities);
         return {
           runner,
           cliVersion: backend?.cliVersion ?? null,
+          cliAvailable: availability?.available ?? null,
+          cliResolvedPath: availability?.resolvedPath ?? null,
+          cliAvailabilityReason: availability?.reason ?? null,
+          cliUnavailableSince: availability?.unavailableSince ?? null,
+          lastAvailabilityAt: availability?.lastCheckedAt ?? null,
           authMode: backend?.authMode ?? null,
           lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
           lastPreflightOk: backend?.lastPreflightOk ?? null,
@@ -3286,6 +3308,76 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
   });
 
+  app.post("/runner/availability", async (context) => {
+    const body = await readJson(context.req.raw, runnerAvailabilityInput);
+    const now = new Date();
+    const state = await db.$transaction(async (tx) => {
+      const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
+      const previousAvailability = readStoredCliAvailability(previous?.capabilities);
+      const availability = nextStoredCliAvailability(body, previousAvailability, now);
+      if (!body.available) {
+        const outageStarted = previousAvailability?.available !== false;
+        const unavailable = await tx.runnerBackendState.upsert({
+          where: { runner: body.runner },
+          create: {
+            runner: body.runner,
+            capabilities: storeCliAvailability(null, availability),
+          },
+          update: {
+            capabilities: storeCliAvailability(previous?.capabilities, availability),
+          },
+        });
+        await tx.task.updateMany({
+          where: {
+            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+            runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
+          },
+          data: { failureReason: availability.reason },
+        });
+        if (outageStarted) {
+          const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
+          const thread = chatId ? (
+            await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+            ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
+          ) : null;
+          await tx.inboxMessage.create({ data: {
+            from: "AGENT",
+            kind: "TEXT",
+            body: `${body.runner.toLowerCase()} runner CLI is unavailable: ${body.binary} was not found in configured runner PATH.`,
+            dedupeKey: availability.outageKey,
+            ...(thread ? { threadId: thread.id } : {}),
+          } });
+        }
+        return unavailable;
+      }
+
+      const available = await tx.runnerBackendState.upsert({
+        where: { runner: body.runner },
+        create: {
+          runner: body.runner,
+          capabilities: storeCliAvailability(null, availability),
+        },
+        update: {
+          capabilities: storeCliAvailability(previous?.capabilities, availability),
+        },
+      });
+      if (previousAvailability?.reason) {
+        await tx.task.updateMany({
+          where: { failureReason: previousAvailability.reason },
+          data: { failureReason: null },
+        });
+      }
+      if (previousAvailability?.outageKey) {
+        await tx.inboxMessage.updateMany({
+          where: { dedupeKey: previousAvailability.outageKey, status: InboxStatus.OPEN },
+          data: { status: InboxStatus.CLOSED, answeredAt: now },
+        });
+      }
+      return available;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return context.json(state);
+  });
+
   app.post("/runner/preflight", async (context) => {
     const body = await readJson(context.req.raw, preflightInput);
     const now = new Date();
@@ -3296,7 +3388,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         runner: body.runner,
         cliVersion: body.cliVersion ?? null,
         authMode: body.authMode ?? null,
-        capabilities: jsonValue(body.capabilities),
+        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
         lastPreflightAt: now,
         lastPreflightOk: body.ok,
         circuitOpen: !body.ok,
@@ -3306,7 +3398,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       update: {
         cliVersion: body.cliVersion ?? null,
         authMode: body.authMode ?? null,
-        capabilities: jsonValue(body.capabilities),
+        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
         lastPreflightAt: now,
         lastPreflightOk: body.ok,
         ...(body.ok
@@ -3452,7 +3544,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // `runner` on its row is an inert artifact of the sentinel Agent.
         if (executionMode === "agent") {
           const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
-          if (backend?.circuitOpen) continue;
+          if (readStoredCliAvailability(backend?.capabilities)?.available === false || backend?.circuitOpen) continue;
         }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);

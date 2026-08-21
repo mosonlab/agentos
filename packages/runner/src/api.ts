@@ -370,3 +370,13 @@ export const reportPreflight = async (
     body: JSON.stringify({ runner, ...result }),
   });
 };
+
+export const reportCliAvailability = async (
+  config: RunnerConfig,
+  availability: { runner: RunnerKind; binary: string; available: boolean; resolvedPath: string | null },
+): Promise<void> => {
+  await request(config, "/runner/availability", {
+    method: "POST",
+    body: JSON.stringify(availability),
+  });
+};
