@@ -155,15 +155,6 @@ export const chainDisplayByTask = (rows: readonly Pick<BoardRow, "id" | "project
   return result;
 };
 
-type ActivityRow = { id: string; updatedAt: Date };
-
-/** Stable newest-activity-first ordering shared by both task-list shapes. */
-export const byLatestRunActivity = <T extends ActivityRow>(rows: T[], activityByTask: ReadonlyMap<string, Date>): T[] => [...rows].sort((left, right) => {
-  const leftAt = activityByTask.get(left.id) ?? left.updatedAt;
-  const rightAt = activityByTask.get(right.id) ?? right.updatedAt;
-  return rightAt.getTime() - leftAt.getTime() || left.id.localeCompare(right.id);
-});
-
 export const boardCard = (
   row: BoardRow,
   chainProgress: (ChainProgress & { position: number | null }) | null,

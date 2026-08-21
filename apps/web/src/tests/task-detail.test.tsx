@@ -19,6 +19,10 @@ test("every task-detail run row uses the projected cost with estimate and token 
   assert.doesNotMatch(source, /money\(run\.session\?\.costUsd/u);
 });
 
+test("the Runs section is rendered before the Chain section", () => {
+  assert.ok(source.indexOf('t("taskDetail.runs.title")') < source.indexOf("<ChainList chain={chain.data}"));
+});
+
 const output = (body: string): TaskStepOutput => ({
   id: "o1", taskId: "t1", runId: "r1", kind: "review", body,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
