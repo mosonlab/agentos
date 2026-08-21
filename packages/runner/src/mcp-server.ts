@@ -9,6 +9,7 @@
  *  Hand-rolled JSON-RPC rather than the MCP SDK: the runner package ships with
  *  no runtime dependencies, and the surface here is eight tools. */
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -30,6 +31,7 @@ export type SessionCredentials = {
   runId: string;
   sessionToken: string;
   fencingToken: string;
+  workspacePath: string;
 };
 
 const credentialsFile = (argv: string[]): Record<string, unknown> => {
@@ -51,11 +53,13 @@ export const readCredentials = (environment: NodeJS.ProcessEnv, argv: string[] =
   const runId = environment.AGENTOS_RUN_ID ?? asString(file.runId) ?? undefined;
   const sessionToken = environment.AGENTOS_SESSION_TOKEN ?? asString(file.sessionToken) ?? undefined;
   const fencingToken = environment.AGENTOS_FENCING_TOKEN ?? asString(file.fencingToken) ?? undefined;
+  const workspacePath = environment.AGENTOS_WORKSPACE_PATH ?? asString(file.workspacePath) ?? undefined;
   const missing = [
     ...(apiUrl ? [] : ["AGENTOS_API_URL"]),
     ...(runId ? [] : ["AGENTOS_RUN_ID"]),
     ...(sessionToken ? [] : ["AGENTOS_SESSION_TOKEN"]),
     ...(fencingToken ? [] : ["AGENTOS_FENCING_TOKEN"]),
+    ...(workspacePath ? [] : ["AGENTOS_WORKSPACE_PATH"]),
   ];
   if (missing.length > 0) throw new Error(`AgentOS MCP server is missing ${missing.join(", ")}`);
   return {
@@ -63,7 +67,19 @@ export const readCredentials = (environment: NodeJS.ProcessEnv, argv: string[] =
     runId: runId!,
     sessionToken: sessionToken!,
     fencingToken: fencingToken!,
+    workspacePath: workspacePath!,
   };
+};
+
+const workspaceHead = (credentials: SessionCredentials): string => {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: credentials.workspacePath,
+    encoding: "utf8",
+  }).trim();
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(head)) {
+    throw new Error(`Workspace HEAD is not a commit SHA: ${head}`);
+  }
+  return head;
 };
 
 const asRecord = (value: unknown): Record<string, unknown> =>
@@ -215,13 +231,20 @@ export const invokeTool = async (
     const kind = asString(rawArguments.kind);
     const body = asString(rawArguments.body);
     if (!kind || !body) throw new Error("task_output requires kind and body");
-    await call(credentials, "PUT", "/output", {
+    const persisted = await call(credentials, "PUT", "/output", {
       fencingToken: credentials.fencingToken,
       kind,
       body,
+      commitSha: workspaceHead(credentials),
       ...(rawArguments.metadata ? { metadata: asRecord(rawArguments.metadata) } : {}),
-    });
-    return text(`Output persisted as '${kind}' (${body.length} characters).`);
+    }) as { predecessorOutputs?: unknown } | null;
+    const predecessorOutputs = persisted?.predecessorOutputs;
+    return text([
+      `Output persisted as '${kind}' (${body.length} characters).`,
+      ...(Array.isArray(predecessorOutputs) && predecessorOutputs.length > 0
+        ? ["Predecessor step outputs are now available:", JSON.stringify(predecessorOutputs, null, 2)]
+        : []),
+    ].join("\n\n"));
   }
   if (name === "task_status") {
     return text(JSON.stringify(await call(credentials, "GET", "/status"), null, 2));

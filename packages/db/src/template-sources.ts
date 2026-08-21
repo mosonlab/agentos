@@ -22,6 +22,7 @@ const STRUCTURAL_FIELDS = [
   "outputKind",
   "attachmentsFromPrevious",
   "opensPullRequest",
+  "baseFromStepIndex",
   "spawnPolicy",
 ] as const;
 
@@ -32,6 +33,7 @@ export type TemplateStepSource = {
   outputKind: string;
   attachmentsFromPrevious: boolean;
   opensPullRequest: boolean;
+  baseFromStepIndex: number | null;
   spawnPolicy: Prisma.InputJsonObject | null;
   prompt: string;
 };
@@ -43,6 +45,7 @@ export type PersistedTemplateStepStructure = {
   outputKind: string;
   attachmentsFromPrevious: boolean;
   opensPullRequest: boolean;
+  baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
 };
 
@@ -58,6 +61,7 @@ export const templateStepStructureDifferences = (
     ["outputKind", actual.outputKind, expected.outputKind],
     ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
     ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
+    ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
     ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
   ] as const;
   return fields
@@ -76,6 +80,10 @@ const parseStepIndex = (value: string, filePath: string): number => {
   if (!Number.isSafeInteger(stepIndex) || stepIndex < 1) throw new Error(`${filePath} stepIndex must be a positive integer`);
   return stepIndex;
 };
+
+const parseOptionalStepIndex = (value: string, filePath: string): number | null => (
+  value === "null" ? null : parseStepIndex(value, filePath)
+);
 
 const parseSpawnPolicy = (value: string, filePath: string): Prisma.InputJsonObject | null => {
   if (value === "null") return null;
@@ -122,6 +130,7 @@ export const loadTemplateStepSources = async (
       outputKind: requiredFrontmatter(document, "outputKind", filePath),
       attachmentsFromPrevious: parseBoolean(requiredFrontmatter(document, "attachmentsFromPrevious", filePath), filePath, "attachmentsFromPrevious"),
       opensPullRequest: parseBoolean(requiredFrontmatter(document, "opensPullRequest", filePath), filePath, "opensPullRequest"),
+      baseFromStepIndex: parseOptionalStepIndex(requiredFrontmatter(document, "baseFromStepIndex", filePath), filePath),
       spawnPolicy: parseSpawnPolicy(requiredFrontmatter(document, "spawnPolicy", filePath), filePath),
       prompt: document.body,
     });
@@ -134,6 +143,14 @@ export const loadTemplateStepSources = async (
   const expectedIndexes = Array.from({ length: sourceSpec.stepCount }, (_, index) => index + 1);
   if (JSON.stringify(indexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`${templateRoot} stepIndex values must be contiguous from 1 through ${sourceSpec.stepCount}`);
+  }
+  for (const step of steps) {
+    if (step.baseFromStepIndex !== null && !indexes.includes(step.baseFromStepIndex)) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`);
+    }
+    if (step.baseFromStepIndex !== null && step.baseFromStepIndex >= step.stepIndex) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} baseFromStepIndex must reference a strictly earlier stepIndex`);
+    }
   }
   return steps;
 };

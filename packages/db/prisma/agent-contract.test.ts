@@ -74,15 +74,15 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(planReview, /mislabelled risk\s+flags/u);
 
   assert.match(firstReview, /implementation step's persisted output/u);
-  assert.match(firstReview, /labelled `implementation_range` entry/u);
   assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
-  assert.match(firstReview, /reviews\/sol-findings\.md/u);
+  assert.match(firstReview, /only as the AgentOS task output/u);
+  assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
   assert.match(firstReview, /codex exec review -m gpt-5\.6-sol -c model_reasoning_effort=high/u);
   assert.match(firstReview, /review the changes from <implementation base sha> to <delivered head sha>/u);
 
-  const blindWrite = finalReview.indexOf("reviews/opus-blind-findings.md");
-  const firstReportRead = finalReview.indexOf("reviews/sol-findings.md", blindWrite);
+  const blindWrite = finalReview.indexOf("intermediate AgentOS task output");
+  const firstReportRead = finalReview.indexOf("predecessor step outputs", blindWrite);
   assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
   assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/slices\/` where the chain carries one/u);
   assert.match(finalReview, /reachable in the tree at `head`/u);
@@ -92,7 +92,7 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(finalReview, /does not become effective\s+automatically/u);
   assert.match(finalReview, /entire fix diff as one\s+unit/u);
   assert.match(finalReview, /exact fixed head/u);
-  assert.match(finalReview, /label `opus_blind_review`/u);
+  assert.match(finalReview, /provider id in the platform output/u);
 });
 
 test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {
@@ -225,6 +225,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
     opensPullRequest: expected.opensPullRequest,
+    baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy,
   };
   assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
@@ -235,6 +236,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     ["outputKind", { ...persisted, outputKind: "different-output" }],
     ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],
     ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
+    ["baseFromStepIndex", { ...persisted, baseFromStepIndex: 0 }],
     ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],
   ];
   for (const [field, mutation] of mutations) {

@@ -196,7 +196,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config);
-    const env = buildChildEnvironment(config, claim, scratch);
+    const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -321,14 +321,26 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     // Bound outside the closures below: `workspace` is nullable at the top of
     // this function, and the narrowing does not survive into a callback.
     const delivered = { ...workspace, branch: gitResult.branch };
-    if (executionSucceeded) delivery = await deliverUnderLease(lease, (retryOptions) => deliverWorkspace(
-      config,
-      claim,
-      delivered,
-      undefined,
-      (branch) => recordPublishedBranch(config, claim, branch),
-      retryOptions,
-    ));
+    if (executionSucceeded) {
+      // A pinned review started from an object-id-only detached checkout. It
+      // produces a platform output, not a branch artifact, so publishing it
+      // would either create a forbidden local chain ref or overwrite the chain
+      // from an intentionally stale base.
+      delivery = workspace.pinnedBaseSha
+        ? {
+          pushStatus: "SUCCEEDED",
+          pushRemote: claim.repo.remoteUrl,
+          deliveryInstructions: `Pinned checkout ${workspace.pinnedBaseSha} completed without branch publication.`,
+        }
+        : await deliverUnderLease(lease, (retryOptions) => deliverWorkspace(
+          config,
+          claim,
+          delivered,
+          undefined,
+          (branch) => recordPublishedBranch(config, claim, branch),
+          retryOptions,
+        ));
+    }
     else {
       // The workspace is about to be destroyed; commit and salvage its trackable changes.
       const salvage = await deliverUnderLease(lease, (retryOptions) =>

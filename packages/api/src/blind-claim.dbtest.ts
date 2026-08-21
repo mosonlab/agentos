@@ -15,12 +15,15 @@ import { instantiateTemplate } from "./templates.js";
 const execFileAsync = promisify(execFile);
 const DB_DIRECTORY = fileURLToPath(new URL("../../db", import.meta.url));
 const RUNNER_TOKEN = "blind-claim-runner-token";
+const OPERATOR_TOKEN = "blind-claim-operator-token";
 
 let db: PrismaClient;
 const priorRunnerToken = process.env.RUNNER_TOKEN;
+const priorOperatorToken = process.env.OPERATOR_TOKEN;
 
 before(() => {
   process.env.RUNNER_TOKEN = RUNNER_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR_TOKEN;
   db = setupTestDb();
 });
 beforeEach(async () => { await resetTestDb(db); });
@@ -28,6 +31,8 @@ after(async () => {
   await db.$disconnect();
   if (priorRunnerToken === undefined) delete process.env.RUNNER_TOKEN;
   else process.env.RUNNER_TOKEN = priorRunnerToken;
+  if (priorOperatorToken === undefined) delete process.env.OPERATOR_TOKEN;
+  else process.env.OPERATOR_TOKEN = priorOperatorToken;
 });
 
 const seedCanonicalTemplate = async () => {
@@ -77,13 +82,28 @@ const queueCanonicalStep = async (
     where: { id: { in: priorTasks.map((task) => task.id) } },
     data: { status: "DONE" },
   });
-  await db.taskStepOutput.createMany({ data: priorTasks.map((task) => ({
-    taskId: task.id,
-    kind: `step-${task.chainIndex}`,
-    body: `persisted output from step ${task.chainIndex}`,
-  })) });
   const target = chain.tasks.find((task) => task.chainIndex === stepIndex);
   assert.ok(target, `canonical step ${stepIndex} must exist`);
+  const sourceStepIndex = template.steps.find((step) => step.stepIndex === stepIndex)?.baseFromStepIndex ?? null;
+  const sourceTask = sourceStepIndex === null
+    ? null
+    : priorTasks.find((task) => task.chainIndex === sourceStepIndex) ?? null;
+  const sourceRun = sourceTask
+    ? await db.$transaction((tx) => enqueueTaskRun(tx as never, sourceTask.id))
+    : null;
+  if (sourceRun) {
+    await db.run.update({
+      where: { id: sourceRun.id },
+      data: { status: "SUCCEEDED", baseSha: "b".repeat(40) },
+    });
+  }
+  await db.taskStepOutput.createMany({ data: priorTasks.map((task) => ({
+    taskId: task.id,
+    ...(task.id === sourceTask?.id && sourceRun ? { runId: sourceRun.id } : {}),
+    kind: `step-${task.chainIndex}`,
+    body: `persisted output from step ${task.chainIndex}`,
+    commitSha: String(task.chainIndex).padStart(40, "0"),
+  })) });
   const run = await db.$transaction((tx) => enqueueTaskRun(tx as never, target.id));
   return { run, expectedPriorOutputs: priorTasks.length };
 };
@@ -95,7 +115,18 @@ const claim = async () => {
     body: JSON.stringify({ runnerId: "blind-claim-runner", leaseSeconds: 60 }),
   });
   assert.equal(response.status, 200);
-  return response.json() as Promise<{ run: { id: string }; priorOutputs: Array<{ body: string }> }>;
+  return response.json() as Promise<{
+    run: {
+      id: string;
+      targetBranch: string;
+      pinnedBaseSha: string | null;
+      implementationBaseSha: string | null;
+      implementationHeadSha: string | null;
+    };
+    priorOutputs: Array<{ body: string }>;
+    sessionToken: string;
+    fencingToken: string;
+  }>;
 };
 
 test("canonical blind-review claims omit prior outputs while attached steps retain them", async () => {
@@ -111,4 +142,38 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
   const blindClaim = await claim();
   assert.equal(blindClaim.run.id, blind.run.id);
   assert.deepEqual(blindClaim.priorOutputs, []);
+  assert.equal(blindClaim.run.pinnedBaseSha, "5".padStart(40, "0"));
+  assert.equal(blindClaim.run.targetBranch, blindClaim.run.pinnedBaseSha);
+  assert.equal(blindClaim.run.implementationBaseSha, "b".repeat(40));
+  assert.equal(blindClaim.run.implementationHeadSha, blindClaim.run.pinnedBaseSha);
+
+  const persisted = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: blindClaim.fencingToken,
+      kind: "must-fix",
+      body: "independent findings persisted before adjudication",
+      commitSha: "f".repeat(40),
+    }),
+  });
+  assert.equal(persisted.status, 200);
+  const unlocked = await persisted.json() as { predecessorOutputs: Array<{ body: string }> };
+  assert.equal(unlocked.predecessorOutputs.length, blind.expectedPriorOutputs);
+  assert.ok(unlocked.predecessorOutputs.some((output) => output.body === "persisted output from step 6"));
+});
+
+test("operator retry re-resolves a pinned step to the recorded implementation commit", async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const blind = await queueCanonicalStep(template, repo.id, 7);
+  await db.run.update({ where: { id: blind.run.id }, data: { status: "FAILED" } });
+
+  const retried = await createApp(db).request(`/tasks/${blind.run.taskId}/retry`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}` },
+  });
+  assert.equal(retried.status, 201);
+  const body = await retried.json() as { targetBranch: string; branch: string | null };
+  assert.equal(body.targetBranch, "5".padStart(40, "0"));
+  assert.notEqual(body.targetBranch, body.branch, "a pinned retry must not use the chain branch as its base");
 });

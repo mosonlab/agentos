@@ -170,7 +170,7 @@ const main = async (): Promise<void> => {
     "Merge execution",
   ] as const;
   for (const step of templateSteps) {
-    const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy } = step;
+    const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
     const name = stepNames[stepIndex - 1];
     if (!name) throw new Error(`Missing canonical template step name ${stepIndex}`);
     const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
@@ -178,8 +178,8 @@ const main = async (): Promise<void> => {
     if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
     await prisma.taskTemplateStep.upsert({
       where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex } },
-      update: { name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      update: { name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
     });
   }
 
@@ -205,7 +205,7 @@ const main = async (): Promise<void> => {
     "Human PR review",
   ] as const;
   for (const step of directTemplateSteps) {
-    const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy } = step;
+    const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
     const name = directStepNames[stepIndex - 1];
     if (!name) throw new Error(`Missing direct template step name ${stepIndex}`);
     const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
@@ -213,8 +213,8 @@ const main = async (): Promise<void> => {
     if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
     await prisma.taskTemplateStep.upsert({
       where: { taskTemplateId_stepIndex: { taskTemplateId: directTemplate.id, stepIndex } },
-      update: { name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-      create: { taskTemplateId: directTemplate.id, stepIndex, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      update: { name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: directTemplate.id, stepIndex, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
     });
   }
 

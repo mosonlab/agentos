@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "14d50bd0be9c0d91a9c72712eb0b09a3bd97f3a4",
-  "tree": "7b2db531167823f54ac0d9a1b95bc8da5a05bbc8",
+  "commit": "132dfc50367474cda9eafc1c49a77537fa07ae6b",
+  "tree": "a44ce6137a49eb9f66f7b520f3ad3ca1cb763430",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -112,6 +112,11 @@
       "blob": "8b50b0ceb0b53bfbef1ec8e44c626d94fb357a4c"
     },
     {
+      "path": "packages/db/prisma/migrations/20260821020000_blind_review_base_pinning/migration.sql",
+      "sha256": "1578301dd7cf61b6af7ef8aacd488cae7e63c4d977c13dcfb9bddc120d57b52d",
+      "blob": "44cac1e1284d63be695428c7344dfcecd2150133"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -128,8 +133,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "8e6fb22a73150b52db3c7b2e3e3a751ea39e47d12a25fe42b5edb186a15ae05d",
-      "blob": "8c93a7a9d4b9661a20f9a78c57c6afc1ce897cab"
+      "sha256": "afea04c566cb28b78a3a8173cad1c870038c144d4cacf8a74f9ed6452e265123",
+      "blob": "b72ab1b48628610958c4c9d2e51dce8585bccb6d"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -138,8 +143,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "98c117ef87a7db79ce92c6e8d1d21124a497f9fe0553c831627fe35527dd5c0f",
-      "blob": "43730dd795fc74eeb323ccd2b764bf8dd954712e"
+      "sha256": "7fa7d209a089d847b19f534eec21c287af51d944f98336cecc3b6b5c0792e7c5",
+      "blob": "a76212f4b67429bd5f5f1aab2b3f45f9b54f8c82"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -153,13 +158,13 @@
     }
   ],
   "migrations": {
-    "count": 20,
-    "terminal": "20260818210000_workspace_reclaim_intent",
-    "sha256": "725294422d9c1724a9def074f717a5ca8ed04a576d5a92fc6da7a36e5fe40e4c"
+    "count": 21,
+    "terminal": "20260821020000_blind_review_base_pinning",
+    "sha256": "8a2c7bde1cbaa6606a1450c7f575cc53242be6ae89cb9c5699e711a2709af2af"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "pB7hXVZoUUkzTPLon8fh03o2Y3iP1gPzLx5JMBB4Qg7CIFqBd/qzxDXtzdFq0qpX9Aznn8Ly3/wtdQaIl+m7DA=="
+    "value": "GwlJufCEZwYo41QoLx/QNmJ9CnX5StsdGPt5sQ+9SXrGiQIB/H32luPGiKf6wKyYi4tiipxQ3mBu7iX1v17eAw=="
   }
 }

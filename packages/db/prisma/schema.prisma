@@ -470,6 +470,7 @@ model TaskTemplateStep {
   runner                  RunnerKind?
   outputKind              String       @default("result")
   opensPullRequest        Boolean      @default(true)
+  baseFromStepIndex       Int?
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
   assigneeAgent           Agent?       @relation(fields: [assigneeAgentId], references: [id], onDelete: SetNull)
   tasks                   Task[]
@@ -599,6 +600,7 @@ model TaskStepOutput {
   kind      String
   body      String
   metadata  Json?
+  commitSha String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)

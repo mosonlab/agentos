@@ -170,12 +170,17 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           select: {
             id: true, projectId: true, repoId: true, chainId: true, chainIndex: true, templateId: true,
             targetBranch: true, opensPullRequest: true,
+            templateStep: { select: { baseFromStepIndex: true } },
             repo: { select: { defaultBranch: true } },
           },
         });
-        // `prior` is null deliberately: for chain steps the resolver ignores it,
-        // and passing the lost run would be misleading.
-        const branches = task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
+        // Ordinary chain steps recompute without inheriting the lost run.
+        // Pinned template steps pass only the workspace branch identity; the
+        // resolver re-reads their immutable source range and never trusts the
+        // lost run's targetBranch as a commit.
+        const branches = task?.templateStep?.baseFromStepIndex != null && task.repo
+          ? await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch })
+          : task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
           ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
           : {
             branch: run.branch,

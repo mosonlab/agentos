@@ -59,10 +59,10 @@ This is the target shape of the seeded `compound-engineer-workflow` template and
 | ③ 计划评审 | review-coordinator | CODEX, sol, high | 作者为 Fable，评审异厂；检查：粒度/依赖边真伪/该合该拆三问、每片「能演示什么」、每条验收判据在基点 commit 为红 |
 | ④ 计划修订 | plan-reviser | CLAUDE, fable-5, medium | resume ②会话（同模型同档；显式 session-id，禁 `--last`）；跨链步 resume 实测不通过则新窗读②③产出；不服 findings 须列明理由不得静默略过；实施授权闸在本步后 |
 | ⑤ 实现 | executioner | CODEX 父会话 sol, medium + 子代理 luna, max | 切片逐片按正典入口 (a)/(b) 路由（链即入口 (b) 结构），触及 persisted data 或不可回滚外部动作的切片改 sol:high；父会话按 blocked_by 拓扑分层 wave 调度，同 wave 并行，每子代理一 worktree，屏障处串行合入并跑测试，整案单次 push；子代理经 multi_agent_v2 spawn 且档位写死。fan-out 启用 hard gate（先实测：spawn schema、子代理 model/effort 生效证据、worktree 创建/回收、并发上限、失败清理），任一项不可证明则过渡态=逐片 luna:max 串行（一片一新进程） |
-| ⑥a 代码评审（Sol 路） | review-coordinator-sol | CODEX, sol, high | base=⑤启动前冻结链 head，head=⑤交付 head，审完整 integrated diff；`codex exec review`，custom prompt 注入 Fowler smell 基线与「Spec 轴每条 finding 引 spec 原文」；findings 按正典 finding 结构落 docs/reviews/<chain>/sol-findings.md 并推链分支 |
-| ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, high | 盲审：先独立完成两轴评审（Standards/Spec）并落盘，再读⑥a，按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；session-id 落链分支文件 |
+| ⑥a 代码评审（Sol 路） | review-coordinator-sol | CODEX, sol, high | base=⑤启动前冻结 commit，head=⑤记录的结束 commit，审完整 integrated diff；`codex exec review`，custom prompt 注入 Fowler smell 基线与「Spec 轴每条 finding 引 spec 原文」；findings 仅持久化为 TaskStepOutput，不写入或推送链分支 |
+| ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, high | workspace 以⑤记录的结束 commit 做 fetch-level isolated detached checkout；claim 以 non-report metadata 提供 immutable base/head；先将独立 Standards/Spec 评审持久化为 intermediate TaskStepOutput，成功写入后才解锁并读取⑥a，再按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；最终报告与 provider session id 仅落 platform output |
 | ⑦ 修复 | senior-dev | CODEX, sol, medium | 按封闭 must-fix 清单修；修复 diff 触及任一结构风险升 sol:high（本合同的 product-owner 裁定） |
-| ⑥c 回归核销 | review-coordinator-opus | CLAUDE, opus-5, high | 对全部 must-fix 修复 diff 整体回归核销（exact-head=人工验收对象）；优先 resume ⑥b（显式 session-id），实测不通过则独立新窗 |
+| ⑥c 回归核销 | review-coordinator-opus | CLAUDE, opus-5, high | 从 predecessor TaskStepOutput 读取闭合 must-fix 与修复结果，对完整修复 diff 整体回归核销（exact-head=人工验收对象）；优先以 platform output 中的显式 provider session id resume ⑥b，实测不通过则独立新窗完整读取 persisted review package |
 | ⑧ wiki | librarian | CODEX, terra, medium | 自 luna:high 改此（luna:high 违「Luna 一律 max」硬禁令；Terra $2/$12） |
 | ⑨ 人工 PR 审查 | 人工闸 | — | 不变 |
 
@@ -70,7 +70,7 @@ In summary, Full Assurance runs specification and planning through implementatio
 
 ## Review structure
 
-Steps ⑥a, ⑥b, and ⑥c form the two-route blind-review flow. ⑥a independently reviews the integrated diff. ⑥b completes and persists its own Standards/Spec review before reading ⑥a, then performs final adjudication. After ⑦ closes the must-fix list, ⑥c verifies the complete repair diff and binds human acceptance to the verified exact head.
+Steps ⑥a, ⑥b, and ⑥c form the two-route blind-review flow. Review reports and session records live only in TaskStepOutput/platform output and never on the chain branch. ⑥a independently reviews the integrated diff and persists its findings there. ⑥b receives the immutable implementation base/head as non-report claim metadata and runs from a fetch-level isolated detached checkout pinned to ⑤'s recorded end commit; it completes and persists its own Standards/Spec review before the successful write unlocks ⑥a, then performs final adjudication. After ⑦ closes the must-fix list from predecessor outputs, ⑥c verifies the complete repair diff and binds human acceptance to the verified exact head.
 
 Luna may write only when the dispatch route's safeguards and rollback conditions have been verified. Blind review requires the adjudicator to persist an independent review before reading the other route. Findings carry a stable ID, location, evidence, and severity; P0/P1 findings are must-fix. After repair, the adjudicator verifies the complete must-fix diff, and that verified exact head becomes the human-review target.
 
