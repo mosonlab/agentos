@@ -8,11 +8,21 @@
 #
 # What this machine is allowed to be: a stateless compute worker that checks a
 # commit out of a bare mirror and runs scripts/merge-gate.sh against it. That is
-# all. It never talks to GitHub, never holds a credential, and never runs an
+# all. It holds no credential, reaches GitHub by no route, and never runs an
 # AgentOS runner or an agent session — the execution plane stays on the local
 # machine (Leo's ruling, 2026-08-18). This script therefore installs a toolchain
 # and a directory layout and nothing else: no service, no queue, no daemon, no
 # token file, no clone of a GitHub remote.
+#
+# Two of those three it can establish; the third it can only check. Having no
+# credential and no configured remote is something this script and mirror-push.sh
+# enforce. Being unable to reach GitHub is a property of the host's egress rules,
+# which are the operator's to apply and are not installed here — a script that
+# rewrote a box's firewall from a scp'd file would be a worse idea than the
+# problem it solves. So the route is probed instead, and a box that can still
+# open a connection to GitHub does not finish provisioning. That check is not
+# decoration: the gate runs the candidate commit's own npm scripts, builds and
+# tests, so whatever a candidate commit contains executes here.
 #
 # Idempotent by construction: every step reads the current state first and prints
 # "ok" for what already matches, so re-running after a partial failure is safe
@@ -29,7 +39,7 @@ for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
     --dry-run) APPLY=0 ;;
-    -h|--help) sed -n '2,24p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 64 ;;
   esac
 done
@@ -57,6 +67,13 @@ POSTGRES_IMAGE="${AGENTOS_GATE_POSTGRES_IMAGE:-postgres:16-alpine}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 NODE_MIRROR="${NODE_MIRROR:-https://cdn.npmmirror.com/binaries/node}"
 DOCKER_REGISTRY_MIRRORS="${DOCKER_REGISTRY_MIRRORS:-https://docker.m.daocloud.io,https://dockerproxy.net}"
+
+# The hosts a compromised or malicious candidate commit would reach for, probed
+# on the port it would use. Not an exhaustive list of GitHub's names — it cannot
+# be — but the three a build script actually talks to, and enough that a box
+# which answers on all three plainly has no egress rule at all.
+GATE_GITHUB_HOSTS="${GATE_GITHUB_HOSTS:-github.com api.github.com codeload.github.com}"
+GATE_EGRESS_PROBE_SECONDS="${GATE_EGRESS_PROBE_SECONDS:-8}"
 
 failures=0
 note() { printf '  %s\n' "$*"; }
@@ -161,6 +178,38 @@ for path in "$HOME/.config/gh/hosts.yml" "$HOME/.claude/.credentials.json" "$HOM
   fi
 done
 [ "$failures" = 0 ] && ok "no known credential variable or file present"
+
+# --- red line: this box has no route to GitHub -------------------------------
+
+# Checked, never installed. A TCP connect and nothing more: no request is sent,
+# so this cannot be confused with the box asking GitHub for anything, and the
+# answer is the one thing that matters — whether a session can be established at
+# all. Read as evidence in one direction only. A refusal here proves the route
+# is open; a success proves only that these three names were unreachable from
+# this shell at this moment, which is why the rule the runbook asks for is an
+# egress rule on the addresses and not a hosts-file entry.
+step "Red line: no route from this host to GitHub"
+
+probe_tcp() {
+  timeout "$GATE_EGRESS_PROBE_SECONDS" bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null
+}
+
+reachable=""
+for host in $GATE_GITHUB_HOSTS; do
+  if probe_tcp "$host" 443; then
+    reachable="${reachable} ${host}"
+  else
+    ok "no TCP session to ${host}:443"
+  fi
+done
+if [ -n "$reachable" ]; then
+  fail "this host can open a TCP session to:${reachable}"
+  note "The gate runs the candidate commit's own build and test scripts, so that"
+  note "commit's code runs here with whatever network this box has. Apply an"
+  note "egress rule that denies these hosts before this box gates anything, then"
+  note "re-run this script; docs/runbooks/gate-worker.md carries the ruling and"
+  note "the deployment step."
+fi
 
 # --- packages ---------------------------------------------------------------
 
@@ -297,8 +346,15 @@ run mkdir -p "$GATE_HOME"
 repo_dirs="$(find "$GATE_HOME" -mindepth 2 -maxdepth 2 -type d -name mirror.git 2>/dev/null)"
 if [ -n "$repo_dirs" ]; then
   while IFS= read -r mirror; do
-    if git -C "$mirror" remote 2>/dev/null | grep -q .; then
-      fail "${mirror} has a remote configured; the worker fetches from nowhere — remove it"
+    # "git succeeded and printed nothing", not "the output was empty": those
+    # differ exactly when git failed, and a guard that cannot tell them apart
+    # reports a mirror it never managed to read as clean. There is no `pipefail`
+    # covering the old `git remote | grep -q .`, which is why this reads the
+    # exit status directly.
+    if ! mirror_remotes="$(git -C "$mirror" remote 2>&1)"; then
+      fail "could not read the remotes of ${mirror}: ${mirror_remotes}"
+    elif [ -n "$mirror_remotes" ]; then
+      fail "${mirror} has a remote configured (${mirror_remotes}); the worker fetches from nowhere — remove it"
     else
       ok "$mirror (no remote)"
     fi

@@ -11,9 +11,9 @@
 #
 # --master carries the authoritative master oid, which the frozen-record rules
 # are evaluated against. remote-gate.sh reads it from origin on the local
-# machine and passes it here, because this box cannot ask anyone: it holds no
-# credential and never talks to GitHub. When it is given, it is verified to be
-# resolvable in the mirror before the gate starts.
+# machine and passes it here, because this box cannot ask: it holds no GitHub
+# credential and its mirror has no remote to fetch through. When it is given, it
+# is verified to be resolvable in the mirror before the gate starts.
 #
 # It is optional on purpose. This harness is installed by mirror-push.sh, so a
 # worker can be running an older copy than the commit being gated, and a
@@ -33,10 +33,16 @@
 # — progress, npm noise, docker noise — goes to the log. The caller reads one line
 # and an exit code; anyone debugging scp's the log.
 #
-# Exit codes are merge-gate.sh's, passed through unchanged:
+# Exit codes are merge-gate.sh's, passed through unchanged, plus one this
+# harness adds for everything that stops it before merge-gate.sh forms a verdict:
 #
 #   0  PASS               2  usage error (this script or merge-gate.sh)
 #   1  FAIL               3  NOT AUTHORITATIVE
+#   76 nothing ran — no mirror, the commit is not in the mirror, a missing tool,
+#      a credential in this box's environment. The line on stdout is
+#      GATE NOT RUN: <reason>, and it is not a FAIL. Only merge-gate.sh's own
+#      judgement about the commit exits 1, so a caller reading exit codes can
+#      tell a verdict from an errand.
 #
 # The worktree is per-run and unique, so two gates for different commits can run
 # concurrently and neither waits for the other. #131's per-worktree lock still
@@ -51,6 +57,10 @@ set -uo pipefail
 
 EXIT_FAIL=1
 EXIT_USAGE=2
+# Nothing ran, so nothing was judged. Kept distinct from FAIL because
+# remote-gate.sh and gate-dispatch.sh pass this code home unchanged and an
+# automation must not read a missing mirror as a verdict about a commit.
+EXIT_NO_VERDICT=76
 
 # The directory this script was installed into by mirror-push.sh, which is the
 # repository's own directory on the worker. Deriving it from the script's path
@@ -60,10 +70,17 @@ GATE_HOME="${GATE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)}"
 MIRROR_DIR="$GATE_HOME/mirror.git"
 WORKTREES_DIR="$GATE_HOME/worktrees"
 LOGS_DIR="$GATE_HOME/logs"
-# How long an abandoned worktree is left alone before the sweep reclaims it. Long
-# enough that it can never catch a running gate (a full gate is 10-15 minutes),
-# short enough that a killed run does not hold its disk for a day.
+# How long an abandoned worktree is left alone before the sweep reclaims it.
+# Comfortably longer than a gate takes, short enough that a killed run does not
+# hold its disk for a day. Age alone never decides: the sweep also refuses to
+# touch a worktree whose creating process is still alive, which is what keeps a
+# gate that is merely slow — a hung registry, a stalled pull — from having its
+# tree deleted underneath it by the next run.
 STALE_WORKTREE_MINUTES="${STALE_WORKTREE_MINUTES:-180}"
+case "$STALE_WORKTREE_MINUTES" in
+  ''|*[!0-9]*) printf 'run-gate: STALE_WORKTREE_MINUTES must be a whole number of minutes, got: %s\n' \
+                 "$STALE_WORKTREE_MINUTES" >&2; exit 2 ;;
+esac
 
 VERBOSE=0
 OID=""
@@ -82,7 +99,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die_usage "--master needs an object id"
       MASTER_OID="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift ;;
     --master=*) MASTER_OID="$(printf '%s' "${1#--master=}" | tr '[:upper:]' '[:lower:]')" ;;
-    -h|--help) sed -n '2,50p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,55p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
     -*) die_usage "unknown argument $1" ;;
     *)
       [ -z "$OID" ] || die_usage "more than one commit given: $OID and $1"
@@ -119,27 +136,48 @@ fi
 # months after provisioning; a worker that runs with a token in its environment is
 # outside the boundary this design was approved under, so it refuses rather than
 # produces a verdict.
-for var in OPERATOR_TOKEN RUNNER_TOKEN AGENTOS_API_TOKEN AGENTOS_SESSION_TOKEN AGENTOS_FENCING_TOKEN VITE_API_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN; do
+# The same list provision.sh checks, under the same variable name, because the
+# two are one red line stated twice: a variable that provisioning refuses to
+# finish with must also be a variable a gate refuses to run with, and the pair
+# has drifted apart before. scripts/gate-worker/gate-worker.test.mjs fails if
+# they stop matching.
+SECRET_VARS="OPERATOR_TOKEN RUNNER_TOKEN AGENTOS_API_TOKEN AGENTOS_SESSION_TOKEN AGENTOS_FENCING_TOKEN VITE_API_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN FEISHU_APP_SECRET"
+
+for var in $SECRET_VARS; do
   eval "value=\${$var:-}"
   # shellcheck disable=SC2154
   if [ -n "$value" ]; then
+    # Not a FAIL: the gate never ran. This box being outside the boundary it was
+    # approved under is a stop, and calling it a verdict about the commit would
+    # be a lie in both directions.
     printf 'run-gate: %s is set in this environment; the gate worker holds no credentials\n' "$var" >&2
-    printf 'MERGE GATE: FAIL (worker environment carries %s)\n' "$var"
-    exit "$EXIT_FAIL"
+    printf 'GATE NOT RUN: worker environment carries %s\n' "$var"
+    exit "$EXIT_NO_VERDICT"
   fi
 done
 
 # --- preconditions ----------------------------------------------------------
 
+# A verdict about the commit. Reserved for the one precondition that is a
+# property of the commit rather than of this box.
 fail_out() {
   printf 'run-gate: %s\n' "$1" >&2
   printf 'MERGE GATE: FAIL (%s)\n' "$1"
   exit "$EXIT_FAIL"
 }
 
-[ -d "$MIRROR_DIR" ] || fail_out "no mirror at ${MIRROR_DIR}; run scripts/gate-worker/mirror-push.sh from the local machine first"
-command -v git >/dev/null 2>&1 || fail_out "git is not installed on the worker"
-command -v node >/dev/null 2>&1 || fail_out "node is not installed on the worker"
+# Everything that stops the harness before merge-gate.sh runs. The state of this
+# box, of its mirror and of its toolchain says nothing about the commit, so it
+# must not be reported in the same words or the same code as a judgement.
+no_verdict() {
+  printf 'run-gate: %s\n' "$1" >&2
+  printf 'GATE NOT RUN: %s\n' "$1"
+  exit "$EXIT_NO_VERDICT"
+}
+
+[ -d "$MIRROR_DIR" ] || no_verdict "no mirror at ${MIRROR_DIR}; run scripts/gate-worker/mirror-push.sh from the local machine first"
+command -v git >/dev/null 2>&1 || no_verdict "git is not installed on the worker"
+command -v node >/dev/null 2>&1 || no_verdict "node is not installed on the worker"
 # Docker is deliberately not pre-checked here. merge-gate.sh requires it too, and
 # does so after the frozen-record rules, which need neither a daemon nor an
 # install: a documentation branch that rewrites history should be told that,
@@ -150,17 +188,17 @@ command -v node >/dev/null 2>&1 || fail_out "node is not installed on the worker
 # means the local machine has not pushed it yet, and saying so precisely is the
 # difference between a one-command fix and a debugging session.
 if ! git -C "$MIRROR_DIR" cat-file -e "${OID}^{commit}" 2>/dev/null; then
-  fail_out "commit ${OID} is not in the mirror; run scripts/gate-worker/mirror-push.sh from the local machine"
+  no_verdict "commit ${OID} is not in the mirror; run scripts/gate-worker/mirror-push.sh from the local machine"
 fi
 
 # The same is true of the master the caller bound the verdict to: an oid this
 # mirror cannot resolve would make the gate's own baseline unresolvable, and the
 # honest answer is that the mirror is behind the machine that asked.
 if [ -n "$MASTER_OID" ] && ! git -C "$MIRROR_DIR" cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null; then
-  fail_out "master ${MASTER_OID} is not in the mirror; run scripts/gate-worker/mirror-push.sh from the local machine"
+  no_verdict "master ${MASTER_OID} is not in the mirror; run scripts/gate-worker/mirror-push.sh from the local machine"
 fi
 
-mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || fail_out "could not create the gate directories under ${GATE_HOME}"
+mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || no_verdict "could not create the gate directories under ${GATE_HOME}"
 
 # --- reclaim what earlier runs abandoned ------------------------------------
 
@@ -170,10 +208,28 @@ mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || fail_out "could not create the gate dir
 # together, so removing the directory and pruning the registration is the whole
 # reclaim. Failures here are noted and not fatal: a stale directory wastes disk,
 # it does not make this run's verdict wrong.
+#
+# Age is necessary and not sufficient. The name a worktree was created with ends
+# in the pid of the run that created it, and a pid that still answers `kill -0`
+# is a gate that is still going — slowly, because the runbook's own worst case
+# is a registry or a pull that hangs. Deleting that tree would not produce a
+# false PASS, it would produce a false FAIL in a run that was doing nothing
+# wrong, and it would do it to a *different* dispatch than the one asking. So a
+# live pid keeps its worktree however old it is, and only a pid that is gone —
+# or a name this scheme did not produce — is swept.
 sweep_stale_worktrees() {
-  local dir
+  local dir base pid
   while IFS= read -r dir; do
     [ -n "$dir" ] || continue
+    base="${dir##*/}"
+    pid="${base##*-}"
+    case "$pid" in
+      ''|*[!0-9]*) pid="" ;;
+    esac
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      printf 'run-gate: leaving %s alone, its gate (pid %s) is still running\n' "$dir" "$pid" >&2
+      continue
+    fi
     printf 'run-gate: reclaiming abandoned worktree %s\n' "$dir" >&2
     rm -rf -- "$dir" || printf 'run-gate: could not remove %s\n' "$dir" >&2
   done <<EOF
@@ -218,7 +274,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 printf 'run-gate: %s\n' "$OID" > "$LOG" 2>/dev/null \
-  || fail_out "could not write the log at ${LOG}"
+  || no_verdict "could not write the log at ${LOG}"
 {
   printf 'run-gate: worker %s\n' "$(uname -srm)"
   printf 'run-gate: node %s, npm %s\n' "$(node -v 2>/dev/null)" "$(npm -v 2>/dev/null)"
@@ -231,9 +287,9 @@ printf 'run-gate: %s\n' "$OID" > "$LOG" 2>/dev/null \
 # into the mirror while the gate is running.
 if ! git -C "$MIRROR_DIR" worktree add --detach --quiet "$WORKTREE" "$OID" >> "$LOG" 2>&1; then
   printf 'run-gate: could not check %s out of the mirror; see %s\n' "$OID" "$LOG" >&2
-  printf 'MERGE GATE: FAIL (could not check out %s on the worker)\n' "$OID"
+  printf 'GATE NOT RUN: could not check out %s on the worker\n' "$OID"
   printf 'run-gate: log %s\n' "$LOG"
-  exit "$EXIT_FAIL"
+  exit "$EXIT_NO_VERDICT"
 fi
 WORKTREE_CREATED=1
 
@@ -264,8 +320,12 @@ fi
 # often pasted into a PR.
 verdict="$(grep -a 'MERGE GATE: ' "$LOG" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"
 if [ -z "$verdict" ]; then
-  verdict="MERGE GATE: FAIL (the gate produced no verdict line; exit ${status})"
-  [ "$status" -eq 0 ] && status="$EXIT_FAIL"
+  # merge-gate.sh ran and printed no verdict, which means it died rather than
+  # decided — killed, out of memory, a crash inside a step. That is not a FAIL:
+  # calling it one would put a judgement about the commit on the record that
+  # nothing actually formed. The log is where the reason is.
+  verdict="GATE NOT RUN: the gate produced no verdict line (exit ${status}); read the log"
+  status="$EXIT_NO_VERDICT"
 fi
 
 printf '%s\n' "$verdict"

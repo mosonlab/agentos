@@ -1,0 +1,370 @@
+// Fixtures for the gate worker's harness and for the values its local-side
+// scripts are allowed to send.
+//
+// Three things are proved here, and each is something that has already been
+// wrong once.
+//
+// 1. The credential red line is one rule stated in two files. `provision.sh`
+//    refuses to finish provisioning a box that carries any of a list of
+//    variables, and `run-gate.sh` refuses to gate on one. The lists drifted
+//    apart — `FEISHU_APP_SECRET` was in the first and not the second — which
+//    turned "re-checked on every single run" into a claim the code did not
+//    keep. They are compared here rather than trusted.
+//
+// 2. Repository names, gate homes, ssh destinations and ref names become part
+//    of a command string a remote login shell parses. `.` and `..` were
+//    accepted as repository names; `--gate-home` was not checked at all. These
+//    are the allowlists, tested as allowlists: what is refused matters more
+//    than what is accepted.
+//
+// 3. `run-gate.sh` must not report the worker's own state as a verdict about a
+//    commit. A missing mirror, a commit that was never pushed, a credential in
+//    the environment — none of those are things the gate decided, and each is
+//    checked to exit 76 with a GATE NOT RUN line rather than 1 with a
+//    MERGE GATE: FAIL line.
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import nodeTest from "node:test";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const libPath = join(here, "lib.sh");
+const runGatePath = join(here, "run-gate.sh");
+const provisionPath = join(here, "provision.sh");
+const runbookPath = join(here, "..", "..", "docs", "runbooks", "gate-worker.md");
+
+const test = (name, body) => nodeTest(name, { concurrency: true }, body);
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "gate-worker-fixture",
+  GIT_AUTHOR_EMAIL: "gate-worker-fixture",
+  GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+  GIT_COMMITTER_NAME: "gate-worker-fixture",
+  GIT_COMMITTER_EMAIL: "gate-worker-fixture",
+  GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
+};
+
+const scratch = (t) => {
+  const root = mkdtempSync(join(tmpdir(), "gate-worker-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+};
+
+const git = (cwd, ...args) =>
+  execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
+
+// --- the credential red line -------------------------------------------------
+
+// Both files declare the list under the same name, on one line, so one reader
+// serves both. A change that splits the list across lines will fail here rather
+// than pass by reading half of it.
+const secretVars = (path) => {
+  const source = readFileSync(path, "utf8");
+  const match = source.match(/^SECRET_VARS="([^"]*)"$/m);
+  assert.ok(match, `${path} has no single-line SECRET_VARS= declaration`);
+  return match[1].split(/\s+/).filter(Boolean);
+};
+
+test("provision.sh and run-gate.sh refuse the same credential variables", () => {
+  const provisioning = secretVars(provisionPath);
+  const runtime = secretVars(runGatePath);
+  assert.deepEqual(
+    [...runtime].sort(),
+    [...provisioning].sort(),
+    "the provisioning red line and the per-run red line have drifted apart",
+  );
+  assert.ok(provisioning.length > 0);
+});
+
+test("the credential list still carries the variables the red line names", () => {
+  const declared = new Set(secretVars(runGatePath));
+  for (const name of [
+    "OPERATOR_TOKEN",
+    "RUNNER_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    // The one that was missing at runtime while provisioning called it a secret.
+    "FEISHU_APP_SECRET",
+  ]) {
+    assert.ok(declared.has(name), `${name} is not in the runtime red line`);
+  }
+});
+
+// --- what may reach a remote shell -------------------------------------------
+
+const lib = (call) =>
+  spawnSync("bash", ["-c", `set -uo pipefail\n. "${libPath}"\n${call}`], { encoding: "utf8" });
+
+const accepts = (fn, value) => lib(`${fn} '${value.replace(/'/g, "'\\''")}'`);
+
+test("gate_valid_home refuses everything that is not a plain relative path", () => {
+  for (const good of ["gate", "gate/nested", "srv.gates/agentos_1", "a-b/c.d"]) {
+    assert.equal(accepts("gate_valid_home", good).status, 0, `rejected ${good}`);
+  }
+  for (const bad of [
+    "",
+    "/absolute",
+    "-flag",
+    "..",
+    "../escape",
+    "gate/..",
+    "gate/../..",
+    ".",
+    "gate/./x",
+    "gate//x",
+    "gate/",
+    "gate home",
+    "gate;id",
+    "gate$(id)",
+    "gate`id`",
+    'gate"x',
+    "gate&&id",
+    "gate|id",
+    "gate\nid",
+  ]) {
+    assert.equal(accepts("gate_valid_home", bad).status, 1, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test("gate_valid_server refuses everything that is not an ssh destination", () => {
+  for (const good of ["agentos-gate", "user@host", "host.example.com", "u_1@10.0.0.1"]) {
+    assert.equal(accepts("gate_valid_server", good).status, 0, `rejected ${good}`);
+  }
+  for (const bad of ["", "-oProxyCommand=id", "host;id", "host:path", "host $(id)", "host|id"]) {
+    assert.equal(accepts("gate_valid_server", bad).status, 1, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test("gate_valid_ref refuses anything that is not a plain branch ref", () => {
+  for (const good of ["refs/heads/main", "refs/heads/release/v1.2", "refs/heads/a_b.c-d"]) {
+    assert.equal(accepts("gate_valid_ref", good).status, 0, `rejected ${good}`);
+  }
+  for (const bad of [
+    "",
+    "main",
+    "refs/heads/",
+    "refs/tags/v1",
+    "refs/heads/..",
+    "refs/heads/a/../b",
+    "refs/heads/a b",
+    "refs/heads/a;id",
+    "refs/heads/-x",
+  ]) {
+    assert.equal(accepts("gate_valid_ref", bad).status, 1, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+// gate_repo_name reads the name off origin's URL, so the cases are URLs.
+const repoNameOf = (t, originUrl) => {
+  const root = scratch(t);
+  git(root, "init", "-q", "-b", "main");
+  git(root, "remote", "add", "origin", originUrl);
+  return spawnSync("bash", ["-c", `set -uo pipefail\n. "${libPath}"\ngate_repo_name "${root}"`], {
+    encoding: "utf8",
+  });
+};
+
+test("gate_repo_name takes an ordinary repository name off origin", (t) => {
+  const result = repoNameOf(t, "https://github.com/mosonlab/agentos-public.git");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "agentos-public");
+});
+
+test("gate_repo_name refuses a name that is a path segment with a meaning", (t) => {
+  // `https://host/..git` reduces to `.`, which would collapse a repository's
+  // directory onto the gate root and fold every repository's mirror together.
+  assert.equal(repoNameOf(t, "https://example.com/..git").status, 1);
+  // `https://host/...git` reduces to `..`, which walks out of the gate root.
+  assert.equal(repoNameOf(t, "https://example.com/...git").status, 1);
+});
+
+test("gate_repo_name refuses a name carrying remote shell syntax", (t) => {
+  for (const url of [
+    "https://example.com/a;id.git",
+    "https://example.com/a b.git",
+    "https://example.com/$(id).git",
+    "https://example.com/-x.git",
+  ]) {
+    assert.equal(repoNameOf(t, url).status, 1, `accepted ${url}`);
+  }
+});
+
+// --- run-gate.sh: the worker's state is never a verdict ----------------------
+
+// A gate home the way mirror-push.sh leaves one: run-gate.sh beside a bare
+// mirror, deriving its own GATE_HOME from where it was installed.
+const gateHome = (t, { verdict } = {}) => {
+  const root = scratch(t);
+  const work = join(root, "work");
+  const home = join(root, "home");
+  mkdirSync(join(work, "scripts"), { recursive: true });
+  writeFileSync(
+    join(work, "scripts", "merge-gate.sh"),
+    `#!/usr/bin/env bash\n${verdict ?? 'printf "MERGE GATE: PASS fixture\\n"; exit 0'}\n`,
+  );
+  chmodSync(join(work, "scripts", "merge-gate.sh"), 0o755);
+  git(work, "init", "-q", "-b", "main");
+  git(work, "add", "-A");
+  git(work, "commit", "-q", "-m", "fixture");
+  const oid = git(work, "rev-parse", "HEAD");
+
+  mkdirSync(home, { recursive: true });
+  execFileSync("git", ["clone", "-q", "--bare", work, join(home, "mirror.git")], { env: GIT_ENV });
+  writeFileSync(join(home, "run-gate.sh"), readFileSync(runGatePath));
+  chmodSync(join(home, "run-gate.sh"), 0o755);
+  return { root, home, oid };
+};
+
+const runGate = (home, args, env = {}) =>
+  spawnSync("bash", [join(home, "run-gate.sh"), ...args], {
+    encoding: "utf8",
+    env: { ...GIT_ENV, ...env },
+  });
+
+test("a gate that passes is reported as the gate's own verdict", (t) => {
+  const fixture = gateHome(t);
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS/);
+});
+
+test("a gate that fails is 1 and says MERGE GATE: FAIL", (t) => {
+  const fixture = gateHome(t, { verdict: 'printf "MERGE GATE: FAIL (fixture)\\n"; exit 1' });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /MERGE GATE: FAIL/);
+});
+
+test("a credential in the worker's environment stops the run without a verdict", (t) => {
+  // The regression for the missing entry: FEISHU_APP_SECRET must stop a gate,
+  // and stopping it is not a FAIL — the runbook calls this a red-line stop.
+  const fixture = gateHome(t);
+  const result = runGate(fixture.home, [fixture.oid], { FEISHU_APP_SECRET: "x" });
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: worker environment carries FEISHU_APP_SECRET$/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+test("a commit the mirror does not have is not a FAIL", (t) => {
+  const fixture = gateHome(t);
+  const absent = "0".repeat(40);
+  const result = runGate(fixture.home, [absent]);
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: /m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+test("a missing mirror is not a FAIL", (t) => {
+  const fixture = gateHome(t);
+  rmSync(join(fixture.home, "mirror.git"), { recursive: true, force: true });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 76);
+  assert.match(result.stdout, /^GATE NOT RUN: no mirror at /m);
+});
+
+test("a gate that dies without printing a verdict is not a FAIL", (t) => {
+  // merge-gate.sh killed, or out of memory, or crashed inside a step. Nothing
+  // judged the commit, so nothing may be recorded as a judgement of it.
+  const fixture = gateHome(t, { verdict: 'printf "no verdict here\\n"; exit 137' });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 76);
+  assert.match(result.stdout, /^GATE NOT RUN: the gate produced no verdict line/m);
+});
+
+test("a malformed STALE_WORKTREE_MINUTES is refused rather than passed to find", (t) => {
+  const fixture = gateHome(t);
+  const result = runGate(fixture.home, [fixture.oid], { STALE_WORKTREE_MINUTES: "-1; id" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /STALE_WORKTREE_MINUTES/);
+});
+
+// --- the stale-worktree sweep ------------------------------------------------
+
+const abandonedWorktree = (home, pid) => {
+  const dir = join(home, "worktrees", `gate-${"a".repeat(40)}-20260101T000000Z-${pid}`);
+  mkdirSync(dir, { recursive: true });
+  // Older than any sweep window: `find -mmin` reads the directory's own mtime.
+  const longAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
+  utimesSync(dir, longAgo, longAgo);
+  return dir;
+};
+
+test("the sweep reclaims a worktree whose gate is gone", (t) => {
+  const fixture = gateHome(t);
+  const dead = spawnSync("bash", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim();
+  const dir = abandonedWorktree(fixture.home, dead);
+  const result = runGate(fixture.home, [fixture.oid], { STALE_WORKTREE_MINUTES: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(dir), false, "an abandoned worktree survived the sweep");
+});
+
+test("the sweep leaves a worktree whose gate is still running", (t) => {
+  // The regression: age alone used to decide, so a gate stuck on a hung
+  // registry for longer than the window had its tree deleted by the next run —
+  // turning one box's infrastructure problem into a different dispatch's FAIL.
+  const fixture = gateHome(t);
+  const dir = abandonedWorktree(fixture.home, String(process.pid));
+  const result = runGate(fixture.home, [fixture.oid], { STALE_WORKTREE_MINUTES: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(dir), true, "the sweep deleted a running gate's worktree");
+  assert.match(result.stderr, /still running/);
+});
+
+// --- the scripts themselves --------------------------------------------------
+
+test("every gate-worker script parses", () => {
+  for (const name of [
+    "lib.sh",
+    "gate-dispatch.sh",
+    "mirror-push.sh",
+    "remote-gate.sh",
+    "run-gate.sh",
+    "provision.sh",
+    "bench-postgres.sh",
+    "bench-dbtest-concurrency.sh",
+  ]) {
+    const result = spawnSync("bash", ["-n", join(here, name)], { encoding: "utf8" });
+    assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+  }
+});
+
+test("a usage error is 2 everywhere the exit-code table applies", () => {
+  // The table has one row for a usage error. remote-gate.sh documented 2 and
+  // exited sysexits' 64 in every one of its argument checks, which is two
+  // numbers for one meaning and a case a caller does not handle.
+  const remoteGate = spawnSync("bash", [join(here, "remote-gate.sh"), "--port"], {
+    encoding: "utf8",
+  });
+  assert.equal(remoteGate.status, 2, remoteGate.stderr);
+  const dispatch = spawnSync("bash", [join(here, "gate-dispatch.sh"), "--master"], {
+    encoding: "utf8",
+  });
+  assert.equal(dispatch.status, 2, dispatch.stderr);
+});
+
+test("the runbook and the scripts agree on the no-verdict exit code", () => {
+  // The contract is only useful if it is written down where an operator reads
+  // it, so the runbook naming 76 is part of the fix and not commentary on it.
+  const runbook = readFileSync(runbookPath, "utf8");
+  assert.match(runbook, /\|\s*`76`\s*\|/);
+  assert.match(runbook, /GATE NOT RUN/);
+  for (const path of [runGatePath, join(here, "remote-gate.sh"), join(here, "gate-dispatch.sh")]) {
+    assert.match(readFileSync(path, "utf8"), /EXIT_NO_VERDICT=76/, `${path} has no 76`);
+  }
+});

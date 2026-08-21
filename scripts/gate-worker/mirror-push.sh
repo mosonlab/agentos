@@ -18,15 +18,20 @@
 # lives under its own directory, so a second project can be gated on the same
 # worker without either seeing the other.
 #
-# This is the only path by which code reaches the worker. The worker has no
-# GitHub credential and no configured remote, so nothing arrives there unless it
-# is pushed from here — which is what makes "the worker never talks to GitHub" a
-# property of the deployment rather than a promise.
+# This is the only path by which code reaches the worker. The worker holds no
+# GitHub credential and its mirror has no remote configured, so no repository
+# content arrives there except by this push, and the mirror cannot fetch. That
+# is a statement about how code gets in, not about what the worker's network can
+# reach: the gate executes the candidate commit's own code, and blocking that
+# code's outbound connections is an egress rule on the worker, not something
+# these scripts establish. docs/runbooks/gate-worker.md states the boundary.
 #
 # Two things are pushed:
 #
-#   1. every ref, with --mirror, so any commit the local repository knows about
-#      can be gated by object id without naming a branch;
+#   1. every ref, with --mirror, so any commit reachable from a ref here can be
+#      gated by object id without naming a branch. Reachable from a ref: an oid
+#      that only a reflog or a detached HEAD holds has no ref to carry it and
+#      does not travel, which the local-HEAD readback below is what catches;
 #   2. scripts/gate-worker/run-gate.sh, installed at ~/gate/<repo>/run-gate.sh,
 #      so the harness on the worker is the one in this checkout. The install is
 #      a copy to a temporary name in that directory followed by a rename, so the
@@ -46,6 +51,11 @@
 #
 # Sends no credential of any kind. The push is git-over-ssh; the ssh key stays on
 # this machine and is used for authentication, never copied.
+#
+# <server>, --gate-home and the repository name all become part of a command
+# string a remote login shell parses. Each is validated against an allowlist in
+# lib.sh before anything is sent, and refused rather than quoted when it falls
+# outside; the values are a trust boundary, not a formatting problem.
 set -uo pipefail
 
 SERVER="${AGENTOS_GATE_SERVER:-}"
@@ -54,7 +64,7 @@ SSH_PORT=""
 DRY_RUN=0
 
 usage() {
-  sed -n '2,49p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,58p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -101,6 +111,13 @@ git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+
+# Checked before anything is sent: each of these is interpolated into a command
+# string the remote login shell parses. lib.sh says what each one accepts.
+gate_valid_server "$SERVER" >/dev/null \
+  || die "not a usable ssh destination: ${SERVER}" 64
+gate_valid_home "$GATE_HOME" >/dev/null \
+  || die "not a usable gate home: ${GATE_HOME} (relative path, [A-Za-z0-9._-] segments, no . or ..)" 64
 REPO_NAME="$(gate_repo_name "$REPO_ROOT")" \
   || die "could not derive a safe repository name for ${REPO_ROOT}"
 REPO_HOME="${GATE_HOME}/${REPO_NAME}"
@@ -150,12 +167,22 @@ else
 fi
 
 # A mirror that has acquired a remote is a mirror that could fetch, and "the
-# worker never talks to GitHub" is a property this script gets to keep true on
+# mirror fetches from nowhere" is a property this script gets to keep true on
 # every push, not only at creation.
+#
+# The question asked is "does `git remote` succeed and print nothing", not "is
+# the output empty": those differ exactly when git itself failed, and a guard
+# that cannot tell them apart reports a mirror it never managed to inspect as
+# clean. `git remote` on a readable repository exits 0 with no output, so a
+# non-zero exit here — git's or ssh's — is a mirror whose remotes are unknown,
+# and unknown is refused.
 if [ "$DRY_RUN" -eq 0 ]; then
-  if ! ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
-      "test -z \"\$(git -C ${REPO_HOME}/mirror.git remote 2>/dev/null)\"" 2>/dev/null; then
-    die "${REPO_HOME}/mirror.git has a remote configured; the worker fetches from nowhere — remove it"
+  if ! mirror_remotes="$(ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
+      "git -C ${REPO_HOME}/mirror.git remote" 2>/dev/null)"; then
+    die "could not read the remotes of ${REPO_HOME}/mirror.git on ${SERVER}; refusing to push into a mirror this check could not inspect"
+  fi
+  if [ -n "$mirror_remotes" ]; then
+    die "${REPO_HOME}/mirror.git has a remote configured (${mirror_remotes}); the worker fetches from nowhere — remove it"
   fi
 fi
 
@@ -229,6 +256,12 @@ BASELINE_OID="$(printf '%s\n' "$symref" | awk '$2 == "HEAD" {print $1; exit}')"
 if [ -z "$DEFAULT_REF" ] || [ -z "$BASELINE_OID" ]; then
   printf '   could not read the default branch from origin; remote-gate.sh will need --master <oid>\n' >&2
 else
+  # Origin answered, so this is input: the ref name is named in a remote command
+  # string below and gets the same allowlist as everything else that travels.
+  gate_valid_ref "$DEFAULT_REF" >/dev/null \
+    || die "origin named a default branch this script will not send: ${DEFAULT_REF}"
+  case "$BASELINE_OID" in *[!0-9a-f]*) die "origin answered with something that is not an object id: ${BASELINE_OID}" ;; esac
+  [ "${#BASELINE_OID}" -eq 40 ] || die "origin answered with a short object id: ${BASELINE_OID}"
   git -C "$REPO_ROOT" cat-file -e "${BASELINE_OID}^{commit}" 2>/dev/null \
     || die "origin's ${DEFAULT_REF} ${BASELINE_OID} is not in ${REPO_ROOT}; run: git fetch origin, then push again"
   if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
@@ -237,6 +270,16 @@ else
   else
     die "pushed, but origin's ${DEFAULT_REF} ${BASELINE_OID} is not resolvable in ${REMOTE_MIRROR}"
   fi
+
+  # `git push --mirror` writes refs and never touches the receiving repository's
+  # HEAD, so a mirror created by `git init --bare` keeps pointing at whatever
+  # that git's init.defaultBranch was — a ref the mirror may not even have. The
+  # gate never reads it (every path here names an oid) but a dangling HEAD is a
+  # trap for anything that does, so it is converged to the branch origin just
+  # named. Convergent: set only when it differs.
+  ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
+      "test \"\$(git -C ${REPO_HOME}/mirror.git symbolic-ref -q HEAD)\" = ${DEFAULT_REF} || git -C ${REPO_HOME}/mirror.git symbolic-ref HEAD ${DEFAULT_REF}" \
+    || die "could not point ${REPO_HOME}/mirror.git HEAD at ${DEFAULT_REF} on ${SERVER}"
 fi
 
 printf '\nMIRROR PUSH: OK\n'

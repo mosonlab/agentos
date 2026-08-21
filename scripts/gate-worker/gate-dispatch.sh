@@ -15,10 +15,11 @@
 # were measured to carry. Three slots, machine-wide, shared by every repository
 # that dispatches from this machine.
 #
-# The accounting is three mkdir locks under ${XDG_CACHE_HOME:-~/.cache}/
+# The accounting is three lock files under ${XDG_CACHE_HOME:-~/.cache}/
 # gate-dispatch/, outside any repository because the slots belong to the
-# machines, not to a checkout. Every dispatch on this machine contends for the
-# same three, which makes the local locks the whole truth — with one honest
+# machines, not to a checkout. lib.sh holds the locking itself and says why it
+# is shaped the way it is. Every dispatch on this machine contends for the same
+# three, which makes the local locks the whole truth — with one honest
 # exception: a merge-gate.sh or remote-gate.sh run directly, without this
 # script, is invisible to it. That is an operator overriding the rationing, and
 # the override is theirs to answer for; nothing here tries to detect it.
@@ -37,18 +38,25 @@
 # that long means the queue is systemically full, which the caller should hear
 # about rather than sit in.
 #
-# Exit codes: the gate's own verdict codes pass through unchanged, and the two
-# codes this script adds are chosen to collide with nothing the gate can emit:
+# Exit codes. A verdict and the absence of a verdict are different answers and
+# never share a code: the gate's own codes pass through unchanged, and every way
+# this script can end without a gate having run maps to one of the three codes
+# that mean "no verdict exists". An automation may read 1 as FAIL only because
+# nothing else here can produce it.
 #
-#   0  PASS               3   NOT AUTHORITATIVE
-#   1  FAIL               75  no slot freed up within the timeout; nothing ran,
-#   2  usage error            no verdict exists — re-dispatch, this is not a FAIL
-#   255 ssh transport failure from the remote path — also not a verdict; re-run
+#   0  PASS                 75  no slot freed up within the timeout
+#   1  FAIL                 76  nothing ran: a precondition or the mirror push
+#   2  usage error              failed, so no verdict was formed — re-dispatch
+#   3  NOT AUTHORITATIVE    255 ssh transport failure on the remote path
+#
+# 75, 76 and 255 are not FAILs and must never be read as one.
 set -uo pipefail
 
-EXIT_FAIL=1
+# No EXIT_FAIL here on purpose: this script transports verdicts and forms none,
+# so the only 1 a caller can ever see from it is one the gate itself produced.
 EXIT_USAGE=2
 EXIT_NO_SLOT=75
+EXIT_NO_VERDICT=76
 
 SERVER="${AGENTOS_GATE_SERVER:-agentos-gate}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
@@ -59,7 +67,7 @@ OID=""
 MASTER_OID=""
 
 usage() {
-  sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -94,7 +102,16 @@ case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a p
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 [ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
-  || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch" "$EXIT_FAIL"
+  || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch and no verdict exists" "$EXIT_NO_VERDICT"
+
+# shellcheck source=scripts/gate-worker/lib.sh
+. "${SCRIPT_DIR}/lib.sh"
+
+# Validated here as well as inside the scripts that send it: this one decides
+# which of them to call, and a destination it cannot vouch for is a dispatch
+# that should not start rather than one that fails halfway through a push.
+gate_valid_server "$SERVER" >/dev/null \
+  || die "not a usable ssh destination: ${SERVER}" "$EXIT_USAGE"
 
 if [ -z "$OID" ]; then
   OID="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
@@ -112,41 +129,17 @@ fi
 
 HELD_SLOT=""
 
-# Same discipline as merge-gate.sh's own lock: mkdir is the one atomic
-# create-or-fail every filesystem here offers, the pid inside names the holder,
-# and a recorded pid that no longer runs means the holder was killed rather
-# than exited, so the slot is reclaimed. `kill -0` succeeding on a recycled pid
-# only ever costs waiting out a slot that was actually free, which is the
-# direction this check is allowed to be wrong in.
 try_slot() {
-  local slot="$1" dir="${SLOT_ROOT}/${1}.lock" holder=""
-  if mkdir "$dir" 2>/dev/null; then
-    printf '%s\n' "$$" > "${dir}/pid"
-    HELD_SLOT="$slot"
+  if gate_slot_try "$SLOT_ROOT" "$1"; then
+    HELD_SLOT="$1"
     return 0
   fi
-  holder="$(cat "${dir}/pid" 2>/dev/null || true)"
-  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-    return 1
-  fi
-  printf 'gate-dispatch: reclaiming stale slot %s (pid %s is gone)\n' "$slot" "${holder:-none}" >&2
-  rm -rf -- "$dir"
-  mkdir "$dir" 2>/dev/null || return 1
-  printf '%s\n' "$$" > "${dir}/pid"
-  HELD_SLOT="$slot"
-  return 0
+  return 1
 }
 
 release_slot() {
   [ -n "$HELD_SLOT" ] || return 0
-  local dir="${SLOT_ROOT}/${HELD_SLOT}.lock" holder=""
-  holder="$(cat "${dir}/pid" 2>/dev/null || true)"
-  if [ "$holder" = "$$" ]; then
-    rm -rf -- "$dir"
-  else
-    printf 'gate-dispatch: not releasing slot %s, it is now held by pid %s\n' \
-      "$HELD_SLOT" "${holder:-unknown}" >&2
-  fi
+  gate_slot_release "$SLOT_ROOT" "$HELD_SLOT" || true
   HELD_SLOT=""
 }
 
@@ -169,7 +162,7 @@ local_eligible() {
   [ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]
 }
 
-mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$EXIT_FAIL"
+mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$EXIT_NO_VERDICT"
 
 printf 'gate-dispatch: %s, slots local(1) + %s(2), poll %ss, timeout %smin\n' \
   "$OID" "$SERVER" "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
@@ -188,9 +181,15 @@ run_remote() {
   # is safe (the worker's worktrees are per-run and detached), but the slot is
   # what meters how much of the worker one dispatch may occupy, and the push is
   # part of the occupancy.
+  #
+  # A push that fails is not a gate that failed. Nothing was run on the worker,
+  # so there is no verdict to report and 76 says exactly that; returning the
+  # gate's FAIL code here would have dressed a transport or mirror problem up as
+  # a judgement about the commit.
   bash "${SCRIPT_DIR}/mirror-push.sh" "$SERVER" >&2 || {
-    printf 'gate-dispatch: mirror-push failed; no gate was run\n' >&2
-    return "$EXIT_FAIL"
+    printf 'gate-dispatch: mirror-push failed; no gate was run and no verdict exists\n' >&2
+    printf 'GATE NOT RUN: the mirror push failed, so nothing was gated\n'
+    return "$EXIT_NO_VERDICT"
   }
   bash "${SCRIPT_DIR}/remote-gate.sh" "$SERVER" "$OID" \
     ${MASTER_OID:+--master "$MASTER_OID"}

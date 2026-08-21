@@ -922,6 +922,13 @@ step "frozen records append-only" bash scripts/check-frozen-docs.sh --master "${
 # The checker is a gate rule, so it is gated too: PR #156 shipped one whose
 # date-prefix rule was unreachable by construction, and nothing ran to say so.
 step "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs
+# The gate worker's own mechanisms: the slot locks that ration how many gates
+# run at once, the exit codes that keep a verdict distinct from the absence of
+# one, and the allowlists on everything that reaches a remote shell. Node and
+# bash and nothing else, so it belongs with the install-free checks — and it has
+# to run here, because scripts/merge-gate.sh is this repository's only CI and a
+# concurrency invariant nobody re-checks is one that decays.
+step "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs
 
 # --- docker ----------------------------------------------------------------
 
