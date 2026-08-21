@@ -60,8 +60,6 @@ test("provisioning trusts an already-published intended head after its database 
     assert.equal(workspace.baseSha, publishedSha);
     assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "published\n");
   } finally {
-    await rm(scratch.base, { recursive: true, force: true });
-    await rm(configParent, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -418,6 +416,8 @@ test("a distinct run-as uid can create and read its Codex config root", {
       await assert.rejects(stat(removed), /ENOENT/u);
     }
   } finally {
+    await rm(scratch.base, { recursive: true, force: true });
+    await rm(configParent, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
