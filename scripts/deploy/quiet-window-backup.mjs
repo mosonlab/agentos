@@ -101,7 +101,7 @@ export const pgDumpInvocation = ({ configuration, databaseUrl, env = process.env
   throw new Error(`backup-configuration-invalid:unsupported-mode-${String(configuration.mode)}`);
 };
 
-const runToFile = ({ invocation, output, spawnImpl = spawn }) => new Promise((accept, reject) => {
+const runToFile = ({ invocation, output, spawnImpl = spawn, signal }) => new Promise((accept, reject) => {
   const temporary = `${output}.partial-${process.pid}-${randomUUID()}`;
   let descriptor;
   try {
@@ -115,6 +115,7 @@ const runToFile = ({ invocation, output, spawnImpl = spawn }) => new Promise((ac
   const finish = (initialError) => {
     if (settled) return;
     settled = true;
+    signal?.removeEventListener("abort", abort);
     let error = initialError;
     try {
       if (error === null) fsyncSync(descriptor);
@@ -151,6 +152,14 @@ const runToFile = ({ invocation, output, spawnImpl = spawn }) => new Promise((ac
   };
 
   let child;
+  const abort = () => {
+    child?.kill("SIGTERM");
+    finish(new Error("pg_dump-interrupted"));
+  };
+  if (signal?.aborted) {
+    finish(new Error("pg_dump-interrupted"));
+    return;
+  }
   try {
     child = spawnImpl(invocation.program, invocation.args, {
       env: invocation.env,
@@ -161,6 +170,7 @@ const runToFile = ({ invocation, output, spawnImpl = spawn }) => new Promise((ac
     finish(error);
     return;
   }
+  signal?.addEventListener("abort", abort, { once: true });
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk) => {
     stderr = `${stderr}${chunk}`.slice(-2_000);
@@ -178,8 +188,9 @@ export const writePgDumpBackup = async ({
   output,
   env = process.env,
   spawnImpl = spawn,
+  signal,
 }) => {
   const invocation = pgDumpInvocation({ configuration, databaseUrl, env });
-  await runToFile({ invocation, output, spawnImpl });
+  await runToFile({ invocation, output, spawnImpl, signal });
   return { output, program: invocation.program, args: invocation.args };
 };

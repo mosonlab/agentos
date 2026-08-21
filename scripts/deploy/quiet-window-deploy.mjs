@@ -35,7 +35,9 @@ import {
   publishDirectories,
 } from "./quiet-window-adapters.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
+import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
+import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
@@ -53,6 +55,10 @@ const DEPLOY_BARRIER_KEY = 1;
 const log = (line) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 const activeResources = new Set();
+const interruption = createDeployInterruption();
+const interruptController = { signal: interruption.signal };
+const interruptFailure = interruption.failure;
+const throwIfInterrupted = interruption.throwIfInterrupted;
 const trackResource = (resource) => {
   const release = resource.release.bind(resource);
   resource.release = async () => {
@@ -62,14 +68,21 @@ const trackResource = (resource) => {
   return resource;
 };
 
-const command = (program, args, { cwd = REPOSITORY_ROOT, env = process.env, capture = false } = {}) =>
-  new Promise((accept, reject) => {
+const command = (program, args, {
+  cwd = REPOSITORY_ROOT,
+  env = process.env,
+  capture = false,
+  allowAfterInterrupt = false,
+} = {}) => {
+  if (!allowAfterInterrupt) throwIfInterrupted();
+  return new Promise((accept, reject) => {
     const child = spawn(program, args, {
       cwd,
       env,
       shell: false,
       stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     });
+    let settled = false;
     let stdout = "";
     let stderr = "";
     if (capture) {
@@ -78,13 +91,35 @@ const command = (program, args, { cwd = REPOSITORY_ROOT, env = process.env, capt
       child.stdout.on("data", (chunk) => { stdout += chunk; });
       child.stderr.on("data", (chunk) => { stderr += chunk; });
     }
-    child.once("error", reject);
-    child.once("exit", (code, signal) => accept({ code: code ?? 1, signal, stdout, stderr }));
+    const cleanUp = () => interruptController.signal.removeEventListener("abort", onAbort);
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanUp();
+      reject(error);
+    };
+    const acceptOnce = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanUp();
+      accept(result);
+    };
+    const onAbort = () => {
+      child.kill(interruption.receivedSignal() === "SIGINT" ? "SIGINT" : "SIGTERM");
+      rejectOnce(interruptFailure());
+    };
+    if (!allowAfterInterrupt) interruptController.signal.addEventListener("abort", onAbort, { once: true });
+    child.once("error", rejectOnce);
+    child.once("exit", (code, signal) => acceptOnce({ code: code ?? 1, signal, stdout, stderr }));
   });
+};
 
 const checked = async (reason, program, args, options) => {
   log(`START ${reason}`);
-  const result = await command(program, args, options).catch((error) => ({ code: 1, stderr: String(error), stdout: "" }));
+  const result = await command(program, args, options).catch((error) => {
+    if (error instanceof DeployFailure) throw error;
+    return { code: 1, stderr: String(error), stdout: "" };
+  });
   if (result.code !== 0) {
     const diagnosis = (result.stderr || result.stdout || "").trim().slice(-2_000).replaceAll(/\s+/gu, " ");
     fail(reason, `exit-${result.code}${diagnosis ? `: ${diagnosis}` : ""}`);
@@ -170,16 +205,21 @@ const database = async () => {
 };
 
 const blockingRuns = async () => {
+  throwIfInterrupted();
   const db = await database();
   try {
     const statement = blockingRunsStatement();
-    return await db.$queryRawUnsafe(statement.sql, ...statement.parameters);
-  } catch {
+    const runs = await db.$queryRawUnsafe(statement.sql, ...statement.parameters);
+    throwIfInterrupted();
+    return runs;
+  } catch (error) {
+    if (error instanceof DeployFailure) throw error;
     fail("quiet-window-query-failed", "platform-database-unreadable");
   }
 };
 
 const notify = async ({ outcome, reason, detail = "", from, to }) => {
+  if (outcome === "success") throwIfInterrupted();
   const db = await database();
   const body = `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
   const dedupeKey = `auto-deploy:${createHash("sha256").update(body).digest("hex")}`;
@@ -193,18 +233,34 @@ const notify = async ({ outcome, reason, detail = "", from, to }) => {
       create: { from: "AGENT", kind: "TEXT", body, dedupeKey, threadId: thread.id },
       update: {},
     });
+    if (outcome === "success") throwIfInterrupted();
     log(`INBOX ${body}`);
-  } catch {
+  } catch (error) {
+    if (error instanceof DeployFailure) throw error;
     fail("inbox-notification-failed", `${outcome}-${reason}`);
   }
 };
 
-const sleep = (milliseconds) => new Promise((accept) => setTimeout(accept, milliseconds));
+const sleep = (milliseconds) => {
+  throwIfInterrupted();
+  return new Promise((accept, reject) => {
+    const timer = setTimeout(() => {
+      interruptController.signal.removeEventListener("abort", onAbort);
+      accept();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(interruptFailure());
+    };
+    interruptController.signal.addEventListener("abort", onAbort, { once: true });
+  });
+};
 
-const launchctl = async (reason, args) => checked(reason, "/bin/launchctl", args, { capture: true });
+const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/launchctl", args, { capture: true, ...options });
 const domain = () => `gui/${process.getuid()}`;
 
 const acquireDeployBarrier = async () => {
+  throwIfInterrupted();
   const module = await import("@prisma/client").catch(() => fail("deploy-barrier-unavailable", "prisma-client-import-failed"));
   const url = new URL(process.env.DATABASE_URL);
   url.searchParams.set("connection_limit", "1");
@@ -213,11 +269,13 @@ const acquireDeployBarrier = async () => {
   const session = new module.PrismaClient({ datasources: { db: { url: url.href } } });
   try {
     await session.$connect();
+    throwIfInterrupted();
     const rows = await session.$queryRawUnsafe(
       "SELECT pg_try_advisory_lock($1::int4, $2::int4) AS granted, pg_backend_pid() AS pid",
       DEPLOY_BARRIER_CLASS,
       DEPLOY_BARRIER_KEY,
     );
+    throwIfInterrupted();
     if (rows.length !== 1 || rows[0]?.granted !== true) { await session.$disconnect(); return null; }
     const pid = Number(rows[0].pid);
     let released = false;
@@ -247,12 +305,14 @@ const acquireDeployBarrier = async () => {
     });
   } catch (error) {
     await session.$disconnect().catch(() => undefined);
+    if (error instanceof DeployFailure) throw error;
     fail("deploy-barrier-unavailable", error instanceof Error ? error.name : "query-failed");
   }
 };
 
 const waitForQuiet = async () => {
   while (true) {
+    throwIfInterrupted();
     const before = await blockingRuns();
     if (before.length > 0) {
       log(`HOLD quiet-window blockers=${before.length} statuses=${[...new Set(before.map((run) => run.status))].join(",")}`);
@@ -378,9 +438,22 @@ const dryRun = async () => {
     authorityState: async () => {
       try { readAuthority(); return { ok: true }; } catch (error) { return { ok: false, reason: error.reason ?? "invalid" }; }
     },
+    backupState: async () => {
+      const requested = loadBinaries().backup;
+      try {
+        const verified = verifyBackupConfiguration(requested);
+        return { ok: true, mode: verified.mode };
+      } catch (error) {
+        return {
+          ok: false,
+          mode: requested.mode,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
   });
   for (const line of result.lines) log(line);
-  return result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.authority.ok ? 1 : 0;
+  return result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.authority.ok || !result.backup.ok ? 1 : 0;
 };
 
 const main = async () => {
@@ -467,8 +540,10 @@ const main = async () => {
             configuration: loadBinaries().backup,
             databaseUrl: process.env.DATABASE_URL,
             output,
+            signal: interruptController.signal,
           });
         } catch (error) {
+          throwIfInterrupted();
           fail("database-backup-failed", error instanceof Error ? error.message : String(error));
         }
       },
@@ -512,16 +587,24 @@ const main = async () => {
               const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
               const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
               const payload = version.ok ? await version.json() : {};
-              if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) return;
+              if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
+                throwIfInterrupted();
+                return;
+              }
               lastReason = `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
-            } catch (error) { lastReason = error instanceof Error ? error.name : "probe-failed"; }
+            } catch (error) {
+              if (error instanceof DeployFailure) throw error;
+              lastReason = error instanceof Error ? error.name : "probe-failed";
+            }
           }
           await sleep(1_000);
         }
         fail("service-verification-failed", lastReason);
       },
       restorePreviousServices: async () => {
-        for (const label of SERVICE_LABELS) await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`]);
+        for (const label of SERVICE_LABELS) {
+          await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], { allowAfterInterrupt: true });
+        }
       },
       escalate: writeEscalation,
       markEscalationNotified,
@@ -531,8 +614,10 @@ const main = async () => {
         let cleanupFailure = null;
         try {
           if (stage && existsSync(join(stage, ".env"))) rmSync(join(stage, ".env"), { force: true });
-          if (stage && existsSync(stage)) await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "remove", "--force", stage], { capture: true });
-          await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "prune"], { capture: true });
+          if (stage && existsSync(stage)) {
+            await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "remove", "--force", stage], { capture: true, allowAfterInterrupt: true });
+          }
+          await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "prune"], { capture: true, allowAfterInterrupt: true });
         } catch (error) {
           cleanupFailure = error;
         } finally {
@@ -548,8 +633,8 @@ const main = async () => {
 
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
   process.once(signal, () => {
-    void Promise.allSettled([...activeResources].map((resource) => resource.release()))
-      .finally(() => process.exit(code));
+    if (!interruption.interrupt(signal)) return;
+    log(`STOP deploy-interrupted detail=${signal}; rolling-back-before-exit-${code}`);
   });
 }
 
@@ -571,6 +656,7 @@ try {
   }
   exitCode = failure.reason === "usage" ? 64 : 1;
 } finally {
+  await Promise.allSettled([...activeResources].map((resource) => resource.release()));
   if (prisma) await prisma.$disconnect().catch(() => undefined);
 }
-process.exitCode = exitCode;
+process.exitCode = interruption.receivedSignal() === "SIGINT" ? 130 : interruption.receivedSignal() === "SIGTERM" ? 143 : exitCode;

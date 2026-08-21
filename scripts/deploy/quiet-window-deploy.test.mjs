@@ -36,6 +36,7 @@ import {
   writePgDumpBackup,
 } from "./quiet-window-backup.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
+import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 
@@ -157,6 +158,24 @@ test("restart failure rolls the build back and restarts the previous services", 
   assert.equal(calls.includes("rollback-build"), true);
   assert.equal(calls.includes("restore-previous-services"), true);
   assert.equal(calls.includes("commit-build"), false);
+});
+
+test("SIGTERM after publication enters the failure path and restores the previous services", async () => {
+  const interruption = createDeployInterruption();
+  const { host, calls, state } = fixture();
+  host.restartServices = async () => {
+    calls.push("restart-services");
+    assert.equal(interruption.interrupt("SIGTERM"), true);
+    interruption.throwIfInterrupted();
+  };
+  const result = await executeUpgrade(host, revisions);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "deploy-interrupted");
+  assert.equal(result.failure.detail, "SIGTERM");
+  assert.equal(state.serving, "previous");
+  assert.ok(calls.includes("rollback-build"));
+  assert.ok(calls.includes("restore-previous-services"));
+  assert.ok(calls.includes("notify-failure"));
 });
 
 test("a service that exits after kickstart rolls back before success", async () => {
@@ -303,10 +322,31 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
     repositoryState: async () => { calls.push("repository"); return { dirty: false, fastForward: "yes" }; },
     serviceState: async () => { calls.push("services"); return { ok: true }; },
     authorityState: async () => { calls.push("authority"); return { ok: true }; },
+    backupState: async () => { calls.push("backup"); return { ok: true, mode: "container" }; },
   });
   assert.equal(result.quiet, true);
-  assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "authority"]));
+  assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "authority", "backup"]));
+  assert.ok(result.lines.includes("DRY-RUN backup=ready mode=container"));
   assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 11);
+});
+
+test("dry-run reports a refused container backup contract as a named decision", async () => {
+  const result = await dryRunDecision({
+    revisions: async () => ({ from: "a", source: "a", to: "b" }),
+    blockingRuns: async () => [],
+    repositoryState: async () => ({ dirty: false, fastForward: "yes" }),
+    serviceState: async () => ({ ok: true }),
+    authorityState: async () => ({ ok: true }),
+    backupState: async () => ({
+      ok: false,
+      mode: "container",
+      reason: "backup-container-pg-dump-not-executable:/missing/pg_dump",
+    }),
+  });
+  assert.equal(result.backup.ok, false);
+  assert.ok(result.lines.includes(
+    "DRY-RUN backup=not-ready mode=container reason=backup-container-pg-dump-not-executable:/missing/pg_dump",
+  ));
 });
 
 const fakeDocker = (root) => {
@@ -319,6 +359,9 @@ fi
 if [ -n "$FAKE_DOCKER_LOG" ]; then
   printf '%s\\n' "$@" > "$FAKE_DOCKER_LOG"
   printf 'password=%s\\n' "$PGPASSWORD" >> "$FAKE_DOCKER_LOG"
+fi
+if [ -n "$FAKE_DOCKER_DELAY" ]; then
+  sleep "$FAKE_DOCKER_DELAY"
 fi
 if [ "$FAKE_DOCKER_FAIL" = "1" ]; then
   printf 'fixture backup failed\\n' >&2
@@ -336,7 +379,7 @@ test("installer requires an explicit backup mode and executable configuration", 
     () => parseInstallerArgs([
       "--pg-dump-mode", "container",
       "--pg-dump-container", "agentos-postgres-1",
-      "--container-pg-dump-binary", "/usr/bin/pg_dump",
+      "--container-pg-dump-binary", "/usr/local/bin/pg_dump",
     ]),
     /installer-option-required:--docker-binary/u,
   );
@@ -349,7 +392,7 @@ test("installer requires an explicit backup mode and executable configuration", 
       mode: "container",
       dockerBinary: docker,
       container: "agentos-postgres-1",
-      pgDumpBinary: "/usr/bin/pg_dump",
+      pgDumpBinary: "/usr/local/bin/pg_dump",
     }),
     /backup-configuration-invalid:docker-binary-not-executable/u,
   );
@@ -359,7 +402,7 @@ test("installer requires an explicit backup mode and executable configuration", 
       mode: "container",
       dockerBinary: docker,
       container: "agentos-postgres-1",
-      pgDumpBinary: "/usr/bin/pg_dump",
+      pgDumpBinary: "/usr/local/bin/pg_dump",
     }, (_program, args) => {
       if (args[0] === "inspect") return "true\n";
       throw new Error("not executable");
@@ -380,14 +423,14 @@ test("installer verifies and renders the production container backup contract", 
     "--pg-dump-mode", "container",
     "--docker-binary", docker,
     "--pg-dump-container", "agentos-postgres-1",
-    "--container-pg-dump-binary", "/usr/bin/pg_dump",
+    "--container-pg-dump-binary", "/usr/local/bin/pg_dump",
   ]);
   const backup = verifyBackupConfiguration(parsed.backup);
   assert.deepEqual(backup, {
     mode: "container",
     dockerBinary: realpathSync(docker),
     container: "agentos-postgres-1",
-    pgDumpBinary: "/usr/bin/pg_dump",
+    pgDumpBinary: "/usr/local/bin/pg_dump",
   });
   const template = readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8");
   const rendered = renderLaunchdPlist(template, {
@@ -424,7 +467,7 @@ test("container backup preserves pg_dump arguments and writes host output atomic
       mode: "container",
       dockerBinary: docker,
       container: "agentos-postgres-1",
-      pgDumpBinary: "/usr/bin/pg_dump",
+      pgDumpBinary: "/usr/local/bin/pg_dump",
     },
     databaseUrl: "postgresql://alice:s3cr%40t@db.internal:5544/agentos",
     output,
@@ -432,7 +475,7 @@ test("container backup preserves pg_dump arguments and writes host output atomic
   });
   const flow = readFileSync(logPath, "utf8").split("\n");
   assert.deepEqual(flow.slice(0, 13), [
-    "exec", "--env", "PGPASSWORD", "agentos-postgres-1", "/usr/bin/pg_dump",
+    "exec", "--env", "PGPASSWORD", "agentos-postgres-1", "/usr/local/bin/pg_dump",
     "-Fc", "--host", "db.internal", "--port", "5544", "--username", "alice", "--dbname",
   ]);
   assert.equal(flow[13], "agentos");
@@ -454,7 +497,7 @@ test("container backup failure leaves no final or partial host backup", async ()
         mode: "container",
         dockerBinary: docker,
         container: "agentos-postgres-1",
-        pgDumpBinary: "/usr/bin/pg_dump",
+        pgDumpBinary: "/usr/local/bin/pg_dump",
       },
       databaseUrl: "postgresql://alice:secret@localhost:5432/agentos",
       output,
@@ -462,6 +505,30 @@ test("container backup failure leaves no final or partial host backup", async ()
     }),
     /pg_dump-exit-42: fixture backup failed/u,
   );
+  assert.equal(existsSync(output), false);
+  assert.deepEqual(readdirSync(root).filter((name) => name.includes(".partial-")), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("an interrupted container backup terminates the child and removes its partial file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-backup-interrupt-"));
+  const docker = fakeDocker(root);
+  const output = join(root, "backup.dump");
+  const controller = new AbortController();
+  const pending = writePgDumpBackup({
+    configuration: {
+      mode: "container",
+      dockerBinary: docker,
+      container: "agentos-postgres-1",
+      pgDumpBinary: "/usr/local/bin/pg_dump",
+    },
+    databaseUrl: "postgresql://alice:secret@localhost:5432/agentos",
+    output,
+    env: { ...process.env, FAKE_DOCKER_DELAY: "10" },
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 50);
+  await assert.rejects(pending, /pg_dump-interrupted/u);
   assert.equal(existsSync(output), false);
   assert.deepEqual(readdirSync(root).filter((name) => name.includes(".partial-")), []);
   rmSync(root, { recursive: true, force: true });

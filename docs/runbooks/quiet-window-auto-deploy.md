@@ -18,7 +18,8 @@ The checkout must have:
   Inbox/Feishu settings;
 - `git`, `node`, `npm`, Docker CLI, and `launchctl` on the host;
 - the running PostgreSQL container `agentos-postgres-1`, with executable
-  `/usr/bin/pg_dump` inside it;
+  `/usr/local/bin/pg_dump` inside it (the path used by the supported
+  `postgres:16-alpine` image);
 - all nine service labels above already loaded.
 
 The job reads `masterSha` and `controlPlaneASha` from the tracked
@@ -35,7 +36,7 @@ test -n "$DEPLOY_DOCKER_BINARY"
 export DEPLOY_PG_DUMP_MODE=container
 export DEPLOY_DOCKER_BINARY
 export DEPLOY_PG_DUMP_CONTAINER=agentos-postgres-1
-export DEPLOY_CONTAINER_PG_DUMP_BINARY=/usr/bin/pg_dump
+export DEPLOY_CONTAINER_PG_DUMP_BINARY=/usr/local/bin/pg_dump
 ```
 
 First run the complete decision path without taking the deploy lock, fetching,
@@ -48,8 +49,10 @@ node scripts/deploy/quiet-window-deploy.mjs --dry-run
 
 The output names the deployed, source, and remote revisions; the blocking Run
 count; repository fast-forward state; loaded service state; authority state;
-and every skipped mutation in execution order. `claimed`, `provisioning`, and
-`running` block. `queued` and `waiting-inbox` do not.
+the verified host/container backup contract; and every skipped mutation in
+execution order. Container verification runs read-only `docker inspect` and
+`docker exec ... test -x` checks. `claimed`, `provisioning`, and `running`
+block. `queued` and `waiting-inbox` do not.
 
 Do not install after a non-zero dry-run. Resolve the named condition first.
 
@@ -63,7 +66,7 @@ node scripts/deploy/install-launchd.mjs \
   --pg-dump-mode container \
   --docker-binary "$DEPLOY_DOCKER_BINARY" \
   --pg-dump-container agentos-postgres-1 \
-  --container-pg-dump-binary /usr/bin/pg_dump
+  --container-pg-dump-binary /usr/local/bin/pg_dump
 ```
 
 Apply it only after the dry-run passes:
@@ -73,7 +76,7 @@ node scripts/deploy/install-launchd.mjs \
   --pg-dump-mode container \
   --docker-binary "$DEPLOY_DOCKER_BINARY" \
   --pg-dump-container agentos-postgres-1 \
-  --container-pg-dump-binary /usr/bin/pg_dump \
+  --container-pg-dump-binary /usr/local/bin/pg_dump \
   --apply
 launchctl print "gui/$(id -u)/com.agentos.auto-deploy"
 ```
@@ -112,7 +115,7 @@ The job then performs exactly this sequence and stops at the first failure:
 2. create a detached staging worktree under `.agentos-deploy/`, run `npm ci`
    against the target lockfile, and run `npm run db:generate`;
 3. run `npm run build` in staging and verify its API build stamp;
-4. run `/usr/bin/pg_dump -Fc` through `docker exec` in
+4. run `/usr/local/bin/pg_dump -Fc` through `docker exec` in
    `agentos-postgres-1`; stream its stdout to a mode-0600 temporary file on the
    host under `.agentos-deploy/backups/`, fsync it, and rename it to `.dump`
    only after a zero exit and non-empty output;
@@ -144,9 +147,12 @@ that persisted notification until the Inbox row exists, then exit with
 `STOP escalation-active`.
 
 The process lock records PID and process-start identity. SIGINT and SIGTERM
-release both locks. After an uncatchable death, the next invocation reclaims a
-provably stale owner, records `stale-deploy-owner-recovered`, sends it to Inbox,
-and remains escalated instead of starting another upgrade.
+abort the active child, enter the same failure path as a step refusal, roll back
+published artifacts and restart the previous services when publication already
+occurred, persist the interruption, then release the deploy barrier and process
+lock. After an uncatchable death, the next invocation reclaims a provably stale
+owner, records `stale-deploy-owner-recovered`, sends it to Inbox, and remains
+escalated instead of starting another upgrade.
 
 ## Clear an escalation
 

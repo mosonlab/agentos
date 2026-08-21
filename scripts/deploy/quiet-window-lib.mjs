@@ -122,12 +122,13 @@ export const runLocked = async (host, work) => {
 
 /** Dry-run deliberately has no mutating host methods in its interface. */
 export const dryRunDecision = async (host) => {
-  const [revisions, runs, repository, services, authority] = await Promise.all([
+  const [revisions, runs, repository, services, authority, backup] = await Promise.all([
     host.revisions(),
     host.blockingRuns(),
     host.repositoryState(),
     host.serviceState(),
     host.authorityState(),
+    host.backupState(),
   ]);
   const quiet = quietWindowIsOpen(runs);
   const lines = [
@@ -135,7 +136,8 @@ export const dryRunDecision = async (host) => {
     `DRY-RUN quiet-window=${quiet ? "open" : "holding"} blockers=${runs.length}`,
     `DRY-RUN repository dirty=${repository.dirty} fast-forward=${repository.fastForward}`,
     `DRY-RUN services=${services.ok ? "ready" : "not-ready"} authority=${authority.ok ? "valid" : "invalid"}`,
+    `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
   for (const step of DEPLOY_STEPS) lines.push(`DRY-RUN plan step=${step} mutation=skipped`);
-  return { quiet, revisions, runs, repository, services, authority, lines };
+  return { quiet, revisions, runs, repository, services, authority, backup, lines };
 };
