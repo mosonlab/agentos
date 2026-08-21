@@ -87,7 +87,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
+import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
@@ -2324,33 +2324,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       : archived === "true" ? { archivedAt: { not: null } }
       : {};
     const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
-    const orderBy = [{ updatedAt: "desc" as const }, { id: "asc" as const }];
-
-    /** Latest append-only run event per task. Querying all runs matters: a
-     * queued retry can be the highest runNumber while its predecessor still
-     * owns the task's newest recorded event. */
-    const latestRunActivity = async (taskIds: string[]): Promise<Map<string, Date>> => {
-      if (taskIds.length === 0) return new Map();
-      const runs = await db.run.findMany({
-        where: { taskId: { in: taskIds } },
-        select: { id: true, taskId: true },
-      });
-      const taskByRun = new Map(runs.flatMap((run) => run.taskId === null ? [] : [[run.id, run.taskId] as const]));
-      const events = runs.length === 0 ? [] : await db.sessionEvent.groupBy({
-        by: ["runId"],
-        where: { runId: { in: runs.map(({ id: runId }) => runId) } },
-        _max: { at: true },
-      });
-      const latest = new Map<string, Date>();
-      for (const event of events) {
-        const taskId = taskByRun.get(event.runId);
-        const at = event._max.at;
-        if (taskId === undefined || at === null) continue;
-        const previous = latest.get(taskId);
-        if (previous === undefined || previous < at) latest.set(taskId, at);
-      }
-      return latest;
-    };
+    const orderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
 
     // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
     // queries over the whole task table, and `Projects.tsx` polls this endpoint
@@ -2450,10 +2424,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           stepOutput: { select: { kind: true, body: true, runId: true } },
         },
       });
-      const ordered = byLatestRunActivity(rows, await latestRunActivity(rows.map(({ id: taskId }) => taskId)));
-      const progressFor = await chainProgressLookup(ordered);
-      const displayByTask = chainDisplayByTask(ordered);
-      return validated(context, ordered.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
+      const progressFor = await chainProgressLookup(rows);
+      const displayByTask = chainDisplayByTask(rows);
+      return validated(context, rows.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
     }
 
     const tasks = await db.task.findMany({
@@ -2472,15 +2445,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       },
     });
-    const orderedTasks = enrich
-      ? byLatestRunActivity(tasks, await latestRunActivity(tasks.map(({ id: taskId }) => taskId)))
-      : tasks;
-    const progressFor = await chainProgressLookup(orderedTasks);
+    const progressFor = await chainProgressLookup(tasks);
 
     // The Automations page needs `Last run` on a *collapsed* row, and a poll
     // that only mounts while a row is expanded can never supply it. Skipped
     // entirely on a board with no automations.
-    const cronIds = !enrich ? [] : orderedTasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
+    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
     const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
       by: ["recurringSourceTaskId"],
       where: { recurringSourceTaskId: { in: cronIds } },
@@ -2489,7 +2459,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
 
-    return validated(context, orderedTasks.map((task) => ({
+    return validated(context, tasks.map((task) => ({
       ...task,
       chainProgress: progressFor(task),
       recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
