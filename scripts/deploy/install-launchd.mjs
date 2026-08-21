@@ -26,6 +26,17 @@ const xml = (value) => value
   .replaceAll('"', "&quot;")
   .replaceAll("'", "&apos;");
 
+const requiredBinary = (name) => {
+  let path;
+  try {
+    path = execFileSync("/usr/bin/which", [name], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    throw new Error(`required-binary-unavailable:${name}`);
+  }
+  if (!path.startsWith("/")) throw new Error(`required-binary-not-absolute:${name}`);
+  return realpathSync(path);
+};
+
 export const renderLaunchdPlist = (template, values) => {
   const replacements = {
     __NODE_BINARY__: values.nodeBinary,
@@ -33,6 +44,9 @@ export const renderLaunchdPlist = (template, values) => {
     __REPOSITORY_ROOT__: values.repositoryRoot,
     __STDOUT_PATH__: values.stdoutPath,
     __STDERR_PATH__: values.stderrPath,
+    __GIT_BINARY__: values.gitBinary,
+    __NPM_BINARY__: values.npmBinary,
+    __PG_DUMP_BINARY__: values.pgDumpBinary,
   };
   let rendered = template;
   for (const [placeholder, value] of Object.entries(replacements)) {
@@ -59,12 +73,18 @@ export const installLaunchd = (args) => {
     repositoryRoot: realpathSync(REPOSITORY_ROOT),
     stdoutPath: join(logs, "auto-deploy.log"),
     stderrPath: join(logs, "auto-deploy.error.log"),
+    gitBinary: requiredBinary("git"),
+    npmBinary: requiredBinary("npm"),
+    pgDumpBinary: requiredBinary("pg_dump"),
   };
   const rendered = renderLaunchdPlist(readFileSync(TEMPLATE, "utf8"), values);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} label=${LABEL}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} destination=${destination}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} repository=${values.repositoryRoot}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} node=${values.nodeBinary}\n`);
+  process.stdout.write(`${apply ? "APPLY" : "PLAN"} git=${values.gitBinary}\n`);
+  process.stdout.write(`${apply ? "APPLY" : "PLAN"} npm=${values.npmBinary}\n`);
+  process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump=${values.pgDumpBinary}\n`);
 
   if (!apply) {
     process.stdout.write("PLAN no files or launchd state changed\n");

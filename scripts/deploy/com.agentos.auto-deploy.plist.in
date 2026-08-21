@@ -15,6 +15,12 @@
   <dict>
     <key>QUIET_WINDOW_POLL_SECONDS</key>
     <string>60</string>
+    <key>DEPLOY_GIT_BINARY</key>
+    <string>__GIT_BINARY__</string>
+    <key>DEPLOY_NPM_BINARY</key>
+    <string>__NPM_BINARY__</string>
+    <key>DEPLOY_PG_DUMP_BINARY</key>
+    <string>__PG_DUMP_BINARY__</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

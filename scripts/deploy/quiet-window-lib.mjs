@@ -2,13 +2,16 @@ export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "
 
 export const DEPLOY_STEPS = Object.freeze([
   "fast-forward",
+  "install-dependencies",
   "prisma-generate",
   "build",
   "backup",
   "guarded-migration",
   "canonical-prompt-sync",
+  "verify-runtime-prisma-client",
   "publish-build",
   "restart-services",
+  "verify-services",
 ]);
 
 export const SERVICE_LABELS = Object.freeze([
@@ -50,20 +53,25 @@ const failureOf = (error) => error instanceof DeployFailure
  * harness can prove ordering and stop-on-first-failure without a live checkout,
  * launchd, or PostgreSQL.
  */
-export const executeUpgrade = async (host, revisions) => {
+export const executeUpgrade = async (host, initialRevisions) => {
   let publication = null;
+  let revisions = initialRevisions;
   try {
-    await host.fastForward();
+    const to = await host.fastForward();
+    revisions = Object.freeze({ from: initialRevisions.from, to });
     await host.createStage();
+    await host.installDependencies();
     await host.prismaGenerate();
     await host.build();
     await host.backup();
     await host.guardedMigration();
     await host.syncCanonicalPrompts();
+    await host.verifyRuntimePrismaClient();
     await host.assertQuietBeforeRestart();
     publication = await host.publishBuild();
     try {
       await host.restartServices();
+      await host.verifyServices(revisions);
       await host.notify({ outcome: "success", reason: "deployed", ...revisions });
     } catch (error) {
       await publication.rollback();
@@ -74,8 +82,14 @@ export const executeUpgrade = async (host, revisions) => {
     return { ok: true };
   } catch (error) {
     const failure = failureOf(error);
-    await host.escalate({ reason: failure.reason, detail: failure.detail, ...revisions });
-    await host.notify({ outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions });
+    const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
+    await host.escalate(record);
+    try {
+      await host.notify(record);
+      await host.markEscalationNotified?.();
+    } catch (notificationError) {
+      host.log?.(`STOP inbox-notification-pending reason=${failure.reason}`);
+    }
     return { ok: false, failure };
   } finally {
     await host.cleanupStage();
@@ -89,6 +103,13 @@ export const runLocked = async (host, work) => {
   if (lock === null) {
     host.log("SKIP concurrent-run lock-held");
     return { ok: true, skipped: "lock-held" };
+  }
+  if (lock.recovered) {
+    await lock.release();
+    throw new DeployFailure(
+      "stale-deploy-owner-recovered",
+      `pid-${lock.recovered.pid ?? "unknown"}`,
+    );
   }
   try {
     return await work();

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
   chmodSync,
   closeSync,
   copyFileSync,
@@ -15,6 +16,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +28,14 @@ import {
   gitPreflightFailure,
   runLocked,
 } from "./quiet-window-lib.mjs";
+import {
+  acquireProcessLock,
+  blockingRunsStatement,
+  DEPLOY_ARTIFACT_PATHS,
+  inspectGitPreflight,
+  publishDirectories,
+} from "./quiet-window-adapters.mjs";
+import { createProductionHost } from "./quiet-window-host.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
@@ -37,20 +47,20 @@ const POLL_SECONDS_TEXT = process.env.QUIET_WINDOW_POLL_SECONDS ?? "60";
 const POLL_SECONDS = /^\d+$/u.test(POLL_SECONDS_TEXT) ? Number(POLL_SECONDS_TEXT) : Number.NaN;
 const POLL_MS = POLL_SECONDS * 1_000;
 const SHA = /^[0-9a-f]{40}$/u;
-const RUNNER_LABELS = SERVICE_LABELS.filter((label) => label.includes(".runner"));
-const DIST_PATHS = Object.freeze([
-  "packages/github-client/dist",
-  "packages/db/dist",
-  "packages/api/dist",
-  "packages/runner/dist",
-  "packages/inbox/dist",
-  "packages/merge-executor/dist",
-  "packages/cli/dist",
-  "apps/web/dist",
-]);
+const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @agentos/db deploy-barrier.ts ("AGDP").
+const DEPLOY_BARRIER_KEY = 1;
 
 const log = (line) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
+const activeResources = new Set();
+const trackResource = (resource) => {
+  const release = resource.release.bind(resource);
+  resource.release = async () => {
+    try { await release(); } finally { activeResources.delete(resource); }
+  };
+  activeResources.add(resource);
+  return resource;
+};
 
 const command = (program, args, { cwd = REPOSITORY_ROOT, env = process.env, capture = false } = {}) =>
   new Promise((accept, reject) => {
@@ -75,12 +85,15 @@ const command = (program, args, { cwd = REPOSITORY_ROOT, env = process.env, capt
 const checked = async (reason, program, args, options) => {
   log(`START ${reason}`);
   const result = await command(program, args, options).catch((error) => ({ code: 1, stderr: String(error), stdout: "" }));
-  if (result.code !== 0) fail(reason, `exit-${result.code}`);
+  if (result.code !== 0) {
+    const diagnosis = (result.stderr || result.stdout || "").trim().slice(-2_000).replaceAll(/\s+/gu, " ");
+    fail(reason, `exit-${result.code}${diagnosis ? `: ${diagnosis}` : ""}`);
+  }
   log(`PASS ${reason}`);
   return result;
 };
 
-const gitText = (...args) => execFileSync("git", ["-C", REPOSITORY_ROOT, ...args], {
+const gitText = (...args) => execFileSync(loadBinaries().git, ["-C", REPOSITORY_ROOT, ...args], {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
 }).trim();
@@ -104,7 +117,7 @@ const readDeployedRevision = () => {
 };
 
 const remoteMainRevision = async () => {
-  const result = await command("git", ["ls-remote", "--exit-code", "origin", "refs/heads/main"], { capture: true });
+  const result = await command(loadBinaries().git, ["ls-remote", "--exit-code", "origin", "refs/heads/main"], { capture: true });
   const revision = result.stdout.trim().split(/\s+/u)[0] ?? "";
   if (result.code !== 0 || !SHA.test(revision)) fail("remote-main-unreadable", `exit-${result.code}`);
   return revision;
@@ -117,6 +130,29 @@ const loadEnvironment = async () => {
   const { config } = await import("dotenv").catch(() => fail("environment-unreadable", "dotenv-module-unavailable"));
   const loaded = config({ path: envPath, override: false, quiet: true });
   if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
+  if (!process.env.FEISHU_DEFAULT_CHAT_ID) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
+};
+
+const resolveExecutable = (variable, fallback) => {
+  const configured = process.env[variable];
+  let path = configured;
+  if (!path) {
+    try { path = execFileSync("/usr/bin/which", [fallback], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+    catch { path = ""; }
+  }
+  if (!path?.startsWith("/")) fail("environment-unreadable", `${variable}-missing`);
+  try { accessSync(path, fsConstants.X_OK); } catch { fail("environment-unreadable", `${variable}-not-executable`); }
+  return path;
+};
+
+let binaries = null;
+const loadBinaries = () => {
+  binaries ??= Object.freeze({
+    git: resolveExecutable("DEPLOY_GIT_BINARY", "git"),
+    npm: resolveExecutable("DEPLOY_NPM_BINARY", "npm"),
+    pgDump: resolveExecutable("DEPLOY_PG_DUMP_BINARY", "pg_dump"),
+  });
+  return binaries;
 };
 
 let prisma = null;
@@ -130,9 +166,8 @@ const database = async () => {
 const blockingRuns = async () => {
   const db = await database();
   try {
-    return await db.$queryRawUnsafe(
-      `SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN ('claimed','provisioning','running') ORDER BY "id"`,
-    );
+    const statement = blockingRunsStatement();
+    return await db.$queryRawUnsafe(statement.sql, ...statement.parameters);
   } catch {
     fail("quiet-window-query-failed", "platform-database-unreadable");
   }
@@ -141,21 +176,17 @@ const blockingRuns = async () => {
 const notify = async ({ outcome, reason, detail = "", from, to }) => {
   const db = await database();
   const body = `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
+  const dedupeKey = `auto-deploy:${createHash("sha256").update(body).digest("hex")}`;
   try {
-    let threadId;
     const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-    if (chatId) {
-      const thread = await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-        ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } });
-      threadId = thread.id;
-    }
-    await db.inboxMessage.create({ data: {
-      from: "AGENT",
-      kind: "TEXT",
-      body,
-      dedupeKey: `auto-deploy:${outcome}:${from}:${to}:${randomUUID()}`,
-      ...(threadId ? { threadId } : {}),
-    } });
+    if (!chatId) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
+    const thread = await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+      ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } });
+    await db.inboxMessage.upsert({
+      where: { dedupeKey },
+      create: { from: "AGENT", kind: "TEXT", body, dedupeKey, threadId: thread.id },
+      update: {},
+    });
     log(`INBOX ${body}`);
   } catch {
     fail("inbox-notification-failed", `${outcome}-${reason}`);
@@ -164,32 +195,54 @@ const notify = async ({ outcome, reason, detail = "", from, to }) => {
 
 const sleep = (milliseconds) => new Promise((accept) => setTimeout(accept, milliseconds));
 
-const launchctl = async (reason, args) => checked(reason, "/bin/launchctl", args);
+const launchctl = async (reason, args) => checked(reason, "/bin/launchctl", args, { capture: true });
 const domain = () => `gui/${process.getuid()}`;
 
-const freezeRunners = async () => {
-  const frozen = [];
+const acquireDeployBarrier = async () => {
+  const module = await import("@prisma/client").catch(() => fail("deploy-barrier-unavailable", "prisma-client-import-failed"));
+  const url = new URL(process.env.DATABASE_URL);
+  url.searchParams.set("connection_limit", "1");
+  url.searchParams.set("max_connection_lifetime", "0");
+  url.searchParams.set("max_idle_connection_lifetime", "0");
+  const session = new module.PrismaClient({ datasources: { db: { url: url.href } } });
   try {
-    for (const label of RUNNER_LABELS) {
-      await launchctl("quiet-window-freeze-failed", ["kill", "SIGSTOP", `${domain()}/${label}`]);
-      frozen.push(label);
-    }
-    return frozen;
+    await session.$connect();
+    const rows = await session.$queryRawUnsafe(
+      "SELECT pg_try_advisory_lock($1::int4, $2::int4) AS granted, pg_backend_pid() AS pid",
+      DEPLOY_BARRIER_CLASS,
+      DEPLOY_BARRIER_KEY,
+    );
+    if (rows.length !== 1 || rows[0]?.granted !== true) { await session.$disconnect(); return null; }
+    const pid = Number(rows[0].pid);
+    let released = false;
+    return trackResource({
+      verify: async () => {
+        if (released) return false;
+        const checks = await session.$queryRawUnsafe(
+          `SELECT pg_backend_pid() AS pid, EXISTS (
+             SELECT 1 FROM pg_locks
+             WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+               AND classid = $1::oid AND objid = $2::oid AND objsubid = 2
+               AND granted AND mode = 'ExclusiveLock'
+           ) AS held`,
+          DEPLOY_BARRIER_CLASS,
+          DEPLOY_BARRIER_KEY,
+        ).catch(() => []);
+        // The backend identity and pg_locks row prove the pinned session still
+        // owns the exact exclusive key; either becoming unreadable is loss.
+        return checks.length === 1 && Number(checks[0]?.pid) === pid && checks[0]?.held === true;
+      },
+      release: async () => {
+        if (released) return;
+        released = true;
+        try { await session.$queryRawUnsafe("SELECT pg_advisory_unlock($1::int4, $2::int4)", DEPLOY_BARRIER_CLASS, DEPLOY_BARRIER_KEY); }
+        finally { await session.$disconnect(); }
+      },
+    });
   } catch (error) {
-    for (const label of frozen.reverse()) {
-      await command("/bin/launchctl", ["kill", "SIGCONT", `${domain()}/${label}`], { capture: true });
-    }
-    throw error;
+    await session.$disconnect().catch(() => undefined);
+    fail("deploy-barrier-unavailable", error instanceof Error ? error.name : "query-failed");
   }
-};
-
-const continueRunners = async (labels = RUNNER_LABELS) => {
-  const failures = [];
-  for (const label of labels) {
-    const result = await command("/bin/launchctl", ["kill", "SIGCONT", `${domain()}/${label}`], { capture: true });
-    if (result.code !== 0) failures.push(label);
-  }
-  if (failures.length > 0) fail("quiet-window-resume-failed", `labels-${failures.join(",")}`);
 };
 
 const waitForQuiet = async () => {
@@ -200,50 +253,69 @@ const waitForQuiet = async () => {
       await sleep(POLL_MS);
       continue;
     }
-    // Freeze every process able to claim queued work, then ask the database
-    // again. The second read closes the ordinary check/restart race: queued
-    // work cannot become claimed while the deployment is in the window.
-    const frozen = await freezeRunners();
+    const barrier = await acquireDeployBarrier();
+    if (barrier === null) {
+      log("HOLD quiet-window deploy-barrier-contended");
+      await sleep(POLL_MS);
+      continue;
+    }
     let after;
     try {
-      await sleep(1_000);
       after = await blockingRuns();
     } catch (error) {
-      await continueRunners(frozen);
+      await barrier.release();
       throw error;
     }
     if (after.length === 0) {
-      log("PASS quiet-window runners-frozen blockers=0");
-      return frozen;
+      log("PASS quiet-window deploy-barrier-held blockers=0");
+      return barrier;
     }
-    await continueRunners(frozen);
+    await barrier.release();
     log(`HOLD quiet-window raced-blockers=${after.length}`);
     await sleep(POLL_MS);
   }
 };
 
 const acquireLock = async () => {
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  try {
-    const fd = openSync(LOCK_PATH, "wx", 0o600);
-    try {
-      writeFileSync(fd, `${process.pid}\n`);
-    } finally {
-      closeSync(fd);
-    }
-    return { release: async () => { try { unlinkSync(LOCK_PATH); } catch { /* a lost lock is already a loud next-run refusal */ } } };
-  } catch (error) {
-    if (error?.code === "EEXIST") return null;
-    fail("deploy-lock-unavailable", error?.code ?? "unknown");
-  }
+  const lock = acquireProcessLock({ path: LOCK_PATH, stateDir: STATE_DIR });
+  return lock === null ? null : trackResource(lock);
 };
 
 const writeEscalation = async (record) => {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   const temporary = `${ESCALATION_PATH}.${process.pid}.${randomUUID()}`;
-  writeFileSync(temporary, `${JSON.stringify({ ...record, escalatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  writeFileSync(temporary, `${JSON.stringify({ notificationDelivered: false, ...record, escalatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   renameSync(temporary, ESCALATION_PATH);
   log(`ESCALATED reason=${record.reason} from=${record.from} to=${record.to}`);
+};
+
+const markEscalationNotified = async () => {
+  const record = readJson(ESCALATION_PATH, "escalation-state-unreadable");
+  const temporary = `${ESCALATION_PATH}.${process.pid}.${randomUUID()}`;
+  writeFileSync(temporary, `${JSON.stringify({ ...record, notificationDelivered: true }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  renameSync(temporary, ESCALATION_PATH);
+};
+
+const retryEscalationNotification = async () => {
+  const record = readJson(ESCALATION_PATH, "escalation-state-unreadable");
+  if (record.notificationDelivered === true) return;
+  await notify({
+    outcome: "failure",
+    reason: String(record.reason ?? "unknown-failure"),
+    detail: String(record.detail ?? ""),
+    from: String(record.from ?? "unknown"),
+    to: String(record.to ?? "unknown"),
+  });
+  await markEscalationNotified();
+};
+
+const persistAndNotifyFailure = async (failure, from, to) => {
+  await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from, to });
+  try {
+    await retryEscalationNotification();
+  } catch {
+    log(`STOP inbox-notification-pending reason=${failure.reason}`);
+  }
 };
 
 const readAuthority = (root = REPOSITORY_ROOT) => {
@@ -266,7 +338,7 @@ const serviceState = async () => {
   const unavailable = [];
   for (const label of SERVICE_LABELS) {
     const result = await command("/bin/launchctl", ["print", `${domain()}/${label}`], { capture: true });
-    if (result.code !== 0) unavailable.push(label);
+    if (result.code !== 0 || !/^\s*state = running\s*$/mu.test(result.stdout)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
 };
@@ -276,8 +348,8 @@ const repositoryState = async (target) => {
   const dirty = gitText("status", "--porcelain").length > 0;
   let fastForward = "verify-after-fetch";
   try {
-    execFileSync("git", ["-C", REPOSITORY_ROOT, "cat-file", "-e", `${target}^{commit}`], { stdio: "ignore" });
-    fastForward = commandSyncOk("git", ["-C", REPOSITORY_ROOT, "merge-base", "--is-ancestor", source, target]) ? "yes" : "no";
+    execFileSync(loadBinaries().git, ["-C", REPOSITORY_ROOT, "cat-file", "-e", `${target}^{commit}`], { stdio: "ignore" });
+    fastForward = commandSyncOk(loadBinaries().git, ["-C", REPOSITORY_ROOT, "merge-base", "--is-ancestor", source, target]) ? "yes" : "no";
   } catch { /* ls-remote can name an object this checkout has not fetched */ }
   return { source, dirty, fastForward };
 };
@@ -288,6 +360,7 @@ const commandSyncOk = (program, args) => {
 
 const dryRun = async () => {
   await loadEnvironment();
+  loadBinaries();
   const from = readDeployedRevision();
   const to = await remoteMainRevision();
   const source = gitText("rev-parse", "HEAD");
@@ -301,7 +374,7 @@ const dryRun = async () => {
     },
   });
   for (const line of result.lines) log(line);
-  return result.repository.dirty || result.repository.fastForward === "no" || !result.services.ok || !result.authority.ok ? 1 : 0;
+  return result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.authority.ok ? 1 : 0;
 };
 
 const main = async () => {
@@ -315,7 +388,9 @@ const main = async () => {
   if (options.dryRun) return dryRun();
 
   await loadEnvironment();
+  loadBinaries();
   if (existsSync(ESCALATION_PATH)) {
+    await retryEscalationNotification();
     log(`STOP escalation-active path=${ESCALATION_PATH}`);
     return 2;
   }
@@ -330,8 +405,7 @@ const main = async () => {
       const failure = error instanceof DeployFailure
         ? error
         : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
-      await writeEscalation({ reason: failure.reason, detail: failure.detail, from, to });
-      await notify({ outcome: "failure", reason: failure.reason, detail: failure.detail, from, to });
+      await persistAndNotifyFailure(failure, from, to);
       return { ok: false, reason: failure.reason };
     }
     if (from === to) {
@@ -339,48 +413,45 @@ const main = async () => {
       return { ok: true, skipped: "already-deployed" };
     }
 
-    let frozenRunners = [];
     let stage = null;
-    let runnersFrozen = false;
-    let restartStarted = false;
+    let barrier = null;
     const transactionId = randomUUID();
     const backupDirectory = join(STATE_DIR, "backups");
     const previousDirectory = join(STATE_DIR, `previous-${transactionId}`);
     try {
-      frozenRunners = await waitForQuiet();
-      runnersFrozen = true;
+      barrier = await waitForQuiet();
     } catch (error) {
       const failure = error instanceof DeployFailure
         ? error
         : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
-      await writeEscalation({ reason: failure.reason, detail: failure.detail, from, to });
-      await notify({ outcome: "failure", reason: failure.reason, detail: failure.detail, from, to });
+      await persistAndNotifyFailure(failure, from, to);
       return { ok: false, reason: failure.reason };
     }
-    const host = {
+    const host = createProductionHost({
       fastForward: async () => {
         const dirty = gitText("status", "--porcelain").length > 0;
-        if (dirty) fail("dirty-working-tree", "checkout-has-uncommitted-content");
-        await checked("fetch-main-failed", "git", ["fetch", "origin", "main"]);
+        const headBeforeFetch = gitText("rev-parse", "HEAD");
+        const preflight = gitPreflightFailure({ dirty, head: headBeforeFetch, target: headBeforeFetch, fastForward: true });
+        if (preflight) fail(preflight, "checkout-has-uncommitted-content");
+        await checked("fetch-main-failed", loadBinaries().git, ["fetch", "origin", "main"]);
         to = gitText("rev-parse", "origin/main");
-        const head = gitText("rev-parse", "HEAD");
-        const fastForward = commandSyncOk("git", ["-C", REPOSITORY_ROOT, "merge-base", "--is-ancestor", head, to]);
-        const refusal = gitPreflightFailure({ dirty: false, head, target: to, fastForward });
-        if (refusal) fail(refusal, `${head}-to-${to}`);
-        if (head !== to) await checked("fast-forward-failed", "git", ["merge", "--ff-only", "origin/main"]);
+        const state = inspectGitPreflight({ git: loadBinaries().git, root: REPOSITORY_ROOT, target: to });
+        const { head } = state;
+        if (state.refusal) fail(state.refusal, `${head}-to-${to}`);
+        if (head !== to) await checked("fast-forward-failed", loadBinaries().git, ["merge", "--ff-only", "origin/main"]);
+        return to;
       },
       createStage: async () => {
         stage = join(STATE_DIR, `stage-${transactionId}`);
-        await checked("staging-worktree-failed", "git", ["worktree", "add", "--detach", stage, "HEAD"]);
-        if (!existsSync(join(REPOSITORY_ROOT, "node_modules"))) fail("staging-dependencies-missing", "checkout-node_modules-is-absent");
-        await checked("staging-dependencies-failed", "/bin/cp", ["-cR", join(REPOSITORY_ROOT, "node_modules"), join(stage, "node_modules")]);
+        await checked("staging-worktree-failed", loadBinaries().git, ["worktree", "add", "--detach", stage, "HEAD"]);
       },
-      prismaGenerate: () => checked("prisma-generate-failed", "npm", ["run", "db:generate"], { cwd: stage }),
+      installDependencies: () => checked("staging-dependencies-failed", loadBinaries().npm, ["ci"], { cwd: stage }),
+      prismaGenerate: () => checked("prisma-generate-failed", loadBinaries().npm, ["run", "db:generate"], { cwd: stage }),
       build: async () => {
-        await checked("build-failed", "npm", ["run", "build"], { cwd: stage });
+        await checked("build-failed", loadBinaries().npm, ["run", "build"], { cwd: stage });
         const stamp = readJson(join(stage, "packages/api/dist/build-info.json"), "build-stamp-invalid");
         if (stamp.commit !== to || stamp.dirty !== false) fail("build-stamp-invalid", "staged-api-dist-does-not-match-target");
-        for (const path of DIST_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
+        for (const path of DEPLOY_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
       },
       backup: async () => {
         mkdirSync(backupDirectory, { recursive: true, mode: 0o700 });
@@ -403,14 +474,14 @@ const main = async () => {
           "--username", decodeURIComponent(databaseUrl.username),
           "--dbname", decodeURIComponent(databaseUrl.pathname.replace(/^\//u, "")),
         ];
-        await checked("database-backup-failed", "pg_dump", args, { env: backupEnv });
+        await checked("database-backup-failed", loadBinaries().pgDump, args, { env: backupEnv });
         chmodSync(output, 0o600);
       },
       guardedMigration: async () => {
         copyFileSync(join(REPOSITORY_ROOT, ".env"), join(stage, ".env"));
         chmodSync(join(stage, ".env"), 0o600);
         const authority = readAuthority(stage);
-        await checked("guarded-migration-refused", "npm", ["run", "db:migrate-goal-execution"], {
+        await checked("guarded-migration-refused", loadBinaries().npm, ["run", "db:migrate-goal-execution"], {
           cwd: stage,
           env: {
             ...process.env,
@@ -419,71 +490,73 @@ const main = async () => {
           },
         });
       },
-      syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", "npm", ["run", "db:sync-canonical-prompts"], { cwd: stage }),
+      syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().npm, ["run", "db:sync-canonical-prompts"], { cwd: stage }),
+      verifyRuntimePrismaClient: async () => {
+        if (!existsSync(join(stage, "node_modules/.prisma/client/index.js"))) {
+          fail("runtime-prisma-client-missing", "staged-generated-client-is-absent");
+        }
+      },
       assertQuietBeforeRestart: async () => {
+        if (!await barrier.verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");
         const blockers = await blockingRuns();
         if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
       },
-      publishBuild: async () => {
-        mkdirSync(previousDirectory, { recursive: true, mode: 0o700 });
-        const moved = [];
-        try {
-          for (const path of DIST_PATHS) {
-            const live = join(REPOSITORY_ROOT, path);
-            const prior = join(previousDirectory, path);
-            mkdirSync(dirname(prior), { recursive: true });
-            const entry = { live, prior, staged: join(stage, path), hadPrior: existsSync(live), published: false };
-            if (entry.hadPrior) renameSync(live, prior);
-            moved.push(entry);
-            renameSync(join(stage, path), live);
-            entry.published = true;
-          }
-        } catch (error) {
-          for (const entry of moved.reverse()) {
-            if (entry.published && existsSync(entry.live)) renameSync(entry.live, entry.staged);
-            if (entry.hadPrior) renameSync(entry.prior, entry.live);
-          }
-          fail("build-swap-failed", error?.code ?? "rename-failed");
-        }
-        let settled = false;
-        return {
-          rollback: async () => {
-            if (settled) return;
-            for (const path of [...DIST_PATHS].reverse()) {
-              const live = join(REPOSITORY_ROOT, path);
-              const prior = join(previousDirectory, path);
-              if (existsSync(live)) rmSync(live, { recursive: true, force: true });
-              if (existsSync(prior)) renameSync(prior, live);
-            }
-            settled = true;
-          },
-          commit: async () => {
-            if (!settled) log(`RETAIN previous-build path=${previousDirectory}`);
-            settled = true;
-          },
-        };
-      },
+      publishBuild: async () => publishDirectories({ root: REPOSITORY_ROOT, stage, previousDirectory, paths: DEPLOY_ARTIFACT_PATHS }),
       restartServices: async () => {
-        restartStarted = true;
         for (const label of SERVICE_LABELS) await launchctl("service-restart-failed", ["kickstart", "-k", `${domain()}/${label}`]);
-        runnersFrozen = false;
+      },
+      verifyServices: async (revisions) => {
+        const deadline = Date.now() + 30_000;
+        let lastReason = "not-ready";
+        while (Date.now() < deadline) {
+          const state = await serviceState();
+          if (!state.ok) lastReason = `launchd-unavailable-${state.unavailable.join(",")}`;
+          else {
+            try {
+              const port = process.env.API_PORT ?? "3000";
+              const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+              const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+              const payload = version.ok ? await version.json() : {};
+              if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) return;
+              lastReason = `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
+            } catch (error) { lastReason = error instanceof Error ? error.name : "probe-failed"; }
+          }
+          await sleep(1_000);
+        }
+        fail("service-verification-failed", lastReason);
       },
       restorePreviousServices: async () => {
         for (const label of SERVICE_LABELS) await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`]);
-        runnersFrozen = false;
       },
       escalate: writeEscalation,
+      markEscalationNotified,
       notify,
+      log,
       cleanupStage: async () => {
-        if (stage && existsSync(stage)) await command("git", ["worktree", "remove", "--force", stage], { capture: true });
-        await command("git", ["worktree", "prune"], { capture: true });
-        if (runnersFrozen && !restartStarted) await continueRunners(frozenRunners);
+        let cleanupFailure = null;
+        try {
+          if (stage && existsSync(join(stage, ".env"))) rmSync(join(stage, ".env"), { force: true });
+          if (stage && existsSync(stage)) await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "remove", "--force", stage], { capture: true });
+          await checked("staging-cleanup-failed", loadBinaries().git, ["worktree", "prune"], { capture: true });
+        } catch (error) {
+          cleanupFailure = error;
+        } finally {
+          if (barrier) await barrier.release();
+        }
+        if (cleanupFailure) throw cleanupFailure;
       },
-    };
+    });
     const result = await executeUpgrade(host, { from, to });
     return result.ok ? { ok: true } : { ok: false, reason: result.failure.reason };
   }).then((result) => result.ok ? 0 : 1);
 };
+
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.once(signal, () => {
+    void Promise.allSettled([...activeResources].map((resource) => resource.release()))
+      .finally(() => process.exit(code));
+  });
+}
 
 let exitCode = 1;
 try {
@@ -491,6 +564,15 @@ try {
 } catch (error) {
   const failure = error instanceof DeployFailure ? error : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
   log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
+  if (failure.reason !== "usage" && !existsSync(ESCALATION_PATH)) {
+    await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
+      .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));
+  }
+  if (failure.reason !== "usage" && existsSync(ESCALATION_PATH)) {
+    await loadEnvironment()
+      .then(retryEscalationNotification)
+      .catch(() => log(`STOP inbox-notification-pending reason=${failure.reason}`));
+  }
   exitCode = failure.reason === "usage" ? 64 : 1;
 } finally {
   if (prisma) await prisma.$disconnect().catch(() => undefined);

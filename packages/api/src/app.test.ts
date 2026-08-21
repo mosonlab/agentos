@@ -987,6 +987,7 @@ test("claim query filters archived agents before take so active work cannot star
     let claimWhere: Record<string, unknown> | undefined;
     let claimedId: string | undefined;
     const tx = {
+      $queryRaw: async () => [{ granted: true }],
       run: {
         findMany: async ({ where, take }: { where: Record<string, any>; take: number }) => {
           claimWhere = where;
@@ -1039,6 +1040,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
       },
       taskActivity: { createMany: async () => ({ count: 0 }) },
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ granted: true }],
         run: { findMany: async () => [] },
       }),
     } as unknown as PrismaClient;

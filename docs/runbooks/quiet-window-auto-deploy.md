@@ -16,7 +16,6 @@ The checkout must have:
 - a clean, stamped build in `packages/api/dist/build-info.json`;
 - its existing mode-0600 `.env`, including `DATABASE_URL` and the existing
   Inbox/Feishu settings;
-- `node_modules` installed for the committed `package-lock.json`;
 - `git`, `node`, `npm`, `pg_dump`, and `launchctl` on the host;
 - all nine service labels above already loaded.
 
@@ -26,7 +25,7 @@ The job reads `masterSha` and `controlPlaneASha` from the tracked
 ## Read-only verification
 
 First run the complete decision path without taking the deploy lock, fetching,
-freezing runners, building, backing up, migrating, syncing, writing Inbox rows,
+building, backing up, migrating, syncing, writing Inbox rows,
 or restarting services:
 
 ```sh
@@ -67,20 +66,25 @@ The installer refuses to replace a different existing plist. Inspect and
 unload that definition before replacing it; the installer never guesses that
 an existing service definition is obsolete.
 
+The installer resolves `git`, `npm`, and `pg_dump` to executable absolute paths
+and writes them into the launchd environment. A missing binary is a named
+installation refusal, not a failure discovered after deployment starts.
+
 ## Upgrade behavior
 
-When a new remote revision exists, the job freezes the six runner launchd
-processes only after its first zero-blocker query, waits one second, and queries
-again. If a run raced into a blocking status, it resumes the runners and keeps
-waiting. Once the second query is clear, queued work cannot be claimed during
-the upgrade.
+When a new remote revision exists, the job waits for a zero-blocker query, takes
+an exclusive PostgreSQL deploy barrier, and queries again. The claim transaction
+takes the shared form before reading candidates. An in-flight claim therefore
+finishes before the deploy obtains its barrier; later claims return no work.
+The barrier stays held through every restart, verification, notification, or
+recovery. The job does not stop runner processes while it waits.
 
 The job then performs exactly this sequence and stops at the first failure:
 
 1. refuse a dirty checkout; fetch `origin/main`; prove the current source is
    its ancestor; fast-forward with `git merge --ff-only`;
-2. create a detached staging worktree under `.agentos-deploy/`, clone the
-   installed dependencies there, and run `npm run db:generate`;
+2. create a detached staging worktree under `.agentos-deploy/`, run `npm ci`
+   against the target lockfile, and run `npm run db:generate`;
 3. run `npm run build` in staging and verify its API build stamp;
 4. write a mode-0600 `pg_dump -Fc` backup under
    `.agentos-deploy/backups/`;
@@ -88,10 +92,14 @@ The job then performs exactly this sequence and stops at the first failure:
    SHAs read from that revision's `release-authority.json`;
 6. run `npm run db:sync-canonical-prompts`; structural drift is a terminal
    refusal and is never changed with SQL;
-7. query the blocking statuses again, swap all staged `dist/` trees, and
-   restart the nine launchd services.
+7. verify the staged generated Prisma client, recheck the barrier and blocking
+   statuses, swap the staged `dist/` trees and target `node_modules`, and
+   restart the services;
+8. require every launchd service to be running, `/health` to pass, and
+   `/version` to report the exact target commit before reporting success.
 
-The old `dist/` trees stay in a private `previous-*` transaction directory. A
+The old `dist/` trees and `node_modules` stay in a private `previous-*`
+transaction directory. A
 build, migration, sync, swap, notification, or restart failure restores or
 retains the previous build. Database migration rollback is not attempted.
 Database backups and successful previous-build directories are not deleted
@@ -100,7 +108,14 @@ automatically; retain or remove them under the operator's backup policy.
 Success and failure create an AgentOS Inbox message containing both revisions
 and the named outcome. A failure also writes
 `.agentos-deploy/escalated.json`. While that file exists, scheduled invocations
-exit with `STOP escalation-active` and do not retry.
+never retry the upgrade. If the Inbox write was interrupted, they retry only
+that persisted notification until the Inbox row exists, then exit with
+`STOP escalation-active`.
+
+The process lock records PID and process-start identity. SIGINT and SIGTERM
+release both locks. After an uncatchable death, the next invocation reclaims a
+provably stale owner, records `stale-deploy-owner-recovered`, sends it to Inbox,
+and remains escalated instead of starting another upgrade.
 
 ## Clear an escalation
 
