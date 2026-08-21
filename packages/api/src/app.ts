@@ -4544,28 +4544,29 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           where: { id: run.task.id },
           include: { templateStep: true, repo: { select: { defaultBranch: true } } },
         });
-        // The fifth run-creating path. It copies `targetBranch` and has never
-        // carried `branch` forward, so before this change an automatic retry of
-        // a chain step silently dropped off the chain branch onto
-        // `agentos/<taskId>/run-<n>` (workspace.ts's fallback) — the same defect
-        // this batch exists to fix, one route further along. Only chain steps
-        // are rerouted; template and non-chain retries still carry no `branch`
-        // at all (unlike the operator retry route — that asymmetry is
-        // preserved, not tidied), but their *base* now answers to the same
-        // publication evidence every other path uses. Copying `run.targetBranch`
-        // unconditionally is what let an issue #118 retry chain keep cloning a
-        // ref no remote had, and it threw away the WIP salvage this very
-        // completion had just recorded.
+        // The fifth run-creating path. Indexed chains already resolve their
+        // branch here; template chains must do the same or a retry is created
+        // with `branch: null` and workspace.ts silently moves it to a per-run
+        // branch. Pass the failed template run as the prior so publication
+        // evidence — including WIP salvage written by this completion — still
+        // decides the retry's base; the resolved logical chain head wins over
+        // that run's workspace branch. Non-template
+        // chains retain their existing no-prior resolution, and non-chain
+        // retries retain the historical `branch: null` behavior.
         //
         // All of this runs *after* the updateMany that writes the completing
         // run's `branch`/`pushedBranch`, so the run's own push — a chain step's
         // publication, or a failed run's salvage — is evidence in this
         // transaction. `body.branch ?? run.branch` is that same effective value,
         // because `run` was read before the update.
-        const branches = currentTask.templateStep?.baseFromStepIndex != null && currentTask.repo
-          ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, { branch: body.branch ?? run.branch })
-          : currentTask.chainId && currentTask.chainIndex !== null && !currentTask.templateId && currentTask.repo
-          ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, null)
+        const resolveChain = currentTask.repo && currentTask.chainId
+          && (currentTask.templateId || currentTask.chainIndex !== null);
+        const branches = resolveChain && currentTask.repo
+          ? await resolveRunBranches(
+            tx,
+            { ...currentTask, repo: currentTask.repo },
+            currentTask.templateId ? { branch: body.branch ?? run.branch } : null,
+          )
           : {
             branch: null,
             targetBranch: currentTask.repo
