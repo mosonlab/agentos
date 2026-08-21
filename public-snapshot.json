@@ -91,6 +91,8 @@
     { "glob": "packages/merge-executor/src/**/*.ts", "purpose": "merge executor TypeScript source and tests" },
     { "glob": "packages/merge-executor/tsconfig.json", "purpose": "merge executor TypeScript configuration" },
     { "glob": "packages/runner/assets/**/*.ts", "purpose": "runner extension source" },
+    { "glob": "packages/runner/assets/claude-platform-settings.json", "purpose": "versioned platform-owned Claude settings that exclude host configuration and auto-memory" },
+    { "glob": "packages/runner/assets/session-config-baseline/codex/config.toml", "purpose": "versioned platform-owned Codex session baseline" },
     { "glob": "packages/runner/package.json", "purpose": "runner package definition" },
     { "glob": "packages/runner/src/**/*.ts", "purpose": "runner TypeScript source and tests" },
     { "glob": "packages/runner/tsconfig.json", "purpose": "runner TypeScript configuration" },
@@ -356,6 +358,11 @@
       "category": "pii-email",
       "glob": "packages/build-info/stamp.test.mjs",
       "reason": "synthetic commit identity in a fixture repository the test creates and deletes; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person; reviewed and approved as safe public material by Leo on 2026-08-19"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/api/src/merge-tail-repair.dbtest.ts",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     }
   ],
   "mintedArtifacts": [],

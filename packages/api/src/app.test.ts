@@ -95,6 +95,47 @@ test("operator principal cannot impersonate a runner", async () => {
   });
 });
 
+test("operator can close only detached agent notifications", async () => {
+  await withTokens(async () => {
+    const notification = {
+      status: "OPEN", from: "AGENT", kind: "TEXT", taskId: null, goalId: null,
+      sessionId: null, gateTaskId: null, replyToMessageId: null,
+    };
+    let updateWhere: unknown;
+    const database = {
+      inboxMessage: {
+        findUnique: async () => notification,
+        updateMany: async ({ where }: { where: unknown }) => { updateWhere = where; return { count: 1 }; },
+      },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/inbox/messages/message-1/close", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "close-message-1" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { closed: true, duplicate: false, requestId: "close-message-1" });
+    assert.deepEqual(updateWhere, {
+      id: "message-1", status: "OPEN", from: "AGENT", kind: "TEXT", taskId: null,
+      goalId: null, sessionId: null, gateTaskId: null, replyToMessageId: null,
+    });
+
+    const gateDatabase = {
+      inboxMessage: {
+        findUnique: async () => ({ ...notification, gateTaskId: "gate-1" }),
+        updateMany: async () => { throw new Error("must not close a gate"); },
+      },
+    } as unknown as PrismaClient;
+    const refused = await createApp(gateDatabase).request("/inbox/messages/message-2/close", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "close-message-2" }),
+    });
+    assert.equal(refused.status, 409);
+    assert.match(String((await refused.json() as { error: string }).error), /Only a detached agent notification/u);
+  });
+});
+
 test("live claim reconciliation asserts root ownership before touching database state", async () => {
   await withTokens(async () => {
     let databaseTouched = false;

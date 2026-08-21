@@ -784,6 +784,9 @@ const inboxReplyInput = z.object({
   body: z.string().trim().min(1).max(8000),
   requestId: z.string().trim().min(1).max(200),
 });
+const inboxCloseInput = z.object({
+  requestId: z.string().trim().min(1).max(200),
+});
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
@@ -3533,6 +3536,49 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       throw error;
     }
+  });
+  app.post("/inbox/messages/:messageId/close", async (context) => {
+    const body = await readJson(context.req.raw, inboxCloseInput);
+    const messageId = id.parse(context.req.param("messageId"));
+    const message = await db.inboxMessage.findUnique({
+      where: { id: messageId },
+      select: {
+        status: true, from: true, kind: true, taskId: true, goalId: true,
+        sessionId: true, gateTaskId: true, replyToMessageId: true,
+      },
+    });
+    if (!message) return context.json({ error: "Inbox message not found" }, 404);
+    const detachedNotification = message.from === "AGENT"
+      && message.kind === "TEXT"
+      && message.taskId === null
+      && message.goalId === null
+      && message.sessionId === null
+      && message.gateTaskId === null
+      && message.replyToMessageId === null;
+    if (!detachedNotification) {
+      return context.json({ error: "Only a detached agent notification can be closed without a decision" }, 409);
+    }
+    if (message.status === InboxStatus.CLOSED) {
+      return context.json({ closed: false, duplicate: true, requestId: body.requestId });
+    }
+    if (message.status !== InboxStatus.OPEN) {
+      return context.json({ error: "Only an open notification can be closed" }, 409);
+    }
+    const closed = await db.inboxMessage.updateMany({
+      where: {
+        id: messageId, status: InboxStatus.OPEN, from: "AGENT", kind: "TEXT",
+        taskId: null, goalId: null, sessionId: null, gateTaskId: null, replyToMessageId: null,
+      },
+      data: { status: InboxStatus.CLOSED, answeredAt: new Date() },
+    });
+    if (closed.count !== 1) {
+      const current = await db.inboxMessage.findUnique({ where: { id: messageId }, select: { status: true } });
+      if (current?.status === InboxStatus.CLOSED) {
+        return context.json({ closed: false, duplicate: true, requestId: body.requestId });
+      }
+      return context.json({ error: "Inbox message changed before it could be closed" }, 409);
+    }
+    return context.json({ closed: true, duplicate: false, requestId: body.requestId });
   });
 
   app.post("/runner/availability", async (context) => {

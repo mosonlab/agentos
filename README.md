@@ -217,6 +217,12 @@ Local runner -----> ephemeral git workspace
 - Child processes receive an explicit environment containing configured
   `PATH`/`HOME`, Run identity, session credentials, and granted secrets; the
   runner does not copy the host environment wholesale.
+- Runner proxying is opt-in through `RUNNER_HTTP_PROXY`, `RUNNER_HTTPS_PROXY`,
+  and `RUNNER_NO_PROXY`. When configured, it applies to the whole
+  runner-controlled network path: Claude, Codex, the experimental Pi adapter,
+  and Git/workspace provisioning and delivery commands. Conventional host proxy
+  variables are ignored. A `RUNNER_RUN_AS_PREFIX` launcher must preserve the
+  explicit environment; proxy URLs are not serialized into provider argv.
 - Stored secrets use AES-256-GCM. Plaintext and ciphertext are excluded from the
   public API's secret representations.
 - The control plane requires a repository-access row and checks Files Root

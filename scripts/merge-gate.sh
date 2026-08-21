@@ -1083,6 +1083,9 @@ step "npm ci" install_dependencies
 # before npm ci had a chance to establish the dependency state being gated.
 step "release documentation executable contract" npm run test:release-docs
 step "templates release-demo harness" npm run test:demo-templates
+step "public snapshot scanner tests" npm run test:snapshot-scan
+step "public snapshot closed-scope scan" npm run snapshot:scan
+step "quiet-window auto-deploy harness" npm run test:auto-deploy
 step "prisma generate" npm run db:generate
 step "typecheck (all workspaces)" run_workspace_script_parallel typecheck
 # The minimum lint gate (#143): Biome's opt-in safety rules, then the one

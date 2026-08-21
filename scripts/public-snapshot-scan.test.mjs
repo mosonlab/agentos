@@ -195,6 +195,13 @@ test("the checked-out tree is fully classified", () => {
   assert.equal(includedPaths.includes("public-snapshot.json"), true);
 });
 
+test("the merge gate executes snapshot and auto-deploy contracts", () => {
+  const gate = readFileSync("scripts/merge-gate.sh", "utf8");
+  for (const script of ["test:snapshot-scan", "snapshot:scan", "test:auto-deploy"]) {
+    assert.match(gate, new RegExp(`step [^\\n]+ npm run ${script.replace(":", "\\:")}`), `${script} is absent from the merge gate`);
+  }
+});
+
 test("an approved credential on the published surface is always a blocker", () => {
   const credential = `ghp_${"A".repeat(24)}`;
   withRepositoryFixture({
@@ -345,13 +352,16 @@ test("the docs surface is closed and named one file at a time", () => {
   const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
   const docs = manifest.include.map((entry) => entry.glob).filter((glob) => glob.startsWith("docs/"));
   // `docs/` is closed by default and this is the whole of what is open in it.
-  // Publishing user or governance documentation must not become a reason to
-  // publish plans, reviews, specifications or runbooks alongside it.
+  // Publishing one reviewed document must not become a reason to publish
+  // unrelated plans, reviews, specifications, or runbooks alongside it.
   assert.deepEqual(docs.sort(), [
+    "docs/BRIEF-TEMPLATE.md",
     "docs/demos/templates-release-demo.md",
     "docs/demos/templates-release-evidence.schema.json",
     "docs/governance/review-role-convergence-v1.md",
     "docs/governance/task-routing-v1.md",
+    "docs/media/agents.png",
+    "docs/media/tasks-board.png",
     "docs/public-snapshot.md",
     "docs/release/fixtures/oss-b0-smoke-task.json",
     "docs/release/v0.1.0-developer-preview.md",
@@ -360,6 +370,9 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/release/v0.1.0-release-notes.md",
     "docs/release/v0.1.0-security.md",
     "docs/release/v0.1.0-support-matrix.md",
+    "docs/release/v0.2.0-release-notes.md",
+    "docs/runbooks/gate-worker.md",
+    "docs/runbooks/quiet-window-auto-deploy.md",
   ]);
   // Named one at a time rather than by `docs/release/*.md`, because a directory
   // glob would publish anything dropped into the directory later — the
@@ -418,19 +431,20 @@ test("every workspace manifest records the same first-party version", () => {
   const manifests = execFileSync("git", ["ls-files", "package.json", "apps/*/package.json", "packages/*/package.json"])
     .toString("utf8").trim().split("\n");
   assert.ok(manifests.length >= 10, "expected the root manifest and every workspace manifest");
+  const releaseVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
   for (const path of manifests) {
     const pkg = JSON.parse(readFileSync(path, "utf8"));
-    assert.equal(pkg.version, "0.1.0", `${path} must record version 0.1.0`);
+    assert.equal(pkg.version, releaseVersion, `${path} must record version ${releaseVersion}`);
     assert.equal(pkg.private, true, `${path} must stay private`);
     for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
       for (const [name, range] of Object.entries(pkg[field] ?? {})) {
         if (!name.startsWith("@agentos/")) continue;
-        assert.equal(range, "0.1.0", `${path} must pin ${name} to the exact release version`);
+        assert.equal(range, releaseVersion, `${path} must pin ${name} to the exact release version`);
       }
     }
   }
   const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
-  assert.equal(lock.version, "0.1.0", "the lockfile must record the same root version");
+  assert.equal(lock.version, releaseVersion, "the lockfile must record the same root version");
 });
 
 test("the release trust anchor is tracked, classified included, and actually published", () => {

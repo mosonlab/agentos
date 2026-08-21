@@ -7,7 +7,7 @@ import test from "node:test";
 
 import {
   adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, failureReasonFromEvidence,
-  claudePlatformSettingsPath, inputForRunner, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
+  claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
   runtimeDescriptor, type ExitEvidence,
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
@@ -169,12 +169,12 @@ test("Claude's staged platform settings path is overridable and published", () =
   }
 });
 
-test("runner proxy environment wins over task secrets for Claude and Codex", () => {
+test("runner proxy environment wins over task secrets for Claude, Codex, and Pi", () => {
   const config = {
     path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [],
     proxyEnvironment: { HTTP_PROXY: "http://runner-http", HTTPS_PROXY: "http://runner-https", NO_PROXY: "localhost" },
   };
-  for (const runner of ["CLAUDE", "CODEX"] as const) {
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
     const env = buildChildEnvironment(
       config,
       { ...claim, runner, secrets: { ...claim.secrets, HTTP_PROXY: "http://task-http", HTTPS_PROXY: "http://task-https", NO_PROXY: "task" } },
@@ -185,6 +185,24 @@ test("runner proxy environment wins over task secrets for Claude and Codex", () 
     assert.equal(env.HTTPS_PROXY, "http://runner-https");
     assert.equal(env.NO_PROXY, "localhost");
   }
+});
+
+test("a credential-bearing runner proxy stays in env and out of run-as argv", () => {
+  const proxyUrl = ["http://proxy-user:", "proxy-pass@", "proxy.invalid:7897"].join("");
+  const config = {
+    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["sudo", "-E", "--"],
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    proxyEnvironment: { HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl },
+  };
+  const env = buildChildEnvironment(config, { ...claim, runner: "PI" }, scratch, "/work");
+  const launch = launchArgv(config, "PI", ["--version"], env);
+  const argv = [launch.executable, ...launch.args].join(" ");
+  assert.equal(env.HTTP_PROXY, proxyUrl);
+  assert.equal(env.HTTPS_PROXY, proxyUrl);
+  assert.equal(argv.includes(proxyUrl), false);
+  assert.equal(argv.includes("proxy-pass"), false);
+  assert.match(argv, /RUNNER_WORKSPACE_ROOT=/u);
+  assert.match(argv, /CONTROL_PLANE_STATE_DIR=/u);
 });
 
 test("the interpreter the CLI is told to run the MCP server with is overridable and published", () => {
