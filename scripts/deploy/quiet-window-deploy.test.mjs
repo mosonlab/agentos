@@ -513,10 +513,35 @@ test("installer verifies and renders the production container backup contract", 
   assert.match(rendered, /DEPLOY_CONTAINER_PG_DUMP_BINARY/u);
   assert.doesNotMatch(rendered, /DEPLOY_PG_DUMP_BINARY/u);
   assert.doesNotMatch(rendered, /__[A-Z_]+__/u);
-  const renderedPath = join(root, "rendered.plist");
-  writeFileSync(renderedPath, rendered);
-  execFileSync("/usr/bin/plutil", ["-lint", renderedPath], { stdio: "ignore" });
   rmSync(root, { recursive: true, force: true });
+});
+
+test("macOS plutil accepts the rendered launchd contract", { skip: process.platform !== "darwin" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-plutil-"));
+  try {
+    const template = readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8");
+    const rendered = renderLaunchdPlist(template, {
+      nodeBinary: "/opt/node/bin/node",
+      deployScript: "/opt/agentos/deploy.mjs",
+      repositoryRoot: "/opt/agentos/repository",
+      stdoutPath: "/var/log/agentos-deploy.stdout",
+      stderrPath: "/var/log/agentos-deploy.stderr",
+      path: "/opt/node/bin:/usr/bin:/bin",
+      gitBinary: "/usr/bin/git",
+      npmBinary: "/opt/node/bin/npm",
+      backup: {
+        mode: "container",
+        dockerBinary: "/usr/local/bin/docker",
+        container: "agentos-postgres-1",
+        pgDumpBinary: "/usr/local/bin/pg_dump",
+      },
+    });
+    const renderedPath = join(root, "rendered.plist");
+    writeFileSync(renderedPath, rendered);
+    execFileSync("/usr/bin/plutil", ["-lint", renderedPath], { stdio: "ignore" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("installer proves node, git, and npm under the exact rendered launchd PATH", () => {
