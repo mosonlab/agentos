@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
-import type { RunnerConfig, RunnerKind } from "./config.js";
+import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import type { InFlightTool } from "./budget.js";
 import { isTransientNetworkError } from "./network-retry.js";
 import { workspaceEnvironment, type AgentScratch } from "./workspace.js";
@@ -143,7 +143,14 @@ const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 
 export const mcpServerPath = (): string => process.env.RUNNER_MCP_SERVER_PATH ?? join(packageRoot, "dist", "mcp-server.js");
 export const piExtensionPath = (): string => process.env.RUNNER_PI_EXTENSION_PATH ?? join(packageRoot, "assets", "pi-agentos-extension.ts");
-export const claudePlatformSettingsPath = (): string => join(packageRoot, "assets", "claude-platform-settings.json");
+export const claudePlatformSettingsPath = (): string =>
+  process.env.RUNNER_CLAUDE_SETTINGS_PATH ?? join(packageRoot, "assets", "claude-platform-settings.json");
+
+const codexPlatformBaselinePath = (): string => join(
+  process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
+  "codex",
+  "config.toml",
+);
 
 /**
  * The interpreter the CLI is told to run the MCP server with.
@@ -172,6 +179,8 @@ export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): stri
   nodeExecPath: process.execPath,
   mcpServerPath: mcpServerPath(),
   piExtensionPath: piExtensionPath(),
+  claudeSettingsPath: claudePlatformSettingsPath(),
+  codexBaselinePath: codexPlatformBaselinePath(),
   runAsPrefix: runAsPrefix.join(" "),
 });
 

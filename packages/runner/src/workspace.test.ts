@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chown, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import test from "node:test";
@@ -377,6 +377,41 @@ test("Codex session config contains only the platform baseline and host auth, th
     await assert.rejects(stat(scratch.configRoot), /ENOENT/u);
   } finally {
     await rm(scratch.configRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a distinct run-as uid can create and read its Codex config root", {
+  skip: typeof process.getuid !== "function" || process.getuid() !== 0
+    ? "requires root to exercise a genuinely distinct uid"
+    : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-codex-distinct-uid-"));
+  const targetUser = "daemon";
+  const targetUid = Number(execFileSync("id", ["-u", targetUser], { encoding: "utf8" }).trim());
+  const targetGid = Number(execFileSync("id", ["-g", targetUser], { encoding: "utf8" }).trim());
+  const home = join(root, "runner-home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await writeFile(join(home, ".codex", "auth.json"), '{"tokens":"target-only"}\n', { mode: 0o600 });
+  await chown(root, targetUid, targetGid);
+  await chown(home, targetUid, targetGid);
+  await chown(join(home, ".codex"), targetUid, targetGid);
+  await chown(join(home, ".codex", "auth.json"), targetUid, targetGid);
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: ["/usr/bin/sudo", "-n", "-u", targetUser, "--"],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home,
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-codex-distinct-uid");
+  try {
+    await provisionSessionConfig(config, "CODEX", scratch);
+    assert.equal((await stat(scratch.configRoot)).uid, targetUid);
+    assert.equal((await stat(join(scratch.configRoot, "auth.json"))).uid, targetUid);
+    assert.equal(execFileSync("/usr/bin/sudo", ["-n", "-u", targetUser, "--", "/bin/cat", join(scratch.configRoot, "auth.json")], { encoding: "utf8" }), '{"tokens":"target-only"}\n');
+  } finally {
+    await cleanupAgentScratch(config, scratch);
     await rm(root, { recursive: true, force: true });
   }
 });

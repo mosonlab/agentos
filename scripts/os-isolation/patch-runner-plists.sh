@@ -165,7 +165,11 @@ else
   done
   # Pointing RUNNER_MCP_SERVER_PATH at a file that is not there turns every
   # session into an MCP protocol error with no mention of this rollout.
-  for asset in "$LIB_DIR/mcp-server.js" "$LIB_DIR/pi-agentos-extension.ts"; do
+  for asset in \
+    "$LIB_DIR/mcp-server.js" \
+    "$LIB_DIR/pi-agentos-extension.ts" \
+    "$LIB_DIR/claude-platform-settings.json" \
+    "$LIB_DIR/session-config-baseline/codex/config.toml"; do
     [ -r "$asset" ] || fail "$asset is missing; run provision.sh --apply after building the runner"
   done
   [ -d "$WORKSPACE_ROOT" ] || fail "$WORKSPACE_ROOT does not exist; run provision.sh --apply first"
@@ -295,7 +299,7 @@ expected_keys() {
   if [ "$label" = "$API_LABEL" ]; then
     printf 'RUNNER_WORKSPACE_ROOT RUNNER_RUN_AS_PREFIX'
   else
-    printf 'RUNNER_RUN_AS_PREFIX RUNNER_HOME RUNNER_WORKSPACE_ROOT RUNNER_MCP_SERVER_PATH RUNNER_PI_EXTENSION_PATH RUNNER_PATH'
+    printf 'RUNNER_RUN_AS_PREFIX RUNNER_HOME RUNNER_WORKSPACE_ROOT RUNNER_MCP_SERVER_PATH RUNNER_PI_EXTENSION_PATH RUNNER_CLAUDE_SETTINGS_PATH RUNNER_SESSION_CONFIG_BASELINE_ROOT RUNNER_PATH'
   fi
 }
 
@@ -403,6 +407,8 @@ else
     # readable by it. provision.sh stages root-owned copies.
     set_env "$file" "$label" RUNNER_MCP_SERVER_PATH "$LIB_DIR/mcp-server.js" "$manifest"
     set_env "$file" "$label" RUNNER_PI_EXTENSION_PATH "$LIB_DIR/pi-agentos-extension.ts" "$manifest"
+    set_env "$file" "$label" RUNNER_CLAUDE_SETTINGS_PATH "$LIB_DIR/claude-platform-settings.json" "$manifest"
+    set_env "$file" "$label" RUNNER_SESSION_CONFIG_BASELINE_ROOT "$LIB_DIR/session-config-baseline" "$manifest"
     if [ -f "$BIN_DIR/codex-with-proxy.sh" ] && [ -n "$(buddy_get "$file" CODEX_BINARY)" ]; then
       set_env "$file" "$label" CODEX_BINARY "$BIN_DIR/codex-with-proxy.sh" "$manifest"
     fi
@@ -454,6 +460,8 @@ else
           RUNNER_WORKSPACE_ROOT)    want="$WORKSPACE_ROOT" ;;
           RUNNER_MCP_SERVER_PATH)   want="$LIB_DIR/mcp-server.js" ;;
           RUNNER_PI_EXTENSION_PATH) want="$LIB_DIR/pi-agentos-extension.ts" ;;
+          RUNNER_CLAUDE_SETTINGS_PATH) want="$LIB_DIR/claude-platform-settings.json" ;;
+          RUNNER_SESSION_CONFIG_BASELINE_ROOT) want="$LIB_DIR/session-config-baseline" ;;
           RUNNER_PATH)              want="" ;;
         esac
         if [ "$key" = RUNNER_PATH ]; then

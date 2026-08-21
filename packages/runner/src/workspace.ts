@@ -1,7 +1,7 @@
 import { appendFile, chmod, copyFile, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
 import { defaultSessionConfigBaselineRoot, runnerProxyEnvironment, type RunnerConfig, type RunnerKind } from "./config.js";
@@ -99,7 +99,17 @@ const sessionConfigParent = async (): Promise<string> => {
 
 const sessionConfigPath = async (sessionId: string): Promise<string> => {
   if (!/^[A-Za-z0-9_-]+$/u.test(sessionId)) throw new Error(`Invalid session id for CLI config root: ${sessionId}`);
-  return join(await sessionConfigParent(), sessionId);
+  return join(await sessionConfigParent(), sessionId, "config");
+};
+
+export const sessionConfigRootExists = async (scratch: AgentScratch): Promise<boolean> => {
+  try {
+    const info = await lstat(scratch.configRoot);
+    return info.isDirectory() && !info.isSymbolicLink();
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 };
 
 /**
@@ -147,17 +157,20 @@ export const cleanupAgentScratch = async (
   scratch: AgentScratch,
   options: { retainConfigRoot?: boolean } = {},
 ): Promise<void> => {
+  const configParent = dirname(scratch.configRoot);
   if (config.runAsPrefix.length > 0) {
     await command(config, "/bin/rm", [
       "-rf", "--", scratch.workspaceRoot, scratch.stateDir,
       ...(options.retainConfigRoot ? [] : [scratch.configRoot]),
-    ], scratch.base, workspaceEnvironment(config));
+    ], await realpath(tmpdir()), workspaceEnvironment(config));
+    if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   } else {
     await Promise.all([
       rm(scratch.workspaceRoot, { recursive: true, force: true }),
       rm(scratch.stateDir, { recursive: true, force: true }),
       ...(options.retainConfigRoot ? [] : [rm(scratch.configRoot, { recursive: true, force: true })]),
     ]);
+    if (!options.retainConfigRoot) await rm(configParent, { recursive: true, force: true });
   }
   await rm(scratch.base, { recursive: true, force: true });
 };
@@ -190,13 +203,16 @@ export const provisionSessionConfig = async (
   }
 
   const baseline = codexBaselineFile(config);
+  const configParent = dirname(scratch.configRoot);
   try {
+    await mkdir(configParent, { mode: 0o733 });
+    await chmod(configParent, 0o733);
     if (config.runAsPrefix.length > 0) {
       await command(
         config,
         "/bin/sh",
         ["-c", 'umask 077; mkdir "$1"; cp "$2" "$1/config.toml"; chmod 700 "$1"; chmod 600 "$1/config.toml"', "agentos-codex-config", scratch.configRoot, baseline],
-        scratch.base,
+        configParent,
         workspaceEnvironment(config),
       );
     } else {
@@ -206,6 +222,7 @@ export const provisionSessionConfig = async (
       await chmod(join(scratch.configRoot, "config.toml"), 0o600);
     }
   } catch (error: unknown) {
+    await chmod(configParent, 0o711).catch(() => undefined);
     throw new Error(`Unable to create session CLI config root ${scratch.configRoot} from baseline ${baseline}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 
@@ -213,14 +230,19 @@ export const provisionSessionConfig = async (
   const destination = join(scratch.configRoot, "auth.json");
   try {
     if (config.runAsPrefix.length > 0) {
-      await command(config, "/bin/cp", [source, destination], scratch.base, workspaceEnvironment(config));
-      await command(config, "/bin/chmod", ["600", destination], scratch.base, workspaceEnvironment(config));
+      await command(config, "/bin/cp", [source, destination], configParent, workspaceEnvironment(config));
+      await command(config, "/bin/chmod", ["600", destination], configParent, workspaceEnvironment(config));
     } else {
       await copyFile(source, destination);
       await chmod(destination, 0o600);
     }
   } catch (error: unknown) {
     throw new Error(`Unable to establish Codex authentication in ${scratch.configRoot} from ${source}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  } finally {
+    // The target account needed write access only long enough to create its
+    // own 0700 root. Afterwards other runner accounts may traverse the
+    // session-specific parent but cannot add, replace, or enumerate entries.
+    await chmod(configParent, 0o711);
   }
 };
 
