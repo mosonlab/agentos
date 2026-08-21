@@ -16,6 +16,7 @@ export * from "./maintenance-lock.js";
 export * from "./service-maintenance-lock.js";
 export * from "./merge-integrator.js";
 export * from "./merge-integrator-db.js";
+export * from "./merge-tail.js";
 export * from "./workflow.js";
 export * from "./usage.js";
 export * from "./cost.js";

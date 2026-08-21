@@ -114,6 +114,38 @@ test("§11.3 — the merge call is one PUT carrying only the sha and the pinned 
   assert.deepEqual(JSON.parse(requests[0]!.body!), { sha: "a".repeat(40), merge_method: "merge" });
 });
 
+test("canonical merge constructs a two-parent tree without .chain and leaves the PR branch untouched", async () => {
+  const head = "a".repeat(40);
+  const base = "b".repeat(40);
+  const headTree = "1".repeat(40);
+  const cleanTree = "2".repeat(40);
+  const mergeCommit = "c".repeat(40);
+  const { client, requests } = clientWith([
+    { status: 200, body: JSON.stringify({ tree: { sha: headTree } }) },
+    { status: 200, body: JSON.stringify({ tree: [{ path: ".chain/topic/spec.md", sha: "3".repeat(40) }, { path: "src/a.ts", sha: "4".repeat(40) }] }) },
+    { status: 201, body: JSON.stringify({ sha: cleanTree }) },
+    { status: 201, body: JSON.stringify({ sha: mergeCommit }) },
+    { status: 200, body: JSON.stringify({ ref: "refs/heads/main", object: { sha: mergeCommit } }) },
+  ]);
+  assert.deepEqual(
+    await client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, head, { ref: "main", sha: base }),
+    { status: "merged", sha: mergeCommit },
+  );
+  assert.deepEqual(JSON.parse(requests[2]!.body!), {
+    base_tree: headTree,
+    tree: [{ path: ".chain", mode: "040000", type: "tree", sha: null }],
+  });
+  assert.deepEqual(JSON.parse(requests[3]!.body!), {
+    message: "Merge pull request #7\n\nAgentOS autonomous exact-head merge",
+    tree: cleanTree,
+    parents: [base, head],
+  });
+  assert.equal(requests[4]!.method, "PATCH");
+  assert.match(requests[4]!.url, /\/git\/refs\/heads\/main$/u);
+  assert.deepEqual(JSON.parse(requests[4]!.body!), { sha: mergeCommit, force: false });
+  assert.equal(requests.some((request) => request.url.includes("git/refs/heads/feature")), false);
+});
+
 test("§11.3 — every documented merge status maps to its named classification", async () => {
   const expectations: Array<[number, string]> = [
     [409, "head-moved"],

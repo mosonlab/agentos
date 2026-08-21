@@ -11,6 +11,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   // mismatch assertion below never fires on it, and `INHERIT` is inert because
   // no adapter is ever constructed for it (agents/roles/merge-integrator.md).
   { name: "merge-integrator", model: "mechanical/merge-executor-v1", runner: RunnerPreference.INHERIT },
+  { name: "merge-resolver", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "plan-reviser", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
@@ -21,10 +22,9 @@ export const CANONICAL_AGENT_DEFAULTS = [
 ] as const;
 
 /**
- * The Direct tier: no spec or plan phase, and no mechanical merge — the
- * integrator's bidirectional binding admits only step 12 of the twelve-step
- * template, so a direct chain ends at its human pull-request gate and the
- * human merges. Implementation is senior-dev, not the executioner, whose
+ * The Direct tier has no spec or plan phase and ends in the same mechanical
+ * readiness and merge contract as the full-assurance template. Implementation
+ * is senior-dev, not the executioner, whose
  * contract presumes an existing reviewed plan.
  */
 export const DIRECT_TEMPLATE_NAME = "direct-engineer-workflow";

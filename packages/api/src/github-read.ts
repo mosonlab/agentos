@@ -92,6 +92,12 @@ export type GitHubReader = {
     baseRef: string,
     signal: AbortSignal,
   ) => Promise<PullRequestSnapshot>;
+  compareCommits?: (
+    repository: string,
+    baseSha: string,
+    headSha: string,
+    signal: AbortSignal,
+  ) => Promise<{ files: Array<{ filename: string; patch: string | null }> }>;
 };
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
@@ -224,6 +230,19 @@ export const createGitHubReader = (
   fetchImpl: typeof fetch = fetch,
 ): GitHubReader | null => {
   if (!token) return null;
+  const request = async (url: string, init: RequestInit): Promise<Response> => {
+    let response: Response;
+    try {
+      response = await fetchImpl(url, init);
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === "AbortError") throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
+      const message = error instanceof Error ? error.message : "unknown";
+      throw new GitHubReadError(`GitHub read failed: ${message}`, isDeterministicRefusal(error) ? "permission" : "transport");
+    }
+    if (response.status === 401 || response.status === 403) throw new GitHubReadError(`GitHub read refused with ${response.status}`, "permission");
+    if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
+    return response;
+  };
   return {
     readPullRequest: async (repository, prNumber, baseRef, signal) => {
       const [owner, name] = repository.split("/");
@@ -258,6 +277,26 @@ export const createGitHubReader = (
       }
       if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
       return parsePullRequestResponse(repository, baseRef, await response.json(), new Date().toISOString());
+    },
+    compareCommits: async (repository, baseSha, headSha, signal) => {
+      const [owner, name, ...rest] = repository.split("/");
+      if (!owner || !name || rest.length > 0) throw new GitHubReadError(`malformed repository ${repository}`, "response");
+      const response = await request(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/compare/${baseSha}...${headSha}`,
+        {
+          method: "GET",
+          signal,
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+        },
+      );
+      const payload = asObject(await response.json());
+      const files = asArray(payload?.files).map((entry) => asObject(entry)).flatMap((entry) => (
+        entry && typeof entry.filename === "string"
+          ? [{ filename: entry.filename, patch: typeof entry.patch === "string" ? entry.patch : null }]
+          : []
+      ));
+      if (!Array.isArray(payload?.files)) throw new GitHubReadError("comparison response has no files array", "response");
+      return { files };
     },
   };
 };

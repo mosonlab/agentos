@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Run one merge gate in the first free slot: this machine first, then one of the
-# offshore worker's two. Runs ON THE LOCAL MACHINE:
+# Run one merge gate in the first free slot: the offshore worker's two first,
+# then this machine only while both worker slots are busy. Runs ON THE LOCAL MACHINE:
 #
 #   scripts/gate-worker/gate-dispatch.sh                    # gate the local HEAD
 #   scripts/gate-worker/gate-dispatch.sh <oid>              # gate that commit
@@ -225,14 +225,6 @@ while :; do
   round_broken=""
   outcome=0
 
-  if local_eligible; then
-    try_slot local || outcome=$?
-    case "$outcome" in
-      0) run_local; exit $? ;;
-      1) round_busy=$(( round_busy + 1 )) ;;
-      *) round_broken="${round_broken} local" ;;
-    esac
-  fi
   for slot in remote-1 remote-2; do
     outcome=0
     try_slot "$slot" || outcome=$?
@@ -242,6 +234,19 @@ while :; do
       *) round_broken="${round_broken} ${slot}" ;;
     esac
   done
+  # Local capacity protects the production machine from agent-driven gate
+  # load. It is spillover only: both remote slots must be positively busy in
+  # this round. A broken remote lock is not "busy" and never unlocks local as a
+  # silent fallback.
+  if [ "$round_busy" -eq 2 ] && local_eligible; then
+    outcome=0
+    try_slot local || outcome=$?
+    case "$outcome" in
+      0) run_local; exit $? ;;
+      1) round_busy=$(( round_busy + 1 )) ;;
+      *) round_broken="${round_broken} local" ;;
+    esac
+  fi
   # Union, not concatenation: a slot that is broken stays broken every round, and
   # an hour of polling would otherwise build a message naming it 120 times.
   for slot in $round_broken; do

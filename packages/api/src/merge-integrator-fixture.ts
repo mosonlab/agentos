@@ -1,12 +1,11 @@
 /**
  * Shared fixture for the Merge Integrator v1.1 database tests.
  *
- * Every integrator test needs the same shape — a chain whose step 11 is a human
- * gate and whose step 12 is the mechanical integrator step — and the shape is
- * load-bearing: `isIntegratorStep` is a conjunction over the template name, the
- * step index, and the output kind, so a fixture that gets any of them wrong
- * silently tests the ordinary non-integrator path instead. Building it once here
- * keeps the dbtest files honest about what they are exercising.
+ * These compatibility tests deliberately model a pre-autonomous-tail chain
+ * whose snapshot still has a human gate at step 11 and a mechanical integrator
+ * at step 12. The shape is load-bearing: `isIntegratorStep` is a conjunction
+ * over the template name, step index, and output kind, so a fixture that gets
+ * any of them wrong silently tests the ordinary non-integrator path instead.
  */
 
 import {

@@ -131,6 +131,25 @@ test("a valid authorization is selected and reports no near-matches", () => {
   assert.equal(result.ignoredCount, 0);
 });
 
+test("a server-owned readiness authorization needs no human decision and cannot be forged as operator activity", () => {
+  const binding = "mechanical:readiness-1";
+  const mechanical: CandidateActivity = {
+    id: "mechanical-authorization",
+    createdAt: new Date("2026-08-18T02:00:01.100Z"),
+    actorType: "control-plane",
+    metadata: authorizationMetadata({
+      ...evidence(),
+      issuedAt: "2026-08-18T02:00:01.100Z",
+      decision: { channel: "mechanical", inboxDecisionId: binding, inboxMessageId: binding },
+    }),
+  };
+  const selected = selectAuthorization([mechanical], [], [], "readiness-1");
+  assert.equal(selected.refusal, null);
+  assert.equal(selected.authorization?.headSha, HEAD);
+  assert.equal(selectAuthorization([{ ...mechanical, actorType: "operator" }], [], [], "readiness-1").authorization, null);
+  assert.equal(selectAuthorization([mechanical], [], [], "another-readiness").authorization, null);
+});
+
 test("rule 1: a non-operator actorType is ignored", () => {
   const result = selectAuthorization([activity(evidence(), { actorType: "session" })], [decision()], [card()], "step9");
   assert.equal(result.authorization, null);

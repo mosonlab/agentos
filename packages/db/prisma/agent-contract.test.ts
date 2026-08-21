@@ -111,7 +111,7 @@ test("the canonical twelve-step template sources split code review and preserve 
       { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
       { stepIndex: 9, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
       { stepIndex: 10, agentName: "librarian", outputKind: "documentation" },
-      { stepIndex: 11, agentName: null, outputKind: "approval" },
+      { stepIndex: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
@@ -142,7 +142,7 @@ test("only implementation opens a pull request, and the integrator is not a mode
   assert.equal(catalogRunnerForModel(sentinel.model), null);
 });
 
-test("the direct template sources keep the review spine, drop planning, and end at the human gate", async () => {
+test("the direct template sources keep the review spine, drop planning, and end in mechanical readiness and merge", async () => {
   const directTemplateSteps = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   assert.deepEqual(
     directTemplateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
@@ -152,7 +152,8 @@ test("the direct template sources keep the review spine, drop planning, and end 
       { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
       { stepIndex: 5, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
-      { stepIndex: 6, agentName: null, outputKind: "approval" },
+      { stepIndex: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   // Only implementation opens the chain's pull request; the blind review
@@ -161,15 +162,13 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
   assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
-  assert.match(directTemplateSteps[5]!.prompt, /no mechanical merge step/u);
-  // The human pull-request gate is the terminal step: the integrator's
-  // bidirectional binding admits no mechanical merge outside the twelve-step
-  // template, so no direct step may bind the sentinel.
+  assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
+  // Readiness is server-owned and the terminal step is the sentinel-bound
+  // mechanical executor, with no human approval gate on either.
   const last = directTemplateSteps.at(-1)!;
-  assert.equal(last.approvalGate, true);
-  assert.equal(last.agentName, null);
+  assert.equal(last.approvalGate, false);
+  assert.equal(last.agentName, INTEGRATOR_AGENT_NAME);
   for (const step of directTemplateSteps) {
-    assert.notEqual(step.agentName, INTEGRATOR_AGENT_NAME);
     assert.equal(
       integratorBindingValid(step.agentName, { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: DIRECT_TEMPLATE_NAME } }),
       true,
@@ -181,7 +180,7 @@ test("the complete template source inventory contains only the twelve-step and d
   const templates = await loadAllTemplateStepSources();
   assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
   assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
-  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 6);
+  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 7);
 });
 
 test("the complete template source inventory rejects an unregistered workflow directory", async () => {

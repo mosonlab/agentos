@@ -51,6 +51,7 @@ export type Deps = {
   merge: (
     reference: { owner: string; name: string; number: number },
     expectedHeadSha: string,
+    expectedBase: { ref: string; sha: string },
   ) => Promise<MergeResponse>;
   disableAutoMerge: (pullRequestId: string) => Promise<import("./github.js").DisarmResult>;
   dequeuePullRequest: (entryId: string) => Promise<import("./github.js").DisarmResult>;
@@ -458,7 +459,11 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
         }
       }
       state.sends += 1;
-      const response = await deps.merge(reference, authorization.headSha);
+      const response = await deps.merge(
+        reference,
+        authorization.headSha,
+        { ref: authorization.baseRef, sha: authorization.baseSha },
+      );
       state.response = response;
       if (response.status === "merged") return { status: "applied", value: { via: "response", sha: response.sha } };
       // `unknown` is the only lost class the transport produces: a 5xx, a

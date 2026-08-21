@@ -8,6 +8,7 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   legacyNineStepTemplateName,
   legacyTenStepTemplateName,
+  legacyHumanTwelveStepTemplateName,
 } from "../src/merge-integrator.js";
 import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
@@ -121,6 +122,11 @@ const main = async (): Promise<void> => {
       && existing.steps.every((step, index) => step.stepIndex === index + 1)
       && historicalIntegrator?.outputKind === INTEGRATOR_OUTPUT_KIND
       && historicalIntegrator.assigneeAgent?.name === INTEGRATOR_AGENT_NAME;
+    const isHistoricalHumanTwelveStepTemplate = existing?.steps.length === 12
+      && existing.steps[10]?.assigneeType === AssigneeType.HUMAN
+      && existing.steps[10]?.outputKind === "approval"
+      && existing.steps[11]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
+      && existing.steps[11]?.outputKind === INTEGRATOR_OUTPUT_KIND;
 
     // A historical 9- or 10-row template cannot be rewritten in place: its
     // in-flight tasks keep foreign keys to rows 6-10, whose meanings changed in
@@ -129,7 +135,9 @@ const main = async (): Promise<void> => {
     // new template for new Runs. Runtime mechanical recognition remains
     // limited to the marked 10-row shape, because the 9-row shape had no
     // integrator.
-    const legacyName = existing && isHistoricalNineStepTemplate
+    const legacyName = existing && isHistoricalHumanTwelveStepTemplate
+      ? legacyHumanTwelveStepTemplateName(existing.id)
+      : existing && isHistoricalNineStepTemplate
       ? legacyNineStepTemplateName(existing.id)
       : existing && isHistoricalTenStepTemplate
         ? legacyTenStepTemplateName(existing.id)
@@ -144,13 +152,13 @@ const main = async (): Promise<void> => {
     return tx.taskTemplate.upsert({
       where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
       update: {
-        description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
+        description: "Twelve-step Full Assurance workflow with dual independent code review, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
         variables: ["branchName"],
       },
       create: {
         projectId: project.id,
         name: INTEGRATOR_TEMPLATE_NAME,
-        description: "Twelve-step Full Assurance workflow with dual independent code review, regression verification, human approval, and mechanical merge execution.",
+        description: "Twelve-step Full Assurance workflow with dual independent code review, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
         variables: ["branchName"],
       },
     });
@@ -166,7 +174,7 @@ const main = async (): Promise<void> => {
     "Apply review fixes",
     "Regression verification",
     "Librarian",
-    "Human PR review",
+    "Merge readiness",
     "Merge execution",
   ] as const;
   for (const step of templateSteps) {
@@ -183,16 +191,28 @@ const main = async (): Promise<void> => {
     });
   }
 
+  const historicalDirect = await prisma.taskTemplate.findUnique({
+    where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  if (historicalDirect?.steps.length === 6
+    && historicalDirect.steps[5]?.assigneeType === AssigneeType.HUMAN
+    && historicalDirect.steps[5]?.outputKind === "approval") {
+    await prisma.taskTemplate.update({
+      where: { id: historicalDirect.id },
+      data: { name: `${DIRECT_TEMPLATE_NAME}-legacy-human-6-${historicalDirect.id}` },
+    });
+  }
   const directTemplate = await prisma.taskTemplate.upsert({
     where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
     update: {
-      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, regression verification, and human pull-request review. No spec or plan phase and no mechanical merge.",
+      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
       variables: ["branchName"],
     },
     create: {
       projectId: project.id,
       name: DIRECT_TEMPLATE_NAME,
-      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, regression verification, and human pull-request review. No spec or plan phase and no mechanical merge.",
+      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
       variables: ["branchName"],
     },
   });
@@ -202,7 +222,8 @@ const main = async (): Promise<void> => {
     "Code review and adjudication (Opus)",
     "Apply review fixes",
     "Regression verification",
-    "Human PR review",
+    "Merge readiness",
+    "Merge execution",
   ] as const;
   for (const step of directTemplateSteps) {
     const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
@@ -218,7 +239,7 @@ const main = async (): Promise<void> => {
     });
   }
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the six-step direct template.`);
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the seven-step direct template.`);
 };
 
 try {

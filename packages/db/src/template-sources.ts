@@ -12,7 +12,7 @@ import { parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   { name: INTEGRATOR_TEMPLATE_NAME, stepCount: 12 },
-  { name: DIRECT_TEMPLATE_NAME, stepCount: 6 },
+  { name: DIRECT_TEMPLATE_NAME, stepCount: 7 },
 ] as const;
 export type CanonicalTemplateName = (typeof CANONICAL_TEMPLATE_SOURCE_SPECS)[number]["name"];
 const STRUCTURAL_FIELDS = [

@@ -74,6 +74,10 @@ import {
   type CandidateActivity,
   type CardRow,
   type DecisionRow,
+  asJsonObject,
+  isMergeReadinessStep,
+  MERGE_TAIL_KIND,
+  parseRegressionVerdict,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -138,6 +142,190 @@ export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
 }
+
+type DbTx = Prisma.TransactionClient;
+
+const openMergeTailInbox = async (
+  tx: DbTx,
+  input: { taskId: string; agentId: string; sessionId: string; reason: string },
+): Promise<void> => {
+  await tx.inboxMessage.create({ data: {
+    from: "AGENT",
+    agentId: input.agentId,
+    sessionId: input.sessionId,
+    taskId: input.taskId,
+    kind: "TEXT",
+    body: `Autonomous merge tail stopped: ${input.reason}`,
+    dedupeKey: `merge-tail-stop:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`,
+  } });
+};
+
+const createMergeTailRepairTask = async (
+  tx: DbTx,
+  input: {
+    regressionTask: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; targetBranch: string | null };
+    sourceRun: { id: string; branch: string | null };
+    agentName: string;
+    repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
+    headSha: string;
+    baseHeadSha: string;
+    summary: string;
+    now: Date;
+  },
+): Promise<{ taskId: string } | { refusal: string }> => {
+  const { regressionTask } = input;
+  if (!regressionTask.repoId || !regressionTask.chainId || !regressionTask.templateId || !input.sourceRun.branch) {
+    return { refusal: "repair task cannot resolve its chain repository and shared branch" };
+  }
+  const agent = await tx.agent.findFirst({
+    where: { projectId: regressionTask.projectId, name: input.agentName, archivedAt: null },
+  });
+  if (!agent) return { refusal: `required repair agent ${input.agentName} is absent or archived` };
+  const grant = await tx.agentRepoAccess.findFirst({
+    where: { projectId: regressionTask.projectId, agentId: agent.id, repoId: regressionTask.repoId },
+  });
+  if (!grant) return { refusal: `required repair agent ${input.agentName} has no repository grant` };
+
+  const prompt = input.repairKind === "refresh-conflict"
+    ? [
+      `Resolve the refresh conflict between chain head ${input.headSha} and target head ${input.baseHeadSha}.`,
+      input.summary,
+      "Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist JSON with outcome resolved or unable.",
+    ].join("\n\n")
+    : [
+      `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
+      input.summary,
+      "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output.",
+    ].join("\n\n");
+  const task = await tx.task.create({ data: {
+    projectId: regressionTask.projectId,
+    repoId: regressionTask.repoId,
+    followUpTaskId: regressionTask.id,
+    name: `Autonomous merge tail: ${input.repairKind}`,
+    description: prompt,
+    assigneeType: "AGENT",
+    assigneeAgentId: agent.id,
+    approvalGate: false,
+    opensPullRequest: false,
+    status: TaskStatus.TODO,
+    targetBranch: input.sourceRun.branch,
+    maxSessionsPerTask: 1,
+  } });
+  const repairRun = await enqueueTaskRun(tx, task.id, input.now);
+  await tx.run.update({
+    where: { id: repairRun.id },
+    data: { branch: input.sourceRun.branch, targetBranch: input.sourceRun.branch },
+  });
+  await tx.taskActivity.createMany({ data: [
+    {
+      taskId: regressionTask.id,
+      actorType: "control-plane",
+      body: `Automatic ${input.repairKind} attempt queued at chain head ${input.headSha} against ${input.baseHeadSha}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.repairAttempt,
+        schemaVersion: 1,
+        repairKind: input.repairKind,
+        repairTaskId: task.id,
+        headSha: input.headSha,
+        baseHeadSha: input.baseHeadSha,
+      },
+    },
+    {
+      taskId: task.id,
+      actorType: "control-plane",
+      body: `Automatic ${input.repairKind} attempt for regression task ${regressionTask.id}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.repairAttempt,
+        schemaVersion: 1,
+        repairKind: input.repairKind,
+        regressionTaskId: regressionTask.id,
+        headSha: input.headSha,
+        baseHeadSha: input.baseHeadSha,
+      },
+    },
+  ] });
+  await tx.task.update({
+    where: { id: regressionTask.id },
+    data: { status: TaskStatus.REVIEW, failureReason: `${input.repairKind}: automatic repair ${task.id} queued at ${input.headSha}` },
+  });
+  return { taskId: task.id };
+};
+
+export const handleRegressionCompletion = async (
+  tx: DbTx,
+  input: {
+    task: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; targetBranch: string | null };
+    run: { id: string; agentId: string; branch: string | null; headSha: string | null; sessionId: string };
+    now: Date;
+  },
+): Promise<"advance" | "handled"> => {
+  const output = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
+  const parsed = parseRegressionVerdict(output?.body);
+  const stop = async (reason: string): Promise<"handled"> => {
+    await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+    await tx.taskActivity.create({ data: {
+      taskId: input.task.id,
+      actorType: "control-plane",
+      body: `Regression did not advance: ${reason}`,
+      metadata: { kind: MERGE_TAIL_KIND.regression, schemaVersion: 1, state: "stopped", reason },
+    } });
+    await openMergeTailInbox(tx, { taskId: input.task.id, agentId: input.run.agentId, sessionId: input.run.sessionId, reason });
+    return "handled";
+  };
+  if (parsed.status === "invalid") return stop(parsed.reason);
+  const verdict = parsed.verdict;
+  const effectiveHead = input.run.headSha ?? output?.commitSha ?? null;
+  if (effectiveHead !== verdict.headSha || output?.commitSha !== verdict.headSha) {
+    return stop(`stale regression evidence: verdict ${verdict.headSha}, output ${output?.commitSha ?? "missing"}, run ${effectiveHead ?? "missing"}`);
+  }
+  await tx.taskActivity.create({ data: {
+    taskId: input.task.id,
+    actorType: "control-plane",
+    body: `Regression ${verdict.outcome} recorded for chain head ${verdict.headSha} against target ${verdict.baseHeadSha}`,
+    metadata: { kind: MERGE_TAIL_KIND.regression, ...verdict },
+  } });
+  if (verdict.outcome === "pass") return "advance";
+
+  const attempts = await tx.taskActivity.findMany({
+    where: { taskId: input.task.id }, select: { metadata: true }, orderBy: { createdAt: "asc" },
+  });
+  const repairKind = verdict.outcome === "refresh-conflict" ? "refresh-conflict" : "gate-fix";
+  const alreadyAttempted = attempts.some((row) => {
+    const metadata = asJsonObject(row.metadata);
+    if (metadata?.kind !== MERGE_TAIL_KIND.repairAttempt || metadata.repairKind !== repairKind) return false;
+    return repairKind === "gate-fix" || metadata.headSha === verdict.headSha;
+  });
+  if (alreadyAttempted) {
+    return stop(repairKind === "refresh-conflict"
+      ? `second refresh conflict on chain head ${verdict.headSha}`
+      : `second merge gate FAIL on chain head ${verdict.headSha}`);
+  }
+  let agentName = "merge-resolver";
+  if (repairKind === "gate-fix") {
+    const fixTask = await tx.task.findFirst({
+      where: {
+        projectId: input.task.projectId,
+        chainId: input.task.chainId,
+        templateId: input.task.templateId,
+        templateStep: { outputKind: "fixed-implementation" },
+      },
+      select: { assigneeAgent: { select: { name: true } } },
+    });
+    agentName = fixTask?.assigneeAgent?.name ?? "senior-dev";
+  }
+  const repair = await createMergeTailRepairTask(tx, {
+    regressionTask: input.task,
+    sourceRun: input.run,
+    agentName,
+    repairKind,
+    headSha: verdict.headSha,
+    baseHeadSha: verdict.baseHeadSha,
+    summary: verdict.summary,
+    now: input.now,
+  });
+  if ("refusal" in repair) return stop(repair.refusal);
+  return "handled";
+};
 
 const id = z.string().min(1);
 const fence = z.string().min(1);
@@ -2943,7 +3131,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
         const task = await tx.task.findUniqueOrThrow({
           where: { id: taskId },
-          include: { assigneeAgent: { select: { archivedAt: true } } },
+          include: {
+            assigneeAgent: { select: { archivedAt: true } },
+            templateStep: { include: { taskTemplate: { select: { name: true } } } },
+          },
         });
         if (identity.chainId && identity.chainIndex !== null) {
           const prefix = await tx.task.findMany({
@@ -2967,6 +3158,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (task.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
         if (task.assigneeType !== AssigneeType.AGENT) {
           return { error: "Human steps cannot be started", code: 409 as const };
+        }
+        if (isMergeReadinessStep(task.templateStep)) {
+          return { error: "Merge readiness is server-owned and cannot be started as a model run", code: 409 as const };
         }
         if (await hasActiveRun(tx, taskId)) {
           return { error: "Task already has an active run", code: 409 as const };
@@ -3579,6 +3773,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // not claimed: a mis-bound step-12 row must never be handed to anything,
         // and the sentinel Agent on an ordinary step must never reach an adapter.
         if (integratorBindingRefusal(candidate.agent.name, candidate.task.templateStep)) continue;
+        // Readiness is server-owned. Even if an old/manual path materializes a
+        // Run row for it, no model runner or merge executor may claim it; the
+        // readiness worker consumes the TODO task row directly.
+        if (isMergeReadinessStep(candidate.task.templateStep)) continue;
         const executionMode = executionModeFor(candidate.task.templateStep);
         // §D-P1 rule 3, symmetric and fail-closed: only the independently
         // authenticated merge-executor principal is offered an integrator run,
@@ -4402,6 +4600,50 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
+        if (!succeeded && !retryCreated && run.task) {
+          const tailRows = await tx.taskActivity.findMany({
+            where: { taskId: run.taskId },
+            select: { metadata: true },
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          });
+          const metadataRows = tailRows.map((row) => asJsonObject(row.metadata));
+          const repairMarker = metadataRows.find((metadata) => (
+            metadata?.kind === MERGE_TAIL_KIND.repairAttempt && typeof metadata.regressionTaskId === "string"
+          ));
+          const reviewMarker = metadataRows.find((metadata) => (
+            metadata?.kind === MERGE_TAIL_KIND.reviewObligation
+            && typeof metadata.readinessTaskId === "string"
+            && typeof metadata.regressionTaskId === "string"
+          ));
+          if (repairMarker && typeof repairMarker.regressionTaskId === "string") {
+            const reason = `${String(repairMarker.repairKind)} repair ${run.taskId} failed without closing the repair at ${String(repairMarker.headSha)}`;
+            await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await tx.taskActivity.create({ data: {
+              taskId: repairMarker.regressionTaskId,
+              actorType: "control-plane",
+              body: `Automatic ${String(repairMarker.repairKind)} attempt failed: ${String(repairMarker.headSha)} -> ${body.headSha ?? "no-delivered-head"}`,
+              metadata: jsonValue({
+                kind: MERGE_TAIL_KIND.repairResult,
+                schemaVersion: 1,
+                repairKind: typeof repairMarker.repairKind === "string" ? repairMarker.repairKind : null,
+                repairTaskId: run.taskId,
+                startHeadSha: typeof repairMarker.headSha === "string" ? repairMarker.headSha : null,
+                targetHeadSha: typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null,
+                resolvedHeadSha: body.headSha ?? null,
+                state: "failed",
+              }),
+            } });
+            await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+          } else if (reviewMarker
+            && typeof reviewMarker.readinessTaskId === "string"
+            && typeof reviewMarker.regressionTaskId === "string") {
+            const reason = `independent review ${run.taskId} failed without an exact-head decision for ${String(reviewMarker.headSha)}`;
+            await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await tx.task.update({ where: { id: reviewMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+          }
+        }
         // §4.0 outcome branching. The executor's own fenced write is the only
         // writer of a step-12 output: neither synthesis nor the metadata update
         // may touch it, because a synthesized body would read as a merge that
@@ -4470,9 +4712,159 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (succeeded && mechanical) {
           // Already branched above; the mechanical path owns its own advance.
         } else if (succeeded && run.task?.templateId) {
-          await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+          if (run.task.templateStep?.outputKind === "regression-verification") {
+            const result = await handleRegressionCompletion(tx, {
+              task: run.task,
+              run: {
+                id: run.id,
+                agentId: run.agentId,
+                branch: body.branch ?? run.branch,
+                headSha: body.headSha ?? null,
+                sessionId: run.session.id,
+              },
+              now,
+            });
+            if (result === "advance") {
+              await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+            }
+          } else {
+            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+          }
         } else if (succeeded && (run.task?.chainId || run.task?.followUpTaskId)) {
-          if (run.task.approvalGate) {
+          const tailRows = await tx.taskActivity.findMany({
+            where: { taskId: run.taskId },
+            select: { metadata: true },
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          });
+          const repairMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
+            metadata?.kind === MERGE_TAIL_KIND.repairAttempt && typeof metadata.regressionTaskId === "string"
+          ));
+          const reviewMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
+            metadata?.kind === MERGE_TAIL_KIND.reviewObligation
+            && metadata.state === "open"
+            && typeof metadata.readinessTaskId === "string"
+            && typeof metadata.regressionTaskId === "string"
+          ));
+          let repairUnable = false;
+          let reviewRejected = false;
+          if (reviewMarker
+            && typeof reviewMarker.readinessTaskId === "string"
+            && typeof reviewMarker.regressionTaskId === "string"
+            && typeof reviewMarker.headSha === "string") {
+            const reviewOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
+            let decision: Record<string, unknown> | null = null;
+            try { decision = JSON.parse(reviewOutput?.body ?? "null") as Record<string, unknown> | null; } catch { decision = null; }
+            const validHead = decision?.schemaVersion === 1 && decision.headSha === reviewMarker.headSha;
+            if (!validHead || (decision?.outcome !== "approved" && decision?.outcome !== "rejected")) {
+              reviewRejected = true;
+              const reason = `independent review returned missing, malformed, or stale decision for ${reviewMarker.headSha}`;
+              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
+              await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+            } else if (decision.outcome === "approved") {
+              await tx.taskActivity.create({ data: {
+                taskId: reviewMarker.readinessTaskId,
+                actorType: "control-plane",
+                body: `Independent review approved exact head ${reviewMarker.headSha}`,
+                metadata: jsonValue({
+                  kind: MERGE_TAIL_KIND.reviewObligation,
+                  schemaVersion: 1,
+                  state: "approved",
+                  reviewTaskId: run.taskId,
+                  headSha: reviewMarker.headSha,
+                  baseSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null,
+                }),
+              } });
+            } else {
+              reviewRejected = true;
+              const prior = await tx.taskActivity.findMany({
+                where: { taskId: reviewMarker.readinessTaskId }, select: { metadata: true },
+              });
+              const alreadyRejected = prior.some((row) => {
+                const metadata = asJsonObject(row.metadata);
+                return metadata?.kind === MERGE_TAIL_KIND.reviewObligation && metadata.state === "rejected";
+              });
+              const summary = typeof decision.summary === "string" ? decision.summary : "independent review rejected without a summary";
+              await tx.taskActivity.create({ data: {
+                taskId: reviewMarker.readinessTaskId,
+                actorType: "control-plane",
+                body: `Independent review rejected exact head ${reviewMarker.headSha}`,
+                metadata: {
+                  kind: MERGE_TAIL_KIND.reviewObligation,
+                  schemaVersion: 1,
+                  state: "rejected",
+                  reviewTaskId: run.taskId,
+                  headSha: reviewMarker.headSha,
+                  summary,
+                },
+              } });
+              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: `independent review rejected: ${summary}` } });
+              if (alreadyRejected) {
+                const reason = `second independent review rejection at ${reviewMarker.headSha}: ${summary}`;
+                await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+                await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+              } else {
+                const regressionTask = await tx.task.findUniqueOrThrow({ where: { id: reviewMarker.regressionTaskId } });
+                const fixTask = await tx.task.findFirst({
+                  where: {
+                    projectId: regressionTask.projectId,
+                    chainId: regressionTask.chainId,
+                    templateId: regressionTask.templateId,
+                    templateStep: { outputKind: "fixed-implementation" },
+                  },
+                  select: { assigneeAgent: { select: { name: true } } },
+                });
+                const repair = await createMergeTailRepairTask(tx, {
+                  regressionTask,
+                  sourceRun: { id: run.id, branch: body.branch ?? run.branch },
+                  agentName: fixTask?.assigneeAgent?.name ?? "senior-dev",
+                  repairKind: "review-fix",
+                  headSha: reviewMarker.headSha,
+                  baseHeadSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : reviewMarker.headSha,
+                  summary,
+                  now,
+                });
+                if ("refusal" in repair) {
+                  await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: repair.refusal } });
+                  await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason: repair.refusal });
+                }
+              }
+            }
+          }
+          if (repairMarker && typeof repairMarker.regressionTaskId === "string") {
+            const repairOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
+            let reportedUnable = false;
+            try {
+              const value = JSON.parse(repairOutput?.body ?? "null") as Record<string, unknown> | null;
+              reportedUnable = value?.outcome === "unable";
+            } catch { /* fix tasks may produce prose; successful completion is still a closed attempt */ }
+            if (reportedUnable) {
+              repairUnable = true;
+              const reason = `${String(repairMarker.repairKind)} repair ${run.taskId} reported unable at ${String(repairMarker.headSha)}`;
+              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
+              await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+            } else {
+              await tx.taskActivity.create({ data: {
+                taskId: repairMarker.regressionTaskId,
+                actorType: "control-plane",
+                body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${body.headSha ?? "missing-head"}`,
+                metadata: jsonValue({
+                  kind: MERGE_TAIL_KIND.repairResult,
+                  schemaVersion: 1,
+                  repairKind: typeof repairMarker.repairKind === "string" ? repairMarker.repairKind : null,
+                  repairTaskId: run.taskId,
+                  startHeadSha: typeof repairMarker.headSha === "string" ? repairMarker.headSha : null,
+                  targetHeadSha: typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null,
+                  resolvedHeadSha: body.headSha ?? null,
+                }),
+              } });
+            }
+          }
+          if (repairUnable || reviewRejected) {
+            // The failed repair owns the stop; never activate its follow-up.
+          } else if (run.task.approvalGate) {
             const claimed = await tx.task.updateMany({
               where: { id: run.taskId, status: run.task.status },
               data: { status: TaskStatus.REVIEW, failureReason: null },

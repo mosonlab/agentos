@@ -116,8 +116,14 @@ test("the daemon's reachable module graph contains no adapter, workspace, delive
   }
 });
 
-test("the only mutating operations this package can construct are the merge and the two disarms", async () => {
-  assert.deepEqual([...MUTATING_OPERATIONS], ["merge", "disablePullRequestAutoMerge", "dequeuePullRequest"]);
+test("the only mutating operations are the sanitized merge construction and the two disarms", async () => {
+  assert.deepEqual([...MUTATING_OPERATIONS], [
+    "createSanitizedTree",
+    "createMergeCommit",
+    "updateBaseRef",
+    "disablePullRequestAutoMerge",
+    "dequeuePullRequest",
+  ]);
   const github = await readFile(join(sourceRoot, "github.ts"), "utf8");
   // Comments are stripped first: prose explaining that we never send `--admin`
   // is not a code path that sends it, and a test that cannot tell the two apart
@@ -126,8 +132,12 @@ test("the only mutating operations this package can construct are the merge and 
   for (const bypass of ["admin", "bypass", "enablePullRequestAutoMerge", "enqueuePullRequest", "mergePullRequest(input"]) {
     assert.equal(code.toLowerCase().includes(bypass.toLowerCase()), false, `github.ts constructs a ${bypass} request`);
   }
-  // Exactly one REST endpoint, exactly two GraphQL mutations.
+  assert.match(code, /path: "\.chain"/u);
+  assert.match(code, /force: false/u);
+  // The compatibility expected-head endpoint remains one PUT; canonical merges
+  // use the explicitly non-force PATCH. Disarm remains exactly two mutations.
   assert.equal([...github.matchAll(/method: "PUT"/gu)].length, 1);
+  assert.equal([...github.matchAll(/method: "PATCH"/gu)].length >= 1, true);
   assert.equal([...github.matchAll(/^mutation|`mutation\(/gmu)].length, 2);
 });
 

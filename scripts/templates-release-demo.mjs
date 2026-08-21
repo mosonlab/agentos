@@ -253,17 +253,18 @@ export async function apiRequest(config, method, path, body) {
 }
 
 const canonicalSteps = (steps) => {
-  if (steps.length !== 10) throw new Error("canonical template must contain ten steps");
+  if (steps.length !== 12) throw new Error("canonical template must contain twelve steps");
   for (let index = 0; index < steps.length; index += 1) {
     if (steps[index].stepIndex !== index + 1) throw new Error("canonical template step order drifted");
   }
-  const human = steps[8];
-  const integrator = steps[9];
-  if (human.assigneeType !== "HUMAN" || human.assigneeAgentId !== null || human.approvalGate !== true) {
-    throw new Error("canonical step 9 must be the human approval gate");
+  const readiness = steps[10];
+  const integrator = steps[11];
+  if (readiness.assigneeType !== "AGENT" || readiness.assigneeAgent?.name !== "review-coordinator"
+    || readiness.approvalGate !== false || readiness.outputKind !== "merge-authorization") {
+    throw new Error("canonical step 11 must be server-side mechanical readiness");
   }
   if (integrator.assigneeAgent?.name !== "merge-integrator" || integrator.outputKind !== "merge-result" || integrator.opensPullRequest !== false) {
-    throw new Error("canonical step 10 must be the no-PR mechanical merge-integrator");
+    throw new Error("canonical step 12 must be the no-PR mechanical merge-integrator");
   }
   return steps;
 };
@@ -344,7 +345,7 @@ export async function runInstantiate(options, request = apiRequest) {
     name: `OSS-C0 template demo ${config.runId.slice(-3)}`,
     description: CHANGE_REQUEST,
   });
-  if (result.branchName !== config.branch || result.tasks?.length !== 10) throw new Error("instantiation did not create the canonical ten-step chain");
+  if (result.branchName !== config.branch || result.tasks?.length !== 12) throw new Error("instantiation did not create the canonical twelve-step chain");
   const evidence = {
     schemaVersion: 1,
     runId: config.runId,
@@ -405,21 +406,21 @@ export async function runCapture(options, request = apiRequest) {
 export function verifyEvidence(config, setup, instantiated, capture) {
   if (setup.runId !== config.runId || instantiated.runId !== config.runId || capture.runId !== config.runId) throw new Error("evidence run ids disagree");
   if (capture.chainId !== instantiated.chainId || instantiated.branchName !== config.branch) throw new Error("chain identity disagrees");
-  if (capture.tasks.length !== 10) throw new Error("capture must contain ten tasks");
+  if (capture.tasks.length !== 12) throw new Error("capture must contain twelve tasks");
   const expectedKinds = setup.steps.map((step) => step.outputKind);
   for (let index = 0; index < capture.tasks.length; index += 1) {
     const task = capture.tasks[index];
     if (task.chainIndex !== index + 1) throw new Error("task positions are missing or reordered");
     if (task.status !== "DONE") throw new Error(`step ${index + 1} is not done`);
-    if (index !== 8 && (!task.output || task.output.kind !== expectedKinds[index])) {
+    if (!task.output || task.output.kind !== expectedKinds[index]) {
       throw new Error(`step ${index + 1} output is missing or has the wrong kind`);
     }
   }
-  const human = capture.tasks[8];
-  const integrator = capture.tasks[9];
-  if (human.assigneeType !== "HUMAN") throw new Error("step 9 is not human review");
-  if ((human.activity?.count ?? 0) === 0) throw new Error("step 9 has no captured human decision activity");
-  if (integrator.agentName !== "merge-integrator" || integrator.templateStep?.opensPullRequest !== false) throw new Error("step 10 is not mechanical merge execution");
+  const readiness = capture.tasks[10];
+  const integrator = capture.tasks[11];
+  if (readiness.assigneeType !== "AGENT" || readiness.agentName !== "review-coordinator"
+    || readiness.output?.kind !== "merge-authorization") throw new Error("step 11 is not mechanical readiness");
+  if (integrator.agentName !== "merge-integrator" || integrator.templateStep?.opensPullRequest !== false) throw new Error("step 12 is not mechanical merge execution");
   const delivered = capture.tasks.flatMap((task) => task.runs).filter((run) => run.pullRequestUrl);
   if (config.mode === "public") {
     if (delivered.length === 0 || delivered.some((run) => run.deliveryInstructions)) throw new Error("public evidence requires an automatic pull request with no manual fallback");

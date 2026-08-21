@@ -129,8 +129,8 @@ const main = async (): Promise<void> => {
 
   const direct = templates.find((template) => template.name === DIRECT_TEMPLATE_NAME)!;
   const directLast = direct.steps.at(-1)!;
-  if (directLast.assigneeAgent !== null || directLast.approvalGate !== true) {
-    throw new Error(`${DIRECT_TEMPLATE_NAME} must end at a human approval gate`);
+  if (directLast.assigneeAgent?.name !== INTEGRATOR_AGENT_NAME || directLast.approvalGate !== false) {
+    throw new Error(`${DIRECT_TEMPLATE_NAME} must end at mechanical merge execution`);
   }
   for (const step of direct.steps) {
     if (!integratorBindingValid(step.assigneeAgent?.name ?? null, {

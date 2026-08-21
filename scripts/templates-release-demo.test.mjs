@@ -61,20 +61,20 @@ test("evidence rejects secret keys and credential-shaped values", () => {
   assert.throws(() => assertSanitized({ body: `ghp_${"A".repeat(24)}` }), /credential-shaped/);
 });
 
-test("setup converges on the canonical ten-step topology and grants every agent step", async () => {
-  const steps = Array.from({ length: 10 }, (_, offset) => ({
+test("setup converges on the canonical twelve-step topology and grants every agent step", async () => {
+  const steps = Array.from({ length: 12 }, (_, offset) => ({
     id: `step-${offset + 1}`,
     stepIndex: offset + 1,
-    assigneeType: offset === 8 ? "HUMAN" : "AGENT",
-    assigneeAgentId: offset === 8 ? null : `agent-${offset + 1}`,
-    assigneeAgent: offset === 8 ? null : {
+    assigneeType: "AGENT",
+    assigneeAgentId: `agent-${offset + 1}`,
+    assigneeAgent: {
       id: `agent-${offset + 1}`,
-      name: offset === 9 ? "merge-integrator" : `agent-${offset + 1}`,
+      name: offset === 10 ? "review-coordinator" : offset === 11 ? "merge-integrator" : `agent-${offset + 1}`,
       archivedAt: null,
     },
-    outputKind: offset === 9 ? "merge-result" : `kind-${offset + 1}`,
-    approvalGate: offset === 8,
-    opensPullRequest: offset !== 9,
+    outputKind: offset === 10 ? "merge-authorization" : offset === 11 ? "merge-result" : `kind-${offset + 1}`,
+    approvalGate: false,
+    opensPullRequest: offset !== 11,
   }));
   const calls = [];
   const request = async (_config, method, path, body) => {
@@ -100,26 +100,26 @@ test("setup converges on the canonical ten-step topology and grants every agent 
       request,
       () => ({ argv: ["npm", "run", "db:verify-agent-template"], exitCode: 0, stdoutSha256: "a".repeat(64), stderrSha256: "b".repeat(64) }),
     );
-    assert.equal(result.steps.length, 10);
-    assert.equal(result.steps[8].assigneeType, "HUMAN");
-    assert.equal(result.steps[9].agentName, "merge-integrator");
-    assert.equal(result.steps[9].opensPullRequest, false);
-    assert.equal(calls.filter((call) => call.path.endsWith("/access")).length, 9);
+    assert.equal(result.steps.length, 12);
+    assert.equal(result.steps[10].agentName, "review-coordinator");
+    assert.equal(result.steps[11].agentName, "merge-integrator");
+    assert.equal(result.steps[11].opensPullRequest, false);
+    assert.equal(calls.filter((call) => call.path.endsWith("/access")).length, 12);
   });
 });
 
 const completeEvidence = (mode = "rehearsal") => {
-  const steps = Array.from({ length: 10 }, (_, offset) => ({
+  const steps = Array.from({ length: 12 }, (_, offset) => ({
     stepIndex: offset + 1,
-    outputKind: offset === 9 ? "merge-result" : `kind-${offset + 1}`,
+    outputKind: offset === 10 ? "merge-authorization" : offset === 11 ? "merge-result" : `kind-${offset + 1}`,
   }));
   const tasks = steps.map((step, offset) => ({
     id: `task-${step.stepIndex}`,
     chainIndex: step.stepIndex,
     status: "DONE",
-    assigneeType: offset === 8 ? "HUMAN" : "AGENT",
-    agentName: offset === 9 ? "merge-integrator" : offset === 8 ? null : `agent-${offset + 1}`,
-    templateStep: { outputKind: step.outputKind, opensPullRequest: offset !== 9 },
+    assigneeType: "AGENT",
+    agentName: offset === 10 ? "review-coordinator" : offset === 11 ? "merge-integrator" : `agent-${offset + 1}`,
+    templateStep: { outputKind: step.outputKind, opensPullRequest: offset !== 11 },
     output: { kind: step.outputKind, bytes: 1, sha256: "a".repeat(64) },
     activity: { count: 1, digest: "b".repeat(64) },
     runs: offset === 4 ? [{
@@ -135,7 +135,7 @@ const completeEvidence = (mode = "rehearsal") => {
   };
 };
 
-test("verification proves positions 1-10 and distinguishes rehearsal from public proof", () => {
+test("verification proves positions 1-12 and distinguishes rehearsal from public proof", () => {
   const rehearsal = completeEvidence();
   assert.equal(verifyEvidence(rehearsal.config, rehearsal.setup, rehearsal.instantiated, rehearsal.capture).verdict, "REHEARSAL_ONLY");
   const published = completeEvidence("public");
