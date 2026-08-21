@@ -66,6 +66,7 @@ export type PullRequestSnapshot = {
 };
 
 export type RepositorySnapshot = {
+  repositoryId: string;
   mergeQueue: { id: string } | null;
   branchProtectionRules: BranchProtectionRule[];
   baseRefOid: string | null;
@@ -86,12 +87,14 @@ export type MergeResponse =
   | { status: "forbidden"; reason: string }
   | { status: "not-found"; reason: string }
   | { status: "unprocessable"; reason: string }
+  | { status: "ref-update-refused"; reason: string }
   | { status: "unknown"; reason: string };
 
 export type DisarmResult = { ok: true } | { ok: false; reason: string };
 
 export const READ_QUERY = `query($owner:String!,$name:String!,$number:Int!,$base:String!) {
   repository(owner:$owner,name:$name) {
+    id
     mergeQueue(branch:$base) { id }
     branchProtectionRules(first:100) { nodes {
       pattern requiresStatusChecks requiresStrictStatusChecks
@@ -119,6 +122,9 @@ export const DISABLE_AUTO_MERGE_MUTATION =
 
 export const DEQUEUE_MUTATION =
   `mutation($id:ID!) { dequeuePullRequest(input:{id:$id}) { mergeQueueEntry { id } } }`;
+
+export const UPDATE_REFS_MUTATION =
+  `mutation($repositoryId:ID!,$refUpdates:[RefUpdate!]!) { updateRefs(input:{repositoryId:$repositoryId,refUpdates:$refUpdates}) { clientMutationId } }`;
 
 type Json = Record<string, unknown>;
 
@@ -174,7 +180,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   });
 
   const call = async (
-    request: { url: string; method: "GET" | "POST" | "PUT" | "PATCH"; accept: string; body?: string },
+    request: { url: string; method: "GET" | "POST"; accept: string; body?: string },
   ): Promise<HttpAttempt> => callWithTimeout(options.http, {
     url: request.url,
     method: request.method,
@@ -246,7 +252,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     const present = (holder: Json, path: string, keys: string[]): void => {
       for (const key of keys) if (!(key in holder)) faults.push(`${path}.${key} was omitted from the response`);
     };
-    present(repository, "repository", ["mergeQueue", "branchProtectionRules", "ref"]);
+    present(repository, "repository", ["id", "mergeQueue", "branchProtectionRules", "ref"]);
     present(pullRequest, "pullRequest", [
       "id", "number", "state", "isDraft", "merged", "mergedAt", "mergeable", "mergeStateStatus",
       "baseRefName", "headRefOid", "autoMergeRequest", "mergeQueueEntry", "mergedBy", "mergeCommit", "commits",
@@ -368,6 +374,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
 
     const mergedBy = strictNullableRecord(pullRequest.mergedBy, "pullRequest.mergedBy");
     const snapshot: RepositorySnapshot = {
+      repositoryId: strictString(repository.id, "repository.id"),
       mergeQueue: mergeQueue ? { id: strictString(mergeQueue.id, "repository.mergeQueue.id") } : null,
       branchProtectionRules: rules,
       baseRefOid: baseTarget ? strictNullableString(baseTarget.oid, "repository.ref.target.oid") : null,
@@ -411,7 +418,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   };
 
   const restJson = async (
-    request: { url: string; method: "GET" | "POST" | "PATCH"; body?: unknown },
+    request: { url: string; method: "GET" | "POST"; body?: unknown },
   ): Promise<{ ok: true; value: Json } | { ok: false; response: HttpAttempt }> => {
     const response = await call({
       url: request.url,
@@ -438,40 +445,19 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   const mergePullRequest = async (
     reference: Pick<PullRequestRef, "owner" | "name" | "number">,
     expectedHeadSha: string,
-    expectedBase?: { ref: string; sha: string },
+    expectedBase: { ref: string; sha: string; repositoryId: string },
   ): Promise<MergeResponse> => {
     const repo = `${options.restUrl}/repos/${reference.owner}/${reference.name}`;
-    if (!expectedBase) {
-      const response = await call({
-        url: `${repo}/pulls/${reference.number}/merge`,
-        method: "PUT",
-        accept: "application/vnd.github+json",
-        body: JSON.stringify({ sha: expectedHeadSha, merge_method: "merge" }),
-      });
-      const outcome = classifyHttpStatus(response.status);
-      if (outcome === "lost") return { status: "unknown", reason: response.status === NO_RESPONSE ? `network: ${response.body}` : `HTTP ${response.status}` };
-      if (outcome === "applied") {
-        try {
-          const record = asRecord(JSON.parse(response.body));
-          const sha = asString(record?.sha);
-          return record?.merged === true && sha ? { status: "merged", sha } : { status: "unknown", reason: "merge response did not report a merged sha" };
-        } catch { return { status: "unknown", reason: "merge response body is not valid JSON" }; }
-      }
-      if (response.status === 409) return { status: "head-moved" };
-      if (response.status === 405) return { status: "not-mergeable" };
-      if (response.status === 403) return { status: "forbidden", reason: "HTTP 403" };
-      if (response.status === 404) return { status: "not-found", reason: "HTTP 404" };
-      if (response.status === 422) return { status: "unprocessable", reason: "HTTP 422" };
-      return { status: "unknown", reason: `HTTP ${response.status}` };
-    }
     const commit = await restJson({ url: `${repo}/git/commits/${expectedHeadSha}`, method: "GET" });
     if (!commit.ok) return { status: "unknown", reason: `head commit read failed: HTTP ${commit.response.status} ${commit.response.body}` };
     const headTree = asString(asRecord(commit.value.tree)?.sha);
     if (!headTree) return { status: "unknown", reason: "head commit has no tree sha" };
     const recursive = await restJson({ url: `${repo}/git/trees/${headTree}?recursive=1`, method: "GET" });
     if (!recursive.ok) return { status: "unknown", reason: `head tree read failed: HTTP ${recursive.response.status} ${recursive.response.body}` };
-    const carriesChain = Array.isArray(recursive.value.tree)
-      && recursive.value.tree.some((entry) => asString(asRecord(entry)?.path)?.split("/")[0] === ".chain");
+    if (!Array.isArray(recursive.value.tree) || recursive.value.truncated !== false) {
+      return { status: "unknown", reason: "head tree response is malformed or truncated; .chain absence is unproven" };
+    }
+    const carriesChain = recursive.value.tree.some((entry) => asString(asRecord(entry)?.path)?.split("/")[0] === ".chain");
     let mergeTree = headTree;
     if (carriesChain) {
       const tree = await restJson({
@@ -496,26 +482,20 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     if (!created.ok) return { status: "unknown", reason: `merge commit creation failed: HTTP ${created.response.status} ${created.response.body}` };
     const mergeSha = asString(created.value.sha);
     if (!mergeSha) return { status: "unknown", reason: "merge commit response has no sha" };
-    const response = await call({
-      url: `${repo}/git/refs/heads/${expectedBase.ref.split("/").map(encodeURIComponent).join("/")}`,
-      method: "PATCH",
-      accept: "application/vnd.github+json",
-      body: JSON.stringify({ sha: mergeSha, force: false }),
+    const updated = await graphql(UPDATE_REFS_MUTATION, {
+      repositoryId: expectedBase.repositoryId,
+      refUpdates: [{
+        name: `refs/heads/${expectedBase.ref}`,
+        beforeOid: expectedBase.sha,
+        afterOid: mergeSha,
+        force: false,
+      }],
     });
-    const outcome = classifyHttpStatus(response.status);
-    if (outcome === "lost") {
-      return {
-        status: "unknown",
-        reason: response.status === NO_RESPONSE ? `network: ${response.body}` : `HTTP ${response.status}`,
-      };
+    if ("error" in updated) return { status: "ref-update-refused", reason: updated.error };
+    if (!asRecord(updated.data.updateRefs)) {
+      return { status: "unknown", reason: "updateRefs response did not prove the atomic ref update" };
     }
-    if (outcome === "applied") return { status: "merged", sha: mergeSha };
-    if (response.status === 409) return { status: "head-moved" };
-    if (response.status === 405) return { status: "not-mergeable" };
-    if (response.status === 403) return { status: "forbidden", reason: `HTTP 403` };
-    if (response.status === 404) return { status: "not-found", reason: `HTTP 404` };
-    if (response.status === 422) return { status: "unprocessable", reason: `HTTP 422` };
-    return { status: "unknown", reason: `HTTP ${response.status}` };
+    return { status: "merged", sha: mergeSha };
   };
 
   const disableAutoMerge = async (pullRequestId: string): Promise<DisarmResult> => {

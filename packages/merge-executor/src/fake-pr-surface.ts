@@ -38,6 +38,7 @@ export const cleanSnapshot = (overrides: {
   pullRequest?: Partial<RepositorySnapshot["pullRequest"]>;
   repository?: Partial<Omit<RepositorySnapshot, "pullRequest">>;
 } = {}): RepositorySnapshot => ({
+  repositoryId: "R_repo",
   mergeQueue: null,
   branchProtectionRules: [{
     pattern: "master",
@@ -70,6 +71,7 @@ export const cleanSnapshot = (overrides: {
 
 export const mergedSnapshot = (overrides: Partial<RepositorySnapshot["pullRequest"]> = {}): RepositorySnapshot =>
   cleanSnapshot({
+    repository: { baseRefOid: MERGE_COMMIT },
     pullRequest: {
       state: "MERGED",
       merged: true,
@@ -138,9 +140,9 @@ export const makeFake = (options: FakeOptions = {}) => {
       readIndex += 1;
       return result;
     },
-    merge: async (reference, expectedHeadSha) => {
+    merge: async (reference, expectedHeadSha, expectedBase) => {
       mergeSends += 1;
-      trace.push({ call: "merge", detail: { ...reference, expectedHeadSha, nth: mergeSends } });
+      trace.push({ call: "merge", detail: { ...reference, expectedHeadSha, expectedBase, nth: mergeSends } });
       const sequence = options.merges;
       if (sequence && sequence.length > 0) return sequence[Math.min(mergeSends - 1, sequence.length - 1)]!;
       return options.merge ?? { status: "merged", sha: MERGE_COMMIT };

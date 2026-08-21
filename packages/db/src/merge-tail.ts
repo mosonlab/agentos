@@ -17,6 +17,10 @@ export type RegressionVerdict =
   | { schemaVersion: 1; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
   | { schemaVersion: 1; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
 
+export type ResolverResult =
+  | { schemaVersion: 1; outcome: "resolved"; startHeadSha: string; targetHeadSha: string; resolvedHeadSha: string; tradeOffs: string[]; changedTestExpectations: string[] }
+  | { schemaVersion: 1; outcome: "unable"; startHeadSha: string; targetHeadSha: string; blockingContradiction: string };
+
 export type RegressionParse =
   | { status: "ok"; verdict: RegressionVerdict }
   | { status: "invalid"; reason: string };
@@ -44,6 +48,39 @@ export const parseRegressionVerdict = (body: string | null | undefined): Regress
   return { status: "invalid", reason: "regression outcome and gateVerdict disagree or required summary is absent" };
 };
 
+export const parseResolverResult = (
+  body: string | null | undefined,
+): { status: "ok"; result: ResolverResult } | { status: "invalid"; reason: string } => {
+  let value: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(body ?? "null") as unknown;
+    value = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return { status: "invalid", reason: "merge-resolver output is not valid JSON" };
+  }
+  if (!value || value.schemaVersion !== 1 || (value.outcome !== "resolved" && value.outcome !== "unable")) {
+    return { status: "invalid", reason: "merge-resolver output has an unknown schema or outcome" };
+  }
+  if (typeof value.startHeadSha !== "string" || !SHA.test(value.startHeadSha)
+    || typeof value.targetHeadSha !== "string" || !SHA.test(value.targetHeadSha)) {
+    return { status: "invalid", reason: "merge-resolver output is not bound to well-formed start and target heads" };
+  }
+  if (value.outcome === "unable") {
+    if (typeof value.blockingContradiction !== "string" || value.blockingContradiction.trim().length === 0) {
+      return { status: "invalid", reason: "merge-resolver unable output has no blocking contradiction" };
+    }
+    return { status: "ok", result: value as ResolverResult };
+  }
+  if (typeof value.resolvedHeadSha !== "string" || !SHA.test(value.resolvedHeadSha)
+    || !Array.isArray(value.tradeOffs) || !value.tradeOffs.every((entry) => typeof entry === "string")
+    || !Array.isArray(value.changedTestExpectations) || !value.changedTestExpectations.every((entry) => typeof entry === "string")) {
+    return { status: "invalid", reason: "merge-resolver resolved output is malformed or has no resolved head" };
+  }
+  return { status: "ok", result: value as ResolverResult };
+};
+
 export type MergeReadinessStepShape = {
   stepIndex: number;
   outputKind: string;
@@ -69,6 +106,8 @@ const DEFENSE_EXACT = new Set([
   "packages/db/prisma/seed.ts",
   "packages/db/prisma/sync-canonical-prompts.ts",
   "packages/api/src/merge-readiness-worker.ts",
+  "packages/api/src/github-read.ts",
+  "packages/api/src/index.ts",
   "packages/api/src/app.ts",
   "agents/roles/merge-resolver.md",
   "agents/roles/merge-integrator.md",
@@ -76,6 +115,7 @@ const DEFENSE_EXACT = new Set([
 
 export const defenseListReason = (path: string): string | null => {
   if (DEFENSE_EXACT.has(path)) return "merge-tail-machinery";
+  if (path.startsWith("packages/api/src/merge-")) return "merge-tail-machinery";
   if (path.startsWith("scripts/gate-worker/")) return "gate-worker";
   if (path.startsWith("packages/db/prisma/migrations/")) return "database-migration";
   if (path.startsWith("packages/merge-executor/")) return "merge-execution";
@@ -86,11 +126,11 @@ export const defenseListReason = (path: string): string | null => {
   return null;
 };
 
-export type ChangedFile = { filename: string; patch: string | null };
+export type ChangedFile = { filename: string; previousFilename: string | null; patch: string | null };
 
 export const isTestPath = (path: string): boolean => (
   /(?:^|\/)(?:tests?|__tests__)(?:\/|$)/u.test(path)
-  || /\.(?:dbtest|test|spec)\.[^.]+$/u.test(path)
+  || /(?:\.(?:dbtest|test|spec)|-test)\.[^.]+$/u.test(path)
 );
 
 export const patchModifiesExistingLines = (patch: string | null): boolean => {
@@ -99,15 +139,25 @@ export const patchModifiesExistingLines = (patch: string | null): boolean => {
 };
 
 export const defenseTriggers = (files: ChangedFile[]): Array<{ path: string; reason: string }> => files.flatMap((file) => {
-  const reason = defenseListReason(file.filename);
-  return reason ? [{ path: file.filename, reason }] : [];
+  const paths = file.previousFilename && file.previousFilename !== file.filename
+    ? [file.filename, file.previousFilename]
+    : [file.filename];
+  return paths.flatMap((path) => {
+    const reason = defenseListReason(path);
+    return reason ? [{ path, reason }] : [];
+  });
 });
 
-export const resolutionTestTriggers = (files: ChangedFile[]): Array<{ path: string; reason: string }> => files.flatMap((file) => (
-  isTestPath(file.filename) && patchModifiesExistingLines(file.patch)
-    ? [{ path: file.filename, reason: file.patch === null ? "existing-test-lines-unverifiable" : "existing-test-lines-modified" }]
-    : []
-));
+export const resolutionTestTriggers = (files: ChangedFile[]): Array<{ path: string; reason: string }> => files.flatMap((file) => {
+  const paths = file.previousFilename && file.previousFilename !== file.filename
+    ? [file.filename, file.previousFilename]
+    : [file.filename];
+  return paths.flatMap((path) => (
+    isTestPath(path) && patchModifiesExistingLines(file.patch)
+      ? [{ path, reason: file.patch === null ? "existing-test-lines-unverifiable" : "existing-test-lines-modified" }]
+      : []
+  ));
+});
 
 export const asJsonObject = (value: Prisma.JsonValue | null | undefined): Record<string, unknown> | null => (
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null

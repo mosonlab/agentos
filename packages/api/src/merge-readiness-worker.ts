@@ -11,6 +11,7 @@ import {
   authorizationMetadata,
   defenseTriggers,
   enqueueTaskRun,
+  isMergeReadinessStep,
   parseRegressionVerdict,
   resolveChainTarget,
   resolutionTestTriggers,
@@ -24,6 +25,19 @@ import { createGitHubReader, type GitHubReader } from "./github-read.js";
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
+};
+
+const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
+const READINESS_LEASE_MS = 30_000;
+
+const readinessClaim = (now: Date): string => (
+  `${READINESS_CLAIM_PREFIX}${randomUUID()}|${new Date(now.getTime() + READINESS_LEASE_MS).toISOString()}`
+);
+
+const expiredReadinessClaim = (reason: string | null, now: Date): boolean => {
+  if (!reason?.startsWith(READINESS_CLAIM_PREFIX)) return false;
+  const expiry = Date.parse(reason.slice(reason.lastIndexOf("|") + 1));
+  return Number.isFinite(expiry) && expiry <= now.getTime();
 };
 
 const stopReadiness = async (
@@ -141,7 +155,38 @@ const createReviewObligation = async (
   return { ok: true as const };
 });
 
-export type ReadinessTickResult = { claimed: number; authorized: number; reviewing: number; stopped: number };
+export type ReadinessTickResult = { claimed: number; authorized: number; reviewing: number; requeued: number; stopped: number };
+
+const requeueRegression = async (
+  db: PrismaClient,
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    staleBaseSha: string;
+    currentBaseSha: string;
+    reason: string;
+    now: Date;
+  },
+): Promise<void> => {
+  await db.$transaction(async (tx) => {
+    await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
+    await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
+    await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    await tx.taskActivity.create({ data: {
+      taskId: input.regressionTaskId,
+      actorType: "control-plane",
+      body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.readiness,
+        schemaVersion: 1,
+        state: "requeued-regression",
+        reason: input.reason,
+        staleBaseSha: input.staleBaseSha,
+        currentBaseSha: input.currentBaseSha,
+      },
+    } });
+  });
+};
 
 export const readinessTick = async (
   db: PrismaClient,
@@ -149,23 +194,22 @@ export const readinessTick = async (
   now = new Date(),
   limit = 5,
 ): Promise<ReadinessTickResult> => {
-  const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, stopped: 0 };
+  const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
   const candidates = await db.task.findMany({
     where: {
-      status: TaskStatus.TODO,
-      templateStep: {
-        outputKind: "merge-authorization",
-        taskTemplate: { name: { in: ["direct-engineer-workflow", "compound-engineer-workflow"] } },
-      },
+      status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+      OR: [
+        { templateStep: { stepIndex: 6, outputKind: "merge-authorization", taskTemplate: { name: "direct-engineer-workflow" } } },
+        { templateStep: { stepIndex: 11, outputKind: "merge-authorization", taskTemplate: { name: "compound-engineer-workflow" } } },
+      ],
     },
-    include: { templateStep: true, repo: true },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true },
     orderBy: { createdAt: "asc" },
-    take: limit,
+    take: Math.max(limit * 20, 100),
   });
   for (const readiness of candidates) {
-    const claimed = await db.task.updateMany({ where: { id: readiness.id, status: TaskStatus.TODO }, data: { status: TaskStatus.DOING, failureReason: null } });
-    if (claimed.count !== 1) continue;
-    result.claimed += 1;
+    if (result.claimed >= limit) break;
+    if (!isMergeReadinessStep(readiness.templateStep)) continue;
     const regression = await db.task.findFirst({
       where: {
         projectId: readiness.projectId,
@@ -175,6 +219,19 @@ export const readinessTick = async (
       },
       include: { stepOutput: true },
     });
+    if (!regression || regression.status !== TaskStatus.DONE) continue;
+    const claimReason = readinessClaim(now);
+    const claimWhere = readiness.status === TaskStatus.TODO
+      ? { id: readiness.id, status: TaskStatus.TODO }
+      : expiredReadinessClaim(readiness.failureReason, now)
+        ? { id: readiness.id, status: TaskStatus.DOING, failureReason: readiness.failureReason }
+        : null;
+    if (!claimWhere) continue;
+    const claimed = await db.task.updateMany({ where: claimWhere, data: { status: TaskStatus.DOING, failureReason: claimReason } });
+    if (claimed.count !== 1) continue;
+    result.claimed += 1;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
     if (!regression?.stepOutput) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression?.id ?? readiness.id, reason: "missing head-bound regression PASS evidence" });
       result.stopped += 1;
@@ -197,33 +254,60 @@ export const readinessTick = async (
       result.stopped += 1;
       continue;
     }
-    try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8_000);
+      timer = setTimeout(() => controller.abort(), 8_000);
       const snapshot = await reader.readPullRequest(target.repository, target.prNumber, readiness.repo?.defaultBranch ?? "main", controller.signal);
       if (snapshot.headRefOid !== verdict.verdict.headSha) {
-        clearTimeout(timer);
-        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `stale PASS evidence ${verdict.verdict.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}` });
-        result.stopped += 1;
+        await requeueRegression(db, {
+          readinessTaskId: readiness.id,
+          regressionTaskId: regression.id,
+          staleBaseSha: verdict.verdict.baseHeadSha,
+          currentBaseSha: snapshot.baseSha ?? "missing",
+          reason: `stale PASS head ${verdict.verdict.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
+          now,
+        });
+        result.requeued += 1;
         continue;
       }
       if (!snapshot.baseSha || !snapshot.baseRefName) {
-        clearTimeout(timer);
         await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "pull request base identity is unavailable" });
         result.stopped += 1;
         continue;
       }
       if (snapshot.baseSha !== verdict.verdict.baseHeadSha) {
-        clearTimeout(timer);
+        await requeueRegression(db, {
+          readinessTaskId: readiness.id,
+          regressionTaskId: regression.id,
+          staleBaseSha: verdict.verdict.baseHeadSha,
+          currentBaseSha: snapshot.baseSha,
+          reason: "target base advanced after regression PASS",
+          now,
+        });
+        result.requeued += 1;
+        continue;
+      }
+      const diff = await reader.compareCommits(target.repository, snapshot.baseSha, verdict.verdict.headSha, controller.signal);
+      if (!diff.filesComplete) {
         await stopReadiness(db, {
           readinessTaskId: readiness.id,
           regressionTaskId: regression.id,
-          reason: `stale PASS base ${verdict.verdict.baseHeadSha}; current pull request base is ${snapshot.baseSha}`,
+          reason: "GitHub comparison file list is truncated or completeness is unproven",
         });
         result.stopped += 1;
         continue;
       }
-      const diff = await reader.compareCommits(target.repository, snapshot.baseSha, verdict.verdict.headSha, controller.signal);
+      if ((diff.status !== "ahead" && diff.status !== "identical") || diff.behindBy !== 0) {
+        await requeueRegression(db, {
+          readinessTaskId: readiness.id,
+          regressionTaskId: regression.id,
+          staleBaseSha: verdict.verdict.baseHeadSha,
+          currentBaseSha: snapshot.baseSha,
+          reason: `server-side ancestry check refused ${diff.status} comparison with behind_by=${diff.behindBy}`,
+          now,
+        });
+        result.requeued += 1;
+        continue;
+      }
       const triggers = defenseTriggers(diff.files);
       const resolutionRows = await db.taskActivity.findMany({ where: { taskId: regression.id }, select: { metadata: true } });
       for (const row of resolutionRows) {
@@ -234,9 +318,12 @@ export const readinessTick = async (
           continue;
         }
         const resolution = await reader.compareCommits(target.repository, metadata.startHeadSha, metadata.resolvedHeadSha, controller.signal);
+        if (!resolution.filesComplete) {
+          triggers.push({ path: "<resolution-range>", reason: "existing-test-lines-unverifiable" });
+          continue;
+        }
         triggers.push(...resolutionTestTriggers(resolution.files));
       }
-      clearTimeout(timer);
       const review = await latestReviewState(db, readiness.id, verdict.verdict.headSha);
       if (triggers.length > 0 && review?.state !== "approved") {
         if (review?.state === "open") {
@@ -308,6 +395,8 @@ export const readinessTick = async (
     } catch (error: unknown) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}` });
       result.stopped += 1;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   return result;

@@ -27,6 +27,7 @@ const clientWith = (responses: HttpResponse[]) => {
 const readBody = (overrides: Record<string, unknown> = {}): string => JSON.stringify({
   data: {
     repository: {
+      id: "R_repo",
       mergeQueue: null,
       branchProtectionRules: { nodes: [{ pattern: "master", requiresStatusChecks: true, requiresStrictStatusChecks: false, requiredStatusCheckContexts: ["ci"] }] },
       ref: { target: { oid: "b".repeat(40) } },
@@ -105,15 +106,6 @@ test("an omitted synchronous-execution field is sync-unknown, not null", async (
   assert.equal((await second.client.readPullRequest(reference)).status, "sync-unknown");
 });
 
-test("§11.3 — the merge call is one PUT carrying only the sha and the pinned method", async () => {
-  const { client, requests } = clientWith([{ status: 200, body: JSON.stringify({ merged: true, sha: "c".repeat(40) }) }]);
-  const response = await client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, "a".repeat(40));
-  assert.deepEqual(response, { status: "merged", sha: "c".repeat(40) });
-  assert.equal(requests[0]!.method, "PUT");
-  assert.equal(requests[0]!.url, "https://api.github.test/repos/owner/name/pulls/7/merge");
-  assert.deepEqual(JSON.parse(requests[0]!.body!), { sha: "a".repeat(40), merge_method: "merge" });
-});
-
 test("canonical merge constructs a two-parent tree without .chain and leaves the PR branch untouched", async () => {
   const head = "a".repeat(40);
   const base = "b".repeat(40);
@@ -122,13 +114,13 @@ test("canonical merge constructs a two-parent tree without .chain and leaves the
   const mergeCommit = "c".repeat(40);
   const { client, requests } = clientWith([
     { status: 200, body: JSON.stringify({ tree: { sha: headTree } }) },
-    { status: 200, body: JSON.stringify({ tree: [{ path: ".chain/topic/spec.md", sha: "3".repeat(40) }, { path: "src/a.ts", sha: "4".repeat(40) }] }) },
+    { status: 200, body: JSON.stringify({ truncated: false, tree: [{ path: ".chain/topic/spec.md", sha: "3".repeat(40) }, { path: "src/a.ts", sha: "4".repeat(40) }] }) },
     { status: 201, body: JSON.stringify({ sha: cleanTree }) },
     { status: 201, body: JSON.stringify({ sha: mergeCommit }) },
-    { status: 200, body: JSON.stringify({ ref: "refs/heads/main", object: { sha: mergeCommit } }) },
+    { status: 200, body: JSON.stringify({ data: { updateRefs: { clientMutationId: null } } }) },
   ]);
   assert.deepEqual(
-    await client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, head, { ref: "main", sha: base }),
+    await client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, head, { ref: "main", sha: base, repositoryId: "R_repo" }),
     { status: "merged", sha: mergeCommit },
   );
   assert.deepEqual(JSON.parse(requests[2]!.body!), {
@@ -140,30 +132,81 @@ test("canonical merge constructs a two-parent tree without .chain and leaves the
     tree: cleanTree,
     parents: [base, head],
   });
-  assert.equal(requests[4]!.method, "PATCH");
-  assert.match(requests[4]!.url, /\/git\/refs\/heads\/main$/u);
-  assert.deepEqual(JSON.parse(requests[4]!.body!), { sha: mergeCommit, force: false });
+  assert.equal(requests[4]!.method, "POST");
+  assert.equal(requests[4]!.url, "https://api.github.test/graphql");
+  assert.deepEqual(JSON.parse(requests[4]!.body!).variables.refUpdates, [{
+    name: "refs/heads/main", beforeOid: base, afterOid: mergeCommit, force: false,
+  }]);
   assert.equal(requests.some((request) => request.url.includes("git/refs/heads/feature")), false);
 });
 
-test("§11.3 — every documented merge status maps to its named classification", async () => {
-  const expectations: Array<[number, string]> = [
-    [409, "head-moved"],
-    [405, "not-mergeable"],
-    [403, "forbidden"],
-    [404, "not-found"],
-    [422, "unprocessable"],
-    [500, "unknown"],
-    [502, "unknown"],
-  ];
-  for (const [status, expected] of expectations) {
-    const { client } = clientWith([{ status, body: "" }]);
-    const response = await client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, "a".repeat(40));
-    assert.equal(response.status, expected, String(status));
+test("resulting Git objects strip .chain only from the landed merge and CAS refuses stale base", async () => {
+  const head = "a".repeat(40);
+  const base = "b".repeat(40);
+  const headTree = "1".repeat(40);
+  const cleanTree = "2".repeat(40);
+  const mergeCommit = "c".repeat(40);
+  const trees = new Map<string, string[]>([[headTree, [".chain/topic/spec.md", "src/a.ts"]]]);
+  const commits = new Map<string, { tree: string; parents: string[] }>([[head, { tree: headTree, parents: [] }]]);
+  let baseRef = base;
+  let forceDrift = false;
+  const http: Http = async (request) => {
+    if (request.url.endsWith(`/git/commits/${head}`)) return { status: 200, body: JSON.stringify({ tree: { sha: headTree } }) };
+    if (request.url.includes(`/git/trees/${headTree}?recursive=1`)) {
+      return { status: 200, body: JSON.stringify({ truncated: false, tree: trees.get(headTree)!.map((path) => ({ path })) }) };
+    }
+    if (request.url.endsWith("/git/trees")) {
+      trees.set(cleanTree, trees.get(headTree)!.filter((path) => path.split("/")[0] !== ".chain"));
+      return { status: 201, body: JSON.stringify({ sha: cleanTree }) };
+    }
+    if (request.url.endsWith("/git/commits")) {
+      const body = JSON.parse(request.body ?? "{}") as { tree: string; parents: string[] };
+      commits.set(mergeCommit, { tree: body.tree, parents: body.parents });
+      return { status: 201, body: JSON.stringify({ sha: mergeCommit }) };
+    }
+    if (request.url.endsWith("/graphql")) {
+      const body = JSON.parse(request.body ?? "{}") as { variables: { refUpdates: Array<{ beforeOid: string; afterOid: string }> } };
+      const update = body.variables.refUpdates[0]!;
+      if (forceDrift) baseRef = head;
+      if (baseRef !== update.beforeOid) return { status: 200, body: JSON.stringify({ data: null, errors: [{ message: "beforeOid mismatch" }] }) };
+      baseRef = update.afterOid;
+      return { status: 200, body: JSON.stringify({ data: { updateRefs: { clientMutationId: null } } }) };
+    }
+    return { status: 500, body: "unexpected request" };
+  };
+  const client = makeGitHubClient({
+    restUrl: "https://api.github.test", graphqlUrl: "https://api.github.test/graphql",
+    token: TOKEN, timeoutMs: 1_000, http,
+  });
+  assert.deepEqual(await client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, head,
+    { ref: "main", sha: base, repositoryId: "R_repo" },
+  ), { status: "merged", sha: mergeCommit });
+  assert.equal(trees.get(commits.get(baseRef)!.tree)!.some((path) => path.startsWith(".chain/")), false);
+  assert.equal(trees.get(commits.get(head)!.tree)!.some((path) => path.startsWith(".chain/")), true);
+
+  baseRef = base;
+  forceDrift = true;
+  assert.deepEqual(await client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, head,
+    { ref: "main", sha: base, repositoryId: "R_repo" },
+  ), { status: "ref-update-refused", reason: "UNKNOWN: beforeOid mismatch" });
+  assert.equal(baseRef, head);
+});
+
+test("a malformed or truncated recursive tree refuses the merge", async () => {
+  for (const tree of [{ tree: [] }, { truncated: true, tree: [] }, { truncated: false, tree: null }]) {
+    const { client } = clientWith([
+      { status: 200, body: JSON.stringify({ tree: { sha: "1".repeat(40) } }) },
+      { status: 200, body: JSON.stringify(tree) },
+    ]);
+    const response = await client.mergePullRequest(
+      { owner: "owner", name: "name", number: 7 }, "a".repeat(40),
+      { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" },
+    );
+    assert.equal(response.status, "unknown");
+    assert.match(response.status === "unknown" ? response.reason : "", /malformed or truncated/u);
   }
-  // A 200 that does not actually report a merged sha is unknown, never merged.
-  const lying = clientWith([{ status: 200, body: JSON.stringify({ merged: false }) }]);
-  assert.equal((await lying.client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, "a".repeat(40))).status, "unknown");
 });
 
 test("§11.4 — the two disarm mutations report their own GraphQL errors rather than swallowing them", async () => {
@@ -185,7 +228,10 @@ test("a network failure or an unparseable body is reported, never treated as suc
   });
   const read = await client.readPullRequest(reference);
   assert.equal(read.status, "api-error");
-  const merge = await client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, "a".repeat(40));
+  const merge = await client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, "a".repeat(40),
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" },
+  );
   assert.equal(merge.status, "unknown");
 
   const garbage = clientWith([{ status: 200, body: "<html>" }]);

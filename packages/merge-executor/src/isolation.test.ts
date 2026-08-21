@@ -134,14 +134,7 @@ test("the only mutating operations are the sanitized merge construction and the 
   }
   assert.match(code, /path: "\.chain"/u);
   assert.match(code, /force: false/u);
-  // The compatibility expected-head endpoint remains one PUT; canonical merges
-  // use the explicitly non-force PATCH. Disarm remains exactly two mutations.
-  assert.equal([...github.matchAll(/method: "PUT"/gu)].length, 1);
-  assert.equal([...github.matchAll(/method: "PATCH"/gu)].length >= 1, true);
-  assert.equal([...github.matchAll(/^mutation|`mutation\(/gmu)].length, 2);
-});
-
-test("the merge body carries the compare-and-swap sha and the pinned method, and nothing else", async () => {
-  const github = await readFile(join(sourceRoot, "github.ts"), "utf8");
-  assert.match(github, /JSON\.stringify\(\{ sha: expectedHeadSha, merge_method: "merge" \}\)/u);
+  assert.equal([...github.matchAll(/method: "PUT"/gu)].length, 0);
+  assert.equal([...github.matchAll(/beforeOid/gu)].length >= 1, true);
+  assert.equal([...github.matchAll(/^mutation|`mutation\(/gmu)].length, 3);
 });

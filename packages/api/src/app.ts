@@ -78,6 +78,7 @@ import {
   isMergeReadinessStep,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
+  parseResolverResult,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -190,7 +191,7 @@ const createMergeTailRepairTask = async (
     ? [
       `Resolve the refresh conflict between chain head ${input.headSha} and target head ${input.baseHeadSha}.`,
       input.summary,
-      "Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist JSON with outcome resolved or unable.",
+      `Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
     ].join("\n\n")
     : [
       `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
@@ -4835,17 +4836,54 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           if (repairMarker && typeof repairMarker.regressionTaskId === "string") {
             const repairOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
             let reportedUnable = false;
-            try {
-              const value = JSON.parse(repairOutput?.body ?? "null") as Record<string, unknown> | null;
-              reportedUnable = value?.outcome === "unable";
-            } catch { /* fix tasks may produce prose; successful completion is still a closed attempt */ }
+            let resolvedHeadSha = body.headSha ?? null;
+            if (repairMarker.repairKind === "refresh-conflict") {
+              const parsedResolver = parseResolverResult(repairOutput?.body);
+              const expectedStart = typeof repairMarker.headSha === "string" ? repairMarker.headSha : null;
+              const expectedTarget = typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null;
+              const bindingError = parsedResolver.status === "invalid"
+                ? parsedResolver.reason
+                : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
+                  ? "merge-resolver output is bound to stale start or target heads"
+                  : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== body.headSha
+                    ? "merge-resolver output resolved head does not match the delivered run head"
+                    : null;
+              if (bindingError) {
+                repairUnable = true;
+                const reason = `refresh-conflict repair ${run.taskId} returned invalid output: ${bindingError}`;
+                await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
+                await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+                await tx.taskActivity.create({ data: {
+                  taskId: repairMarker.regressionTaskId,
+                  actorType: "control-plane",
+                  body: `Automatic refresh-conflict attempt stopped: ${reason}`,
+                  metadata: jsonValue({
+                    kind: MERGE_TAIL_KIND.repairResult,
+                    schemaVersion: 1,
+                    repairKind: "refresh-conflict",
+                    repairTaskId: run.taskId,
+                    startHeadSha: expectedStart,
+                    targetHeadSha: expectedTarget,
+                    resolvedHeadSha: body.headSha ?? null,
+                    state: "invalid-output",
+                    reason: bindingError,
+                  }),
+                } });
+                await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+              } else if (parsedResolver.status === "ok") {
+                reportedUnable = parsedResolver.result.outcome === "unable";
+                resolvedHeadSha = parsedResolver.result.outcome === "resolved" ? parsedResolver.result.resolvedHeadSha : null;
+              }
+            }
+            // gate-fix and review-fix agents have no JSON wire contract; their
+            // successful delivered head is the completion evidence.
             if (reportedUnable) {
               repairUnable = true;
               const reason = `${String(repairMarker.repairKind)} repair ${run.taskId} reported unable at ${String(repairMarker.headSha)}`;
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
               await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
               await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-            } else {
+            } else if (!repairUnable) {
               await tx.taskActivity.create({ data: {
                 taskId: repairMarker.regressionTaskId,
                 actorType: "control-plane",
@@ -4857,7 +4895,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                   repairTaskId: run.taskId,
                   startHeadSha: typeof repairMarker.headSha === "string" ? repairMarker.headSha : null,
                   targetHeadSha: typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null,
-                  resolvedHeadSha: body.headSha ?? null,
+                  resolvedHeadSha,
                 }),
               } });
             }

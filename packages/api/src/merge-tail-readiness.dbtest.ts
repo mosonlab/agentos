@@ -3,6 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AssigneeType,
+  type ChangedFile,
   INTEGRATOR_SENTINEL_MODEL,
   PrismaClient,
   TaskStatus,
@@ -46,11 +47,11 @@ const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnap
 });
 
 const reader = (
-  files: Array<{ filename: string; patch: string | null }> = [],
+  files: ChangedFile[] = [],
   pullRequest = snapshot(),
 ): GitHubReader => ({
   readPullRequest: async () => pullRequest,
-  compareCommits: async () => ({ files }),
+  compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files }),
 });
 
 const seedReadiness = async () => {
@@ -146,7 +147,7 @@ const seedReadiness = async () => {
 
 test("clean exact-head readiness authorizes and queues mechanical merge", async () => {
   const seeded = await seedReadiness();
-  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 1, reviewing: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.readiness.id } });
   assert.equal(output.commitSha, HEAD);
@@ -155,8 +156,8 @@ test("clean exact-head readiness authorizes and queues mechanical merge", async 
 
 test("a defense-list diff opens one blind review and blocks authorization until exact-head approval", async () => {
   const seeded = await seedReadiness();
-  const guarded = reader([{ filename: "scripts/merge-gate.sh", patch: "@@ -1 +1 @@\n-old\n+new" }]);
-  assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 0, reviewing: 1, stopped: 0 });
+  const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
+  assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.readiness.id } }), 0);
   const review = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.readiness.id, name: "Autonomous merge tail: independent review" } });
   const reviewRun = await db.run.findFirstOrThrow({ where: { taskId: review.id } });
@@ -168,7 +169,7 @@ test("a defense-list diff opens one blind review and blocks authorization until 
     metadata: { kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "approved", reviewTaskId: review.id, headSha: HEAD, baseSha: BASE },
   } });
   await db.task.update({ where: { id: seeded.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-  assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 1, reviewing: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
 });
 
 test("a conflict resolution that edits existing test lines opens the same review obligation", async () => {
@@ -185,11 +186,11 @@ test("a conflict resolution that edits existing test lines opens the same review
   let compare = 0;
   const testEditReader: GitHubReader = {
     readPullRequest: async () => snapshot(),
-    compareCommits: async () => ({ files: compare++ === 0
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: compare++ === 0
       ? []
-      : [{ filename: "packages/api/src/example.test.ts", patch: "@@ -1 +1 @@\n-old\n+new" }] }),
+      : [{ filename: "packages/api/src/example.test.ts", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }] }),
   };
-  assert.deepEqual(await readinessTick(db, testEditReader), { claimed: 1, authorized: 0, reviewing: 1, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, testEditReader), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   const obligation = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.readiness.id, body: { startsWith: "Independent review obligation opened" } } });
   assert.match(JSON.stringify(obligation.metadata), /existing-test-lines-modified/u);
 });
@@ -197,14 +198,65 @@ test("a conflict resolution that edits existing test lines opens the same review
 test("base drift invalidates a head-bound PASS and returns the chain to regression", async () => {
   const seeded = await seedReadiness();
   const driftedBase = "d".repeat(40);
-  assert.deepEqual(await readinessTick(db, reader([], snapshot({ baseSha: driftedBase }))), { claimed: 1, authorized: 0, reviewing: 0, stopped: 1 });
+  assert.deepEqual(await readinessTick(db, reader([], snapshot({ baseSha: driftedBase }))), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
   const [readiness, regression] = await Promise.all([
     db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
     db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
   ]);
-  assert.equal(readiness.status, TaskStatus.REVIEW);
-  assert.equal(regression.status, TaskStatus.REVIEW);
-  assert.match(readiness.failureReason ?? "", new RegExp(driftedBase));
+  assert.equal(readiness.status, TaskStatus.TODO);
+  assert.equal(regression.status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+});
+
+test("future and wrong-index readiness steps are never claimed", async () => {
+  const future = await seedReadiness();
+  await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.TODO } });
+  assert.deepEqual(await readinessTick(db, reader()), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.equal(await db.inboxMessage.count(), 0);
+
+  await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.DONE } });
+  await db.taskTemplateStep.update({ where: { id: future.readiness.templateStepId! }, data: { stepIndex: 8 } });
+  assert.deepEqual(await readinessTick(db, reader()), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+});
+
+test("an expired orphaned DOING readiness claim is reclaimed after restart", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.readiness.id }, data: {
+    status: TaskStatus.DOING,
+    failureReason: "merge-readiness-claim:dead-worker|2000-01-01T00:00:00.000Z",
+  } });
+  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
+});
+
+test("an incomplete compare response and a behind head fail closed", async () => {
+  const incomplete = await seedReadiness();
+  const maxFiles = Array.from({ length: 300 }, (_, index) => ({
+    filename: `docs/benign-${index}.md`, previousFilename: null, patch: "+new",
+  }));
+  const incompleteReader: GitHubReader = {
+    readPullRequest: async () => snapshot(),
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: false, files: maxFiles }),
+  };
+  assert.deepEqual(await readinessTick(db, incompleteReader), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
+  assert.match((await db.task.findUniqueOrThrow({ where: { id: incomplete.readiness.id } })).failureReason ?? "", /completeness/u);
+
+  await resetTestDb(db);
+  const behind = await seedReadiness();
+  const behindReader: GitHubReader = {
+    readPullRequest: async () => snapshot(),
+    compareCommits: async () => ({ status: "behind", behindBy: 1, filesComplete: true, files: [] }),
+  };
+  assert.deepEqual(await readinessTick(db, behindReader), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: behind.regression.id } })).status, TaskStatus.TODO);
+});
+
+test("an absent runner-created PR identity stops loudly before authorization", async () => {
+  const seeded = await seedReadiness();
+  await db.run.updateMany({ where: { taskId: seeded.regression.id }, data: {
+    pullRequestNumber: null, pullRequestUrl: null,
+  } });
+  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
+  assert.match((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).failureReason ?? "", /pull-request target/u);
 });
 
 test("manual start cannot turn server-owned readiness into a model run", async () => {

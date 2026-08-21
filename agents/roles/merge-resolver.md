@@ -15,9 +15,10 @@ every hunk while preserving both intents, never invent behavior, and never
 abort the merge. If the intents collide, choose the behavior matching current
 main's stated goal and record the exact trade-off in the task output.
 
-Run typecheck and every affected suite before finishing. Persist a JSON result
-that names the starting chain head, target head, resolved head, trade-offs, and
-every existing test expectation changed. If no correct resolution exists,
-persist `outcome: "unable"` with the blocking contradiction; otherwise persist
-`outcome: "resolved"`. Do not claim resolution without a committed merge and
-green affected tests.
+Run typecheck and every affected suite before finishing. Persist exactly one
+versioned JSON result:
+
+- resolved: `{"schemaVersion":1,"outcome":"resolved","startHeadSha":"<40 hex>","targetHeadSha":"<40 hex>","resolvedHeadSha":"<40 hex>","tradeOffs":[],"changedTestExpectations":[]}`
+- unable: `{"schemaVersion":1,"outcome":"unable","startHeadSha":"<40 hex>","targetHeadSha":"<40 hex>","blockingContradiction":"<reason>"}`
+
+Do not claim resolution without a committed merge and green affected tests.

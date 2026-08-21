@@ -22,6 +22,7 @@
  */
 
 import { isDeterministicRefusal } from "@agentos/github-client";
+import type { ChangedFile } from "@agentos/db";
 
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
@@ -97,7 +98,12 @@ export type GitHubReader = {
     baseSha: string,
     headSha: string,
     signal: AbortSignal,
-  ) => Promise<{ files: Array<{ filename: string; patch: string | null }> }>;
+  ) => Promise<{
+    status: "ahead" | "behind" | "diverged" | "identical";
+    behindBy: number;
+    filesComplete: boolean;
+    files: ChangedFile[];
+  }>;
 };
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
@@ -290,13 +296,33 @@ export const createGitHubReader = (
         },
       );
       const payload = asObject(await response.json());
-      const files = asArray(payload?.files).map((entry) => asObject(entry)).flatMap((entry) => (
-        entry && typeof entry.filename === "string"
-          ? [{ filename: entry.filename, patch: typeof entry.patch === "string" ? entry.patch : null }]
-          : []
-      ));
+      const status = payload?.status;
+      const behindBy = payload?.behind_by;
+      if (status !== "ahead" && status !== "behind" && status !== "diverged" && status !== "identical") {
+        throw new GitHubReadError("comparison response has an invalid status", "response");
+      }
+      if (typeof behindBy !== "number" || !Number.isInteger(behindBy) || behindBy < 0) {
+        throw new GitHubReadError("comparison response has an invalid behind_by", "response");
+      }
       if (!Array.isArray(payload?.files)) throw new GitHubReadError("comparison response has no files array", "response");
-      return { files };
+      const files = payload.files.map((raw) => {
+        const entry = asObject(raw);
+        if (!entry || typeof entry.filename !== "string") {
+          throw new GitHubReadError("comparison response has a malformed file entry", "response");
+        }
+        if (entry.status === "renamed" && typeof entry.previous_filename !== "string") {
+          throw new GitHubReadError("renamed comparison entry has no previous_filename", "response");
+        }
+        return {
+          filename: entry.filename,
+          previousFilename: typeof entry.previous_filename === "string" ? entry.previous_filename : null,
+          patch: typeof entry.patch === "string" ? entry.patch : null,
+        };
+      });
+      // GitHub exposes at most 300 changed files and does not expose later file
+      // pages. Exactly 300 is therefore ambiguous and must not be read as a
+      // complete benign diff.
+      return { status, behindBy, filesComplete: files.length < 300, files };
     },
   };
 };

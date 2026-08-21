@@ -41,6 +41,18 @@ test("the happy path merges once, under the authorized head, and verifies the la
   assertNoPublication(fake.calls());
 });
 
+test("a successful atomic ref update is not falsely rejected while GitHub still reports the PR open", async () => {
+  const landedRefBeforePrProjection = mergedSnapshot({
+    state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
+  });
+  const fake = makeFake({ reads: [
+    { status: "ok", snapshot: cleanSnapshot() },
+    { status: "ok", snapshot: cleanSnapshot() },
+    { status: "ok", snapshot: landedRefBeforePrProjection },
+  ] });
+  assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
+});
+
 test("N1 — an advanced head stops head-drift and issues no merge", async () => {
   const fake = makeFake({
     reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: { headRefOid: "d".repeat(40), rollupCommitOid: "d".repeat(40) } }) }],
@@ -49,7 +61,7 @@ test("N1 — an advanced head stops head-drift and issues no merge", async () =>
   assert.equal(fake.calls().includes("merge"), false);
 });
 
-test("N1 [platform] — a 409 on the expected-head compare-and-swap is head-drift, not a retry", async () => {
+test("N1 [platform] — a beforeOid CAS refusal is head-drift, not a retry", async () => {
   const fake = makeFake({ merge: { status: "head-moved" } });
   assert.equal(stopped(await execute(fake.deps)).condition, "head-drift");
   assert.equal(fake.trace.filter((entry) => entry.call === "merge").length, 1);
