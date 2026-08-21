@@ -17,15 +17,16 @@
  * form read the identical directory.
  */
 import { readdir, readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { RunnerPreference } from "@prisma/client";
 
 import { assertCanonicalAgentSources, CANONICAL_AGENT_DEFAULTS } from "./agent-contract.js";
+import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
 const agentsRoot = fileURLToPath(new URL("../../../agents/", import.meta.url));
 
-type FrontmatterDocument = { attributes: Record<string, string>; body: string };
 export type RoleSource = {
   name: string;
   title: string;
@@ -37,31 +38,30 @@ export type RoleSource = {
 };
 export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
 
-const parseDocument = (source: string, filePath: string): FrontmatterDocument => {
-  const normalized = source.replace(/\r\n/g, "\n");
-  if (!normalized.startsWith("---\n")) throw new Error(`${filePath} must start with frontmatter`);
-  const end = normalized.indexOf("\n---\n", 4);
-  if (end < 0) throw new Error(`${filePath} has unterminated frontmatter`);
-  const attributes: Record<string, string> = {};
-  for (const line of normalized.slice(4, end).split("\n")) {
-    const separator = line.indexOf(":");
-    if (separator < 1) throw new Error(`${filePath} has invalid frontmatter line: ${line}`);
-    attributes[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
-  }
-  return { attributes, body: normalized.slice(end + 5).trim() };
+export type PersistedRoleStructure = {
+  title: string;
+  model: string;
+  runnerPreference: RunnerPreference;
+  inboxAccess: boolean;
+  collaborators: Array<{ allowedAgent: { name: string } }>;
 };
 
-const required = (document: FrontmatterDocument, key: string, filePath: string): string => {
-  const value = document.attributes[key];
-  if (!value) throw new Error(`${filePath} is missing ${key}`);
-  return value;
-};
-
-const parseList = (value: string | undefined, filePath: string, key: string): string[] => {
-  if (value === undefined) throw new Error(`${filePath} is missing ${key}`);
-  if (!value.startsWith("[") || !value.endsWith("]")) throw new Error(`${filePath} ${key} must be an inline list`);
-  const content = value.slice(1, -1).trim();
-  return content === "" ? [] : content.split(",").map((item) => item.trim()).filter(Boolean);
+export const roleSourceStructureDifferences = (
+  actual: PersistedRoleStructure,
+  expected: RoleSource,
+): string[] => {
+  const actualCollaborators = actual.collaborators.map(({ allowedAgent }) => allowedAgent.name).sort();
+  const expectedCollaborators = [...expected.collaborators].sort();
+  const fields = [
+    ["title", actual.title, expected.title],
+    ["model", actual.model, expected.model],
+    ["runnerPreference", actual.runnerPreference, expected.runnerPreference],
+    ["inboxAccess", actual.inboxAccess, expected.inboxAccess],
+    ["collaborators", actualCollaborators, expectedCollaborators],
+  ] as const;
+  return fields
+    .filter(([, actualValue, expectedValue]) => !isDeepStrictEqual(actualValue, expectedValue))
+    .map(([field]) => field);
 };
 
 const runnerPreference = (value: string, filePath: string): RunnerPreference => {
@@ -72,22 +72,22 @@ const runnerPreference = (value: string, filePath: string): RunnerPreference => 
 
 export const loadAgentSources = async (): Promise<AgentSources> => {
   const foundationalFile = `${agentsRoot}foundational.md`;
-  const foundationalPrompt = parseDocument(await readFile(foundationalFile, "utf8"), foundationalFile).body;
+  const foundationalPrompt = parsePromptDocument(await readFile(foundationalFile, "utf8"), foundationalFile).body;
   const roleDirectory = `${agentsRoot}roles`;
   const roleFiles = (await readdir(roleDirectory)).filter((name) => name.endsWith(".md")).sort();
   const roles: RoleSource[] = [];
   for (const filename of roleFiles) {
     const filePath = `${roleDirectory}/${filename}`;
-    const document = parseDocument(await readFile(filePath, "utf8"), filePath);
-    const inboxAccess = required(document, "inboxAccess", filePath);
+    const document = parsePromptDocument(await readFile(filePath, "utf8"), filePath);
+    const inboxAccess = requiredFrontmatter(document, "inboxAccess", filePath);
     if (inboxAccess !== "true" && inboxAccess !== "false") throw new Error(`${filePath} inboxAccess must be true or false`);
     roles.push({
-      name: required(document, "name", filePath),
-      title: required(document, "title", filePath),
-      model: required(document, "model", filePath),
-      runnerPreference: runnerPreference(required(document, "runner", filePath), filePath),
+      name: requiredFrontmatter(document, "name", filePath),
+      title: requiredFrontmatter(document, "title", filePath),
+      model: requiredFrontmatter(document, "model", filePath),
+      runnerPreference: runnerPreference(requiredFrontmatter(document, "runner", filePath), filePath),
       inboxAccess: inboxAccess === "true",
-      collaborators: parseList(document.attributes.collaborators, filePath, "collaborators"),
+      collaborators: parseInlineList(document.attributes.collaborators, filePath, "collaborators"),
       rolePrompt: document.body,
     });
   }

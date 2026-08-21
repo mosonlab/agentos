@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -15,11 +17,23 @@ import {
 } from "../src/merge-integrator.js";
 
 import {
+  loadAgentSources,
+  type PersistedRoleStructure,
+  roleSourceStructureDifferences,
+} from "../src/agent-sources.js";
+import {
   assertCanonicalAgentSources,
   CANONICAL_AGENT_DEFAULTS,
-  CANONICAL_TEMPLATE_STEPS,
   catalogRunnerForModel,
+  DIRECT_TEMPLATE_NAME,
 } from "../src/agent-contract.js";
+import {
+  CANONICAL_TEMPLATE_SOURCE_SPECS,
+  loadAllTemplateStepSources,
+  loadTemplateStepSources,
+  type PersistedTemplateStepStructure,
+  templateStepStructureDifferences,
+} from "../src/template-sources.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 
@@ -70,8 +84,8 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   const blindWrite = finalReview.indexOf("reviews/opus-blind-findings.md");
   const firstReportRead = finalReview.indexOf("reviews/sol-findings.md", blindWrite);
   assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
-  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/`/u);
-  assert.match(finalReview, /both are reachable in the tree at `head`/u);
+  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/slices\/` where the chain carries one/u);
+  assert.match(finalReview, /reachable in the tree at `head`/u);
   assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
   assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
   assert.match(finalReview, /stop in this step, and use Inbox to present both\s+bodies of evidence to the human/u);
@@ -81,10 +95,11 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(finalReview, /label `opus_blind_review`/u);
 });
 
-test("the canonical twelve-step template splits code review and preserves mechanical merge", () => {
-  assert.equal(CANONICAL_TEMPLATE_STEPS.length, 12);
+test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {
+  const templateSteps = await loadTemplateStepSources();
+  assert.equal(templateSteps.length, 12);
   assert.deepEqual(
-    CANONICAL_TEMPLATE_STEPS.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    templateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
     [
       { stepIndex: 1, agentName: "spec", outputKind: "spec" },
       { stepIndex: 2, agentName: "plan", outputKind: "plan" },
@@ -100,15 +115,21 @@ test("the canonical twelve-step template splits code review and preserves mechan
       { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
-  assert.equal(CANONICAL_TEMPLATE_STEPS.some((step) => step.agentName === "code-reviewer"), false);
-  assert.equal(CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
-  assert.equal(CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
+  assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
+  assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
+  assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
+  assert.match(templateSteps[1]!.prompt, /this run's id/u);
+  assert.match(templateSteps[2]!.prompt, /merge or split decisions priced against frontier width/u);
+  assert.match(templateSteps[3]!.prompt, /run id labelled `plan_authoring`/u);
 });
 
-test("only implementation opens a pull request, and the integrator is not a model row", () => {
-  const opening = CANONICAL_TEMPLATE_STEPS.filter((step) => step.opensPullRequest).map((step) => step.stepIndex);
+test("only implementation opens a pull request, and the integrator is not a model row", async () => {
+  const templateSteps = await loadTemplateStepSources();
+  const opening = templateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex);
   assert.deepEqual(opening, [5]);
-  const integrator = CANONICAL_TEMPLATE_STEPS.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX)!;
+  const integrator = templateSteps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX)!;
   assert.equal(integrator.agentName, INTEGRATOR_AGENT_NAME);
   assert.equal(integrator.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.equal(integrator.approvalGate, false);
@@ -119,6 +140,128 @@ test("only implementation opens a pull request, and the integrator is not a mode
   // string, so `assertCanonicalAgentSources`' runner/model mismatch check
   // cannot fire on it and nothing maps it onto a real adapter.
   assert.equal(catalogRunnerForModel(sentinel.model), null);
+});
+
+test("the direct template sources keep the review spine, drop planning, and end at the human gate", async () => {
+  const directTemplateSteps = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
+  assert.deepEqual(
+    directTemplateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    [
+      { stepIndex: 1, agentName: "senior-dev", outputKind: "implementation" },
+      { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
+      { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
+      { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 5, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
+      { stepIndex: 6, agentName: null, outputKind: "approval" },
+    ],
+  );
+  // Only implementation opens the chain's pull request; the blind review
+  // starts blind; regression verification reads the fix diff.
+  assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
+  assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
+  assert.match(directTemplateSteps[5]!.prompt, /no mechanical merge step/u);
+  // The human pull-request gate is the terminal step: the integrator's
+  // bidirectional binding admits no mechanical merge outside the twelve-step
+  // template, so no direct step may bind the sentinel.
+  const last = directTemplateSteps.at(-1)!;
+  assert.equal(last.approvalGate, true);
+  assert.equal(last.agentName, null);
+  for (const step of directTemplateSteps) {
+    assert.notEqual(step.agentName, INTEGRATOR_AGENT_NAME);
+    assert.equal(
+      integratorBindingValid(step.agentName, { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: DIRECT_TEMPLATE_NAME } }),
+      true,
+    );
+  }
+});
+
+test("the complete template source inventory contains only the twelve-step and direct workflows", async () => {
+  const templates = await loadAllTemplateStepSources();
+  assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
+  assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
+  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 6);
+});
+
+test("the complete template source inventory rejects an unregistered workflow directory", async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), "agentos-template-sources-"));
+  try {
+    await Promise.all(CANONICAL_TEMPLATE_SOURCE_SPECS.map(({ name }) => mkdir(join(sourceRoot, name))));
+    await mkdir(join(sourceRoot, "unregistered-workflow"));
+    await assert.rejects(
+      loadAllTemplateStepSources(sourceRoot),
+      /canonical template inventory must be exactly/u,
+    );
+  } finally {
+    await rm(sourceRoot, { recursive: true, force: true });
+  }
+});
+
+test("the complete template source inventory rejects a missing workflow or non-directory entry", async () => {
+  const missingRoot = await mkdtemp(join(tmpdir(), "agentos-template-sources-missing-"));
+  const fileRoot = await mkdtemp(join(tmpdir(), "agentos-template-sources-file-"));
+  try {
+    await mkdir(join(missingRoot, INTEGRATOR_TEMPLATE_NAME));
+    await assert.rejects(loadAllTemplateStepSources(missingRoot), /canonical template inventory must be exactly/u);
+
+    await mkdir(join(fileRoot, INTEGRATOR_TEMPLATE_NAME));
+    await writeFile(join(fileRoot, DIRECT_TEMPLATE_NAME), "not a directory\n");
+    await assert.rejects(loadAllTemplateStepSources(fileRoot), /must contain only canonical template directories/u);
+  } finally {
+    await Promise.all([
+      rm(missingRoot, { recursive: true, force: true }),
+      rm(fileRoot, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test("canonical prompt sync can detect every Markdown-owned structural field", async () => {
+  const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
+  const persisted: PersistedTemplateStepStructure = {
+    assigneeAgent: { name: expected.agentName! },
+    assigneeType: "AGENT",
+    approvalGate: expected.approvalGate,
+    outputKind: expected.outputKind,
+    attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    opensPullRequest: expected.opensPullRequest,
+    spawnPolicy: expected.spawnPolicy,
+  };
+  assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
+  const mutations: Array<[string, PersistedTemplateStepStructure]> = [
+    ["agent", { ...persisted, assigneeAgent: { name: "different-agent" } }],
+    ["assigneeType", { ...persisted, assigneeType: "HUMAN" }],
+    ["approvalGate", { ...persisted, approvalGate: !persisted.approvalGate }],
+    ["outputKind", { ...persisted, outputKind: "different-output" }],
+    ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],
+    ["opensPullRequest", { ...persisted, opensPullRequest: !persisted.opensPullRequest }],
+    ["spawnPolicy", { ...persisted, spawnPolicy: { tier: "sub" } }],
+  ];
+  for (const [field, mutation] of mutations) {
+    assert.deepEqual(templateStepStructureDifferences(mutation, expected), [field]);
+  }
+});
+
+test("canonical prompt sync can detect every role frontmatter field", async () => {
+  const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian")!;
+  const persisted: PersistedRoleStructure = {
+    title: role.title,
+    model: role.model,
+    runnerPreference: role.runnerPreference,
+    inboxAccess: role.inboxAccess,
+    collaborators: role.collaborators.map((name) => ({ allowedAgent: { name } })),
+  };
+  assert.deepEqual(roleSourceStructureDifferences(persisted, role), []);
+  const mutations: Array<[string, PersistedRoleStructure]> = [
+    ["title", { ...persisted, title: "Different title" }],
+    ["model", { ...persisted, model: "different-model" }],
+    ["runnerPreference", { ...persisted, runnerPreference: RunnerPreference.CLAUDE }],
+    ["inboxAccess", { ...persisted, inboxAccess: !persisted.inboxAccess }],
+    ["collaborators", { ...persisted, collaborators: [{ allowedAgent: { name: "default" } }] }],
+  ];
+  for (const [field, mutation] of mutations) {
+    assert.deepEqual(roleSourceStructureDifferences(mutation, role), [field]);
+  }
 });
 
 test("the sentinel may bind only step 12, and step 12 only the sentinel", () => {

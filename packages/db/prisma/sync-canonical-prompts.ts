@@ -1,94 +1,120 @@
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-
 import { PrismaClient } from "@prisma/client";
-import ts from "typescript";
 
-import { loadAgentSources } from "../src/agent-sources.js";
-import { INTEGRATOR_TEMPLATE_NAME } from "../src/merge-integrator.js";
+import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
+import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
 
-// Every step the seed states a prompt for, and every role under agents/, is
-// synced. A hand-kept subset is how a prompt edit silently misses production.
-const loadStepPrompts = async (): Promise<Map<number, string>> => {
-  const seedPath = fileURLToPath(new URL("./seed.ts", import.meta.url));
-  const sourceText = await readFile(seedPath, "utf8");
-  const source = ts.createSourceFile(seedPath, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  let steps: ts.ArrayLiteralExpression | null = null;
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node)
-      && ts.isIdentifier(node.name)
-      && node.name.text === "steps"
-      && node.initializer
-      && ts.isAsExpression(node.initializer)
-      && ts.isArrayLiteralExpression(node.initializer.expression)) {
-      steps = node.initializer.expression;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  if (!steps) throw new Error("Canonical seed steps tuple array was not found in prisma/seed.ts");
-
-  const prompts = new Map<number, string>();
-  for (const element of (steps as ts.ArrayLiteralExpression).elements) {
-    if (!ts.isArrayLiteralExpression(element)) continue;
-    const indexNode = element.elements[0];
-    const promptNode = element.elements[7];
-    if (!indexNode || !ts.isNumericLiteral(indexNode) || !promptNode || !ts.isStringLiteral(promptNode)) continue;
-    prompts.set(Number(indexNode.text), promptNode.text);
-  }
-  if (prompts.size === 0) throw new Error("No template step prompts were found in prisma/seed.ts");
-  return prompts;
-};
-
+// Every canonical template, every step of each, and every role under agents/
+// is synced. Omitting any source here would let a prompt edit silently miss
+// production, so the loader owns the complete template inventory.
 const main = async (): Promise<void> => {
-  const [stepPrompts, sources] = await Promise.all([loadStepPrompts(), loadAgentSources()]);
-  const rolePrompts = new Map(sources.roles.map((role) => [role.name, role.rolePrompt]));
-  const roleNames = [...rolePrompts.keys()];
+  const [templateSources, sources] = await Promise.all([loadAllTemplateStepSources(), loadAgentSources()]);
+  const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+  const roleNames = [...rolesByName.keys()];
 
   const prisma = new PrismaClient();
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const templates = await tx.taskTemplate.findMany({
-        where: { name: INTEGRATOR_TEMPLATE_NAME },
+      const canonicalProject = await tx.project.findUnique({
+        where: { slug: "agentos-example" },
         select: { id: true },
       });
-      if (templates.length === 0) throw new Error(`Template ${INTEGRATOR_TEMPLATE_NAME} was not found`);
-      const templateIds = templates.map((template) => template.id);
-      const updatedSteps: Record<number, number> = {};
-      for (const stepIndex of [...stepPrompts.keys()].sort((left, right) => left - right)) {
-        const prompt = stepPrompts.get(stepIndex)!;
-        const present = await tx.taskTemplateStep.count({
-          where: { taskTemplateId: { in: templateIds }, stepIndex },
+      if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
+      const updatedSteps: Record<string, Record<number, number>> = {};
+      let templateCount = 0;
+      for (const [templateName, steps] of templateSources) {
+        const templates = await tx.taskTemplate.findMany({
+          where: { name: templateName },
+          select: { id: true },
         });
-        if (present !== templates.length) {
-          throw new Error(`Expected step ${stepIndex} on ${templates.length} canonical templates; found ${present}`);
+        if (templates.length === 0) throw new Error(`Template ${templateName} was not found`);
+        templateCount += templates.length;
+        const templateIds = templates.map((template) => template.id);
+        const present = await tx.taskTemplateStep.count({ where: { taskTemplateId: { in: templateIds } } });
+        const expected = templates.length * steps.length;
+        if (present !== expected) {
+          throw new Error(`Expected ${expected} total steps on ${templates.length} ${templateName} templates; found ${present}`);
         }
-        updatedSteps[stepIndex] = (await tx.taskTemplateStep.updateMany({
-          where: { taskTemplateId: { in: templateIds }, stepIndex, prompt: { not: prompt } },
-          data: { prompt },
-        })).count;
+
+        const updated: Record<number, number> = {};
+        for (const step of steps) {
+          const persistedSteps = await tx.taskTemplateStep.findMany({
+            where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex },
+            select: {
+              taskTemplateId: true,
+              assigneeAgent: { select: { name: true } },
+              assigneeType: true,
+              approvalGate: true,
+              outputKind: true,
+              attachmentsFromPrevious: true,
+              opensPullRequest: true,
+              spawnPolicy: true,
+            },
+          });
+          if (persistedSteps.length !== templates.length) {
+            throw new Error(`Expected step ${step.stepIndex} on ${templates.length} ${templateName} templates; found ${persistedSteps.length}`);
+          }
+          for (const persisted of persistedSteps) {
+            const differences = templateStepStructureDifferences(persisted, step);
+            if (differences.length > 0) {
+              throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
+            }
+          }
+          updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
+            where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex, prompt: { not: step.prompt } },
+            data: { prompt: step.prompt },
+          })).count;
+        }
+        updatedSteps[templateName] = updated;
       }
 
       const presentAgents = await tx.agent.findMany({
-        where: { name: { in: roleNames } },
-        select: { name: true },
+        where: { projectId: canonicalProject.id, archivedAt: null, name: { in: roleNames } },
+        select: {
+          id: true,
+          name: true,
+          title: true,
+          model: true,
+          runnerPreference: true,
+          inboxAccess: true,
+          collaborators: { select: { allowedAgent: { select: { name: true } } } },
+        },
       });
-      const presentRoleNames = new Set(presentAgents.map((agent) => agent.name));
+      const agentsByName = new Map<string, typeof presentAgents>();
+      for (const agent of presentAgents) {
+        const matches = agentsByName.get(agent.name) ?? [];
+        matches.push(agent);
+        agentsByName.set(agent.name, matches);
+      }
       for (const name of roleNames) {
-        if (!presentRoleNames.has(name)) throw new Error(`Agent ${name} was not found`);
+        if (!agentsByName.has(name)) throw new Error(`Agent ${name} was not found`);
       }
       const updatedRoles: Record<string, number> = {};
       for (const name of roleNames) {
-        const rolePrompt = rolePrompts.get(name)!;
+        const role = rolesByName.get(name)!;
+        for (const agent of agentsByName.get(name)!) {
+          const differences = roleSourceStructureDifferences(agent, role);
+          if (differences.length > 0) {
+            throw new Error(`Agent ${name} (${agent.id}) differs from canonical Markdown structure: ${differences.join(", ")}`);
+          }
+        }
         updatedRoles[name] = (await tx.agent.updateMany({
-          where: { name, rolePrompt: { not: rolePrompt } },
-          data: { rolePrompt },
+          where: {
+            projectId: canonicalProject.id,
+            archivedAt: null,
+            name,
+            OR: [
+              { foundationalPrompt: { not: sources.foundationalPrompt } },
+              { rolePrompt: { not: role.rolePrompt } },
+            ],
+          },
+          data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
         })).count;
       }
-      return { templates: templates.length, updatedSteps, updatedRoles };
+      return { templates: templateCount, updatedSteps, updatedRoles };
     });
-    const updated = Object.values(result.updatedSteps).reduce((sum, count) => sum + count, 0)
+    const updated = Object.values(result.updatedSteps)
+      .flatMap((byStep) => Object.values(byStep))
+      .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);
     console.log(JSON.stringify({ ...result, updated }));
   } finally {

@@ -34,7 +34,7 @@ execFileSync("git", [
 ]);
 // The authority the recorded revalidation names; the preflight refuses to pass
 // without them, so these are the real values, not placeholders.
-const MASTER_SHA = "29aac967f373ec6fd96f52b8289724f76eb4721f";
+const MASTER_SHA = "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b";
 const CONTROL_PLANE_A_SHA = "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d";
 
 let fixture: ReturnType<typeof stageAtPreviousMigration>;

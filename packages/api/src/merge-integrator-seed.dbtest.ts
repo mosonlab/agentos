@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import {
   activateChainSuccessor,
   AssigneeType,
+  DIRECT_TEMPLATE_NAME,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -30,6 +31,8 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   legacyNineStepTemplateName,
   legacyTenStepTemplateName,
+  loadAgentSources,
+  loadTemplateStepSources,
   PrismaClient,
   type Task,
   TaskStatus,
@@ -59,6 +62,7 @@ const runScript = async (script: string): Promise<{ code: number; output: string
 };
 
 const seed = () => runScript("seed.ts");
+const sync = () => runScript("sync-canonical-prompts.ts");
 const verify = () => runScript("verify-agent-template.ts");
 
 const integratorStep = async () => db.taskTemplateStep.findFirstOrThrow({
@@ -66,9 +70,14 @@ const integratorStep = async () => db.taskTemplateStep.findFirstOrThrow({
   include: { assigneeAgent: true, taskTemplate: { include: { steps: true } } },
 });
 
+const directTemplate = async () => db.taskTemplate.findUniqueOrThrow({
+  where: { projectId_name: { projectId: (await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } })).id, name: DIRECT_TEMPLATE_NAME } },
+  include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+});
+
 /* ------------------------------------------------------ the fresh-seed negative */
 
-test("a fresh seed writes a twelve-step template whose step 12 is mechanical", async () => {
+test("a fresh seed writes the twelve-step mechanical template and six-step direct template", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
 
@@ -91,13 +100,24 @@ test("a fresh seed writes a twelve-step template whose step 12 is mechanical", a
 
   const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
   assert.deepEqual(opening, [5], "only implementation opens the chain pull request");
+
+  const direct = await directTemplate();
+  assert.equal(direct.steps.length, 6);
+  assert.equal(direct.steps[0]?.assigneeAgent?.name, "senior-dev");
+  assert.equal(direct.steps[0]?.opensPullRequest, true);
+  assert.match(direct.steps[0]?.prompt ?? "", /brief is the specification of record/u);
+  assert.equal(direct.steps[2]?.attachmentsFromPrevious, false);
+  assert.equal(direct.steps[5]?.assigneeType, AssigneeType.HUMAN);
+  assert.equal(direct.steps[5]?.approvalGate, true);
+  assert.match(direct.steps[5]?.prompt ?? "", /no mechanical merge step/u);
+  assert.equal(direct.steps.some((candidate) => candidate.assigneeAgent?.name === INTEGRATOR_AGENT_NAME), false);
 });
 
 test("the verifier passes on a freshly seeded database, and says how many steps it saw", async () => {
   assert.equal((await seed()).code, 0);
   const verified = await verify();
   assert.equal(verified.code, 0, verified.output);
-  assert.match(verified.output, /12 steps/u);
+  assert.match(verified.output, /18 steps across 2 templates/u);
 });
 
 test("re-seeding is idempotent and does not flip step 12 back", async () => {
@@ -106,6 +126,100 @@ test("re-seeding is idempotent and does not flip step 12 back", async () => {
   const step = await integratorStep();
   assert.equal(step.opensPullRequest, false, "the update branch of the upsert sets it too, not only create");
   assert.equal(step.taskTemplate.steps.length, 12);
+});
+
+test("canonical sync restores step, role, and foundational prompts when structure matches", async () => {
+  assert.equal((await seed()).code, 0);
+  const direct = await directTemplate();
+  const step = direct.steps[0]!;
+  const agent = await db.agent.findFirstOrThrow({ where: { name: "default" } });
+  await Promise.all([
+    db.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: "step prompt drift" } }),
+    db.agent.update({ where: { id: agent.id }, data: { foundationalPrompt: "foundation drift", rolePrompt: "role drift" } }),
+  ]);
+
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  const expectedStep = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
+  const sources = await loadAgentSources();
+  const expectedRole = sources.roles.find(({ name }) => name === "default")!;
+  const [persistedStep, persistedAgent] = await Promise.all([
+    db.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } }),
+    db.agent.findUniqueOrThrow({ where: { id: agent.id } }),
+  ]);
+  assert.equal(persistedStep.prompt, expectedStep.prompt);
+  assert.equal(persistedAgent.foundationalPrompt, sources.foundationalPrompt);
+  assert.equal(persistedAgent.rolePrompt, expectedRole.rolePrompt);
+});
+
+test("canonical sync rejects template structure drift without applying its prompt", async () => {
+  assert.equal((await seed()).code, 0);
+  const direct = await directTemplate();
+  const step = direct.steps[0]!;
+  await db.taskTemplateStep.update({
+    where: { id: step.id },
+    data: { attachmentsFromPrevious: !step.attachmentsFromPrevious, prompt: "step prompt drift" },
+  });
+
+  const synced = await sync();
+  assert.notEqual(synced.code, 0, synced.output);
+  assert.match(synced.output, /attachmentsFromPrevious/u);
+  assert.equal((await db.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } })).prompt, "step prompt drift");
+});
+
+test("canonical sync rejects role structure drift without applying its prompts", async () => {
+  assert.equal((await seed()).code, 0);
+  const agent = await db.agent.findFirstOrThrow({ where: { name: "librarian" } });
+  await db.agent.update({
+    where: { id: agent.id },
+    data: { inboxAccess: !agent.inboxAccess, foundationalPrompt: "foundation drift", rolePrompt: "role drift" },
+  });
+
+  const synced = await sync();
+  assert.notEqual(synced.code, 0, synced.output);
+  assert.match(synced.output, /inboxAccess/u);
+  const persisted = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+  assert.equal(persisted.foundationalPrompt, "foundation drift");
+  assert.equal(persisted.rolePrompt, "role drift");
+});
+
+test("canonical sync ignores a customized same-name agent outside the canonical project", async () => {
+  assert.equal((await seed()).code, 0);
+  const canonical = await db.agent.findFirstOrThrow({
+    where: { name: "default", project: { slug: "agentos-example" } },
+  });
+  const customProject = await db.project.create({
+    data: { name: "Custom", slug: "custom", yamlDocument: "# custom\n" },
+  });
+  const customEnvironment = await db.environment.create({
+    data: { projectId: customProject.id, name: "local", networking: "OPEN", allowedHosts: [] },
+  });
+  const custom = await db.agent.create({
+    data: {
+      projectId: customProject.id,
+      environmentId: customEnvironment.id,
+      name: "default",
+      title: "Custom Default",
+      model: "custom-model",
+      runnerPreference: "CODEX",
+      inboxAccess: false,
+      foundationalPrompt: "custom foundation",
+      rolePrompt: "custom role",
+    },
+  });
+  await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role drift" } });
+
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  const expected = (await loadAgentSources()).roles.find(({ name }) => name === "default")!;
+  const [persistedCanonical, persistedCustom] = await Promise.all([
+    db.agent.findUniqueOrThrow({ where: { id: canonical.id } }),
+    db.agent.findUniqueOrThrow({ where: { id: custom.id } }),
+  ]);
+  assert.equal(persistedCanonical.rolePrompt, expected.rolePrompt);
+  assert.equal(persistedCustom.title, "Custom Default");
+  assert.equal(persistedCustom.foundationalPrompt, "custom foundation");
+  assert.equal(persistedCustom.rolePrompt, "custom role");
 });
 
 /* ------------------------------------------------------- the verifier negatives */
@@ -165,6 +279,28 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
       await db.taskTemplateStep.update({ where: { id: blind.id }, data: { attachmentsFromPrevious: true } });
     },
     expect: /attachmentsFromPrevious/u,
+  },
+  {
+    name: "role frontmatter drift",
+    break: async () => {
+      const agent = await db.agent.findFirstOrThrow({ where: { name: "librarian" } });
+      await db.agent.update({ where: { id: agent.id }, data: { inboxAccess: !agent.inboxAccess } });
+    },
+    expect: /inboxAccess/u,
+  },
+  {
+    name: "foundational prompt drift",
+    break: async () => {
+      await db.agent.updateMany({ where: { name: "librarian" }, data: { foundationalPrompt: "drift" } });
+    },
+    expect: /foundational prompt/u,
+  },
+  {
+    name: "role prompt drift",
+    break: async () => {
+      await db.agent.updateMany({ where: { name: "librarian" }, data: { rolePrompt: "drift" } });
+    },
+    expect: /role prompt/u,
   },
 ];
 

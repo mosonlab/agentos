@@ -1,6 +1,6 @@
 import { AssigneeType, Prisma, PrismaClient } from "@prisma/client";
 
-import { CANONICAL_TEMPLATE_STEPS } from "../src/agent-contract.js";
+import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
   INTEGRATOR_AGENT_NAME,
@@ -9,6 +9,7 @@ import {
   legacyNineStepTemplateName,
   legacyTenStepTemplateName,
 } from "../src/merge-integrator.js";
+import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
 // so that OSS-B0's first-run onboarding can read the same `agents/` contract
@@ -29,7 +30,9 @@ const HISTORICAL_NINE_STEP_CONTRACT = [
 ] as const;
 
 const main = async (): Promise<void> => {
-  const sources = await loadAgentSources();
+  const [sources, templateStepsByName] = await Promise.all([loadAgentSources(), loadAllTemplateStepSources()]);
+  const templateSteps = templateStepsByName.get(INTEGRATOR_TEMPLATE_NAME)!;
+  const directTemplateSteps = templateStepsByName.get(DIRECT_TEMPLATE_NAME)!;
   const project = await prisma.project.upsert({
     where: { slug: "agentos-example" },
     update: {},
@@ -152,39 +155,70 @@ const main = async (): Promise<void> => {
       },
     });
   });
-  const canonicalStep = (stepIndex: number) => {
-    const step = CANONICAL_TEMPLATE_STEPS.find((candidate) => candidate.stepIndex === stepIndex);
-    if (!step) throw new Error(`Missing canonical template step ${stepIndex}`);
-    return step;
-  };
-  // The tuple carries `opensPullRequest` as its tenth element and both branches
-  // of the upsert set it. `templates.ts` copies the value onto every materialized
-  // task row. Only implementation creates the chain PR; every later row reuses it.
-  const steps = [
-    [1, "Write a spec", canonicalStep(1).agentName, AssigneeType.AGENT, null, canonicalStep(1).approvalGate, canonicalStep(1).outputKind, "Write a detailed feature specification for {{branchName}} and persist it for human approval.", null, canonicalStep(1).opensPullRequest],
-    [2, "Plan", canonicalStep(2).agentName, AssigneeType.AGENT, null, canonicalStep(2).approvalGate, canonicalStep(2).outputKind, "Turn the approved spec into a tracer-bullet slice set engineered for parallel execution: many slices with empty blocked_by, a shallow critical path. Write the chain artifacts under `.chain/{{branchName}}/` on {{branchName}} — the approved spec copied to `spec.md`, one file per slice at `slices/<NN>-<slug>.md`, and this run's id in `sessions.md` under the label `plan_authoring`. Each slice file carries YAML frontmatter — `id` (unique, matching its file's `<NN>-<slug>`), `title`, `blocked_by` (a list of existing slice ids, never its own), `files_hint` (a list of repo-relative paths), `risk` (boolean, true exactly when the slice touches persisted data or an irreversible external action) — and body sections Delivers and Acceptance. Each slice cuts one demonstrable path through every layer it needs and fits a single fresh context window. blocked_by carries only true prerequisites and stays acyclic; slice boundaries keep files_hint overlap between independent slices rare. Stage a wide refactor as expand-migrate-contract slices rather than one tracer bullet. Every acceptance criterion is red at the frozen base and names the verification that turns it green. The plan is complete when every spec requirement maps to exactly one slice's Delivers and every file above is committed to {{branchName}}.", null, canonicalStep(2).opensPullRequest],
-    [3, "Plan review", canonicalStep(3).agentName, AssigneeType.AGENT, null, canonicalStep(3).approvalGate, canonicalStep(3).outputKind, "Review every vertical slice against the approved specification and frozen base: standalone demonstration, layer coverage and context size, true blocked_by prerequisites, merge or split decisions priced against frontier width, expand-migrate-contract staging for wide refactors, and acceptance criteria that fail at base and turn green under the named verification.", null, canonicalStep(3).opensPullRequest],
-    [4, "Revise plan", canonicalStep(4).agentName, AssigneeType.AGENT, null, canonicalStep(4).approvalGate, canonicalStep(4).outputKind, "Attempt to resume the planning session with the run id labelled `plan_authoring` in `.chain/{{branchName}}/sessions.md`; if exact resume is unavailable, follow your role's new-session fallback. Revise the slice set against the plan-review findings by editing the slice files in place under `.chain/{{branchName}}/slices/`, preserving the planning invariants — tracer-bullet cut, acyclic true blocked_by, wide frontier and shallow critical path, rare files_hint overlap between independent slices, risk true exactly for persisted data or an irreversible external action, every acceptance criterion red at the frozen base. On a successful resume the `plan_authoring` id stands; in a new session add this session's id under `plan_revision`. Commit to {{branchName}}. The revised slice set is the implementation authority: complete when every must-fix finding has a resolving slice edit, every should-fix a recorded decision, and every spec requirement still maps to exactly one slice.", null, canonicalStep(4).opensPullRequest],
-    [5, "Implementation", canonicalStep(5).agentName, AssigneeType.AGENT, null, canonicalStep(5).approvalGate, canonicalStep(5).outputKind, "Implement the approved slice set on {{branchName}} by frontier waves. Read every slice under `.chain/{{branchName}}/slices/`; the frontier — every slice whose blocked_by is fully merged — forms the next wave. Run all slices of a wave in parallel, each as one background subprocess in its own git worktree at the subordinate tier fixed in your role configuration, escalating any slice whose frontmatter flags risk as that configuration directs. At the wave barrier, merge finished worktrees back serially in ascending slice id, resolve conflicts in that order, and rerun the affected tests before opening the next wave. After the final wave, run the end-to-end suite and record the implementation range — the base commit you started from and the final head — in your task output; leave publication of the branch to the runner. Complete when every slice's acceptance criteria are green at the recorded head.", null, canonicalStep(5).opensPullRequest],
-    [6, "Code review (Sol)", canonicalStep(6).agentName, AssigneeType.AGENT, null, canonicalStep(6).approvalGate, canonicalStep(6).outputKind, "Review the complete integrated implementation diff from the frozen pre-implementation base through the delivered head. Persist stable evidence-backed findings as the task output.", null, canonicalStep(6).opensPullRequest],
-    [7, "Code review and adjudication (Opus)", canonicalStep(7).agentName, AssigneeType.AGENT, null, canonicalStep(7).approvalGate, canonicalStep(7).outputKind, "Blind-review the complete integrated implementation diff and persist independent findings before reading the first review. Then apply the canonical merge matrix and persist the closed must-fix list.", null, canonicalStep(7).opensPullRequest],
-    [8, "Apply review fixes", canonicalStep(8).agentName, AssigneeType.AGENT, null, canonicalStep(8).approvalGate, canonicalStep(8).outputKind, "Apply the complete closed must-fix list and rerun every affected regression.", null, canonicalStep(8).opensPullRequest],
-    [9, "Regression verification", canonicalStep(9).agentName, AssigneeType.AGENT, null, canonicalStep(9).approvalGate, canonicalStep(9).outputKind, "Review the full fix diff as one unit, account for every must-fix ID, rerun relevant regressions, and bind the verdict to the exact fixed head for human review.", null, canonicalStep(9).opensPullRequest],
-    [10, "Librarian", canonicalStep(10).agentName, AssigneeType.AGENT, null, canonicalStep(10).approvalGate, canonicalStep(10).outputKind, "Update internal documentation to match the delivered code.", null, canonicalStep(10).opensPullRequest],
-    [11, "Human PR review", canonicalStep(11).agentName, AssigneeType.HUMAN, null, canonicalStep(11).approvalGate, canonicalStep(11).outputKind, "Review the pull request for {{branchName}} at the exact head approved by regression verification and authorize its merge against the evidence presented in the approval card.", null, canonicalStep(11).opensPullRequest],
-    [12, "Merge execution", canonicalStep(12).agentName, AssigneeType.AGENT, null, canonicalStep(12).approvalGate, canonicalStep(12).outputKind, "Execute the authorized merge mechanically. No model runs this step: @agentos/merge-executor claims it, re-verifies every precondition against the live pull request, and merges only under the step-11 human authorization for that exact head.", null, canonicalStep(12).opensPullRequest],
+  const stepNames = [
+    "Write a spec",
+    "Plan",
+    "Plan review",
+    "Revise plan",
+    "Implementation",
+    "Code review (Sol)",
+    "Code review and adjudication (Opus)",
+    "Apply review fixes",
+    "Regression verification",
+    "Librarian",
+    "Human PR review",
+    "Merge execution",
   ] as const;
-  for (const [stepIndex, name, agentName, assigneeType, runner, approvalGate, outputKind, prompt, spawnPolicy, opensPullRequest] of steps) {
+  for (const step of templateSteps) {
+    const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy } = step;
+    const name = stepNames[stepIndex - 1];
+    if (!name) throw new Error(`Missing canonical template step name ${stepIndex}`);
+    const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
     const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
     if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
     await prisma.taskTemplateStep.upsert({
       where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex } },
-      update: { name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: canonicalStep(stepIndex).attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious: canonicalStep(stepIndex).attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      update: { name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: template.id, stepIndex, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
     });
   }
 
-  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents and the twelve-step feature template.`);
+  const directTemplate = await prisma.taskTemplate.upsert({
+    where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
+    update: {
+      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, regression verification, and human pull-request review. No spec or plan phase and no mechanical merge.",
+      variables: ["branchName"],
+    },
+    create: {
+      projectId: project.id,
+      name: DIRECT_TEMPLATE_NAME,
+      description: "Direct-tier workflow: implementation from the task brief, dual independent code review with blind adjudication, fix application, regression verification, and human pull-request review. No spec or plan phase and no mechanical merge.",
+      variables: ["branchName"],
+    },
+  });
+  const directStepNames = [
+    "Implementation",
+    "Code review (Sol)",
+    "Code review and adjudication (Opus)",
+    "Apply review fixes",
+    "Regression verification",
+    "Human PR review",
+  ] as const;
+  for (const step of directTemplateSteps) {
+    const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy } = step;
+    const name = directStepNames[stepIndex - 1];
+    if (!name) throw new Error(`Missing direct template step name ${stepIndex}`);
+    const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
+    const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
+    if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
+    await prisma.taskTemplateStep.upsert({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: directTemplate.id, stepIndex } },
+      update: { name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: directTemplate.id, stepIndex, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+    });
+  }
+
+  console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the six-step direct template.`);
 };
 
 try {

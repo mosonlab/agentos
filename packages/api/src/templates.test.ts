@@ -4,22 +4,31 @@ import test from "node:test";
 import {
   AssigneeType,
   CANONICAL_AGENT_DEFAULTS,
-  CANONICAL_TEMPLATE_STEPS,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_SENTINEL_MODEL,
+  INTEGRATOR_TEMPLATE_NAME,
   Prisma,
   RunnerKind,
   RunnerPreference,
+  loadTemplateStepSources,
   type PrismaClient,
 } from "@agentos/db";
 
 import { instantiateTemplate } from "./templates.js";
 
 test("instantiating the canonical feature template creates twelve tasks including the mechanical integrator", async () => {
+  const canonicalTemplateSteps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
   const created: Array<Record<string, any>> = [];
   const runs: Array<Record<string, any>> = [];
-  const agents = new Map(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
+  const agents = new Map<string, {
+    id: string;
+    name: string;
+    model: string;
+    runnerPreference: RunnerPreference;
+    foundationalPrompt: string;
+    rolePrompt: string;
+  }>(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
     id: `agent-${index + 1}`,
     name: contract.name,
     model: contract.model,
@@ -27,7 +36,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   }]));
-  const steps = CANONICAL_TEMPLATE_STEPS.map((contract) => {
+  const steps = canonicalTemplateSteps.map((contract) => {
     const agent = contract.agentName ? agents.get(contract.agentName)! : null;
     return {
       id: `step-${contract.stepIndex}`,
@@ -104,7 +113,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
   assert.equal(created[11]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
   assert.equal(created[11]!.opensPullRequest, false);
   assert.equal(executionModeFor(created[11]!.templateStep), "mechanical");
-  assert.deepEqual(created.map((task) => task.outputKind ?? task.templateStep.outputKind), CANONICAL_TEMPLATE_STEPS.map((step) => step.outputKind));
+  assert.deepEqual(created.map((task) => task.outputKind ?? task.templateStep.outputKind), canonicalTemplateSteps.map((step) => step.outputKind));
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runner, RunnerKind.CLAUDE);
   assert.equal(runs[0]!.branch, "feature/twelve-steps");

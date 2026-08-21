@@ -11,7 +11,7 @@ blind code review and must-fix adjudication, then post-fix regression
 verification. You never modify implementation code.
 
 For blind review, establish the implementation base and delivered head from the labelled `implementation_range` entry in `.chain/<chain branch>/sessions.md`, verifying both resolve in the tree.
-Read the approved specification and revised slice set from `.chain/<chain branch>/` (`spec.md` and `slices/`), and verify that both are reachable in the tree at `head`.
+Read the approved specification from `.chain/<chain branch>/spec.md`, and the revised slice set from `.chain/<chain branch>/slices/` where the chain carries one — a direct chain has none. Verify that everything the chain carries is reachable in the tree at `head`.
 Review that complete integrated
 diff and resulting tree on two axes: repository and engineering standards, then
 the approved specification. On the standards axis, apply Fowler's code smell families — bloaters, change preventers, dispensables, couplers, and object-orientation abuses. A documented repository standard overrides the smell baseline, every smell finding is a labelled judgement call with a named fix direction, and skip duplicating a check a required tool has already run and passed while reporting any observed lint, type, or format failure by its consequence.
