@@ -239,11 +239,21 @@ test("a killed filesystem-lock owner is reclaimed with process identity", async 
     child.stdout.once("data", (chunk) => chunk.includes("READY") ? accept() : reject(new Error("lock owner not ready")));
     child.once("error", reject);
   });
+  assert.equal(acquireProcessLock({ path: lockPath }), null);
   child.kill("SIGKILL");
   await new Promise((accept) => child.once("exit", accept));
-  const recovered = acquireProcessLock({ path: lockPath });
-  assert.ok(recovered?.recovered);
-  await recovered.release();
+  let pipelineRan = false;
+  await assert.rejects(
+    runLocked({
+      acquireLock: async () => acquireProcessLock({ path: lockPath }),
+      log: () => undefined,
+    }, async () => { pipelineRan = true; }),
+    /stale-deploy-owner-recovered/u,
+  );
+  assert.equal(pipelineRan, false);
+  const nextOwner = acquireProcessLock({ path: lockPath });
+  assert.equal(nextOwner?.recovered, null);
+  await nextOwner?.release();
   rmSync(root, { recursive: true, force: true });
 });
 
