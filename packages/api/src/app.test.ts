@@ -1439,15 +1439,19 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
 const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
   let call = 0;
   const taskRows = rows.map(({ runActivity: _runActivity, ...row }) => row);
+  const activities = rows.flatMap((row, rowIndex) => (row.runActivity as Array<{ at: Date }> | undefined ?? []).map((event, eventIndex) => ({
+    runId: `activity-${rowIndex}-${eventIndex}`, taskId: String(row.id), at: event.at,
+  })));
   return {
     task: {
       findMany: async () => (call++ === 0 ? taskRows : []),
       groupBy: async () => [],
     },
     run: {
-      findMany: async () => rows.flatMap((row) => (row.runActivity as Array<{ at: Date }> | undefined ?? []).map((event) => ({
-        taskId: row.id, events: [event],
-      }))),
+      findMany: async () => activities.map(({ runId: id, taskId }) => ({ id, taskId })),
+    },
+    sessionEvent: {
+      groupBy: async () => activities.map(({ runId, at }) => ({ runId, _max: { at } })),
     },
   } as unknown as PrismaClient;
 };
@@ -1475,11 +1479,45 @@ test("GET /tasks?view=board answers with the card projection, not the whole row"
     assert.equal(body.length, 1);
     // The fields the board reads survive...
     assert.equal(body[0]!.name, "Ship the thing");
+    assert.equal(body[0]!.displayName, "Ship the thing");
     assert.deepEqual(body[0]!.latestRun, { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: "0.42", startedAt: null, endedAt: null });
     // ...and the ones it does not are gone, which is the entire point.
     for (const dropped of ["description", "repo", "runs", "maxDurationMin", "workingDirectory"]) {
       assert.equal(dropped in body[0]!, false, `${dropped} must not ride along`);
     }
+  });
+});
+
+test("the board derives a shared title and badge for API-created chains", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase([
+      taskRow({ id: "build", chainId: "direct", chainIndex: 0, name: "Release: Build", templateStep: null }),
+      taskRow({ id: "review", chainId: "direct", chainIndex: 1, name: "Release: Review", templateStep: null }),
+    ]), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; name: string; displayName: string; chainName: string | null }>;
+    assert.deepEqual(body.map(({ id, name, displayName, chainName }) => ({ id, name, displayName, chainName })), [
+      { id: "build", name: "Release: Build", displayName: "Build", chainName: "Release" },
+      { id: "review", name: "Release: Review", displayName: "Review", chainName: "Release" },
+    ]);
+  });
+});
+
+test("GET /tasks?enrich=false skips all latest-activity queries", async () => {
+  await withTokens(async () => {
+    const database = boardDatabase([taskRow()]);
+    let runQueried = false;
+    let eventQueried = false;
+    const stub = database as unknown as {
+      run: { findMany: () => Promise<never[]> };
+      sessionEvent: { groupBy: () => Promise<never[]> };
+    };
+    stub.run.findMany = async () => { runQueried = true; return []; };
+    stub.sessionEvent.groupBy = async () => { eventQueried = true; return []; };
+    const response = await getTasks(database, "?enrich=false");
+    assert.equal(response.status, 200);
+    assert.equal(runQueried, false);
+    assert.equal(eventQueried, false);
   });
 });
 

@@ -21,6 +21,8 @@ import type { ChainProgress } from "./chain.js";
 export type BoardCard = {
   id: string;
   name: string;
+  /** Display-only title with a verified chain prefix removed. */
+  displayName: string;
   status: TaskStatus;
   /** Full text, not a truncation: the card clamps it to three lines but the
    *  card menu's `Copy error` hands the operator the whole thing. */
@@ -60,6 +62,7 @@ export type BoardCard = {
  *  can `select` exactly these columns and nothing else. */
 export type BoardRow = {
   id: string;
+  projectId: string;
   name: string;
   status: TaskStatus;
   failureReason: string | null;
@@ -99,6 +102,45 @@ export const taskChainName = (row: Pick<BoardRow, "name" | "chainId" | "template
   return row.name.endsWith(suffix) ? row.name.slice(0, -suffix.length) : null;
 };
 
+export type ChainDisplay = { chainName: string | null; displayName: string };
+
+/**
+ * Derives display-only chain identity once, on the server, for every card in a
+ * response. Template-instantiated rows have an exact persisted suffix as proof.
+ * Direct API chains need at least two rows and one `name: ` prefix carried by
+ * every returned row; punctuation in one task name is never enough to guess.
+ */
+export const chainDisplayByTask = (rows: readonly Pick<BoardRow, "id" | "projectId" | "name" | "chainId" | "templateStep">[]): Map<string, ChainDisplay> => {
+  const result = new Map<string, ChainDisplay>(rows.map((row) => [row.id, { chainName: null, displayName: row.name }]));
+  const grouped = new Map<string, typeof rows[number][]>();
+  for (const row of rows) {
+    if (row.chainId === null) continue;
+    const key = `${row.projectId}\u0000${row.chainId}`;
+    const group = grouped.get(key) ?? [];
+    group.push(row);
+    grouped.set(key, group);
+  }
+  for (const group of grouped.values()) {
+    const exact = group.map(taskChainName);
+    const exactName = exact[0] ?? null;
+    let chainName: string | null = exactName !== null && exact.every((name) => name === exactName) ? exactName : null;
+    if (chainName === null && group.length > 1) {
+      const candidates = [...group[0]!.name.matchAll(/: /g)]
+        .map((match) => group[0]!.name.slice(0, match.index))
+        .filter((candidate) => candidate.length > 0);
+      chainName = [...candidates].reverse().find((candidate) => group.every((row) => (
+        row.name.startsWith(`${candidate}: `) && row.name.length > candidate.length + 2
+      ))) ?? null;
+    }
+    if (chainName === null) continue;
+    const prefix = `${chainName}: `;
+    for (const row of group) {
+      result.set(row.id, { chainName, displayName: row.name.slice(prefix.length) });
+    }
+  }
+  return result;
+};
+
 type ActivityRow = { id: string; updatedAt: Date };
 
 /** Stable newest-activity-first ordering shared by both task-list shapes. */
@@ -111,11 +153,13 @@ export const byLatestRunActivity = <T extends ActivityRow>(rows: T[], activityBy
 export const boardCard = (
   row: BoardRow,
   chainProgress: (ChainProgress & { position: number | null }) | null,
+  display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
 ): BoardCard => {
   const run = row.runs[0];
   return {
     id: row.id,
     name: row.name,
+    displayName: display.displayName,
     status: row.status,
     failureReason: row.failureReason,
     scheduleKind: row.scheduleKind,
@@ -127,7 +171,7 @@ export const boardCard = (
     source: row.source,
     chainId: row.chainId,
     chainIndex: row.chainIndex,
-    chainName: taskChainName(row),
+    chainName: display.chainName,
     updatedAt: row.updatedAt,
     assigneeAgent: row.assigneeAgent === null
       ? null

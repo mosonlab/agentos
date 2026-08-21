@@ -317,6 +317,7 @@ export type Task = {
 export type BoardTask = {
   id: string;
   name: string;
+  displayName: string;
   status: TaskStatus;
   failureReason: string | null;
   scheduleKind: "NOW" | "AT" | "CRON";

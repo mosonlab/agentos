@@ -9,14 +9,16 @@ import { MobileTaskList } from "../components/mobile-task-list";
 import { cardTime, cardTitle, TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
-import { BOARD_PAGE, ChainFilterControl, archiveDoneNotice, moveAction, stableRows, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
+import { ProjectProvider } from "../lib/project";
+import { storage } from "../lib/storage";
+import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveAction, stableRows, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
 import { installDom, reactDom } from "./dom-harness";
 
 const en = (key: string): string => translate("en", key);
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
-  id: "t1", name: "Ship the thing", status: "TODO", failureReason: null,
+  id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null,
@@ -207,9 +209,9 @@ test("cards in one chain render their own positions and never the active-step na
 });
 
 test("chain badges filter to one chain, can be cleared, and titles drop the shared prefix", () => {
-  const alpha = task({ id: "a", name: "Release: Implementation", chainId: "c1", chainName: "Release", chainProgress: progress() });
-  const review = task({ id: "b", name: "Release: Review", chainId: "c1", chainName: "Release", chainProgress: progress({ position: 5 }) });
-  const other = task({ id: "c", name: "Other: Review", chainId: "c2", chainName: "Other", chainProgress: progress({ chainId: "c2" }) });
+  const alpha = task({ id: "a", name: "Release: Implementation", displayName: "Implementation", chainId: "c1", chainName: "Release", chainProgress: progress() });
+  const review = task({ id: "b", name: "Release: Review", displayName: "Review", chainId: "c1", chainName: "Release", chainProgress: progress({ position: 5 }) });
+  const other = task({ id: "c", name: "Other: Review", displayName: "Review", chainId: "c2", chainName: "Other", chainProgress: progress({ chainId: "c2" }) });
   assert.deepEqual(tasksForChain([alpha, review, other], "c1").map(({ id }) => id), ["a", "b"]);
   assert.deepEqual(tasksForChain([alpha, review, other], null).map(({ id }) => id), ["a", "b", "c"]);
   assert.equal(cardTitle(alpha), "Implementation");
@@ -219,6 +221,67 @@ test("chain badges filter to one chain, can be cleared, and titles drop the shar
   const control = renderToStaticMarkup(<ChainFilterControl name="Release" onClear={noop} />);
   assert.match(control, /Showing chain Release/);
   assert.match(control, />Clear filter<\/button>/);
+});
+
+test("a non-template chain uses the API-derived badge and short card title", () => {
+  const direct = task({
+    name: "Release: Build", displayName: "Build", chainId: "direct-chain", chainName: "Release",
+    chainProgress: progress({ chainId: "direct-chain", position: 1, total: 2 }),
+  });
+  const markup = card(direct);
+  assert.match(markup, /aria-label="Show only chain Release"/);
+  assert.match(markup, />Build<\/a>/);
+  assert.doesNotMatch(markup, />Release: Build<\/a>/);
+});
+
+test("Archive All confirms the project-wide Done scope even while one chain is visible", async () => {
+  const { dom, container } = installDom();
+  storage.set("agentos.projectId", "p1");
+  const rows = [
+    task({ id: "visible", name: "Alpha: Review", displayName: "Review", status: "DONE", chainId: "alpha", chainName: "Alpha", chainProgress: progress({ chainId: "alpha" }) }),
+    task({ id: "hidden", name: "Beta: Review", displayName: "Review", status: "DONE", chainId: "beta", chainName: "Beta", chainProgress: progress({ chainId: "beta" }) }),
+  ];
+  const originalFetch = globalThis.fetch;
+  const confirmations: string[] = [];
+  const mutations: string[] = [];
+  Object.defineProperty(dom.window, "confirm", { configurable: true, value: (message: string) => { confirmations.push(message); return true; } });
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string, init?: RequestInit) => {
+    const path = String(input);
+    if ((init?.method ?? "GET") === "POST") {
+      mutations.push(path);
+      return Response.json({ archived: 2, skipped: 0 });
+    }
+    if (path === "/api/projects") return Response.json([{ id: "p1", name: "Project One" }]);
+    if (path.includes("/api/tasks?")) return Response.json(rows);
+    return Response.json([]);
+  } });
+  const root = (await reactDom()).createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+  };
+  const press = async (label: string): Promise<void> => {
+    const button = [...dom.window.document.querySelectorAll("button")].find((node) => (
+      node.textContent?.trim() === label || node.getAttribute("aria-label") === label
+    ));
+    assert.ok(button, `missing button ${label}: ${container.innerHTML}`);
+    await act(async () => button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    await flush();
+  };
+  try {
+    await act(async () => root.render(<ProjectProvider><TasksPage /></ProjectProvider>));
+    await flush();
+    await press("Show only chain Alpha");
+    assert.ok(container.querySelector('[data-card="visible"]'));
+    assert.equal(container.querySelector('[data-card="hidden"]'), null);
+    await press("Archive All");
+    assert.deepEqual(confirmations, ["Archive all 2 done tasks in this project?"]);
+    assert.deepEqual(mutations, ["/api/projects/p1/tasks/archive-done"]);
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+    storage.remove("agentos.projectId");
+  }
 });
 
 test("running, ended, and absent runs render only durations their timestamps prove", () => {
@@ -232,6 +295,39 @@ test("running, ended, and absent runs render only durations their timestamps pro
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
   } finally {
     Date.now = originalNow;
+  }
+});
+
+test("a mounted running card advances elapsed time while its props stay unchanged", async () => {
+  const { dom, container } = installDom();
+  const originalNow = Date.now;
+  const originalSetInterval = dom.window.setInterval;
+  const originalClearInterval = dom.window.clearInterval;
+  let now = new Date("2026-08-16T00:12:00.000Z").getTime();
+  let tick: (() => void) | null = null;
+  Date.now = () => now;
+  Object.defineProperty(dom.window, "setInterval", {
+    configurable: true, value: (run: () => void) => { tick = run; return 1; },
+  });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
+  const root = (await reactDom()).createRoot(container);
+  const running = task({ latestRun: {
+    id: "r1", runNumber: 1, status: "RUNNING", costUsd: null,
+    startedAt: "2026-08-16T00:00:00.000Z", endedAt: null,
+  } });
+  try {
+    await act(async () => root.render(<TaskCard task={running} actions={ACTIONS} />));
+    assert.match(container.textContent ?? "", /running 12m 0s/);
+    now += 60_000;
+    assert.ok(tick);
+    await act(async () => tick?.());
+    assert.match(container.textContent ?? "", /running 13m 0s/);
+  } finally {
+    await act(async () => root.unmount());
+    Date.now = originalNow;
+    Object.defineProperty(dom.window, "setInterval", { configurable: true, value: originalSetInterval });
+    Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: originalClearInterval });
+    dom.window.close();
   }
 });
 
@@ -300,6 +396,8 @@ test("the assignee is one line with a keyboard-reachable way to see the rest", (
   assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>Implementation Plan Executioner<\/button>/);
   assert.match(markup, /title="Implementation Plan Executioner"/);
   assert.match(markup, /gpt-5\.6-sol:medium/);
+  assert.match(markup, /aria-label="Model gpt-5\.6-sol:medium"/);
+  assert.doesNotMatch(markup, /truncate[^>]*>gpt-5\.6-sol:medium/);
 });
 
 test("a card with no assignee still says so", () => {

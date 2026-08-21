@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type BoardRow, boardCard, byLatestRunActivity, etagFor, etagMatches, taskChainName } from "./board.js";
+import { type BoardRow, boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches, taskChainName } from "./board.js";
 
 const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   id: "t1",
+  projectId: "p1",
   name: "Ship the thing",
   status: "TODO" as BoardRow["status"],
   failureReason: null,
@@ -30,7 +31,7 @@ test("the board card carries every field the board renders and nothing else", ()
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
-    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainName", "chainProgress", "cron",
+    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainName", "chainProgress", "cron", "displayName",
     "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status",
     "templateId", "timezone", "updatedAt",
   ]);
@@ -93,6 +94,30 @@ test("chain names are derived only from the exact persisted template-step suffix
   assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review", templateStep: { name: "Review" } })), "Release");
   assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review notes", templateStep: { name: "Review" } })), null);
   assert.equal(taskChainName(row({ chainId: null, name: "Release: Review", templateStep: { name: "Review" } })), null);
+});
+
+test("direct chains derive one verified shared display prefix without changing stored names", () => {
+  const rows = [
+    row({ id: "build", chainId: "direct", name: "Release: Build" }),
+    row({ id: "review", chainId: "direct", name: "Release: Review" }),
+  ];
+  const display = chainDisplayByTask(rows);
+  assert.deepEqual(display.get("build"), { chainName: "Release", displayName: "Build" });
+  assert.deepEqual(display.get("review"), { chainName: "Release", displayName: "Review" });
+  assert.equal(rows[0]!.name, "Release: Build");
+  assert.deepEqual(boardCard(rows[0]!, null, display.get("build")), {
+    ...boardCard(rows[0]!, null), chainName: "Release", displayName: "Build",
+  });
+});
+
+test("a direct chain prefix is not guessed from one row or a partial match", () => {
+  const displays = chainDisplayByTask([
+    row({ id: "solo", chainId: "solo-chain", name: "Release: Build" }),
+    row({ id: "a", chainId: "mixed", name: "Release: Build" }),
+    row({ id: "b", chainId: "mixed", name: "Other: Review" }),
+  ]);
+  assert.deepEqual(displays.get("solo"), { chainName: null, displayName: "Release: Build" });
+  assert.deepEqual(displays.get("a"), { chainName: null, displayName: "Release: Build" });
 });
 
 test("tasks sort newest run-event activity first with an updatedAt fallback and stable ties", () => {

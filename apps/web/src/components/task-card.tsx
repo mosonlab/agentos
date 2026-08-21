@@ -1,4 +1,4 @@
-import { type DragEvent, type MouseEvent, type ReactNode, memo, useState } from "react";
+import { type DragEvent, type MouseEvent, type ReactNode, memo, useEffect, useState } from "react";
 
 import { chainPositionMarker } from "../lib/chain";
 import { duration, money, timeAgo } from "../lib/format";
@@ -124,21 +124,30 @@ const opensTask = (event: MouseEvent<HTMLElement>): boolean => {
 };
 
 export const cardTitle = (task: BoardTask): string => {
-  if (task.chainName === null) return task.name;
-  const prefix = `${task.chainName}: `;
-  return task.name.startsWith(prefix) ? task.name.slice(prefix.length) : task.name;
+  return task.displayName;
 };
 
-export const cardTime = (task: BoardTask, t: Translate): string => {
+export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): string => {
   const run = task.latestRun;
   if (!run) return timeAgo(task.updatedAt);
   if (run.status === "RUNNING" && run.startedAt !== null) {
-    return t("tasks.card.runningDuration", { duration: duration(run.startedAt, null) });
+    return t("tasks.card.runningDuration", { duration: duration(run.startedAt, null, now) });
   }
   if (run.startedAt !== null && run.endedAt !== null) {
     return `${duration(run.startedAt, run.endedAt)} · ${timeAgo(task.updatedAt)}`;
   }
   return timeAgo(task.updatedAt);
+};
+
+/** Only the changing text owns a clock. Memoized inactive cards never wake. */
+export const RunningCardTime = ({ task, t }: { task: BoardTask; t: Translate }): ReactNode => {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [task.latestRun?.startedAt]);
+  return <>{cardTime(task, t, now)}</>;
 };
 
 const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => [
@@ -161,7 +170,6 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
   const title = cardTitle(task);
   const chainName = task.chainName ?? (task.chainId === null ? null : task.chainId.slice(0, 8));
-  const chainTitle = task.chainName ?? task.chainId;
   return <article
     data-card={task.id}
     className={TASK_CARD}
@@ -174,7 +182,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           keyboard, opens in a new tab on the modifier click every operator
           tries, and gives the card an accessible name it did not have. */}
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
-        <a data-card-title="" href={`#/tasks/${task.id}`} className={TASK_TITLE}>{title}</a>
+        <a data-card-title="" href={`#/tasks/${task.id}`} aria-label={task.name} className={TASK_TITLE}>{title}</a>
       </h3>
       <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
@@ -199,7 +207,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
             <button
               type="button"
               className="max-w-full overflow-hidden text-ellipsis rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
-              title={chainTitle ?? chainName}
+              title={chainName}
               aria-label={t("tasks.card.filterChain", { name: chainName })}
               onClick={(event) => { event.stopPropagation(); actions.onFilterChain(task); }}
             >
@@ -210,17 +218,27 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         </div>
       ) : null}
       <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
+      {task.assigneeAgent === null ? null : (
+        <div className={TASK_META_ROW}>
+          <span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: task.assigneeAgent.model })}>
+            {task.assigneeAgent.model}
+          </span>
+        </div>
+      )}
       {task.failureReason === null ? null : <div className={cn(TASK_META_ROW, TASK_FAILURE)}>{task.failureReason}</div>}
     </div>
     <div className={TASK_FOOT}>
       <span className={cn(ROW, "min-w-0 gap-[6px]")}>
         <IconRobot />
         <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
-        {task.assigneeAgent === null ? null : <span className="truncate text-[color:var(--faint)]">{task.assigneeAgent.model}</span>}
       </span>
       <span className="flex-1" />
       {task.latestRun?.costUsd ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span> : null}
-      <span className="whitespace-nowrap">{cardTime(task, t)}</span>
+      <span className="whitespace-nowrap">
+        {task.latestRun?.status === "RUNNING" && task.latestRun.startedAt !== null
+          ? <RunningCardTime task={task} t={t} />
+          : cardTime(task, t)}
+      </span>
     </div>
   </article>;
 };

@@ -8,7 +8,7 @@ import {
 import type { BoardTask, ChainProgress } from "../lib/types";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
-  id: "t1", name: "Ship the thing", status: "TODO", failureReason: null,
+  id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null,

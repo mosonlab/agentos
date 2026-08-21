@@ -79,7 +79,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, byLatestRunActivity, etagFor, etagMatches } from "./board.js";
+import { boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
@@ -2093,17 +2093,21 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (taskIds.length === 0) return new Map();
       const runs = await db.run.findMany({
         where: { taskId: { in: taskIds } },
-        select: {
-          taskId: true,
-          events: { orderBy: { at: "desc" }, take: 1, select: { at: true } },
-        },
+        select: { id: true, taskId: true },
+      });
+      const taskByRun = new Map(runs.flatMap((run) => run.taskId === null ? [] : [[run.id, run.taskId] as const]));
+      const events = runs.length === 0 ? [] : await db.sessionEvent.groupBy({
+        by: ["runId"],
+        where: { runId: { in: runs.map(({ id: runId }) => runId) } },
+        _max: { at: true },
       });
       const latest = new Map<string, Date>();
-      for (const run of runs) {
-        const at = run.events[0]?.at;
-        if (run.taskId === null || at === undefined) continue;
-        const previous = latest.get(run.taskId);
-        if (previous === undefined || previous < at) latest.set(run.taskId, at);
+      for (const event of events) {
+        const taskId = taskByRun.get(event.runId);
+        const at = event._max.at;
+        if (taskId === undefined || at === null) continue;
+        const previous = latest.get(taskId);
+        if (previous === undefined || previous < at) latest.set(taskId, at);
       }
       return latest;
     };
@@ -2208,7 +2212,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       const ordered = byLatestRunActivity(rows, await latestRunActivity(rows.map(({ id: taskId }) => taskId)));
       const progressFor = await chainProgressLookup(ordered);
-      return validated(context, ordered.map((row) => boardCard(row, progressFor(row))));
+      const displayByTask = chainDisplayByTask(ordered);
+      return validated(context, ordered.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
     }
 
     const tasks = await db.task.findMany({
@@ -2227,7 +2232,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       },
     });
-    const orderedTasks = byLatestRunActivity(tasks, await latestRunActivity(tasks.map(({ id: taskId }) => taskId)));
+    const orderedTasks = enrich
+      ? byLatestRunActivity(tasks, await latestRunActivity(tasks.map(({ id: taskId }) => taskId)))
+      : tasks;
     const progressFor = await chainProgressLookup(orderedTasks);
 
     // The Automations page needs `Last run` on a *collapsed* row, and a poll

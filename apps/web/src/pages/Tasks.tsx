@@ -245,6 +245,8 @@ export const TasksPage = (): ReactNode => {
   // card callbacks below stay stable, every time a task list arrives.
   const latest = useRef(tasks);
   latest.current = tasks;
+  const latestAll = useRef(allTasks);
+  latestAll.current = allTasks;
 
   /** Which card should take the focus once the moved one lands, and the list it
    *  was in when it left — read after the next payload, not now. */
@@ -336,7 +338,7 @@ export const TasksPage = (): ReactNode => {
    *  `ErrorNotice` as everything else on the page. One error surface, one
    *  information surface. */
   const archiveDone = useCallback(async (): Promise<void> => {
-    const done = latest.current.filter((task) => task.status === "DONE");
+    const done = latestAll.current.filter((task) => task.status === "DONE");
     if (!window.confirm(t("tasks.confirm.archiveDone", { n: done.length }))) return;
     setNotice(null);
     let result: { archived: number; skipped: number } | null = null;
