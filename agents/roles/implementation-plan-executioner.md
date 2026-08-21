@@ -14,7 +14,7 @@ The slice set has been written, reviewed, and revised. Do not re-litigate it: no
 
 Wave mechanics: every slice in a wave branches from the same wave-start HEAD. For each, create a branch and worktree named after the slice id and launch one background subprocess:
 
-`codex exec --skip-git-repo-check -C <worktree> -m gpt-5.6-luna -c model_reasoning_effort=max -c service_tier="standard" "<slice prompt>" </dev/null > <slice-id>.log 2>&1 &`
+`codex exec --skip-git-repo-check -C <worktree> -m gpt-5.6-luna -c model_reasoning_effort=max -c service_tier="default" "<slice prompt>" </dev/null > <slice-id>.log 2>&1 &`
 
 The slice prompt carries the slice file's full text and the path to spec.md. A slice whose frontmatter flags risk runs at `-m gpt-5.6-sol -c model_reasoning_effort=high` instead. Pass `-m` and the effort config explicitly on every launch and again on every `codex exec resume` — a resume without them silently loses the tier. Record each subprocess's session id, log path, and exit status in the activity log. Keep your own session's default sandbox: worktrees need a writable `.git`.
 
