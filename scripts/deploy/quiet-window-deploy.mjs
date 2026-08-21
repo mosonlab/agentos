@@ -27,6 +27,7 @@ import {
   executeUpgrade,
   gitPreflightFailure,
   runLocked,
+  shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import {
   acquireProcessLock,
@@ -564,11 +565,12 @@ try {
 } catch (error) {
   const failure = error instanceof DeployFailure ? error : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
   log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
-  if (failure.reason !== "usage" && !existsSync(ESCALATION_PATH)) {
+  const dryRunMode = process.argv.includes("--dry-run");
+  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && !existsSync(ESCALATION_PATH)) {
     await writeEscalation({ outcome: "failure", reason: failure.reason, detail: failure.detail, from: "unknown", to: "unknown" })
       .catch((writeError) => log(`STOP escalation-write-failed detail=${writeError instanceof Error ? writeError.name : "unknown"}`));
   }
-  if (failure.reason !== "usage" && existsSync(ESCALATION_PATH)) {
+  if (shouldPersistFailure({ dryRun: dryRunMode, reason: failure.reason }) && existsSync(ESCALATION_PATH)) {
     await loadEnvironment()
       .then(retryEscalationNotification)
       .catch(() => log(`STOP inbox-notification-pending reason=${failure.reason}`));

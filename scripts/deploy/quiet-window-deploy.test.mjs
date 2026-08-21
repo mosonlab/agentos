@@ -12,6 +12,7 @@ import {
   gitPreflightFailure,
   quietWindowIsOpen,
   runLocked,
+  shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
 import { acquireProcessLock, blockingRunsStatement, DEPLOY_ARTIFACT_PATHS, inspectGitPreflight, publishDirectories } from "./quiet-window-adapters.mjs";
@@ -82,6 +83,13 @@ test("git preflight names dirty and non-fast-forward refusals", () => {
   assert.equal(gitPreflightFailure({ dirty: false, head: "a", target: "b", fastForward: false }), "non-fast-forward-main");
   assert.equal(gitPreflightFailure({ dirty: false, head: "a", target: "b", fastForward: true }), null);
   assert.equal(gitPreflightFailure({ dirty: false, head: "b", target: "b", fastForward: false }), null);
+});
+
+test("dry-run failures never persist escalation state", () => {
+  assert.equal(shouldPersistFailure({ dryRun: true, reason: "environment-unreadable" }), false);
+  assert.equal(shouldPersistFailure({ dryRun: true, reason: "usage" }), false);
+  assert.equal(shouldPersistFailure({ dryRun: false, reason: "environment-unreadable" }), true);
+  assert.equal(shouldPersistFailure({ dryRun: false, reason: "usage" }), false);
 });
 
 test("successful upgrade runs the safety sequence in order", async () => {

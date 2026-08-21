@@ -44,6 +44,8 @@ export const gitPreflightFailure = ({ dirty, head, target, fastForward }) => {
   return null;
 };
 
+export const shouldPersistFailure = ({ dryRun, reason }) => !dryRun && reason !== "usage";
+
 const failureOf = (error) => error instanceof DeployFailure
   ? error
   : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
