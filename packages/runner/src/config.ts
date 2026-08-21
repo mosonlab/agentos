@@ -41,10 +41,22 @@ export type RunnerConfig = {
 export const defaultSessionConfigBaselineRoot = (): string =>
   fileURLToPath(new URL("../assets/session-config-baseline", import.meta.url));
 
-export const runnerProxyEnvironment = (): NodeJS.ProcessEnv => Object.fromEntries(
-  ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
-    .flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]!]]),
-);
+const runnerProxyVariables = [
+  [["HTTP_PROXY", "http_proxy"], "RUNNER_HTTP_PROXY"],
+  [["HTTPS_PROXY", "https_proxy"], "RUNNER_HTTPS_PROXY"],
+  [["NO_PROXY", "no_proxy"], "RUNNER_NO_PROXY"],
+] as const;
+
+/**
+ * Builds the proxy environment owned by the runner, not by a CLI's user
+ * settings. RUNNER_* is the only operator surface, so an unrelated proxy in
+ * the runner daemon's own environment cannot silently reach child processes.
+ */
+export const runnerProxyEnvironment = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv =>
+  Object.fromEntries(runnerProxyVariables.flatMap(([childNames, configuredName]) => {
+    const value = env[configuredName];
+    return value ? childNames.map((childName) => [childName, value]) : [];
+  }));
 
 const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
 
