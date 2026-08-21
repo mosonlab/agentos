@@ -27,6 +27,7 @@
     "verify:compose-binding": "node scripts/compose-binding.mjs",
     "test:compose-binding": "node --test scripts/compose-binding.test.mjs",
     "test:frozen-docs": "node --test scripts/check-frozen-docs.test.mjs",
+    "test:gate-worker": "node --test scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs",
     "snapshot:authority": "npm run snapshot:authority -w @agentos/db",
     "snapshot:authority-keygen": "npm run snapshot:authority-keygen -w @agentos/db --",
     "snapshot:scan": "node scripts/public-snapshot-scan.mjs",

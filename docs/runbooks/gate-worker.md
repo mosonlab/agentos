@@ -60,17 +60,77 @@ scripts/gate-worker/gate-dispatch.sh <oid>
 - All three busy: the dispatcher blocks and re-polls (default every 30s, for
   60 minutes — `GATE_DISPATCH_POLL_SECONDS`, `GATE_DISPATCH_TIMEOUT_MINUTES`).
   On timeout it exits **75** with `GATE DISPATCH: NO SLOT`: nothing ran, no
-  verdict exists, and re-dispatching is the recovery. 75 is not a FAIL and must
-  never be read as one; a timeout that recurs means the queue is systemically
-  full, which is a capacity question, not a code question.
-- Every other exit code is the gate's own, passed through: 0 PASS, 1 FAIL,
-  3 NOT AUTHORITATIVE, 255 ssh transport failure (also not a verdict; re-run).
+  verdict exists, and re-dispatching is the recovery. A timeout that recurs
+  means the queue is systemically full, which is a capacity question, not a
+  code question.
+- A slot whose lock cannot be *operated* — a read-only `~/.cache`, a lock left
+  by the pre-#132 dispatcher, a lock naming no pid — is not busy and is never
+  waited on. The dispatcher keeps using whatever slots still work; if none do it
+  exits **76** immediately with `GATE NOT RUN:` naming the slots to clear, and
+  if it waited on a busy slot and the wait ran out with a broken lock still
+  around it exits 76 rather than 75. Waiting for a lock nobody can take is
+  waiting for nothing, and reporting it as a full queue hides what to fix.
 
-The accounting is three mkdir locks under `~/.cache/gate-dispatch/`, outside
-any repository because the slots belong to the machines. They are the whole
-truth about dispatched gates, with one honest exception: running
-`merge-gate.sh` or `remote-gate.sh` directly bypasses the rationing, is
-invisible to it, and is the operator's own override to answer for.
+The accounting is three lock files under `~/.cache/gate-dispatch/`, outside any
+repository because the slots belong to the machines. They are the whole truth
+about dispatched gates, with one honest exception: running `merge-gate.sh` or
+`remote-gate.sh` directly bypasses the rationing, is invisible to it, and is the
+operator's own override to answer for.
+
+A lock is a file created with `ln`, holding the pid of the dispatcher that owns
+it. That shape is deliberate and `scripts/gate-worker/lib.sh` explains it:
+`link(2)` is the one atomic create-or-fail that also carries its payload, so a
+slot lock names its owner from the instant it exists. A lock *directory* with a
+pid file written a moment later has a window in which it names nobody, and a
+second dispatcher reading that window calls the lock abandoned, deletes it, and
+takes the slot its owner is already gating in — three slots silently becoming
+more than three. Reclaiming a lock whose pid is gone is done by hard-linking it
+to a witness name first, so of two dispatchers that both see the holder dead
+exactly one may act; a lock whose pid is still alive is never touched, and a
+lock that names no pid at all is never reclaimed automatically — it blocks the
+slot and says so, because a file this script did not write is not evidence that
+nobody is running a gate.
+
+## Exit codes
+
+One rule: **a verdict and the absence of a verdict never share a code.**
+`gate-dispatch.sh` and `remote-gate.sh` transport verdicts and never form one,
+so neither can produce a `1` of its own.
+
+| Code | Means | Is it a verdict? |
+| --- | --- | --- |
+| `0` | `MERGE GATE: PASS <oid>` | yes |
+| `1` | `MERGE GATE: FAIL (<step>)` | yes |
+| `2` | usage error | no gate ran |
+| `3` | `MERGE GATE: NOT AUTHORITATIVE` | yes |
+| `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
+| `76` | `GATE NOT RUN: <reason>` — a precondition failed: the mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is not in this checkout, the commit is not in the mirror, the worker's toolchain is incomplete, a credential is set in the worker's environment, or `merge-gate.sh` died without printing a verdict | no gate ran |
+| `130` / `143` | interrupted | no gate ran |
+| `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
+| `255` | ssh transport failure | no gate ran |
+
+**`1` is the only code that means the commit was judged and did not pass.**
+`75`, `76`, `128+N` and `255` are errands, not judgements: re-dispatch after
+fixing what the message names. An automation that treats them as FAIL blocks
+merges on network weather and, worse, teaches people to ignore FAILs.
+
+`75` and `76` are not interchangeable. `75` means at least one slot existed that
+could have been taken and stayed busy for the whole timeout — a queue, so
+re-dispatching later is the fix. `76` means the slot lock itself could not be
+operated (a read-only cache directory, a lock left by the pre-#132 dispatcher, a
+lock naming no pid): waiting changes nothing, and the message names what to
+clear. A slot whose lock is broken is never counted as busy, so a run that sees
+nothing but broken locks reports `76` at once instead of polling out the timeout
+and claiming the queue was full.
+
+Every code below `128` carries a matching stdout line, so a caller may read
+either: a verdict line starts `MERGE GATE:`, and everything that ran no gate
+starts `GATE NOT RUN:` or `GATE DISPATCH:`. The exception is a gate killed by a
+signal it cannot handle. `merge-gate.sh` traps `INT` and `TERM` and prints
+through its `EXIT` trap, so `130` and `143` still say what happened, but `SIGKILL`
+cannot be trapped: a gate the OOM killer takes produces `137` and **no stdout
+line at all**. Read a missing verdict line as "no verdict", never as a pass —
+`128+N` with silence is the one case where the code is the only evidence.
 
 ## The red lines
 
@@ -83,10 +143,28 @@ one of them is not a tuning decision.
   credential, no Anthropic key, no SSH private key. `provision.sh` refuses to
   finish if it finds one, and `run-gate.sh` re-checks the environment on every
   single run — a profile can acquire a variable months after provisioning.
-- **The server never talks to GitHub.** Code arrives only by SSH push from the
-  local machine; a mirror has no remote configured, and both `provision.sh` and
-  every `mirror-push.sh` fail if one appears. All `gh` reads and writes stay
-  local.
+- **No GitHub credential and no remote on the worker.** Code reaches the worker
+  only by SSH push from the local machine. The worker holds no GitHub
+  credential, its mirror has no remote configured, and both `provision.sh` and
+  every `mirror-push.sh` refuse to proceed if one appears — including when the
+  check cannot read the mirror's remotes at all, which is treated as "unknown"
+  and therefore refused. `run-gate.sh` re-checks the credential list on every
+  run. All `gh` reads and writes stay local. This is what makes the *mirror*
+  unable to fetch and the worker unable to push anywhere.
+
+  **The worker is not network-isolated, and this repository does not claim it
+  is** (Leo's ruling, 2026-08-20). The gate's normal flow never needs GitHub —
+  the mirror arrives over SSH, nothing fetches — but nothing here denies the
+  host a route to GitHub or anywhere else, and no firewall rule is required
+  before a box may gate. That was weighed and declined: the gate executes the
+  candidate commit's own build and test scripts, so blocking GitHub alone would
+  leave every other host reachable and buy little, at the cost of maintaining
+  deny rules against addresses that move. What carries the weight instead is the
+  line above plus no merge authority: a remote PASS is evidence, never an
+  authoritative verdict.
+
+  So when a worker's verdicts are quoted, the accurate claim is "holds no
+  credential, has no remote, cannot merge" — **never** "cannot reach GitHub".
 - **Local production is untouched by any of this.** `localhost:5432`,
   `localhost:3000`, `~/.agentos/` and launchd are not in this picture at all.
 
@@ -97,7 +175,9 @@ State this honestly wherever a remote verdict is quoted.
 A remote PASS is **evidence, not authority**. The merge still happens on the
 local machine and still binds an exact head, so the worst a compromised worker
 can do is forge a PASS for a commit that would not really pass. It cannot merge
-anything, it cannot reach GitHub, and it holds no credential worth stealing.
+anything, and it holds no credential worth stealing. What it can do is whatever
+its network allows the candidate commit's own build and test scripts to do —
+the box is not isolated, and this repository does not pretend otherwise.
 
 The hedge against a forged PASS is **spot-checking**: for release-grade merges,
 re-run the gate locally and compare. That is a deliberate trade — one gate's
@@ -165,6 +245,14 @@ If it adds the account to the `docker` group, **log out and back in and re-run
 it** — group membership does not apply to the session that granted it, and the
 re-run is what confirms `docker info` works.
 
+It also refuses to finish while a known credential variable or file is present
+on the box. That is the red line above, and it is checked again on every gate
+run.
+
+It does **not** check or install any egress rule: the worker is not
+network-isolated by design (see the red lines), so there is no firewall step
+between provisioning and the first gate.
+
 **2. Push the mirror (local).** The first push creates
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
 
@@ -187,11 +275,9 @@ scripts/gate-worker/remote-gate.sh agentos-gate <oid> --master <oid> # state the
 credential) or when the baseline is deliberately not origin's current head;
 otherwise `remote-gate.sh` asks origin itself.
 
-Exit codes are `merge-gate.sh`'s, passed through: `0` PASS, `1` FAIL, `2`
-usage, `3` NOT AUTHORITATIVE. **`255` is ssh's own code and is not a verdict** —
-the connection failed and no gate ran. Re-run it; never read it as a FAIL. The
-dispatcher adds `75`: no slot freed up within the timeout, nothing ran,
-re-dispatch.
+Exit codes are the table under "Exit codes" above. The short version: `1` is
+the only code that means the commit was judged and did not pass; `75`, `76` and
+`255` all mean no gate ran.
 
 **4. Acceptance: the double-run.** Gate the *same* commit locally and remotely
 and compare the two verdict lines.
@@ -234,18 +320,24 @@ way to fetch what it was not given.
 **`no mirror at ...`** — that repository has never been pushed from this
 machine. `mirror-push.sh` creates it.
 
-**`MERGE GATE: FAIL (worker environment carries <VAR>)`** — a credential
+**`GATE NOT RUN: worker environment carries <VAR>`** (exit 76) — a credential
 appeared in the worker's environment. This is a red-line stop, not a gate
-failure: find what set it (`~/.bashrc`, `~/.profile`, an ssh `SendEnv`, a
-systemd drop-in), remove it, and re-run `provision.sh` to confirm the box is
-clean again.
+failure, and the exit code says so: find what set it (`~/.bashrc`, `~/.profile`,
+an ssh `SendEnv`, a systemd drop-in), remove it, and re-run `provision.sh` to
+confirm the box is clean again. `run-gate.sh` checks the same variable list
+`provision.sh` does, `FEISHU_APP_SECRET` included; the two lists are held
+identical by `scripts/gate-worker/gate-worker.test.mjs`.
 
 **`another merge gate is running in ... (pid N)`** — the per-worktree lock.
 Each remote run gets a unique worktree, so this can only mean a previous run in
 *this* directory was killed rather than exited. `run-gate.sh` sweeps worktrees
 older than `STALE_WORKTREE_MINUTES` (default 180) at the start of every run and
-prunes the mirror's registrations, so the reclaim is automatic; intervene only
-if you need the disk back sooner:
+prunes the mirror's registrations, so the reclaim is automatic. Age alone does
+not decide: a worktree whose creating pid is still alive is left where it is
+however old it is, because a gate waiting on a hung registry or a stalled pull
+is slow, not abandoned, and deleting its tree would turn one box's
+infrastructure problem into somebody else's FAIL. Intervene only if you need the
+disk back sooner:
 
 ```sh
 ssh agentos-gate 'ls -la ~/gate/<repo>/worktrees'
@@ -255,6 +347,15 @@ ssh agentos-gate 'rm -rf ~/gate/<repo>/worktrees/gate-<oid>-<stamp>-<pid> && git
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the three slots are systemically
 full. That is a capacity signal, not an error to retry harder: either stagger
 the merges, or revisit the worker's sizing with the bench scripts.
+
+**`GATE NOT RUN: the slot locks are unusable (...)`** — the named slots have a
+lock this dispatcher cannot operate, so nothing was gated and nothing will be
+until they are cleared. Look at `~/.cache/gate-dispatch/`: a `<slot>.lock`
+*directory* is a leftover from the pre-#132 dispatcher and can go once no old
+`gate-dispatch.sh` is running; a `<slot>.slot` file that does not contain a pid
+was not written by this script and is cleared by hand, again only once no gate
+is running; and a message about not being able to write a lock means the cache
+directory itself is read-only or full. Re-dispatch after clearing.
 
 **`docker: permission denied` / `the docker daemon is not reachable`** — the
 account is not in the `docker` group yet, or its session predates the change.
@@ -317,7 +418,7 @@ interpreter than the local one is weaker evidence than it looks.
 
 ## Undoing it
 
-The local machine carries only the slot locks under `~/.cache/gate-dispatch/`,
-which are inert when nothing runs. To retire one repository from the worker,
+The local machine carries only the slot lock files under
+`~/.cache/gate-dispatch/`, which are inert when nothing runs. To retire one repository from the worker,
 delete `~/gate/<repo>` on it; to decommission the worker, delete `~/gate`.
 Gating locally is, and remains, `bash scripts/merge-gate.sh`.

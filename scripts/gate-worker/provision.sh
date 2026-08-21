@@ -8,11 +8,23 @@
 #
 # What this machine is allowed to be: a stateless compute worker that checks a
 # commit out of a bare mirror and runs scripts/merge-gate.sh against it. That is
-# all. It never talks to GitHub, never holds a credential, and never runs an
-# AgentOS runner or an agent session — the execution plane stays on the local
-# machine (Leo's ruling, 2026-08-18). This script therefore installs a toolchain
-# and a directory layout and nothing else: no service, no queue, no daemon, no
-# token file, no clone of a GitHub remote.
+# all. It holds no credential, has no remote configured on its mirror, and never
+# runs an AgentOS runner or an agent session — the execution plane stays on the
+# local machine (Leo's ruling, 2026-08-18). This script therefore installs a
+# toolchain and a directory layout and nothing else: no service, no queue, no
+# daemon, no token file, no clone of a GitHub remote.
+#
+# Both of those are enforced, here and in mirror-push.sh, and both are checked
+# again on every run. What is deliberately NOT claimed: this box is not made
+# network-isolated. Nothing here denies it a route to GitHub or anywhere else,
+# and the repository does not guarantee one is denied (Leo's ruling,
+# 2026-08-20). The gate's own flow never needs GitHub — the mirror arrives over
+# ssh from the local machine and nothing fetches from a remote — but a candidate
+# commit's build and test scripts run on this box, so what they can reach is
+# whatever this box's network policy allows. Blocking GitHub alone would not
+# change that, since every other host would remain reachable; the boundary that
+# does the work is the one above — no credential, no remote, no merge authority,
+# and a remote PASS that is evidence rather than an authoritative verdict.
 #
 # Idempotent by construction: every step reads the current state first and prints
 # "ok" for what already matches, so re-running after a partial failure is safe
@@ -29,7 +41,7 @@ for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
     --dry-run) APPLY=0 ;;
-    -h|--help) sed -n '2,24p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 64 ;;
   esac
 done
@@ -297,8 +309,15 @@ run mkdir -p "$GATE_HOME"
 repo_dirs="$(find "$GATE_HOME" -mindepth 2 -maxdepth 2 -type d -name mirror.git 2>/dev/null)"
 if [ -n "$repo_dirs" ]; then
   while IFS= read -r mirror; do
-    if git -C "$mirror" remote 2>/dev/null | grep -q .; then
-      fail "${mirror} has a remote configured; the worker fetches from nowhere — remove it"
+    # "git succeeded and printed nothing", not "the output was empty": those
+    # differ exactly when git failed, and a guard that cannot tell them apart
+    # reports a mirror it never managed to read as clean. There is no `pipefail`
+    # covering the old `git remote | grep -q .`, which is why this reads the
+    # exit status directly.
+    if ! mirror_remotes="$(git -C "$mirror" remote 2>&1)"; then
+      fail "could not read the remotes of ${mirror}: ${mirror_remotes}"
+    elif [ -n "$mirror_remotes" ]; then
+      fail "${mirror} has a remote configured (${mirror_remotes}); the worker fetches from nowhere — remove it"
     else
       ok "$mirror (no remote)"
     fi

@@ -23,26 +23,43 @@
 # the origin repository's name; this script derives the same name mirror-push.sh
 # does and asks that directory's own run-gate.sh.
 #
-# One synchronous ssh call. No service, no queue, no polling: the gate takes
-# 10-15 minutes and this command blocks for exactly that long, which is the whole
-# reason it needs no state on either side.
+# One synchronous ssh call. No service, no queue, no polling: the gate is a few
+# minutes on an idle worker and longer on a busy one, and this command blocks
+# for exactly that long, which is the whole reason it needs no state on either
+# side. `docs/runbooks/gate-worker.md` carries the measured numbers.
 #
 # What comes back on stdout is merge-gate.sh's own verdict line — MERGE GATE:
 # PASS <oid> / FAIL (<step>) / NOT AUTHORITATIVE — and the path of the full log
 # on the worker. The exit code is the worker's, unchanged:
 #
-#   0  PASS               2  usage error
-#   1  FAIL               3  NOT AUTHORITATIVE
-#   255 ssh transport failure — no verdict was produced; this is not a FAIL, and
-#       it is the one code that must never be read as one. Re-run it.
+#   0  PASS                 2  usage error
+#   1  FAIL                 3  NOT AUTHORITATIVE
+#   76  nothing ran: a precondition failed here or on the worker, so no verdict
+#       was formed. Not a FAIL. The line on stdout is GATE NOT RUN: <reason>.
+#   255 ssh transport failure — no verdict was produced either; this is not a
+#       FAIL, and it is the one code that must never be read as one. Re-run it.
+#
+# A FAIL is a statement about the commit. Everything that stops this script
+# before the worker forms one — an unreadable origin, a baseline this checkout
+# does not have, a repository name that cannot be sent — exits 76 rather than 1,
+# because an automation reading exit codes must be able to tell a judgement from
+# an errand.
 #
 # What a remote PASS is worth (state this honestly wherever it is quoted):
 #
 #   It is evidence, not authority. The merge still happens on the local machine
 #   and still binds an exact head. A worker that has been tampered with can forge
-#   a PASS; it cannot forge a merge, cannot reach GitHub, and holds no credential
-#   to steal. Release-grade merges are spot-checked by re-running the gate
-#   locally, which is the hedge against exactly that.
+#   a PASS; it cannot forge a merge, and it holds no GitHub credential to steal
+#   or to push with. What it does have is a working network: the worker runs the
+#   gate the candidate commit ships, so the candidate's own code executes there,
+#   and nothing in this repository makes that box network-isolated. The gate's
+#   own flow needs no GitHub access — the mirror arrives by ssh and never fetches
+#   — but the repository does not guarantee the route is unreachable, and does
+#   not ask an operator to block it (Leo's ruling, 2026-08-20): denying GitHub
+#   alone would leave every other host open, so the containment that carries the
+#   weight is no credential, no remote, no merge authority. Release-grade merges
+#   are spot-checked by re-running the gate locally, which is the hedge against a
+#   forged PASS. docs/runbooks/gate-worker.md states the boundary.
 #
 # The commit must already be in the worker's mirror. The worker never fetches, so
 # push first: scripts/gate-worker/mirror-push.sh <server>.
@@ -56,12 +73,23 @@ MASTER_OID=""
 VERBOSE=0
 FETCH_LOG=0
 
-EXIT_FAIL=1
+# 2, not sysexits' 64: this script's exit codes are the gate's table, and the
+# table has one row for a usage error. Two numbers for one meaning is how a
+# caller ends up with a case it does not handle.
 EXIT_USAGE=2
+# Nothing here forms a verdict, so nothing here may exit 1: a precondition that
+# fails means no gate ran, and 76 is the code for that.
+EXIT_NO_VERDICT=76
 
 usage() {
-  sed -n '2,48p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,65p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
+}
+
+no_verdict() {
+  printf 'remote-gate: %s\n' "$1" >&2
+  printf 'GATE NOT RUN: %s\n' "$1"
+  exit "$EXIT_NO_VERDICT"
 }
 
 die() { printf 'remote-gate: %s\n' "$1" >&2; exit "${2:-$EXIT_USAGE}"; }
@@ -79,21 +107,21 @@ looks_like_oid() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --port)
-      [ $# -ge 2 ] || die "--port needs a number" 64
+      [ $# -ge 2 ] || die "--port needs a number" "$EXIT_USAGE"
       SSH_PORT="$2"; shift ;;
     --port=*) SSH_PORT="${1#--port=}" ;;
     --gate-home)
-      [ $# -ge 2 ] || die "--gate-home needs a path" 64
+      [ $# -ge 2 ] || die "--gate-home needs a path" "$EXIT_USAGE"
       GATE_HOME="$2"; shift ;;
     --gate-home=*) GATE_HOME="${1#--gate-home=}" ;;
     --verbose|-v) VERBOSE=1 ;;
     --fetch-log) FETCH_LOG=1 ;;
     --master)
-      [ $# -ge 2 ] || die "--master needs an object id" 64
+      [ $# -ge 2 ] || die "--master needs an object id" "$EXIT_USAGE"
       MASTER_OID="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift ;;
     --master=*) MASTER_OID="$(printf '%s' "${1#--master=}" | tr '[:upper:]' '[:lower:]')" ;;
     -h|--help) usage 0 ;;
-    -*) printf 'remote-gate: unknown argument %s\n\n' "$1" >&2; usage 64 ;;
+    -*) printf 'remote-gate: unknown argument %s\n\n' "$1" >&2; usage "$EXIT_USAGE" ;;
     *)
       # Server first, then commit. A first argument that already looks like an oid
       # is taken as one so that AGENTOS_GATE_SERVER users can pass just the commit;
@@ -104,17 +132,17 @@ while [ $# -gt 0 ]; do
       elif [ -z "$OID" ]; then
         OID="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
       else
-        die "unexpected extra argument: $1" 64
+        die "unexpected extra argument: $1" "$EXIT_USAGE"
       fi
       ;;
   esac
   shift
 done
 
-[ -n "$SERVER" ] || { printf 'remote-gate: no server given\n\n' >&2; usage 64; }
+[ -n "$SERVER" ] || { printf 'remote-gate: no server given\n\n' >&2; usage "$EXIT_USAGE"; }
 if [ -n "$SSH_PORT" ]; then
   case "$SSH_PORT" in
-    ''|*[!0-9]*) die "--port needs a number, got: $SSH_PORT" 64 ;;
+    ''|*[!0-9]*) die "--port needs a number, got: $SSH_PORT" "$EXIT_USAGE" ;;
   esac
 fi
 
@@ -123,8 +151,15 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+
+# Everything below that ends up inside the ssh command string is checked here,
+# before anything is sent. lib.sh says what each of these accepts and why.
+gate_valid_server "$SERVER" >/dev/null \
+  || die "not a usable ssh destination: ${SERVER}" "$EXIT_USAGE"
+gate_valid_home "$GATE_HOME" >/dev/null \
+  || die "not a usable gate home: ${GATE_HOME} (relative path, [A-Za-z0-9._-] segments, no . or ..)" "$EXIT_USAGE"
 REPO_NAME="$(gate_repo_name "$REPO_ROOT")" \
-  || die "could not derive a safe repository name for ${REPO_ROOT}" "$EXIT_FAIL"
+  || no_verdict "could not derive a safe repository name for ${REPO_ROOT}"
 REPO_HOME="${GATE_HOME}/${REPO_NAME}"
 
 # Default to this checkout's HEAD, resolved here rather than on the worker: the
@@ -133,14 +168,14 @@ REPO_HOME="${GATE_HOME}/${REPO_NAME}"
 # be" are different questions and only the first one is ever meant.
 if [ -z "$OID" ]; then
   OID="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
-  [ -n "$OID" ] || die "no commit given and ${REPO_ROOT} has no resolvable HEAD" 64
+  [ -n "$OID" ] || die "no commit given and ${REPO_ROOT} has no resolvable HEAD" "$EXIT_USAGE"
   printf 'remote-gate: no commit given, using the local HEAD\n' >&2
 fi
 
 case "$OID" in
-  *[!0-9a-f]*) die "not a full object id: $OID" 64 ;;
+  *[!0-9a-f]*) die "not a full object id: $OID" "$EXIT_USAGE" ;;
 esac
-[ "${#OID}" -eq 40 ] || die "not a full 40-character object id: $OID" 64
+[ "${#OID}" -eq 40 ] || die "not a full 40-character object id: $OID" "$EXIT_USAGE"
 
 # Local sanity, not a substitute for the worker's own check: an oid this machine
 # cannot resolve was certainly never pushed, and catching that here costs nothing
@@ -162,18 +197,18 @@ if [ -z "$MASTER_OID" ]; then
   # GIT_TERMINAL_PROMPT=0 so an expired credential fails here instead of hanging
   # on a password prompt in the middle of a scripted merge.
   symref="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)" \
-    || die "could not read HEAD from origin; pass --master <oid> to state it" "$EXIT_FAIL"
+    || no_verdict "could not read HEAD from origin; pass --master <oid> to state it"
   MASTER_OID="$(printf '%s\n' "$symref" | awk '$2 == "HEAD" {print $1; exit}')"
   [ -n "$MASTER_OID" ] \
-    || die "origin did not answer with a default-branch head; pass --master <oid> to state it" "$EXIT_FAIL"
+    || no_verdict "origin did not answer with a default-branch head; pass --master <oid> to state it"
 fi
 case "$MASTER_OID" in
-  *[!0-9a-f]* | "") die "not a full object id for master: ${MASTER_OID:-<empty>}" 64 ;;
+  *[!0-9a-f]* | "") die "not a full object id for master: ${MASTER_OID:-<empty>}" "$EXIT_USAGE" ;;
 esac
-[ "${#MASTER_OID}" -eq 40 ] || die "not a full 40-character object id for master: $MASTER_OID" 64
+[ "${#MASTER_OID}" -eq 40 ] || die "not a full 40-character object id for master: $MASTER_OID" "$EXIT_USAGE"
 # If this repository cannot resolve it, the mirror it feeds certainly cannot.
 if ! git -C "$REPO_ROOT" cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null; then
-  die "baseline ${MASTER_OID} is not in ${REPO_ROOT}; run: git fetch origin, then mirror-push.sh" "$EXIT_FAIL"
+  no_verdict "baseline ${MASTER_OID} is not in ${REPO_ROOT}; run: git fetch origin, then mirror-push.sh"
 fi
 
 # Expanded as ${arr[@]+"${arr[@]}"} at every use site: bash 3.2, which is what
@@ -186,16 +221,16 @@ SCP_OPTS=()
 
 printf 'remote-gate: %s on %s%s\n' "$OID" "$SERVER" "${SSH_PORT:+ (port ${SSH_PORT})}" >&2
 printf 'remote-gate: baseline %s\n' "$MASTER_OID" >&2
-printf 'remote-gate: a full gate is 10-15 minutes; this blocks until it finishes\n' >&2
+printf 'remote-gate: a full gate is a few minutes on an idle worker; this blocks until it finishes\n' >&2
 
 REMOTE_VERBOSE=""
 [ "$VERBOSE" -eq 1 ] && REMOTE_VERBOSE=" --verbose"
 
 # Output goes to a file rather than a command substitution so that --verbose can
-# stream: a $(...) capture would hold 10-15 minutes of build output and print it
-# all at the end, which is the opposite of what asking for the log means.
+# stream: a $(...) capture would hold the whole build's output and print it all
+# at the end, which is the opposite of what asking for the log means.
 CAPTURE="$(mktemp "${TMPDIR:-/tmp}/agentos-remote-gate.XXXXXXXX")" \
-  || die "could not create a temporary file for the worker's output" "$EXIT_FAIL"
+  || no_verdict "could not create a temporary file for the worker's output"
 trap 'rm -f -- "$CAPTURE"' EXIT
 
 # -n so the remote command cannot consume this script's stdin, and no -t: a tty
