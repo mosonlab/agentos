@@ -406,7 +406,7 @@ export const resolveRunBranches = async (
       ? task.targetBranch
       : null;
     return {
-      branch: prior?.branch ?? chainBranch,
+      branch: chainBranch ?? prior?.branch ?? null,
       targetBranch: pinnedRange.implementationHeadSha,
     };
   }
@@ -418,7 +418,11 @@ export const resolveRunBranches = async (
   if (task.templateId) {
     const chainBranch = await templateChainBranch(tx, task);
     return {
-      branch: prior?.branch ?? chainBranch,
+      // A prior Run carries the workspace branch the runner actually used. An
+      // upgrade-state retry may therefore carry a per-run fallback here; when
+      // the logical template head is recoverable, it must win so successors
+      // clone the ref this retry publishes.
+      branch: chainBranch ?? prior?.branch ?? null,
       targetBranch: (await inheritedBase(tx, task, prior)) ?? task.targetBranch ?? task.repo.defaultBranch,
     };
   }

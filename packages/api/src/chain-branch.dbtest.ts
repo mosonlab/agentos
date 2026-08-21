@@ -113,6 +113,23 @@ const publishViaRoute = async (claim: any, pushedBranch: string): Promise<Respon
   return { status: response.status, body: await response.json() };
 });
 
+const startRunViaRoute = async (claim: any, branch: string): Promise<Response> => withTokens(async () => {
+  const response = await createApp(db).request(`/runner/runs/${claim.run.id}/start`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "runner-1",
+      fencingToken: claim.fencingToken,
+      adapterVersion: "test-adapter",
+      cliVersion: "test-cli",
+      manifest: {},
+      workspacePath: `${isolatedRoot}/${claim.run.id}`,
+      branch,
+    }),
+  });
+  return { status: response.status, body: await response.json() };
+});
+
 /** Claim the queued run of `taskId` and finish it, optionally publishing a ref. */
 const runStep = async (taskId: string, overrides: Record<string, unknown> = {}): Promise<void> => {
   const queued = await db.run.findFirstOrThrow({ where: { taskId, status: "QUEUED" }, orderBy: { runNumber: "desc" } });
@@ -670,6 +687,49 @@ test("T12b: an operator retry bases on the WIP salvage the failed run did publis
 });
 
 // --- WI-6: the automatic retry inside the completion transaction -------------
+
+test("T13b: an upgrade-state template retry returns to its chain head", async () => {
+  const seed = await seedProject("template-retry");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "retry-template", description: "t", variables: [],
+    steps: { create: [0, 1].map((index) => ({
+      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
+      assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, {
+    repoId: seed.repo.id, variables: {}, autoStart: true,
+  });
+  const chainBranch = `agentos/${chain.chainId}`;
+  const firstTask = chain.tasks[0]!;
+  const firstRun = await db.run.findFirstOrThrow({ where: { taskId: firstTask.id, runNumber: 1 } });
+  // Reproduce a retry queued before the fix: it had no branch, so provisioning
+  // selected a per-run fallback and the start route persisted that workspace
+  // branch before completion read the row.
+  await db.run.update({ where: { id: firstRun.id }, data: { branch: null } });
+  const failedClaim = await claimRun(firstRun.id);
+  const workspaceBranch = `agentos/${firstTask.id}/run-1`;
+  assert.equal((await startRunViaRoute(failedClaim, workspaceBranch)).status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: firstRun.id } })).branch, workspaceBranch);
+
+  const salvageBranch = `agentos/${firstTask.id}/run-2`;
+  const failed = await completeRunViaRoute(failedClaim, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TRANSIENT_PROVIDER", retryable: true,
+    branch: workspaceBranch, pushStatus: "SUCCEEDED", pushedBranch: salvageBranch,
+  });
+  assert.equal(failed.status, 200);
+
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: firstTask.id, runNumber: 2 } });
+  assert.equal(retry.branch, chainBranch, "the retry publishes where its successor will clone");
+  assert.equal(retry.targetBranch, salvageBranch, "same-transaction WIP evidence still decides the base");
+
+  await db.run.update({ where: { id: retry.id }, data: { readyAt: new Date(0) } });
+  const retryClaim = await claimRun(retry.id);
+  assert.equal((await publishViaRoute(retryClaim, chainBranch)).status, 200);
+  assert.equal((await completeRunViaRoute(retryClaim)).status, 200);
+  const publishedRetry = await db.run.findUniqueOrThrow({ where: { id: retry.id } });
+  assert.equal(publishedRetry.pushedBranch, chainBranch);
+});
 
 test("T13: an automatic retry of a chain step stays on the shared branch", async () => {
   const seed = await seedProject("t13");
