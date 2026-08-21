@@ -1438,20 +1438,18 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
  *  page, the chain-progress page, and the recurring groupBy the full shape adds. */
 const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
   let call = 0;
-  const taskRows = rows.map(({ runActivity: _runActivity, ...row }) => row);
-  const activities = rows.flatMap((row, rowIndex) => (row.runActivity as Array<{ at: Date }> | undefined ?? []).map((event, eventIndex) => ({
-    runId: `activity-${rowIndex}-${eventIndex}`, taskId: String(row.id), at: event.at,
-  })));
+  const taskRows = [...rows].sort((left, right) => (
+    (right.createdAt as Date).getTime() - (left.createdAt as Date).getTime()
+      || String(left.id).localeCompare(String(right.id))
+  ));
   return {
     task: {
-      findMany: async () => (call++ === 0 ? taskRows : []),
+      findMany: async (args: Record<string, unknown> | undefined) => {
+        if (call++ !== 0) return [];
+        assert.deepEqual(args?.orderBy, [{ createdAt: "desc" }, { id: "asc" }]);
+        return taskRows;
+      },
       groupBy: async () => [],
-    },
-    run: {
-      findMany: async () => activities.map(({ runId: id, taskId }) => ({ id, taskId })),
-    },
-    sessionEvent: {
-      groupBy: async () => activities.map(({ runId, at }) => ({ runId, _max: { at } })),
     },
   } as unknown as PrismaClient;
 };
@@ -1460,6 +1458,7 @@ const taskRow = (overrides: Record<string, unknown> = {}): Record<string, unknow
   id: "t1", projectId: "p1", name: "Ship the thing", status: "TODO", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false,
   templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
+  createdAt: new Date("2026-08-16T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
   assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium" },
   runs: [{
@@ -1509,40 +1508,31 @@ test("the board derives a shared title and badge for API-created chains", async 
   });
 });
 
-test("GET /tasks?enrich=false skips all latest-activity queries", async () => {
+test("GET /tasks?enrich=false keeps creation ordering without enrichment queries", async () => {
   await withTokens(async () => {
-    const database = boardDatabase([taskRow()]);
-    let runQueried = false;
-    let eventQueried = false;
-    const stub = database as unknown as {
-      run: { findMany: () => Promise<never[]> };
-      sessionEvent: { groupBy: () => Promise<never[]> };
-    };
-    stub.run.findMany = async () => { runQueried = true; return []; };
-    stub.sessionEvent.groupBy = async () => { eventQueried = true; return []; };
-    const response = await getTasks(database, "?enrich=false");
+    const response = await getTasks(boardDatabase([
+      taskRow({ id: "older", createdAt: new Date("2026-08-15T00:00:00Z") }),
+      taskRow({ id: "newer", createdAt: new Date("2026-08-16T00:00:00Z") }),
+    ]), "?enrich=false");
     assert.equal(response.status, 200);
-    assert.equal(runQueried, false);
-    assert.equal(eventQueried, false);
+    const body = await response.json() as Array<{ id: string }>;
+    assert.deepEqual(body.map(({ id }) => id), ["newer", "older"]);
   });
 });
 
-test("board and full task views order every status by newest run activity", async () => {
+test("board and full task views order by createdAt descending with a stable id tie-break", async () => {
   await withTokens(async () => {
-    const event = (value: string) => ({ at: new Date(value) });
     const rows = [
-      taskRow({ id: "newer-created", status: "DONE", updatedAt: new Date("2026-08-16T12:00:00Z"), runActivity: [event("2026-08-16T13:00:00Z")] }),
-      taskRow({ id: "later-finished", status: "DONE", updatedAt: new Date("2026-08-16T08:00:00Z"), runActivity: [event("2026-08-16T14:00:00Z")] }),
-      taskRow({ id: "todo-old", status: "TODO", updatedAt: new Date("2026-08-16T09:00:00Z"), runs: [] }),
-      taskRow({ id: "todo-new", status: "TODO", updatedAt: new Date("2026-08-16T10:00:00Z"), runs: [] }),
+      taskRow({ id: "older-recently-updated", createdAt: new Date("2026-08-15T00:00:00Z"), updatedAt: new Date("2026-08-20T00:00:00Z") }),
+      taskRow({ id: "b-tie", createdAt: new Date("2026-08-16T00:00:00Z"), updatedAt: new Date("2026-08-18T00:00:00Z") }),
+      taskRow({ id: "newest", createdAt: new Date("2026-08-17T00:00:00Z"), updatedAt: new Date("2026-08-17T00:00:00Z") }),
+      taskRow({ id: "a-tie", createdAt: new Date("2026-08-16T00:00:00Z"), updatedAt: new Date("2026-08-19T00:00:00Z") }),
     ];
     for (const query of ["?view=board", ""]) {
       const response = await getTasks(boardDatabase(rows), query);
       assert.equal(response.status, 200);
-      const body = await response.json() as Array<{ id: string; status: string; runs?: Array<Record<string, unknown>> }>;
-      assert.deepEqual(body.filter(({ status }) => status === "DONE").map(({ id }) => id), ["later-finished", "newer-created"]);
-      assert.deepEqual(body.filter(({ status }) => status === "TODO").map(({ id }) => id), ["todo-new", "todo-old"]);
-      assert.equal("runActivity" in body[0]!, false, "test-only sorting evidence must not leak into the wire shape");
+      const body = await response.json() as Array<{ id: string }>;
+      assert.deepEqual(body.map(({ id }) => id), ["newest", "a-tie", "b-tie", "older-recently-updated"]);
     }
   });
 });

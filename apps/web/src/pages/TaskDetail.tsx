@@ -377,16 +377,6 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
               : <EmptyState>{t("common.loading")}</EmptyState>}
         </Card>
 
-        {task.chainId === null ? null
-          : chain.data && chain.data.chainId !== null
-            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
-            : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
-              : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
-
-        <TaskPrompt description={task.description} />
-
-        <TaskOutput poll={output} />
-
         <Card title={t("taskDetail.runs.title")} extra={<span className={COUNT}>{runs.length}</span>} flush>
           <Table>
             <TableHeader>
@@ -405,6 +395,16 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           </Table>
           {runs.length === 0 ? <EmptyState>{t("taskDetail.runs.empty")}</EmptyState> : null}
         </Card>
+
+        {task.chainId === null ? null
+          : chain.data && chain.data.chainId !== null
+            ? <ChainList chain={chain.data} taskId={taskId} pending={pending} onStart={startStep} />
+            : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
+              : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
+
+        <TaskPrompt description={task.description} />
+
+        <TaskOutput poll={output} />
 
         <Activity taskId={taskId} />
       </div>

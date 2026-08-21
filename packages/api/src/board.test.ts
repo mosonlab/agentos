@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Prisma } from "@agentos/db";
 
-import { type BoardRow, boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches, taskChainName } from "./board.js";
+import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, taskChainName } from "./board.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
   costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
@@ -138,17 +138,6 @@ test("a direct chain prefix is not guessed from one row or a partial match", () 
   ]);
   assert.deepEqual(displays.get("solo"), { chainName: null, displayName: "Release: Build" });
   assert.deepEqual(displays.get("a"), { chainName: null, displayName: "Release: Build" });
-});
-
-test("tasks sort newest run-event activity first with an updatedAt fallback and stable ties", () => {
-  const at = (value: string) => new Date(value);
-  const rows = [
-    row({ id: "later-created", status: "DONE", updatedAt: at("2026-08-16T12:00:00Z") }),
-    row({ id: "earlier-created-later-finish", status: "DONE", updatedAt: at("2026-08-16T08:00:00Z") }),
-    row({ id: "no-runs", updatedAt: at("2026-08-16T15:00:00Z"), runs: [] }),
-  ];
-  const activity = new Map([["later-created", at("2026-08-16T13:00:00Z")], ["earlier-created-later-finish", at("2026-08-16T14:00:00Z")]]);
-  assert.deepEqual(byLatestRunActivity(rows, activity).map(({ id }) => id), ["no-runs", "earlier-created-later-finish", "later-created"]);
 });
 
 test("chainProgress is passed through, not recomputed", () => {
