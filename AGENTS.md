@@ -39,6 +39,12 @@ Instantiating a direct chain: the `description` you pass is the chain's
 specification of record — write it as a feature brief per
 `docs/BRIEF-TEMPLATE.md` before instantiating.
 
+A backlog card leaves the board the moment its content is taken over, and by
+whoever takes it over: dispatching a chain from a card, or recording the
+decisions that settle a discussion card, ends with archiving that card (with
+an activity pointing at the chain or brief) in the same action. Cards with
+genuinely open questions stay — that is what the backlog is for.
+
 ## Testing red lines
 
 - `export RUNNER_WORKSPACE_ROOT=$(mktemp -d)` before any test run. The runner's
