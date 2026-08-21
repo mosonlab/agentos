@@ -59,10 +59,15 @@ const withTokens = async (operation: () => Promise<void>): Promise<void> => {
   }
 };
 
-const makeDatabase = (candidates: Record<string, unknown>[] = []): PrismaClient => {
+const makeDatabase = (
+  candidates: Record<string, unknown>[] = [],
+  barrierGranted = true,
+  onCandidateRead: () => void = () => undefined,
+): PrismaClient => {
   const tx = {
+    $queryRaw: async () => [{ granted: barrierGranted }],
     run: {
-      findMany: async () => candidates,
+      findMany: async () => { onCandidateRead(); return candidates; },
       findFirst: async () => null,
       updateMany: async () => ({ count: 1 }),
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => ({ id: where.id, status: RunStatus.CLAIMED }),
@@ -88,6 +93,15 @@ const makeDatabase = (candidates: Record<string, unknown>[] = []): PrismaClient 
     $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
 };
+
+test("deploy barrier refuses claims before candidate reads", async () => {
+  await withTokens(async () => {
+    let candidateRead = false;
+    const database = makeDatabase([], false, () => { candidateRead = true; });
+    assert.equal((await runnerRequest(createApp(database), {})).status, 204);
+    assert.equal(candidateRead, false);
+  });
+});
 
 const runnerRequest = async (app: ReturnType<typeof createApp>, body: Record<string, unknown>): Promise<Response> => app.request("/runner/tasks/claim", {
   method: "POST",

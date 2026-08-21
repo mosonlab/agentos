@@ -9,6 +9,7 @@ import {
   applyInboxDecision,
   CleanupStatus,
   deriveRunConfig,
+  deployBarrierAllowsClaim,
   FAILURE_ENVELOPE_VERSION,
   FailureClass,
   failurePhases,
@@ -3696,6 +3697,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     await reconcileDatabaseRuns(db, now);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await db.$transaction(async (tx) => {
+      // This is the shared half of the production deploy barrier. It is the
+      // first statement in the claim transaction: an in-flight claim finishes
+      // before a deploy can acquire the exclusive half, and claims arriving
+      // during a deploy return no work without observing candidates.
+      if (!await deployBarrierAllowsClaim(tx)) return null;
       const candidates = await tx.run.findMany({
         where: {
           status: RunStatus.QUEUED,
