@@ -53,6 +53,7 @@ export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run">,
   scratch: AgentScratch,
+  workspacePath: string,
 ): NodeJS.ProcessEnv => ({
   ...claim.secrets,
   ...workspaceEnvironment(config),
@@ -60,6 +61,7 @@ export const buildChildEnvironment = (
   AGENTOS_SESSION_TOKEN: claim.sessionToken,
   AGENTOS_RUN_ID: claim.run.id,
   AGENTOS_FENCING_TOKEN: claim.fencingToken,
+  AGENTOS_WORKSPACE_PATH: workspacePath,
   // Last on purpose, so no task secret can point a session back at the
   // production roots. See provisionAgentScratch for why this containment has
   // to live in the runner rather than in the run's checkout.

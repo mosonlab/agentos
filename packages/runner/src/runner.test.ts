@@ -61,6 +61,7 @@ const mechanicalClaim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "mechanical/merge-executor-v1",
     targetBranch: "master",
+    pinnedBaseSha: null,
     promptHash: "hash",
     workspacePath: null,
     branch: null,

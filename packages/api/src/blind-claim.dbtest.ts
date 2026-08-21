@@ -80,6 +80,7 @@ const queueCanonicalStep = async (
     taskId: task.id,
     kind: `step-${task.chainIndex}`,
     body: `persisted output from step ${task.chainIndex}`,
+    commitSha: String(task.chainIndex).padStart(40, "0"),
   })) });
   const target = chain.tasks.find((task) => task.chainIndex === stepIndex);
   assert.ok(target, `canonical step ${stepIndex} must exist`);
@@ -94,7 +95,12 @@ const claim = async () => {
     body: JSON.stringify({ runnerId: "blind-claim-runner", leaseSeconds: 60 }),
   });
   assert.equal(response.status, 200);
-  return response.json() as Promise<{ run: { id: string }; priorOutputs: Array<{ body: string }> }>;
+  return response.json() as Promise<{
+    run: { id: string; targetBranch: string; pinnedBaseSha: string | null };
+    priorOutputs: Array<{ body: string }>;
+    sessionToken: string;
+    fencingToken: string;
+  }>;
 };
 
 test("canonical blind-review claims omit prior outputs while attached steps retain them", async () => {
@@ -110,4 +116,21 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
   const blindClaim = await claim();
   assert.equal(blindClaim.run.id, blind.run.id);
   assert.deepEqual(blindClaim.priorOutputs, []);
+  assert.equal(blindClaim.run.pinnedBaseSha, "5".padStart(40, "0"));
+  assert.equal(blindClaim.run.targetBranch, blindClaim.run.pinnedBaseSha);
+
+  const persisted = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: blindClaim.fencingToken,
+      kind: "must-fix",
+      body: "independent findings persisted before adjudication",
+      commitSha: "f".repeat(40),
+    }),
+  });
+  assert.equal(persisted.status, 200);
+  const unlocked = await persisted.json() as { predecessorOutputs: Array<{ body: string }> };
+  assert.equal(unlocked.predecessorOutputs.length, blind.expectedPriorOutputs);
+  assert.ok(unlocked.predecessorOutputs.some((output) => output.body === "persisted output from step 6"));
 });

@@ -298,6 +298,7 @@ test("a later run does not restamp the output row an earlier run wrote", async (
     fencingToken: first.fencingToken,
     kind: "result",
     body: "The deadlock is in reconcile.ts; here is the patch and its proof.",
+    commitSha: SHA,
   });
   assert.equal(written.status, 200, JSON.stringify(written.body));
 

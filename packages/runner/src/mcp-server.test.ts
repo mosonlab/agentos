@@ -31,6 +31,7 @@ const withApi = async (
       runId: "run-1",
       sessionToken: "agos_session_test",
       fencingToken: "1:run-1:token",
+      workspacePath: process.cwd(),
     }, received);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -38,7 +39,7 @@ const withApi = async (
 };
 
 test("the MCP handshake advertises all eight AgentOS tools", async () => {
-  const credentials = { apiUrl: "http://unused", runId: "run-1", sessionToken: "t", fencingToken: "f" };
+  const credentials = { apiUrl: "http://unused", runId: "run-1", sessionToken: "t", fencingToken: "f", workspacePath: process.cwd() };
   const initialize = await handleRequest(credentials, {
     jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" },
   });
@@ -111,6 +112,22 @@ test("tools carry the session token and fencing token to the session endpoints",
     ]);
     assert.ok(received.every((hit) => hit.authorization === "Bearer agos_session_test"));
     assert.ok(received.every((hit) => JSON.parse(hit.body).fencingToken === "1:run-1:token"));
+    assert.match(String(JSON.parse(received[0]!.body).commitSha), /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
+  });
+});
+
+test("task_output reveals predecessor outputs only in the successful platform response", async () => {
+  await withApi((_hit) => ({
+    status: 200,
+    body: JSON.stringify({
+      id: "output-1",
+      predecessorOutputs: [{ kind: "sol-findings", body: "SOL-1", commitSha: "a".repeat(40), task: { name: "Review", chainIndex: 2 } }],
+    }),
+  }), async (credentials) => {
+    const result = await invokeTool(credentials, "task_output", { kind: "must-fix", body: "independent findings" });
+    assert.match(result.content[0]!.text, /Output persisted/u);
+    assert.match(result.content[0]!.text, /Predecessor step outputs are now available/u);
+    assert.match(result.content[0]!.text, /SOL-1/u);
   });
 });
 
@@ -129,10 +146,10 @@ test("an API rejection is reported to the model rather than breaking the protoco
 test("credentials come from the environment or the file, and missing ones are named", () => {
   const environment = {
     AGENTOS_API_URL: "http://api/", AGENTOS_RUN_ID: "run-1",
-    AGENTOS_SESSION_TOKEN: "token", AGENTOS_FENCING_TOKEN: "fence",
+    AGENTOS_SESSION_TOKEN: "token", AGENTOS_FENCING_TOKEN: "fence", AGENTOS_WORKSPACE_PATH: "/work",
   };
   assert.deepEqual(readCredentials(environment), {
-    apiUrl: "http://api", runId: "run-1", sessionToken: "token", fencingToken: "fence",
+    apiUrl: "http://api", runId: "run-1", sessionToken: "token", fencingToken: "fence", workspacePath: "/work",
   });
-  assert.throws(() => readCredentials({ AGENTOS_RUN_ID: "run-1" }), /AGENTOS_API_URL, AGENTOS_SESSION_TOKEN, AGENTOS_FENCING_TOKEN/);
+  assert.throws(() => readCredentials({ AGENTOS_RUN_ID: "run-1" }), /AGENTOS_API_URL, AGENTOS_SESSION_TOKEN, AGENTOS_FENCING_TOKEN, AGENTOS_WORKSPACE_PATH/);
 });

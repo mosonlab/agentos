@@ -63,6 +63,63 @@ test("provisioning trusts an already-published intended head after its database 
   }
 });
 
+test("a pinned workspace fetches only the recorded commit and never creates the chain ref", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-pinned-"));
+  try {
+    const remote = join(root, "origin.git");
+    const seed = join(root, "seed");
+    git(root, "init", "--bare", remote);
+    git(root, "init", "--initial-branch=main", seed);
+    git(seed, "config", "user.name", "AgentOS Test");
+    git(seed, "config", "user.email", "runner@agentos.local");
+    await writeFile(join(seed, "implementation.txt"), "delivered\n");
+    git(seed, "add", "implementation.txt");
+    git(seed, "commit", "-m", "implementation");
+    const pinnedBaseSha = git(seed, "rev-parse", "HEAD");
+    git(seed, "remote", "add", "origin", remote);
+    git(seed, "push", "-u", "origin", "main");
+    const chainBranch = "agentos/chain/blind-demo";
+    git(seed, "switch", "-c", chainBranch);
+    await writeFile(join(seed, "successor-report.md"), "must stay unreachable\n");
+    git(seed, "add", "successor-report.md");
+    git(seed, "commit", "-m", "successor artifact");
+    const successorSha = git(seed, "rev-parse", "HEAD");
+    git(seed, "push", "-u", "origin", chainBranch);
+
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: process.env.HOME ?? root,
+    } as unknown as RunnerConfig;
+    const claim = {
+      task: { id: "task-blind" },
+      repo: { remoteUrl: remote, defaultBranch: "main" },
+      run: {
+        id: "run-blind",
+        runNumber: 1,
+        targetBranch: pinnedBaseSha,
+        pinnedBaseSha,
+        branch: chainBranch,
+      },
+    } as ClaimedTask;
+
+    const workspace = await provisionWorkspace(config, claim);
+    assert.equal(workspace.baseSha, pinnedBaseSha);
+    assert.equal(git(workspace.path, "branch", "--show-current"), "");
+    assert.equal(git(workspace.path, "for-each-ref", "--format=%(refname)"), "");
+    assert.equal(await readFile(join(workspace.path, "implementation.txt"), "utf8"), "delivered\n");
+    await assert.rejects(readFile(join(workspace.path, "successor-report.md")), /ENOENT/u);
+    assert.throws(
+      () => git(workspace.path, "cat-file", "-e", `${successorSha}^{commit}`),
+      /Command failed/u,
+      "the successor commit must not exist in the pinned workspace's object database",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace clone retries two transient failures and succeeds on the third attempt", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-retry-"));
   try {
@@ -162,6 +219,7 @@ test("session credentials are created through the run-as prefix, with the token 
       runId: "run-1",
       sessionToken: "session-token-never-in-argv",
       fencingToken: "fencing-token-never-in-argv",
+      workspacePath,
     });
     assert.equal((await stat(path)).mode & 0o777, 0o600);
     assert.equal((await stat(join(workspacePath, ".agentos"))).mode & 0o777, 0o700);

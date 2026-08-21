@@ -821,6 +821,40 @@ const seedTemplateChain = async (label: string, stepCount = 3) => {
   return { project, agent, repo, template, chain };
 };
 
+test("a pinned successor fails explicitly without its source commit and advances linearly once recorded", async () => {
+  const { template, chain } = await seedTemplateChain("pinned-base", 3);
+  const pinnedStep = await db.taskTemplateStep.findFirstOrThrow({
+    where: { taskTemplateId: template.id, stepIndex: 2 },
+  });
+  await db.taskTemplateStep.update({
+    where: { id: pinnedStep.id },
+    data: { baseFromStepIndex: 1 },
+  });
+  const predecessor = chain.tasks[0]!;
+  await db.run.updateMany({ where: { taskId: predecessor.id }, data: { status: "SUCCEEDED" } });
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DONE" } });
+
+  await assert.rejects(
+    () => db.$transaction((tx) => activateChainSuccessor(tx, predecessor)),
+    /Pinned task .* cannot activate from step 1: referenced step has no recorded commitSha/u,
+  );
+  assert.equal(await db.run.count({ where: { taskId: chain.tasks[1]!.id } }), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.tasks[1]!.id } })).status, "TODO");
+
+  const commitSha = "a".repeat(40);
+  await db.taskStepOutput.create({ data: {
+    taskId: predecessor.id,
+    kind: "implementation",
+    body: "implemented",
+    commitSha,
+  } });
+  const advanced = await db.$transaction((tx) => activateChainSuccessor(tx, predecessor));
+  assert.equal(advanced.nextTaskId, chain.tasks[1]!.id);
+  const pinnedRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[1]!.id } });
+  assert.equal(pinnedRun.targetBranch, commitSha);
+  assert.equal(pinnedRun.branch, chain.branchName);
+});
+
 test("GET /tasks/:id/chain returns every step in order with startable and gate flags", async () => {
   const { chain } = await seedTemplateChain("chainroute", 9);
   const { status, body } = await operatorGet(`/tasks/${chain.tasks[3]!.id}/chain`);

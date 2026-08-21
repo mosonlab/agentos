@@ -80,6 +80,9 @@ export type ClaimedTask = {
     maxRunsPerTask: number;
     model: string;
     targetBranch: string | null;
+    /** Exact commit selected by baseFromStepIndex. Null means ordinary branch
+     * provisioning; a value means fetch-only detached provisioning. */
+    pinnedBaseSha: string | null;
     promptHash: string;
     workspacePath: string | null;
     branch: string | null;

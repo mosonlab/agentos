@@ -54,7 +54,7 @@ const assertValidBaseReferences = (
 ): void => {
   const indexes = new Set(steps.map((step) => step.stepIndex));
   for (const step of steps) {
-    if (step.baseFromStepIndex === null) continue;
+    if (step.baseFromStepIndex == null) continue;
     if (!indexes.has(step.baseFromStepIndex)) {
       throw new Error(`Template step ${step.name} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`);
     }

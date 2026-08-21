@@ -1820,7 +1820,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
         }
         const baseStep = await tx.taskTemplateStep.findFirst({
-          where: { taskTemplateId, stepIndex: body.baseFromStepIndex }, select: { id: true },
+          where: { taskTemplateId: templateId, stepIndex: body.baseFromStepIndex }, select: { id: true },
         });
         if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
       }
@@ -3812,7 +3812,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
     const body = await readJson(context.req.raw, taskOutputInput);
     if (!body.fencingToken) return context.json({ error: "fencingToken is required" }, 400);
-    if (!body.commitSha) return context.json({ error: "commitSha is required" }, 400);
     const run = await db.run.findFirst({
       where: { id: runId, fencingToken: body.fencingToken, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
       select: {
@@ -3823,21 +3822,53 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // well as to the session token: a session issued to anything but an
         // allowlisted merge executor cannot author a `merge-result`, and the
         // executor's session cannot author an ordinary step's output.
-        task: { select: { templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } } } },
+        task: { select: {
+          projectId: true,
+          chainId: true,
+          chainIndex: true,
+          templateStep: { select: {
+            stepIndex: true,
+            outputKind: true,
+            baseFromStepIndex: true,
+            taskTemplate: { select: { name: true } },
+          } },
+        } },
       },
     });
     if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
+    const executionMode = executionModeFor(run.task?.templateStep ?? null);
+    if (executionMode !== "mechanical" && !body.commitSha) {
+      return context.json({ error: "commitSha is required" }, 400);
+    }
     const outputRefusal = mechanicalPrincipalRefusal(
-      executionModeFor(run.task?.templateStep ?? null),
+      executionMode,
       isMergeExecutorRunnerId(run.runnerId ?? "") ? "merge-executor" : "runner",
       run.runnerId ?? "",
     );
     if (outputRefusal) return context.json({ error: outputRefusal }, 403);
-    return context.json(await db.taskStepOutput.upsert({
+    const output = await db.taskStepOutput.upsert({
       where: { taskId: run.taskId },
-      create: { taskId: run.taskId, runId, kind: body.kind, body: body.body, commitSha: body.commitSha, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-      update: { runId, kind: body.kind, body: body.body, commitSha: body.commitSha, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-    }));
+      create: { taskId: run.taskId, runId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      update: { runId, kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+    });
+    // A blind step's claim deliberately carried no predecessor output. Its
+    // first task_output call durably records the independent review; only then
+    // does the same platform endpoint reveal earlier outputs for adjudication.
+    const predecessorOutputs = run.task?.templateStep?.baseFromStepIndex != null
+      && run.task.chainId && run.task.chainIndex !== null
+      ? await db.taskStepOutput.findMany({
+        where: {
+          task: {
+            projectId: run.task.projectId,
+            chainId: run.task.chainId,
+            chainIndex: { lt: run.task.chainIndex },
+          },
+        },
+        select: { kind: true, body: true, commitSha: true, task: { select: { name: true, chainIndex: true } } },
+        orderBy: { task: { chainIndex: "asc" } },
+      })
+      : [];
+    return context.json({ ...output, predecessorOutputs });
   });
 
   app.post("/session/runs/:runId/inbox/questions", async (context) => {
@@ -4225,7 +4256,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               kind: run.task.templateStep?.outputKind ?? "result",
               body: body.output?.trim() || `Run ${run.runNumber} completed successfully.`,
               metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
-              commitSha: body.headSha,
+              commitSha: body.headSha ?? null,
             } });
           } else if (existingOutput.runId === run.id && body.headSha) {
             // The MCP records the live HEAD at authorship time. Delivery may

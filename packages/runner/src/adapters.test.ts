@@ -37,6 +37,7 @@ const claim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "codex",
     targetBranch: "main",
+    pinnedBaseSha: null,
     promptHash: "hash",
     workspacePath: null,
     branch: null,
@@ -344,6 +345,7 @@ test("agent session environment pins both roots inside the run's disposable scra
     // A task secret must not be able to aim a session at the production root.
     { ...claim, secrets: { ...claim.secrets, RUNNER_WORKSPACE_ROOT: productionRoot, CONTROL_PLANE_STATE_DIR: productionRoot } },
     scratch,
+    "/work",
   );
   assert.equal(env.RUNNER_WORKSPACE_ROOT, scratch.workspaceRoot);
   assert.equal(env.CONTROL_PLANE_STATE_DIR, scratch.stateDir);
@@ -355,7 +357,7 @@ test("child environment is an explicit allowlist and excludes host variables", (
   const previous = process.env.HOST_ONLY_CREDENTIAL;
   process.env.HOST_ONLY_CREDENTIAL = "must-not-leak";
   try {
-    const env = buildChildEnvironment({ path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] }, claim, scratch);
+    const env = buildChildEnvironment({ path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] }, claim, scratch, "/work");
     assert.equal(env.HOST_ONLY_CREDENTIAL, undefined);
     assert.equal(env.ALLOWED_SECRET, "secret");
     assert.equal(env.AGENTOS_SESSION_TOKEN, "agos_session_secret");
@@ -399,7 +401,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   } as unknown as RunnerConfig;
   const runScratch = await provisionAgentScratch(config);
   try {
-    const env = buildChildEnvironment(config, claim, runScratch);
+    const env = buildChildEnvironment(config, claim, runScratch, fixture);
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
       const spec = {
         config,

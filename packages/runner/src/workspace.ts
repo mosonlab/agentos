@@ -13,6 +13,8 @@ export type Workspace = {
   path: string;
   branch: string;
   baseSha: string;
+  /** Present only for an object-id-only detached checkout. */
+  pinnedBaseSha?: string;
 };
 
 const inside = (root: string, candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
@@ -158,6 +160,26 @@ export const provisionWorkspace = async (
   try {
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
+    const pinnedBaseSha = claim.run.pinnedBaseSha;
+    if (pinnedBaseSha) {
+      // A branch clone would advertise and fetch the shared chain ref before a
+      // blind reviewer starts. Build an empty repository, fetch exactly the
+      // recorded implementation commit by object id, and stay detached. With
+      // no refspec for the chain branch, successor commits and their report
+      // artifacts are not reachable from this object database.
+      await execute(config, "git", ["init"], workspace, env);
+      await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
+      await runWithNetworkRetry("git", ["fetch"],
+        ({ timeoutMs }) => execute(config, "git", ["fetch", "--no-tags", "origin", pinnedBaseSha], workspace, env, { timeoutMs }),
+        retryOptions,
+      );
+      await execute(config, "git", ["checkout", "--detach", pinnedBaseSha], workspace, env);
+      const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
+      if (baseSha !== pinnedBaseSha) {
+        throw new Error(`Pinned workspace resolved ${baseSha}, expected ${pinnedBaseSha}`);
+      }
+      return { path: workspace, branch, baseSha, pinnedBaseSha };
+    }
     // The publication ACK is fenced and immediate, but no database protocol can
     // eliminate a crash between the remote accepting git push and that ACK.
     // When the run's intended head already exists remotely, clone that durable
@@ -198,7 +220,12 @@ export const reuseWorkspace = async (config: RunnerConfig, claim: ClaimedTask): 
   if (!inside(root, workspace)) throw new Error("Resumed workspace escaped the controlled root");
   const info = await stat(workspace);
   if (!info.isDirectory()) throw new Error("Resumed workspace is not a directory");
-  return { path: workspace, branch: claim.run.branch, baseSha: claim.run.baseSha };
+  return {
+    path: workspace,
+    branch: claim.run.branch,
+    baseSha: claim.run.baseSha,
+    ...(claim.run.pinnedBaseSha ? { pinnedBaseSha: claim.run.pinnedBaseSha } : {}),
+  };
 };
 
 /**
@@ -223,6 +250,7 @@ export const writeSessionCredentials = async (
     runId: claim.run.id,
     sessionToken: claim.sessionToken,
     fencingToken: claim.fencingToken,
+    workspacePath: workspace.path,
   });
   if (config.runAsPrefix.length > 0) {
     // Under a run-as prefix the workspace tree belongs to the launched account:
@@ -247,7 +275,9 @@ export const captureWorkspaceResult = async (
   workspace: Workspace,
 ): Promise<{ branch: string; baseSha: string; headSha: string }> => {
   const env = workspaceEnvironment(config);
-  const branch = await command(config, "git", ["branch", "--show-current"], workspace.path, env);
+  const branch = workspace.pinnedBaseSha
+    ? workspace.branch
+    : await command(config, "git", ["branch", "--show-current"], workspace.path, env);
   const headSha = await command(config, "git", ["rev-parse", "HEAD"], workspace.path, env);
   return { branch, baseSha: workspace.baseSha, headSha };
 };

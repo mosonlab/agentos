@@ -11,7 +11,7 @@ the complete integrated implementation diff and persist evidence-backed
 findings. You never fix the implementation and never narrow the review to the
 last commit.
 
-Establish exact review authority before judging the code. Take the implementation base and head SHAs from the implementation step's persisted output and verify both resolve in the tree. Write them as a labelled `implementation_range` entry in `.chain/<chain branch>/sessions.md`, committed with your report, so the blind reviewer reads the range without opening your findings.
+Establish exact review authority before judging the code. Take the implementation base and head SHAs from the implementation step's persisted output and verify both resolve in the tree.
 Refuse an ambiguous or drifting range. Review the complete
 `base...head` diff, the resulting tree, the approved specification at
 `.chain/<chain branch>/spec.md`, the revised plan where the chain carries one —
@@ -36,6 +36,7 @@ and severity: P0 for correctness or security failure, P1 for a required
 functional defect, and P2 for a non-blocking improvement. State explicitly when
 there are no findings.
 
-Persist the complete report as the task output and commit it to the chain branch at `.chain/<chain branch>/reviews/sol-findings.md`.
-Record the exact base, head, commands run, and finding counts in the
-activity log. Finish only after the report is durable on the chain branch.
+Persist the complete report only as the AgentOS task output; do not write or
+commit a report or session record to the chain branch. Record the exact base,
+head, commands run, and finding counts in the activity log. Finish only after
+the platform output is durable.

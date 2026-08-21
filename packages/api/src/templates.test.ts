@@ -50,6 +50,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
       assigneeAgent: agent,
       approvalGate: contract.approvalGate,
       opensPullRequest: contract.opensPullRequest,
+      baseFromStepIndex: contract.baseFromStepIndex,
       runner: null,
       taskTemplate: { name: "compound-engineer-workflow" },
     };
@@ -151,6 +152,38 @@ test("the lower-level materializer rejects blank variables and invalid branches 
       () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName } }),
       /Missing template variables|Invalid template branch name/,
       branchName,
+    );
+  }
+});
+
+test("the lower-level materializer rejects self and forward baseFromStepIndex references", async () => {
+  const step = (stepIndex: number, baseFromStepIndex: number | null) => ({
+    id: `step-${stepIndex}`,
+    stepIndex,
+    baseFromStepIndex,
+    name: `Step ${stepIndex}`,
+    prompt: "work",
+    outputKind: "result",
+    attachmentsFromPrevious: false,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: "agent-1",
+    assigneeAgent: { id: "agent-1", name: "Agent", archivedAt: null },
+    approvalGate: false,
+    opensPullRequest: true,
+    runner: null,
+  });
+  for (const steps of [
+    [step(1, 1)],
+    [step(1, 2), step(2, null)],
+  ]) {
+    const db = {
+      taskTemplate: { findFirst: async () => ({ id: "template-1", name: "Template", variables: [], steps }) },
+      repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+      $transaction: async () => { throw new Error("transaction must not start"); },
+    } as unknown as PrismaClient;
+    await assert.rejects(
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
+      /baseFromStepIndex must reference a strictly earlier stepIndex/u,
     );
   }
 });
