@@ -19,8 +19,7 @@
     <string>__GIT_BINARY__</string>
     <key>DEPLOY_NPM_BINARY</key>
     <string>__NPM_BINARY__</string>
-    <key>DEPLOY_PG_DUMP_BINARY</key>
-    <string>__PG_DUMP_BINARY__</string>
+__BACKUP_ENVIRONMENT__
   </dict>
   <key>RunAtLoad</key>
   <true/>

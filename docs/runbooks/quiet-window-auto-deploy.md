@@ -16,13 +16,27 @@ The checkout must have:
 - a clean, stamped build in `packages/api/dist/build-info.json`;
 - its existing mode-0600 `.env`, including `DATABASE_URL` and the existing
   Inbox/Feishu settings;
-- `git`, `node`, `npm`, `pg_dump`, and `launchctl` on the host;
+- `git`, `node`, `npm`, Docker CLI, and `launchctl` on the host;
+- the running PostgreSQL container `agentos-postgres-1`, with executable
+  `/usr/bin/pg_dump` inside it;
 - all nine service labels above already loaded.
 
 The job reads `masterSha` and `controlPlaneASha` from the tracked
 `release-authority.json`; do not add those values to a plist or `.env`.
 
 ## Read-only verification
+
+The production host has no host `pg_dump`. Define the exact container backup
+contract in the operator shell first:
+
+```sh
+DEPLOY_DOCKER_BINARY="$(command -v docker)"
+test -n "$DEPLOY_DOCKER_BINARY"
+export DEPLOY_PG_DUMP_MODE=container
+export DEPLOY_DOCKER_BINARY
+export DEPLOY_PG_DUMP_CONTAINER=agentos-postgres-1
+export DEPLOY_CONTAINER_PG_DUMP_BINARY=/usr/bin/pg_dump
+```
 
 First run the complete decision path without taking the deploy lock, fetching,
 building, backing up, migrating, syncing, writing Inbox rows,
@@ -41,17 +55,26 @@ Do not install after a non-zero dry-run. Resolve the named condition first.
 
 ## Install
 
-Inspect the exact definition the installer would derive from this checkout and
-the current Node binary:
+Inspect the exact definition the installer would derive from this checkout,
+the current Node binary, and the production container backup contract:
 
 ```sh
-node scripts/deploy/install-launchd.mjs
+node scripts/deploy/install-launchd.mjs \
+  --pg-dump-mode container \
+  --docker-binary "$DEPLOY_DOCKER_BINARY" \
+  --pg-dump-container agentos-postgres-1 \
+  --container-pg-dump-binary /usr/bin/pg_dump
 ```
 
 Apply it only after the dry-run passes:
 
 ```sh
-node scripts/deploy/install-launchd.mjs --apply
+node scripts/deploy/install-launchd.mjs \
+  --pg-dump-mode container \
+  --docker-binary "$DEPLOY_DOCKER_BINARY" \
+  --pg-dump-container agentos-postgres-1 \
+  --container-pg-dump-binary /usr/bin/pg_dump \
+  --apply
 launchctl print "gui/$(id -u)/com.agentos.auto-deploy"
 ```
 
@@ -66,9 +89,12 @@ The installer refuses to replace a different existing plist. Inspect and
 unload that definition before replacing it; the installer never guesses that
 an existing service definition is obsolete.
 
-The installer resolves `git`, `npm`, and `pg_dump` to executable absolute paths
-and writes them into the launchd environment. A missing binary is a named
-installation refusal, not a failure discovered after deployment starts.
+The installer resolves `git`, `npm`, and Docker to executable absolute paths,
+requires an explicit `host` or `container` pg-dump mode, and writes the complete
+contract into the launchd environment. In container mode it also refuses unless
+the named container is running and the configured container-internal `pg_dump`
+path is executable. Missing or unexecutable configuration is a named
+installation refusal; there is no host/container fallback.
 
 ## Upgrade behavior
 
@@ -86,8 +112,10 @@ The job then performs exactly this sequence and stops at the first failure:
 2. create a detached staging worktree under `.agentos-deploy/`, run `npm ci`
    against the target lockfile, and run `npm run db:generate`;
 3. run `npm run build` in staging and verify its API build stamp;
-4. write a mode-0600 `pg_dump -Fc` backup under
-   `.agentos-deploy/backups/`;
+4. run `/usr/bin/pg_dump -Fc` through `docker exec` in
+   `agentos-postgres-1`; stream its stdout to a mode-0600 temporary file on the
+   host under `.agentos-deploy/backups/`, fsync it, and rename it to `.dump`
+   only after a zero exit and non-empty output;
 5. run `npm run db:migrate-goal-execution` from staging with the two authority
    SHAs read from that revision's `release-authority.json`;
 6. run `npm run db:sync-canonical-prompts`; structural drift is a terminal
@@ -104,6 +132,9 @@ build, migration, sync, swap, notification, or restart failure restores or
 retains the previous build. Database migration rollback is not attempted.
 Database backups and successful previous-build directories are not deleted
 automatically; retain or remove them under the operator's backup policy.
+If Docker, the container, or `pg_dump` fails, the attempt stops as
+`database-backup-failed`, removes the partial host file, and performs no
+migration, sync, publication, or restart.
 
 Success and failure create an AgentOS Inbox message containing both revisions
 and the named outcome. A failure also writes

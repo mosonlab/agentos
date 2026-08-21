@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import {
+  accessSync,
   chmodSync,
+  constants as fsConstants,
   existsSync,
   linkSync,
   mkdirSync,
@@ -34,7 +36,105 @@ const requiredBinary = (name) => {
     throw new Error(`required-binary-unavailable:${name}`);
   }
   if (!path.startsWith("/")) throw new Error(`required-binary-not-absolute:${name}`);
-  return realpathSync(path);
+  const resolved = realpathSync(path);
+  try { accessSync(resolved, fsConstants.X_OK); } catch { throw new Error(`required-binary-not-executable:${name}`); }
+  return resolved;
+};
+
+const requiredConfiguredBinary = (path, name) => {
+  if (!path?.startsWith("/")) throw new Error(`backup-configuration-invalid:${name}-must-be-an-absolute-path`);
+  let resolved;
+  try { resolved = realpathSync(path); } catch { throw new Error(`backup-configuration-invalid:${name}-missing`); }
+  try { accessSync(resolved, fsConstants.X_OK); } catch { throw new Error(`backup-configuration-invalid:${name}-not-executable`); }
+  return resolved;
+};
+
+const optionValue = (args, option) => {
+  const indexes = args.flatMap((argument, index) => argument === option ? [index] : []);
+  if (indexes.length !== 1 || indexes[0] === args.length - 1 || args[indexes[0] + 1].startsWith("--")) {
+    throw new Error(`installer-option-required:${option}`);
+  }
+  return args[indexes[0] + 1];
+};
+
+export const parseInstallerArgs = (args) => {
+  const applyCount = args.filter((argument) => argument === "--apply").length;
+  if (applyCount > 1) throw new Error("installer-option-repeated:--apply");
+  const mode = optionValue(args, "--pg-dump-mode");
+  const allowed = new Set(["--apply", "--pg-dump-mode"]);
+  const backup = { mode };
+  if (mode === "container") {
+    allowed.add("--docker-binary");
+    allowed.add("--pg-dump-container");
+    allowed.add("--container-pg-dump-binary");
+    backup.dockerBinary = optionValue(args, "--docker-binary");
+    backup.container = optionValue(args, "--pg-dump-container");
+    backup.pgDumpBinary = optionValue(args, "--container-pg-dump-binary");
+  } else if (mode === "host") {
+    allowed.add("--pg-dump-binary");
+    backup.pgDumpBinary = optionValue(args, "--pg-dump-binary");
+  } else {
+    throw new Error("backup-configuration-invalid:pg-dump-mode-must-be-host-or-container");
+  }
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (!argument.startsWith("--")) throw new Error(`installer-option-unexpected-value:${argument}`);
+    if (!allowed.has(argument)) throw new Error(`installer-option-unknown:${argument}`);
+    if (argument !== "--apply") index += 1;
+  }
+  return { apply: applyCount === 1, backup };
+};
+
+export const verifyBackupConfiguration = (backup, execute = execFileSync) => {
+  if (backup.mode === "host") {
+    return Object.freeze({ mode: "host", pgDumpBinary: requiredConfiguredBinary(backup.pgDumpBinary, "pg-dump-binary") });
+  }
+  if (backup.mode !== "container") throw new Error("backup-configuration-invalid:unsupported-mode");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(backup.container ?? "")) {
+    throw new Error("backup-configuration-invalid:pg-dump-container-invalid");
+  }
+  if (!backup.pgDumpBinary?.startsWith("/")) {
+    throw new Error("backup-configuration-invalid:container-pg-dump-binary-must-be-an-absolute-path");
+  }
+  const dockerBinary = requiredConfiguredBinary(backup.dockerBinary, "docker-binary");
+  let running;
+  try {
+    running = execute(dockerBinary, ["inspect", "--type", "container", "--format", "{{.State.Running}}", backup.container], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    throw new Error(`backup-container-unavailable:${backup.container}`);
+  }
+  if (running !== "true") throw new Error(`backup-container-not-running:${backup.container}`);
+  try {
+    execute(dockerBinary, ["exec", backup.container, "test", "-x", backup.pgDumpBinary], { stdio: "ignore" });
+  } catch {
+    throw new Error(`backup-container-pg-dump-not-executable:${backup.pgDumpBinary}`);
+  }
+  return Object.freeze({
+    mode: "container",
+    dockerBinary,
+    container: backup.container,
+    pgDumpBinary: backup.pgDumpBinary,
+  });
+};
+
+const backupEnvironment = (backup) => {
+  const values = backup.mode === "host"
+    ? {
+        DEPLOY_PG_DUMP_MODE: "host",
+        DEPLOY_PG_DUMP_BINARY: backup.pgDumpBinary,
+      }
+    : {
+        DEPLOY_PG_DUMP_MODE: "container",
+        DEPLOY_DOCKER_BINARY: backup.dockerBinary,
+        DEPLOY_PG_DUMP_CONTAINER: backup.container,
+        DEPLOY_CONTAINER_PG_DUMP_BINARY: backup.pgDumpBinary,
+      };
+  return Object.entries(values)
+    .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
+    .join("\n");
 };
 
 export const renderLaunchdPlist = (template, values) => {
@@ -46,22 +146,18 @@ export const renderLaunchdPlist = (template, values) => {
     __STDERR_PATH__: values.stderrPath,
     __GIT_BINARY__: values.gitBinary,
     __NPM_BINARY__: values.npmBinary,
-    __PG_DUMP_BINARY__: values.pgDumpBinary,
   };
   let rendered = template;
   for (const [placeholder, value] of Object.entries(replacements)) {
     rendered = rendered.replaceAll(placeholder, xml(value));
   }
+  rendered = rendered.replaceAll("__BACKUP_ENVIRONMENT__", backupEnvironment(values.backup));
   if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-template-has-unresolved-placeholder");
   return rendered;
 };
 
 export const installLaunchd = (args) => {
-  if (args.some((argument) => argument !== "--apply") || args.filter((argument) => argument === "--apply").length > 1) {
-    process.stderr.write("usage: node scripts/deploy/install-launchd.mjs [--apply]\n");
-    return 64;
-  }
-  const apply = args.includes("--apply");
+  const { apply, backup: requestedBackup } = parseInstallerArgs(args);
   if (process.getuid() === 0) throw new Error("launchd-installer-refuses-root");
   const userHome = homedir();
   const launchAgents = join(userHome, "Library/LaunchAgents");
@@ -75,7 +171,7 @@ export const installLaunchd = (args) => {
     stderrPath: join(logs, "auto-deploy.error.log"),
     gitBinary: requiredBinary("git"),
     npmBinary: requiredBinary("npm"),
-    pgDumpBinary: requiredBinary("pg_dump"),
+    backup: verifyBackupConfiguration(requestedBackup),
   };
   const rendered = renderLaunchdPlist(readFileSync(TEMPLATE, "utf8"), values);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} label=${LABEL}\n`);
@@ -84,7 +180,14 @@ export const installLaunchd = (args) => {
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} node=${values.nodeBinary}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} git=${values.gitBinary}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} npm=${values.npmBinary}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump=${values.pgDumpBinary}\n`);
+  process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump_mode=${values.backup.mode}\n`);
+  if (values.backup.mode === "host") {
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump=${values.backup.pgDumpBinary}\n`);
+  } else {
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} docker=${values.backup.dockerBinary}\n`);
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump_container=${values.backup.container}\n`);
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} container_pg_dump=${values.backup.pgDumpBinary}\n`);
+  }
 
   if (!apply) {
     process.stdout.write("PLAN no files or launchd state changed\n");

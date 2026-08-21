@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,8 +25,16 @@ import {
   runLocked,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
-import { renderLaunchdPlist } from "./install-launchd.mjs";
+import {
+  parseInstallerArgs,
+  renderLaunchdPlist,
+  verifyBackupConfiguration,
+} from "./install-launchd.mjs";
 import { acquireProcessLock, blockingRunsStatement, DEPLOY_ARTIFACT_PATHS, inspectGitPreflight, publishDirectories } from "./quiet-window-adapters.mjs";
+import {
+  backupConfigurationFromEnvironment,
+  writePgDumpBackup,
+} from "./quiet-window-backup.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
@@ -290,8 +309,87 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
   assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 11);
 });
 
-test("launchd renderer pins child binaries, escapes paths, and leaves no placeholder", () => {
-  const template = "<string>__NODE_BINARY__</string><string>__DEPLOY_SCRIPT__</string><string>__REPOSITORY_ROOT__</string><string>__STDOUT_PATH__</string><string>__STDERR_PATH__</string><string>__GIT_BINARY__</string><string>__NPM_BINARY__</string><string>__PG_DUMP_BINARY__</string>";
+const fakeDocker = (root) => {
+  const path = join(root, "docker-fixture");
+  writeFileSync(path, `#!/bin/sh
+if [ "$1" = "inspect" ]; then
+  printf 'true\\n'
+  exit 0
+fi
+if [ -n "$FAKE_DOCKER_LOG" ]; then
+  printf '%s\\n' "$@" > "$FAKE_DOCKER_LOG"
+  printf 'password=%s\\n' "$PGPASSWORD" >> "$FAKE_DOCKER_LOG"
+fi
+if [ "$FAKE_DOCKER_FAIL" = "1" ]; then
+  printf 'fixture backup failed\\n' >&2
+  exit 42
+fi
+printf 'PGDUMP-CUSTOM-FIXTURE'
+`);
+  chmodSync(path, 0o755);
+  return path;
+};
+
+test("installer requires an explicit backup mode and executable configuration", () => {
+  assert.throws(() => parseInstallerArgs([]), /installer-option-required:--pg-dump-mode/u);
+  assert.throws(
+    () => parseInstallerArgs([
+      "--pg-dump-mode", "container",
+      "--pg-dump-container", "agentos-postgres-1",
+      "--container-pg-dump-binary", "/usr/bin/pg_dump",
+    ]),
+    /installer-option-required:--docker-binary/u,
+  );
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-installer-refusal-"));
+  const docker = join(root, "docker");
+  writeFileSync(docker, "#!/bin/sh\nexit 0\n");
+  chmodSync(docker, 0o644);
+  assert.throws(
+    () => verifyBackupConfiguration({
+      mode: "container",
+      dockerBinary: docker,
+      container: "agentos-postgres-1",
+      pgDumpBinary: "/usr/bin/pg_dump",
+    }),
+    /backup-configuration-invalid:docker-binary-not-executable/u,
+  );
+  chmodSync(docker, 0o755);
+  assert.throws(
+    () => verifyBackupConfiguration({
+      mode: "container",
+      dockerBinary: docker,
+      container: "agentos-postgres-1",
+      pgDumpBinary: "/usr/bin/pg_dump",
+    }, (_program, args) => {
+      if (args[0] === "inspect") return "true\n";
+      throw new Error("not executable");
+    }),
+    /backup-container-pg-dump-not-executable/u,
+  );
+  assert.throws(
+    () => backupConfigurationFromEnvironment({ DEPLOY_PG_DUMP_MODE: "container" }),
+    /DEPLOY_PG_DUMP_CONTAINER-invalid/u,
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("installer verifies and renders the production container backup contract", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-installer-"));
+  const docker = fakeDocker(root);
+  const parsed = parseInstallerArgs([
+    "--pg-dump-mode", "container",
+    "--docker-binary", docker,
+    "--pg-dump-container", "agentos-postgres-1",
+    "--container-pg-dump-binary", "/usr/bin/pg_dump",
+  ]);
+  const backup = verifyBackupConfiguration(parsed.backup);
+  assert.deepEqual(backup, {
+    mode: "container",
+    dockerBinary: realpathSync(docker),
+    container: "agentos-postgres-1",
+    pgDumpBinary: "/usr/bin/pg_dump",
+  });
+  const template = readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8");
   const rendered = renderLaunchdPlist(template, {
     nodeBinary: "/node&bin",
     deployScript: "/repo/<deploy>",
@@ -300,11 +398,71 @@ test("launchd renderer pins child binaries, escapes paths, and leaves no placeho
     stderrPath: "/logs/err",
     gitBinary: "/usr/bin/git",
     npmBinary: "/opt/homebrew/bin/npm",
-    pgDumpBinary: "/opt/homebrew/bin/pg_dump",
+    backup,
   });
   assert.match(rendered, /\/node&amp;bin/u);
   assert.match(rendered, /\/repo\/&lt;deploy&gt;/u);
   assert.match(rendered, /\/opt\/homebrew\/bin\/npm/u);
-  assert.match(rendered, /\/opt\/homebrew\/bin\/pg_dump/u);
+  assert.match(rendered, /DEPLOY_PG_DUMP_MODE/u);
+  assert.match(rendered, /agentos-postgres-1/u);
+  assert.match(rendered, /DEPLOY_CONTAINER_PG_DUMP_BINARY/u);
+  assert.doesNotMatch(rendered, /DEPLOY_PG_DUMP_BINARY/u);
   assert.doesNotMatch(rendered, /__[A-Z_]+__/u);
+  const renderedPath = join(root, "rendered.plist");
+  writeFileSync(renderedPath, rendered);
+  execFileSync("/usr/bin/plutil", ["-lint", renderedPath], { stdio: "ignore" });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("container backup preserves pg_dump arguments and writes host output atomically", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-backup-"));
+  const docker = fakeDocker(root);
+  const logPath = join(root, "arguments");
+  const output = join(root, "backup.dump");
+  await writePgDumpBackup({
+    configuration: {
+      mode: "container",
+      dockerBinary: docker,
+      container: "agentos-postgres-1",
+      pgDumpBinary: "/usr/bin/pg_dump",
+    },
+    databaseUrl: "postgresql://alice:s3cr%40t@db.internal:5544/agentos",
+    output,
+    env: { ...process.env, FAKE_DOCKER_LOG: logPath },
+  });
+  const flow = readFileSync(logPath, "utf8").split("\n");
+  assert.deepEqual(flow.slice(0, 13), [
+    "exec", "--env", "PGPASSWORD", "agentos-postgres-1", "/usr/bin/pg_dump",
+    "-Fc", "--host", "db.internal", "--port", "5544", "--username", "alice", "--dbname",
+  ]);
+  assert.equal(flow[13], "agentos");
+  assert.equal(flow[14], "password=s3cr@t");
+  assert.equal(flow.some((value) => value.includes("s3cr@t") && !value.startsWith("password=")), false);
+  assert.equal(readFileSync(output, "utf8"), "PGDUMP-CUSTOM-FIXTURE");
+  assert.equal(statSync(output).mode & 0o777, 0o600);
+  assert.deepEqual(readdirSync(root).filter((name) => name.includes(".partial-")), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("container backup failure leaves no final or partial host backup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-backup-failure-"));
+  const docker = fakeDocker(root);
+  const output = join(root, "backup.dump");
+  await assert.rejects(
+    writePgDumpBackup({
+      configuration: {
+        mode: "container",
+        dockerBinary: docker,
+        container: "agentos-postgres-1",
+        pgDumpBinary: "/usr/bin/pg_dump",
+      },
+      databaseUrl: "postgresql://alice:secret@localhost:5432/agentos",
+      output,
+      env: { ...process.env, FAKE_DOCKER_FAIL: "1" },
+    }),
+    /pg_dump-exit-42: fixture backup failed/u,
+  );
+  assert.equal(existsSync(output), false);
+  assert.deepEqual(readdirSync(root).filter((name) => name.includes(".partial-")), []);
+  rmSync(root, { recursive: true, force: true });
 });

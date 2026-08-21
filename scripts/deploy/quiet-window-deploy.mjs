@@ -4,11 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   chmodSync,
-  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -37,6 +35,7 @@ import {
   publishDirectories,
 } from "./quiet-window-adapters.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
+import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
@@ -148,11 +147,17 @@ const resolveExecutable = (variable, fallback) => {
 
 let binaries = null;
 const loadBinaries = () => {
-  binaries ??= Object.freeze({
-    git: resolveExecutable("DEPLOY_GIT_BINARY", "git"),
-    npm: resolveExecutable("DEPLOY_NPM_BINARY", "npm"),
-    pgDump: resolveExecutable("DEPLOY_PG_DUMP_BINARY", "pg_dump"),
-  });
+  if (binaries === null) {
+    try {
+      binaries = Object.freeze({
+        git: resolveExecutable("DEPLOY_GIT_BINARY", "git"),
+        npm: resolveExecutable("DEPLOY_NPM_BINARY", "npm"),
+        backup: backupConfigurationFromEnvironment(),
+      });
+    } catch (error) {
+      fail("environment-unreadable", error instanceof Error ? error.message : String(error));
+    }
+  }
   return binaries;
 };
 
@@ -456,27 +461,16 @@ const main = async () => {
       },
       backup: async () => {
         mkdirSync(backupDirectory, { recursive: true, mode: 0o700 });
-        let databaseUrl;
-        try {
-          databaseUrl = new URL(process.env.DATABASE_URL);
-        } catch {
-          fail("database-backup-failed", "DATABASE_URL-is-invalid");
-        }
-        if (!new Set(["postgres:", "postgresql:"]).has(databaseUrl.protocol)) {
-          fail("database-backup-failed", "DATABASE_URL-is-not-postgresql");
-        }
         const output = join(backupDirectory, `${new Date().toISOString().replace(/[:.]/gu, "-")}-${from.slice(0, 12)}-${to.slice(0, 12)}.dump`);
-        closeSync(openSync(output, "wx", 0o600));
-        const backupEnv = { ...process.env, PGPASSWORD: decodeURIComponent(databaseUrl.password) };
-        const args = [
-          "-Fc", "--file", output,
-          "--host", databaseUrl.hostname,
-          "--port", databaseUrl.port || "5432",
-          "--username", decodeURIComponent(databaseUrl.username),
-          "--dbname", decodeURIComponent(databaseUrl.pathname.replace(/^\//u, "")),
-        ];
-        await checked("database-backup-failed", loadBinaries().pgDump, args, { env: backupEnv });
-        chmodSync(output, 0o600);
+        try {
+          await writePgDumpBackup({
+            configuration: loadBinaries().backup,
+            databaseUrl: process.env.DATABASE_URL,
+            output,
+          });
+        } catch (error) {
+          fail("database-backup-failed", error instanceof Error ? error.message : String(error));
+        }
       },
       guardedMigration: async () => {
         copyFileSync(join(REPOSITORY_ROOT, ".env"), join(stage, ".env"));
