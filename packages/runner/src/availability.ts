@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -18,7 +18,7 @@ type AccessExecutable = (path: string, mode: number) => Promise<void>;
 const executable = async (path: string, check: AccessExecutable): Promise<boolean> => {
   try {
     await check(path, constants.X_OK);
-    return true;
+    return (await stat(path)).isFile();
   } catch {
     return false;
   }

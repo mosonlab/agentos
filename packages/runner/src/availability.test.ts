@@ -24,3 +24,14 @@ test("CLI resolution follows configured PATH order and requires execute permissi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("CLI resolution rejects an executable directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cli-directory-"));
+  try {
+    await mkdir(join(root, "codex"), { mode: 0o755 });
+    assert.equal(await resolveCliExecutable("codex", root), null);
+    assert.equal(await resolveCliExecutable(join(root, "codex"), root), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
