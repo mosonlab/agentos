@@ -306,7 +306,14 @@ export const completeRun = async (config: RunnerConfig, claim: ClaimedTask, comp
   });
 };
 
-export type ReclaimOffer = { runId: string; workspacePath: string | null };
+export type ReclaimOffer = {
+  runId: string;
+  workspacePath: string | null;
+  taskId?: string | null;
+  runNumber?: number;
+  baseSha?: string | null;
+  pushedBranch?: string | null;
+};
 export type ReclaimPlan = {
   /** Directories in the reported inventory this runner may remove. */
   reclaim: ReclaimOffer[];
@@ -357,6 +364,16 @@ export const reportReclaimOutcomes = async (
   }).catch((error: unknown) => {
     if ((error as { status?: number }).status === 404) return null;
     throw error;
+  });
+};
+
+export const recordReclaimPublication = async (
+  config: RunnerConfig,
+  body: { runnerId: string; runId: string; pushedBranch: string },
+): Promise<void> => {
+  await request(config, "/runner/workspaces/salvaged", {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 };
 

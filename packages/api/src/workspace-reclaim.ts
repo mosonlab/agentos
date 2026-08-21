@@ -61,6 +61,10 @@ export type ReclaimOffer = {
    * clone window, before /start persisted a path.
    */
   workspacePath: string | null;
+  taskId?: string | null;
+  runNumber?: number;
+  baseSha?: string | null;
+  pushedBranch?: string | null;
 };
 
 export type ReclaimPlan = {
@@ -97,7 +101,11 @@ export type ReclaimReport = {
   runnerId: string;
   /** Telemetry for the audit record. Authority comes from `runnerId` alone. */
   workspaceRoot: string;
-  results: Array<{ runId: string; outcome: ReclaimOutcome; failureReason?: string | null | undefined }>;
+  results: Array<{
+    runId: string;
+    outcome: ReclaimOutcome;
+    failureReason?: string | null | undefined;
+  }>;
 };
 
 const audit = (event: string, detail: Record<string, unknown>): void => {
@@ -106,6 +114,10 @@ const audit = (event: string, detail: Record<string, unknown>): void => {
 
 type ReclaimCandidate = {
   id: string;
+  taskId: string | null;
+  runNumber: number;
+  baseSha: string | null;
+  pushedBranch: string | null;
   runnerId: string | null;
   workspacePath: string | null;
   status: RunStatus;
@@ -159,7 +171,8 @@ export const publishReclaimIntents = async (
   const runs = directories.length === 0 ? [] : await db.run.findMany({
     where: { id: { in: directories } },
     select: {
-      id: true, runnerId: true, workspacePath: true, status: true,
+      id: true, taskId: true, runNumber: true, baseSha: true, pushedBranch: true,
+      runnerId: true, workspacePath: true, status: true,
       workspaceRetained: true, endedAt: true, workspaceReclaimAt: true, workspaceReclaimedAt: true,
     },
   }) as ReclaimCandidate[];
@@ -225,7 +238,14 @@ export const publishReclaimIntents = async (
       audit("keep-noncanonical-workspace-path", { root, runId: run.id, workspacePath: run.workspacePath });
       continue;
     }
-    reclaim.push({ runId: run.id, workspacePath: run.workspacePath });
+    reclaim.push({
+      runId: run.id,
+      workspacePath: run.workspacePath,
+      taskId: run.taskId,
+      runNumber: run.runNumber,
+      baseSha: run.baseSha,
+      pushedBranch: run.pushedBranch,
+    });
     if (!run.workspaceReclaimAt) publish.push(run.id);
     if (run.workspaceRetained) unretain.push(run.id);
   }
@@ -285,7 +305,10 @@ const applyOutcome = async (
 ): Promise<ApplyResult> => db.$transaction(async (tx) => {
   const run = await tx.run.findUnique({
     where: { id: result.runId },
-    select: { id: true, runnerId: true, status: true, workspaceReclaimAt: true, workspaceReclaimedAt: true },
+    select: {
+      id: true,
+      runnerId: true, status: true, workspaceReclaimAt: true, workspaceReclaimedAt: true,
+    },
   });
   // Only an intent this API published, for a finished run, reported by the
   // runner that owns it, and not already answered for.
@@ -356,6 +379,39 @@ export const recordReclaimOutcomes = async (
     audit("reclaimed", { caller: report.runnerId, root: report.workspaceRoot, ...tally });
   }
   return tally;
+};
+
+/** A retained/lost workspace can outlive its run lease. The owning runner uses
+ * this narrow ACK after pushing the deterministic salvage ref and before it
+ * deletes the directory; unlike run publication it is authorized by the open
+ * reclaim intent and recorded runner ownership, not by an expired fence. */
+export const acknowledgeReclaimSalvage = async (
+  db: PrismaClient,
+  input: { runnerId: string; runId: string; pushedBranch: string },
+): Promise<boolean> => {
+  const run = await db.run.findUnique({
+    where: { id: input.runId },
+    select: {
+      id: true, runnerId: true, taskId: true, runNumber: true, status: true,
+      workspaceReclaimAt: true, workspaceReclaimedAt: true, pushedBranch: true,
+    },
+  });
+  const expected = run?.taskId ? `agentos/${run.taskId}/run-${run.runNumber}` : null;
+  if (!run || !ownedByCaller(run, input.runnerId) || !isTerminal(run.status)
+    || !run.workspaceReclaimAt || run.workspaceReclaimedAt
+    || input.pushedBranch !== expected
+    || (run.pushedBranch !== null && run.pushedBranch !== input.pushedBranch)) return false;
+  const updated = await db.run.updateMany({
+    where: {
+      id: run.id,
+      runnerId: input.runnerId,
+      workspaceReclaimAt: { not: null },
+      workspaceReclaimedAt: null,
+      OR: [{ pushedBranch: null }, { pushedBranch: input.pushedBranch }],
+    },
+    data: { pushedBranch: input.pushedBranch },
+  });
+  return updated.count === 1;
 };
 
 /** How many published intents are still waiting for their owner to act. */

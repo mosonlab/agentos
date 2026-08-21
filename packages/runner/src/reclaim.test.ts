@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { access, chmod, mkdir, mkdtemp, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -34,11 +35,20 @@ type Call = { path: string; body: Record<string, any> };
 /** Stands in for the control plane: answers the plan, records the report. */
 const stubApi = (plan: unknown, status = 200): Call[] => {
   const calls: Call[] = [];
+  const compatiblePlan = plan && typeof plan === "object" && "reclaim" in plan
+    ? {
+      ...plan,
+      reclaim: (plan as { reclaim: Array<Record<string, unknown>> }).reclaim.map((offer) => ({
+        pushedBranch: "already/durable",
+        ...offer,
+      })),
+    }
+    : plan;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const path = String(input);
     calls.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
     if (path.endsWith("/runner/workspaces/reclaimable")) {
-      return new Response(status === 200 ? JSON.stringify(plan) : "no such route", {
+      return new Response(status === 200 ? JSON.stringify(compatiblePlan) : "no such route", {
         status, headers: { "content-type": status === 200 ? "application/json" : "text/plain" },
       });
     }
@@ -48,6 +58,7 @@ const stubApi = (plan: unknown, status = 200): Call[] => {
 };
 
 const root = async (label: string): Promise<string> => resolve(await mkdtemp(join(tmpdir(), `agentos-reclaim-${label}-`)));
+const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 test("removes exactly the directory the control plane offered and reports it", async () => {
   const workspaceRoot = await root("offer");
@@ -68,6 +79,44 @@ test("removes exactly the directory the control plane offered and reports it", a
   // a run id into a path, and it does so against its own configured root.
   assert.deepEqual([...calls[0]!.body.directories].sort(), ["bystander", "done-run"]);
   assert.deepEqual(calls[1]!.body.results, [{ runId: "done-run", outcome: "REMOVED" }]);
+});
+
+test("a delayed reclaim salvages an unpublished retained workspace before deleting it", async () => {
+  const workspaceRoot = await root("salvage");
+  const remote = join(workspaceRoot, "origin.git");
+  const seed = join(workspaceRoot, "seed");
+  const runPath = join(workspaceRoot, "run-1");
+  git(workspaceRoot, "init", "--bare", "--initial-branch=master", remote);
+  git(workspaceRoot, "init", "--initial-branch=master", seed);
+  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.email", "runner@agentos.local");
+  await writeFile(join(seed, "base.txt"), "base\n");
+  git(seed, "add", "base.txt");
+  git(seed, "commit", "-m", "base");
+  git(seed, "remote", "add", "origin", remote);
+  git(seed, "push", "origin", "master");
+  git(workspaceRoot, "clone", "--branch", "master", remote, runPath);
+  const baseSha = git(runPath, "rev-parse", "HEAD");
+  await writeFile(join(runPath, "recovered.txt"), "keep\n");
+  const calls = stubApi({
+    reclaim: [{
+      runId: "run-1", workspacePath: runPath, taskId: "task-1", runNumber: 3,
+      baseSha, pushedBranch: null,
+    }],
+    verify: [], keep: [],
+  });
+
+  const sweep = await reclaimWorkspaces(config(workspaceRoot), {
+    listDirectories: async () => ["run-1"],
+  });
+
+  assert.deepEqual(sweep, { offered: 1, removed: 1, refused: 0, failed: 0, settled: 0 });
+  await assert.rejects(access(runPath));
+  const salvage = "agentos/task-1/run-3";
+  assert.match(git(workspaceRoot, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
+  assert.equal(calls[1]!.path, "http://api.invalid/runner/workspaces/salvaged");
+  assert.deepEqual(calls[1]!.body, { runnerId: "runner-1", runId: "run-1", pushedBranch: salvage });
+  assert.deepEqual(calls[2]!.body.results, [{ runId: "run-1", outcome: "REMOVED" }]);
 });
 
 test("refuses an offer that escapes the configured root and deletes nothing", async () => {

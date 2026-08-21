@@ -88,6 +88,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
       findFirst: async () => created.find((item) => item.targetBranch !== "main") ?? null,
     },
     run: {
+      findFirst: async () => null,
       create: async ({ data }: { data: Record<string, any> }) => { const run = { id: "run-1", ...data }; runs.push(run); return run; },
       update: async ({ data }: { data: Record<string, any> }) => { Object.assign(runs[0]!, data); return runs[0]; },
     },

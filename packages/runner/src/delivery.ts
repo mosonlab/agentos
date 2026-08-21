@@ -407,16 +407,16 @@ export const deliverWorkspace = async (
  * them in sync: whatever ref is handed to `git push` is the ref reported as
  * `pushedBranch`.
  */
-export const deliverFailedWorkspace = async (
+export const salvageWorkspace = async (
   config: RunnerConfig,
-  claim: ClaimedTask,
+  identity: { taskId: string; runId: string; runNumber: number; remoteUrl?: string },
   workspace: Workspace,
   command: CommandExecutor = executeCommand(config),
   retryOptions: RetryOptions = {},
 ): Promise<DeliveryResult | null> => {
   const env = workspaceEnvironment(config);
-  const remote = claim.repo.remoteUrl;
-  const branch = `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
+  const remote = identity.remoteUrl ?? "origin";
+  const branch = `agentos/${identity.taskId}/run-${identity.runNumber}`;
   try {
     // Respect .gitignore while including tracked deletions and untracked files.
     await command("git", ["add", "-A"], workspace.path, env);
@@ -427,7 +427,7 @@ export const deliverFailedWorkspace = async (
         "-c", "user.email=runner@agentos.local",
         "-c", "commit.gpgSign=false",
         "-c", "core.hooksPath=/dev/null",
-        "commit", "--no-verify", "-m", `WIP salvage for AgentOS run ${claim.run.id}`,
+        "commit", "--no-verify", "-m", `WIP salvage for AgentOS run ${identity.runId}`,
       ], workspace.path, env);
     }
     const head = await command("git", ["rev-parse", "HEAD"], workspace.path, env);
@@ -451,3 +451,16 @@ export const deliverFailedWorkspace = async (
     return { pushStatus: "FAILED", pushRemote: remote, pushError: `WIP salvage failed: ${message}` };
   }
 };
+
+export const deliverFailedWorkspace = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  workspace: Workspace,
+  command: CommandExecutor = executeCommand(config),
+  retryOptions: RetryOptions = {},
+): Promise<DeliveryResult | null> => salvageWorkspace(config, {
+  taskId: claim.task.id,
+  runId: claim.run.id,
+  runNumber: claim.run.runNumber,
+  remoteUrl: claim.repo.remoteUrl,
+}, workspace, command, retryOptions);

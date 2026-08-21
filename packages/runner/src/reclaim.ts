@@ -1,9 +1,13 @@
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
-import { fetchReclaimPlan, reportReclaimOutcomes, type ReclaimOffer, type ReclaimResult } from "./api.js";
+import {
+  fetchReclaimPlan, recordReclaimPublication, reportReclaimOutcomes,
+  type ReclaimOffer, type ReclaimResult,
+} from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { cleanupWorkspace } from "./workspace.js";
+import { salvageWorkspace } from "./delivery.js";
+import { captureWorkspaceResult, cleanupWorkspace } from "./workspace.js";
 
 /**
  * Workspace GC, from the side that owns the disk (issue #115).
@@ -183,6 +187,44 @@ export const reclaimWorkspaces = async (
       continue;
     }
     try {
+      let pushedBranch: string | undefined;
+      // New control planes always include pushedBranch. Null means no durable
+      // publication exists yet, so this delayed cleanup owns the same salvage
+      // obligation as inline runner cleanup. An omitted field is accepted only
+      // for compatibility with the pre-salvage reclaim protocol.
+      if (offer.pushedBranch === null) {
+        if (!offer.taskId || offer.runNumber === undefined || !offer.baseSha) {
+          throw new Error("Salvage required before reclaim, but taskId, runNumber, or clone base is missing");
+        }
+        const workspace = {
+          path: authorized.path,
+          branch: "",
+          baseSha: offer.baseSha,
+        };
+        const gitResult = await captureWorkspaceResult(config, workspace);
+        const salvage = await salvageWorkspace(config, {
+          taskId: offer.taskId,
+          runId: offer.runId,
+          runNumber: offer.runNumber,
+        }, { ...workspace, branch: gitResult.branch });
+        if (salvage?.pushStatus === "FAILED") {
+          throw new Error(salvage.pushError ?? "WIP salvage failed before reclaim");
+        }
+        pushedBranch = salvage?.pushedBranch;
+        if (pushedBranch) {
+          await recordReclaimPublication(config, {
+            runnerId: config.runnerId,
+            runId: offer.runId,
+            pushedBranch,
+          });
+        }
+        if (!pushedBranch) {
+          audit("nothing-to-salvage", {
+            runId: offer.runId,
+            reason: "clean tree with no commits past the clone base",
+          });
+        }
+      }
       await remove(config, authorized.path);
       sweep.removed += 1;
       results.push({ runId: offer.runId, outcome: "REMOVED" });

@@ -123,7 +123,7 @@ import {
   runnerFor,
 } from "./execution.js";
 import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
-import { publishReclaimIntents, recordReclaimOutcomes } from "./workspace-reclaim.js";
+import { acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes } from "./workspace-reclaim.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
@@ -557,6 +557,11 @@ const reclaimReportInput = z.object({
     outcome: z.enum(["REMOVED", "REFUSED", "FAILED"]),
     failureReason: z.string().max(2000).nullable().optional(),
   })).max(5000),
+});
+const reclaimSalvageInput = z.object({
+  runnerId: z.string().trim().min(1).max(120),
+  runId: id,
+  pushedBranch: z.string().trim().min(1).max(255),
 });
 const heartbeatInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -3660,6 +3665,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(await recordReclaimOutcomes(db, body));
   });
 
+  app.post("/runner/workspaces/salvaged", async (context) => {
+    const body = await readJson(context.req.raw, reclaimSalvageInput);
+    return await acknowledgeReclaimSalvage(db, body)
+      ? context.json({ ok: true })
+      : context.json({ error: "Salvage publication is not authorized by an open reclaim intent" }, 409);
+  });
+
   app.post("/runner/tasks/claim", async (context) => {
     const body = await readJson(context.req.raw, claimInput);
     const principal = context.get("principal");
@@ -3971,15 +3983,63 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/publication", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, publicationInput);
-    const updated = await db.run.updateMany({
-      where: {
-        id: runId,
-        runnerId: body.runnerId,
-        fencingToken: body.fencingToken,
-        leaseExpiresAt: { gt: new Date() },
-        status: { in: activeRunStatuses },
+    const now = new Date();
+    const run = await db.run.findUnique({
+      where: { id: runId },
+      select: {
+        runnerId: true, fencingToken: true, leaseExpiresAt: true, status: true,
+        taskId: true, repoId: true, runNumber: true, pushedBranch: true, branch: true,
       },
-      data: { pushedBranch: body.pushedBranch },
+    });
+    const owned = run?.runnerId === body.runnerId && run.fencingToken === body.fencingToken;
+    const live = owned && run.leaseExpiresAt !== null && run.leaseExpiresAt > now
+      && activeRunStatuses.includes(run.status as typeof activeRunStatuses[number]);
+    // Salvage is the one publication allowed after lease loss. It is confined
+    // to this run's deterministic per-run ref, requires the same runner and
+    // fencing token that owned the workspace, and cannot replace a different
+    // publication already acknowledged for the run. Git durability does not
+    // depend on a live platform lease; making its ACK depend on one used to
+    // leave a pushed recovery ref invisible to the resolver.
+    const salvageBranch = run?.taskId
+      ? `agentos/${run.taskId}/run-${run.runNumber}`
+      : null;
+    const salvage = owned && run?.repoId !== null
+      && body.pushedBranch === salvageBranch
+      && (run?.pushedBranch === null || run?.pushedBranch === body.pushedBranch);
+    if (!live && !salvage) return context.json({ error: "Stale fencing token" }, 409);
+    const updated = await db.$transaction(async (tx) => {
+      const ack = await tx.run.updateMany({
+        where: {
+          id: runId,
+          runnerId: body.runnerId,
+          fencingToken: body.fencingToken,
+          ...(live
+            ? { leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } }
+            : { OR: [{ pushedBranch: null }, { pushedBranch: body.pushedBranch }] }),
+        },
+        data: { pushedBranch: body.pushedBranch },
+      });
+      if (ack.count !== 1 || !salvage || !run?.taskId) return ack;
+      // Reconciliation may have queued the replacement between lease loss and
+      // this lease-independent salvage ACK. Repair that still-unclaimed row in
+      // the same transaction, with resolveRunBranches making the decision, so
+      // it does not clone the fallback while the durable salvage ref is known.
+      const queued = await tx.run.findFirst({
+        where: { taskId: run.taskId, runNumber: run.runNumber + 1, status: RunStatus.QUEUED },
+        select: { id: true },
+      });
+      if (!queued) return ack;
+      const task = await tx.task.findUnique({
+        where: { id: run.taskId },
+        include: { repo: true, templateStep: true },
+      });
+      if (!task?.repo) return ack;
+      const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch });
+      await tx.run.updateMany({
+        where: { id: queued.id, status: RunStatus.QUEUED },
+        data: { branch: branches.branch, targetBranch: branches.targetBranch },
+      });
+      return ack;
     });
     return updated.count === 1
       ? context.json({ ok: true })

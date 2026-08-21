@@ -167,12 +167,14 @@ test("startup reconciliation does not fail when archived notice persistence fail
 test("lease-loss requeue for an archived agent becomes visible through the sweep", async () => {
   const now = new Date("2026-08-16T06:00:00.000Z");
   let queued: Record<string, unknown> | undefined;
+  let lostUpdate: Record<string, unknown> | undefined;
   const activities: Record<string, unknown>[] = [];
   const candidate = {
-    id: "lost-1", heartbeatAt: new Date(now.getTime() - 20 * 60_000), projectId: "project-1",
+    id: "lost-1", heartbeatAt: new Date(now.getTime() - 20 * 60_000),
+    leaseExpiresAt: new Date(now.getTime() - 10 * 60_000), projectId: "project-1",
     taskId: "task-1", goalId: null, agentId: "agent-1", repoId: "repo-1", runNumber: 1,
-    runner: "CLAUDE", model: "model", targetBranch: "main", promptHash: "hash",
-    maxDurationMin: 120, stallTimeoutMin: 10, maxRunsPerTask: 3,
+    runner: "CLAUDE", model: "model", targetBranch: "main", branch: "feature/x", promptHash: "hash",
+    maxDurationMin: 120, stallTimeoutMin: 10, maxRunsPerTask: 3, budgetGrants: 0,
   };
   const database = {
     run: {
@@ -183,7 +185,7 @@ test("lease-loss requeue for an archived agent becomes visible through the sweep
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
       run: {
-        updateMany: async () => ({ count: 1 }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => { lostUpdate = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
       },
       session: { updateMany: async () => ({ count: 1 }) },
@@ -202,6 +204,8 @@ test("lease-loss requeue for an archived agent becomes visible through the sweep
     },
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
+  assert.equal(lostUpdate?.failureClass, "CANCELLED_OR_TIMED_OUT");
+  assert.match(String(lostUpdate?.failureReason), /heartbeat starved.*lease expired/i);
   assert.equal(await noteArchivedQueuedRuns(database), 1);
   assert.match(String(activities[0]?.body), /Archived.*run 2/);
 });

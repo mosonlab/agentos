@@ -66,16 +66,78 @@ const appendRetainedSessionConfig = (reason: string, path: string | null): strin
 
 const cleanup = async (
   config: RunnerConfig,
+  claim: ClaimedTask,
   workspace: Workspace | null,
   retain: boolean,
-): Promise<{ cleanupStatus: CleanupStatus; cleanupFailureReason?: string; workspaceRetained: boolean }> => {
-  if (!workspace) return { cleanupStatus: "SUCCEEDED", workspaceRetained: false };
-  if (retain) return { cleanupStatus: "RETAINED", workspaceRetained: true };
+  alreadyDurable = false,
+): Promise<{
+  cleanupStatus: CleanupStatus;
+  cleanupFailureReason?: string;
+  workspaceRetained: boolean;
+  salvage: Awaited<ReturnType<typeof deliverFailedWorkspace>>;
+}> => {
+  if (!workspace) return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage: null };
+  let salvage: Awaited<ReturnType<typeof deliverFailedWorkspace>> = null;
+  if (!alreadyDurable && !workspace.pinnedBaseSha) {
+    let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
+    try {
+      gitResult = await captureWorkspaceResult(config, workspace);
+    } catch (error: unknown) {
+      return {
+        cleanupStatus: "FAILED",
+        cleanupFailureReason: `Salvage preflight failed: ${errorMessage(error)}`,
+        workspaceRetained: true,
+        salvage: null,
+      };
+    }
+    salvage = await deliverFailedWorkspace(config, claim, { ...workspace, branch: gitResult.branch });
+    if (salvage?.pushStatus === "FAILED") {
+      return {
+        cleanupStatus: "FAILED",
+        cleanupFailureReason: salvage.pushError ?? "WIP salvage failed",
+        workspaceRetained: true,
+        salvage,
+      };
+    }
+    if (salvage?.pushedBranch) {
+      try {
+        await recordPublishedBranch(config, claim, salvage.pushedBranch);
+      } catch (error: unknown) {
+        await appendActivity(config, claim,
+          `Salvage ref '${salvage.pushedBranch}' is durable, but its publication ACK failed: ${errorMessage(error)}`,
+          { stream: "runner" }).catch(() => undefined);
+        return {
+          cleanupStatus: "FAILED",
+          cleanupFailureReason: `Salvage publication ACK failed: ${errorMessage(error)}`,
+          workspaceRetained: true,
+          salvage,
+        };
+      }
+    } else {
+      console.warn(JSON.stringify({
+        audit: "workspace-cleanup",
+        event: "nothing-to-salvage",
+        runId: claim.run.id,
+        reason: "clean tree with no commits past the clone base",
+      }));
+      await appendActivity(config, claim,
+        "Workspace cleanup verified there was nothing to salvage: clean tree with no commits past the clone base",
+        { stream: "runner" }).catch((error: unknown) => {
+        console.error(JSON.stringify({
+          audit: "workspace-cleanup",
+          event: "nothing-to-salvage-activity-failed",
+          runId: claim.run.id,
+          error: errorMessage(error),
+        }));
+      });
+    }
+  }
+  if (retain) return { cleanupStatus: "RETAINED", workspaceRetained: true, salvage };
   try {
     await cleanupWorkspace(config, workspace.path);
-    return { cleanupStatus: "SUCCEEDED", workspaceRetained: false };
+    return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage };
   } catch (error: unknown) {
-    return { cleanupStatus: "FAILED", cleanupFailureReason: errorMessage(error), workspaceRetained: false };
+    return { cleanupStatus: "FAILED", cleanupFailureReason: errorMessage(error), workspaceRetained: true, salvage };
   }
 };
 
@@ -180,7 +242,7 @@ export const executeClaim = async (
       return;
     }
     if (claim.run.runNumber > claim.run.maxRunsPerTask) {
-      const finishedCleanup = await cleanup(config, workspace, false);
+      const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, false);
       await completeRun(config, claim, {
         exitCode: null,
         terminalEventSeen: false,
@@ -229,14 +291,14 @@ export const executeClaim = async (
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      await cleanup(config, workspace, false);
+      await cleanup(config, claim, workspace, false);
       return;
     }
     if (!preflight.ok) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       const evidence = preflightEvidence(preflight.error ?? "Preflight failed");
       const classified = adapter.classifyError(evidence);
-      const finishedCleanup = await cleanup(config, workspace, config.failedWorkspaceRetention > 0);
+      const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
       const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
       await completeRun(config, claim, {
         ...evidence,
@@ -339,7 +401,7 @@ export const executeClaim = async (
     adoptLeaseVerdict(lease);
     if (fencingRejected) {
       if (waitingInbox) return;
-      await cleanup(config, workspace, false);
+      await cleanup(config, claim, workspace, false);
       return;
     }
     const executionSucceeded = adapterExecutionSucceeded(evidence);
@@ -371,22 +433,24 @@ export const executeClaim = async (
           retryOptions,
         ));
     }
-    else {
-      // The workspace is about to be destroyed; commit and salvage its trackable changes.
-      const salvage = await deliverUnderLease(lease, (retryOptions) =>
-        deliverFailedWorkspace(config, claim, delivered, undefined, retryOptions))
-        .catch((error: unknown) => {
-          void appendActivity(config, claim, `WIP salvage failed: ${errorMessage(error)}`, { stream: "runner" }).catch(() => undefined);
-          return null;
-        });
-      if (salvage) {
-        delivery = salvage;
-        if (salvage.headSha) gitResult = { ...gitResult, headSha: salvage.headSha };
-        await appendActivity(config, claim, salvage.deliveryInstructions ?? salvage.pushError ?? "WIP salvage attempted", { stream: "runner" })
-          .catch(() => undefined);
-      }
+    const primaryDelivery = delivery;
+    const succeeded = executionSucceeded && primaryDelivery?.pushStatus !== "FAILED";
+    const cleaned = await cleanup(
+      config,
+      claim,
+      workspace,
+      !succeeded && config.failedWorkspaceRetention > 0,
+      // Pinned review/verification checkouts are disposable at every outcome;
+      // their stale scratch state must never become chain publication evidence.
+      succeeded || Boolean(workspace.pinnedBaseSha),
+    );
+    if (!succeeded && cleaned.salvage) {
+      delivery = cleaned.salvage;
+      if (cleaned.salvage.headSha) gitResult = { ...gitResult, headSha: cleaned.salvage.headSha };
+      await appendActivity(config, claim,
+        cleaned.salvage.deliveryInstructions ?? cleaned.salvage.pushError ?? "WIP salvage attempted",
+        { stream: "runner" }).catch(() => undefined);
     }
-    let succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
     retainSessionConfig = !succeeded;
     let scratchCleanupFailure: string | null = null;
     if (scratch) {
@@ -405,15 +469,15 @@ export const executeClaim = async (
         }
       }
     }
-    const classified = succeeded ? null : delivery?.failureClass
-      ? { failureClass: delivery.failureClass, retryable: false }
+    const { salvage: _salvage, ...finishedCleanup } = cleaned;
+    const classified = succeeded ? null : primaryDelivery?.failureClass
+      ? { failureClass: primaryDelivery.failureClass, retryable: false }
       : adapter.classifyError(evidence);
-    // Destructured off rather than spread: `failure` holds a live error object
-    // for the envelope builder, and everything else in a DeliveryResult goes on
-    // the wire. TypeScript does not flag excess properties introduced by a
-    // spread, so nothing but this line keeps it out of the completion payload.
-    const { failure: deliveryFailure, ...deliveryPayload } = delivery ?? { pushStatus: "NOT_REQUESTED" as const };
-    const finishedCleanup = await cleanup(config, workspace, !succeeded && config.failedWorkspaceRetention > 0);
+    // The normal delivery failure remains the failure-envelope evidence even
+    // when terminal salvage subsequently succeeds. The wire publication is the
+    // salvage result, because it names the ref that actually became durable.
+    const { failure: deliveryFailure } = primaryDelivery ?? {};
+    const { failure: _deliveryError, ...deliveryPayload } = delivery ?? { pushStatus: "NOT_REQUESTED" as const };
     const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
     const cleanupFailureReason = [
       finishedCleanup.cleanupFailureReason,
@@ -439,7 +503,7 @@ export const executeClaim = async (
       // A salvage push failure must not mask why the run itself failed.
       ...(!succeeded ? {
         failureReason: appendRetainedSessionConfig(
-          budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence),
+          budgetReason ?? (executionSucceeded ? primaryDelivery?.pushError : null) ?? failureReasonFromEvidence(evidence),
           retainedPath,
         ),
       } : {}),
@@ -474,12 +538,13 @@ export const executeClaim = async (
     if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
     if (fencingRejected) {
       if (waitingInbox) return;
-      if (workspace) await cleanup(config, workspace, false);
+      if (workspace) await cleanup(config, claim, workspace, false);
       return;
     }
     const evidence = preflightEvidence(message);
     const classified = adapter.classifyError(evidence);
-    const finishedCleanup = await cleanup(config, workspace, config.failedWorkspaceRetention > 0);
+    const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
+    const { salvage, ...finishedCleanup } = cleaned;
     let restorationFailure: string | null = null;
     if (claim.runner === "CODEX" && scratch && sessionConfigRemoved) {
       try {
@@ -524,6 +589,7 @@ export const executeClaim = async (
       // it — it is reconstructed from the error, not from the process.
       output: producedOutput,
       ...(workspace ? { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha } : {}),
+      ...(salvage ?? {}),
       ...finishedCleanup,
       ...(scratchCleanupFailure ? {
         cleanupStatus: "FAILED" as const,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -183,6 +183,23 @@ const codexStub = (log: string, authFails = false, configReportPath?: string): s
   'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"installed"}}\'',
   'echo \'{"type":"turn.completed"}\'',
   "exit 0",
+].join("\n");
+
+const failingCodexStub = (log: string, mutation = ":"): string => [
+  "#!/bin/sh",
+  `echo "$@" >> ${log}`,
+  'case "$1" in',
+  '  --version) echo "codex-cli 0.147.0"; exit 0 ;;',
+  '  exec)',
+  '    if [ "$2" = "--help" ]; then echo "resume --json --model --config --dangerously-bypass-approvals-and-sandbox"; exit 0; fi',
+  '    if [ "$2" = "resume" ] && [ "$3" = "--help" ]; then echo "SESSION_ID --json --model --config --dangerously-bypass-approvals-and-sandbox read from stdin"; exit 0; fi',
+  '    ;;',
+  '  login) echo "Logged in using ChatGPT"; exit 0 ;;',
+  "esac",
+  "cat > /dev/null",
+  mutation,
+  'echo \'{"type":"error","message":"agent execution failed"}\'',
+  "exit 1",
 ].join("\n");
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -658,6 +675,160 @@ test("session-config cleanup failure does not turn delivered work into a failed 
     assert.match(String(completion.body.cleanupFailureReason), /session CLI config retained at/u);
     assert.equal((await stat(configRoot)).isDirectory(), true);
     await rm(dirname(configRoot), { recursive: true, force: true });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed run salvages commits before cleanup and records the exact durable ref", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-salvage-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, failingCodexStub(log, 'printf "work\\n" > recovered.txt'));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    });
+
+    const salvage = "agentos/task-10/run-1";
+    const publication = posts.find((post) => post.path.endsWith("/publication"));
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.equal(publication?.body.pushedBranch, salvage);
+    assert.equal(completion?.body.pushedBranch, salvage);
+    assert.equal(completion?.body.cleanupStatus, "SUCCEEDED");
+    assert.ok(posts.indexOf(publication!) < posts.indexOf(completion!), "publication must precede terminal completion");
+    assert.match(git(root, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
+    await assert.rejects(access(join(workspaces, "run-10")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a dead delivery lease still salvages before cleanup without terminal API authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dead-lease-salvage-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, failingCodexStub(log, 'printf "work\\n" > recovered.txt'));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    let started = false;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      if (path.endsWith("/start")) started = true;
+      if (started && path.endsWith("/heartbeat")) {
+        return new Response(JSON.stringify({ error: "Stale fencing token" }), { status: 409, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    });
+
+    const salvage = "agentos/task-10/run-1";
+    assert.equal(posts.find((post) => post.path.endsWith("/publication"))?.body.pushedBranch, salvage);
+    assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
+    assert.match(git(root, `--git-dir=${remote}`, "show-ref", `refs/heads/${salvage}`), new RegExp(`refs/heads/${salvage}$`, "u"));
+    await assert.rejects(access(join(workspaces, "run-10")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a clean failed run records that there is nothing to salvage before cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-clean-failure-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, failingCodexStub(log));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    });
+
+    assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
+    assert.ok(posts.some((post) => post.path.endsWith("/activity")
+      && String(post.body.body).includes("nothing to salvage")));
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.equal(completion?.body.cleanupStatus, "SUCCEEDED");
+    assert.equal(completion?.body.workspaceRetained, false);
+    await assert.rejects(access(join(workspaces, "run-10")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed salvage keeps the workspace and reports cleanup failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-salvage-failure-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    const missingRemote = join(root, "missing-origin.git");
+    await writeFile(binary, failingCodexStub(log,
+      `printf "work\\n" > recovered.txt; git remote set-url origin ${missingRemote}`));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    });
+
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.equal(completion?.body.cleanupStatus, "FAILED");
+    assert.equal(completion?.body.workspaceRetained, true);
+    assert.match(String(completion?.body.cleanupFailureReason), /WIP salvage failed/u);
+    await access(join(workspaces, "run-10", "recovered.txt"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

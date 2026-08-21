@@ -246,13 +246,13 @@ test("T2: the base branch follows the chain, not the task", async () => {
   assert.equal(thirdRun.targetBranch, shared);
 });
 
-test("T3: a failed run's WIP salvage push is not evidence that the shared branch exists", async () => {
+test("T3: a failed run's WIP salvage push is the successor's durable clone base", async () => {
   // The payload below is exactly what the runner emits after a WIP salvage:
   // `branch` is the workspace branch (the shared one), `pushStatus` is SUCCEEDED
   // — and `deliverFailedWorkspace` pushed `agentos/<taskId>/run-<n>` instead.
   // Inferring publication from `branch` + `pushStatus` would send step ② to
-  // clone a ref nobody ever created, and the chain would die in provisioning
-  // with nothing but "clone failed" to go on. That is why `pushedBranch` exists.
+  // clone a ref nobody ever created. `pushedBranch` names the durable salvage
+  // ref that the successor must actually clone.
   const seed = await seedProject("t3");
   const chainId = `chain-${Date.now()}`;
   const shared = expectedBranch(seed.project.id, chainId);
@@ -284,9 +284,9 @@ test("T3: a failed run's WIP salvage push is not evidence that the shared branch
   });
   assert.equal(completed.status, 200, JSON.stringify(completed.body));
   const secondRun = await db.run.findFirstOrThrow({ where: { taskId: second.id, status: "QUEUED" } });
-  assert.equal(secondRun.targetBranch, seed.repo.defaultBranch);
+  assert.equal(secondRun.targetBranch, `agentos/${first.body.id}/run-1`);
   assert.notEqual(secondRun.targetBranch, shared);
-  assert.equal(secondRun.branch, shared, "it still pushes to the chain's branch — it just cannot base on it yet");
+  assert.equal(secondRun.branch, shared, "the successor still publishes the declared chain branch");
 });
 
 test("T4: the first step of a chain that has published nothing bases on the default branch", async () => {
@@ -566,6 +566,54 @@ test("T10: an operator retry lands on the shared branch", async () => {
   assert.equal(retried.body.targetBranch, shared);
 });
 
+test("an operator-retried template step publishes its declared head from the latest salvage base", async () => {
+  const seed = await seedProject("operator-template-salvage");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "operator-template", description: "t", variables: [],
+    steps: { create: [0, 1].map((stepIndex) => ({
+      stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT" as const,
+      assigneeAgentId: seed.agent.id, prompt: `do ${stepIndex}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, {
+    repoId: seed.repo.id, variables: {}, autoStart: true,
+  });
+  const task = chain.tasks[0]!;
+  const declared = `agentos/${chain.chainId}`;
+  const salvage = `agentos/${task.id}/run-1`;
+  await runStep(task.id, {
+    exitCode: 1, terminalSuccess: false, failureClass: "TASK_FAILED", retryable: false,
+    branch: salvage, pushStatus: "SUCCEEDED", pushedBranch: salvage,
+  });
+
+  const retried = await operatorRequest(`/tasks/${task.id}/retry`, { method: "POST" });
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  assert.equal(retried.body.branch, declared);
+  assert.equal(retried.body.targetBranch, salvage);
+});
+
+test("a successor first run clones the predecessor's salvage publication", async () => {
+  const seed = await seedProject("successor-salvage");
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seed.project.id, name: "successor-template", description: "t", variables: [],
+    steps: { create: [0, 1].map((stepIndex) => ({
+      stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT" as const,
+      assigneeAgentId: seed.agent.id, prompt: `do ${stepIndex}`,
+    })) },
+  } });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, {
+    repoId: seed.repo.id, variables: {}, autoStart: true,
+  });
+  const first = chain.tasks[0]!;
+  const second = chain.tasks[1]!;
+  const salvage = `agentos/${first.id}/run-1`;
+  await runStep(first.id, { pushedBranch: salvage });
+
+  const successor = await db.run.findFirstOrThrow({ where: { taskId: second.id, runNumber: 1 } });
+  assert.equal(successor.branch, `agentos/${chain.chainId}`);
+  assert.equal(successor.targetBranch, salvage);
+});
+
 test("T11: a post-push publication ACK survives lease loss and bases the retry on the shared branch", async () => {
   const seed = await seedProject("t11");
   const chainId = `chain-${Date.now()}`;
@@ -586,6 +634,30 @@ test("T11: a post-push publication ACK survives lease loss and bases the retry o
   const requeued = await db.run.findFirstOrThrow({ where: { taskId: first.body.id, runNumber: 2 } });
   assert.equal(requeued.branch, shared);
   assert.equal(requeued.targetBranch, shared, "the ACK is durable before terminal completion");
+});
+
+test("a lost run may ACK only its exact salvage ref after lease expiry", async () => {
+  const seed = await seedProject("late-salvage-ack");
+  const task = await postTask(seed.project.id, {
+    name: "Lost", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+  });
+  const run = await db.run.findFirstOrThrow({ where: { taskId: task.body.id } });
+  const claim = await claimRun(run.id);
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", leaseExpiresAt: new Date(Date.now() - 60_000), heartbeatAt: null,
+  } });
+  await reconcileDatabaseRuns(db, new Date());
+  const queuedBeforeAck = await db.run.findFirstOrThrow({ where: { taskId: task.body.id, runNumber: 2 } });
+  assert.equal(queuedBeforeAck.targetBranch, seed.repo.defaultBranch);
+
+  const arbitrary = await publishViaRoute(claim, "some/arbitrary-head");
+  assert.equal(arbitrary.status, 409);
+  const salvage = `agentos/${task.body.id}/run-1`;
+  const accepted = await publishViaRoute(claim, salvage);
+  assert.equal(accepted.status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).pushedBranch, salvage);
+  const repaired = await db.run.findUniqueOrThrow({ where: { id: queuedBeforeAck.id } });
+  assert.equal(repaired.targetBranch, salvage);
 });
 
 test("T12: a non-chain requeue is unchanged", async () => {

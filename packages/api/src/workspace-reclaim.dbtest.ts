@@ -109,6 +109,7 @@ const seedRun = async (options: {
   workspaceRetained?: boolean;
   workspacePath?: string | null;
   endedAt?: Date | null;
+  pushedBranch?: string | null;
 }) => {
   const suffix = `${Date.now()}-${seedCounter++}`;
   const project = await db.project.create({ data: { name: "Reclaim", slug: `reclaim-${suffix}` } });
@@ -131,6 +132,10 @@ const seedRun = async (options: {
     fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
     status, model: "claude", promptHash: "hash", maxRunsPerTask: 5,
     workspaceRetained: options.workspaceRetained ?? false,
+    // These ownership/retry fixtures predate terminal salvage and exercise a
+    // workspace whose normal delivery is already durable. Tests for an
+    // unpublished workspace opt back into null explicitly.
+    pushedBranch: options.pushedBranch === undefined ? "already/durable" : options.pushedBranch,
     ...(options.endedAt === undefined ? {} : { endedAt: options.endedAt }),
   } });
   // Written after create so a caller can ask for the canonical path without

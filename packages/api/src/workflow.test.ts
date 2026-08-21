@@ -519,7 +519,7 @@ const branchTx = (rows: Array<{
       if (typeof where.pushedBranch === "string") {
         return scoped.find((row) => row.pushedBranch === where.pushedBranch) ?? null;
       }
-      assert.deepEqual(orderBy, { runNumber: "desc" });
+      assert.deepEqual(orderBy, [{ createdAt: "desc" }, { id: "desc" }]);
       return [...scoped].sort((a, b) => b.runNumber - a.runNumber)[0] ?? null;
     },
   },
@@ -592,6 +592,45 @@ test("a template retry falls back to its own targetBranch but still honours a si
     templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
   }, { branch: "agentos/chain-1" }), {
     branch: "agentos/chain-1", targetBranch: "agentos/chain-1",
+  });
+});
+
+test("a template operator retry publishes the declared head while basing on the newest salvage", async () => {
+  const salvage = "agentos/task-1/run-2";
+  const tx = branchTx([
+    { taskId: "task-1", chainId: "chain-1", repoId: "repo-1", runNumber: 2, pushedBranch: salvage },
+  ], "declared/chain-head");
+  assert.deepEqual(await resolveRunBranches(tx, {
+    id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 0,
+    templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
+  }, { branch: salvage }), {
+    branch: "declared/chain-head",
+    targetBranch: salvage,
+  });
+});
+
+test("a successor first run bases on the newest sibling publication whatever ref carried it", async () => {
+  const salvage = "agentos/task-1/run-2";
+  const tx = branchTx([
+    { taskId: "task-1", chainId: "chain-1", repoId: "repo-1", runNumber: 2, pushedBranch: salvage },
+  ], "declared/chain-head");
+  assert.deepEqual(await resolveRunBranches(tx, {
+    id: "task-2", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 1,
+    templateId: "template-1", targetBranch: "declared/chain-head", repo: { defaultBranch: "main" },
+  }, null), {
+    branch: "declared/chain-head",
+    targetBranch: salvage,
+  });
+
+  const declared = branchTx([
+    { taskId: "task-1", chainId: "chain-1", repoId: "repo-1", runNumber: 1, pushedBranch: "declared/chain-head" },
+  ], "declared/chain-head");
+  assert.deepEqual(await resolveRunBranches(declared, {
+    id: "task-2", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 1,
+    templateId: "template-1", targetBranch: "declared/chain-head", repo: { defaultBranch: "main" },
+  }, null), {
+    branch: "declared/chain-head",
+    targetBranch: "declared/chain-head",
   });
 });
 

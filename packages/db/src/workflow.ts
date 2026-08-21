@@ -327,34 +327,40 @@ const inheritedBase = async (
   task: RunBranchTask,
   prior: { branch: string | null } | null,
 ): Promise<string | null> => {
-  // No prior run at all: this is the pre-existing `prior?.branch ?? ...` answer
-  // for a first run, and skipping both queries keeps that path untouched.
-  if (!prior || !task.repoId) return null;
+  if (!task.repoId) return null;
   // Template steps of one chain share a branch, so the ref this retry wants may
-  // have been published by a *sibling* step. Everything else owns its branch —
-  // and a chainIndex-null row must stay isolated from indexed siblings carrying
-  // the same chainId (see resolveRunBranches) — so it asks about itself only.
-  const scope = task.templateId && task.chainId
-    ? { projectId: task.projectId, chainId: task.chainId }
-    : { id: task.id };
-  // Scoped by repo: the same branch name on two remotes is two unrelated refs.
-  const published = prior.branch
-    ? await tx.run.findFirst({
-      where: { pushedBranch: prior.branch, repoId: task.repoId, task: scope },
-      select: { id: true },
-    })
+  // have been published by a *sibling* step. This also applies to a successor's
+  // first run: `prior` is null there, but the predecessor's salvage ref is the
+  // newest durable tree the chain owns. Everything else asks about itself only.
+  // A chainIndex-null row stays isolated from indexed siblings carrying the
+  // same chainId (see resolveRunBranches).
+  const chainScope = task.chainId && task.chainIndex !== null
+    ? { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } }
     : null;
-  if (published && prior.branch) return prior.branch;
-  // The workspace branch was never published, but a failed run's WIP salvage
-  // push (`agentos/<taskId>/run-<n>`, delivery.ts) may still hold this task's
-  // work. Basing on the newest one is how the retry keeps the progress that did
-  // reach the remote instead of silently restarting from the default branch.
-  const salvaged = await tx.run.findFirst({
-    where: { taskId: task.id, repoId: task.repoId, pushedBranch: { not: null } },
-    orderBy: { runNumber: "desc" },
+  if (!prior && !chainScope) return null;
+  const scope = chainScope
+    ? chainScope
+    : { id: task.id };
+  // A non-chain retry first asks the narrow historical question: did this task
+  // publish the workspace branch it is trying to continue? Chain retries skip
+  // this shortcut because a newer sibling salvage must outrank an older head.
+  if (!chainScope && prior?.branch) {
+    const exact = await tx.run.findFirst({
+      where: { repoId: task.repoId, pushedBranch: prior.branch, task: scope },
+      select: { pushedBranch: true },
+    });
+    if (exact?.pushedBranch) return exact.pushedBranch;
+  }
+  // `createdAt`, not a per-task runNumber, orders publications across sibling
+  // steps. Run rows are created serially along a chain; their updatedAt can move
+  // later for cleanup bookkeeping and is therefore not publication ordering.
+  // Scoped by repo: the same branch name on two remotes is two unrelated refs.
+  const published = await tx.run.findFirst({
+    where: { repoId: task.repoId, pushedBranch: { not: null }, task: scope },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     select: { pushedBranch: true },
   });
-  return salvaged?.pushedBranch ?? null;
+  return published?.pushedBranch ?? null;
 };
 
 /**
@@ -442,8 +448,8 @@ export const resolveRunBranches = async (
   }
 
   const shared = sharedChainBranch({ projectId: task.projectId, chainId: task.chainId });
-  // "Has any step of this chain actually published the shared branch *on this
-  // repo*?"
+  // "What is the newest ref any indexed step of this chain actually published
+  // on this repo?" It may be the declared head or a per-run salvage ref.
   //
   // Read `pushedBranch` and nothing else. It is written only after `git push`
   // returns, with the ref that was actually given to it, on both delivery paths
@@ -466,24 +472,10 @@ export const resolveRunBranches = async (
   // refs) and restricted to indexed tasks. A chainIndex-null row is the API's
   // isolated 1/1 malformed-chain case and must neither contribute nor consume
   // publication evidence for an indexed chain with the same chainId.
-  const published = task.repoId
-    ? await tx.run.findFirst({
-      where: {
-        pushedBranch: shared,
-        repoId: task.repoId,
-        task: { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } },
-      },
-      select: { id: true },
-    })
-    : null;
-  // `prior?.branch` is deliberately not consulted here. Post-change it is always
-  // `shared`, so it would give the same answer; pre-change (a chain that spans
-  // the restart) it is a per-task branch, and honouring it would quietly keep a
-  // mixed chain mixed instead of falling through to the operator's targetBranch,
-  // which the rollback runbook names as the manual repair lever.
-  const targetBranch = published
-    ? shared
-    : task.targetBranch ?? task.repo.defaultBranch;
+  const published = await inheritedBase(tx, task, prior);
+  // `prior?.branch` is deliberately not consulted as publication evidence.
+  // Only pushedBranch proves that a cloneable remote ref exists.
+  const targetBranch = published ?? task.targetBranch ?? task.repo.defaultBranch;
 
   // targetBranch stays writable for chain steps but no longer routes them.
   // Silently ignoring an operator's value is a footgun, so say so once per run —
