@@ -48,6 +48,38 @@ test("lists, bold and inline code still render as before", () => {
   assert.match(markup, /<code[^>]*>code<\/code>/);
 });
 
+test("hard-wrapped ordered items stay in one list and keep their text", () => {
+  const markup = renderToStaticMarkup(<Markdown text={"1. first item\n  first continuation\n2. second item\n   second continuation\n3. third item\n  third continuation"} />);
+  assert.equal((markup.match(/<ol\b/g) ?? []).length, 1);
+  assert.equal((markup.match(/<li\b/g) ?? []).length, 3);
+  assert.match(markup, /first item first continuation/);
+  assert.match(markup, /second item second continuation/);
+  assert.match(markup, /third item third continuation/);
+});
+
+test("ordered lists preserve a non-one starting number", () => {
+  const markup = renderToStaticMarkup(<Markdown text={"4. fourth\n5. fifth"} />);
+  assert.match(markup, /<ol[^>]*start="4"[^>]*>/);
+});
+
+test("hard-wrapped unordered items stay in one list and keep their text", () => {
+  const markup = renderToStaticMarkup(<Markdown text={"- first item\n   first continuation\n- second item\n  second continuation"} />);
+  assert.equal((markup.match(/<ul\b/g) ?? []).length, 1);
+  assert.equal((markup.match(/<li\b/g) ?? []).length, 2);
+  assert.match(markup, /first item first continuation/);
+  assert.match(markup, /second item second continuation/);
+});
+
+test("headings, blank lines, inline code and fenced blocks remain separated", () => {
+  const markup = renderToStaticMarkup(<Markdown text={"# Heading\n\n- item\n  wrapped\n\n1. numbered\n\n`inline`\n\n```\n- raw\n```"} />);
+  assert.match(markup, /<strong[^>]*>Heading<\/strong>/);
+  assert.equal((markup.match(/<ul\b/g) ?? []).length, 1);
+  assert.equal((markup.match(/<ol\b/g) ?? []).length, 1);
+  assert.match(markup, /<code[^>]*>inline<\/code>/);
+  assert.match(markup, /- raw/);
+  assert.doesNotMatch(markup, /<li[^>]*>[^<]*raw/);
+});
+
 test("compactTokens is honest about absence and never rounds to a fake zero", () => {
   assert.equal(compactTokens(null), "—");
   assert.equal(compactTokens(undefined), "—");
