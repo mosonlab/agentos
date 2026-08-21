@@ -443,6 +443,7 @@ export type TaskActivity = {
   actorType: string;
   actorId: string | null;
   body: string;
+  commitSha: string | null;
   metadata: unknown;
   createdAt: string;
 };
@@ -465,6 +466,7 @@ export type TaskTemplateStep = {
   prompt: string;
   approvalGate: boolean;
   outputKind: string;
+  baseFromStepIndex: number | null;
   runner: RunnerKind | null;
   assigneeAgentId: string | null;
   assigneeAgent: Agent | null;
