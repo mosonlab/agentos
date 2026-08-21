@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
@@ -487,6 +487,16 @@ const preflightInput = z.object({
   capabilities: z.record(z.string(), z.unknown()),
   error: z.string().nullable().optional(),
 });
+const runnerAvailabilityInput = z.object({
+  runner: z.nativeEnum(RunnerKind),
+  binary: z.string().trim().min(1).max(500),
+  available: z.boolean(),
+  resolvedPath: z.string().trim().min(1).max(2000).nullable(),
+}).superRefine((body, context) => {
+  if (body.available !== (body.resolvedPath !== null)) {
+    context.addIssue({ code: "custom", message: "available and resolvedPath disagree" });
+  }
+});
 const inboxQuestionInput = z.object({
   fencingToken: fence,
   requestId: z.string().min(1).max(200),
@@ -917,6 +927,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         return {
           runner,
           cliVersion: backend?.cliVersion ?? null,
+          cliAvailable: backend?.cliAvailable ?? null,
+          cliResolvedPath: backend?.cliResolvedPath ?? null,
+          cliAvailabilityReason: backend?.cliAvailabilityReason ?? null,
+          cliUnavailableSince: backend?.cliUnavailableSince?.toISOString() ?? null,
+          lastAvailabilityAt: backend?.lastAvailabilityAt?.toISOString() ?? null,
           authMode: backend?.authMode ?? null,
           lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
           lastPreflightOk: backend?.lastPreflightOk ?? null,
@@ -3259,6 +3274,97 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
   });
 
+  app.post("/runner/availability", async (context) => {
+    const body = await readJson(context.req.raw, runnerAvailabilityInput);
+    const now = new Date();
+    const state = await db.$transaction(async (tx) => {
+      const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
+      if (!body.available) {
+        const reason = `runner-cli-unavailable: ${body.runner.toLowerCase()} CLI "${body.binary}" was not found in configured runner PATH`;
+        const outageStarted = previous?.cliAvailable !== false;
+        const outageKey = outageStarted
+          ? `runner-cli-unavailable:${body.runner}:${randomUUID()}`
+          : previous.cliAvailabilityOutageKey ?? `runner-cli-unavailable:${body.runner}:${randomUUID()}`;
+        const unavailable = await tx.runnerBackendState.upsert({
+          where: { runner: body.runner },
+          create: {
+            runner: body.runner,
+            cliAvailable: false,
+            cliResolvedPath: null,
+            cliAvailabilityReason: reason,
+            cliUnavailableSince: now,
+            cliAvailabilityOutageKey: outageKey,
+            lastAvailabilityAt: now,
+          },
+          update: {
+            cliAvailable: false,
+            cliResolvedPath: null,
+            cliAvailabilityReason: reason,
+            cliUnavailableSince: previous?.cliUnavailableSince ?? now,
+            cliAvailabilityOutageKey: outageKey,
+            lastAvailabilityAt: now,
+          },
+        });
+        await tx.task.updateMany({
+          where: {
+            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+            runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
+          },
+          data: { failureReason: reason },
+        });
+        if (outageStarted) {
+          const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
+          const thread = chatId ? (
+            await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+            ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
+          ) : null;
+          await tx.inboxMessage.create({ data: {
+            from: "AGENT",
+            kind: "TEXT",
+            body: `${body.runner.toLowerCase()} runner CLI is unavailable: ${body.binary} was not found in configured runner PATH.`,
+            dedupeKey: outageKey,
+            ...(thread ? { threadId: thread.id } : {}),
+          } });
+        }
+        return unavailable;
+      }
+
+      const legacyCliCircuit = previous?.circuitReason?.startsWith("cli-missing:") === true;
+      const available = await tx.runnerBackendState.upsert({
+        where: { runner: body.runner },
+        create: {
+          runner: body.runner,
+          cliAvailable: true,
+          cliResolvedPath: body.resolvedPath,
+          lastAvailabilityAt: now,
+        },
+        update: {
+          cliAvailable: true,
+          cliResolvedPath: body.resolvedPath,
+          cliAvailabilityReason: null,
+          cliUnavailableSince: null,
+          cliAvailabilityOutageKey: null,
+          lastAvailabilityAt: now,
+          ...(legacyCliCircuit ? { circuitOpen: false, circuitReason: null, circuitOpenedAt: null } : {}),
+        },
+      });
+      if (previous?.cliAvailabilityReason) {
+        await tx.task.updateMany({
+          where: { failureReason: previous.cliAvailabilityReason },
+          data: { failureReason: null },
+        });
+      }
+      if (previous?.cliAvailabilityOutageKey) {
+        await tx.inboxMessage.updateMany({
+          where: { dedupeKey: previous.cliAvailabilityOutageKey, status: InboxStatus.OPEN },
+          data: { status: InboxStatus.CLOSED, answeredAt: now },
+        });
+      }
+      return available;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return context.json(state);
+  });
+
   app.post("/runner/preflight", async (context) => {
     const body = await readJson(context.req.raw, preflightInput);
     const now = new Date();
@@ -3425,7 +3531,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // `runner` on its row is an inert artifact of the sentinel Agent.
         if (executionMode === "agent") {
           const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
-          if (backend?.circuitOpen) continue;
+          if (backend?.cliAvailable === false || backend?.circuitOpen) continue;
         }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);

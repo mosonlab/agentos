@@ -907,6 +907,12 @@ model SessionEvent {
 model RunnerBackendState {
   runner                  RunnerKind @id
   cliVersion              String?
+  cliAvailable            Boolean?
+  cliResolvedPath         String?
+  cliAvailabilityReason   String?
+  cliUnavailableSince     DateTime?
+  cliAvailabilityOutageKey String?
+  lastAvailabilityAt      DateTime?
   authMode                String?
   capabilities            Json?
   lastPreflightAt         DateTime?
