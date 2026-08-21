@@ -26,9 +26,11 @@ import {
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import {
+  controlledLaunchdPath,
   parseInstallerArgs,
   renderLaunchdPlist,
   verifyBackupConfiguration,
+  verifyRenderedToolchain,
 } from "./install-launchd.mjs";
 import { acquireProcessLock, blockingRunsStatement, DEPLOY_ARTIFACT_PATHS, inspectGitPreflight, publishDirectories } from "./quiet-window-adapters.mjs";
 import {
@@ -110,6 +112,19 @@ test("dry-run failures never persist escalation state", () => {
   assert.equal(shouldPersistFailure({ dryRun: true, reason: "usage" }), false);
   assert.equal(shouldPersistFailure({ dryRun: false, reason: "environment-unreadable" }), true);
   assert.equal(shouldPersistFailure({ dryRun: false, reason: "usage" }), false);
+});
+
+test("idle quiet-wait interruption is non-sticky while an upgrade interruption escalates", () => {
+  assert.equal(shouldPersistFailure({
+    dryRun: false,
+    reason: "deploy-interrupted",
+    upgradeStarted: false,
+  }), false);
+  assert.equal(shouldPersistFailure({
+    dryRun: false,
+    reason: "deploy-interrupted",
+    upgradeStarted: true,
+  }), true);
 });
 
 test("successful upgrade runs the safety sequence in order", async () => {
@@ -439,13 +454,17 @@ test("installer verifies and renders the production container backup contract", 
     repositoryRoot: "/repo",
     stdoutPath: "/logs/out",
     stderrPath: "/logs/err",
+    path: "/node&path:/usr/bin:/bin",
     gitBinary: "/usr/bin/git",
     npmBinary: "/opt/homebrew/bin/npm",
     backup,
   });
   assert.match(rendered, /\/node&amp;bin/u);
+  assert.match(rendered, /\/node&amp;path:\/usr\/bin:\/bin/u);
   assert.match(rendered, /\/repo\/&lt;deploy&gt;/u);
   assert.match(rendered, /\/opt\/homebrew\/bin\/npm/u);
+  assert.match(rendered, /<key>PATH<\/key>/u);
+  assert.match(rendered, /DEPLOY_NODE_BINARY/u);
   assert.match(rendered, /DEPLOY_PG_DUMP_MODE/u);
   assert.match(rendered, /agentos-postgres-1/u);
   assert.match(rendered, /DEPLOY_CONTAINER_PG_DUMP_BINARY/u);
@@ -455,6 +474,26 @@ test("installer verifies and renders the production container backup contract", 
   writeFileSync(renderedPath, rendered);
   execFileSync("/usr/bin/plutil", ["-lint", renderedPath], { stdio: "ignore" });
   rmSync(root, { recursive: true, force: true });
+});
+
+test("installer proves node, git, and npm under the exact rendered launchd PATH", () => {
+  const values = {
+    nodeBinary: "/opt/node/bin/node",
+    gitBinary: "/opt/git/bin/git",
+    npmBinary: "/opt/npm/npm-cli.js",
+  };
+  const path = controlledLaunchdPath(values);
+  assert.equal(path, "/opt/node/bin:/opt/git/bin:/usr/local/bin:/usr/bin:/bin");
+  const calls = [];
+  verifyRenderedToolchain({ ...values, path }, (program, args, options) => {
+    calls.push({ program, args, path: options.env.PATH });
+    return "fixture\n";
+  });
+  assert.deepEqual(calls, [
+    { program: values.nodeBinary, args: ["--version"], path },
+    { program: values.gitBinary, args: ["--version"], path },
+    { program: values.nodeBinary, args: [values.npmBinary, "--version"], path },
+  ]);
 });
 
 test("container backup preserves pg_dump arguments and writes host output atomically", async () => {

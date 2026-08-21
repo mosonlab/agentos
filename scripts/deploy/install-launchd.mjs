@@ -49,6 +49,25 @@ const requiredConfiguredBinary = (path, name) => {
   return resolved;
 };
 
+export const controlledLaunchdPath = ({ nodeBinary, gitBinary }) =>
+  [...new Set([dirname(nodeBinary), dirname(gitBinary), "/usr/local/bin", "/usr/bin", "/bin"])].join(":");
+
+export const verifyRenderedToolchain = (values, execute = execFileSync) => {
+  const options = {
+    env: { PATH: values.path },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  };
+  try {
+    execute(values.nodeBinary, ["--version"], options);
+    execute(values.gitBinary, ["--version"], options);
+    execute(values.nodeBinary, [values.npmBinary, "--version"], options);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`rendered-toolchain-unexecutable:${detail}`);
+  }
+};
+
 const optionValue = (args, option) => {
   const indexes = args.flatMap((argument, index) => argument === option ? [index] : []);
   if (indexes.length !== 1 || indexes[0] === args.length - 1 || args[indexes[0] + 1].startsWith("--")) {
@@ -144,6 +163,7 @@ export const renderLaunchdPlist = (template, values) => {
     __REPOSITORY_ROOT__: values.repositoryRoot,
     __STDOUT_PATH__: values.stdoutPath,
     __STDERR_PATH__: values.stderrPath,
+    __PATH__: values.path,
     __GIT_BINARY__: values.gitBinary,
     __NPM_BINARY__: values.npmBinary,
   };
@@ -163,23 +183,30 @@ export const installLaunchd = (args) => {
   const launchAgents = join(userHome, "Library/LaunchAgents");
   const logs = join(userHome, "Library/Logs/AgentOS");
   const destination = join(launchAgents, `${LABEL}.plist`);
+  const nodeBinary = realpathSync(process.execPath);
+  const gitBinary = requiredBinary("git");
+  const npmBinary = requiredBinary("npm");
   const values = {
-    nodeBinary: realpathSync(process.execPath),
+    nodeBinary,
     deployScript: realpathSync(join(SCRIPT_DIR, "quiet-window-deploy.mjs")),
     repositoryRoot: realpathSync(REPOSITORY_ROOT),
     stdoutPath: join(logs, "auto-deploy.log"),
     stderrPath: join(logs, "auto-deploy.error.log"),
-    gitBinary: requiredBinary("git"),
-    npmBinary: requiredBinary("npm"),
+    path: controlledLaunchdPath({ nodeBinary, gitBinary }),
+    gitBinary,
+    npmBinary,
     backup: verifyBackupConfiguration(requestedBackup),
   };
+  verifyRenderedToolchain(values);
   const rendered = renderLaunchdPlist(readFileSync(TEMPLATE, "utf8"), values);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} label=${LABEL}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} destination=${destination}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} repository=${values.repositoryRoot}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} node=${values.nodeBinary}\n`);
+  process.stdout.write(`${apply ? "APPLY" : "PLAN"} path=${values.path}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} git=${values.gitBinary}\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} npm=${values.npmBinary}\n`);
+  process.stdout.write(`${apply ? "APPLY" : "PLAN"} rendered_toolchain=verified\n`);
   process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump_mode=${values.backup.mode}\n`);
   if (values.backup.mode === "host") {
     process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump=${values.backup.pgDumpBinary}\n`);

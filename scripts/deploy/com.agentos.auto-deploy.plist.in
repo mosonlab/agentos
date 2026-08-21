@@ -13,8 +13,12 @@
   <string>__REPOSITORY_ROOT__</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
     <key>QUIET_WINDOW_POLL_SECONDS</key>
     <string>60</string>
+    <key>DEPLOY_NODE_BINARY</key>
+    <string>__NODE_BINARY__</string>
     <key>DEPLOY_GIT_BINARY</key>
     <string>__GIT_BINARY__</string>
     <key>DEPLOY_NPM_BINARY</key>

@@ -186,6 +186,7 @@ const loadBinaries = () => {
     try {
       binaries = Object.freeze({
         git: resolveExecutable("DEPLOY_GIT_BINARY", "git"),
+        node: resolveExecutable("DEPLOY_NODE_BINARY", "node"),
         npm: resolveExecutable("DEPLOY_NPM_BINARY", "npm"),
         backup: backupConfigurationFromEnvironment(),
       });
@@ -503,6 +504,10 @@ const main = async () => {
       const failure = error instanceof DeployFailure
         ? error
         : new DeployFailure("unexpected-error", error instanceof Error ? error.message : String(error));
+      if (!shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted: false })) {
+        log(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}; no-upgrade-started`);
+        return { ok: false, reason: failure.reason };
+      }
       await persistAndNotifyFailure(failure, from, to);
       return { ok: false, reason: failure.reason };
     }
@@ -524,10 +529,10 @@ const main = async () => {
         stage = join(STATE_DIR, `stage-${transactionId}`);
         await checked("staging-worktree-failed", loadBinaries().git, ["worktree", "add", "--detach", stage, "HEAD"]);
       },
-      installDependencies: () => checked("staging-dependencies-failed", loadBinaries().npm, ["ci"], { cwd: stage }),
-      prismaGenerate: () => checked("prisma-generate-failed", loadBinaries().npm, ["run", "db:generate"], { cwd: stage }),
+      installDependencies: () => checked("staging-dependencies-failed", loadBinaries().node, [loadBinaries().npm, "ci"], { cwd: stage }),
+      prismaGenerate: () => checked("prisma-generate-failed", loadBinaries().node, [loadBinaries().npm, "run", "db:generate"], { cwd: stage }),
       build: async () => {
-        await checked("build-failed", loadBinaries().npm, ["run", "build"], { cwd: stage });
+        await checked("build-failed", loadBinaries().node, [loadBinaries().npm, "run", "build"], { cwd: stage });
         const stamp = readJson(join(stage, "packages/api/dist/build-info.json"), "build-stamp-invalid");
         if (stamp.commit !== to || stamp.dirty !== false) fail("build-stamp-invalid", "staged-api-dist-does-not-match-target");
         for (const path of DEPLOY_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
@@ -551,7 +556,7 @@ const main = async () => {
         copyFileSync(join(REPOSITORY_ROOT, ".env"), join(stage, ".env"));
         chmodSync(join(stage, ".env"), 0o600);
         const authority = readAuthority(stage);
-        await checked("guarded-migration-refused", loadBinaries().npm, ["run", "db:migrate-goal-execution"], {
+        await checked("guarded-migration-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:migrate-goal-execution"], {
           cwd: stage,
           env: {
             ...process.env,
@@ -560,7 +565,7 @@ const main = async () => {
           },
         });
       },
-      syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().npm, ["run", "db:sync-canonical-prompts"], { cwd: stage }),
+      syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:sync-canonical-prompts"], { cwd: stage }),
       verifyRuntimePrismaClient: async () => {
         if (!existsSync(join(stage, "node_modules/.prisma/client/index.js"))) {
           fail("runtime-prisma-client-missing", "staged-generated-client-is-absent");

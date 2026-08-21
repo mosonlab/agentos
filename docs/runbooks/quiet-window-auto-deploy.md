@@ -92,8 +92,12 @@ The installer refuses to replace a different existing plist. Inspect and
 unload that definition before replacing it; the installer never guesses that
 an existing service definition is obsolete.
 
-The installer resolves `git`, `npm`, and Docker to executable absolute paths,
-requires an explicit `host` or `container` pg-dump mode, and writes the complete
+The installer resolves Node, `git`, `npm`, and Docker to executable absolute
+paths, renders a controlled `PATH` containing the Node and Git binary
+directories, and proves Node, Git, and the npm CLI under exactly that environment
+before it writes the plist. The deploy invokes npm as `<absolute node>
+<absolute npm-cli.js>` rather than trusting an `env node` shebang. The installer
+requires an explicit `host` or `container` pg-dump mode and writes the complete
 contract into the launchd environment. In container mode it also refuses unless
 the named container is running and the configured container-internal `pg_dump`
 path is executable. Missing or unexecutable configuration is a named
@@ -147,12 +151,15 @@ that persisted notification until the Inbox row exists, then exit with
 `STOP escalation-active`.
 
 The process lock records PID and process-start identity. SIGINT and SIGTERM
-abort the active child, enter the same failure path as a step refusal, roll back
-published artifacts and restart the previous services when publication already
-occurred, persist the interruption, then release the deploy barrier and process
-lock. After an uncatchable death, the next invocation reclaims a provably stale
-owner, records `stale-deploy-owner-recovered`, sends it to Inbox, and remains
-escalated instead of starting another upgrade.
+during the idle quiet-window wait exit without a sticky escalation because no
+upgrade has started; the next scheduled invocation resumes waiting normally.
+After the upgrade pipeline starts, the same signals abort the active child,
+enter the normal failure path, roll back published artifacts and restart the
+previous services when publication already occurred, persist the interruption,
+then release the deploy barrier and process lock. After an uncatchable death,
+the next invocation reclaims a provably stale owner, records
+`stale-deploy-owner-recovered`, sends it to Inbox, and remains escalated instead
+of starting another upgrade.
 
 ## Clear an escalation
 

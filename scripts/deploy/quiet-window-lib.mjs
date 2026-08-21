@@ -44,7 +44,8 @@ export const gitPreflightFailure = ({ dirty, head, target, fastForward }) => {
   return null;
 };
 
-export const shouldPersistFailure = ({ dryRun, reason }) => !dryRun && reason !== "usage";
+export const shouldPersistFailure = ({ dryRun, reason, upgradeStarted = true }) =>
+  !dryRun && reason !== "usage" && (reason !== "deploy-interrupted" || upgradeStarted);
 
 const failureOf = (error) => error instanceof DeployFailure
   ? error
