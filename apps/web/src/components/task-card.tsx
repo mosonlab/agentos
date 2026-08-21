@@ -182,7 +182,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           keyboard, opens in a new tab on the modifier click every operator
           tries, and gives the card an accessible name it did not have. */}
       <h3 className="min-w-0 flex-1 text-[13px] leading-[1.45]">
-        <a data-card-title="" href={`#/tasks/${task.id}`} aria-label={task.name} className={TASK_TITLE}>{title}</a>
+        <a data-card-title="" href={`#/tasks/${task.id}`} className={TASK_TITLE}>{title}</a>
       </h3>
       <RowMenu items={menu(task, actions, t)} label={t("tasks.card.actionsFor", { name: task.name })} />
     </div>
