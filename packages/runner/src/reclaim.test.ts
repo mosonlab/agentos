@@ -18,6 +18,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   path: "/usr/bin:/bin",
   home: workspaceRoot,
   proxyEnvironment: {},
+  sessionConfigBaselineRoot: join(import.meta.dirname, "..", "assets", "session-config-baseline"),
   workspaceRoot,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,

@@ -1,4 +1,4 @@
-import { appendFile, chmod, copyFile, cp, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, cp, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +85,17 @@ export type AgentScratch = {
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 export const sessionConfigBaselineRoot = (): string => join(packageRoot, "assets", "session-config-baseline");
+const sessionConfigParent = async (): Promise<string> => {
+  const parent = join(await realpath(tmpdir()), "agentos-session-config");
+  await mkdir(parent, { recursive: true, mode: 0o711 });
+  await chmod(parent, 0o711);
+  return parent;
+};
+
+const sessionConfigPath = async (sessionId: string): Promise<string> => {
+  if (!/^[A-Za-z0-9_-]+$/u.test(sessionId)) throw new Error(`Invalid session id for CLI config root: ${sessionId}`);
+  return join(await sessionConfigParent(), sessionId);
+};
 
 /**
  * A per-run disposable root for anything *inside* the run that resolves a
@@ -103,13 +114,16 @@ export const sessionConfigBaselineRoot = (): string => join(packageRoot, "assets
  * because the control plane also refuses aliased paths and symlinked path
  * components (on macOS os.tmpdir() sits under /var -> /private/var).
  */
-export const provisionAgentScratch = async (config: RunnerConfig): Promise<AgentScratch> => {
+export const provisionAgentScratch = async (config: RunnerConfig, sessionId: string): Promise<AgentScratch> => {
   const base = await realpath(await mkdtemp(join(tmpdir(), "agentos-run-scratch-")));
   const workspaceRoot = join(base, "workspaces");
   const stateDir = join(base, "control-plane");
   // Deliberately named before it exists: if seeding fails, the catch path can
   // still report the exact path it attempted and retain any partial directory.
-  const configRoot = join(base, "cli-config");
+  // Session.id is durable control-plane authority across WAITING_INBOX claims.
+  // Its deterministic root keeps CLI conversation state available to resume
+  // without putting mutable config inside the git workspace.
+  const configRoot = await sessionConfigPath(sessionId);
   if (config.runAsPrefix.length > 0) {
     // The session runs as another principal: it has to own what it writes, so
     // let it traverse the base and create both directories itself.
@@ -132,14 +146,15 @@ export const cleanupAgentScratch = async (
   options: { retainConfigRoot?: boolean } = {},
 ): Promise<void> => {
   if (config.runAsPrefix.length > 0) {
-    await command(config, "/bin/rm", ["-rf", "--", scratch.workspaceRoot, scratch.stateDir], scratch.base, workspaceEnvironment(config));
-  } else if (options.retainConfigRoot) {
+    await command(config, "/bin/rm", ["-rf", "--", scratch.workspaceRoot, scratch.stateDir,
+      ...(options.retainConfigRoot ? [] : [scratch.configRoot])], scratch.base, workspaceEnvironment(config));
+  } else {
     await Promise.all([
       rm(scratch.workspaceRoot, { recursive: true, force: true }),
       rm(scratch.stateDir, { recursive: true, force: true }),
+      ...(options.retainConfigRoot ? [] : [rm(scratch.configRoot, { recursive: true, force: true })]),
     ]);
   }
-  if (options.retainConfigRoot) return;
   await rm(scratch.base, { recursive: true, force: true });
 };
 
@@ -155,10 +170,14 @@ export const provisionSessionConfig = async (
   config: RunnerConfig,
   runner: RunnerKind,
   scratch: AgentScratch,
+  options: { reuse?: boolean } = {},
 ): Promise<void> => {
-  const baseline = join(sessionConfigBaselineRoot(), baselineName(runner));
+  const baseline = join(config.sessionConfigBaselineRoot, baselineName(runner));
   try {
-    if (config.runAsPrefix.length > 0) {
+    if (options.reuse) {
+      const info = await lstat(scratch.configRoot);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("existing session config root is not a real directory");
+    } else if (config.runAsPrefix.length > 0) {
       await command(
         config,
         "/bin/sh",
@@ -174,6 +193,11 @@ export const provisionSessionConfig = async (
   } catch (error: unknown) {
     throw new Error(`Unable to create session CLI config root ${scratch.configRoot}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+
+  if (runner === "CLAUDE" && !config.claudeCodeOAuthToken) {
+    throw new Error(`Unable to establish Claude authentication in ${scratch.configRoot}: CLAUDE_CODE_OAUTH_TOKEN is required because isolated CLAUDE_CONFIG_DIR does not inherit the host Keychain login`);
+  }
+  if (options.reuse) return;
 
   if (runner !== "CODEX") return;
   const source = join(config.home, ".codex", "auth.json");

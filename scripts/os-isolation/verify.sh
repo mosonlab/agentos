@@ -190,12 +190,15 @@ done
 step "staged assets readable by every account"
 for i in $(seq 1 "$RUNNER_COUNT"); do
   account="$(account_for "$i")"
-  for asset in "$LIB_DIR/mcp-server.js" "$LIB_DIR/pi-agentos-extension.ts"; do
+  for asset in "$LIB_DIR/mcp-server.js" "$LIB_DIR/pi-agentos-extension.ts" \
+    "$LIB_DIR/session-config-baseline/claude" \
+    "$LIB_DIR/session-config-baseline/codex" \
+    "$LIB_DIR/session-config-baseline/pi"; do
     as_account "$account" /bin/test -r "$asset" 2>/dev/null \
       || fail "$account cannot read $asset"
   done
 done
-[ "$problems" -eq 0 ] && pass "all $RUNNER_COUNT accounts can read the staged MCP server and pi extension"
+[ "$problems" -eq 0 ] && pass "all $RUNNER_COUNT accounts can read every staged runner asset"
 
 step "plist wiring"
 plists=()

@@ -39,6 +39,23 @@ test("the daemon reports the runner package version", () => {
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
 });
 
+test("a run-as deployment reads the staged session baseline unless explicitly overridden", () => {
+  const previousPrefix = process.env.RUNNER_RUN_AS_PREFIX;
+  const previousBaseline = process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT;
+  try {
+    process.env.RUNNER_RUN_AS_PREFIX = "sudo -u _agentos1 -E --";
+    delete process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT;
+    assert.equal(loadRunnerConfig().sessionConfigBaselineRoot, "/opt/agentos/lib/session-config-baseline");
+    process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT = "/staged/test-baseline";
+    assert.equal(loadRunnerConfig().sessionConfigBaselineRoot, "/staged/test-baseline");
+  } finally {
+    if (previousPrefix === undefined) delete process.env.RUNNER_RUN_AS_PREFIX;
+    else process.env.RUNNER_RUN_AS_PREFIX = previousPrefix;
+    if (previousBaseline === undefined) delete process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT;
+    else process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT = previousBaseline;
+  }
+});
+
 test("the tool inactivity deadline defaults to 30 minutes and rejects unsafe values", () => {
   const previous = process.env.RUNNER_TOOL_DEADLINE_MS;
   try {

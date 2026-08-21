@@ -27,6 +27,8 @@ export type RunnerConfig = {
   proxyEnvironment: NodeJS.ProcessEnv;
   /** Host-owned fallback produced by `claude setup-token`; never task-controlled. */
   claudeCodeOAuthToken?: string;
+  /** Repository baseline directly, or its staged copy for a run-as deployment. */
+  sessionConfigBaselineRoot: string;
   workspaceRoot: string;
   failedWorkspaceRetention: number;
   workspaceReclaimIntervalMs: number;
@@ -52,6 +54,7 @@ const positiveInteger = (name: string, value: string): number => {
 
 export const loadRunnerConfig = (): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
+  const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
   // First, and before this function returns anything a caller could dial: the
   // runner's own index.ts builds the client, the preflight and the poll loop out
   // of this object, so a destination refused here is refused before any DNS
@@ -69,6 +72,8 @@ export const loadRunnerConfig = (): RunnerConfig => {
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
     proxyEnvironment: proxyEnvironment(),
     ...(process.env.CLAUDE_CODE_OAUTH_TOKEN ? { claudeCodeOAuthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN } : {}),
+    sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT
+      ?? (runAsPrefix.length > 0 ? "/opt/agentos/lib/session-config-baseline" : join(import.meta.dirname, "..", "assets", "session-config-baseline")),
     workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     // How often this runner asks the control plane which of its directories may
@@ -86,7 +91,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     // crash. None of these routes long-poll — claim returns 204 when there is
     // no work — so a flat ceiling is safe.
     apiTimeoutMs: positiveInteger("RUNNER_API_TIMEOUT_MS", process.env.RUNNER_API_TIMEOUT_MS ?? "10000"),
-    runAsPrefix: splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? ""),
+    runAsPrefix,
     binaries: {
       CLAUDE: process.env.CLAUDE_BINARY ?? "claude",
       CODEX: process.env.CODEX_BINARY ?? "codex",

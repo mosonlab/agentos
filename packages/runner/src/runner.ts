@@ -89,6 +89,7 @@ const preflightEvidence = (message: string): ExitEvidence => ({
 
 export type ExecuteClaimDependencies = {
   provisionSessionConfig?: typeof provisionSessionConfig;
+  cleanupAgentScratch?: typeof cleanupAgentScratch;
 };
 
 export const executeClaim = async (
@@ -107,6 +108,7 @@ export const executeClaim = async (
   let waitingInbox = false;
   let budgetReason: string | null = null;
   let retainSessionConfig = false;
+  let sessionConfigPath: string | null = null;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
   // agent's own work, everything else is this process's plumbing.
@@ -210,9 +212,10 @@ export const executeClaim = async (
     }, config.heartbeatIntervalMs);
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
-    scratch = await provisionAgentScratch(config);
+    scratch = await provisionAgentScratch(config, claim.session.id);
+    sessionConfigPath = scratch.configRoot;
     retainSessionConfig = true;
-    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
+    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, { reuse: claim.resume !== null });
     const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
@@ -373,9 +376,22 @@ export const executeClaim = async (
           .catch(() => undefined);
       }
     }
-    const succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
+    let succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
     retainSessionConfig = !succeeded;
-    const classified = succeeded ? null : delivery?.failureClass
+    let scratchCleanupFailure: string | null = null;
+    if (scratch) {
+      try {
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig });
+        scratch = null;
+      } catch (error: unknown) {
+        scratchCleanupFailure = errorMessage(error);
+        succeeded = false;
+        retainSessionConfig = true;
+      }
+    }
+    const classified = scratchCleanupFailure
+      ? { failureClass: "PROTOCOL_ERROR" as const, retryable: false }
+      : succeeded ? null : delivery?.failureClass
       ? { failureClass: delivery.failureClass, retryable: false }
       : adapter.classifyError(evidence);
     // Destructured off rather than spread: `failure` holds a live error object
@@ -389,7 +405,6 @@ export const executeClaim = async (
     // one heartbeat interval old — half the lease — and the completion call is
     // itself bounded by RUNNER_API_TIMEOUT_MS, so it cannot outlive that.
     lease.close();
-    phase = "COMPLETE";
     await completeRun(config, claim, {
       exitCode: evidence.exitCode,
       signal: evidence.signal,
@@ -399,14 +414,24 @@ export const executeClaim = async (
       ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
       ...(!succeeded ? {
-        failureReason: `${budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence)}; session CLI config retained at ${scratch!.configRoot}`,
+        failureReason: `${scratchCleanupFailure
+          ? `Session CLI config cleanup failed: ${scratchCleanupFailure}`
+          : budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence)}; session CLI config retained at ${sessionConfigPath}`,
       } : {}),
       output: outputTail(evidence),
       // Only a failure carries one: the envelope is the account of what went
       // wrong, and `executionSucceeded` decides which side of the agent/plumbing
       // line it went wrong on. A run whose agent finished and whose push failed
       // is a DELIVER failure, and the API must not charge the task for it.
-      ...(succeeded ? {} : {
+      ...(succeeded ? {} : scratchCleanupFailure ? {
+        externalFailure: true,
+        failureEnvelope: runnerExceptionEnvelope({
+          phase,
+          evidence: preflightEvidence(scratchCleanupFailure),
+          runnerClass: "PROTOCOL_ERROR",
+          error: new Error(scratchCleanupFailure),
+        }),
+      } : {
         failureEnvelope: completionEnvelope({
           executionSucceeded,
           evidence,
@@ -418,6 +443,7 @@ export const executeClaim = async (
       ...gitResult,
       ...deliveryPayload,
       ...finishedCleanup,
+      ...(scratchCleanupFailure ? { cleanupStatus: "FAILED" as const, cleanupFailureReason: scratchCleanupFailure } : {}),
     });
   } catch (error: unknown) {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -429,7 +455,7 @@ export const executeClaim = async (
     }
     const message = errorMessage(error);
     if (scratch) retainSessionConfig = true;
-    const failureReason = scratch ? `${message}; session CLI config retained at ${scratch.configRoot}` : message;
+    let failureReason = scratch ? `${message}; session CLI config retained at ${scratch.configRoot}` : message;
     if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
     if (fencingRejected) {
       if (waitingInbox) return;
@@ -439,6 +465,16 @@ export const executeClaim = async (
     const evidence = preflightEvidence(message);
     const classified = adapter.classifyError(evidence);
     const finishedCleanup = await cleanup(config, workspace, config.failedWorkspaceRetention > 0);
+    let scratchCleanupFailure: string | null = null;
+    if (scratch) {
+      try {
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: true });
+        scratch = null;
+      } catch (cleanupError: unknown) {
+        scratchCleanupFailure = errorMessage(cleanupError);
+        failureReason = `${failureReason}; scratch cleanup failed: ${scratchCleanupFailure}`;
+      }
+    }
     await appendActivity(config, claim, failureReason, { stream: "stderr" }).catch(() => undefined);
     await completeRun(config, claim, {
       exitCode: evidence.exitCode,
@@ -458,11 +494,18 @@ export const executeClaim = async (
       output: producedOutput,
       ...(workspace ? { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha } : {}),
       ...finishedCleanup,
+      ...(scratchCleanupFailure ? { cleanupStatus: "FAILED" as const, cleanupFailureReason: scratchCleanupFailure } : {}),
     });
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     lease?.close();
-    if (scratch) await cleanupAgentScratch(config, scratch, { retainConfigRoot: retainSessionConfig }).catch(() => undefined);
+    if (scratch) {
+      try {
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig });
+      } catch (error: unknown) {
+        console.error(`Agent scratch cleanup failed; session config ${scratch.configRoot} retained or may require manual recovery`, error);
+      }
+    }
   }
 };
 

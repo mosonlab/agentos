@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { adapters } from "./adapters.js";
@@ -21,6 +21,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   path: "/usr/bin:/bin",
   home: workspaceRoot,
   proxyEnvironment: {},
+  sessionConfigBaselineRoot: join(import.meta.dirname, "..", "assets", "session-config-baseline"),
   workspaceRoot,
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
@@ -209,7 +210,7 @@ const seedCodexAuth = async (root: string): Promise<void> => {
 
 const removeRetainedConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
   const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
-  if (retained) await rm(dirname(retained), { recursive: true, force: true });
+  if (retained) await rm(retained, { recursive: true, force: true });
 };
 
 test("a session config creation failure completes in PROVISION without reaching a CLI", async () => {
@@ -261,10 +262,78 @@ test("a session config creation failure completes in PROVISION without reaching 
     assert.match(String(completion.body.failureReason), /EACCES while seeding repository baseline/u);
     assert.match(String(completion.body.failureReason), new RegExp(`${configRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u"));
     assert.equal((await stat(configRoot)).isDirectory(), true);
-    await rm(dirname(configRoot), { recursive: true, force: true });
+    await rm(configRoot, { recursive: true, force: true });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the real provisioner reports Codex auth and baseline failures in PROVISION without spawning a CLI", async () => {
+  const originalPreflight = adapters.CODEX.preflight;
+  const originalStart = adapters.CODEX.start;
+  let preflightCalls = 0;
+  let startCalls = 0;
+  adapters.CODEX.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
+  adapters.CODEX.start = (async () => { startCalls += 1; throw new Error("CLI must not spawn"); }) as typeof originalStart;
+  try {
+    for (const scenario of ["missing-auth", "unreadable-auth", "unreadable-baseline"] as const) {
+      const root = await mkdtemp(join(tmpdir(), `runner-real-provision-${scenario}-`));
+      try {
+        const remote = await seedRemote(root);
+        const home = join(root, "runner-home");
+        await mkdir(join(home, ".codex"), { recursive: true });
+        const auth = join(home, ".codex", "auth.json");
+        if (scenario !== "missing-auth") await writeFile(auth, '{"tokens":"test-only"}\n', { mode: 0o600 });
+        if (scenario === "unreadable-auth") await chmod(auth, 0o000);
+
+        const runnerConfig = { ...config(join(root, "workspaces")), home, failedWorkspaceRetention: 0 };
+        if (scenario === "unreadable-baseline") {
+          const baselineRoot = join(root, "baseline");
+          const codexBaseline = join(baselineRoot, "codex");
+          await mkdir(codexBaseline, { recursive: true });
+          await writeFile(join(codexBaseline, "config.toml"), "model_provider = 'openai'\n");
+          await chmod(codexBaseline, 0o000);
+          runnerConfig.sessionConfigBaselineRoot = baselineRoot;
+        }
+
+        const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+        }) as typeof fetch;
+        const sessionId = `session-real-${scenario}`;
+        await executeClaim(runnerConfig, {
+          ...mechanicalClaim,
+          executionMode: "agent",
+          runner: "CODEX",
+          repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+          agent: { ...mechanicalClaim.agent, model: "codex" },
+          run: { ...mechanicalClaim.run, id: `run-real-${scenario}`, model: "codex", maxRunsPerTask: 3 },
+          session: { id: sessionId },
+        });
+
+        const completion = posts.find((post) => post.path.endsWith("/complete"));
+        assert.ok(completion, scenario);
+        assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+        assert.match(String(completion.body.failureReason), scenario === "unreadable-baseline"
+          ? /Unable to create session CLI config root/u
+          : /Unable to establish Codex authentication/u);
+        const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
+        assert.ok(retained);
+        assert.equal(retained.startsWith(home), false, "host HOME must never become CODEX_HOME");
+        await rm(retained, { recursive: true, force: true });
+      } finally {
+        await chmod(join(root, "runner-home", ".codex", "auth.json"), 0o600).catch(() => undefined);
+        await chmod(join(root, "baseline", "codex"), 0o700).catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    adapters.CODEX.preflight = originalPreflight;
+    adapters.CODEX.start = originalStart;
+  }
+  assert.equal(preflightCalls, 0);
+  assert.equal(startCalls, 0);
 });
 
 /** The config the two tests below share: a real Codex stub, and nothing at all

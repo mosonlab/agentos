@@ -11,7 +11,7 @@ import {
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
+import { cleanupAgentScratch, provisionAgentScratch, sessionConfigBaselineRoot } from "./workspace.js";
 
 const claim: ClaimedTask = {
   executionMode: "agent",
@@ -491,8 +491,9 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
     path: "/bin",
     home: fixture,
     apiUrl: "http://api",
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
   } as unknown as RunnerConfig;
-  const runScratch = await provisionAgentScratch(config);
+  const runScratch = await provisionAgentScratch(config, "session-runas-scrub");
   try {
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
       const env = buildChildEnvironment(config, { ...claim, runner }, runScratch, fixture);

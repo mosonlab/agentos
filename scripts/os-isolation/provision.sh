@@ -101,6 +101,8 @@ staged_dests=(
   "$BIN_DIR/codex-with-proxy.sh"
 )
 staged_modes=(644 644 755)
+baseline_source="$REPO_ROOT/packages/runner/assets/session-config-baseline"
+baseline_dest="$LIB_DIR/session-config-baseline"
 
 printf 'AgentOS OS isolation — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
 printf '  operator account : %s\n' "$LAUNCHER_USER"
@@ -156,6 +158,10 @@ done
 for index in 0 1 2; do
   src="${staged_sources[$index]}"
   [ -f "$src" ] || fail "missing $src — build it first (npm run build -w @agentos/runner), then re-run"
+done
+[ -d "$baseline_source" ] || fail "missing $baseline_source"
+for runner in claude codex pi; do
+  [ -d "$baseline_source/$runner" ] || fail "missing baseline directory $baseline_source/$runner"
 done
 
 if [ -d "$WORKSPACE_ROOT" ]; then
@@ -235,6 +241,19 @@ for index in 0 1 2; do
     run install -o root -g wheel -m "${staged_modes[$index]}" "$src" "$dest"
   fi
 done
+if [ -d "$baseline_dest" ] && diff -qr "$baseline_source" "$baseline_dest" >/dev/null; then
+  ok "$baseline_dest is current"
+elif [ "$APPLY" = 1 ]; then
+  baseline_tmp="$(mktemp -d "$LIB_DIR/.session-config-baseline.XXXXXX")"
+  cp -R "$baseline_source"/. "$baseline_tmp"/
+  chown -R root:wheel "$baseline_tmp"
+  find "$baseline_tmp" -type d -exec chmod 755 {} +
+  find "$baseline_tmp" -type f -exec chmod 644 {} +
+  rm -rf "$baseline_dest"
+  mv "$baseline_tmp" "$baseline_dest"
+else
+  plan "stage $baseline_source at $baseline_dest as root:wheel, directories 755 and files 644"
+fi
 
 step "6. sudoers grant"
 # A de-escalation grant only: the operator may become an account weaker than
@@ -314,6 +333,19 @@ if [ "$APPLY" = 1 ]; then
     expect "$dest owner" "$(stat -f '%Su' "$dest")" "root"
     expect "$dest mode" "$(stat -f '%Lp' "$dest")" "${staged_modes[$index]}"
   done
+  if [ ! -d "$baseline_dest" ]; then
+    fail "$baseline_dest was not staged"
+  else
+    diff -qr "$baseline_source" "$baseline_dest" >/dev/null || fail "$baseline_dest does not match $baseline_source"
+    while IFS= read -r path; do
+      expect "$path owner" "$(stat -f '%Su' "$path")" "root"
+      if [ -d "$path" ]; then
+        expect "$path mode" "$(stat -f '%Lp' "$path")" "755"
+      else
+        expect "$path mode" "$(stat -f '%Lp' "$path")" "644"
+      fi
+    done < <(find "$baseline_dest" -print)
+  fi
   if [ -f "$SUDOERS_FILE" ]; then
     expect "$SUDOERS_FILE mode" "$(stat -f '%Lp' "$SUDOERS_FILE")" "440"
     expect "$SUDOERS_FILE owner" "$(stat -f '%Su' "$SUDOERS_FILE")" "root"

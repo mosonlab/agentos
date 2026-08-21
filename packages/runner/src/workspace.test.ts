@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import test from "node:test";
@@ -319,7 +319,7 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
       home: process.env.HOME ?? tmpdir(),
     } as unknown as RunnerConfig;
 
-    const scratch = await provisionAgentScratch(config);
+    const scratch = await provisionAgentScratch(config, `session-scratch-${runAsPrefix.length}`);
     try {
       assert.notEqual(scratch.workspaceRoot, config.workspaceRoot);
       assert.equal(scratch.workspaceRoot.startsWith(`${scratch.base}${sep}`), true);
@@ -364,8 +364,10 @@ test("each CLI config root is seeded from the repository baseline without person
         runAsPrefix: [],
         path: process.env.PATH ?? "/usr/bin:/bin",
         home,
+        claudeCodeOAuthToken: "test-setup-token",
+        sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
       } as unknown as RunnerConfig;
-      const scratch = await provisionAgentScratch(config);
+      const scratch = await provisionAgentScratch(config, `session-baseline-${runner.toLowerCase()}`);
       try {
         await provisionSessionConfig(config, runner, scratch);
         const baseline = join(sessionConfigBaselineRoot(), runner.toLowerCase());
@@ -391,6 +393,37 @@ test("each CLI config root is seeded from the repository baseline without person
       }
     }
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a real different-uid runner reads a staged baseline and owner-aware success cleanup deletes its config", {
+  skip: process.getuid?.() !== 0 && "requires root to cross a real uid boundary",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-real-uid-config-"));
+  const baselineRoot = join(root, "staged-baseline");
+  await mkdir(join(baselineRoot, "pi"), { recursive: true, mode: 0o755 });
+  await writeFile(join(baselineRoot, "pi", "config.json"), '{"provider":"platform"}\n', { mode: 0o644 });
+  await chmod(root, 0o755);
+  await chmod(baselineRoot, 0o755);
+  await chmod(join(baselineRoot, "pi"), 0o755);
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: ["/usr/bin/sudo", "-n", "-u", "nobody", "-E", "--"],
+    path: "/usr/bin:/bin",
+    home: root,
+    sessionConfigBaselineRoot: baselineRoot,
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-real-different-uid");
+  try {
+    await provisionSessionConfig(config, "PI", scratch);
+    assert.equal(await readFile(join(scratch.configRoot, "config.json"), "utf8"), '{"provider":"platform"}\n');
+    assert.notEqual((await stat(scratch.configRoot)).uid, process.getuid?.());
+    await cleanupAgentScratch(config, scratch);
+    await assert.rejects(stat(scratch.configRoot), /ENOENT/u);
+    await assert.rejects(stat(scratch.base), /ENOENT/u);
+  } finally {
+    await rm(scratch.configRoot, { recursive: true, force: true }).catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
