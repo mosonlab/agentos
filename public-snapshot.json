@@ -36,6 +36,8 @@
     { "glob": "biome.jsonc", "purpose": "lint gate rule set" },
     { "glob": "docker-compose.yml", "purpose": "local development services" },
     { "glob": "eslint.config.mjs", "purpose": "type-aware lint gate rule" },
+    { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents view, each role with its model, reasoning effort, runner and inbox access" },
+    { "glob": "docs/media/tasks-board.png", "purpose": "README screenshot: the task board with a twelve-step template chain in flight" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/demos/templates-release-demo.md", "purpose": "templates release-demo operator contract" },
     { "glob": "docs/demos/templates-release-evidence.schema.json", "purpose": "templates release-demo verification schema" },
@@ -48,6 +50,7 @@
     { "glob": "docs/release/v0.1.0-release-notes.md", "purpose": "the release notes for v0.1.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/release/v0.1.0-security.md", "purpose": "the loopback, secret, host-authority and known-gap boundaries of a v0.1.0 install" },
     { "glob": "docs/release/v0.1.0-support-matrix.md", "purpose": "the authoritative support statement: what is Verified, Maintainer-verified, Experimental, Unverified and Unsupported, with the evidence boundary for each row" },
+    { "glob": "docs/release/v0.2.0-release-notes.md", "purpose": "the release notes for v0.2.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/runbooks/gate-worker.md", "purpose": "the offshore merge-gate worker and gate dispatcher runbook: slot model, red lines, deployment, troubleshooting" },
     { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
     { "glob": "package.json", "purpose": "workspace definition" },
@@ -261,6 +264,16 @@
     }
   ],
   "approvedFindings": [
+    {
+      "category": "binary-material",
+      "glob": "docs/media/agents.png",
+      "reason": "reviewed README screenshot of the agents view, published with v0.2.0"
+    },
+    {
+      "category": "binary-material",
+      "glob": "docs/media/tasks-board.png",
+      "reason": "reviewed README screenshot of the task board, published with v0.2.0"
+    },
     {
       "category": "credential-placeholder",
       "glob": ".env.example",
