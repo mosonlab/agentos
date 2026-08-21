@@ -39,6 +39,12 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   "",
   `Role (${claim.agent.name}): ${claim.agent.rolePrompt}`,
   ...toolManifest(claim),
+  ...(claim.run.implementationBaseSha && claim.run.implementationHeadSha ? [
+    "",
+    "Platform-pinned implementation range (non-report claim metadata):",
+    `- implementationBaseSha: ${claim.run.implementationBaseSha}`,
+    `- implementationHeadSha: ${claim.run.implementationHeadSha}`,
+  ] : []),
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,

@@ -174,14 +174,12 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
             repo: { select: { defaultBranch: true } },
           },
         });
-        const pinnedRetry = task?.templateStep?.baseFromStepIndex != null;
-        if (pinnedRetry && !run.targetBranch) {
-          throw new Error(`Pinned task ${task.id} retry is missing its recorded target commit`);
-        }
-        // `prior` is null deliberately: for chain steps the resolver ignores it,
-        // and passing the lost run would be misleading.
-        const branches = pinnedRetry
-          ? { branch: run.branch, targetBranch: run.targetBranch }
+        // Ordinary chain steps recompute without inheriting the lost run.
+        // Pinned template steps pass only the workspace branch identity; the
+        // resolver re-reads their immutable source range and never trusts the
+        // lost run's targetBranch as a commit.
+        const branches = task?.templateStep?.baseFromStepIndex != null && task.repo
+          ? await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch })
           : task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
           ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
           : {

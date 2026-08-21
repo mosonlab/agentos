@@ -62,6 +62,8 @@ const mechanicalClaim: ClaimedTask = {
     model: "mechanical/merge-executor-v1",
     targetBranch: "master",
     pinnedBaseSha: null,
+    implementationBaseSha: null,
+    implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
     branch: null,

@@ -72,6 +72,10 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
     git(root, "init", "--initial-branch=main", seed);
     git(seed, "config", "user.name", "AgentOS Test");
     git(seed, "config", "user.email", "runner@agentos.local");
+    await writeFile(join(seed, "base.txt"), "review base\n");
+    git(seed, "add", "base.txt");
+    git(seed, "commit", "-m", "review base");
+    const implementationBaseSha = git(seed, "rev-parse", "HEAD");
     await writeFile(join(seed, "implementation.txt"), "delivered\n");
     git(seed, "add", "implementation.txt");
     git(seed, "commit", "-m", "implementation");
@@ -100,6 +104,8 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
         runNumber: 1,
         targetBranch: pinnedBaseSha,
         pinnedBaseSha,
+        implementationBaseSha,
+        implementationHeadSha: pinnedBaseSha,
         branch: chainBranch,
       },
     } as ClaimedTask;
@@ -108,6 +114,7 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
     assert.equal(workspace.baseSha, pinnedBaseSha);
     assert.equal(git(workspace.path, "branch", "--show-current"), "");
     assert.equal(git(workspace.path, "for-each-ref", "--format=%(refname)"), "");
+    assert.doesNotThrow(() => git(workspace.path, "cat-file", "-e", `${implementationBaseSha}^{commit}`));
     assert.equal(await readFile(join(workspace.path, "implementation.txt"), "utf8"), "delivered\n");
     await assert.rejects(readFile(join(workspace.path, "successor-report.md")), /ENOENT/u);
     assert.throws(

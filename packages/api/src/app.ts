@@ -35,6 +35,7 @@ import {
   recomputeSessionUsage,
   resolveRequeueBase,
   resolveRunBranches,
+  pinnedImplementationRange,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -3494,6 +3495,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // write endpoint already caps each artifact at 500k; pass the durable
         // body verbatim until artifact references replace prompt embedding.
         const priorOutputs = priorOutputsRaw;
+        const implementationRange = await pinnedImplementationRange(tx, candidate.task);
+        if (implementationRange && implementationRange.implementationHeadSha !== run.targetBranch) {
+          throw new Error(
+            `Pinned run ${run.id} targets ${run.targetBranch ?? "no commit"}, but its source step now records ${implementationRange.implementationHeadSha}`,
+          );
+        }
         return {
           task: candidate.task,
           agent: candidate.agent,
@@ -3509,6 +3516,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             ...run,
             pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch,
             pinnedBaseSha: candidate.task.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
+            implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
+            implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
           },
           session,
           runner: candidate.runner,
@@ -4160,12 +4169,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // publication, or a failed run's salvage — is evidence in this
         // transaction. `body.branch ?? run.branch` is that same effective value,
         // because `run` was read before the update.
-        const pinnedRetry = currentTask.templateStep?.baseFromStepIndex != null;
-        if (pinnedRetry && !run.targetBranch) {
-          throw new Error(`Pinned task ${currentTask.id} retry is missing its recorded target commit`);
-        }
-        const branches = pinnedRetry
-          ? { branch: body.branch ?? run.branch, targetBranch: run.targetBranch }
+        const branches = currentTask.templateStep?.baseFromStepIndex != null && currentTask.repo
+          ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, { branch: body.branch ?? run.branch })
           : currentTask.chainId && currentTask.chainIndex !== null && !currentTask.templateId && currentTask.repo
           ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, null)
           : {

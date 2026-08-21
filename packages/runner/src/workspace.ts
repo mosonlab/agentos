@@ -162,15 +162,26 @@ export const provisionWorkspace = async (
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
     const pinnedBaseSha = claim.run.pinnedBaseSha;
     if (pinnedBaseSha) {
+      const implementationBaseSha = claim.run.implementationBaseSha;
+      if (!implementationBaseSha || claim.run.implementationHeadSha !== pinnedBaseSha) {
+        throw new Error(`Pinned run ${claim.run.id} is missing its immutable implementation range`);
+      }
       // A branch clone would advertise and fetch the shared chain ref before a
-      // blind reviewer starts. Build an empty repository, fetch exactly the
-      // recorded implementation commit by object id, and stay detached. With
-      // no refspec for the chain branch, successor commits and their report
-      // artifacts are not reachable from this object database.
+      // blind reviewer starts. Build an empty repository, fetch the immutable
+      // implementation range endpoints by object id, and stay detached at its
+      // head. With no fetch of the chain branch, successor commits and their
+      // report artifacts are not reachable from this object database.
       await execute(config, "git", ["init"], workspace, env);
       await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
       await runWithNetworkRetry("git", ["fetch"],
-        ({ timeoutMs }) => execute(config, "git", ["fetch", "--no-tags", "origin", pinnedBaseSha], workspace, env, { timeoutMs }),
+        ({ timeoutMs }) => execute(
+          config,
+          "git",
+          ["fetch", "--no-tags", "origin", implementationBaseSha, pinnedBaseSha],
+          workspace,
+          env,
+          { timeoutMs },
+        ),
         retryOptions,
       );
       await execute(config, "git", ["checkout", "--detach", pinnedBaseSha], workspace, env);

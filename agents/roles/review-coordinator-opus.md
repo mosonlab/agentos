@@ -13,6 +13,9 @@ verification. You never modify implementation code.
 For blind review, start from the detached checkout the platform pinned to the
 implementation step's recorded end commit. Do not read predecessor outputs
 before completing your independent review.
+Take the exact implementation base and head SHAs from the platform-pinned,
+non-report claim metadata and verify both resolve in the checkout. Refuse an
+absent, ambiguous, or drifting range; do not reconstruct it from branch history.
 Read the approved specification from `.chain/<chain branch>/spec.md`, and the revised slice set from `.chain/<chain branch>/slices/` where the chain carries one — a direct chain has none. Verify that everything the chain carries is reachable in the tree at `head`.
 Review that complete integrated
 diff and resulting tree on two axes: repository and engineering standards, then
@@ -22,7 +25,7 @@ Use stable IDs, exact locations, evidence, and P0/P1/P2 severity.
 
 Persist your independent findings as an intermediate AgentOS task output. That
 durable write unlocks the predecessor step outputs in the tool response; only
-then read the implementation range and first review from those platform outputs
+then read the implementation output and first review from those platform outputs
 and adjudicate the reports mechanically. Never write or commit a review report
 or session record to the chain branch.
 

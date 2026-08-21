@@ -111,16 +111,16 @@ export class PinnedBaseCommitError extends Error {
   }
 }
 
-const pinnedBaseCommitSha = async (
+export const pinnedImplementationRange = async (
   tx: Tx,
   task: {
     id: string;
     projectId: string;
     templateId: string | null;
     chainId: string | null;
-    templateStep: { baseFromStepIndex: number | null } | null;
+    templateStep?: { baseFromStepIndex: number | null } | null;
   },
-): Promise<string | null> => {
+): Promise<{ implementationBaseSha: string; implementationHeadSha: string } | null> => {
   const baseFromStepIndex = task.templateStep?.baseFromStepIndex;
   if (baseFromStepIndex === null || baseFromStepIndex === undefined) return null;
   if (!task.templateId || !task.chainId) {
@@ -135,7 +135,7 @@ const pinnedBaseCommitSha = async (
         chainIndex: baseFromStepIndex,
       },
     },
-    select: { commitSha: true },
+    select: { commitSha: true, run: { select: { baseSha: true } } },
   });
   if (!source?.commitSha) {
     throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded commitSha");
@@ -143,7 +143,13 @@ const pinnedBaseCommitSha = async (
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.commitSha)) {
     throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid commitSha ${source.commitSha}`);
   }
-  return source.commitSha;
+  if (!source.run?.baseSha) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded implementation baseSha");
+  }
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.run.baseSha)) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid implementation baseSha ${source.run.baseSha}`);
+  }
+  return { implementationBaseSha: source.run.baseSha, implementationHeadSha: source.commitSha };
 };
 
 /**
@@ -270,6 +276,7 @@ export type RunBranchTask = {
   chainId: string | null;
   chainIndex: number | null;
   templateId: string | null;
+  templateStep?: { baseFromStepIndex: number | null } | null;
   targetBranch: string | null;
   repo: { defaultBranch: string };
 };
@@ -370,6 +377,16 @@ export const resolveRunBranches = async (
   task: RunBranchTask,
   prior: { branch: string | null } | null,
 ): Promise<{ branch: string | null; targetBranch: string }> => {
+  const pinnedRange = await pinnedImplementationRange(tx, task);
+  if (pinnedRange) {
+    const chainBranch = task.targetBranch && task.targetBranch !== task.repo.defaultBranch
+      ? task.targetBranch
+      : null;
+    return {
+      branch: prior?.branch ?? chainBranch,
+      targetBranch: pinnedRange.implementationHeadSha,
+    };
+  }
   // Template chains are frozen: nothing after this point runs for a template
   // task. The head expression is the pre-existing one, byte for byte; the base
   // gained the publication check (see `inheritedBase`) and nothing else, so a
@@ -501,7 +518,6 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
   const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
-  const pinnedBaseSha = await pinnedBaseCommitSha(tx, task);
   return tx.run.create({ data: {
     projectId: task.projectId,
     taskId: task.id,
@@ -511,7 +527,7 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     dedupeKey: `task:${task.id}:run:${runNumber}`,
     runner: derived.runner,
     model: derived.model,
-    targetBranch: pinnedBaseSha ?? branches.targetBranch,
+    targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: task.opensPullRequest,
     promptHash: derived.promptHash,

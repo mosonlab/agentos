@@ -38,6 +38,8 @@ const claim: ClaimedTask = {
     model: "codex",
     targetBranch: "main",
     pinnedBaseSha: null,
+    implementationBaseSha: null,
+    implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
     branch: null,
@@ -72,6 +74,22 @@ const stableArgv = (args: string[]): string[] => args.map((arg) => arg
 
 test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
+});
+
+test("buildPrompt exposes a pinned implementation range without predecessor outputs", () => {
+  const pinned = {
+    ...claim,
+    run: {
+      ...claim.run,
+      pinnedBaseSha: "b".repeat(40),
+      implementationBaseSha: "a".repeat(40),
+      implementationHeadSha: "b".repeat(40),
+    },
+  };
+  const prompt = buildPrompt(pinned);
+  assert.match(prompt, new RegExp(`implementationBaseSha: ${"a".repeat(40)}`));
+  assert.match(prompt, new RegExp(`implementationHeadSha: ${"b".repeat(40)}`));
+  assert.doesNotMatch(prompt, /Persisted outputs from prior template steps/u);
 });
 
 test("the prompt manifest names the AgentOS tools the session actually got", () => {
