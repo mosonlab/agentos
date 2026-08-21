@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Prisma } from "@agentos/db";
 
-const CAPABILITY_KEY = "cliAvailability";
+export const CLI_AVAILABILITY_CAPABILITY_KEY = "cliAvailability";
 
 export type StoredCliAvailability = {
   available: boolean;
@@ -20,8 +20,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export const readStoredCliAvailability = (
   capabilities: unknown,
 ): StoredCliAvailability | null => {
-  if (!isRecord(capabilities) || !(CAPABILITY_KEY in capabilities)) return null;
-  const value = capabilities[CAPABILITY_KEY];
+  if (!isRecord(capabilities) || !(CLI_AVAILABILITY_CAPABILITY_KEY in capabilities)) return null;
+  const value = capabilities[CLI_AVAILABILITY_CAPABILITY_KEY];
   if (
     !isRecord(value)
     || typeof value.available !== "boolean"
@@ -46,7 +46,7 @@ export const storeCliAvailability = (
   availability: StoredCliAvailability,
 ): Prisma.InputJsonValue => ({
   ...(isRecord(capabilities) ? capabilities : {}),
-  [CAPABILITY_KEY]: availability,
+  [CLI_AVAILABILITY_CAPABILITY_KEY]: availability,
 }) as Prisma.InputJsonObject;
 
 export const preserveCliAvailability = (
@@ -54,9 +54,10 @@ export const preserveCliAvailability = (
   capabilities: unknown,
 ): Prisma.InputJsonValue => {
   const availability = readStoredCliAvailability(capabilities);
+  const { [CLI_AVAILABILITY_CAPABILITY_KEY]: _reserved, ...accepted } = reported;
   return {
-    ...reported,
-    ...(availability ? { [CAPABILITY_KEY]: availability } : {}),
+    ...accepted,
+    ...(availability ? { [CLI_AVAILABILITY_CAPABILITY_KEY]: availability } : {}),
   } as Prisma.InputJsonObject;
 };
 

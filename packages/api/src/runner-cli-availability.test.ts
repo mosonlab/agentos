@@ -46,6 +46,16 @@ test("availability is an explicit capability and preflight preserves it", () => 
   assert.deepEqual(merged, { resume: true, cliAvailability: missing });
 });
 
+test("preflight cannot inject the reserved CLI availability capability", () => {
+  const merged = preserveCliAvailability({
+    resume: true,
+    cliAvailability: { available: false },
+  }, null);
+
+  assert.deepEqual(merged, { resume: true });
+  assert.equal(readStoredCliAvailability(merged), null);
+});
+
 test("malformed persisted availability fails loudly", () => {
   assert.throws(
     () => readStoredCliAvailability({ cliAvailability: { available: false } }),

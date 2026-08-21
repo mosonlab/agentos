@@ -34,6 +34,35 @@ const post = async (path: string, body: unknown) => {
   return response;
 };
 
+const postWithBackendReadHook = async (
+  hook: NonNullable<NonNullable<Parameters<typeof createApp>[1]>["runnerBackendStateAfterRead"]>,
+  path: string,
+  body: unknown,
+) => {
+  const response = await createApp(db, { runnerBackendStateAfterRead: hook }).request(path, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) assert.fail(`${path} returned ${response.status}: ${await response.text()}`);
+  return response;
+};
+
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+const passingPreflight = {
+  runner: "CLAUDE",
+  ok: true,
+  cliVersion: "claude test",
+  authMode: "test",
+  capabilities: { resume: true },
+  error: null,
+};
+
 let sequence = 0;
 const seedTask = async (runnerPreference: RunnerPreference) => {
   sequence += 1;
@@ -169,4 +198,94 @@ test("CLI availability reports preserve an independent authentication circuit", 
   assert.equal(readStoredCliAvailability(state.capabilities)?.available, true);
   assert.equal(state.circuitOpen, true);
   assert.equal(state.circuitReason, "not-authenticated: run codex login");
+});
+
+test("a delayed preflight cannot overwrite a missing-CLI outage", async () => {
+  const claude = await seedTask(RunnerPreference.CLAUDE);
+  const preflightRead = deferred();
+  const resumePreflight = deferred();
+  const delayedPreflight = postWithBackendReadHook(async ({ route, attempt }) => {
+    if (route !== "preflight" || attempt !== 1) return;
+    preflightRead.resolve();
+    await resumePreflight.promise;
+  }, "/runner/preflight", passingPreflight);
+
+  await preflightRead.promise;
+  const unavailable = { runner: "CLAUDE", binary: "claude", available: false, resolvedPath: null };
+  await post("/runner/availability", unavailable);
+  resumePreflight.resolve();
+  await delayedPreflight;
+  await post("/runner/availability", unavailable);
+  await post("/runner/availability", unavailable);
+
+  const state = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: "CLAUDE" } });
+  assert.equal(readStoredCliAvailability(state.capabilities)?.available, false);
+  assert.match((await db.task.findUniqueOrThrow({ where: { id: claude.task.id } })).failureReason ?? "", /claude CLI/u);
+  assert.equal(await claim(), null);
+  assert.equal(await db.inboxMessage.count({
+    where: { dedupeKey: { startsWith: "runner-cli-unavailable:CLAUDE:" } },
+  }), 1);
+});
+
+test("a delayed preflight cannot restore stale unavailability after recovery", async () => {
+  const claude = await seedTask(RunnerPreference.CLAUDE);
+  await post("/runner/availability", {
+    runner: "CLAUDE", binary: "claude", available: false, resolvedPath: null,
+  });
+  const preflightRead = deferred();
+  const resumePreflight = deferred();
+  const delayedPreflight = postWithBackendReadHook(async ({ route, attempt }) => {
+    if (route !== "preflight" || attempt !== 1) return;
+    preflightRead.resolve();
+    await resumePreflight.promise;
+  }, "/runner/preflight", passingPreflight);
+
+  await preflightRead.promise;
+  await post("/runner/availability", {
+    runner: "CLAUDE", binary: "claude", available: true, resolvedPath: "/opt/runner/bin/claude",
+  });
+  resumePreflight.resolve();
+  await delayedPreflight;
+
+  const state = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: "CLAUDE" } });
+  assert.equal(readStoredCliAvailability(state.capabilities)?.available, true);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: claude.task.id } })).failureReason, null);
+  assert.equal(await db.inboxMessage.count({
+    where: { dedupeKey: { startsWith: "runner-cli-unavailable:CLAUDE:" }, status: "CLOSED" },
+  }), 1);
+  assert.equal((await claim())?.task.id, claude.task.id);
+});
+
+test("availability replaces a malformed reserved capability and preflight cannot reintroduce one", async () => {
+  await db.runnerBackendState.create({ data: {
+    runner: "CLAUDE",
+    capabilities: { resume: true, cliAvailability: { available: false } },
+  } });
+  const originalError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...values: unknown[]) => { errors.push(values); };
+  try {
+    await post("/runner/availability", {
+      runner: "CLAUDE", binary: "claude", available: true, resolvedPath: "/opt/runner/bin/claude",
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assert.match(String(errors[0]?.[0]), /Replacing malformed CLAUDE runner CLI availability/u);
+
+  await post("/runner/preflight", {
+    ...passingPreflight,
+    capabilities: { resume: false, cliAvailability: { available: false } },
+  });
+  const state = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: "CLAUDE" } });
+  assert.deepEqual(readStoredCliAvailability(state.capabilities), {
+    available: true,
+    binary: "claude",
+    resolvedPath: "/opt/runner/bin/claude",
+    reason: null,
+    unavailableSince: null,
+    outageKey: null,
+    lastCheckedAt: readStoredCliAvailability(state.capabilities)?.lastCheckedAt,
+  });
+  assert.equal((state.capabilities as Record<string, unknown>).resume, false);
 });

@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import type { PrismaClient } from "@agentos/db";
+import type { PrismaClient, RunnerKind } from "@agentos/db";
 
 import { createApp as createLiveApp } from "./app.js";
 import { defaultControlPlaneStateDir } from "./control-plane-state.js";
@@ -75,6 +75,11 @@ const assertRootIsDisposable = (root: string): string => {
 export const createApp = (db: PrismaClient, options: {
   workspaceRoot?: string;
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
+  runnerBackendStateAfterRead?: (input: {
+    route: "availability" | "preflight";
+    runner: RunnerKind;
+    attempt: number;
+  }) => void | Promise<void>;
 } = {}) => {
   const configured = options.workspaceRoot ?? process.env.RUNNER_WORKSPACE_ROOT;
   if (!configured) {
@@ -89,6 +94,9 @@ export const createApp = (db: PrismaClient, options: {
   return createLiveApp(db, {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
     onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
+    ...(options.runnerBackendStateAfterRead
+      ? { runnerBackendStateAfterRead: options.runnerBackendStateAfterRead }
+      : {}),
   });
 };
 

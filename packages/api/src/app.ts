@@ -134,7 +134,54 @@ type AppEnvironment = { Variables: { principal: Principal } };
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
+  runnerBackendStateAfterRead?: (input: {
+    route: "availability" | "preflight";
+    runner: RunnerKind;
+    attempt: number;
+  }) => void | Promise<void>;
 }
+
+const SERIALIZATION_SQLSTATE = new Set(["40001", "40P01"]);
+
+const runnerBackendStateConflict = (error: unknown): boolean => {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code === "P2034" || error.code === "P2002") return true;
+  const sqlstate = (error.meta as { code?: unknown } | undefined)?.code;
+  return error.code === "P2010" && typeof sqlstate === "string" && SERIALIZATION_SQLSTATE.has(sqlstate);
+};
+
+const withRunnerBackendStateTransaction = async <T>(
+  db: PrismaClient,
+  work: (tx: Prisma.TransactionClient, attempt: number) => Promise<T>,
+): Promise<T> => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await db.$transaction(
+        (tx) => work(tx, attempt),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error: unknown) {
+      if (!runnerBackendStateConflict(error) || attempt >= 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 10));
+    }
+  }
+};
+
+const operatorThread = async (
+  client: PrismaClient | Prisma.TransactionClient,
+  chatId: string | undefined,
+): Promise<{ id: string } | null> => {
+  if (!chatId) return null;
+  // Attach the operator chat so the alert can actually leave the web Inbox;
+  // threadless messages are skipped by the Feishu outbox forever.
+  return await client.inboxThread.findFirst({
+    where: { channel: "FEISHU", externalChatId: chatId, sessionId: null },
+    select: { id: true },
+  }) ?? await client.inboxThread.create({
+    data: { channel: "FEISHU", externalChatId: chatId },
+    select: { id: true },
+  });
+};
 
 const id = z.string().min(1);
 const fence = z.string().min(1);
@@ -3284,9 +3331,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
     const now = new Date();
-    const state = await db.$transaction(async (tx) => {
+    const state = await withRunnerBackendStateTransaction(db, async (tx, attempt) => {
       const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
-      const previousAvailability = readStoredCliAvailability(previous?.capabilities);
+      await options.runnerBackendStateAfterRead?.({ route: "availability", runner: body.runner, attempt });
+      let previousAvailability = null;
+      try {
+        previousAvailability = readStoredCliAvailability(previous?.capabilities);
+      } catch (error: unknown) {
+        console.error(`Replacing malformed ${body.runner} runner CLI availability`, error);
+      }
       const availability = nextStoredCliAvailability(body, previousAvailability, now);
       if (!body.available) {
         const outageStarted = previousAvailability?.available !== false;
@@ -3308,11 +3361,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           data: { failureReason: availability.reason },
         });
         if (outageStarted) {
-          const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-          const thread = chatId ? (
-            await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-            ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
-          ) : null;
+          const thread = await operatorThread(tx, process.env.FEISHU_DEFAULT_CHAT_ID);
           await tx.inboxMessage.create({ data: {
             from: "AGENT",
             kind: "TEXT",
@@ -3347,55 +3396,53 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
       }
       return available;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return context.json(state);
   });
 
   app.post("/runner/preflight", async (context) => {
     const body = await readJson(context.req.raw, preflightInput);
     const now = new Date();
-    const previous = await db.runnerBackendState.findUnique({ where: { runner: body.runner } });
-    const state = await db.runnerBackendState.upsert({
-      where: { runner: body.runner },
-      create: {
-        runner: body.runner,
-        cliVersion: body.cliVersion ?? null,
-        authMode: body.authMode ?? null,
-        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
-        lastPreflightAt: now,
-        lastPreflightOk: body.ok,
-        circuitOpen: !body.ok,
-        circuitReason: body.ok ? null : body.error ?? "Preflight failed",
-        circuitOpenedAt: body.ok ? null : now,
-      },
-      update: {
-        cliVersion: body.cliVersion ?? null,
-        authMode: body.authMode ?? null,
-        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
-        lastPreflightAt: now,
-        lastPreflightOk: body.ok,
-        ...(body.ok
-          ? { circuitOpen: false, circuitReason: null, circuitOpenedAt: null, consecutiveAuthFailures: 0 }
-          : { circuitOpen: true, circuitReason: body.error ?? "Preflight failed", circuitOpenedAt: now }),
-      },
-    });
-    if (!body.ok && !previous?.circuitOpen) {
-      // Attach the operator chat so the alert can actually leave the web Inbox;
-      // threadless messages are skipped by the Feishu outbox forever.
-      const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-      const thread = chatId ? (
-        await db.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
-        ?? await db.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
-      ) : null;
-      await db.inboxMessage.create({
-        data: {
-          from: "AGENT",
-          kind: "TEXT",
-          body: `${body.runner.toLowerCase()} runner preflight failed and its circuit is open: ${body.error ?? "unknown error"}`,
-          ...(thread ? { threadId: thread.id } : {}),
+    const state = await withRunnerBackendStateTransaction(db, async (tx, attempt) => {
+      const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
+      await options.runnerBackendStateAfterRead?.({ route: "preflight", runner: body.runner, attempt });
+      const updated = await tx.runnerBackendState.upsert({
+        where: { runner: body.runner },
+        create: {
+          runner: body.runner,
+          cliVersion: body.cliVersion ?? null,
+          authMode: body.authMode ?? null,
+          capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
+          lastPreflightAt: now,
+          lastPreflightOk: body.ok,
+          circuitOpen: !body.ok,
+          circuitReason: body.ok ? null : body.error ?? "Preflight failed",
+          circuitOpenedAt: body.ok ? null : now,
+        },
+        update: {
+          cliVersion: body.cliVersion ?? null,
+          authMode: body.authMode ?? null,
+          capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
+          lastPreflightAt: now,
+          lastPreflightOk: body.ok,
+          ...(body.ok
+            ? { circuitOpen: false, circuitReason: null, circuitOpenedAt: null, consecutiveAuthFailures: 0 }
+            : { circuitOpen: true, circuitReason: body.error ?? "Preflight failed", circuitOpenedAt: now }),
         },
       });
-    }
+      if (!body.ok && !previous?.circuitOpen) {
+        const thread = await operatorThread(tx, process.env.FEISHU_DEFAULT_CHAT_ID);
+        await tx.inboxMessage.create({
+          data: {
+            from: "AGENT",
+            kind: "TEXT",
+            body: `${body.runner.toLowerCase()} runner preflight failed and its circuit is open: ${body.error ?? "unknown error"}`,
+            ...(thread ? { threadId: thread.id } : {}),
+          },
+        });
+      }
+      return updated;
+    });
     return context.json(state);
   });
 
