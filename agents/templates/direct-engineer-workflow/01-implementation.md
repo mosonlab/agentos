@@ -1,6 +1,6 @@
 ---
 stepIndex: 1
-agent: senior-dev
+agent: senior-dev-luna
 approvalGate: false
 outputKind: implementation
 attachmentsFromPrevious: false
