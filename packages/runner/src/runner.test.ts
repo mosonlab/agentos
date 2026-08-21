@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -163,9 +163,10 @@ const SECRETS = [
   ["", "Users", "someone", ".codex", "auth.json"].join("/"),
 ] as const;
 
-const codexStub = (log: string, authFails = false): string => [
+const codexStub = (log: string, authFails = false, configReportPath?: string): string => [
   "#!/bin/sh",
   `echo "$@" >> ${log}`,
+  ...(configReportPath ? [`if [ -n "$CODEX_HOME" ]; then printf '%s' "$CODEX_HOME" > ${configReportPath}; fi`] : []),
   'case "$1" in',
   '  --version) echo "codex-cli 0.147.0"; exit 0 ;;',
   '  exec)',
@@ -200,10 +201,69 @@ const seedRemote = async (root: string): Promise<string> => {
   return remote;
 };
 
+const seedCodexAuth = async (root: string): Promise<void> => {
+  await mkdir(join(root, ".codex"), { recursive: true });
+  await writeFile(join(root, ".codex", "auth.json"), '{"tokens":"test-only"}\n', { mode: 0o600 });
+};
+
+const removeRetainedSessionConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
+  const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
+  if (retained) await rm(retained, { recursive: true, force: true });
+};
+
+test("Codex provision auth failure is PROVISION, retains its root, and never spawns the CLI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-provision-failure-"));
+  try {
+    const remote = await seedRemote(root);
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(join(root, "argv.log")));
+    await chmod(binary, 0o755);
+    const configured = codexOnly(join(root, "workspaces"), root, binary);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const originalPreflight = adapters.CODEX.preflight;
+    const originalStart = adapters.CODEX.start;
+    let preflightCalls = 0;
+    let startCalls = 0;
+    adapters.CODEX.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
+    adapters.CODEX.start = (async () => { startCalls += 1; throw new Error("CLI must not spawn"); }) as typeof originalStart;
+    try {
+      await executeClaim(configured, {
+        ...mechanicalClaim,
+        executionMode: "agent",
+        runner: "CODEX",
+        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+        session: { id: "session-codex-provision-failure" },
+      });
+    } finally {
+      adapters.CODEX.preflight = originalPreflight;
+      adapters.CODEX.start = originalStart;
+    }
+    assert.equal(preflightCalls, 0);
+    assert.equal(startCalls, 0);
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal((completion.body.failureEnvelope as { phase?: string }).phase, "PROVISION");
+    assert.match(String(completion.body.failureReason), /Unable to establish Codex authentication/u);
+    const retained = /session CLI config retained at (.+)$/u.exec(String(completion.body.failureReason))?.[1];
+    assert.ok(retained);
+    assert.equal((await stat(retained)).isDirectory(), true);
+    await rm(retained, { recursive: true, force: true });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /** The config the two tests below share: a real Codex stub, and nothing at all
  *  where the other two CLIs would be. */
 const codexOnly = (workspaceRoot: string, root: string, codexBinary: string): RunnerConfig => ({
   ...config(workspaceRoot),
+  home: root,
   path: process.env.PATH ?? "/usr/bin:/bin",
   binaries: { CLAUDE: join(root, "no-claude-here"), CODEX: codexBinary, PI: join(root, "no-pi-here") },
 });
@@ -358,10 +418,12 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
   const root = await mkdtemp(join(tmpdir(), "runner-codex-claim-"));
   try {
     const log = join(root, "codex-argv.log");
+    const configReportPath = join(root, "successful-config-root.txt");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, codexStub(log));
+    await writeFile(binary, codexStub(log, false, configReportPath));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -379,6 +441,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: { id: "session-codex-claim" },
     });
 
     const started = posts.find((post) => post.path.endsWith("/start"));
@@ -389,6 +452,8 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     assert.ok(completion);
     assert.equal(completion.body.terminalSuccess, true);
     assert.equal(completion.body.failureClass ?? null, null);
+    const configRoot = await readFile(configReportPath, "utf8");
+    await assert.rejects(stat(configRoot), /ENOENT/u, "successful Codex runs must remove CODEX_HOME");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -412,10 +477,12 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
   const root = await mkdtemp(join(tmpdir(), "runner-codex-secret-"));
   try {
     const log = join(root, "codex-argv.log");
+    const configReportPath = join(root, "failed-config-root.txt");
     const binary = join(root, "codex.sh");
-    await writeFile(binary, codexStub(log, true));
+    await writeFile(binary, codexStub(log, true, configReportPath));
     await chmod(binary, 0o755);
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -441,10 +508,13 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: { id: "session-codex-secret" },
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
     assert.equal(completion.body.terminalSuccess, false);
     assert.equal(completion.body.failureClass, "AUTH_REQUIRED");
+    const configRoot = await readFile(configReportPath, "utf8");
+    assert.equal((await stat(configRoot)).isDirectory(), true, "failed Codex runs retain CODEX_HOME");
 
     // Nothing the CLI printed is anywhere in what this process sent — not in the
     // preflight report, not in the run's failure envelope, not in its events.
@@ -454,6 +524,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     assert.deepEqual((await readFile(log, "utf8")).trim().split("\n").slice(0, 4), [
       "--version", "exec --help", "exec resume --help", "login status",
     ]);
+    await removeRetainedSessionConfig(completion);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -463,6 +534,7 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
   const root = await mkdtemp(join(tmpdir(), "runner-codex-absent-"));
   try {
     const remote = await seedRemote(root);
+    await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -483,10 +555,12 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: { id: "session-codex-absent" },
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
     assert.equal(completion.body.failureClass, "BINARY_NOT_FOUND");
     assert.ok(!JSON.stringify(posts).includes("ENOENT"));
+    await removeRetainedSessionConfig(completion);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

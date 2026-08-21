@@ -44,8 +44,8 @@ import {
 } from "./envelope.js";
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
 import {
-  captureWorkspaceResult, cleanupAgentScratch, cleanupWorkspace, provisionAgentScratch, provisionWorkspace,
-  reuseWorkspace, workspaceEnvironment, writeSessionCredentials, type AgentScratch, type Workspace,
+  captureWorkspaceResult, cleanupAgentScratch, cleanupWorkspace, provisionAgentScratch, provisionSessionConfig,
+  provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials, type AgentScratch, type Workspace,
 } from "./workspace.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
@@ -87,7 +87,16 @@ const preflightEvidence = (message: string): ExitEvidence => ({
   stderr: message,
 });
 
-export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Promise<void> => {
+export type ExecuteClaimDependencies = {
+  provisionSessionConfig?: typeof provisionSessionConfig;
+  cleanupAgentScratch?: typeof cleanupAgentScratch;
+};
+
+export const executeClaim = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  dependencies: ExecuteClaimDependencies = {},
+): Promise<void> => {
   const adapter = adapters[claim.runner];
   let workspace: Workspace | null = null;
   let scratch: AgentScratch | null = null;
@@ -98,6 +107,11 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
   let fencingRejected = false;
   let waitingInbox = false;
   let budgetReason: string | null = null;
+  // Codex's root is retained until the run is known to have succeeded, so a
+  // provisioning or execution failure can be inspected and resumed without
+  // ever falling back to the host ~/.codex.
+  let retainSessionConfig = false;
+  let sessionConfigPath: string | null = null;
   // Where the run is, for the failure envelope. The API reads this to decide
   // whether a failed attempt spends the task's budget: only EXECUTE is the
   // agent's own work, everything else is this process's plumbing.
@@ -201,7 +215,10 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     }, config.heartbeatIntervalMs);
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
-    scratch = await provisionAgentScratch(config);
+    scratch = await provisionAgentScratch(config, claim.session.id);
+    sessionConfigPath = scratch.configRoot;
+    retainSessionConfig = claim.runner === "CODEX";
+    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, { reuse: claim.resume !== null });
     const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
@@ -217,7 +234,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       await completeRun(config, claim, {
         ...evidence,
         failureClass: classified.failureClass,
-        failureReason: preflight.error ?? "Preflight failed",
+        failureReason: `${preflight.error ?? "Preflight failed"}${claim.runner === "CODEX" && sessionConfigPath ? `; session CLI config retained at ${sessionConfigPath}` : ""}`,
         retryable: classified.retryable,
         externalFailure: true,
         failureEnvelope: buildFailureEnvelope({
@@ -362,8 +379,22 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
           .catch(() => undefined);
       }
     }
-    const succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
-    const classified = succeeded ? null : delivery?.failureClass
+    let succeeded = executionSucceeded && delivery?.pushStatus !== "FAILED";
+    retainSessionConfig = !succeeded;
+    let scratchCleanupFailure: string | null = null;
+    if (scratch) {
+      try {
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig });
+        scratch = null;
+      } catch (error: unknown) {
+        scratchCleanupFailure = errorMessage(error);
+        succeeded = false;
+        retainSessionConfig = true;
+      }
+    }
+    const classified = scratchCleanupFailure
+      ? { failureClass: "PROTOCOL_ERROR" as const, retryable: false }
+      : succeeded ? null : delivery?.failureClass
       ? { failureClass: delivery.failureClass, retryable: false }
       : adapter.classifyError(evidence);
     // Destructured off rather than spread: `failure` holds a live error object
@@ -385,7 +416,11 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       terminationReason: budgetReason ?? evidence.terminationReason,
       ...(classified ? { failureClass: budgetReason ? "BUDGET_EXCEEDED" : classified.failureClass, retryable: budgetReason ? false : classified.retryable } : {}),
       // A salvage push failure must not mask why the run itself failed.
-      ...(!succeeded ? { failureReason: budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence) } : {}),
+      ...(!succeeded ? {
+        failureReason: `${scratchCleanupFailure
+          ? `Session CLI config cleanup failed: ${scratchCleanupFailure}`
+          : budgetReason ?? (executionSucceeded ? delivery?.pushError : null) ?? failureReasonFromEvidence(evidence)}${claim.runner === "CODEX" && sessionConfigPath ? `; session CLI config retained at ${sessionConfigPath}` : ""}`,
+      } : {}),
       output: outputTail(evidence),
       // Only a failure carries one: the envelope is the account of what went
       // wrong, and `executionSucceeded` decides which side of the agent/plumbing
@@ -403,6 +438,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       ...gitResult,
       ...deliveryPayload,
       ...finishedCleanup,
+      ...(scratchCleanupFailure ? { cleanupStatus: "FAILED" as const, cleanupFailureReason: scratchCleanupFailure } : {}),
     });
   } catch (error: unknown) {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -422,6 +458,20 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     const evidence = preflightEvidence(message);
     const classified = adapter.classifyError(evidence);
     const finishedCleanup = await cleanup(config, workspace, config.failedWorkspaceRetention > 0);
+    let failureReason = `${message}${claim.runner === "CODEX" && sessionConfigPath ? `; session CLI config retained at ${sessionConfigPath}` : ""}`;
+    let scratchCleanupFailure: string | null = null;
+    if (scratch) {
+      try {
+        // An exception is a failed run, so the Codex root must remain available
+        // for diagnosis or resume. Claude has no provisioned config root, and
+        // cleanupAgentScratch safely removes its absent path.
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: claim.runner === "CODEX" });
+        scratch = null;
+      } catch (cleanupError: unknown) {
+        scratchCleanupFailure = errorMessage(cleanupError);
+        failureReason = `${failureReason}; scratch cleanup failed: ${scratchCleanupFailure}`;
+      }
+    }
     await appendActivity(config, claim, message, { stream: "stderr" }).catch(() => undefined);
     await completeRun(config, claim, {
       exitCode: evidence.exitCode,
@@ -430,7 +480,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       terminalSuccess: false,
       terminationReason: RUNNER_EXCEPTION_REASON,
       failureClass: classified.failureClass,
-      failureReason: message,
+      failureReason,
       retryable: classified.retryable,
       externalFailure: true,
       failureEnvelope: runnerExceptionEnvelope({ phase, evidence, runnerClass: classified.failureClass, error }),
@@ -441,13 +491,17 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
       output: producedOutput,
       ...(workspace ? { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha } : {}),
       ...finishedCleanup,
+      ...(scratchCleanupFailure ? { cleanupStatus: "FAILED" as const, cleanupFailureReason: scratchCleanupFailure } : {}),
     });
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     lease?.close();
     // Throwaway by construction, so losing it costs nothing and leaving it
     // behind would leak a directory per run.
-    if (scratch) await cleanupAgentScratch(config, scratch).catch(() => undefined);
+    if (scratch) {
+      await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig })
+        .catch((error: unknown) => console.error(`Agent scratch cleanup failed${claim.runner === "CODEX" ? `; session config ${scratch?.configRoot} retained or may require manual recovery` : ""}`, error));
+    }
   }
 };
 

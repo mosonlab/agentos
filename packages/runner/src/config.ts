@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { hostname, homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { requireLocalApiDestination } from "./local-origin.js";
 
@@ -24,6 +25,10 @@ export type RunnerConfig = {
   heartbeatIntervalMs: number;
   path: string;
   home: string;
+  /** Proxy variables captured once, when the daemon starts. */
+  proxyEnvironment?: NodeJS.ProcessEnv;
+  /** Repository-owned baseline used to provision Codex session config roots. */
+  sessionConfigBaselineRoot?: string;
   workspaceRoot: string;
   failedWorkspaceRetention: number;
   workspaceReclaimIntervalMs: number;
@@ -32,6 +37,14 @@ export type RunnerConfig = {
   runAsPrefix: string[];
   binaries: Record<RunnerKind, string>;
 };
+
+export const defaultSessionConfigBaselineRoot = (): string =>
+  fileURLToPath(new URL("../assets/session-config-baseline", import.meta.url));
+
+export const runnerProxyEnvironment = (): NodeJS.ProcessEnv => Object.fromEntries(
+  ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]
+    .flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]!]]),
+);
 
 const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
 
@@ -44,6 +57,7 @@ const positiveInteger = (name: string, value: string): number => {
 
 export const loadRunnerConfig = (): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
+  const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
   // First, and before this function returns anything a caller could dial: the
   // runner's own index.ts builds the client, the preflight and the poll loop out
   // of this object, so a destination refused here is refused before any DNS
@@ -59,6 +73,8 @@ export const loadRunnerConfig = (): RunnerConfig => {
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
     path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
+    proxyEnvironment: runnerProxyEnvironment(),
+    sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     // How often this runner asks the control plane which of its directories may
@@ -76,7 +92,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     // crash. None of these routes long-poll — claim returns 204 when there is
     // no work — so a flat ceiling is safe.
     apiTimeoutMs: positiveInteger("RUNNER_API_TIMEOUT_MS", process.env.RUNNER_API_TIMEOUT_MS ?? "10000"),
-    runAsPrefix: splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? ""),
+    runAsPrefix,
     binaries: {
       CLAUDE: process.env.CLAUDE_BINARY ?? "claude",
       CODEX: process.env.CODEX_BINARY ?? "codex",

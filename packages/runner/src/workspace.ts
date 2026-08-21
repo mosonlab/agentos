@@ -1,9 +1,10 @@
-import { appendFile, chmod, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
-import type { RunnerConfig } from "./config.js";
+import { defaultSessionConfigBaselineRoot, runnerProxyEnvironment, type RunnerConfig, type RunnerKind } from "./config.js";
 import { runCommand, type CommandOptions } from "./exec.js";
 import {
   CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
@@ -59,11 +60,15 @@ const command: WorkspaceCommandExecutor = (
   options: CommandOptions = {},
 ): Promise<string> => runCommand(config.runAsPrefix, executable, args, cwd, env, options);
 
-export const workspaceEnvironment = (config: Pick<RunnerConfig, "path" | "home" | "runAsPrefix">): NodeJS.ProcessEnv => ({
+export const workspaceEnvironment = (
+  config: Pick<RunnerConfig, "path" | "home" | "runAsPrefix">
+    & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
+): NodeJS.ProcessEnv => ({
   PATH: config.path,
   HOME: config.home,
   LANG: "C.UTF-8",
   GIT_TERMINAL_PROMPT: "0",
+  ...(config.proxyEnvironment ?? runnerProxyEnvironment()),
   // macOS Keychain lookups (claude CLI auth) fail without the login identity.
   // Only the daemon's own identity is meant here: under a run-as prefix the
   // child is a different account, and telling it USER=<daemon owner> while
@@ -75,10 +80,26 @@ export const workspaceEnvironment = (config: Pick<RunnerConfig, "path" | "home" 
 });
 
 export type AgentScratch = {
-  /** The disposable directory both roots live in; removed when the run ends. */
+  /** The disposable directory both runner roots live in; removed when the run ends. */
   base: string;
   workspaceRoot: string;
   stateDir: string;
+  /** A per-session Codex config root; it is outside `base` so failures can retain it. */
+  configRoot: string;
+};
+
+export const sessionConfigBaselineRoot = defaultSessionConfigBaselineRoot;
+
+const sessionConfigParent = async (): Promise<string> => {
+  const parent = join(await realpath(tmpdir()), "agentos-session-config");
+  await mkdir(parent, { recursive: true, mode: 0o711 });
+  await chmod(parent, 0o711);
+  return parent;
+};
+
+const sessionConfigPath = async (sessionId: string): Promise<string> => {
+  if (!/^[A-Za-z0-9_-]+$/u.test(sessionId)) throw new Error(`Invalid session id for CLI config root: ${sessionId}`);
+  return join(await sessionConfigParent(), sessionId);
 };
 
 /**
@@ -98,10 +119,13 @@ export type AgentScratch = {
  * because the control plane also refuses aliased paths and symlinked path
  * components (on macOS os.tmpdir() sits under /var -> /private/var).
  */
-export const provisionAgentScratch = async (config: RunnerConfig): Promise<AgentScratch> => {
+export const provisionAgentScratch = async (config: RunnerConfig, sessionId = `anonymous-${randomUUID()}`): Promise<AgentScratch> => {
   const base = await realpath(await mkdtemp(join(tmpdir(), "agentos-run-scratch-")));
   const workspaceRoot = join(base, "workspaces");
   const stateDir = join(base, "control-plane");
+  // Deliberately name the root before it exists. If baseline or auth seeding
+  // fails, the caller can report and retain the exact path it attempted.
+  const configRoot = await sessionConfigPath(sessionId);
   if (config.runAsPrefix.length > 0) {
     // The session runs as another principal: it has to own what it writes, so
     // let it traverse the base and create both directories itself.
@@ -115,14 +139,89 @@ export const provisionAgentScratch = async (config: RunnerConfig): Promise<Agent
       await chmod(directory, 0o700);
     }
   }
-  return { base, workspaceRoot, stateDir };
+  return { base, workspaceRoot, stateDir, configRoot };
 };
 
-export const cleanupAgentScratch = async (config: RunnerConfig, scratch: AgentScratch): Promise<void> => {
+export const cleanupAgentScratch = async (
+  config: RunnerConfig,
+  scratch: AgentScratch,
+  options: { retainConfigRoot?: boolean } = {},
+): Promise<void> => {
   if (config.runAsPrefix.length > 0) {
-    await command(config, "/bin/rm", ["-rf", "--", scratch.workspaceRoot, scratch.stateDir], scratch.base, workspaceEnvironment(config));
+    await command(config, "/bin/rm", [
+      "-rf", "--", scratch.workspaceRoot, scratch.stateDir,
+      ...(options.retainConfigRoot ? [] : [scratch.configRoot]),
+    ], scratch.base, workspaceEnvironment(config));
+  } else {
+    await Promise.all([
+      rm(scratch.workspaceRoot, { recursive: true, force: true }),
+      rm(scratch.stateDir, { recursive: true, force: true }),
+      ...(options.retainConfigRoot ? [] : [rm(scratch.configRoot, { recursive: true, force: true })]),
+    ]);
   }
   await rm(scratch.base, { recursive: true, force: true });
+};
+
+const codexBaselineFile = (config: RunnerConfig): string =>
+  join(config.sessionConfigBaselineRoot ?? sessionConfigBaselineRoot(), "codex", "config.toml");
+
+/**
+ * Provision only the configuration Codex is allowed to see. The repository
+ * baseline contributes config.toml; the runner host contributes auth.json and
+ * nothing else. Claude deliberately has no config-home provisioner: its
+ * authentication remains the operator Keychain flow and its settings sources
+ * are selected in the adapter argv.
+ */
+export const provisionSessionConfig = async (
+  config: RunnerConfig,
+  runner: RunnerKind,
+  scratch: AgentScratch,
+  options: { reuse?: boolean } = {},
+): Promise<void> => {
+  if (runner !== "CODEX") return;
+  if (options.reuse) {
+    try {
+      const info = await lstat(scratch.configRoot);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("existing session config root is not a real directory");
+      return;
+    } catch (error: unknown) {
+      throw new Error(`Unable to reuse Codex session CLI config root ${scratch.configRoot}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+  }
+
+  const baseline = codexBaselineFile(config);
+  try {
+    if (config.runAsPrefix.length > 0) {
+      await command(
+        config,
+        "/bin/sh",
+        ["-c", 'umask 077; mkdir "$1"; cp "$2" "$1/config.toml"; chmod 700 "$1"; chmod 600 "$1/config.toml"', "agentos-codex-config", scratch.configRoot, baseline],
+        scratch.base,
+        workspaceEnvironment(config),
+      );
+    } else {
+      await mkdir(scratch.configRoot, { mode: 0o700 });
+      await copyFile(baseline, join(scratch.configRoot, "config.toml"));
+      await chmod(scratch.configRoot, 0o700);
+      await chmod(join(scratch.configRoot, "config.toml"), 0o600);
+    }
+  } catch (error: unknown) {
+    throw new Error(`Unable to create session CLI config root ${scratch.configRoot} from baseline ${baseline}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+
+  const source = join(config.home, ".codex", "auth.json");
+  const destination = join(scratch.configRoot, "auth.json");
+  try {
+    if (config.runAsPrefix.length > 0) {
+      await command(config, "/bin/cp", [source, destination], scratch.base, workspaceEnvironment(config));
+      await command(config, "/bin/chmod", ["600", destination], scratch.base, workspaceEnvironment(config));
+    } else {
+      await copyFile(source, destination);
+      await chmod(destination, 0o600);
+    }
+  } catch (error: unknown) {
+    throw new Error(`Unable to establish Codex authentication in ${scratch.configRoot} from ${source}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 };
 
 export const provisionWorkspace = async (
