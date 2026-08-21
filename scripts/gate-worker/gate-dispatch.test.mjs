@@ -12,7 +12,13 @@
 // exactly that window as a state on disk, deterministically, with no timing to
 // lose.
 //
-// The second is that a verdict and the absence of a verdict never share an exit
+// The second is that a slot which is busy and a slot whose lock cannot be
+// operated are different answers. `gate_slot_try` returns 1 for the first and 2
+// for the second, and the dispatcher spends a timeout waiting only on the
+// first: a lock nobody can take does not free up, and reporting it as a full
+// queue sent operators to wait for a slot that was never going to open.
+//
+// The third is that a verdict and the absence of a verdict never share an exit
 // code. Those cases run the dispatcher itself against a throwaway repository
 // whose merge-gate.sh, mirror-push.sh and remote-gate.sh are stubs, because
 // what is being proved is which code comes back from which failure, and a real
@@ -98,7 +104,8 @@ test("refuses a lock that names no pid rather than reclaiming it", (t) => {
   const root = slotRoot(t);
   writeFileSync(lockFile(root, "remote-1"), "");
   const result = runBash(`gate_slot_try "${root}" remote-1`);
-  assert.equal(result.status, 1);
+  // 2, not 1: nobody can take this slot and no amount of waiting changes that.
+  assert.equal(result.status, 2);
   assert.match(result.stderr, /names no pid/);
   assert.ok(readFileSync(lockFile(root, "remote-1"), "utf8") === "");
 });
@@ -107,7 +114,7 @@ test("refuses a lock whose contents are not a pid", (t) => {
   const root = slotRoot(t);
   writeFileSync(lockFile(root, "remote-2"), "held by somebody\n");
   const result = runBash(`gate_slot_try "${root}" remote-2`);
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.match(result.stderr, /names no pid/);
 });
 
@@ -118,7 +125,9 @@ test("refuses an old-format lock directory instead of ignoring it", (t) => {
   const root = slotRoot(t);
   mkdirSync(join(root, "local.lock"));
   const result = runBash(`gate_slot_try "${root}" local`);
-  assert.equal(result.status, 1);
+  // Broken rather than busy: this implementation cannot tell whether an old
+  // dispatcher is holding it, and "cannot tell" is not something to wait out.
+  assert.equal(result.status, 2);
   assert.match(result.stderr, /old-format slot lock/);
 });
 
@@ -162,6 +171,33 @@ test("release leaves a lock that names somebody else", (t) => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /not releasing slot local/);
   assert.equal(readFileSync(lockFile(root, "local"), "utf8").trim(), String(process.pid));
+});
+
+test("a slot root that cannot be written to is broken, not busy", (t) => {
+  // The regression. A read-only cache directory used to return 1 — the same
+  // answer as "somebody is running a gate" — and the dispatcher then polled a
+  // slot that could never be taken until its timeout and reported a full queue.
+  const root = slotRoot(t);
+  chmodSync(root, 0o555);
+  // Restored inline rather than in an after hook: the hook that removes the
+  // scratch directory was registered first and would run against a directory
+  // nothing is allowed to delete from.
+  const result = runBash(`gate_slot_try "${root}" local`);
+  chmodSync(root, 0o755);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /could not write a lock under/);
+});
+
+test("busy and broken are different return values, not different messages", (t) => {
+  // Stated as one assertion because everything downstream depends on it: the
+  // dispatcher branches on the number, never on the text.
+  const root = slotRoot(t);
+  writeFileSync(lockFile(root, "local"), `${process.pid}\n`);
+  writeFileSync(lockFile(root, "remote-1"), "not a pid\n");
+  const busy = runBash(`gate_slot_try "${root}" local`);
+  const broken = runBash(`gate_slot_try "${root}" remote-1`);
+  assert.equal(busy.status, 1);
+  assert.equal(broken.status, 2);
 });
 
 test("sixteen concurrent claimers on one slot produce exactly one holder", (t) => {
@@ -373,6 +409,112 @@ test("every slot busy times out at 75 with no verdict", (t) => {
   );
   assert.equal(result.status, 75, result.stderr);
   assert.match(result.stdout, /GATE DISPATCH: NO SLOT/);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+test("locks that cannot be operated are 76 at once, not 75 after the timeout", (t) => {
+  // The regression, and the reason 75 and 76 exist separately. Every slot lock
+  // here is unusable — the slot root is read-only — and the old helper answered
+  // "busy" for that, so the dispatcher polled until its timeout and then said
+  // GATE DISPATCH: NO SLOT, which told the operator to come back later for a
+  // slot that was never going to open. There is nothing to wait for, so this
+  // must come back immediately and say what to clear.
+  const repo = fixtureRepo(t, {});
+  const cache = join(scratch(t), "cache");
+  const slots = join(cache, "gate-dispatch");
+  mkdirSync(slots, { recursive: true });
+  chmodSync(slots, 0o555);
+  const started = Date.now();
+  const result = spawnSync(
+    "bash",
+    [
+      join(repo.root, "scripts/gate-worker/gate-dispatch.sh"),
+      repo.head,
+      // One minute, not the default hour: long enough that polling is
+      // unmistakable in the elapsed time, short enough that a regression here
+      // fails the suite instead of hanging it.
+      "--timeout-minutes",
+      "1",
+    ],
+    {
+      cwd: repo.root,
+      encoding: "utf8",
+      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
+    },
+  );
+  chmodSync(slots, 0o755);
+  assert.equal(result.status, 76, result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: /m);
+  assert.doesNotMatch(result.stdout, /GATE DISPATCH: NO SLOT/);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+  // It did not wait: a --timeout-minutes 5 run that returns in seconds is the
+  // observable difference between "nothing can be locked" and "everything is
+  // busy".
+  assert.ok(Date.now() - started < 20_000, "it polled instead of answering at once");
+});
+
+test("one broken lock does not cost the dispatch a slot that is free", (t) => {
+  // The other half: a broken lock must not be contagious. remote-1 is
+  // unusable, the local slot is ineligible because the tree is dirty, and
+  // remote-2 is free — so the gate runs in remote-2 and comes back with a
+  // verdict rather than an errand.
+  const repo = fixtureRepo(t, {});
+  writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
+  const cache = join(scratch(t), "cache");
+  const slots = join(cache, "gate-dispatch");
+  mkdirSync(slots, { recursive: true });
+  mkdirSync(join(slots, "remote-1.lock"));
+  const result = spawnSync(
+    "bash",
+    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
+    {
+      cwd: repo.root,
+      encoding: "utf8",
+      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS/);
+  assert.match(result.stderr, /remote-2/);
+});
+
+test("busy plus broken waits out the timeout and then reports 76, not 75", (t) => {
+  // The mixed case. One slot is genuinely busy, so waiting is justified and the
+  // dispatch must not give up early — but when the wait ends empty, the answer
+  // is not "the queue was full": two of the three slots were never available to
+  // anybody, and 75 would send the operator to re-dispatch into the same broken
+  // locks. Nothing may be taken here either, so the capacity limit holds.
+  const repo = fixtureRepo(t, {});
+  const cache = join(scratch(t), "cache");
+  const slots = join(cache, "gate-dispatch");
+  mkdirSync(slots, { recursive: true });
+  writeFileSync(join(slots, "local.slot"), `${process.pid}\n`);
+  mkdirSync(join(slots, "remote-1.lock"));
+  mkdirSync(join(slots, "remote-2.lock"));
+  const result = spawnSync(
+    "bash",
+    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head, "--timeout-minutes", "0"],
+    {
+      cwd: repo.root,
+      encoding: "utf8",
+      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
+    },
+  );
+  assert.equal(result.status, 76, result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: /m);
+  assert.doesNotMatch(result.stdout, /GATE DISPATCH: NO SLOT/);
+  assert.equal(readFileSync(join(slots, "local.slot"), "utf8").trim(), String(process.pid));
+});
+
+test("a gate killed by SIGKILL comes back as 137 with no verdict line", (t) => {
+  // 137 is not in the table's named codes and is not supposed to be: SIGKILL
+  // cannot be trapped, so merge-gate.sh prints nothing and the death shows up
+  // as 128+9. What matters is that it is passed through as itself — a reader
+  // sees no MERGE GATE line and must read the silence as "no verdict", never as
+  // a pass, and never as the FAIL that a rewritten code would have implied.
+  const repo = fixtureRepo(t, { mergeGate: "kill -9 $$" });
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 137);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
 });
 

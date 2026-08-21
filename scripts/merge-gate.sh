@@ -51,7 +51,7 @@
 # assuming it, in this order: --master <oid>, AGENTOS_MASTER_OID, `git ls-remote
 # --symref origin HEAD` when there is an origin to ask, and otherwise this
 # repository's own refs for the default branch — which is the gate worker, a
-# worktree of a bare mirror with no credential and no route to GitHub, whose
+# worktree of a bare mirror with no credential and no remote to fetch from, whose
 # refs are verbatim copies of the operator's own push. The branch's name is read
 # the same way and is not written down here: this repository's is `main`.
 # Whichever it is, the oid and where it came from are printed in the preflight

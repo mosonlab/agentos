@@ -135,10 +135,20 @@ gate_valid_ref() {
 # is left alone even though pids are recycled: waiting out a slot that was
 # really free is the only direction this check is allowed to be wrong in.
 
+# Three outcomes, not two. "Somebody is running a gate in this slot" and "this
+# slot's lock cannot be operated" are different facts and the caller acts on
+# them differently: the first is worth waiting out, the second never resolves on
+# its own. Collapsing them is how a read-only cache directory turned into
+# "every slot busy" and a 75 that said the queue was full when nothing had ever
+# been able to take a lock.
+GATE_SLOT_HELD=0
+GATE_SLOT_BUSY=1
+GATE_SLOT_BROKEN=2
+
 gate_slot_path() { printf '%s/%s.slot' "$1" "$2"; }
 
-# 0: the slot is now held by this process. 1: it is not, and the reason is on
-# stderr whenever it is anything but "somebody else is running a gate".
+# 0 held, 1 busy, 2 broken. Every non-zero return prints its reason on stderr
+# except the ordinary one, which is that another dispatcher holds the slot.
 gate_slot_try() {
   local root="$1" slot="$2"
   local lock staged holder witness observed
@@ -148,17 +158,24 @@ gate_slot_try() {
   # see and which an older dispatcher may still be holding. Refusing is the only
   # safe reading: the two implementations do not exclude each other, so treating
   # it as absent is how three slots become six.
+  # Broken rather than busy: an old dispatcher may or may not be holding it, and
+  # this implementation cannot tell which. "I cannot determine whether this slot
+  # is occupied" is a mechanism failure that a person has to clear, not a queue
+  # to wait in.
   if [ -d "${root}/${slot}.lock" ]; then
     printf 'gate-slot: %s/%s.lock is an old-format slot lock; clear it once no old gate-dispatch.sh is running\n' \
       "$root" "$slot" >&2
-    return 1
+    return "$GATE_SLOT_BROKEN"
   fi
 
   staged="${root}/.staged.${slot}.$$.${RANDOM}"
   if ! printf '%s\n' "$$" > "$staged" 2>/dev/null; then
-    printf 'gate-slot: could not write a lock under %s\n' "$root" >&2
+    # A slot root that cannot be written to — read-only, full, wrong owner — is
+    # not a busy slot. Nothing will free up, so saying "busy" here is what makes
+    # a dispatcher poll for an hour and then report a full queue.
+    printf 'gate-slot: could not write a lock under %s; the slot root is not usable\n' "$root" >&2
     rm -f -- "$staged" 2>/dev/null || true
-    return 1
+    return "$GATE_SLOT_BROKEN"
   fi
 
   if ln "$staged" "$lock" 2>/dev/null; then
@@ -170,7 +187,7 @@ gate_slot_try() {
   # is nothing to diagnose and the next poll will take it.
   if [ ! -e "$lock" ]; then
     rm -f -- "$staged"
-    return 1
+    return "$GATE_SLOT_BUSY"
   fi
 
   holder="$(cat "$lock" 2>/dev/null || true)"
@@ -182,20 +199,23 @@ gate_slot_try() {
       printf 'gate-slot: %s names no pid (%s); refusing to reclaim it — clear it by hand once no gate is running\n' \
         "$lock" "${holder:-empty}" >&2
       rm -f -- "$staged"
-      return 1 ;;
+      return "$GATE_SLOT_BROKEN" ;;
   esac
 
   if kill -0 "$holder" 2>/dev/null; then
     rm -f -- "$staged"
-    return 1
+    return "$GATE_SLOT_BUSY"
   fi
 
   witness="${root}/.reclaim.${slot}.${holder}"
   if ! ln "$lock" "$witness" 2>/dev/null; then
+    # Busy, not broken: winning this link is how one of two dispatchers becomes
+    # the reclaimer, so losing it means another one is mid-reclaim on this slot
+    # right now. It is contention, and it clears in the time two syscalls take.
     printf 'gate-slot: another dispatcher is reclaiming %s; if that never completes, clear %s\n' \
       "$lock" "$witness" >&2
     rm -f -- "$staged"
-    return 1
+    return "$GATE_SLOT_BUSY"
   fi
   observed="$(cat "$witness" 2>/dev/null || true)"
   if [ "$observed" != "$holder" ]; then
@@ -203,11 +223,12 @@ gate_slot_try() {
     # linked is somebody's live claim. Nothing was modified: drop the witness
     # and lose the round.
     rm -f -- "$witness" "$staged"
-    return 1
+    return "$GATE_SLOT_BUSY"
   fi
   if ! mv -f -- "$staged" "$lock" 2>/dev/null; then
+    printf 'gate-slot: could not replace the stale lock %s\n' "$lock" >&2
     rm -f -- "$witness" "$staged"
-    return 1
+    return "$GATE_SLOT_BROKEN"
   fi
   rm -f -- "$witness"
   printf 'gate-slot: reclaimed slot %s (pid %s is gone)\n' "$slot" "$holder" >&2

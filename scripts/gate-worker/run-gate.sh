@@ -184,7 +184,7 @@ command -v node >/dev/null 2>&1 || no_verdict "node is not installed on the work
 # not told about a daemon it never needed. One ordering, defined in one place.
 
 # The commit has to already be in the mirror. The worker never fetches — it has no
-# GitHub credential and no route worth relying on — so "unknown commit" always
+# GitHub credential and its mirror has no remote — so "unknown commit" always
 # means the local machine has not pushed it yet, and saying so precisely is the
 # difference between a one-command fix and a debugging session.
 if ! git -C "$MIRROR_DIR" cat-file -e "${OID}^{commit}" 2>/dev/null; then

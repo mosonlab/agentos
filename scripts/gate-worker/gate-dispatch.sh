@@ -44,12 +44,18 @@
 # that mean "no verdict exists". An automation may read 1 as FAIL only because
 # nothing else here can produce it.
 #
-#   0  PASS                 75  no slot freed up within the timeout
-#   1  FAIL                 76  nothing ran: a precondition or the mirror push
-#   2  usage error              failed, so no verdict was formed — re-dispatch
+#   0  PASS                 75  every slot was busy for the whole timeout
+#   1  FAIL                 76  nothing ran: a precondition, the mirror push or
+#   2  usage error              a slot lock failed, so no verdict was formed
 #   3  NOT AUTHORITATIVE    255 ssh transport failure on the remote path
 #
 # 75, 76 and 255 are not FAILs and must never be read as one.
+#
+# 75 and 76 divide on one question: was there ever a slot that could have been
+# taken? 75 means yes and they stayed occupied — a queue, so re-dispatching later
+# is the answer. 76 means no: a lock could not be operated at all, and waiting
+# for that is waiting for nothing. A slot whose lock is broken is never counted
+# as busy.
 set -uo pipefail
 
 # No EXIT_FAIL here on purpose: this script transports verdicts and forms none,
@@ -67,7 +73,7 @@ OID=""
 MASTER_OID=""
 
 usage() {
-  sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -129,12 +135,16 @@ fi
 
 HELD_SLOT=""
 
+# 0 taken, 1 busy, 2 the lock is unusable. The distinction is the whole point:
+# see the exit-code note in the header.
 try_slot() {
-  if gate_slot_try "$SLOT_ROOT" "$1"; then
+  local outcome=0
+  gate_slot_try "$SLOT_ROOT" "$1" || outcome=$?
+  if [ "$outcome" -eq 0 ]; then
     HELD_SLOT="$1"
     return 0
   fi
-  return 1
+  return "$outcome"
 }
 
 release_slot() {
@@ -195,21 +205,71 @@ run_remote() {
     ${MASTER_OID:+--master "$MASTER_OID"}
 }
 
+no_verdict() {
+  printf 'gate-dispatch: %s\n' "$1" >&2
+  printf 'GATE NOT RUN: %s\n' "$2"
+  exit "$EXIT_NO_VERDICT"
+}
+
 DEADLINE=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
 FIRST=1
+# Survives the rounds: once a slot's lock has been seen broken, a later 75 would
+# be a lie even if that round happened to find only busy slots.
+BROKEN_EVER=""
 while :; do
-  if local_eligible && try_slot local; then
-    run_local
-    exit $?
+  # Per round, because "busy" is a fact with a shelf life. round_busy counts the
+  # slots that could have been taken and were not; round_broken the ones whose
+  # lock could not be operated. Waiting is only justified while round_busy > 0:
+  # a busy slot frees when its gate ends, a broken one does not free at all.
+  round_busy=0
+  round_broken=""
+  outcome=0
+
+  if local_eligible; then
+    try_slot local || outcome=$?
+    case "$outcome" in
+      0) run_local; exit $? ;;
+      1) round_busy=$(( round_busy + 1 )) ;;
+      *) round_broken="${round_broken} local" ;;
+    esac
   fi
   for slot in remote-1 remote-2; do
-    if try_slot "$slot"; then
-      run_remote "$slot"
-      exit $?
-    fi
+    outcome=0
+    try_slot "$slot" || outcome=$?
+    case "$outcome" in
+      0) run_remote "$slot"; exit $? ;;
+      1) round_busy=$(( round_busy + 1 )) ;;
+      *) round_broken="${round_broken} ${slot}" ;;
+    esac
   done
+  # Union, not concatenation: a slot that is broken stays broken every round, and
+  # an hour of polling would otherwise build a message naming it 120 times.
+  for slot in $round_broken; do
+    case " ${BROKEN_EVER} " in
+      *" ${slot} "*) ;;
+      *) BROKEN_EVER="${BROKEN_EVER} ${slot}" ;;
+    esac
+  done
+
+  # Nothing to wait for: every slot this dispatch could have used has a lock that
+  # does not work. Polling would only repeat the same failure until the timeout
+  # and then report a full queue that never existed.
+  if [ "$round_busy" -eq 0 ] && [ -n "$round_broken" ]; then
+    no_verdict \
+      "no slot could be locked (${round_broken# }); nothing ran and no verdict exists" \
+      "the slot locks are unusable (${round_broken# }), so nothing was gated"
+  fi
+
   now="$(date +%s)"
   if [ "$now" -ge "$DEADLINE" ]; then
+    # A slot seen broken at any point during the wait means the timeout is not
+    # the whole story, and 75 — "the queue stayed full" — would send the caller
+    # to re-dispatch into the same broken lock.
+    if [ -n "$BROKEN_EVER" ]; then
+      no_verdict \
+        "waited ${TIMEOUT_MINUTES} minutes with slots busy and the locks of${BROKEN_EVER} unusable; nothing ran" \
+        "some slots stayed busy and${BROKEN_EVER} could not be locked, so nothing was gated"
+    fi
     printf 'gate-dispatch: no slot freed up in %s minutes; nothing ran and no verdict exists\n' \
       "$TIMEOUT_MINUTES" >&2
     printf 'GATE DISPATCH: NO SLOT\n'
@@ -220,8 +280,13 @@ while :; do
     if ! local_eligible; then
       printf 'gate-dispatch: local slot ineligible (worktree not clean at %s); remote only\n' "${OID:0:12}" >&2
     fi
-    printf 'gate-dispatch: all slots busy, polling every %ss until %s\n' \
-      "$POLL_SECONDS" "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" >&2
+    if [ -n "$round_broken" ]; then
+      printf 'gate-dispatch: the locks of%s are unusable; waiting on the %s slot(s) that are merely busy\n' \
+        "$round_broken" "$round_busy" >&2
+    fi
+    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s\n' \
+      "$round_busy" "$POLL_SECONDS" \
+      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" >&2
   fi
   sleep "$POLL_SECONDS"
 done

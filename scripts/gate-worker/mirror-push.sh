@@ -22,9 +22,9 @@
 # GitHub credential and its mirror has no remote configured, so no repository
 # content arrives there except by this push, and the mirror cannot fetch. That
 # is a statement about how code gets in, not about what the worker's network can
-# reach: the gate executes the candidate commit's own code, and blocking that
-# code's outbound connections is an egress rule on the worker, not something
-# these scripts establish. docs/runbooks/gate-worker.md states the boundary.
+# reach: the gate executes the candidate commit's own code, and nothing here
+# constrains what that code connects to. docs/runbooks/gate-worker.md states the
+# boundary.
 #
 # Two things are pushed:
 #

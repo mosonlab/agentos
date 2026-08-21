@@ -63,6 +63,13 @@ scripts/gate-worker/gate-dispatch.sh <oid>
   verdict exists, and re-dispatching is the recovery. A timeout that recurs
   means the queue is systemically full, which is a capacity question, not a
   code question.
+- A slot whose lock cannot be *operated* — a read-only `~/.cache`, a lock left
+  by the pre-#132 dispatcher, a lock naming no pid — is not busy and is never
+  waited on. The dispatcher keeps using whatever slots still work; if none do it
+  exits **76** immediately with `GATE NOT RUN:` naming the slots to clear, and
+  if it waited on a busy slot and the wait ran out with a broken lock still
+  around it exits 76 rather than 75. Waiting for a lock nobody can take is
+  waiting for nothing, and reporting it as a full queue hides what to fix.
 
 The accounting is three lock files under `~/.cache/gate-dispatch/`, outside any
 repository because the slots belong to the machines. They are the whole truth
@@ -97,18 +104,33 @@ so neither can produce a `1` of its own.
 | `2` | usage error | no gate ran |
 | `3` | `MERGE GATE: NOT AUTHORITATIVE` | yes |
 | `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
-| `76` | `GATE NOT RUN: <reason>` — a precondition failed: the mirror push failed, origin was unreadable, the baseline is not in this checkout, the commit is not in the mirror, the worker's toolchain is incomplete, a credential is set in the worker's environment, or `merge-gate.sh` died without printing a verdict | no gate ran |
+| `76` | `GATE NOT RUN: <reason>` — a precondition failed: the mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is not in this checkout, the commit is not in the mirror, the worker's toolchain is incomplete, a credential is set in the worker's environment, or `merge-gate.sh` died without printing a verdict | no gate ran |
 | `130` / `143` | interrupted | no gate ran |
+| `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
 | `255` | ssh transport failure | no gate ran |
 
 **`1` is the only code that means the commit was judged and did not pass.**
-`75`, `76` and `255` are errands, not judgements: re-dispatch after fixing what
-the message names. An automation that treats them as FAIL blocks merges on
-network weather and, worse, teaches people to ignore FAILs.
+`75`, `76`, `128+N` and `255` are errands, not judgements: re-dispatch after
+fixing what the message names. An automation that treats them as FAIL blocks
+merges on network weather and, worse, teaches people to ignore FAILs.
 
-The stdout line always agrees with the code, so a caller may read either: a
-verdict line starts `MERGE GATE:`, and everything that ran no gate starts
-`GATE NOT RUN:` or `GATE DISPATCH:`.
+`75` and `76` are not interchangeable. `75` means at least one slot existed that
+could have been taken and stayed busy for the whole timeout — a queue, so
+re-dispatching later is the fix. `76` means the slot lock itself could not be
+operated (a read-only cache directory, a lock left by the pre-#132 dispatcher, a
+lock naming no pid): waiting changes nothing, and the message names what to
+clear. A slot whose lock is broken is never counted as busy, so a run that sees
+nothing but broken locks reports `76` at once instead of polling out the timeout
+and claiming the queue was full.
+
+Every code below `128` carries a matching stdout line, so a caller may read
+either: a verdict line starts `MERGE GATE:`, and everything that ran no gate
+starts `GATE NOT RUN:` or `GATE DISPATCH:`. The exception is a gate killed by a
+signal it cannot handle. `merge-gate.sh` traps `INT` and `TERM` and prints
+through its `EXIT` trap, so `130` and `143` still say what happened, but `SIGKILL`
+cannot be trapped: a gate the OOM killer takes produces `137` and **no stdout
+line at all**. Read a missing verdict line as "no verdict", never as a pass —
+`128+N` with silence is the one case where the code is the only evidence.
 
 ## The red lines
 
@@ -121,32 +143,28 @@ one of them is not a tuning decision.
   credential, no Anthropic key, no SSH private key. `provision.sh` refuses to
   finish if it finds one, and `run-gate.sh` re-checks the environment on every
   single run — a profile can acquire a variable months after provisioning.
-- **No route from the server to GitHub.** This one has two halves, and only the
-  first is enforced by this repository.
+- **No GitHub credential and no remote on the worker.** Code reaches the worker
+  only by SSH push from the local machine. The worker holds no GitHub
+  credential, its mirror has no remote configured, and both `provision.sh` and
+  every `mirror-push.sh` refuse to proceed if one appears — including when the
+  check cannot read the mirror's remotes at all, which is treated as "unknown"
+  and therefore refused. `run-gate.sh` re-checks the credential list on every
+  run. All `gh` reads and writes stay local. This is what makes the *mirror*
+  unable to fetch and the worker unable to push anywhere.
 
-  *Enforced here:* code reaches the worker only by SSH push from the local
-  machine. The worker holds no GitHub credential, its mirror has no remote
-  configured, and both `provision.sh` and every `mirror-push.sh` refuse to
-  proceed if one appears — including when the check cannot read the mirror's
-  remotes at all, which is treated as "unknown" and therefore refused. All `gh`
-  reads and writes stay local. This is what makes the *mirror* unable to fetch.
+  **The worker is not network-isolated, and this repository does not claim it
+  is** (Leo's ruling, 2026-08-20). The gate's normal flow never needs GitHub —
+  the mirror arrives over SSH, nothing fetches — but nothing here denies the
+  host a route to GitHub or anywhere else, and no firewall rule is required
+  before a box may gate. That was weighed and declined: the gate executes the
+  candidate commit's own build and test scripts, so blocking GitHub alone would
+  leave every other host reachable and buy little, at the cost of maintaining
+  deny rules against addresses that move. What carries the weight instead is the
+  line above plus no merge authority: a remote PASS is evidence, never an
+  authoritative verdict.
 
-  *Not enforced here — an operator deployment step:* whether the host can open
-  a connection to GitHub at all. It is a firewall rule on the server, and
-  nothing in this repository installs one. It matters because the gate runs the
-  gate the candidate commit ships and executes that commit's own build and test
-  scripts, so a malicious candidate's code runs on the worker with whatever
-  network the worker has. Without an egress rule, "the worker cannot reach
-  GitHub" is a statement about credentials, not about the network, and it must
-  not be quoted as the second thing.
-
-  `provision.sh` checks this and does not finish while the route is open: it
-  opens a TCP connection to `github.com`, `api.github.com` and
-  `codeload.github.com` on 443, and every one that answers is a `FAIL`. Apply a
-  deny rule on the addresses — not a hosts-file entry, which a candidate commit
-  can simply not consult — and re-run `provision.sh` to confirm. **A worker that
-  has not had this applied is a worker whose isolation claim stops at "holds no
-  credential"; say that much and no more wherever its verdicts are quoted.**
+  So when a worker's verdicts are quoted, the accurate claim is "holds no
+  credential, has no remote, cannot merge" — **never** "cannot reach GitHub".
 - **Local production is untouched by any of this.** `localhost:5432`,
   `localhost:3000`, `~/.agentos/` and launchd are not in this picture at all.
 
@@ -158,8 +176,8 @@ A remote PASS is **evidence, not authority**. The merge still happens on the
 local machine and still binds an exact head, so the worst a compromised worker
 can do is forge a PASS for a commit that would not really pass. It cannot merge
 anything, and it holds no credential worth stealing. What it can do is whatever
-its network allows the candidate commit's own build and test scripts to do,
-which is why the egress rule above is a deployment step and not a footnote.
+its network allows the candidate commit's own build and test scripts to do —
+the box is not isolated, and this repository does not pretend otherwise.
 
 The hedge against a forged PASS is **spot-checking**: for release-grade merges,
 re-run the gate locally and compare. That is a deliberate trade — one gate's
@@ -227,27 +245,13 @@ If it adds the account to the `docker` group, **log out and back in and re-run
 it** — group membership does not apply to the session that granted it, and the
 re-run is what confirms `docker info` works.
 
-It also probes GitHub on 443 and reports `FAIL` for every name that answers.
-That is the red line above, and it is the one thing provisioning checks but does
-not install.
+It also refuses to finish while a known credential variable or file is present
+on the box. That is the red line above, and it is checked again on every gate
+run.
 
-**1b. Deny the route to GitHub (server, once).** Required before the box gates
-anything, because the gate executes the candidate commit's own scripts. The rule
-belongs on the addresses, applied by whatever the host already uses — the
-provider's security group is the better place when there is one, since it holds
-whether or not the box is healthy. Locally, with nftables:
-
-```sh
-ssh agentos-gate 'sudo nft add table inet gate'
-ssh agentos-gate 'sudo nft add chain inet gate out { type filter hook output priority 0 \; policy accept \; }'
-# one rule per address returned by: getent ahosts github.com api.github.com codeload.github.com
-ssh agentos-gate 'sudo nft add rule inet gate out ip daddr <addr> tcp dport 443 reject'
-```
-
-GitHub's addresses change, so a rule list pinned to today's answers decays.
-Treat the list as a floor, prefer the provider's egress policy where one exists,
-and re-run `provision.sh` afterwards — its probe is the acceptance check for
-this step, and `PROVISION: OK` is what says the route is closed *now*.
+It does **not** check or install any egress rule: the worker is not
+network-isolated by design (see the red lines), so there is no firewall step
+between provisioning and the first gate.
 
 **2. Push the mirror (local).** The first push creates
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
@@ -343,6 +347,15 @@ ssh agentos-gate 'rm -rf ~/gate/<repo>/worktrees/gate-<oid>-<stamp>-<pid> && git
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the three slots are systemically
 full. That is a capacity signal, not an error to retry harder: either stagger
 the merges, or revisit the worker's sizing with the bench scripts.
+
+**`GATE NOT RUN: the slot locks are unusable (...)`** — the named slots have a
+lock this dispatcher cannot operate, so nothing was gated and nothing will be
+until they are cleared. Look at `~/.cache/gate-dispatch/`: a `<slot>.lock`
+*directory* is a leftover from the pre-#132 dispatcher and can go once no old
+`gate-dispatch.sh` is running; a `<slot>.slot` file that does not contain a pid
+was not written by this script and is cleared by hand, again only once no gate
+is running; and a message about not being able to write a lock means the cache
+directory itself is read-only or full. Re-dispatch after clearing.
 
 **`docker: permission denied` / `the docker daemon is not reachable`** — the
 account is not in the `docker` group yet, or its session predates the change.

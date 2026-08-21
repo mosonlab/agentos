@@ -22,6 +22,13 @@
 //    the environment — none of those are things the gate decided, and each is
 //    checked to exit 76 with a GATE NOT RUN line rather than 1 with a
 //    MERGE GATE: FAIL line.
+//
+// 4. What the worker's isolation is claimed to be. Leo's ruling of 2026-08-20
+//    is that no network egress control is required: the containment is no
+//    credential, no remote and no merge authority, and the box is NOT
+//    network-isolated. The failure mode this guards is a document drifting back
+//    into "the worker cannot reach GitHub", which would be an isolation claim
+//    nothing enforces.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -364,7 +371,35 @@ test("the runbook and the scripts agree on the no-verdict exit code", () => {
   const runbook = readFileSync(runbookPath, "utf8");
   assert.match(runbook, /\|\s*`76`\s*\|/);
   assert.match(runbook, /GATE NOT RUN/);
+  // 75 and 76 are only useful to an automation if the table says which is
+  // which, and a gate the OOM killer takes is 128+N with no line at all — the
+  // one case where a reader must not expect stdout to agree with the code.
+  assert.match(runbook, /`75` and `76` are not interchangeable/);
+  assert.match(runbook, /\|\s*`128\+N`\s*\|/);
+  assert.match(runbook, /`137`/);
   for (const path of [runGatePath, join(here, "remote-gate.sh"), join(here, "gate-dispatch.sh")]) {
     assert.match(readFileSync(path, "utf8"), /EXIT_NO_VERDICT=76/, `${path} has no 76`);
   }
+});
+
+test("the isolation claim stays the one that is actually enforced", () => {
+  // Leo's ruling, 2026-08-20: no egress control, so nothing here may probe a
+  // route or make provisioning depend on one, and the runbook has to say plainly
+  // that the box is not isolated. The enforced half — no credential, no remote —
+  // stays fail-closed and is checked above and on every run.
+  const provision = readFileSync(provisionPath, "utf8");
+  assert.doesNotMatch(provision, /\/dev\/tcp/, "provision.sh probes a route again");
+  assert.doesNotMatch(provision, /GATE_GITHUB_HOSTS/, "the egress host list is back");
+
+  const runbook = readFileSync(runbookPath, "utf8");
+  assert.match(runbook, /not network-isolated/);
+  assert.doesNotMatch(runbook, /^\s*ssh [^\n]*nft /m, "the runbook asks for a firewall rule again");
+
+  // The half that is enforced, in both places that enforce it.
+  assert.match(provision, /no AgentOS credentials on this host/);
+  assert.match(readFileSync(runGatePath, "utf8"), /the gate worker holds no credentials/);
+  assert.match(
+    readFileSync(join(here, "mirror-push.sh"), "utf8"),
+    /refusing to push into a mirror this check could not inspect/,
+  );
 });

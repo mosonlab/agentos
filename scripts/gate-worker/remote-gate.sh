@@ -52,11 +52,14 @@
 #   a PASS; it cannot forge a merge, and it holds no GitHub credential to steal
 #   or to push with. What it does have is a working network: the worker runs the
 #   gate the candidate commit ships, so the candidate's own code executes there,
-#   and nothing in this repository blocks that code from opening a connection.
-#   Egress control on the worker is a deployment step, not a property of these
-#   scripts — see the red lines in docs/runbooks/gate-worker.md. Release-grade
-#   merges are spot-checked by re-running the gate locally, which is the hedge
-#   against a forged PASS.
+#   and nothing in this repository makes that box network-isolated. The gate's
+#   own flow needs no GitHub access — the mirror arrives by ssh and never fetches
+#   — but the repository does not guarantee the route is unreachable, and does
+#   not ask an operator to block it (Leo's ruling, 2026-08-20): denying GitHub
+#   alone would leave every other host open, so the containment that carries the
+#   weight is no credential, no remote, no merge authority. Release-grade merges
+#   are spot-checked by re-running the gate locally, which is the hedge against a
+#   forged PASS. docs/runbooks/gate-worker.md states the boundary.
 #
 # The commit must already be in the worker's mirror. The worker never fetches, so
 # push first: scripts/gate-worker/mirror-push.sh <server>.
@@ -79,7 +82,7 @@ EXIT_USAGE=2
 EXIT_NO_VERDICT=76
 
 usage() {
-  sed -n '2,62p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,65p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
