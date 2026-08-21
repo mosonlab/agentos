@@ -170,12 +170,19 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           select: {
             id: true, projectId: true, repoId: true, chainId: true, chainIndex: true, templateId: true,
             targetBranch: true, opensPullRequest: true,
+            templateStep: { select: { baseFromStepIndex: true } },
             repo: { select: { defaultBranch: true } },
           },
         });
+        const pinnedRetry = task?.templateStep?.baseFromStepIndex != null;
+        if (pinnedRetry && !run.targetBranch) {
+          throw new Error(`Pinned task ${task.id} retry is missing its recorded target commit`);
+        }
         // `prior` is null deliberately: for chain steps the resolver ignores it,
         // and passing the lost run would be misleading.
-        const branches = task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
+        const branches = pinnedRetry
+          ? { branch: run.branch, targetBranch: run.targetBranch }
+          : task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
           ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
           : {
             branch: run.branch,

@@ -49,6 +49,21 @@ export const isUsableTemplateVariable = (value: string | undefined): value is st
   value !== undefined && value.trim().length > 0
 );
 
+const assertValidBaseReferences = (
+  steps: Array<{ name: string; stepIndex: number; baseFromStepIndex: number | null }>,
+): void => {
+  const indexes = new Set(steps.map((step) => step.stepIndex));
+  for (const step of steps) {
+    if (step.baseFromStepIndex === null) continue;
+    if (!indexes.has(step.baseFromStepIndex)) {
+      throw new Error(`Template step ${step.name} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`);
+    }
+    if (step.baseFromStepIndex >= step.stepIndex) {
+      throw new Error(`Template step ${step.name} baseFromStepIndex must reference a strictly earlier stepIndex`);
+    }
+  }
+};
+
 export const instantiateTemplate = async (
   db: PrismaClient,
   projectId: string,
@@ -81,6 +96,7 @@ export const instantiateTemplate = async (
   if (input.variables.branchName !== undefined && !isValidBranchName(input.variables.branchName)) {
     throw new Error("Invalid template branch name");
   }
+  assertValidBaseReferences(template.steps);
   for (const step of template.steps) {
     // §D-P4, before any task row exists. A doctored template — the sentinel on
     // an ordinary step, or a model agent on the integrator step — fails

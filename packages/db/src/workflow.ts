@@ -104,6 +104,48 @@ export const isIntegratorStoppedError = (error: unknown): error is IntegratorSto
 export const isArchivedTaskError = (error: unknown): error is ArchivedTaskError =>
   error instanceof Error && error.name === "ArchivedTaskError";
 
+export class PinnedBaseCommitError extends Error {
+  constructor(readonly taskId: string, readonly baseFromStepIndex: number, detail: string) {
+    super(`Pinned task ${taskId} cannot activate from step ${baseFromStepIndex}: ${detail}`);
+    this.name = "PinnedBaseCommitError";
+  }
+}
+
+const pinnedBaseCommitSha = async (
+  tx: Tx,
+  task: {
+    id: string;
+    projectId: string;
+    templateId: string | null;
+    chainId: string | null;
+    templateStep: { baseFromStepIndex: number | null } | null;
+  },
+): Promise<string | null> => {
+  const baseFromStepIndex = task.templateStep?.baseFromStepIndex;
+  if (baseFromStepIndex === null || baseFromStepIndex === undefined) return null;
+  if (!task.templateId || !task.chainId) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "task is not an instantiated template chain step");
+  }
+  const source = await tx.taskStepOutput.findFirst({
+    where: {
+      task: {
+        projectId: task.projectId,
+        templateId: task.templateId,
+        chainId: task.chainId,
+        chainIndex: baseFromStepIndex,
+      },
+    },
+    select: { commitSha: true },
+  });
+  if (!source?.commitSha) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded commitSha");
+  }
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.commitSha)) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid commitSha ${source.commitSha}`);
+  }
+  return source.commitSha;
+};
+
 /**
  * Takes the Task-row mutex the archive/start/retry/cron writers all take.
  *
@@ -459,6 +501,7 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
   const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
+  const pinnedBaseSha = await pinnedBaseCommitSha(tx, task);
   return tx.run.create({ data: {
     projectId: task.projectId,
     taskId: task.id,
@@ -468,7 +511,7 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     dedupeKey: `task:${task.id}:run:${runNumber}`,
     runner: derived.runner,
     model: derived.model,
-    targetBranch: branches.targetBranch,
+    targetBranch: pinnedBaseSha ?? branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: task.opensPullRequest,
     promptHash: derived.promptHash,
