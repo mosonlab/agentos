@@ -183,6 +183,45 @@ test("canonical sync rejects role structure drift without applying its prompts",
   assert.equal(persisted.rolePrompt, "role drift");
 });
 
+test("canonical sync ignores a customized same-name agent outside the canonical project", async () => {
+  assert.equal((await seed()).code, 0);
+  const canonical = await db.agent.findFirstOrThrow({
+    where: { name: "default", project: { slug: "agentos-example" } },
+  });
+  const customProject = await db.project.create({
+    data: { name: "Custom", slug: "custom", yamlDocument: "# custom\n" },
+  });
+  const customEnvironment = await db.environment.create({
+    data: { projectId: customProject.id, name: "local", networking: "OPEN", allowedHosts: [] },
+  });
+  const custom = await db.agent.create({
+    data: {
+      projectId: customProject.id,
+      environmentId: customEnvironment.id,
+      name: "default",
+      title: "Custom Default",
+      model: "custom-model",
+      runnerPreference: "CODEX",
+      inboxAccess: false,
+      foundationalPrompt: "custom foundation",
+      rolePrompt: "custom role",
+    },
+  });
+  await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role drift" } });
+
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  const expected = (await loadAgentSources()).roles.find(({ name }) => name === "default")!;
+  const [persistedCanonical, persistedCustom] = await Promise.all([
+    db.agent.findUniqueOrThrow({ where: { id: canonical.id } }),
+    db.agent.findUniqueOrThrow({ where: { id: custom.id } }),
+  ]);
+  assert.equal(persistedCanonical.rolePrompt, expected.rolePrompt);
+  assert.equal(persistedCustom.title, "Custom Default");
+  assert.equal(persistedCustom.foundationalPrompt, "custom foundation");
+  assert.equal(persistedCustom.rolePrompt, "custom role");
+});
+
 /* ------------------------------------------------------- the verifier negatives */
 
 /** Each of these is a way the contract could be violated in the database while

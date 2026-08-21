@@ -14,6 +14,11 @@ const main = async (): Promise<void> => {
   const prisma = new PrismaClient();
   try {
     const result = await prisma.$transaction(async (tx) => {
+      const canonicalProject = await tx.project.findUnique({
+        where: { slug: "agentos-example" },
+        select: { id: true },
+      });
+      if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
       const updatedSteps: Record<string, Record<number, number>> = {};
       let templateCount = 0;
       for (const [templateName, steps] of templateSources) {
@@ -63,7 +68,7 @@ const main = async (): Promise<void> => {
       }
 
       const presentAgents = await tx.agent.findMany({
-        where: { name: { in: roleNames } },
+        where: { projectId: canonicalProject.id, archivedAt: null, name: { in: roleNames } },
         select: {
           id: true,
           name: true,
@@ -94,6 +99,8 @@ const main = async (): Promise<void> => {
         }
         updatedRoles[name] = (await tx.agent.updateMany({
           where: {
+            projectId: canonicalProject.id,
+            archivedAt: null,
             name,
             OR: [
               { foundationalPrompt: { not: sources.foundationalPrompt } },
