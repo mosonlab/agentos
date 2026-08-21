@@ -27,6 +27,14 @@ runbook, including what a remote PASS is and is not worth.
 
 ## Dispatching chains
 
+Choosing a template: work that fits a single implementation context window
+goes through the direct chain — the discussion that produces its brief is the
+spec phase, done off the board. Work too large for one window, or that
+decomposes into independently demonstrable slices worth executing in
+parallel, goes through the full assurance chain, whose spec and plan steps
+perform that decomposition under human approval gates. Trivial chores stay
+off the board entirely.
+
 Instantiating a direct chain: the `description` you pass is the chain's
 specification of record — write it as a feature brief per
 `docs/BRIEF-TEMPLATE.md` before instantiating.
