@@ -19,6 +19,12 @@ It holds a lock, so run one gate per worktree. The script header documents its
 variants and what each stage proves. If you ran the gate somewhere other than
 the machine that will merge, say so in the pull request.
 
+When anything else might also be running a gate, dispatch instead of running
+directly: `scripts/gate-worker/gate-dispatch.sh <oid>` runs the gate in the
+first free slot — this machine, then one of the offshore worker's two — and
+blocks until a slot frees up. `docs/runbooks/gate-worker.md` is the worker's
+runbook, including what a remote PASS is and is not worth.
+
 ## Testing red lines
 
 - `export RUNNER_WORKSPACE_ROOT=$(mktemp -d)` before any test run. The runner's

@@ -48,6 +48,7 @@
     { "glob": "docs/release/v0.1.0-release-notes.md", "purpose": "the release notes for v0.1.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/release/v0.1.0-security.md", "purpose": "the loopback, secret, host-authority and known-gap boundaries of a v0.1.0 install" },
     { "glob": "docs/release/v0.1.0-support-matrix.md", "purpose": "the authoritative support statement: what is Verified, Maintainer-verified, Experimental, Unverified and Unsupported, with the evidence boundary for each row" },
+    { "glob": "docs/runbooks/gate-worker.md", "purpose": "the offshore merge-gate worker and gate dispatcher runbook: slot model, red lines, deployment, troubleshooting" },
     { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
     { "glob": "package.json", "purpose": "workspace definition" },
     { "glob": "packages/api/package.json", "purpose": "API package definition" },
@@ -95,6 +96,14 @@
     { "glob": "scripts/compose-binding.test.mjs", "purpose": "Compose loopback publication tests" },
     { "glob": "scripts/fixtures/local-api-origin-cases.json", "purpose": "shared local API destination policy table" },
     { "glob": "scripts/fixtures/onboarding-remote-cases.json", "purpose": "shared repository remote policy table" },
+    { "glob": "scripts/gate-worker/bench-dbtest-concurrency.sh", "purpose": "gate worker: dbtest concurrency benchmark over one fixed commit" },
+    { "glob": "scripts/gate-worker/bench-postgres.sh", "purpose": "gate worker: throwaway-postgres settings benchmark over one fixed commit" },
+    { "glob": "scripts/gate-worker/gate-dispatch.sh", "purpose": "gate worker: slot-rationed dispatch across the local machine and the worker" },
+    { "glob": "scripts/gate-worker/lib.sh", "purpose": "gate worker: shared repository-name derivation for the local-side scripts" },
+    { "glob": "scripts/gate-worker/mirror-push.sh", "purpose": "gate worker: mirror push, the only path code reaches the worker by" },
+    { "glob": "scripts/gate-worker/provision.sh", "purpose": "gate worker: worker-wide toolchain provisioning, dry-run by default" },
+    { "glob": "scripts/gate-worker/remote-gate.sh", "purpose": "gate worker: one synchronous ssh call that brings a verdict home" },
+    { "glob": "scripts/gate-worker/run-gate.sh", "purpose": "gate worker: the worker-side harness that checks a commit out of the mirror and gates it" },
     { "glob": "scripts/goal-5a0-dependency-gate.sh", "purpose": "migration dependency-gate supervisor" },
     { "glob": "scripts/goal-5a0-dependency-gate.test.mjs", "purpose": "migration dependency-gate regression tests" },
     { "glob": "scripts/goal-5a0-evidence-destination.sh", "purpose": "migration evidence destination containment" },
@@ -221,11 +230,6 @@
       "reason": "internal review records require a separate publication decision"
     },
     {
-      "glob": "docs/runbooks/**",
-      "disposition": "later-release-follow-up",
-      "reason": "production and operator runbooks require environment review"
-    },
-    {
       "glob": "docs/specs/**",
       "disposition": "later-release-follow-up",
       "reason": "internal product specifications require a separate publication decision"
@@ -234,11 +238,6 @@
       "glob": "docs/wiki/**",
       "disposition": "later-release-follow-up",
       "reason": "internal implementation wiki material requires separate publication review"
-    },
-    {
-      "glob": "scripts/gate-worker/**",
-      "disposition": "later-release-follow-up",
-      "reason": "host-specific merge-gate worker provisioning and drivers, the same class as deploy/**: they encode one operator's server, account and paths and require environment review"
     },
     {
       "glob": "scripts/verify-oss-f0.mjs",
@@ -271,6 +270,16 @@
       "category": "credential-placeholder",
       "glob": ".github/workflows/ci.yml",
       "reason": "localhost-only CI database connection fixtures"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "scripts/gate-worker/bench-dbtest-concurrency.sh",
+      "reason": "loopback-only throwaway benchmark database connection fixtures"
+    },
+    {
+      "category": "credential-placeholder",
+      "glob": "scripts/gate-worker/bench-postgres.sh",
+      "reason": "loopback-only throwaway benchmark database connection fixtures"
     },
     {
       "category": "credential-placeholder",
