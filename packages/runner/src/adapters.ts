@@ -481,6 +481,11 @@ const codexMcpArgs = (credentialsPath: string): string[] => [
   "-c", "mcp_servers.agentos.startup_timeout_sec=30",
 ];
 
+// AgentOS runs must use the standard processing tier explicitly. Without this
+// override, an agent inherits the operator's personal Codex service-tier
+// setting, which may be the faster priority tier.
+const codexDefaultServiceTierArgs = (): string[] => ["-c", `service_tier="default"`];
+
 type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
 const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
 const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
@@ -542,10 +547,11 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     ...(resume ? ["--resume", resume.providerConversationId] : []),
   ];
   if (runner === "CODEX") return resume
-    ? ["exec", "resume", ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, "-"]
+    ? ["exec", "resume", ...codexDefaultServiceTierArgs(), ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, "-"]
     : [
       "exec", "--json", "-m", model,
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      ...codexDefaultServiceTierArgs(),
       ...codexMcpArgs(spec.credentialsPath),
       "--dangerously-bypass-approvals-and-sandbox", "-",
     ];

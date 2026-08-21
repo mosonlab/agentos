@@ -135,6 +135,7 @@ test("every CLI is launched with the AgentOS tool surface attached", () => {
   // Resumed sessions keep the tools; a resume without them silently drops them.
   const resumed = argsForRunner("CODEX", spec, { ...spec, providerConversationId: "thread-1", input: "again" });
   assert.match(resumed.join(" "), /mcp_servers\.agentos\.command=/);
+  assert.ok(resumed.includes('service_tier="default"'));
 });
 
 test("Claude excludes host settings and auto-memory with the versioned platform settings file", async () => {
@@ -252,6 +253,7 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
   ]);
   assert.deepEqual(stableArgv(argsForRunner("CODEX", spec)), [
     "exec", "--json", "-m", "codex",
+    "-c", 'service_tier="default"',
     "-c", "mcp_servers.agentos.command=\"<NODE>\"",
     "-c", "mcp_servers.agentos.args=[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]",
     "-c", "mcp_servers.agentos.startup_timeout_sec=30",

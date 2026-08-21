@@ -63,10 +63,11 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 });
 
 test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
-  const [planReview, firstReview, finalReview] = await Promise.all([
+  const [planReview, firstReview, finalReview, executor] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
     roleSource("review-coordinator-opus"),
+    roleSource("implementation-plan-executioner"),
   ]);
 
   assert.match(planReview, /never review implementation\s+diffs/u);
@@ -78,8 +79,9 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(firstReview, /only as the AgentOS task output/u);
   assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
-  assert.match(firstReview, /codex exec review -m gpt-5\.6-sol -c model_reasoning_effort=high/u);
+  assert.match(firstReview, /codex exec review -m gpt-5\.6-sol -c model_reasoning_effort=high -c service_tier="default"/u);
   assert.match(firstReview, /review the changes from <implementation base sha> to <delivered head sha>/u);
+  assert.match(executor, /codex exec --skip-git-repo-check -C <worktree> -m gpt-5\.6-luna -c model_reasoning_effort=max -c service_tier="default"/u);
 
   const blindWrite = finalReview.indexOf("intermediate AgentOS task output");
   const firstReportRead = finalReview.indexOf("predecessor step outputs", blindWrite);
