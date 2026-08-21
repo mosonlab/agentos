@@ -418,3 +418,55 @@ Recorded because a later reviewer should not re-litigate them.
   steps (`app.ts:3840`).
 - Every template step markdown carries the new required `baseFromStepIndex` frontmatter;
   there is no third template directory that `loadTemplateStepSources` would now reject.
+
+---
+
+## Correction and addition (same session, still pre-adjudication — no predecessor report was ever opened)
+
+Empirical check of STD-1 steps 5-6 against real git changed two details and added one
+finding. Recorded as an append rather than a rewrite so the record keeps its order.
+
+**STD-1, corrected mechanism.** `git remote add origin <url>` writes the default fetch
+refspec `+refs/heads/*:refs/remotes/origin/*`. When `pinnedBaseSha` holds a *branch name*
+(the STD-1 poisoning), `git fetch --no-tags origin <branch name>` matches that refspec and
+**creates `refs/remotes/origin/<chain branch>` in the workspace** — so spec item 3's "the
+chain branch ref is never fetched into the workspace" is violated literally, not merely at
+the object level. The run then fails one command earlier than I wrote: `git checkout
+--detach <branch name>` fails on the unborn HEAD (`fatal: '--detach' cannot be used with
+'-b/-B/--orphan'`), so the `baseSha !== pinnedBaseSha` guard at `workspace.ts:176-178` is
+never the thing that catches it. The workspace is left holding the chain ref and every
+object on it, and is retained on disk when `failedWorkspaceRetention > 0`. Severity
+unchanged (P1); the correction strengthens the evidence.
+
+Verified: an empty repo with `origin` added, `git fetch --no-tags origin main` →
+`* [new branch] main -> origin/main`, `git for-each-ref` → `refs/remotes/origin/main`.
+With a raw object id instead of a name no refspec matches and no ref is created, which is
+why the happy path is correct and `workspace.test.ts:107` passes.
+
+### SPEC-6 (P2) — the pinned workspace keeps a wildcard-refspec `origin`, so the chain branch is one command away
+
+**Governing specification text** (`.chain/blind-review-base-pinning/spec.md`):
+
+> 3. … the chain branch ref is never fetched into the workspace. The prior report must
+>    not be reachable, not merely absent from the worktree.
+
+**Location** `packages/runner/src/workspace.ts:167-168`.
+
+**Evidence** The pinned branch runs `git init` then
+`git remote add origin claim.repo.remoteUrl`, which installs
+`+refs/heads/*:refs/remotes/origin/*`. `workspace.test.ts:107` correctly proves that
+*this* fetch creates no ref — a raw object id matches no refspec — but the remote it left
+behind will happily materialize the whole chain branch on the next `git fetch origin`, with
+the runner's own credentials. The isolation is therefore fetch-shaped, not
+reachability-shaped, and the spec's second sentence asks for the stronger property.
+
+**Failure scenario** A reviewer, a resumed prompt still carrying the old
+"commit your report to the chain branch" instruction, or any tool that runs a bare
+`git fetch`, restores full reachability of every successor artifact. This is P2 rather
+than higher only because spec item 4 removes the reports from the branch in the first
+place, so today there is nothing on the branch worth reaching.
+
+**Fix direction** Do not add a remote: `git fetch --no-tags <remoteUrl> <sha>` takes a URL
+directly. If a named remote is wanted for later commands, create it with no fetch refspec
+(`git remote add --no-tags origin <url> && git config --unset-all remote.origin.fetch`), so
+a bare `git fetch origin` has nothing to expand.
