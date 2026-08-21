@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
@@ -83,6 +83,12 @@ import { boardCard, etagFor, etagMatches } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
+import {
+  nextStoredCliAvailability,
+  preserveCliAvailability,
+  readStoredCliAvailability,
+  storeCliAvailability,
+} from "./runner-cli-availability.js";
 import {
   chainKey,
   chainProgress,
@@ -924,14 +930,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }),
       backends: Object.values(RunnerKind).map((runner) => {
         const backend = backendsByRunner.get(runner);
+        const availability = readStoredCliAvailability(backend?.capabilities);
         return {
           runner,
           cliVersion: backend?.cliVersion ?? null,
-          cliAvailable: backend?.cliAvailable ?? null,
-          cliResolvedPath: backend?.cliResolvedPath ?? null,
-          cliAvailabilityReason: backend?.cliAvailabilityReason ?? null,
-          cliUnavailableSince: backend?.cliUnavailableSince?.toISOString() ?? null,
-          lastAvailabilityAt: backend?.lastAvailabilityAt?.toISOString() ?? null,
+          cliAvailable: availability?.available ?? null,
+          cliResolvedPath: availability?.resolvedPath ?? null,
+          cliAvailabilityReason: availability?.reason ?? null,
+          cliUnavailableSince: availability?.unavailableSince ?? null,
+          lastAvailabilityAt: availability?.lastCheckedAt ?? null,
           authMode: backend?.authMode ?? null,
           lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
           lastPreflightOk: backend?.lastPreflightOk ?? null,
@@ -3279,30 +3286,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const now = new Date();
     const state = await db.$transaction(async (tx) => {
       const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
+      const previousAvailability = readStoredCliAvailability(previous?.capabilities);
+      const availability = nextStoredCliAvailability(body, previousAvailability, now);
       if (!body.available) {
-        const reason = `runner-cli-unavailable: ${body.runner.toLowerCase()} CLI "${body.binary}" was not found in configured runner PATH`;
-        const outageStarted = previous?.cliAvailable !== false;
-        const outageKey = outageStarted
-          ? `runner-cli-unavailable:${body.runner}:${randomUUID()}`
-          : previous.cliAvailabilityOutageKey ?? `runner-cli-unavailable:${body.runner}:${randomUUID()}`;
+        const outageStarted = previousAvailability?.available !== false;
         const unavailable = await tx.runnerBackendState.upsert({
           where: { runner: body.runner },
           create: {
             runner: body.runner,
-            cliAvailable: false,
-            cliResolvedPath: null,
-            cliAvailabilityReason: reason,
-            cliUnavailableSince: now,
-            cliAvailabilityOutageKey: outageKey,
-            lastAvailabilityAt: now,
+            capabilities: storeCliAvailability(null, availability),
           },
           update: {
-            cliAvailable: false,
-            cliResolvedPath: null,
-            cliAvailabilityReason: reason,
-            cliUnavailableSince: previous?.cliUnavailableSince ?? now,
-            cliAvailabilityOutageKey: outageKey,
-            lastAvailabilityAt: now,
+            capabilities: storeCliAvailability(previous?.capabilities, availability),
           },
         });
         await tx.task.updateMany({
@@ -3310,7 +3305,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
             runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
           },
-          data: { failureReason: reason },
+          data: { failureReason: availability.reason },
         });
         if (outageStarted) {
           const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
@@ -3322,41 +3317,32 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             from: "AGENT",
             kind: "TEXT",
             body: `${body.runner.toLowerCase()} runner CLI is unavailable: ${body.binary} was not found in configured runner PATH.`,
-            dedupeKey: outageKey,
+            dedupeKey: availability.outageKey,
             ...(thread ? { threadId: thread.id } : {}),
           } });
         }
         return unavailable;
       }
 
-      const legacyCliCircuit = previous?.circuitReason?.startsWith("cli-missing:") === true;
       const available = await tx.runnerBackendState.upsert({
         where: { runner: body.runner },
         create: {
           runner: body.runner,
-          cliAvailable: true,
-          cliResolvedPath: body.resolvedPath,
-          lastAvailabilityAt: now,
+          capabilities: storeCliAvailability(null, availability),
         },
         update: {
-          cliAvailable: true,
-          cliResolvedPath: body.resolvedPath,
-          cliAvailabilityReason: null,
-          cliUnavailableSince: null,
-          cliAvailabilityOutageKey: null,
-          lastAvailabilityAt: now,
-          ...(legacyCliCircuit ? { circuitOpen: false, circuitReason: null, circuitOpenedAt: null } : {}),
+          capabilities: storeCliAvailability(previous?.capabilities, availability),
         },
       });
-      if (previous?.cliAvailabilityReason) {
+      if (previousAvailability?.reason) {
         await tx.task.updateMany({
-          where: { failureReason: previous.cliAvailabilityReason },
+          where: { failureReason: previousAvailability.reason },
           data: { failureReason: null },
         });
       }
-      if (previous?.cliAvailabilityOutageKey) {
+      if (previousAvailability?.outageKey) {
         await tx.inboxMessage.updateMany({
-          where: { dedupeKey: previous.cliAvailabilityOutageKey, status: InboxStatus.OPEN },
+          where: { dedupeKey: previousAvailability.outageKey, status: InboxStatus.OPEN },
           data: { status: InboxStatus.CLOSED, answeredAt: now },
         });
       }
@@ -3375,7 +3361,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         runner: body.runner,
         cliVersion: body.cliVersion ?? null,
         authMode: body.authMode ?? null,
-        capabilities: jsonValue(body.capabilities),
+        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
         lastPreflightAt: now,
         lastPreflightOk: body.ok,
         circuitOpen: !body.ok,
@@ -3385,7 +3371,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       update: {
         cliVersion: body.cliVersion ?? null,
         authMode: body.authMode ?? null,
-        capabilities: jsonValue(body.capabilities),
+        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
         lastPreflightAt: now,
         lastPreflightOk: body.ok,
         ...(body.ok
@@ -3531,7 +3517,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // `runner` on its row is an inert artifact of the sentinel Agent.
         if (executionMode === "agent") {
           const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
-          if (backend?.cliAvailable === false || backend?.circuitOpen) continue;
+          if (readStoredCliAvailability(backend?.capabilities)?.available === false || backend?.circuitOpen) continue;
         }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);

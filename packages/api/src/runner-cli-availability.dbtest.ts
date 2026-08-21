@@ -6,6 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { enqueueTaskRun, PrismaClient, RunnerPreference, TaskStatus } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
+import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const RUNNER_TOKEN = "runner-cli-availability-token";
@@ -100,8 +101,9 @@ test("a missing CLI blocks only its backend, dedupes the outage, and recovers on
   await post("/runner/availability", unavailable);
 
   const state = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: "CLAUDE" } });
-  assert.equal(state.cliAvailable, false);
-  assert.match(state.cliAvailabilityReason ?? "", /claude CLI "claude" was not found/u);
+  const missing = readStoredCliAvailability(state.capabilities);
+  assert.equal(missing?.available, false);
+  assert.match(missing?.reason ?? "", /claude CLI "claude" was not found/u);
   assert.match((await db.task.findUniqueOrThrow({ where: { id: claude.task.id } })).failureReason ?? "", /claude CLI "claude" was not found/u);
   assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "runner-cli-unavailable:CLAUDE:" } } }), 1);
 
@@ -135,8 +137,9 @@ test("a missing CLI blocks only its backend, dedupes the outage, and recovers on
     resolvedPath: "/opt/runner/bin/claude",
   });
   const recovered = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: "CLAUDE" } });
-  assert.equal(recovered.cliAvailable, true);
-  assert.equal(recovered.cliAvailabilityReason, null);
+  const available = readStoredCliAvailability(recovered.capabilities);
+  assert.equal(available?.available, true);
+  assert.equal(available?.reason, null);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: claude.task.id } })).failureReason, null);
   assert.equal(await db.inboxMessage.count({ where: {
     dedupeKey: { startsWith: "runner-cli-unavailable:CLAUDE:" }, status: "CLOSED",
@@ -145,4 +148,25 @@ test("a missing CLI blocks only its backend, dedupes the outage, and recovers on
   const recoveredClaim = await claim();
   assert.equal(recoveredClaim?.task.id, claude.task.id);
   assert.equal(recoveredClaim?.runner, "CLAUDE");
+});
+
+test("CLI availability reports preserve an independent authentication circuit", async () => {
+  await db.runnerBackendState.create({ data: {
+    runner: "CODEX",
+    circuitOpen: true,
+    circuitReason: "not-authenticated: run codex login",
+    circuitOpenedAt: new Date("2026-08-21T00:00:00.000Z"),
+  } });
+
+  await post("/runner/availability", {
+    runner: "CODEX", binary: "codex", available: false, resolvedPath: null,
+  });
+  await post("/runner/availability", {
+    runner: "CODEX", binary: "codex", available: true, resolvedPath: "/opt/runner/bin/codex",
+  });
+
+  const state = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: "CODEX" } });
+  assert.equal(readStoredCliAvailability(state.capabilities)?.available, true);
+  assert.equal(state.circuitOpen, true);
+  assert.equal(state.circuitReason, "not-authenticated: run codex login");
 });
