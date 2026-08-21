@@ -9,9 +9,17 @@ import type { ChainProgress } from "./types";
  */
 export const chainMarker = (
   // The four fields it formats, not the whole payload: `position` rides along in
-  // the response and nothing here reads it.
+  // the response, but this chain-wide formatter does not read it.
   progress: Pick<ChainProgress, "done" | "total" | "activeStepName" | "activeStatus"> | null | undefined,
 ): string | null => {
   if (!progress) return null;
   return `${progress.done}/${progress.total} · ${progress.activeStepName} · ${progress.activeStatus}`;
+};
+
+/** A board card describes its own place, not the chain's current execution. */
+export const chainPositionMarker = (
+  progress: Pick<ChainProgress, "position" | "total"> | null | undefined,
+): string | null => {
+  if (!progress || progress.position === null) return null;
+  return `step ${progress.position}/${progress.total}`;
 };

@@ -80,7 +80,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, etagFor, etagMatches } from "./board.js";
+import { boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
@@ -2133,7 +2133,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       : archived === "true" ? { archivedAt: { not: null } }
       : {};
     const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
-    const orderBy = { createdAt: "asc" as const };
+    const orderBy = [{ updatedAt: "desc" as const }, { id: "asc" as const }];
+
+    /** Latest append-only run event per task. Querying all runs matters: a
+     * queued retry can be the highest runNumber while its predecessor still
+     * owns the task's newest recorded event. */
+    const latestRunActivity = async (taskIds: string[]): Promise<Map<string, Date>> => {
+      if (taskIds.length === 0) return new Map();
+      const runs = await db.run.findMany({
+        where: { taskId: { in: taskIds } },
+        select: { id: true, taskId: true },
+      });
+      const taskByRun = new Map(runs.flatMap((run) => run.taskId === null ? [] : [[run.id, run.taskId] as const]));
+      const events = runs.length === 0 ? [] : await db.sessionEvent.groupBy({
+        by: ["runId"],
+        where: { runId: { in: runs.map(({ id: runId }) => runId) } },
+        _max: { at: true },
+      });
+      const latest = new Map<string, Date>();
+      for (const event of events) {
+        const taskId = taskByRun.get(event.runId);
+        const at = event._max.at;
+        if (taskId === undefined || at === null) continue;
+        const previous = latest.get(taskId);
+        if (previous === undefined || previous < at) latest.set(taskId, at);
+      }
+      return latest;
+    };
 
     // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
     // queries over the whole task table, and `Projects.tsx` polls this endpoint
@@ -2219,19 +2245,24 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
           templateId: true, source: true, chainId: true, chainIndex: true, updatedAt: true,
-          assigneeAgent: { select: { id: true, title: true } },
+          assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
             orderBy: { runNumber: "desc" }, take: 1,
-            select: { id: true, runNumber: true, status: true, session: { select: { costUsd: true } } },
+            select: {
+              id: true, runNumber: true, status: true,
+              session: { select: { costUsd: true, startedAt: true, endedAt: true } },
+            },
           },
           // §SF-1: the card's run line reads the merge outcome, not only the
           // protocol status, so a stopped mechanical merge is not shown as Done.
           stepOutput: { select: { kind: true, body: true, runId: true } },
         },
       });
-      const progressFor = await chainProgressLookup(rows);
-      return validated(context, rows.map((row) => boardCard(row, progressFor(row))));
+      const ordered = byLatestRunActivity(rows, await latestRunActivity(rows.map(({ id: taskId }) => taskId)));
+      const progressFor = await chainProgressLookup(ordered);
+      const displayByTask = chainDisplayByTask(ordered);
+      return validated(context, ordered.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
     }
 
     const tasks = await db.task.findMany({
@@ -2244,15 +2275,21 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // `Run.output` is forensic bulk — up to 500k per run — and no client of
         // this list reads it. Omitted here and on the task detail below so that
         // recording a run's tail cannot inflate the responses the board polls.
-        runs: { orderBy: { runNumber: "desc" }, take: 1, omit: { output: true }, include: { session: true } },
+        runs: {
+          orderBy: { runNumber: "desc" }, take: 1, omit: { output: true },
+          include: { session: true },
+        },
       },
     });
-    const progressFor = await chainProgressLookup(tasks);
+    const orderedTasks = enrich
+      ? byLatestRunActivity(tasks, await latestRunActivity(tasks.map(({ id: taskId }) => taskId)))
+      : tasks;
+    const progressFor = await chainProgressLookup(orderedTasks);
 
     // The Automations page needs `Last run` on a *collapsed* row, and a poll
     // that only mounts while a row is expanded can never supply it. Skipped
     // entirely on a board with no automations.
-    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
+    const cronIds = !enrich ? [] : orderedTasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
     const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
       by: ["recurringSourceTaskId"],
       where: { recurringSourceTaskId: { in: cronIds } },
@@ -2261,7 +2298,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
 
-    return validated(context, tasks.map((task) => ({
+    return validated(context, orderedTasks.map((task) => ({
       ...task,
       chainProgress: progressFor(task),
       recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,

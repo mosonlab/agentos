@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chainMarker } from "../lib/chain";
+import { chainMarker, chainPositionMarker } from "../lib/chain";
 
 test("the chain marker reads done/total, step, status", () => {
   assert.equal(
@@ -20,4 +20,9 @@ test("a finished chain still reads as n/n rather than collapsing", () => {
     chainMarker({ done: 3, total: 3, activeStepName: "Review", activeStatus: "done" }),
     "3/3 · Review · done",
   );
+});
+
+test("a board position marker names only the card's own ordinal", () => {
+  assert.equal(chainPositionMarker({ position: 4, total: 9 }), "step 4/9");
+  assert.equal(chainPositionMarker({ position: null, total: 9 }), null);
 });
