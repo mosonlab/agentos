@@ -47,6 +47,7 @@ const main = async (): Promise<void> => {
               outputKind: true,
               attachmentsFromPrevious: true,
               opensPullRequest: true,
+              baseFromStepIndex: true,
               spawnPolicy: true,
             },
           });

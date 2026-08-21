@@ -9,6 +9,8 @@
  *  Loaded by pi's own loader, not compiled by the runner's tsc — keep it
  *  dependency-free and self-contained. */
 
+import { execFileSync } from "node:child_process";
+
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
 
 const credentials = () => {
@@ -16,10 +18,20 @@ const credentials = () => {
   const runId = process.env.AGENTOS_RUN_ID;
   const sessionToken = process.env.AGENTOS_SESSION_TOKEN;
   const fencingToken = process.env.AGENTOS_FENCING_TOKEN;
-  if (!apiUrl || !runId || !sessionToken || !fencingToken) {
+  const workspacePath = process.env.AGENTOS_WORKSPACE_PATH;
+  if (!apiUrl || !runId || !sessionToken || !fencingToken || !workspacePath) {
     throw new Error("AgentOS session credentials are missing from this environment");
   }
-  return { apiUrl: apiUrl.replace(/\/$/, ""), runId, sessionToken, fencingToken };
+  return { apiUrl: apiUrl.replace(/\/$/, ""), runId, sessionToken, fencingToken, workspacePath };
+};
+
+const workspaceHead = (): string => {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: credentials().workspacePath,
+    encoding: "utf8",
+  }).trim();
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(head)) throw new Error(`Workspace HEAD is not a commit SHA: ${head}`);
+  return head;
 };
 
 const call = async (method: string, path: string, body?: Record<string, unknown>): Promise<unknown> => {
@@ -75,8 +87,19 @@ export default function (pi: {
       required: ["kind", "body"],
     },
     async execute(_toolCallId: string, params: { kind: string; body: string; metadata?: Record<string, unknown> }): Promise<ToolResult> {
-      await call("PUT", "/output", { kind: params.kind, body: params.body, ...(params.metadata ? { metadata: params.metadata } : {}) });
-      return said(`Output persisted as '${params.kind}' (${params.body.length} characters).`);
+      const persisted = await call("PUT", "/output", {
+        kind: params.kind,
+        body: params.body,
+        commitSha: workspaceHead(),
+        ...(params.metadata ? { metadata: params.metadata } : {}),
+      }) as { predecessorOutputs?: unknown } | null;
+      const predecessorOutputs = persisted?.predecessorOutputs;
+      return said([
+        `Output persisted as '${params.kind}' (${params.body.length} characters).`,
+        ...(Array.isArray(predecessorOutputs) && predecessorOutputs.length > 0
+          ? ["Predecessor step outputs are now available:", JSON.stringify(predecessorOutputs, null, 2)]
+          : []),
+      ].join("\n\n"));
     },
   });
 

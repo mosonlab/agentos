@@ -70,9 +70,9 @@ export const timeAgo = (value: string | null | undefined): string => {
   return days < 30 ? formatT("format.daysAgo", { n: days }) : formatDate(value);
 };
 
-export const duration = (from: string | null | undefined, to: string | null | undefined): string => {
+export const duration = (from: string | null | undefined, to: string | null | undefined, now = Date.now()): string => {
   if (!from) return "—";
-  const end = to ? new Date(to).getTime() : Date.now();
+  const end = to ? new Date(to).getTime() : now;
   const seconds = Math.max(0, Math.round((end - new Date(from).getTime()) / 1000));
   if (seconds < 60) return formatT("format.seconds", { n: seconds });
   const minutes = Math.floor(seconds / 60);

@@ -37,6 +37,7 @@ import {
   resolveRunBranches,
   sessionUsageCost,
   sumUsageCosts,
+  pinnedImplementationRange,
   SecretPurpose,
   SkillKind,
   SessionEventSource,
@@ -81,10 +82,16 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, etagFor, etagMatches, serializeUsageCost } from "./board.js";
+import { boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
+import {
+  nextStoredCliAvailability,
+  preserveCliAvailability,
+  readStoredCliAvailability,
+  storeCliAvailability,
+} from "./runner-cli-availability.js";
 import {
   chainKey,
   chainProgress,
@@ -489,6 +496,16 @@ const preflightInput = z.object({
   capabilities: z.record(z.string(), z.unknown()),
   error: z.string().nullable().optional(),
 });
+const runnerAvailabilityInput = z.object({
+  runner: z.nativeEnum(RunnerKind),
+  binary: z.string().trim().min(1).max(500),
+  available: z.boolean(),
+  resolvedPath: z.string().trim().min(1).max(2000).nullable(),
+}).superRefine((body, context) => {
+  if (body.available !== (body.resolvedPath !== null)) {
+    context.addIssue({ code: "custom", message: "available and resolvedPath disagree" });
+  }
+});
 const inboxQuestionInput = z.object({
   fencingToken: fence,
   requestId: z.string().min(1).max(200),
@@ -530,7 +547,10 @@ const webhookConfigPatch = z.object({
   // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
-const templateStepPatch = z.object({ opensPullRequest: z.boolean() });
+const templateStepPatch = z.object({
+  opensPullRequest: z.boolean().optional(),
+  baseFromStepIndex: z.number().int().min(0).nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const templateStepInput = z.object({
   stepIndex: z.number().int().min(0),
   name: z.string().trim().min(1).max(200),
@@ -543,12 +563,14 @@ const templateStepInput = z.object({
   runner: z.nativeEnum(RunnerKind).nullable().default(null),
   outputKind: z.string().trim().min(1).max(80).default("result"),
   opensPullRequest: z.boolean().default(true),
+  baseFromStepIndex: z.number().int().min(0).nullable().default(null),
 });
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
   body: z.string().min(1).max(500_000),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  commitSha: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u).optional(),
 });
 const inboxDecisionInput = z.object({
   decision: z.string().trim().min(1).max(8000),
@@ -916,9 +938,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }),
       backends: Object.values(RunnerKind).map((runner) => {
         const backend = backendsByRunner.get(runner);
+        const availability = readStoredCliAvailability(backend?.capabilities);
         return {
           runner,
           cliVersion: backend?.cliVersion ?? null,
+          cliAvailable: availability?.available ?? null,
+          cliResolvedPath: availability?.resolvedPath ?? null,
+          cliAvailabilityReason: availability?.reason ?? null,
+          cliUnavailableSince: availability?.unavailableSince ?? null,
+          lastAvailabilityAt: availability?.lastCheckedAt ?? null,
           authMode: backend?.authMode ?? null,
           lastPreflightAt: backend?.lastPreflightAt?.toISOString() ?? null,
           lastPreflightOk: backend?.lastPreflightOk ?? null,
@@ -1773,6 +1801,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         select: { id: true },
       });
       if (duplicate) return { error: "Template step index already exists", code: 409 as const };
+      if (body.baseFromStepIndex !== null) {
+        if (body.baseFromStepIndex >= body.stepIndex) {
+          return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
+        }
+        const baseStep = await tx.taskTemplateStep.findFirst({
+          where: { taskTemplateId: template.id, stepIndex: body.baseFromStepIndex },
+          select: { id: true },
+        });
+        if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
+      }
       return { step: await tx.taskTemplateStep.create({ data: {
         taskTemplateId: template.id,
         stepIndex: body.stepIndex,
@@ -1786,28 +1824,39 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         runner: body.runner,
         outputKind: body.outputKind,
         opensPullRequest: body.opensPullRequest,
+        baseFromStepIndex: body.baseFromStepIndex,
       } }) };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.step, 201);
   });
-  // Bounded on purpose: `opensPullRequest` only. A general template-step editor
-  // is a whole authoring surface (stepIndex, name, assigneeType, prompt,
-  // outputKind, approvalGate, attachmentsFromPrevious, runner, spawnPolicy,
-  // agent) that this batch's spec does not describe and no caller wants yet.
-  // Widening this route is a separate decision, not a follow-on edit.
+  // Bounded on purpose: only delivery and base-pinning fields. A general
+  // template-step editor remains a separate authoring surface.
   app.patch("/task-templates/:templateId/steps/:stepId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
     const stepId = id.parse(context.req.param("stepId"));
     const body = await readJson(context.req.raw, templateStepPatch);
     // Ownership is checked, not assumed: the step id alone would let a caller
     // patch another template's step through any templateId that happens to exist.
-    const step = await db.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
-    if (!step) return context.json({ error: "Template step not found" }, 404);
-    return context.json(await db.taskTemplateStep.update({
-      where: { id: stepId },
-      data: { opensPullRequest: body.opensPullRequest },
-    }));
+    const result = await db.$transaction(async (tx) => {
+      const step = await tx.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
+      if (!step) return { error: "Template step not found", code: 404 as const };
+      if (body.baseFromStepIndex !== undefined && body.baseFromStepIndex !== null) {
+        if (body.baseFromStepIndex >= step.stepIndex) {
+          return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
+        }
+        const baseStep = await tx.taskTemplateStep.findFirst({
+          where: { taskTemplateId: templateId, stepIndex: body.baseFromStepIndex }, select: { id: true },
+        });
+        if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
+      }
+      return { step: await tx.taskTemplateStep.update({
+        where: { id: stepId },
+        data: withoutUndefined(body),
+      }) };
+    });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.step);
   });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
@@ -2086,7 +2135,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       : archived === "true" ? { archivedAt: { not: null } }
       : {};
     const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
-    const orderBy = { createdAt: "asc" as const };
+    const orderBy = [{ updatedAt: "desc" as const }, { id: "asc" as const }];
+
+    /** Latest append-only run event per task. Querying all runs matters: a
+     * queued retry can be the highest runNumber while its predecessor still
+     * owns the task's newest recorded event. */
+    const latestRunActivity = async (taskIds: string[]): Promise<Map<string, Date>> => {
+      if (taskIds.length === 0) return new Map();
+      const runs = await db.run.findMany({
+        where: { taskId: { in: taskIds } },
+        select: { id: true, taskId: true },
+      });
+      const taskByRun = new Map(runs.flatMap((run) => run.taskId === null ? [] : [[run.id, run.taskId] as const]));
+      const events = runs.length === 0 ? [] : await db.sessionEvent.groupBy({
+        by: ["runId"],
+        where: { runId: { in: runs.map(({ id: runId }) => runId) } },
+        _max: { at: true },
+      });
+      const latest = new Map<string, Date>();
+      for (const event of events) {
+        const taskId = taskByRun.get(event.runId);
+        const at = event._max.at;
+        if (taskId === undefined || at === null) continue;
+        const previous = latest.get(taskId);
+        if (previous === undefined || previous < at) latest.set(taskId, at);
+      }
+      return latest;
+    };
 
     // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
     // queries over the whole task table, and `Projects.tsx` polls this endpoint
@@ -2172,13 +2247,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
           templateId: true, source: true, chainId: true, chainIndex: true, updatedAt: true,
-          assigneeAgent: { select: { id: true, title: true } },
+          assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
             orderBy: { runNumber: "desc" },
             select: {
               id: true, runNumber: true, status: true, model: true,
-              session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true } },
+              session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true, startedAt: true, endedAt: true } },
             },
           },
           // §SF-1: the card's run line reads the merge outcome, not only the
@@ -2186,8 +2261,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           stepOutput: { select: { kind: true, body: true, runId: true } },
         },
       });
-      const progressFor = await chainProgressLookup(rows);
-      return validated(context, rows.map((row) => boardCard(row, progressFor(row))));
+      const ordered = byLatestRunActivity(rows, await latestRunActivity(rows.map(({ id: taskId }) => taskId)));
+      const progressFor = await chainProgressLookup(ordered);
+      const displayByTask = chainDisplayByTask(ordered);
+      return validated(context, ordered.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
     }
 
     const tasks = await db.task.findMany({
@@ -2200,15 +2277,21 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // `Run.output` is forensic bulk — up to 500k per run — and no client of
         // this list reads it. Omitted here and on the task detail below so that
         // recording a run's tail cannot inflate the responses the board polls.
-        runs: { orderBy: { runNumber: "desc" }, take: 1, omit: { output: true }, include: { session: true } },
+        runs: {
+          orderBy: { runNumber: "desc" }, take: 1, omit: { output: true },
+          include: { session: true },
+        },
       },
     });
-    const progressFor = await chainProgressLookup(tasks);
+    const orderedTasks = enrich
+      ? byLatestRunActivity(tasks, await latestRunActivity(tasks.map(({ id: taskId }) => taskId)))
+      : tasks;
+    const progressFor = await chainProgressLookup(orderedTasks);
 
     // The Automations page needs `Last run` on a *collapsed* row, and a poll
     // that only mounts while a row is expanded can never supply it. Skipped
     // entirely on a board with no automations.
-    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
+    const cronIds = !enrich ? [] : orderedTasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
     const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
       by: ["recurringSourceTaskId"],
       where: { recurringSourceTaskId: { in: cronIds } },
@@ -2217,7 +2300,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
 
-    return validated(context, tasks.map((task) => ({
+    return validated(context, orderedTasks.map((task) => ({
       ...task,
       chainProgress: progressFor(task),
       recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
@@ -3122,8 +3205,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, taskOutputInput);
     return context.json(await db.taskStepOutput.upsert({
       where: { taskId },
-      create: { taskId, kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-      update: { kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      create: { taskId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
     }));
   });
   /**
@@ -3272,6 +3355,76 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
   });
 
+  app.post("/runner/availability", async (context) => {
+    const body = await readJson(context.req.raw, runnerAvailabilityInput);
+    const now = new Date();
+    const state = await db.$transaction(async (tx) => {
+      const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
+      const previousAvailability = readStoredCliAvailability(previous?.capabilities);
+      const availability = nextStoredCliAvailability(body, previousAvailability, now);
+      if (!body.available) {
+        const outageStarted = previousAvailability?.available !== false;
+        const unavailable = await tx.runnerBackendState.upsert({
+          where: { runner: body.runner },
+          create: {
+            runner: body.runner,
+            capabilities: storeCliAvailability(null, availability),
+          },
+          update: {
+            capabilities: storeCliAvailability(previous?.capabilities, availability),
+          },
+        });
+        await tx.task.updateMany({
+          where: {
+            status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+            runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
+          },
+          data: { failureReason: availability.reason },
+        });
+        if (outageStarted) {
+          const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
+          const thread = chatId ? (
+            await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
+            ?? await tx.inboxThread.create({ data: { channel: "FEISHU", externalChatId: chatId } }).catch(() => null)
+          ) : null;
+          await tx.inboxMessage.create({ data: {
+            from: "AGENT",
+            kind: "TEXT",
+            body: `${body.runner.toLowerCase()} runner CLI is unavailable: ${body.binary} was not found in configured runner PATH.`,
+            dedupeKey: availability.outageKey,
+            ...(thread ? { threadId: thread.id } : {}),
+          } });
+        }
+        return unavailable;
+      }
+
+      const available = await tx.runnerBackendState.upsert({
+        where: { runner: body.runner },
+        create: {
+          runner: body.runner,
+          capabilities: storeCliAvailability(null, availability),
+        },
+        update: {
+          capabilities: storeCliAvailability(previous?.capabilities, availability),
+        },
+      });
+      if (previousAvailability?.reason) {
+        await tx.task.updateMany({
+          where: { failureReason: previousAvailability.reason },
+          data: { failureReason: null },
+        });
+      }
+      if (previousAvailability?.outageKey) {
+        await tx.inboxMessage.updateMany({
+          where: { dedupeKey: previousAvailability.outageKey, status: InboxStatus.OPEN },
+          data: { status: InboxStatus.CLOSED, answeredAt: now },
+        });
+      }
+      return available;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return context.json(state);
+  });
+
   app.post("/runner/preflight", async (context) => {
     const body = await readJson(context.req.raw, preflightInput);
     const now = new Date();
@@ -3282,7 +3435,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         runner: body.runner,
         cliVersion: body.cliVersion ?? null,
         authMode: body.authMode ?? null,
-        capabilities: jsonValue(body.capabilities),
+        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
         lastPreflightAt: now,
         lastPreflightOk: body.ok,
         circuitOpen: !body.ok,
@@ -3292,7 +3445,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       update: {
         cliVersion: body.cliVersion ?? null,
         authMode: body.authMode ?? null,
-        capabilities: jsonValue(body.capabilities),
+        capabilities: preserveCliAvailability(body.capabilities, previous?.capabilities),
         lastPreflightAt: now,
         lastPreflightOk: body.ok,
         ...(body.ok
@@ -3438,7 +3591,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // `runner` on its row is an inert artifact of the sentinel Agent.
         if (executionMode === "agent") {
           const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
-          if (backend?.circuitOpen) continue;
+          if (readStoredCliAvailability(backend?.capabilities)?.available === false || backend?.circuitOpen) continue;
         }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
@@ -3536,6 +3689,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // write endpoint already caps each artifact at 500k; pass the durable
         // body verbatim until artifact references replace prompt embedding.
         const priorOutputs = priorOutputsRaw;
+        const implementationRange = await pinnedImplementationRange(tx, candidate.task);
+        if (implementationRange && implementationRange.implementationHeadSha !== run.targetBranch) {
+          throw new Error(
+            `Pinned run ${run.id} targets ${run.targetBranch ?? "no commit"}, but its source step now records ${implementationRange.implementationHeadSha}`,
+          );
+        }
         return {
           task: candidate.task,
           agent: candidate.agent,
@@ -3547,7 +3706,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           // A later chain run targets the shared head, so its own targetBranch
           // cannot tell delivery which integration line the chain started
           // from. Carry the first run's durable base separately for PR create.
-          run: { ...run, pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch },
+          run: {
+            ...run,
+            pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch,
+            pinnedBaseSha: candidate.task.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
+            implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
+            implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
+          },
           session,
           runner: candidate.runner,
           fencingToken,
@@ -3860,21 +4025,53 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // well as to the session token: a session issued to anything but an
         // allowlisted merge executor cannot author a `merge-result`, and the
         // executor's session cannot author an ordinary step's output.
-        task: { select: { templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } } } },
+        task: { select: {
+          projectId: true,
+          chainId: true,
+          chainIndex: true,
+          templateStep: { select: {
+            stepIndex: true,
+            outputKind: true,
+            baseFromStepIndex: true,
+            taskTemplate: { select: { name: true } },
+          } },
+        } },
       },
     });
     if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
+    const executionMode = executionModeFor(run.task?.templateStep ?? null);
+    if (executionMode !== "mechanical" && !body.commitSha) {
+      return context.json({ error: "commitSha is required" }, 400);
+    }
     const outputRefusal = mechanicalPrincipalRefusal(
-      executionModeFor(run.task?.templateStep ?? null),
+      executionMode,
       isMergeExecutorRunnerId(run.runnerId ?? "") ? "merge-executor" : "runner",
       run.runnerId ?? "",
     );
     if (outputRefusal) return context.json({ error: outputRefusal }, 403);
-    return context.json(await db.taskStepOutput.upsert({
+    const output = await db.taskStepOutput.upsert({
       where: { taskId: run.taskId },
-      create: { taskId: run.taskId, runId, kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-      update: { runId, kind: body.kind, body: body.body, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-    }));
+      create: { taskId: run.taskId, runId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      update: { runId, kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+    });
+    // A blind step's claim deliberately carried no predecessor output. Its
+    // first task_output call durably records the independent review; only then
+    // does the same platform endpoint reveal earlier outputs for adjudication.
+    const predecessorOutputs = run.task?.templateStep?.baseFromStepIndex != null
+      && run.task.chainId && run.task.chainIndex !== null
+      ? await db.taskStepOutput.findMany({
+        where: {
+          task: {
+            projectId: run.task.projectId,
+            chainId: run.task.chainId,
+            chainIndex: { lt: run.task.chainIndex },
+          },
+        },
+        select: { kind: true, body: true, commitSha: true, task: { select: { name: true, chainIndex: true } } },
+        orderBy: { task: { chainIndex: "asc" } },
+      })
+      : [];
+    return context.json({ ...output, predecessorOutputs });
   });
 
   app.post("/session/runs/:runId/inbox/questions", async (context) => {
@@ -4166,7 +4363,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // publication, or a failed run's salvage — is evidence in this
         // transaction. `body.branch ?? run.branch` is that same effective value,
         // because `run` was read before the update.
-        const branches = currentTask.chainId && currentTask.chainIndex !== null && !currentTask.templateId && currentTask.repo
+        const branches = currentTask.templateStep?.baseFromStepIndex != null && currentTask.repo
+          ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, { branch: body.branch ?? run.branch })
+          : currentTask.chainId && currentTask.chainIndex !== null && !currentTask.templateId && currentTask.repo
           ? await resolveRunBranches(tx, { ...currentTask, repo: currentTask.repo }, null)
           : {
             branch: null,
@@ -4247,7 +4446,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           // not by a silent overwrite. The tail this completion carries is
           // recorded on `Run.output` above regardless.
           const existingOutput = await tx.taskStepOutput.findUnique({
-            where: { taskId: run.taskId }, select: { id: true },
+            where: { taskId: run.taskId }, select: { id: true, runId: true },
           });
           if (!existingOutput) {
             await tx.taskStepOutput.create({ data: {
@@ -4256,7 +4455,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               kind: run.task.templateStep?.outputKind ?? "result",
               body: body.output?.trim() || `Run ${run.runNumber} completed successfully.`,
               metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
+              commitSha: body.headSha ?? null,
             } });
+          } else if (existingOutput.runId === run.id && body.headSha) {
+            // The MCP records the live HEAD at authorship time. Delivery may
+            // commit remaining tracked changes afterwards, so completion
+            // advances that same run's output to the actual end commit before
+            // successor activation reads it.
+            await tx.taskStepOutput.update({
+              where: { id: existingOutput.id }, data: { commitSha: body.headSha },
+            });
           }
         }
         if (succeeded && mechanical) {

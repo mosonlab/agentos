@@ -37,6 +37,9 @@ const claim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "codex",
     targetBranch: "main",
+    pinnedBaseSha: null,
+    implementationBaseSha: null,
+    implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
     branch: null,
@@ -71,6 +74,22 @@ const stableArgv = (args: string[]): string[] => args.map((arg) => arg
 
 test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
+});
+
+test("buildPrompt exposes a pinned implementation range without predecessor outputs", () => {
+  const pinned = {
+    ...claim,
+    run: {
+      ...claim.run,
+      pinnedBaseSha: "b".repeat(40),
+      implementationBaseSha: "a".repeat(40),
+      implementationHeadSha: "b".repeat(40),
+    },
+  };
+  const prompt = buildPrompt(pinned);
+  assert.match(prompt, new RegExp(`implementationBaseSha: ${"a".repeat(40)}`));
+  assert.match(prompt, new RegExp(`implementationHeadSha: ${"b".repeat(40)}`));
+  assert.doesNotMatch(prompt, /Persisted outputs from prior template steps/u);
 });
 
 test("the prompt manifest names the AgentOS tools the session actually got", () => {
@@ -344,6 +363,7 @@ test("agent session environment pins both roots inside the run's disposable scra
     // A task secret must not be able to aim a session at the production root.
     { ...claim, secrets: { ...claim.secrets, RUNNER_WORKSPACE_ROOT: productionRoot, CONTROL_PLANE_STATE_DIR: productionRoot } },
     scratch,
+    "/work",
   );
   assert.equal(env.RUNNER_WORKSPACE_ROOT, scratch.workspaceRoot);
   assert.equal(env.CONTROL_PLANE_STATE_DIR, scratch.stateDir);
@@ -355,7 +375,7 @@ test("child environment is an explicit allowlist and excludes host variables", (
   const previous = process.env.HOST_ONLY_CREDENTIAL;
   process.env.HOST_ONLY_CREDENTIAL = "must-not-leak";
   try {
-    const env = buildChildEnvironment({ path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] }, claim, scratch);
+    const env = buildChildEnvironment({ path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] }, claim, scratch, "/work");
     assert.equal(env.HOST_ONLY_CREDENTIAL, undefined);
     assert.equal(env.ALLOWED_SECRET, "secret");
     assert.equal(env.AGENTOS_SESSION_TOKEN, "agos_session_secret");
@@ -399,7 +419,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   } as unknown as RunnerConfig;
   const runScratch = await provisionAgentScratch(config);
   try {
-    const env = buildChildEnvironment(config, claim, runScratch);
+    const env = buildChildEnvironment(config, claim, runScratch, fixture);
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
       const spec = {
         config,

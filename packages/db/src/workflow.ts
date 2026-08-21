@@ -104,6 +104,54 @@ export const isIntegratorStoppedError = (error: unknown): error is IntegratorSto
 export const isArchivedTaskError = (error: unknown): error is ArchivedTaskError =>
   error instanceof Error && error.name === "ArchivedTaskError";
 
+export class PinnedBaseCommitError extends Error {
+  constructor(readonly taskId: string, readonly baseFromStepIndex: number, detail: string) {
+    super(`Pinned task ${taskId} cannot activate from step ${baseFromStepIndex}: ${detail}`);
+    this.name = "PinnedBaseCommitError";
+  }
+}
+
+export const pinnedImplementationRange = async (
+  tx: Tx,
+  task: {
+    id: string;
+    projectId: string;
+    templateId: string | null;
+    chainId: string | null;
+    templateStep?: { baseFromStepIndex: number | null } | null;
+  },
+): Promise<{ implementationBaseSha: string; implementationHeadSha: string } | null> => {
+  const baseFromStepIndex = task.templateStep?.baseFromStepIndex;
+  if (baseFromStepIndex === null || baseFromStepIndex === undefined) return null;
+  if (!task.templateId || !task.chainId) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "task is not an instantiated template chain step");
+  }
+  const source = await tx.taskStepOutput.findFirst({
+    where: {
+      task: {
+        projectId: task.projectId,
+        templateId: task.templateId,
+        chainId: task.chainId,
+        chainIndex: baseFromStepIndex,
+      },
+    },
+    select: { commitSha: true, run: { select: { baseSha: true } } },
+  });
+  if (!source?.commitSha) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded commitSha");
+  }
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.commitSha)) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid commitSha ${source.commitSha}`);
+  }
+  if (!source.run?.baseSha) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded implementation baseSha");
+  }
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.run.baseSha)) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid implementation baseSha ${source.run.baseSha}`);
+  }
+  return { implementationBaseSha: source.run.baseSha, implementationHeadSha: source.commitSha };
+};
+
 /**
  * Takes the Task-row mutex the archive/start/retry/cron writers all take.
  *
@@ -228,6 +276,7 @@ export type RunBranchTask = {
   chainId: string | null;
   chainIndex: number | null;
   templateId: string | null;
+  templateStep?: { baseFromStepIndex: number | null } | null;
   targetBranch: string | null;
   repo: { defaultBranch: string };
 };
@@ -351,6 +400,16 @@ export const resolveRunBranches = async (
   task: RunBranchTask,
   prior: { branch: string | null } | null,
 ): Promise<{ branch: string | null; targetBranch: string }> => {
+  const pinnedRange = await pinnedImplementationRange(tx, task);
+  if (pinnedRange) {
+    const chainBranch = task.targetBranch && task.targetBranch !== task.repo.defaultBranch
+      ? task.targetBranch
+      : null;
+    return {
+      branch: prior?.branch ?? chainBranch,
+      targetBranch: pinnedRange.implementationHeadSha,
+    };
+  }
   // Template chains are frozen: nothing after this point runs for a template
   // task. Step ① keeps the repository default as its base while recovering the
   // shared head from a sibling task; later steps carry that head directly.

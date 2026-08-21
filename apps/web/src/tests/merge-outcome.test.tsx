@@ -37,14 +37,14 @@ const runPill = (status: RunStatus, mergeOutcome?: MergeOutcome | null): string 
   renderToStaticMarkup(<RunPill status={status} mergeOutcome={mergeOutcome} />);
 
 const noop = (): void => undefined;
-const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, onCopyError: noop };
+const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, onCopyError: noop, onFilterChain: noop };
 
 const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
-  id: "t1", name: "Merge execution", status: "DONE", failureReason: null,
+  id: "t1", name: "Merge execution", displayName: overrides.name ?? "Merge execution", status: "DONE", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
-  updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
-  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED" }, taskCost: null,
+  chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
+  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null }, taskCost: null,
   ...overrides,
 });
 

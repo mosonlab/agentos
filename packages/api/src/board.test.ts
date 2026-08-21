@@ -3,14 +3,15 @@ import test from "node:test";
 
 import { Prisma } from "@agentos/db";
 
-import { type BoardRow, boardCard, etagFor, etagMatches } from "./board.js";
+import { type BoardRow, boardCard, byLatestRunActivity, chainDisplayByTask, etagFor, etagMatches, taskChainName } from "./board.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
-  costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, ...overrides,
+  costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
 });
 
 const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   id: "t1",
+  projectId: "p1",
   name: "Ship the thing",
   status: "TODO" as BoardRow["status"],
   failureReason: null,
@@ -24,6 +25,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainId: null,
   chainIndex: null,
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
+  templateStep: null,
   assigneeAgent: null,
   runs: [],
   ...overrides,
@@ -35,7 +37,7 @@ test("the board card carries every field the board renders and nothing else", ()
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
-    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainProgress", "cron",
+    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainName", "chainProgress", "cron", "displayName",
     "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status", "taskCost",
     "templateId", "timezone", "updatedAt",
   ]);
@@ -61,10 +63,13 @@ test("the projection drops the Run and Session columns the board never reads", (
     runs: [{
       id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5",
       // The real row carries ~45 more columns; only these fields survive.
-      session: session({ costUsd: "1.25" }),
+      session: session({ costUsd: "1.25", startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z") }),
     }],
   }), null);
-  assert.deepEqual(card.latestRun, { id: "r1", runNumber: 3, status: "FAILED" });
+  assert.deepEqual(card.latestRun, {
+    id: "r1", runNumber: 3, status: "FAILED", costUsd: "1.25",
+    startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z"),
+  });
   assert.equal(card.taskCost?.costUsd, "1.25");
 });
 
@@ -84,6 +89,7 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
   const decimal = new Prisma.Decimal("0.42");
   const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: decimal }) }] }), null);
   assert.equal(card.taskCost?.costUsd, "0.42");
+  assert.equal(card.latestRun?.costUsd, "0.42");
   assert.match(JSON.stringify(card), /"costUsd":"0\.42"/);
 });
 
@@ -94,14 +100,55 @@ test("task cost sums every run including failures and marks an estimated summand
     }) },
     { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", session: session({ costUsd: "1.25" }) },
   ] }), null);
-  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED" });
+  assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
 });
 
-test("the assignee is narrowed to the two fields the card shows", () => {
-  const card = boardCard(row({ assigneeAgent: { id: "a1", title: "Frontend Developer (Opus)" } }), null);
-  assert.deepEqual(card.assigneeAgent, { id: "a1", title: "Frontend Developer (Opus)" });
+test("the assignee carries the model spec the card shows", () => {
+  const card = boardCard(row({ assigneeAgent: { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" } }), null);
+  assert.deepEqual(card.assigneeAgent, { id: "a1", title: "Frontend Developer", model: "gpt-5.6-sol:medium" });
+});
+
+test("chain names are derived only from the exact persisted template-step suffix", () => {
+  assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review", templateStep: { name: "Review" } })), "Release");
+  assert.equal(taskChainName(row({ chainId: "c1", name: "Release: Review notes", templateStep: { name: "Review" } })), null);
+  assert.equal(taskChainName(row({ chainId: null, name: "Release: Review", templateStep: { name: "Review" } })), null);
+});
+
+test("direct chains derive one verified shared display prefix without changing stored names", () => {
+  const rows = [
+    row({ id: "build", chainId: "direct", name: "Release: Build" }),
+    row({ id: "review", chainId: "direct", name: "Release: Review" }),
+  ];
+  const display = chainDisplayByTask(rows);
+  assert.deepEqual(display.get("build"), { chainName: "Release", displayName: "Build" });
+  assert.deepEqual(display.get("review"), { chainName: "Release", displayName: "Review" });
+  assert.equal(rows[0]!.name, "Release: Build");
+  assert.deepEqual(boardCard(rows[0]!, null, display.get("build")), {
+    ...boardCard(rows[0]!, null), chainName: "Release", displayName: "Build",
+  });
+});
+
+test("a direct chain prefix is not guessed from one row or a partial match", () => {
+  const displays = chainDisplayByTask([
+    row({ id: "solo", chainId: "solo-chain", name: "Release: Build" }),
+    row({ id: "a", chainId: "mixed", name: "Release: Build" }),
+    row({ id: "b", chainId: "mixed", name: "Other: Review" }),
+  ]);
+  assert.deepEqual(displays.get("solo"), { chainName: null, displayName: "Release: Build" });
+  assert.deepEqual(displays.get("a"), { chainName: null, displayName: "Release: Build" });
+});
+
+test("tasks sort newest run-event activity first with an updatedAt fallback and stable ties", () => {
+  const at = (value: string) => new Date(value);
+  const rows = [
+    row({ id: "later-created", status: "DONE", updatedAt: at("2026-08-16T12:00:00Z") }),
+    row({ id: "earlier-created-later-finish", status: "DONE", updatedAt: at("2026-08-16T08:00:00Z") }),
+    row({ id: "no-runs", updatedAt: at("2026-08-16T15:00:00Z"), runs: [] }),
+  ];
+  const activity = new Map([["later-created", at("2026-08-16T13:00:00Z")], ["earlier-created-later-finish", at("2026-08-16T14:00:00Z")]]);
+  assert.deepEqual(byLatestRunActivity(rows, activity).map(({ id }) => id), ["no-runs", "earlier-created-later-finish", "later-created"]);
 });
 
 test("chainProgress is passed through, not recomputed", () => {
@@ -124,10 +171,13 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   // bar is a 250KB initial payload, so a card has ~2.2KB to spend and uses far
   // less than that whenever the task did not fail.
   const card = boardCard(row({
-    assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner" },
+    assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" },
     runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", session: session({ costUsd: "0.42" }) }],
   }), null);
-  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 700, "a clean card must stay well inside its budget");
+  // The card carries both cost surfaces — the latest run's own cost and the
+  // cross-run task total — so the clean-card bound sits at 800, still under
+  // half the ~2.2KB acceptance budget.
+  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 800, "a clean card must stay well inside its budget");
 });
 
 /* --------------------------------------------------------------- the ETag */

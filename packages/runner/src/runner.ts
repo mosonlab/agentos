@@ -20,12 +20,18 @@ import {
   completeRun,
   heartbeat as sendHeartbeat,
   recordPublishedBranch,
+  reportCliAvailability,
   reportPreflight,
   startRun,
   type ClaimedTask,
   type CleanupStatus,
   type SessionEventPayload,
 } from "./api.js";
+import {
+  probeSupportedCliAvailability,
+  SUPPORTED_RUNNERS,
+  type CliAvailability,
+} from "./availability.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { deliverFailedWorkspace, deliverWorkspace } from "./delivery.js";
@@ -196,7 +202,7 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config);
-    const env = buildChildEnvironment(config, claim, scratch);
+    const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -321,14 +327,26 @@ export const executeClaim = async (config: RunnerConfig, claim: ClaimedTask): Pr
     // Bound outside the closures below: `workspace` is nullable at the top of
     // this function, and the narrowing does not survive into a callback.
     const delivered = { ...workspace, branch: gitResult.branch };
-    if (executionSucceeded) delivery = await deliverUnderLease(lease, (retryOptions) => deliverWorkspace(
-      config,
-      claim,
-      delivered,
-      undefined,
-      (branch) => recordPublishedBranch(config, claim, branch),
-      retryOptions,
-    ));
+    if (executionSucceeded) {
+      // A pinned review started from an object-id-only detached checkout. It
+      // produces a platform output, not a branch artifact, so publishing it
+      // would either create a forbidden local chain ref or overwrite the chain
+      // from an intentionally stale base.
+      delivery = workspace.pinnedBaseSha
+        ? {
+          pushStatus: "SUCCEEDED",
+          pushRemote: claim.repo.remoteUrl,
+          deliveryInstructions: `Pinned checkout ${workspace.pinnedBaseSha} completed without branch publication.`,
+        }
+        : await deliverUnderLease(lease, (retryOptions) => deliverWorkspace(
+          config,
+          claim,
+          delivered,
+          undefined,
+          (branch) => recordPublishedBranch(config, claim, branch),
+          retryOptions,
+        ));
+    }
     else {
       // The workspace is about to be destroyed; commit and salvage its trackable changes.
       const salvage = await deliverUnderLease(lease, (retryOptions) =>
@@ -447,6 +465,7 @@ export type StartupReportRetryOptions = {
   attempts?: number;
   wait?: (attempt: number) => Promise<void>;
   onRetry?: (runner: RunnerKind, attempt: number, attempts: number) => void;
+  onAvailability?: (availability: CliAvailability) => void;
 };
 
 const waitBeforeStartupReportRetry = async (attempt: number): Promise<void> => {
@@ -462,10 +481,9 @@ const startupApiMayBecomeReady = (error: unknown): boolean => {
   return status === undefined || (typeof status === "number" && status >= 500);
 };
 
-const reportPreflightWithRetry = async (
-  config: RunnerConfig,
+const reportStartupStateWithRetry = async (
   runner: RunnerKind,
-  result: Parameters<typeof reportPreflight>[2],
+  send: () => Promise<void>,
   options: StartupReportRetryOptions,
 ): Promise<void> => {
   const attempts = options.attempts ?? STARTUP_REPORT_ATTEMPTS;
@@ -477,7 +495,7 @@ const reportPreflightWithRetry = async (
 
   for (let attempt = 1; ; attempt += 1) {
     try {
-      await reportPreflight(config, runner, result);
+      await send();
       return;
     } catch (error: unknown) {
       if (attempt >= attempts || !startupApiMayBecomeReady(error)) throw error;
@@ -487,13 +505,48 @@ const reportPreflightWithRetry = async (
   }
 };
 
+const reportPreflightWithRetry = async (
+  config: RunnerConfig,
+  runner: RunnerKind,
+  result: Parameters<typeof reportPreflight>[2],
+  options: StartupReportRetryOptions,
+): Promise<void> => reportStartupStateWithRetry(
+  runner, () => reportPreflight(config, runner, result), options,
+);
+
+const reportAvailabilityWithRetry = async (
+  config: RunnerConfig,
+  availability: CliAvailability,
+  options: StartupReportRetryOptions,
+): Promise<void> => reportStartupStateWithRetry(
+  availability.runner,
+  () => reportCliAvailability(config, availability),
+  options,
+);
+
 export const runStartupPreflight = async (
   config: RunnerConfig,
   retryOptions: StartupReportRetryOptions = {},
 ): Promise<Record<RunnerKind, boolean>> => {
   const results = {} as Record<RunnerKind, boolean>;
+  const availability = await probeSupportedCliAvailability(config);
+  const onAvailability = retryOptions.onAvailability ?? ((probe: CliAvailability) => {
+    if (probe.available) console.log(`${probe.runner.toLowerCase()} runner CLI available: ${probe.resolvedPath}`);
+    else console.error(`${probe.runner.toLowerCase()} runner CLI NOT FOUND: ${probe.binary} is not executable in configured RUNNER_PATH`);
+  });
+  // Resolve and print every supported backend before any API report or full
+  // preflight can fail. Startup remains alive when one backend is absent, and
+  // the operator still gets a complete local inventory in the daemon log.
+  for (const runner of SUPPORTED_RUNNERS) onAvailability(availability[runner]);
+  for (const runner of SUPPORTED_RUNNERS) {
+    await reportAvailabilityWithRetry(config, availability[runner], retryOptions);
+  }
   const env = workspaceEnvironment(config);
-  for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
+  for (const runner of SUPPORTED_RUNNERS) {
+    if (!availability[runner].available) {
+      results[runner] = false;
+      continue;
+    }
     const model = runner === "PI" ? "openai-codex/gpt-5.6-luna"
       : runner === "CODEX" ? CODEX_STARTER_MODEL : runner.toLowerCase();
     const result = await adapters[runner].preflight({ config, runner, model, env });
@@ -501,4 +554,40 @@ export const runStartupPreflight = async (
     await reportPreflightWithRetry(config, runner, result, retryOptions);
   }
   return results;
+};
+
+export type AvailabilityHeartbeatOptions = {
+  onReportError?: (availability: CliAvailability, error: unknown) => void;
+};
+
+/** One cheap daemon heartbeat. Every backend is attempted independently so a
+ * missing CLI or a failed report for one kind cannot starve the others. */
+export const reportCliAvailabilityHeartbeat = async (
+  config: RunnerConfig,
+  options: AvailabilityHeartbeatOptions = {},
+): Promise<void> => {
+  const availability = await probeSupportedCliAvailability(config);
+  const onReportError = options.onReportError ?? ((probe: CliAvailability, error: unknown) => {
+    console.error(`Failed to report ${probe.runner.toLowerCase()} runner CLI availability`, error);
+  });
+  for (const runner of SUPPORTED_RUNNERS) {
+    try {
+      await reportCliAvailability(config, availability[runner]);
+    } catch (error: unknown) {
+      onReportError(availability[runner], error);
+    }
+  }
+};
+
+export const startCliAvailabilityMonitor = (
+  config: RunnerConfig,
+  options: AvailabilityHeartbeatOptions = {},
+): { stop: () => void } => {
+  let busy = false;
+  const timer = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    void reportCliAvailabilityHeartbeat(config, options).finally(() => { busy = false; });
+  }, config.heartbeatIntervalMs);
+  return { stop: () => clearInterval(timer) };
 };

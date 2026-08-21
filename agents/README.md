@@ -30,6 +30,7 @@ approvalGate: false
 outputKind: implementation
 attachmentsFromPrevious: true
 opensPullRequest: true
+baseFromStepIndex: null                # null or a strictly earlier stepIndex
 spawnPolicy: null                      # null or an inline JSON object
 ```
 
