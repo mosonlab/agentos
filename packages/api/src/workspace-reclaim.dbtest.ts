@@ -15,6 +15,7 @@ import { PrismaClient } from "@agentos/db";
 import { reclaimWorkspaces } from "@agentos/runner/reclaim";
 import type { RunnerConfig } from "@agentos/runner/config";
 
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -412,11 +413,17 @@ test("reclaim salvage acknowledgement rebases an already-queued retry", async ()
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).targetBranch, salvage);
 });
 
-test("an expired run records lease-independent cleanup failure from its owning fence", async () => {
+test("a reconciled-lost run records lease-independent cleanup failure from its owning fence", async () => {
   const root = await scratchRoot("lease-cleanup");
   const runnerId = "runner-lease-cleanup";
   const { run, fencingToken } = await seedRun({ root, runnerId, status: "RUNNING" });
   await db.run.update({ where: { id: run.id }, data: { leaseExpiresAt: new Date(Date.now() - 60_000) } });
+  assert.ok(await reconcileDatabaseRuns(db, new Date()) > 0);
+  const lost = await db.run.findUniqueOrThrow({ where: { id: run.id }, include: { session: true } });
+  assert.equal(lost.status, "LOST");
+  assert.equal(lost.runnerId, runnerId);
+  assert.equal(lost.fencingToken, fencingToken);
+  assert.equal(lost.session?.cleanupStatus, "PENDING");
   const response = await call(root, `/runner/runs/${run.id}/cleanup`, {
     runnerId,
     fencingToken,
