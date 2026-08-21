@@ -8,7 +8,7 @@ import { MobileTaskList } from "../components/mobile-task-list";
 import { TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
-import { BOARD_PAGE, archiveDoneNotice, stableRows } from "../pages/Tasks";
+import { BOARD_PAGE, archiveDoneNotice, dropAction, stableRows } from "../pages/Tasks";
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
 
 const en = (key: string): string => translate("en", key);
@@ -63,6 +63,13 @@ test("the board has five columns, in order, with Backlog first", () => {
   // pass by being present in the array and absent from the render.
   for (const { status, labelKey } of COLUMNS) {
     assert.match(column(status), new RegExp(`${en(labelKey)}<span[^>]*>0</span>`));
+  }
+});
+
+test("only a startable drop onto Doing asks for start confirmation", () => {
+  for (const { status } of COLUMNS) {
+    assert.equal(dropAction(status, true), status === "DOING" ? "confirm-start" : "patch");
+    assert.equal(dropAction(status, false), "patch");
   }
 });
 

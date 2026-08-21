@@ -915,7 +915,7 @@ test("template instantiate route maps an archived step agent to a named 400", as
     const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ repoId: "repo-1", variables: {} }),
+      body: JSON.stringify({ repoId: "repo-1", variables: {}, autoStart: false }),
     });
     assert.equal(response.status, 400);
     assert.match(String((await response.json() as { error: string }).error), /Implementation.*Archived Ada.*archived/);
@@ -940,7 +940,7 @@ test("template instantiate route rejects blank variables and invalid Git refs be
       const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
         method: "POST",
         headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: "repo-1", variables }),
+        body: JSON.stringify({ repoId: "repo-1", variables, autoStart: false }),
       });
       assert.equal(response.status, 400, JSON.stringify(variables));
     }

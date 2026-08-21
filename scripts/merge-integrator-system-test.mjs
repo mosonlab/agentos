@@ -190,6 +190,7 @@ const driveToGate = async (api, config) => {
   ));
   const created = await api("POST", `/projects/${config.projectId}/task-templates/${config.templateId}/instantiate`, {
     variables: { branchName: `merge-system-test-${Date.now()}` },
+    autoStart: true,
   });
   if (created.status !== 200 && created.status !== 201) record.fail(`instantiate returned HTTP ${created.status}`);
   const chainId = created.body.chainId ?? created.body.tasks?.[0]?.chainId;

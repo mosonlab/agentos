@@ -72,6 +72,7 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
     const ok = await run(() => api.post(`/projects/${projectId}/task-templates/${template.id}/instantiate`, {
       repoId: form.repoId,
       variables,
+      autoStart: false,
       ...(form.name.trim() === "" ? {} : { name: form.name }),
     }));
     if (ok) { onCreated(); onClose(); }

@@ -18,6 +18,8 @@ import { isValidBranchName } from "./branch-name.js";
 export type InstantiateTemplateInput = {
   repoId: string;
   variables: Record<string, string>;
+  /** Creating a chain is inert unless its caller explicitly requests a run. */
+  autoStart?: boolean;
   name?: string | undefined;
   description?: string | undefined;
 };
@@ -167,12 +169,16 @@ export const instantiateTemplate = async (
         }
         const first = tasks[0]!;
         if (first.assigneeType !== AssigneeType.AGENT) throw new Error("The first template step must be agent-executable");
-        const run = await enqueueTaskRun(tx, first.id);
-        await tx.run.update({ where: { id: run.id }, data: { branch: branchName } });
+        if (input.autoStart ?? false) {
+          const run = await enqueueTaskRun(tx, first.id);
+          await tx.run.update({ where: { id: run.id }, data: { branch: branchName } });
+        }
         await tx.taskActivity.createMany({ data: tasks.map((task, index) => ({
           taskId: task.id,
           actorType: options.actorType ?? "control-plane",
-          body: index === 0 ? "Template instantiated; first step queued" : "Template instantiated; waiting for predecessor",
+          body: index === 0
+            ? (input.autoStart ?? false) ? "Template instantiated; first step queued" : "Template instantiated; ready to start"
+            : "Template instantiated; waiting for predecessor",
           metadata: { chainId, templateId: template.id, ...options.activityMetadata },
         })) });
         const fire = options.fire

@@ -92,7 +92,7 @@ import {
   positions,
   blockingPredecessor,
   runFactsByTask,
-  startable,
+  taskStartability,
   stepName,
 } from "./chain.js";
 import {
@@ -498,6 +498,7 @@ const inboxQuestionInput = z.object({
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
+  autoStart: z.boolean().default(false),
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
 }).superRefine((value, context) => {
@@ -966,7 +967,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
     try {
       const result = await instantiateTemplate(db, template.projectId, template.id, {
-        repoId: template.webhookRepoId!, variables: resolved.variables,
+        repoId: template.webhookRepoId!, variables: resolved.variables, autoStart: true,
       }, {
         actorType: "webhook",
         activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
@@ -2046,7 +2047,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     try {
       const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
-        repoId: trigger.webhookRepoId!, variables,
+        repoId: trigger.webhookRepoId!, variables, autoStart: true,
       }, {
         actorType: "operator",
         activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
@@ -2325,6 +2326,60 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         ...run,
         mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
       })),
+    });
+  });
+  app.get("/tasks/:taskId/startability", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const task = await db.task.findUnique({
+      where: { id: taskId },
+      include: {
+        assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
+        repo: { select: { id: true, name: true, defaultBranch: true } },
+      },
+    });
+    if (!task) return context.json({ error: "Task not found" }, 404);
+    const [grant, budget, activeRuns, prefix] = await Promise.all([
+      task.assigneeAgentId && task.repoId
+        ? db.agentRepoAccess.findFirst({
+          where: { projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId },
+          select: { agentId: true },
+        })
+        : null,
+      db.run.aggregate({
+        where: { taskId },
+        _count: { _all: true },
+        _max: { budgetGrants: true },
+      }),
+      db.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } }),
+      task.chainId && task.chainIndex !== null
+        ? db.task.findMany({
+          where: {
+            projectId: task.projectId,
+            chainId: task.chainId,
+            chainIndex: { not: null, lte: task.chainIndex },
+          },
+          select: { id: true, name: true, status: true, chainIndex: true },
+        })
+        : [],
+    ]);
+    const blocker = blockingPredecessor(prefix, taskId);
+    const verdict = taskStartability({
+      ...task,
+      hasRepoGrant: grant !== null,
+    }, {
+      total: budget._count._all,
+      active: activeRuns > 0,
+      budgetGrants: budget._max.budgetGrants,
+    }, task.maxSessionsPerTask, blocker === null);
+    return context.json({
+      ...verdict,
+      task: {
+        id: task.id,
+        name: task.name,
+        agent: task.assigneeAgent ? { id: task.assigneeAgent.id, title: task.assigneeAgent.title } : null,
+        repo: task.repo ? { id: task.repo.id, name: task.repo.name } : null,
+        targetBranch: task.targetBranch ?? task.repo?.defaultBranch ?? null,
+      },
     });
   });
   app.get("/tasks/:taskId/chain", async (context) => {
@@ -2863,7 +2918,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (!hasRepoGrant) {
           return { error: "Assignee has no grant for this Repo", code: 400 as const };
         }
-        if (!startable({ ...task, hasRepoGrant }, facts, task.maxSessionsPerTask)) {
+        if (!taskStartability({ ...task, hasRepoGrant }, facts, task.maxSessionsPerTask).startable) {
           // The one remaining `startable` condition with no message of its own
           // is the archived assignee, and `enqueueTaskRun` already throws an
           // error that names the agent — a better sentence than anything this

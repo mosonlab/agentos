@@ -10,6 +10,7 @@ import {
   runFactsByTask,
   startable,
   stepName,
+  taskStartability,
   type ChainRow,
   type StartableRow,
 } from "./chain.js";
@@ -120,6 +121,35 @@ const startableRow = (overrides: Partial<StartableRow> = {}): StartableRow => ({
 
 test("a TODO agent step with no runs is startable", () => {
   assert.equal(startable(startableRow(), { total: 0, active: false }, 3), true);
+});
+
+test("the exposed checklist and overall verdict come from the shared start predicate", () => {
+  assert.deepEqual(taskStartability(startableRow(), { total: 0, active: false }, 3, true), {
+    startable: true,
+    checklist: {
+      repoBound: true,
+      agentAssignee: true,
+      repoAccessGrant: true,
+      budgetRemaining: true,
+      noActiveRun: true,
+      predecessorsDone: true,
+    },
+  });
+  const blocked = taskStartability(
+    startableRow({ repoId: null, hasRepoGrant: false }),
+    { total: 3, active: true },
+    3,
+    false,
+  );
+  assert.equal(blocked.startable, false);
+  assert.deepEqual(blocked.checklist, {
+    repoBound: false,
+    agentAssignee: true,
+    repoAccessGrant: false,
+    budgetRemaining: false,
+    noActiveRun: false,
+    predecessorsDone: false,
+  });
 });
 
 test("a BACKLOG agent step is startable — that is what parks it there", () => {

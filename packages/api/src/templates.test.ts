@@ -102,7 +102,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
     $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
   const result = await instantiateTemplate(db, "project-1", "template-1", {
-    repoId: "repo-1", variables: { branchName: "feature/twelve-steps" }, description: "Build it",
+    repoId: "repo-1", variables: { branchName: "feature/twelve-steps" }, autoStart: true, description: "Build it",
   });
   assert.equal(result.tasks.length, 12);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
@@ -128,6 +128,12 @@ test("instantiating the canonical feature template creates twelve tasks includin
     /Read the prior template steps' persisted outputs before working/u,
     "regression-verification step 9 still consumes prior outputs",
   );
+
+  const inert = await instantiateTemplate(db, "project-1", "template-1", {
+    repoId: "repo-1", variables: { branchName: "feature/inert-chain" }, description: "Build it later",
+  });
+  assert.equal(inert.tasks.length, 12);
+  assert.equal(runs.length, 1, "omitting autoStart defaults to an inert chain with no queued run");
 });
 
 test("the lower-level materializer rejects blank variables and invalid branches before a transaction", async () => {
@@ -148,7 +154,7 @@ test("the lower-level materializer rejects blank variables and invalid branches 
   } as unknown as PrismaClient;
   for (const branchName of ["", "   ", "bad..branch", "refs/heads/main", "feature/.hidden", "feature/main.lock", "bad\nbranch"]) {
     await assert.rejects(
-      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName } }),
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName }, autoStart: false }),
       /Missing template variables|Invalid template branch name/,
       branchName,
     );
@@ -186,7 +192,7 @@ test("an agent archived after the step check still loses to the locked re-read",
     }),
   } as unknown as PrismaClient;
   await assert.rejects(
-    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
     /Template step Implementation agent Racing Agent is archived/,
   );
   assert.equal(taskCreates, 0, "no chain row is written once the lock says archived");
@@ -234,7 +240,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
     }),
   } as unknown as PrismaClient;
   await assert.rejects(
-    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
     /Template step Implementation agent Racing Agent is archived/,
   );
   assert.equal(attempts, 2, "the conflicting attempt is retried once and then decides on the re-read");
@@ -260,7 +266,7 @@ test("template instantiation rejects an archived step agent and names the step",
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
   } as unknown as PrismaClient;
   await assert.rejects(
-    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
     /Template step Implementation agent Archived Agent is archived/,
   );
 });

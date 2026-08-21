@@ -86,6 +86,42 @@ test("start queues exactly one run and records the operator activity", async () 
   }), 1);
 });
 
+test("startability endpoint exposes the shared checklist and dependency verdict", async () => {
+  const context = await seedTask("startability-read");
+  const ready = await call("GET", `/tasks/${context.task.id}/startability`);
+  assert.equal(ready.status, 200);
+  assert.equal(ready.body.startable, true);
+  assert.deepEqual(ready.body.checklist, {
+    repoBound: true,
+    agentAssignee: true,
+    repoAccessGrant: true,
+    budgetRemaining: true,
+    noActiveRun: true,
+    predecessorsDone: true,
+  });
+  assert.deepEqual(ready.body.task, {
+    id: context.task.id,
+    name: context.task.name,
+    agent: { id: context.agent.id, title: context.agent.title },
+    repo: { id: context.repo.id, name: context.repo.name },
+    targetBranch: context.repo.defaultBranch,
+  });
+
+  const chainId = `startability-${Date.now()}`;
+  await db.task.create({ data: {
+    projectId: context.project.id,
+    name: "Blocking predecessor",
+    description: "work",
+    status: "TODO",
+    chainId,
+    chainIndex: 0,
+  } });
+  await db.task.update({ where: { id: context.task.id }, data: { chainId, chainIndex: 1 } });
+  const blocked = await call("GET", `/tasks/${context.task.id}/startability`);
+  assert.equal(blocked.body.startable, false);
+  assert.equal(blocked.body.checklist.predecessorsDone, false);
+});
+
 test("unfinished chain predecessor blocks every future start with zero side effects", async () => {
   const chainId = `safe-chain-${Date.now()}`;
   const context = await seedTask("chain-block", { chainId, chainIndex: 0, name: "Step 1", status: "DONE" });
@@ -197,7 +233,7 @@ test("repo-grant revocation and template instantiation serialize across future s
       return app.request(`/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
         method: "POST",
         headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: context.repo.id, variables: {} }),
+        body: JSON.stringify({ repoId: context.repo.id, variables: {}, autoStart: true }),
       });
     },
     async (release, gate) => {
@@ -759,6 +795,26 @@ const seedTemplate = async (context: Awaited<ReturnType<typeof seedTask>>) => {
   return template;
 };
 
+test("template instantiation creates an inert chain unless autoStart is true", async () => {
+  const context = await seedTask("template-autostart", { status: "DONE" });
+  const template = await seedTemplate(context);
+  const inert = await call("POST", `/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
+    repoId: context.repo.id,
+    variables: {},
+    autoStart: false,
+  });
+  assert.equal(inert.status, 201);
+  assert.equal(await db.run.count({ where: { task: { chainId: inert.body.chainId } } }), 0);
+
+  const started = await call("POST", `/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
+    repoId: context.repo.id,
+    variables: {},
+    autoStart: true,
+  });
+  assert.equal(started.status, 201);
+  assert.equal(await db.run.count({ where: { task: { chainId: started.body.chainId } } }), 1);
+});
+
 test("archive and direct task creation released together never strand a queued run", async () => {
   // The seeded task is DONE so this test is about the run the creation makes:
   // archive fails closed on any live task, and a TODO seed would refuse the
@@ -820,7 +876,7 @@ test("archive and template instantiation released together never strand a queued
       return app.request(`/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
         method: "POST",
         headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: context.repo.id, variables: {} }),
+        body: JSON.stringify({ repoId: context.repo.id, variables: {}, autoStart: true }),
       });
     },
   ]));
@@ -882,7 +938,7 @@ test("an archive committing under the lock is seen by task creation and by insta
   const instantiated = await archiveUnderHeldLock(chain.agent.id, () => call(
     "POST",
     `/projects/${chain.project.id}/task-templates/${template.id}/instantiate`,
-    { repoId: chain.repo.id, variables: {} },
+    { repoId: chain.repo.id, variables: {}, autoStart: true },
   ));
   assert.equal(instantiated.status, 400, JSON.stringify(instantiated.body));
   assert.match(instantiated.body.error, /is archived/);

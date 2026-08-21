@@ -327,7 +327,7 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
       stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
-  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {} });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
   const firstRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[0]!.id } });
   assert.equal(firstRun.branch, `agentos/${chain.chainId}`, "the derived chain name must not leak into template chains");
   assert.equal(firstRun.targetBranch, seed.repo.defaultBranch);
@@ -346,7 +346,7 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
     })) },
   } });
   const custom = await instantiateTemplate(db, seed.project.id, overridable.id, {
-    repoId: seed.repo.id, variables: { branchName: "custom/branch" },
+    repoId: seed.repo.id, variables: { branchName: "custom/branch" }, autoStart: true,
   });
   const customRun = await db.run.findFirstOrThrow({ where: { taskId: custom.tasks[0]!.id } });
   assert.equal(customRun.branch, "custom/branch");
@@ -749,7 +749,7 @@ test("T18: an instantiated template copies each step's flag onto its task", asyn
       prompt: `do ${index}`, opensPullRequest: index !== 1,
     })) },
   } });
-  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {} });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false, true]);
 });
@@ -877,7 +877,7 @@ test("T20: a template step's PR flag is settable through the API", async () => {
   assert.equal(patched.status, 200);
   assert.equal(patched.body.opensPullRequest, false);
 
-  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {} });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false]);
 
