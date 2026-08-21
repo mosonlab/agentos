@@ -21,7 +21,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
-  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null,
+  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null, taskCost: null,
   ...overrides,
 });
 
@@ -31,6 +31,36 @@ const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, 
 const card = (overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
   <TaskCard task={task(overrides)} actions={ACTIONS} />,
 );
+
+test("a card marks estimated cumulative dollars and falls back to token counts", () => {
+  assert.match(card({
+    taskCost: { costUsd: "1.45", estimated: true, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
+  }), /\$1\.45 est\./);
+  const tokens = card({
+    taskCost: { costUsd: null, estimated: false, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
+  });
+  assert.match(tokens, /1K input/);
+  assert.match(tokens, /100 cached/);
+  assert.match(tokens, /50 output/);
+  assert.doesNotMatch(tokens, /\$/);
+});
+
+test("token fallback uses a bounded wrapping row at both desktop card widths", () => {
+  const fallback = card({
+    taskCost: { costUsd: null, estimated: false, inputTokens: 12_345_678, cachedInputTokens: 1_234_567, outputTokens: 987_654 },
+  });
+  for (const cardWidth of [250, 222]) {
+    const bounded = `<div style="width:${cardWidth}px">${fallback}</div>`;
+    assert.match(bounded, /data-task-cost-fallback=""/u);
+    assert.match(bounded, /max-w-full/u);
+    assert.match(bounded, /whitespace-normal/u);
+    assert.match(bounded, /overflow-wrap:anywhere/u);
+  }
+  assert.equal((fallback.match(/data-task-cost-fallback=/gu) ?? []).length, 1);
+  assert.match(fallback, /12\.3M input/u);
+  assert.match(fallback, /1\.2M cached/u);
+  assert.match(fallback, /987\.7K output/u);
+});
 
 const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
   chainId: "c1", done: 3, total: 9, activeStepName: "Implementation", activeStatus: "doing",

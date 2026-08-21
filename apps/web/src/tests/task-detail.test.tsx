@@ -13,6 +13,12 @@ import provenance from "./fixtures/tc-ux-v1-prompts.provenance.json";
 
 const source = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx", import.meta.url)), "utf8");
 
+test("every task-detail run row uses the projected cost with estimate and token fallback semantics", () => {
+  assert.match(source, /usageCostLabel\(run\.session\?\.usageCost\)/u);
+  assert.match(source, /usageCostLabel\(task\.taskCost\)/u);
+  assert.doesNotMatch(source, /money\(run\.session\?\.costUsd/u);
+});
+
 const output = (body: string): TaskStepOutput => ({
   id: "o1", taskId: "t1", runId: "r1", kind: "review", body,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",

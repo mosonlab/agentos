@@ -44,7 +44,7 @@ const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
   chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
-  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null },
+  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null }, taskCost: null,
   ...overrides,
 });
 

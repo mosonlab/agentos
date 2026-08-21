@@ -1,7 +1,7 @@
 import { type DragEvent, type MouseEvent, type ReactNode, memo, useEffect, useState } from "react";
 
 import { chainPositionMarker } from "../lib/chain";
-import { duration, money, timeAgo } from "../lib/format";
+import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
 import { moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -168,6 +168,8 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
   const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  const taskCostLabel = usageCostLabel(task.taskCost);
+  const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   const title = cardTitle(task);
   const chainName = task.chainName ?? (task.chainId === null ? null : task.chainId.slice(0, 8));
   return <article
@@ -233,13 +235,22 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         <Assignee name={assignee} label={t("tasks.card.assignee", { name: assignee })} />
       </span>
       <span className="flex-1" />
-      {task.latestRun?.costUsd ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span> : null}
+      {task.taskCost !== null && !hasTokenFallback
+        ? <span className="whitespace-nowrap">{taskCostLabel}</span>
+        : task.latestRun?.costUsd
+          ? <span className="whitespace-nowrap">{money(task.latestRun.costUsd)}</span>
+          : null}
       <span className="whitespace-nowrap">
         {task.latestRun?.status === "RUNNING" && task.latestRun.startedAt !== null
           ? <RunningCardTime task={task} t={t} />
           : cardTime(task, t)}
       </span>
     </div>
+    {hasTokenFallback ? (
+      <div data-task-cost-fallback="" className="mt-[6px] max-w-full whitespace-normal text-[11.5px] leading-[1.45] text-muted-foreground [overflow-wrap:anywhere]">
+        {taskCostLabel}
+      </div>
+    ) : null}
   </article>;
 };
 

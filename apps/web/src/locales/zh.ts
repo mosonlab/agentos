@@ -220,6 +220,10 @@ export const zh = {
   "format.minutesAgo": "{n} 分钟前",
   "format.minutesSeconds": "{m} 分 {s} 秒",
   "format.seconds": "{n} 秒",
+  "format.usageCost.cachedInput": "{n} 缓存输入",
+  "format.usageCost.estimated": "{amount} 估算",
+  "format.usageCost.input": "{n} 输入",
+  "format.usageCost.output": "{n} 输出",
 
   "goals.card.dodApproved": "DoD 已批准",
   "goals.card.dodPending": "DoD 待批准",
