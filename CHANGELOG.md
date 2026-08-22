@@ -5,6 +5,13 @@ Entries group changes by the part of the product they touch. Versions follow
 Semantic Versioning; before 1.0.0 a minor version may change behaviour, and this
 file says so where it does.
 
+## Unreleased
+
+### Development and operations
+
+- The help-only repository command-line interface is retired; the next minor
+  release will no longer build or ship an `agentos` binary.
+
 ## v0.2.0 — Developer Preview 2
 
 The second preview. The headline is the task-chain overhaul: the twelve-step
@@ -66,8 +73,6 @@ is no upgrade path between previews other than a fresh install.
 - `npm run setup:local` can repair an existing local configuration safely.
 - Public snapshot scanning is hardened, template release gaps are closed, and
   the v0.1.0 install guidance corrections are folded into the released docs.
-- The help-only repository command-line interface is retired; AgentOS no longer
-  builds or ships an `agentos` binary.
 - The README shows the task board and agents screens.
 
 ## v0.1.0 — Developer Preview
@@ -302,8 +307,8 @@ behaviour.
 - **No upgrade path between preview builds** other than a fresh install. Nothing
   is packaged, notarized or self-updating.
 - **Goals have no execution model**, as described above.
-- **The v0.1.0 command-line interface was help-only.** It is retired in v0.2.0;
-  the current release does not ship a repository command-line interface.
+- **The v0.1.0 command-line interface was help-only.** The tagged v0.2.0 release
+  retained it; current main retires it for the next minor release.
 - **Five surfaces merged without an independent implementation review.** Four —
   the control plane's workspace ownership change, the public snapshot mechanism,
   the templates release closure, and the documentation factual-accuracy pass —
