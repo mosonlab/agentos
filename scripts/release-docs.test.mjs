@@ -15,7 +15,6 @@ const CURRENT_CLI_SURFACE_DOCS = [
   "README.zh-CN.md",
   "CONTRIBUTING.md",
   "CHANGELOG.md",
-  "docs/release/v0.1.0-release-notes.md",
   "docs/release/v0.1.0-support-matrix.md",
   "docs/release/v0.2.0-release-notes.md",
 ];
@@ -31,6 +30,15 @@ test("published docs do not advertise or require the retired repository CLI", ()
   }
   assert.match(readFileSync("README.md", "utf8"), /does not ship a repository command-line interface/u);
   assert.match(readFileSync("README.zh-CN.md", "utf8"), /不再提供仓库命令行界面/u);
+});
+
+test("tagged release verification retains its historical CLI check", () => {
+  const notes = readFileSync("docs/release/v0.1.0-release-notes.md", "utf8");
+  assert.match(notes, /npm\s+run\s+agentos\s+--\s+help\b/u);
+  assert.match(
+    readFileSync("docs/release/v0.2.0-release-notes.md", "utf8"),
+    /v0\.1\.0 release notes[\s\S]*apply unchanged/u,
+  );
 });
 
 test("published docs describe the executable existing-mode consumer truthfully", () => {
