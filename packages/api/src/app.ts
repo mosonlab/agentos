@@ -119,6 +119,7 @@ import {
   jsonValue,
   makeDedupeKey,
   makeFencingToken,
+  normalizeSessionEventValue,
   retryDelayMs,
   runBudgetCeiling,
   runnerFor,
@@ -4169,10 +4170,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         seq: event.seq,
         at: event.at ?? new Date(),
         source: event.source,
-        type: event.type,
-        providerEventId: event.providerEventId ?? null,
-        toolCallId: event.toolCallId ?? null,
-        payload: jsonValue(event.payload),
+        type: normalizeSessionEventValue(event.type) as string,
+        providerEventId: event.providerEventId === undefined || event.providerEventId === null
+          ? null
+          : normalizeSessionEventValue(event.providerEventId) as string,
+        toolCallId: event.toolCallId === undefined || event.toolCallId === null
+          ? null
+          : normalizeSessionEventValue(event.toolCallId) as string,
+        payload: jsonValue(normalizeSessionEventValue(event.payload)),
       })),
       skipDuplicates: true,
     });

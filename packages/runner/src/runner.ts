@@ -204,7 +204,7 @@ export const executeClaim = async (
   let leaseRenewedAt = Date.now();
   let seq = claim.nextEventSeq;
   let pendingEvents: SessionEventPayload[] = [];
-  let eventWrites = Promise.resolve();
+  let eventFlushPromise: Promise<void> | null = null;
   const sink = (event: AdapterEvent): void => {
     pendingEvents.push({
       seq: seq++,
@@ -216,12 +216,34 @@ export const executeClaim = async (
       ...(event.toolCallId !== undefined ? { toolCallId: event.toolCallId } : {}),
     });
   };
-  const flushEvents = async (): Promise<void> => {
-    if (pendingEvents.length === 0 || fencingRejected) return;
-    const batch = pendingEvents.splice(0, 250);
-    eventWrites = eventWrites.then(() => appendEvents(config, claim, batch, handle?.providerConversationId));
-    await eventWrites;
-    if (pendingEvents.length > 0) await flushEvents();
+  const flushEvents = (): Promise<void> => {
+    if (eventFlushPromise) return eventFlushPromise;
+    eventFlushPromise = (async () => {
+      while (pendingEvents.length > 0 && !fencingRejected) {
+        // Keep the batch in the queue until the API accepts it. A failed append
+        // therefore remains the head of the queue for the next flush attempt,
+        // while the single worker prevents a later batch overtaking it.
+        const batch = pendingEvents.slice(0, 250);
+        await appendEvents(config, claim, batch, handle?.providerConversationId);
+        pendingEvents.splice(0, batch.length);
+      }
+    })().finally(() => { eventFlushPromise = null; });
+    return eventFlushPromise;
+  };
+
+  const isFencingError = (error: unknown): error is { status: number; code?: string } =>
+    typeof error === "object" && error !== null && (error as { status?: number }).status === 409;
+
+  const noteFencingError = async (error: unknown): Promise<void> => {
+    if (!isFencingError(error)) return;
+    waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
+    fencingRejected = true;
+    if (handle) await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
+  };
+
+  const observeEventFlush = async (error: unknown): Promise<void> => {
+    await noteFencingError(error);
+    if (!isFencingError(error)) console.error("Event flush failed", error);
   };
 
   try {
@@ -280,7 +302,7 @@ export const executeClaim = async (
           lastProgressAt: provisionStartedAt.toISOString(),
         },
       }).then(() => { leaseRenewedAt = Date.now(); }).catch((error: unknown) => {
-        if ((error as { status?: number; code?: string }).status === 409) {
+        if (isFencingError(error)) {
           waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
           fencingRejected = true;
         }
@@ -346,7 +368,10 @@ export const executeClaim = async (
       baseSha: workspace.baseSha,
       runtimeHandle: handle.pid ? `${config.runnerId}:${handle.pid}` : `${config.runnerId}:pending`,
     });
-    await flushEvents();
+    // The first append is also best-effort from the heartbeat loop's point of
+    // view. If the endpoint is down, keep the batch queued and let the active
+    // heartbeat timer renew the lease while later flushes retry it.
+    void flushEvents().catch(observeEventFlush);
 
     heartbeatTimer = setInterval(() => {
       if (!handle || heartbeatBusy || fencingRejected) return;
@@ -369,19 +394,24 @@ export const executeClaim = async (
           budgetReason = `${decision.gate}: ${decision.reason}`;
           await adapter.kill(handle!, budgetReason);
         }
-        await flushEvents();
-        await sendHeartbeat(config, claim, {
-          processAlive: snapshot.processAlive,
-          lastProgressEventAt: snapshot.lastProgressEventAt,
-          inFlightTool: serializeTool(snapshot.inFlightTool),
-        });
-        if (snapshot.processAlive) leaseRenewedAt = Date.now();
+        try {
+          await sendHeartbeat(config, claim, {
+            processAlive: snapshot.processAlive,
+            lastProgressEventAt: snapshot.lastProgressEventAt,
+            inFlightTool: serializeTool(snapshot.inFlightTool),
+          });
+          if (snapshot.processAlive) leaseRenewedAt = Date.now();
+        } catch (error: unknown) {
+          await noteFencingError(error);
+          if (!isFencingError(error)) console.error("Run heartbeat failed", error);
+        }
+        // Event delivery is deliberately detached from the heartbeat attempt:
+        // a failed or slow append must not occupy heartbeatBusy or suppress the
+        // next lease renewal. The queue itself remains ordered and retryable.
+        if (!fencingRejected) void flushEvents().catch(observeEventFlush);
       })().catch(async (error: unknown) => {
-        if ((error as { status?: number; code?: string }).status === 409 && handle) {
-          waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
-          fencingRejected = true;
-          await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
-        } else console.error("Run heartbeat failed", error);
+        await noteFencingError(error);
+        if (!isFencingError(error)) console.error("Run heartbeat failed", error);
       }).finally(() => { heartbeatBusy = false; });
     }, config.heartbeatIntervalMs);
 
@@ -404,7 +434,6 @@ export const executeClaim = async (
     };
     adoptLeaseVerdict(lease);
     await flushEvents();
-    await eventWrites;
     // Re-read: a periodic renewal may have been rejected while the events above
     // were still draining, and everything past this point writes to a remote.
     adoptLeaseVerdict(lease);

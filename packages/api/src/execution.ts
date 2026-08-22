@@ -90,6 +90,19 @@ export const retryDelayMs = (runNumber: number, failureClass: FailureClass): num
 
 export const jsonValue = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJsonValue;
 
+const replaceNul = (value: string): string => value.replaceAll("\u0000", "\\u0000");
+
+/** PostgreSQL text and jsonb reject literal U+0000. Keep event data readable and
+ * deterministic while preserving every non-NUL character and JSON shape. */
+export const normalizeSessionEventValue = (value: unknown): unknown => {
+  if (typeof value === "string") return replaceNul(value);
+  if (Array.isArray(value)) return value.map(normalizeSessionEventValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, nested]) => [replaceNul(key), normalizeSessionEventValue(nested)]));
+  }
+  return value;
+};
+
 // --- Failure classification ------------------------------------------------
 //
 // The API is the only authority here. It used to share the job with the runner:
