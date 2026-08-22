@@ -8,6 +8,9 @@ Use this structure for a completed discovery run. Omit empty prose, but keep eve
 - Compared ref, if any
 - Working-tree state
 - Survey date
+- Parent model and reasoning effort, or `requested gpt-5.6-sol/high; runtime metadata unavailable`
+- Subagent model and reasoning effort, or `serial parent-only survey`
+- Delegated areas and completion status
 - Areas surveyed
 - Protected or excluded areas and the authority for each exclusion
 - Areas where evidence remained ambiguous
@@ -24,6 +27,8 @@ For each bounded theme:
 - Proposed end state
 - Net deletion or consolidation expected
 - Highest risk classification in the theme
+- Recommended chain: `direct` | `compound` | `separate high-risk investigation`
+- Implementation route: `Luna Max eligible` | `Sol High required`, with the current `AGENTS.md` routing reason
 - Why the candidates belong in one independently verifiable change
 
 Keep public-interface candidates and defense or persisted-data candidates visually separate from ordinary internal themes.
@@ -49,6 +54,7 @@ Use a stable ID such as `SIM-RUNNER-001`.
 - Net effect: implementation and support surface removed minus glue or replacement added
 - Acceptance criteria: observable end state for the later implementation task
 - Validation: focused checks plus the repository-required review and exact-head gate path
+- Implementation routing impact: facts that make the owning theme Luna-eligible or require Sol High
 - Confidence: `high` | `medium` | `low`, with the remaining uncertainty
 
 Do not assign `confirmed-internal-delete` when production or dynamic consumption remains ambiguous. Use `rejected` when a production caller survives; use `intentional-keep` when the current architecture deliberately owns the cost.
