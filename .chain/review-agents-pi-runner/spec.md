@@ -13,5 +13,3 @@ Out of scope: product-code changes; changing the PR title, target, or branch; re
 Constraints: published branch history remains append-only; fail loudly if the starting feature head, existing PR identity, or non-`.chain/` tree differs; all gate execution uses the dispatcher; only `agentos-merge-executor[bot]` may merge.
 
 Acceptance: before the implementation step publishes, `git diff --name-only eeb547c33c714b0f467450ce8b6b1d1dabec35ab..HEAD` contains only `.chain/review-agents-pi-runner/spec.md`, every non-`.chain/` blob at HEAD matches `eeb547c33c714b0f467450ce8b6b1d1dabec35ab`, PR #56 is the reused OPEN pull request, later canonical review outputs contain no open must-fix, regression persists PASS for the exact current head and current main base, App merge succeeds, and post-merge main contains no `.chain/` path.
-
-Persist the final implementation output for this step through the AgentOS task output endpoint.
