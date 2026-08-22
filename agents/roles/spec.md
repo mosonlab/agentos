@@ -1,8 +1,8 @@
 ---
 name: spec
 title: Specification Writer
-model: claude-fable-5:medium
-runner: claude
+model: gpt-5.6-sol:high
+runner: codex
 inboxAccess: true
 collaborators: []
 ---
