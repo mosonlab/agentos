@@ -28,6 +28,7 @@ test("the catalog covers every canonical roster model", () => {
   for (const id of mechanical) assert.equal(findModel(id), null, id);
   assert.equal(findModel("claude-fable-5")?.defaultEffort, "medium");
   assert.equal(findModel("gpt-5.6-luna")?.defaultEffort, "max");
+  assert.equal(findModel("openai-codex/gpt-5.6-sol")?.defaultEffort, "high");
   assert.equal(findModel("openai-codex/gpt-5.6-luna")?.defaultEffort, "max");
 });
 
@@ -47,7 +48,8 @@ test("model effort encoding round-trips on the runner's last-colon rule", () => 
   assert.deepEqual(splitModel(":high"), { model: ":high", effort: null });
 });
 
-test("the pi-hosted Luna entry overrides the substring heuristic in the catalog", () => {
+test("pi-hosted entries override the substring heuristic in the catalog", () => {
+  assert.equal(runnerForModel("openai-codex/gpt-5.6-sol:high"), "PI");
   assert.equal(runnerForModel("openai-codex/gpt-5.6-luna:xhigh"), "PI");
 });
 
