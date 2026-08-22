@@ -4,6 +4,7 @@ import {
   AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   MERGE_TAIL_KIND,
+  MergeRecoveryStatus,
   Prisma,
   RunnerPreference,
   TaskStatus,
@@ -13,13 +14,12 @@ import {
   defenseTriggers,
   enqueueTaskRun,
   isMergeReadinessStep,
-  parseBaseDriftRecoveryActivity,
   parseRegressionVerdict,
   resolveChainTarget,
   resolutionTestTriggers,
   runnerFor,
   type PrismaClient,
-  type BaseDriftRecoveryMetadata,
+  type MergeRecoveryAttempt,
 } from "@agentos/db";
 
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
@@ -33,7 +33,49 @@ export const readinessPollIntervalMs = (): number => {
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 const READINESS_LEASE_MS = 30_000;
 
-type RecoveryContext = Extract<BaseDriftRecoveryMetadata, { state: "queued" }>;
+type RecoveryContext = {
+  aggregateId: string;
+  attempt: number;
+  sourceStopId: string;
+  sourceRunId: string;
+  authorizationActivityId: string;
+  repository: string;
+  prNumber: number;
+  targetBranch: string;
+  authorizedHeadSha: string;
+  authorizedBaseSha: string;
+  observedBaseSha: string;
+  currentBaseSha: string;
+  readinessTaskId: string;
+  regressionTaskId: string;
+  integratorTaskId: string;
+  recoveryRunId: string;
+};
+
+const recoveryContext = (row: MergeRecoveryAttempt | null): RecoveryContext | null => {
+  if (!row?.boundSourceRunId || !row.authorizationActivityId || !row.recoveryRunId
+    || !row.readinessTaskId || !row.regressionTaskId || !row.repository
+    || row.prNumber === null || !row.targetBranch || !row.authorizedHeadSha
+    || !row.authorizedBaseSha || !row.observedBaseSha || !row.currentBaseSha) return null;
+  return {
+    aggregateId: row.id,
+    attempt: row.attempt,
+    sourceStopId: row.sourceStopId,
+    sourceRunId: row.boundSourceRunId,
+    authorizationActivityId: row.authorizationActivityId,
+    repository: row.repository,
+    prNumber: row.prNumber,
+    targetBranch: row.targetBranch,
+    authorizedHeadSha: row.authorizedHeadSha,
+    authorizedBaseSha: row.authorizedBaseSha,
+    observedBaseSha: row.observedBaseSha,
+    currentBaseSha: row.currentBaseSha,
+    readinessTaskId: row.readinessTaskId,
+    regressionTaskId: row.regressionTaskId,
+    integratorTaskId: row.integratorTaskId,
+    recoveryRunId: row.recoveryRunId,
+  };
+};
 
 const recoveryContextFor = async (
   db: PrismaClient,
@@ -42,20 +84,13 @@ const recoveryContextFor = async (
   recoveryRunId: string | null,
 ): Promise<RecoveryContext | null> => {
   if (!recoveryRunId) return null;
-  const rows = await db.taskActivity.findMany({
-    where: { taskId: regressionTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { taskId: true, actorType: true, metadata: true },
-  });
-  for (const row of rows) {
-    const metadata = parseBaseDriftRecoveryActivity(row, {
-      activityTaskId: regressionTaskId,
-      regressionTaskId,
-      recoveryRunId,
-    });
-    if (metadata?.state === "queued" && metadata.readinessTaskId === readinessTaskId) return metadata;
-  }
-  return null;
+  const row = await db.mergeRecoveryAttempt.findFirst({ where: {
+    regressionTaskId,
+    readinessTaskId,
+    recoveryRunId,
+    status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
+  }, orderBy: [{ attempt: "desc" }, { id: "desc" }] });
+  return recoveryContext(row);
 };
 
 const readinessClaim = (now: Date): string => (
@@ -87,27 +122,26 @@ const stopReadiness = async (
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
     if (input.recovery) {
+      await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
+        status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+        failureReason: input.reason,
+        endedAt: new Date(),
+      } });
       await tx.task.update({
         where: { id: input.recovery.integratorTaskId },
         data: { status: TaskStatus.REVIEW, failureReason: recoveryBody },
       });
-      const existing = await tx.taskActivity.findFirst({
-        where: { taskId: input.recovery.integratorTaskId, metadata: { path: ["dedupeKey"], equals: dedupeKey } },
-        select: { id: true },
-      });
-      if (!existing) {
-        const metadata = {
-          ...input.recovery,
-          state: "tail-stopped",
-          phase: "readiness",
-          reason: input.reason,
-          dedupeKey,
-        } as Prisma.InputJsonObject;
-        await tx.taskActivity.createMany({ data: [
-          { taskId: input.recovery.integratorTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
-          { taskId: input.regressionTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
-        ] });
-      }
+      const metadata = {
+        ...input.recovery,
+        state: "tail-stopped",
+        phase: "readiness",
+        reason: input.reason,
+        dedupeKey,
+      } as Prisma.InputJsonObject;
+      await tx.taskActivity.createMany({ data: [
+        { taskId: input.recovery.integratorTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
+        { taskId: input.regressionTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
+      ] });
     }
     await tx.taskActivity.create({ data: {
       taskId: input.regressionTaskId,
@@ -244,6 +278,13 @@ const requeueRegression = async (
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
     if (input.recovery) {
+      await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
+        status: MergeRecoveryStatus.REPAIRING,
+        recoveryRunId: run.id,
+        currentBaseSha: input.currentBaseSha,
+        failureReason: null,
+        endedAt: null,
+      } });
       const body = `Automatic base-drift recovery ${String(input.recovery.attempt)} context carried through readiness requeue`;
       const metadata = {
         ...input.recovery,
@@ -330,6 +371,12 @@ export const readinessTick = async (
     let recovery: RecoveryContext | null = null;
     try {
       recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
+      if (recovery) {
+        await db.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
+          status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+          failureReason: null,
+        } });
+      }
     if (!regression?.stepOutput) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression?.id ?? readiness.id, reason: "missing head-bound regression PASS evidence", recovery });
       result.stopped += 1;

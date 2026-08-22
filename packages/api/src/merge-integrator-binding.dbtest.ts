@@ -239,6 +239,37 @@ const queueIntegratorRun = async (chain: IntegratorChain): Promise<string> => {
   return (run as { id: string }).id;
 };
 
+const queuePeerIntegratorRun = async (chain: IntegratorChain, targetBranch: string): Promise<string> => {
+  const task = await db.task.create({ data: {
+    projectId: chain.project.id,
+    repoId: chain.repo.id,
+    templateId: chain.template.id,
+    templateStepId: chain.integratorStep!.id,
+    name: `Merge ${targetBranch}`,
+    description: "merge",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: chain.integratorAgent.id,
+    approvalGate: false,
+    opensPullRequest: false,
+    chainId: `peer-${targetBranch}-${Date.now()}-${Math.random()}`,
+    chainIndex: chain.integratorStep!.stepIndex,
+    status: TaskStatus.TODO,
+    targetBranch,
+  } });
+  const run = await db.$transaction((tx) => enqueueTaskRun(tx as any, task.id));
+  return (run as { id: string }).id;
+};
+
+const concurrentExecutorClaims = async (): Promise<Response[]> => withTokens(async () => {
+  const app = createApp(db);
+  const request = () => app.request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${EXECUTOR_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: EXECUTOR_RUNNER }),
+  });
+  return Promise.all([request(), request()]);
+});
+
 test("only an allowlisted merge executor may claim the integrator step", async () => {
   const chain = await seedIntegratorChain(db, { label: "claim" });
   const runId = await queueIntegratorRun(chain);
@@ -265,6 +296,33 @@ test("only an allowlisted merge executor may claim the integrator step", async (
   // The claim tells the claimant what it is holding, and the ordinary runner's
   // hard refusal keys on exactly this field.
   assert.equal(executor.body.executionMode, "mechanical");
+});
+
+test("concurrent Integrator claims serialize per repository target and leave the later run queued", async () => {
+  const chain = await seedIntegratorChain(db, { label: "claim-serialized" });
+  const firstRunId = await queueIntegratorRun(chain);
+  const secondRunId = await queuePeerIntegratorRun(chain, "master");
+
+  const responses = await concurrentExecutorClaims();
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 204]);
+  const runs = await db.run.findMany({
+    where: { id: { in: [firstRunId, secondRunId] } },
+    select: { id: true, status: true },
+  });
+  assert.equal(runs.filter((run) => run.status === "CLAIMED").length, 1);
+  assert.equal(runs.filter((run) => run.status === "QUEUED").length, 1);
+});
+
+test("concurrent Integrator claims for different target branches do not serialize each other", async () => {
+  const chain = await seedIntegratorChain(db, { label: "claim-independent-targets" });
+  const firstRunId = await queueIntegratorRun(chain);
+  const secondRunId = await queuePeerIntegratorRun(chain, "release");
+
+  const responses = await concurrentExecutorClaims();
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+  assert.equal(await db.run.count({
+    where: { id: { in: [firstRunId, secondRunId] }, status: "CLAIMED" },
+  }), 2);
 });
 
 test("the merge executor is offered no ordinary run", async () => {
