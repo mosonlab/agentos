@@ -635,10 +635,23 @@ export const applyStopAnswer = async (
   return outcome;
 };
 
+/** Refusals raised while resolving the gate, target, or source of confirmation evidence. */
+export class MergeConfirmationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MergeConfirmationError";
+  }
+}
+
+export const isMergeConfirmationError = (error: unknown): error is MergeConfirmationError =>
+  error instanceof Error && error.name === "MergeConfirmationError";
+
 /**
- * The confirmation card a renewal or a repair asks for. It is a real gate card
- * on the step-11 task, so it travels the identical production path — the same
- * worker fills it and the same transaction reads it back.
+ * The confirmation card a renewal or repair asks for. The card is bound to the
+ * immediate same-chain predecessor that feeds the integrator, while its agent,
+ * Session and source Run come from the newest eligible same-chain predecessor.
+ * Keeping those identities separate lets server-owned readiness steps share the
+ * normal authorization path without pretending they executed an agent Run.
  */
 export const requestConfirmationCard = async (
   tx: Tx,
@@ -649,7 +662,7 @@ export const requestConfirmationCard = async (
   const locked = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id" FROM "Task" WHERE "id" = ${integratorTask.id} FOR UPDATE
   `;
-  if (!locked[0]) throw new Error(`Merge integrator task ${integratorTask.id} no longer exists`);
+  if (!locked[0]) throw new MergeConfirmationError(`Merge integrator task ${integratorTask.id} no longer exists`);
   return ensureConfirmationCard(tx, integratorTask, stopId, now);
 };
 
@@ -669,7 +682,9 @@ const ensureConfirmationCard = async (
   now: Date,
 ): Promise<string> => {
   if (!integratorTask.chainId || integratorTask.chainIndex === null) {
-    throw new Error(`Merge integrator task ${integratorTask.id} has no chain identity for confirmation evidence`);
+    throw new MergeConfirmationError(
+      `Merge integrator task ${integratorTask.id} has no chain identity for confirmation evidence`,
+    );
   }
   const dedupeKey = confirmationKey(integratorTask.id, stopId);
   const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { id: true } });
@@ -677,7 +692,7 @@ const ensureConfirmationCard = async (
 
   const target = await resolveChainTarget(tx, integratorTask);
   if (!target.resolved) {
-    throw new Error(
+    throw new MergeConfirmationError(
       `Merge confirmation target for task ${integratorTask.id} is ${target.unresolvable}; refusing unrelated evidence`,
     );
   }
@@ -698,10 +713,18 @@ const ensureConfirmationCard = async (
     },
     orderBy: { chainIndex: "desc" },
   });
-  const gate = predecessors.find((candidate) => !taskIsIntegratorStep(candidate) && candidate.runs[0]?.session);
-  const source = gate?.runs[0];
-  if (!gate || !source?.session) {
-    throw new Error(
+  const gate = predecessors[0];
+  if (!gate) {
+    throw new MergeConfirmationError(
+      `Merge confirmation for task ${integratorTask.id} has no immediate same-chain predecessor`,
+    );
+  }
+  const sourceTask = predecessors.find(
+    (candidate) => !taskIsIntegratorStep(candidate) && candidate.runs[0]?.session,
+  );
+  const source = sourceTask?.runs[0];
+  if (!sourceTask || !source?.session) {
+    throw new MergeConfirmationError(
       `Merge confirmation for task ${integratorTask.id} has no preceding same-chain Run with a Session`,
     );
   }
