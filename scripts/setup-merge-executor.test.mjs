@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const WIZARD_PATH = "scripts/setup-merge-executor.sh";
@@ -33,15 +35,74 @@ test("the wizard is executable Bash and retains the canonical library bytes", ()
   assert.equal(syntax.status, 0, `${syntax.stdout}\n${syntax.stderr}`);
   assert.ok((statSync(WIZARD_PATH).mode & 0o111) !== 0, "wizard is not executable");
 
-  const marker = wizard.indexOf("# STAGES: author this section.");
+  const marker = wizard.indexOf("# STAGES — author this section.");
   assert.ok(marker > 0, "STAGES marker is absent");
   const separatorEnd = wizard.indexOf("\n", wizard.indexOf("# ─", marker)) + 1;
   const library = wizard.slice(0, separatorEnd);
   assert.equal(
     createHash("sha256").update(library).digest("hex"),
-    "d1f95e89977a9cc5ccaec9beb48032d3351fc9e7f9fd78152feb9eef1e2c5760",
+    "33fa2aa97b8244f5d0675da4be7a82674d43cb0c8c28755f7eb56e980205fd0f",
     "wizard library above the authored stages differs from the canonical template",
   );
+});
+
+const runIdentityRefusal = (uidByUser) => {
+  const fixture = mkdtempSync(join(tmpdir(), "merge-executor-identity-"));
+  try {
+    mkdirSync(join(fixture, "scripts"));
+    mkdirSync(join(fixture, "packages", "merge-executor"), { recursive: true });
+    mkdirSync(join(fixture, "bin"));
+    copyFileSync(WIZARD_PATH, join(fixture, WIZARD_PATH));
+    chmodSync(join(fixture, WIZARD_PATH), 0o755);
+    writeFileSync(join(fixture, "package.json"), "{}\n");
+    writeFileSync(join(fixture, "packages", "merge-executor", "package.json"), "{}\n");
+    writeFileSync(join(fixture, ".env"), "");
+    chmodSync(join(fixture, ".env"), 0o600);
+    const cases = Object.entries(uidByUser).map(([user, uid]) => `    ${user}) printf '%s\\n' '${uid}' ;;`).join("\n");
+    writeFileSync(join(fixture, "bin", "id"), `#!/bin/sh
+case "$1" in
+  -u)
+    case "$2" in
+${cases}
+      *) exit 1 ;;
+    esac
+    ;;
+  -Gn) printf '%s\\n' users ;;
+  *) exit 0 ;;
+esac
+`);
+    chmodSync(join(fixture, "bin", "id"), 0o755);
+    return spawnSync("bash", [WIZARD_PATH], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${join(fixture, "bin")}:${process.env.PATH}` },
+      input: "\nexecutor\napi,runner\nmerge-executor\nmerge-executor\nhttp://127.0.0.1:3000\n",
+    });
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+};
+
+test("uid 0 is refused for both the executor and every declared peer", () => {
+  const executorRoot = runIdentityRefusal({ executor: 0, api: 502, runner: 503 });
+  assert.notEqual(executorRoot.status, 0);
+  assert.match(executorRoot.stderr, /root-os-user: MERGE_EXECUTOR_OS_USER must not resolve to uid 0/u);
+
+  const peerRoot = runIdentityRefusal({ executor: 501, api: 0, runner: 503 });
+  assert.notEqual(peerRoot.status, 0);
+  assert.match(peerRoot.stderr, /root-peer-user: declared peer api must not resolve to uid 0/u);
+});
+
+test("key validation consumes an administrator metadata receipt without traversing the protected path", () => {
+  const validator = authoredStages.match(/validate_private_key_metadata_receipt\(\) \{(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? "";
+  assert.match(validator, /MERGE_EXECUTOR_KEY_METADATA_V1/u);
+  assert.match(validator, /validate_parent_mode_receipt/u);
+  assert.doesNotMatch(validator, /(?:\[\[\s+-f|\[\[\s+-L|\bstat\b|\bfile_metadata\b|\bmode_of\b|\buid_of\b|\bsize_of\b)/u);
+  assert.match(authoredStages, /sudo bash scripts\/setup-merge-executor\.sh --inspect-key-metadata %q %q/u);
+  assert.match(authoredStages, /metadata-inspection-requires-root/u);
+  assert.match(authoredStages, /key bytes were not read/u);
+  assert.match(runbook, /mode-0700 executor-owned\s+directory/u);
+  assert.match(runbook, /MERGE_EXECUTOR_KEY_METADATA_V1/u);
 });
 
 test("every captured value has its declared configuration destination", () => {
@@ -128,6 +189,8 @@ test("isolation, service, lifecycle, and public setup checklists stay present", 
     "placeholder-value",
     "aliased-executor-token",
     "same-user-peer",
+    "root-os-user",
+    "root-peer-user",
     "key-mode-not-owner-only",
     "root-execution",
   ]) assert.match(authoredStages, new RegExp(namedRefusal, "u"));
@@ -137,6 +200,16 @@ test("isolation, service, lifecycle, and public setup checklists stay present", 
   assert.match(envExample, /docs\/runbooks\/merge-executor\.md/u);
   assert.match(envExample, /scripts\/setup-merge-executor\.sh/u);
   for (const name of CAPTURED) assert.match(envExample, new RegExp(`^${name}=`, "mu"), `${name} is absent from .env.example`);
+});
+
+test("health and platform claims match the implemented and evidenced surfaces", () => {
+  assert.match(runbook, /`daemons` row/u);
+  assert.match(runbook, /`online: true`/u);
+  assert.match(runbook, /`workspaceRoot: null` and `diskFreeBytes: null`/u);
+  assert.match(runbook, /Run record[^.]*`adapterVersion`\s+and `cliVersion`[^.]*`merge-executor-v1`/u);
+  assert.doesNotMatch(runbook, /Find the exact `MERGE_EXECUTOR_RUNNER_ID`, the `merge-executor-v1` adapter\/CLI identity/u);
+  assert.match(readme, /documented but unverified macOS\s+LaunchDaemon and Linux systemd profiles/u);
+  assert.match(runbook, /documented but unverified/u);
 });
 
 test("the wizard links official concepts and ends with exact non-secret next commands", () => {

@@ -2,8 +2,11 @@
 
 This is the current public authority for provisioning and maintaining the
 self-hosted `@agentos/merge-executor`. It covers GitHub.com, a dedicated local
-service identity, macOS LaunchDaemon, and Linux systemd deployments. It does not
-describe mosonlab's installation or any private operator service.
+service identity, and documented but unverified macOS LaunchDaemon and Linux
+systemd profiles. These profiles are procedures, not qualifying platform
+evidence or a support commitment. They do not change the public support matrix,
+and this runbook does not describe mosonlab's installation or any private
+operator service.
 
 The executor is fail closed. A missing permission, unreadable field, shared
 principal, unsafe key path, failed disarm, or uncertain merge result stops the
@@ -95,17 +98,23 @@ npm run setup:local
 bash scripts/setup-merge-executor.sh
 ```
 
-Run the wizard as the repository operator, never as root. It makes no GitHub API
-request, creates no account, installs no key or service, and invokes no
-privileged command. It opens official documentation and requires the human to
-confirm each GitHub or administrator-owned step. A declined confirmation or
+Run the capture mode as the repository operator, never as root. It makes no
+GitHub API request, creates no account, installs no key or service, and invokes
+no privileged command. It opens official documentation and requires the human
+to confirm each GitHub or administrator-owned step. A declined confirmation or
 failed prerequisite exits with a named error; there is no skipped stage.
 
 The wizard preserves an existing `.env` assignment when Enter is pressed and
 replaces it only when the human types a new value. It validates all values
-before writing any of them. Secret entry uses hidden terminal input. The key
-check reads only `stat` metadata—owner uid, mode, size, and parent-directory
-modes—and never key bytes.
+before writing any of them. Secret entry uses hidden terminal input. Because the
+repository operator cannot and must not traverse the mode-0700 executor-owned
+directory, key validation uses a separately confirmed administrator handoff.
+The administrator invokes the wizard's announced, read-only
+`--inspect-key-metadata` mode; it reads only `stat` metadata—path, regular-file
+kind, owner uid, mode, size, and every parent-directory mode—and emits one
+`MERGE_EXECUTOR_KEY_METADATA_V1` receipt. Capture mode validates the pasted
+receipt without opening or traversing the key path. Neither mode reads key
+bytes.
 
 On success, both `.env` and `.merge-executor.env` are mode 0600. The second file
 is an untracked service-install input containing only executor variables. Keep
@@ -163,11 +172,17 @@ destination paths. This is a human-only administrator action:
 ```sh
 sudo install -d -o <merge-executor-user> -g <merge-executor-group> -m 0700 <merge-executor-home>/secrets
 sudo install -o <merge-executor-user> -g <merge-executor-group> -m 0600 <downloaded-private-key> <merge-executor-home>/secrets/github-app.pem
-sudo stat <merge-executor-home>/secrets/github-app.pem
+cd <repository-root>
+sudo bash scripts/setup-merge-executor.sh --inspect-key-metadata <merge-executor-user> <merge-executor-home>/secrets/github-app.pem
 ```
 
-Remove the download only after the final file passes the wizard metadata check.
-Never use `cat`, command substitution, or a diagnostic that prints key bytes.
+The final command is the wizard's separately invoked, read-only administrator
+mode. It makes no change and prints one non-secret metadata receipt, not key
+bytes. Paste that entire receipt into capture mode when prompted. The repository
+operator does not receive search permission on the private home or the 0700
+`secrets` directory. Remove the download only after capture mode accepts the
+receipt. Never use `cat`, command substitution, or a diagnostic that prints key
+bytes.
 
 ### Adopt a root-owned runtime
 
@@ -346,11 +361,19 @@ curl --fail --silent --show-error --config "$auth_config" "$MERGE_EXECUTOR_API_U
 rm -f "$auth_config"
 ```
 
-Find the exact `MERGE_EXECUTOR_RUNNER_ID`, the `merge-executor-v1` adapter/CLI
-identity after a claim, and a fresh last-seen/claim observation. An empty or
-stale row, authentication failure, or a model runner appearing under the
-executor id is unhealthy. Check `/runners` regularly and alert on staleness;
-service-manager liveness alone does not prove the API recognizes the principal.
+Find the `daemons` row whose `runnerId` exactly equals
+`MERGE_EXECUTOR_RUNNER_ID`. Require `online: true`, a fresh `lastSeenAt`, and
+`workspaceRoot: null` and `diskFreeBytes: null`. A model runner using the
+executor id populates workspace or disk telemetry and is unhealthy. An absent
+or stale row or authentication failure is also unhealthy. Check `/runners`
+regularly and alert on staleness; service-manager liveness alone does not prove
+the API recognizes the principal.
+
+`/runners` does not expose the executor adapter or CLI identity. After a claim
+has started, inspect that mechanical Run record and require its `adapterVersion`
+and `cliVersion` fields to both equal `merge-executor-v1`. Keep this Run-record
+check in first-positive and incident evidence; do not expect those fields in the
+daemon row.
 
 ### First positive App-bot merge
 

@@ -120,9 +120,11 @@ repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
 is not supported. The Inbox service is optional. No launchd definition is
 shipped for the foreground Developer Preview sequence; remote access and this
 repository's internal task-chain templates are also outside that sequence. A
-self-hosted merge executor instead has supported macOS LaunchDaemon and Linux
-systemd profiles in the public
+separate self-hosted merge executor instead has documented but unverified macOS
+LaunchDaemon and Linux systemd profiles in the public
 [`docs/runbooks/merge-executor.md`](docs/runbooks/merge-executor.md) runbook.
+Those procedures do not change the platform classifications above or the
+authoritative support matrix.
 
 Read [`docs/release/v0.1.0-security.md`](docs/release/v0.1.0-security.md)
 before pointing this at anything, and
