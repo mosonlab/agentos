@@ -76,6 +76,13 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
       runner: RunnerPreference.CLAUDE,
     });
   }
+  for (const name of ["review-coordinator", "review-coordinator-sol"] as const) {
+    assert.deepEqual(canonical.get(name), {
+      name,
+      model: "openai-codex/gpt-5.6-sol:high",
+      runner: RunnerPreference.PI,
+    });
+  }
 });
 
 test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
@@ -94,8 +101,11 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(firstReview, /only as the AgentOS task output/u);
   assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
-  assert.match(firstReview, /codex exec review -m gpt-5\.6-sol -c model_reasoning_effort=high/u);
-  assert.match(firstReview, /review the changes from <implementation base sha> to <delivered head sha>/u);
+  assert.match(firstReview, /one session, make two sequential explicit passes over the same reviewed range/u);
+  assert.match(firstReview, /first complete the Standards pass/u);
+  assert.match(firstReview, /only then start a separate Spec pass/u);
+  assert.match(firstReview, /merge both passes into one persisted report/u);
+  assert.doesNotMatch(firstReview, /codex exec review/u);
   assert.match(firstReview, /post-fix regression verification/u);
   assert.match(firstReview, /entire fix diff as one unit/u);
   assert.match(firstReview, /exact fixed head/u);
