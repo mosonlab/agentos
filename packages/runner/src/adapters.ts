@@ -558,6 +558,10 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     "--model", model,
     ...(effort ? ["--thinking", effort] : []),
     ...denyArgs("PI", spec.claim.agent.disabledTools),
+    // Disable host-level pi discovery. The explicit AgentOS extension remains
+    // enabled below, while the reviewer's role prompt supplies its rules and
+    // repository context files remain review material rather than instructions.
+    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
     "--extension", piExtensionPath(),
     ...(resume ? ["--session", resume.providerConversationId] : []),
   ];

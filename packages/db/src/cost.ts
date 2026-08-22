@@ -40,7 +40,9 @@ const MILLION = new Prisma.Decimal(1_000_000);
 
 export const modelNameForPricing = (model: string): string => {
   const suffix = model.lastIndexOf(":");
-  return suffix === -1 ? model : model.slice(0, suffix);
+  const withoutEffort = suffix === -1 ? model : model.slice(0, suffix);
+  const provider = withoutEffort.indexOf("/");
+  return provider === -1 ? withoutEffort : withoutEffort.slice(provider + 1);
 };
 
 const hasTokens = (session: CostableSession): boolean =>

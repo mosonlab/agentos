@@ -273,8 +273,18 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
   ]);
   assert.deepEqual(stableArgv(argsForRunner("PI", spec)), [
     "-p", "--mode", "json", "--session-dir", "/work/.agentos-pi", "--model", "codex",
+    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
     "--extension", "<PI_EXTENSION>",
   ]);
+});
+
+test("Pi disables host discovery while retaining the explicit AgentOS extension", () => {
+  const args = argsForRunner("PI", runSpec());
+  for (const flag of ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"]) {
+    assert.equal(args.filter((arg) => arg === flag).length, 1, `${flag} must be unconditional`);
+  }
+  assert.equal(args.filter((arg) => arg === "--extension").length, 1);
+  assert.equal(args[args.indexOf("--extension") + 1], piExtensionPath());
 });
 
 test("no runner carries the prompt or the resume input in argv", () => {
