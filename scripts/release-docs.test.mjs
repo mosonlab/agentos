@@ -10,6 +10,29 @@ const PUBLIC_EXISTING_MODE_DOCS = [
   "docs/release/v0.1.0-support-matrix.md",
 ];
 
+const CURRENT_CLI_SURFACE_DOCS = [
+  "README.md",
+  "README.zh-CN.md",
+  "CONTRIBUTING.md",
+  "CHANGELOG.md",
+  "docs/release/v0.1.0-release-notes.md",
+  "docs/release/v0.1.0-support-matrix.md",
+  "docs/release/v0.2.0-release-notes.md",
+];
+
+test("published docs do not advertise or require the retired repository CLI", () => {
+  for (const path of CURRENT_CLI_SURFACE_DOCS) {
+    const text = readFileSync(path, "utf8");
+    assert.doesNotMatch(
+      text,
+      /npm\s+run\s+agentos\b|agentos(?:\s+--)?\s+help\b|packages\/cli(?:\/dist)?\b|phase-0\s+cli\b|cli\s+help\s+check\b/iu,
+      path,
+    );
+  }
+  assert.match(readFileSync("README.md", "utf8"), /does not ship a repository command-line interface/u);
+  assert.match(readFileSync("README.zh-CN.md", "utf8"), /不再提供仓库命令行界面/u);
+});
+
 test("published docs describe the executable existing-mode consumer truthfully", () => {
   const docs = PUBLIC_EXISTING_MODE_DOCS.map((path) => [path, readFileSync(path, "utf8")]);
   for (const [path, text] of docs) {

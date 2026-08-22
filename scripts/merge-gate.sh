@@ -473,7 +473,7 @@ install_dependencies() {
 
 BUILD_OUTPUTS=(
   packages/github-client/dist packages/db/dist packages/api/dist packages/runner/dist
-  packages/inbox/dist packages/merge-executor/dist packages/cli/dist apps/web/dist
+  packages/inbox/dist packages/merge-executor/dist apps/web/dist
 )
 
 build_cache_key() {

@@ -348,6 +348,12 @@ test("every Goal 5a0 manifest entry survives, by exact glob", () => {
   assert.equal(GOAL_5A0_MANIFEST_ENTRIES.filter((entry) => entry.endsWith(".test.mjs")).length, 2);
 });
 
+test("the retired repository CLI is absent from snapshot authority", () => {
+  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
+  const globs = manifest.include.map((entry) => entry.glob);
+  assert.equal(globs.some((glob) => glob === "packages/cli" || glob.startsWith("packages/cli/")), false);
+});
+
 test("the docs surface is closed and named one file at a time", () => {
   const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
   const docs = manifest.include.map((entry) => entry.glob).filter((glob) => glob.startsWith("docs/"));
@@ -431,7 +437,7 @@ test("every workspace manifest records the same first-party version", () => {
   // away from a registry entry nobody decided to create.
   const manifests = execFileSync("git", ["ls-files", "package.json", "apps/*/package.json", "packages/*/package.json"])
     .toString("utf8").trim().split("\n");
-  assert.ok(manifests.length >= 10, "expected the root manifest and every workspace manifest");
+  assert.equal(manifests.length, 9, "expected the root manifest and eight workspace manifests");
   const releaseVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
   for (const path of manifests) {
     const pkg = JSON.parse(readFileSync(path, "utf8"));
