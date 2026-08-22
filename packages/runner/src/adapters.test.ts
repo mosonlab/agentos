@@ -273,14 +273,15 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
   ]);
   assert.deepEqual(stableArgv(argsForRunner("PI", spec)), [
     "-p", "--mode", "json", "--session-dir", "/work/.agentos-pi", "--model", "codex",
-    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
+    "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
     "--extension", "<PI_EXTENSION>",
   ]);
 });
 
-test("Pi disables host and project discovery while retaining the explicit AgentOS extension", () => {
+test("Pi relies on its isolated config root while retaining the explicit AgentOS extension", () => {
   const args = argsForRunner("PI", runSpec());
-  for (const flag of ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve"]) {
+  assert.equal(args.includes("--no-extensions"), false, "the global extension kill switch would cancel the AgentOS extension");
+  for (const flag of ["--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve"]) {
     assert.equal(args.filter((arg) => arg === flag).length, 1, `${flag} must be unconditional`);
   }
   assert.equal(args.filter((arg) => arg === "--extension").length, 1);
@@ -588,7 +589,7 @@ test("PI preflight fails closed when the CLI omits an isolation capability", { t
   await writeFile(stub, [
     "#!/bin/sh",
     'if [ "$1" = "--version" ]; then echo "0.1.0"; exit 0; fi',
-    'if [ "$1" = "--help" ]; then echo "--no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files"; exit 0; fi',
+    'if [ "$1" = "--help" ]; then echo "--no-skills --no-prompt-templates --no-themes --no-approve"; exit 0; fi',
     'if [ "$1" = "auth" ]; then exit 0; fi',
     "exit 1",
     "",
@@ -614,7 +615,7 @@ test("PI preflight verifies every isolation capability before authentication", {
   await writeFile(stub, [
     "#!/bin/sh",
     'if [ "$1" = "--version" ]; then echo "0.84.2"; exit 0; fi',
-    'if [ "$1" = "--help" ]; then echo "--no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve"; exit 0; fi',
+    'if [ "$1" = "--help" ]; then echo "--no-skills --no-prompt-templates --no-themes --no-context-files --no-approve"; exit 0; fi',
     'if [ "$1" = "auth" ]; then exit 0; fi',
     "exit 1",
     "",

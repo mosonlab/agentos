@@ -561,10 +561,12 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     "--model", model,
     ...(effort ? ["--thinking", effort] : []),
     ...denyArgs("PI", spec.claim.agent.disabledTools),
-    // Disable host-level pi discovery. The explicit AgentOS extension remains
-    // enabled below, while the reviewer's role prompt supplies its rules and
-    // repository context files remain review material rather than instructions.
-    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
+    // Disable host-level pi discovery. PI_CODING_AGENT_DIR points at a fresh
+    // config root with no extensions directory, so the explicit AgentOS
+    // extension below remains enabled. The reviewer's role prompt supplies its
+    // rules, and repository context files remain review material rather than
+    // instructions.
+    "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
     "--extension", piExtensionPath(),
     ...(resume ? ["--session", resume.providerConversationId] : []),
   ];
@@ -741,7 +743,6 @@ const codexExecHelpIsCompatible = (help: string, resumeHelp: string): boolean =>
   && resumeHelp.includes("read from stdin");
 
 const piHelpIsCompatible = (help: string): boolean => [
-  "--no-extensions",
   "--no-skills",
   "--no-prompt-templates",
   "--no-themes",

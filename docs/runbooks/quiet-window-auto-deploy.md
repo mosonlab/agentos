@@ -126,8 +126,13 @@ The job then performs exactly this sequence and stops at the first failure:
 5. run `npm run db:migrate-goal-execution` from staging with the two authority
    SHAs read from that revision's `release-authority.json`;
 6. run `npm run db:sync-canonical-prompts`; structural drift outside an
-   explicitly source-declared assignee transition is a terminal
-   refusal and is never changed with SQL;
+   explicitly source-declared assignee or Agent-default transition is a
+   terminal refusal and is never changed with SQL. Agent-default transitions
+   are frozen to `review-coordinator` and `review-coordinator-sol`, from model
+   `gpt-5.6-sol:high` with `runnerPreference` `CODEX` to model
+   `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`; the sync adopts
+   one only when both persisted fields exactly match that `from` state and the
+   canonical source exactly matches the `to` state;
 7. verify the staged generated Prisma client, recheck the barrier and blocking
    statuses, swap the staged `dist/` trees and target `node_modules`, and
    restart the services;
