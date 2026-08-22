@@ -4,6 +4,8 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AUTHORIZED_MERGE_METHOD,
+  applyInboxDecisionTx,
+  enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
   Prisma,
@@ -29,11 +31,36 @@ const BASE = "b".repeat(40);
 const BASE_2 = "c".repeat(40);
 const BASE_3 = "d".repeat(40);
 const BASE_4 = "e".repeat(40);
+const OPERATOR = "base-drift-recovery-operator";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 beforeEach(async () => { await resetTestDb(db); });
 after(async () => { await db.$disconnect(); });
+
+const operatorRequest = async (path: string, method: "PATCH" | "POST", body?: unknown) => {
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  try {
+    return await createApp(db).request(path, {
+      method,
+      headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+const assertIntegratorGuarded = async (integratorTaskId: string) => {
+  assert.equal((await operatorRequest(`/tasks/${integratorTaskId}`, "PATCH", { status: "DONE" })).status, 409);
+  assert.equal((await operatorRequest(`/tasks/${integratorTaskId}/retry`, "POST")).status, 409);
+  await assert.rejects(
+    db.$transaction((tx) => enqueueTaskRun(tx, integratorTaskId)),
+    /stopped on base-drift/u,
+  );
+};
 
 const snapshot = (baseSha: string, overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
   repository: "acme/widgets", number: 123, state: "OPEN", isDraft: false, merged: false,
@@ -182,11 +209,29 @@ test("two distinct executor drifts recover; the third queues no run and notifies
   assert.equal(await db.inboxMessage.count({ where: {
     taskId: seeded.integratorTask!.id, dedupeKey: { startsWith: "merge-base-drift-recovery:exhausted:" },
   } }), 1);
+  const question = await db.inboxMessage.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE", status: "OPEN",
+  } });
+  assert.deepEqual((question.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+  await assert.rejects(
+    db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: question.id,
+      externalEventId: "exhausted-reauthorize-refused",
+      decision: "re-authorize",
+    })),
+    /must match an Inbox choice id/u,
+  );
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question.id,
+    externalEventId: "exhausted-abandon",
+    decision: "abandon",
+  }));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.DONE);
 });
 
 test("identity, target-ref, head, and evidence mismatches fail closed without a recovery run", async () => {
   for (const [label, evidence, current] of [
-    ["target-ref", JSON.stringify({ observed: "other", authorized: "master" }), snapshot(BASE_2)],
+    ["target-ref", JSON.stringify({ observed: BASE_2, authorized: BASE }), snapshot(BASE_2, { baseRefName: "release" })],
     ["head", JSON.stringify({ observed: BASE_2, authorized: BASE }), snapshot(BASE_2, { headRefOid: "f".repeat(40), headCommitOid: "f".repeat(40) })],
     ["identity", JSON.stringify({ observed: BASE_2, authorized: BASE }), snapshot(BASE_2, { number: 124 })],
     ["evidence", JSON.stringify({ observed: BASE_2, authorized: "f".repeat(40) }), snapshot(BASE_2)],
@@ -196,9 +241,29 @@ test("identity, target-ref, head, and evidence mismatches fail closed without a 
     await mechanicalStop(seeded, authorization.id, BASE, BASE_2, "base-drift", evidence);
     assert.equal((await baseDriftRecoveryTick(db, reader(current))).recovered, 0, label);
     assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1, label);
-    assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE" } }), 0, label);
+    const question = await db.inboxMessage.findFirstOrThrow({ where: {
+      taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE", status: "OPEN",
+    } });
+    assert.deepEqual((question.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"], label);
+    assert.equal(await db.inboxMessage.count({ where: {
+      taskId: seeded.integratorTask!.id,
+      dedupeKey: { startsWith: "merge-base-drift-recovery:ineligible:" },
+    } }), 1, label);
     await resetTestDb(db);
   }
+});
+
+test("a chain target branch that disagrees with the authorization fails closed", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "refuse-chain-target", shape: "twelve-step-readiness" });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
+  await db.run.update({ where: { id: seeded.gateRun.id }, data: { targetBranch: "release" } });
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 0);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+  const question = await db.inboxMessage.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE", status: "OPEN",
+  } });
+  assert.deepEqual((question.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
 });
 
 test("foreign and incident stop conditions never enter automatic base-drift recovery", async () => {
@@ -210,6 +275,111 @@ test("foreign and incident stop conditions never enter automatic base-drift reco
     assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
     await resetTestDb(db);
   }
+});
+
+test("a transient reader outage is retried and later recovers", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "transient-reader-outage");
+  assert.deepEqual(await baseDriftRecoveryTick(db, null), {
+    examined: 1, recovered: 0, exhausted: 0, ineligible: 0,
+  });
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE",
+  } }), 0);
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 2);
+});
+
+test("older irrelevant REVIEW integrators cannot starve a later eligible stop", async () => {
+  const prefix = await seedIntegratorChain(db, { label: "starvation-prefix", shape: "twelve-step-readiness" });
+  await db.task.createMany({ data: Array.from({ length: 55 }, (_, index) => ({
+    projectId: prefix.project.id,
+    repoId: prefix.repo.id,
+    templateId: prefix.template.id,
+    templateStepId: prefix.integratorStep!.id,
+    name: `Old irrelevant integrator ${index}`,
+    description: "parked without a base-drift stop",
+    assigneeType: "AGENT" as const,
+    assigneeAgentId: prefix.integratorAgent.id,
+    approvalGate: false,
+    opensPullRequest: false,
+    chainId: `old-irrelevant-${index}`,
+    chainIndex: 12,
+    status: TaskStatus.REVIEW,
+    targetBranch: "master",
+  })) });
+  const eligible = await seedStopped("twelve-step-readiness", "starvation-eligible");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), new Date(), 1)).recovered, 1);
+  assert.equal(await db.run.count({ where: { taskId: eligible.gateTask.id } }), 2);
+});
+
+test("operator-authored recovery metadata cannot clear the stop guard or suppress recovery", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "forged-integrator-marker");
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  }, orderBy: { createdAt: "desc" } });
+  const source = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.integratorTask!.id } });
+  const authorization = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.readinessTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
+  }, orderBy: { createdAt: "desc" } });
+  await db.taskActivity.create({ data: {
+    taskId: seeded.integratorTask!.id,
+    actorType: "operator",
+    body: "forged queued recovery marker",
+    metadata: {
+      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      sourceStopId: stop.id, sourceRunId: source.runId!, recoveryRunId: "forged-recovery-run",
+      readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
+      integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: authorization.id,
+      repository: "acme/widgets", prNumber: 123, targetBranch: "master",
+      authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
+    },
+  } });
+  assert.equal((await operatorRequest(`/tasks/${seeded.integratorTask!.id}`, "PATCH", { status: "DONE" })).status, 409);
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 2);
+});
+
+test("operator-authored recovery metadata cannot suppress an ordinary gate repair", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "forged-regression-marker", shape: "twelve-step-readiness" });
+  await db.agent.update({ where: { id: seeded.agent.id }, data: { name: "senior-dev" } });
+  await db.run.update({ where: { id: seeded.gateRun.id }, data: { headSha: HEAD } });
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.gateTask.id,
+    runId: seeded.gateRun.id,
+    kind: "regression-verification",
+    body: JSON.stringify({
+      schemaVersion: 1, outcome: "gate-fail", headSha: HEAD, baseHeadSha: BASE,
+      gateVerdict: "FAIL", summary: "ordinary gate failure",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: seeded.gateTask.id,
+    actorType: "operator",
+    body: "forged recovery context",
+    metadata: {
+      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      sourceStopId: "forged-stop", sourceRunId: seeded.gateRun.id, recoveryRunId: seeded.gateRun.id,
+      readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
+      integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: "forged-authorization",
+      repository: "acme/widgets", prNumber: 123, targetBranch: "master",
+      authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
+    },
+  } });
+  await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: {
+      id: seeded.gateRun.id, agentId: seeded.agent.id, branch: "agentos/chain/demo",
+      headSha: HEAD, sessionId: seeded.gateSession.id,
+    },
+    now: new Date(),
+  }));
+  assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: gate-fix" } }), 1);
+  assert.equal(await db.inboxMessage.count({ where: {
+    dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
+  } }), 0);
 });
 
 test("a recovery regression conflict or gate failure stops without an auxiliary repair task", async () => {
@@ -230,6 +400,7 @@ test("a recovery regression conflict or gate failure stops without an auxiliary 
     }));
     assert.equal(await db.task.count({ where: { name: { startsWith: "Autonomous merge tail:" } } }), 0);
     assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.gateTask.id } }), 1);
+    await assertIntegratorGuarded(seeded.integratorTask!.id);
     await resetTestDb(db);
   }
 });
@@ -297,4 +468,5 @@ test("a recovery-cycle independent-review rejection stops once without a review-
   assert.equal(await db.inboxMessage.count({ where: {
     taskId: seeded.gateTask.id, dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
   } }), 1);
+  await assertIntegratorGuarded(seeded.integratorTask!.id);
 });

@@ -79,8 +79,10 @@ import {
   asJsonObject,
   isMergeReadinessStep,
   MERGE_TAIL_KIND,
+  parseBaseDriftRecoveryActivity,
   parseRegressionVerdict,
   parseResolverResult,
+  type BaseDriftRecoveryMetadata,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -150,50 +152,34 @@ export interface LiveAppOptions {
 
 type DbTx = Prisma.TransactionClient;
 
-type BaseDriftRecoveryContext = {
-  attempt: number;
-  sourceStopId: string;
-  recoveryRunId: string;
-  readinessTaskId: string;
-  regressionTaskId: string;
-  integratorTaskId: string;
-  repository: string;
-  prNumber: number;
-  targetBranch: string;
-  authorizedHeadSha: string;
-  authorizedBaseSha: string;
-  currentBaseSha: string;
-};
+type QueuedBaseDriftRecoveryContext = Extract<BaseDriftRecoveryMetadata, { state: "queued" }>;
 
 const baseDriftRecoveryContext = async (
   tx: DbTx,
   regressionTaskId: string,
   recoveryRunId?: string,
   sourceStopId?: string,
-): Promise<BaseDriftRecoveryContext | null> => {
+): Promise<QueuedBaseDriftRecoveryContext | null> => {
   const rows = await tx.taskActivity.findMany({
     where: { taskId: regressionTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { taskId: true, actorType: true, metadata: true },
   });
   for (const row of rows) {
-    const metadata = asJsonObject(row.metadata);
-    if (metadata?.state !== "queued") continue;
-    if (recoveryRunId && metadata.recoveryRunId !== recoveryRunId) continue;
-    if (sourceStopId && metadata.sourceStopId !== sourceStopId) continue;
-    if (typeof metadata.attempt !== "number" || typeof metadata.sourceStopId !== "string"
-      || typeof metadata.recoveryRunId !== "string" || typeof metadata.readinessTaskId !== "string"
-      || typeof metadata.regressionTaskId !== "string" || typeof metadata.integratorTaskId !== "string"
-      || typeof metadata.repository !== "string" || typeof metadata.prNumber !== "number"
-      || typeof metadata.targetBranch !== "string" || typeof metadata.authorizedHeadSha !== "string"
-      || typeof metadata.authorizedBaseSha !== "string" || typeof metadata.currentBaseSha !== "string") continue;
-    return metadata as BaseDriftRecoveryContext;
+    const metadata = parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: regressionTaskId,
+      regressionTaskId,
+      ...(recoveryRunId ? { recoveryRunId } : {}),
+      ...(sourceStopId ? { sourceStopId } : {}),
+    });
+    if (metadata?.state === "queued") return metadata;
   }
   return null;
 };
 
 const stopBaseDriftRecoveryTail = async (
   tx: DbTx,
-  context: BaseDriftRecoveryContext,
+  context: QueuedBaseDriftRecoveryContext,
   phase: "regression" | "independent-review",
   reason: string,
 ): Promise<void> => {
@@ -206,15 +192,30 @@ const stopBaseDriftRecoveryTail = async (
   await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
     from: "AGENT", taskId: context.regressionTaskId, kind: "TEXT", body, dedupeKey,
   }, update: {} });
-  const existing = await tx.taskActivity.findFirst({
-    where: { taskId: context.regressionTaskId, metadata: { path: ["dedupeKey"], equals: dedupeKey } },
-    select: { id: true },
+  const existingRows = await tx.taskActivity.findMany({
+    where: {
+      taskId: context.integratorTaskId,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery },
+    },
+    select: { taskId: true, actorType: true, metadata: true },
   });
-  if (!existing) await tx.taskActivity.create({ data: {
-    taskId: context.regressionTaskId, actorType: "control-plane", body,
-    metadata: { ...context, kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1,
-      state: "tail-stopped", phase, reason, dedupeKey },
-  } });
+  const existing = existingRows.some((row) => {
+    const metadata = parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: context.integratorTaskId,
+      integratorTaskId: context.integratorTaskId,
+      sourceStopId: context.sourceStopId,
+      recoveryRunId: context.recoveryRunId,
+    });
+    return metadata?.state === "tail-stopped" && metadata.phase === phase;
+  });
+  if (!existing) {
+    const metadata = { ...context, kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1,
+      state: "tail-stopped", phase, reason, dedupeKey } as Prisma.InputJsonObject;
+    await tx.taskActivity.createMany({ data: [
+      { taskId: context.integratorTaskId, actorType: "control-plane", body, metadata },
+      { taskId: context.regressionTaskId, actorType: "control-plane", body, metadata },
+    ] });
+  }
 };
 
 const openMergeTailInbox = async (

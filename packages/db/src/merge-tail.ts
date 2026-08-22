@@ -12,8 +12,122 @@ export const MERGE_TAIL_KIND = {
 } as const;
 
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
+export const MAX_BASE_DRIFT_CLASSIFICATION_RETRIES = 30;
 
 const SHA = /^[0-9a-f]{40}$/u;
+
+export type BaseDriftRecoveryIdentity = {
+  integratorTaskId: string;
+  sourceStopId: string;
+};
+
+export type BaseDriftRecoveryContext = BaseDriftRecoveryIdentity & {
+  kind: typeof MERGE_TAIL_KIND.baseDriftRecovery;
+  schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION;
+  attempt: number;
+  sourceRunId: string;
+  authorizationActivityId: string;
+  repository: string;
+  prNumber: number;
+  targetBranch: string;
+  authorizedHeadSha: string;
+  authorizedBaseSha: string;
+  observedBaseSha: string;
+  currentBaseSha: string;
+  readinessTaskId: string;
+  regressionTaskId: string;
+};
+
+export type BaseDriftRecoveryMetadata =
+  | (BaseDriftRecoveryContext & { state: "queued"; recoveryRunId: string })
+  | (BaseDriftRecoveryContext & {
+      state: "tail-stopped";
+      recoveryRunId: string;
+      phase: "regression" | "independent-review";
+      reason: string;
+      dedupeKey: string;
+    })
+  | (BaseDriftRecoveryContext & { state: "exhausted"; reason: string })
+  | (BaseDriftRecoveryIdentity & {
+      kind: typeof MERGE_TAIL_KIND.baseDriftRecovery;
+      schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION;
+      state: "ineligible";
+      reason: string;
+    })
+  | (BaseDriftRecoveryIdentity & {
+      kind: typeof MERGE_TAIL_KIND.baseDriftRecovery;
+      schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION;
+      state: "classification-retry";
+      reason: string;
+      classificationAttempt: number;
+    });
+
+export type BaseDriftRecoveryActivity = {
+  taskId: string;
+  actorType: string;
+  metadata: Prisma.JsonValue | null;
+};
+
+export type BaseDriftRecoveryExpectation = Partial<{
+  activityTaskId: string;
+  integratorTaskId: string;
+  regressionTaskId: string;
+  sourceStopId: string;
+  recoveryRunId: string;
+}>;
+
+const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+const positiveInteger = (value: unknown): value is number => Number.isInteger(value) && Number(value) > 0;
+
+/**
+ * The sole parser for the server-owned automatic base-drift recovery contract.
+ * A metadata discriminator is not authority: provenance, the activity's real
+ * task, and every state-specific identity binding are checked together.
+ */
+export const parseBaseDriftRecoveryActivity = (
+  row: BaseDriftRecoveryActivity,
+  expected: BaseDriftRecoveryExpectation = {},
+): BaseDriftRecoveryMetadata | null => {
+  if (row.actorType !== "control-plane") return null;
+  if (expected.activityTaskId !== undefined && row.taskId !== expected.activityTaskId) return null;
+  const value = asJsonObject(row.metadata);
+  if (!value || value.kind !== MERGE_TAIL_KIND.baseDriftRecovery
+    || value.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION
+    || !nonempty(value.integratorTaskId) || !nonempty(value.sourceStopId)) return null;
+  if (expected.integratorTaskId !== undefined && value.integratorTaskId !== expected.integratorTaskId) return null;
+  if (expected.sourceStopId !== undefined && value.sourceStopId !== expected.sourceStopId) return null;
+
+  if (value.state === "ineligible") {
+    return nonempty(value.reason) ? value as BaseDriftRecoveryMetadata : null;
+  }
+  if (value.state === "classification-retry") {
+    return nonempty(value.reason) && positiveInteger(value.classificationAttempt)
+      ? value as BaseDriftRecoveryMetadata
+      : null;
+  }
+
+  if (!positiveInteger(value.attempt)
+    || !nonempty(value.sourceRunId) || !nonempty(value.authorizationActivityId)
+    || !nonempty(value.repository) || !positiveInteger(value.prNumber)
+    || !nonempty(value.targetBranch)
+    || typeof value.authorizedHeadSha !== "string" || !SHA.test(value.authorizedHeadSha)
+    || typeof value.authorizedBaseSha !== "string" || !SHA.test(value.authorizedBaseSha)
+    || typeof value.observedBaseSha !== "string" || !SHA.test(value.observedBaseSha)
+    || typeof value.currentBaseSha !== "string" || !SHA.test(value.currentBaseSha)
+    || !nonempty(value.readinessTaskId) || !nonempty(value.regressionTaskId)) return null;
+  if (expected.regressionTaskId !== undefined && value.regressionTaskId !== expected.regressionTaskId) return null;
+
+  if (value.state === "exhausted") {
+    return nonempty(value.reason) ? value as BaseDriftRecoveryMetadata : null;
+  }
+  if ((value.state !== "queued" && value.state !== "tail-stopped") || !nonempty(value.recoveryRunId)) return null;
+  if (expected.recoveryRunId !== undefined && value.recoveryRunId !== expected.recoveryRunId) return null;
+  if (value.state === "queued") return value as BaseDriftRecoveryMetadata;
+  return (value.phase === "regression" || value.phase === "independent-review")
+    && nonempty(value.reason) && nonempty(value.dedupeKey)
+    ? value as BaseDriftRecoveryMetadata
+    : null;
+};
 
 export type RegressionVerdict =
   | { schemaVersion: 1; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }

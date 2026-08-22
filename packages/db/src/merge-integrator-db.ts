@@ -34,12 +34,13 @@ import {
   githubRepositoryFromRemote,
   integratorBindingRefusal,
   stopChoicePayload,
+  isCanonicalIntegratorStep,
   isIntegratorStep,
   isStopCondition,
   isTerminalDisposition,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
-import { MERGE_TAIL_KIND } from "./merge-tail.js";
+import { MERGE_TAIL_KIND, parseBaseDriftRecoveryActivity } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -254,7 +255,7 @@ export const stopStateFor = async (tx: Tx, taskId: string): Promise<StopState> =
   if (!stop) return null;
   const dispositions = await stopAnswerDispositions(tx, taskId, stop.stopId);
   if (dispositions.some((disposition) => isTerminalDisposition(disposition))) return null;
-  const recovered = await tx.taskActivity.findFirst({
+  const recoveryRows = await tx.taskActivity.findMany({
     where: {
       taskId,
       metadata: {
@@ -263,10 +264,16 @@ export const stopStateFor = async (tx: Tx, taskId: string): Promise<StopState> =
       },
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { metadata: true },
+    select: { taskId: true, actorType: true, metadata: true },
   });
-  const recoveryMetadata = asRecord(recovered?.metadata);
-  if (recoveryMetadata?.state === "queued" && recoveryMetadata.sourceStopId === stop.stopId) return null;
+  const recovery = recoveryRows
+    .map((row) => parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: taskId,
+      integratorTaskId: taskId,
+      sourceStopId: stop.stopId,
+    }))
+    .find((metadata) => metadata !== null && metadata.state !== "classification-retry");
+  if (recovery?.state === "queued") return null;
   return { stop, dispositions };
 };
 
@@ -825,7 +832,10 @@ export const recordIntegratorStop = async (
     where: { id: input.integratorTaskId },
     data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${input.condition}` },
   });
-  const question = input.condition === "base-drift" ? null : await openStopQuestion(tx, {
+  const task = await loadIntegratorTask(tx, input.integratorTaskId);
+  const automaticBaseDriftCandidate = input.condition === "base-drift"
+    && isCanonicalIntegratorStep(task?.templateStep);
+  const question = automaticBaseDriftCandidate ? null : await openStopQuestion(tx, {
     integratorTaskId: input.integratorTaskId,
     stopId: stop.id,
     condition: input.condition,

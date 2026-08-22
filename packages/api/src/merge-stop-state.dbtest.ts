@@ -14,6 +14,7 @@ import {
   applyInboxDecisionTx,
   EVIDENCE_PLACEHOLDER_BODY,
   enqueueTaskRun,
+  legacyHumanTwelveStepTemplateName,
   MERGE_INTEGRATOR_KIND,
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
@@ -133,6 +134,24 @@ test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, ques
   assert.equal(activities.filter((row) => (row.metadata as any)?.kind === MERGE_INTEGRATOR_KIND.result).length, 1);
   assert.equal(activities.filter((row) => row.body.includes("Chain complete")).length, 0);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1, "no automatic retry");
+});
+
+test("a legacy integrator base-drift stop retains an abandon-only manual exit", async () => {
+  const chain = await seedIntegratorChain(db, { label: "legacy-base-drift-exit" });
+  await db.taskTemplate.update({
+    where: { id: chain.template.id },
+    data: { name: legacyHumanTwelveStepTemplateName(chain.template.id) },
+  });
+  const run = await liveIntegratorRun(chain);
+  await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
+    outcome: "stopped",
+    condition: "base-drift",
+    evidence: JSON.stringify({ observed: "c".repeat(40), authorized: "b".repeat(40) }),
+  }));
+  assert.equal((await completeRun(run)).status, 200);
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  assert.ok(question, "legacy base-drift stop keeps a manual exit because it is not an automatic-recovery candidate");
+  assert.deepEqual((question!.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
 });
 
 test("Y1 the append-only stop history survives an output replacement", async () => {

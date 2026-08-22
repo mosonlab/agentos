@@ -12,11 +12,13 @@ import {
   defenseTriggers,
   enqueueTaskRun,
   isMergeReadinessStep,
+  parseBaseDriftRecoveryActivity,
   parseRegressionVerdict,
   resolveChainTarget,
   resolutionTestTriggers,
   runnerFor,
   type PrismaClient,
+  type BaseDriftRecoveryMetadata,
 } from "@agentos/db";
 
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
@@ -30,12 +32,7 @@ export const readinessPollIntervalMs = (): number => {
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 const READINESS_LEASE_MS = 30_000;
 
-type RecoveryContext = Record<string, unknown> & {
-  kind: typeof MERGE_TAIL_KIND.baseDriftRecovery;
-  state: "queued";
-  sourceStopId: string;
-  recoveryRunId: string;
-};
+type RecoveryContext = Extract<BaseDriftRecoveryMetadata, { state: "queued" }>;
 
 const recoveryContextFor = async (
   db: PrismaClient,
@@ -45,12 +42,16 @@ const recoveryContextFor = async (
   if (!recoveryRunId) return null;
   const rows = await db.taskActivity.findMany({
     where: { taskId: regressionTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { taskId: true, actorType: true, metadata: true },
   });
   for (const row of rows) {
-    const metadata = row.metadata as Record<string, unknown> | null;
-    if (metadata?.state === "queued" && metadata.recoveryRunId === recoveryRunId
-      && typeof metadata.sourceStopId === "string") return metadata as RecoveryContext;
+    const metadata = parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: regressionTaskId,
+      regressionTaskId,
+      recoveryRunId,
+    });
+    if (metadata?.state === "queued") return metadata;
   }
   return null;
 };
@@ -93,12 +94,18 @@ const stopReadiness = async (
   });
 };
 
-const latestReviewState = async (db: PrismaClient, readinessTaskId: string, headSha: string, baseSha: string) => {
+const latestReviewState = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+  headSha: string,
+  recoveryBaseSha: string | null,
+) => {
   const rows = await db.taskActivity.findMany({ where: { taskId: readinessTaskId }, orderBy: { createdAt: "desc" }, select: { metadata: true } });
   for (const row of rows) {
     const metadata = row.metadata as Record<string, unknown> | null;
     if (metadata?.kind === MERGE_TAIL_KIND.reviewObligation
-      && metadata.headSha === headSha && metadata.baseSha === baseSha) return metadata;
+      && metadata.headSha === headSha
+      && (recoveryBaseSha === null || metadata.baseSha === recoveryBaseSha)) return metadata;
   }
   return null;
 };
@@ -278,12 +285,12 @@ export const readinessTick = async (
       result.stopped += 1;
       continue;
     }
-      const recovery = await recoveryContextFor(db, regression.id, regression.stepOutput.runId);
     if (!reader?.compareCommits) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "server-side GitHub comparison reader is unavailable" });
       result.stopped += 1;
       continue;
     }
+      const recovery = await recoveryContextFor(db, regression.id, regression.stepOutput.runId);
     const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
     if (!target.resolved) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `pull-request target is ${target.unresolvable}` });
@@ -363,7 +370,12 @@ export const readinessTick = async (
         }
         triggers.push(...resolutionTestTriggers(resolution.files));
       }
-      const review = await latestReviewState(db, readiness.id, verdict.verdict.headSha, snapshot.baseSha);
+      const review = await latestReviewState(
+        db,
+        readiness.id,
+        verdict.verdict.headSha,
+        recovery ? snapshot.baseSha : null,
+      );
       if (triggers.length > 0 && review?.state !== "approved") {
         if (review?.state === "open") {
           await db.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW, failureReason: `independent-review-open:${String(review.reviewTaskId)}` } });
