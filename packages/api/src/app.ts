@@ -263,7 +263,11 @@ export const handleRegressionCompletion = async (
     now: Date;
   },
 ): Promise<"advance" | "handled"> => {
-  const output = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
+  const persistedOutput = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
+  // Regression evidence is run-scoped even though TaskStepOutput is not yet.
+  // An earlier attempt's explicit verdict is not this attempt's output and must
+  // not be reused when the current agent finishes without calling task_output.
+  const output = persistedOutput?.runId === input.run.id ? persistedOutput : null;
   const parsed = parseRegressionVerdict(output?.body);
   const stop = async (reason: string): Promise<"handled"> => {
     await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
@@ -4825,7 +4829,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           const existingOutput = await tx.taskStepOutput.findUnique({
             where: { taskId: run.taskId }, select: { id: true, runId: true },
           });
-          if (!existingOutput) {
+          const requiresExplicitOutput = run.task.templateStep?.outputKind === "regression-verification";
+          if (!existingOutput && !requiresExplicitOutput) {
             await tx.taskStepOutput.create({ data: {
               taskId: run.taskId,
               runId: run.id,
@@ -4834,7 +4839,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
               commitSha: body.headSha ?? null,
             } });
-          } else if (existingOutput.runId === run.id && body.headSha) {
+          } else if (existingOutput?.runId === run.id && body.headSha) {
             // The MCP records the live HEAD at authorship time. Delivery may
             // commit remaining tracked changes afterwards, so completion
             // advances that same run's output to the actual end commit before

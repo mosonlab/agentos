@@ -50,10 +50,11 @@
 # gate has to know which commit that is, and it establishes that rather than
 # assuming it, in this order: --master <oid>, AGENTOS_MASTER_OID, `git ls-remote
 # --symref origin HEAD` when there is an origin to ask, and otherwise this
-# repository's own refs for the default branch — which is the gate worker, a
-# worktree of a bare mirror with no credential and no remote to fetch from, whose
-# refs are verbatim copies of the operator's own push. The branch's name is read
-# the same way and is not written down here: this repository's is `main`.
+# repository's own refs for a locally inferable default branch. The supported
+# gate-worker path always takes the first route: gate-dispatch supplies its
+# frozen exact baseline because the worker cache intentionally has no remote and
+# no mirrored branch namespace. The branch's name is otherwise read rather than
+# written down here: this repository's is `main`.
 # Whichever it is, the oid and where it came from are printed in the preflight
 # and the frozen check is bound to it. When the two local refs disagree the
 # descendant wins, because a later baseline can only ever refuse more.
@@ -854,13 +855,11 @@ elif git -C "${REPO_ROOT}" remote get-url origin >/dev/null 2>&1; then
   MASTER_SOURCE="read from origin (${DEFAULT_REF})"
 else
   # No remote to ask. On the gate worker that is not a broken checkout, it is
-  # the design: a worktree of a bare mirror that holds no credential and never
-  # talks to GitHub. Its refs are verbatim copies of the operator's, placed
-  # there by the operator's own `git push --mirror`, so the master in this
-  # repository *is* the master the operator has — the strongest statement
-  # obtainable inside this box, and stated in the verdict rather than assumed.
-  # Freshness is checked where it can be: mirror-push.sh refuses to report OK
-  # unless origin's current master arrived in the mirror.
+  # ordinarily means a standalone local clone. The supported gate-worker path
+  # always passes its dispatcher-frozen baseline explicitly; its bare cache has
+  # no remote and deliberately does not mirror a branch namespace. Any caller
+  # reaching this fallback therefore gets only what this checkout's own refs can
+  # establish, stated in the preflight rather than silently treated as current.
   #
   # Which of the two refs, when they disagree, is not a preference: the
   # descendant is the later master, and a later baseline can only ever refuse

@@ -320,6 +320,12 @@ const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
     env: GIT_ENV,
     encoding: "utf8",
   }).trim();
+  const originRoot = scratch(t);
+  const origin = join(originRoot, "origin.git");
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: GIT_ENV });
+  execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
+  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: GIT_ENV });
+  execFileSync("git", ["push", "-q", "origin", "main"], { cwd: root, env: GIT_ENV });
   return { root, head };
 };
 
@@ -408,6 +414,18 @@ test("the remote path's exit code is passed through unchanged", (t) => {
   const result = dispatch(t, repo, [repo.head]);
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /GATE NOT RUN/);
+});
+
+test("the remote path receives the exact candidate and frozen baseline", (t) => {
+  const repo = fixtureRepo(t, {
+    mirrorPush: 'printf "mirror args: %s\\n" "$*" >&2',
+    remoteGate: 'printf "remote args: %s\\n" "$*" >&2; printf "MERGE GATE: PASS stub\\n"',
+  });
+  writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, new RegExp(`mirror args: .*--candidate ${repo.head} --baseline ${repo.head}`));
+  assert.match(result.stderr, new RegExp(`remote args: .*${repo.head} --master ${repo.head}`));
 });
 
 test("an ssh transport failure stays 255", (t) => {

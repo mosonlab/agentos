@@ -17,7 +17,7 @@
 # head in one answer, or --master to state it — and passed to the worker, which
 # holds no credential and could otherwise only offer a mirror ref of unknown
 # age. If this repository cannot resolve the oid origin just named, neither can
-# the mirror, and the fix is a fetch and another mirror-push.
+# the mirror, and the fix is an exact candidate/baseline mirror-push.
 #
 # The worker hosts one directory per repository under ~/gate/<repo>, keyed by
 # the origin repository's name; this script derives the same name mirror-push.sh
@@ -62,7 +62,9 @@
 #   forged PASS. docs/runbooks/gate-worker.md states the boundary.
 #
 # The commit must already be in the worker's mirror. The worker never fetches, so
-# push first: scripts/gate-worker/mirror-push.sh <server>.
+# push first: scripts/gate-worker/mirror-push.sh <server> --candidate <oid>
+# --baseline <baseline-oid>. Routine callers use gate-dispatch.sh, which freezes
+# and transports both before invoking this script.
 set -uo pipefail
 
 SERVER="${AGENTOS_GATE_SERVER:-}"
