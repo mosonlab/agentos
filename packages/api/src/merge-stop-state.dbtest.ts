@@ -267,7 +267,7 @@ test("N19 re-authorize creates no run and writes no authorization; it asks for e
 });
 
 test("legacy seven-step re-authorize binds the card to readiness and evidence to the nearest Run/Session", async () => {
-  const { chain } = await stoppedChain("legacy-seven-reauth", "base-drift", "legacy-seven-step-direct");
+  const { chain } = await stoppedChain("legacy-seven-reauth", "head-drift", "legacy-seven-step-direct");
   assert.ok(chain.readinessTask, "the legacy shape has an immediate Merge readiness predecessor");
   assert.equal(await db.run.count({ where: { taskId: chain.readinessTask!.id } }), 0);
   assert.equal(await db.session.count({ where: { taskId: chain.readinessTask!.id } }), 0);
@@ -302,7 +302,7 @@ test("legacy seven-step re-authorize binds the card to readiness and evidence to
 });
 
 test("legacy seven-step re-authorize fails loudly rather than crossing chains for evidence", async () => {
-  const { chain } = await stoppedChain("legacy-seven-no-source", "base-drift", "legacy-seven-step-direct");
+  const { chain } = await stoppedChain("legacy-seven-no-source", "head-drift", "legacy-seven-step-direct");
   await db.session.delete({ where: { id: chain.gateSession.id } });
   const foreignTask = await db.task.create({ data: {
     projectId: chain.project.id, repoId: chain.repo.id, name: "Foreign evidence", description: "unrelated chain",
@@ -335,7 +335,7 @@ test("legacy seven-step re-authorize fails loudly rather than crossing chains fo
 });
 
 test("safe replay repairs refresh-requested without a card exactly once under concurrent attempts", async () => {
-  const { chain } = await stoppedChain("legacy-seven-recovery", "base-drift", "legacy-seven-step-direct");
+  const { chain } = await stoppedChain("legacy-seven-recovery", "head-drift", "legacy-seven-step-direct");
   const question = await stopQuestionFor(chain.integratorTask!.id);
   await db.$transaction((tx) => applyInboxDecisionTx(tx, {
     inboxMessageId: question!.id, externalEventId: "evt-legacy-seven-old-answer", decision: "re-authorize",
@@ -388,7 +388,7 @@ test("safe replay repairs refresh-requested without a card exactly once under co
 
 test("recovered confirmation approval renews authorization through real seven- and twelve-step readiness tails", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
-    const { chain } = await stoppedChain(`renew-${shape}`, "base-drift", shape, 5, 5);
+    const { chain } = await stoppedChain(`renew-${shape}`, "head-drift", shape, 5, 5);
     assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
     const question = await stopQuestionFor(chain.integratorTask!.id);
     await db.$transaction((tx) => applyInboxDecisionTx(tx, {
@@ -467,7 +467,7 @@ test("recovered confirmation approval renews authorization through real seven- a
 
 test("fresh confirmation rejection reruns regression, never server-owned readiness, for seven- and twelve-step tails", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
-    const { chain } = await stoppedChain(`reject-${shape}`, "base-drift", shape);
+    const { chain } = await stoppedChain(`reject-${shape}`, "head-drift", shape);
     assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
     const question = await stopQuestionFor(chain.integratorTask!.id);
     await db.$transaction((tx) => applyInboxDecisionTx(tx, {

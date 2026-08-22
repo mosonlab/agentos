@@ -30,6 +30,31 @@ export const readinessPollIntervalMs = (): number => {
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 const READINESS_LEASE_MS = 30_000;
 
+type RecoveryContext = Record<string, unknown> & {
+  kind: typeof MERGE_TAIL_KIND.baseDriftRecovery;
+  state: "queued";
+  sourceStopId: string;
+  recoveryRunId: string;
+};
+
+const recoveryContextFor = async (
+  db: PrismaClient,
+  regressionTaskId: string,
+  recoveryRunId: string | null,
+): Promise<RecoveryContext | null> => {
+  if (!recoveryRunId) return null;
+  const rows = await db.taskActivity.findMany({
+    where: { taskId: regressionTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true },
+  });
+  for (const row of rows) {
+    const metadata = row.metadata as Record<string, unknown> | null;
+    if (metadata?.state === "queued" && metadata.recoveryRunId === recoveryRunId
+      && typeof metadata.sourceStopId === "string") return metadata as RecoveryContext;
+  }
+  return null;
+};
+
 const readinessClaim = (now: Date): string => (
   `${READINESS_CLAIM_PREFIX}${randomUUID()}|${new Date(now.getTime() + READINESS_LEASE_MS).toISOString()}`
 );
@@ -68,11 +93,12 @@ const stopReadiness = async (
   });
 };
 
-const latestReviewState = async (db: PrismaClient, readinessTaskId: string, headSha: string) => {
+const latestReviewState = async (db: PrismaClient, readinessTaskId: string, headSha: string, baseSha: string) => {
   const rows = await db.taskActivity.findMany({ where: { taskId: readinessTaskId }, orderBy: { createdAt: "desc" }, select: { metadata: true } });
   for (const row of rows) {
     const metadata = row.metadata as Record<string, unknown> | null;
-    if (metadata?.kind === MERGE_TAIL_KIND.reviewObligation && metadata.headSha === headSha) return metadata;
+    if (metadata?.kind === MERGE_TAIL_KIND.reviewObligation
+      && metadata.headSha === headSha && metadata.baseSha === baseSha) return metadata;
   }
   return null;
 };
@@ -86,6 +112,7 @@ const createReviewObligation = async (
     baseSha: string;
     headSha: string;
     triggers: Array<{ path: string; reason: string }>;
+    recovery: RecoveryContext | null;
   },
 ): Promise<{ ok: true } | { ok: false; reason: string }> => db.$transaction(async (tx) => {
   if (!input.readinessTask.repoId) return { ok: false as const, reason: "readiness task has no repository" };
@@ -130,6 +157,7 @@ const createReviewObligation = async (
         baseSha: input.baseSha,
         reviewTaskId: task.id,
         triggers: input.triggers,
+        recoverySourceStopId: input.recovery?.sourceStopId ?? null,
       },
     },
     {
@@ -144,6 +172,7 @@ const createReviewObligation = async (
         regressionTaskId: input.regressionTaskId,
         headSha: input.headSha,
         baseSha: input.baseSha,
+        recoverySourceStopId: input.recovery?.sourceStopId ?? null,
       },
     },
   ] });
@@ -165,12 +194,19 @@ const requeueRegression = async (
     currentBaseSha: string;
     reason: string;
     now: Date;
+    recovery: RecoveryContext | null;
   },
 ): Promise<void> => {
   await db.$transaction(async (tx) => {
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
-    await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    if (input.recovery) await tx.taskActivity.create({ data: {
+      taskId: input.regressionTaskId,
+      actorType: "control-plane",
+      body: `Automatic base-drift recovery ${String(input.recovery.attempt)} context carried through readiness requeue`,
+      metadata: { ...input.recovery, recoveryRunId: run.id },
+    } });
     await tx.taskActivity.create({ data: {
       taskId: input.regressionTaskId,
       actorType: "control-plane",
@@ -242,6 +278,7 @@ export const readinessTick = async (
       result.stopped += 1;
       continue;
     }
+      const recovery = await recoveryContextFor(db, regression.id, regression.stepOutput.runId);
     if (!reader?.compareCommits) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "server-side GitHub comparison reader is unavailable" });
       result.stopped += 1;
@@ -264,6 +301,7 @@ export const readinessTick = async (
           currentBaseSha: snapshot.baseSha ?? "missing",
           reason: `stale PASS head ${verdict.verdict.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
           now,
+          recovery,
         });
         result.requeued += 1;
         continue;
@@ -281,6 +319,7 @@ export const readinessTick = async (
           currentBaseSha: snapshot.baseSha,
           reason: "target base advanced after regression PASS",
           now,
+          recovery,
         });
         result.requeued += 1;
         continue;
@@ -303,6 +342,7 @@ export const readinessTick = async (
           currentBaseSha: snapshot.baseSha,
           reason: `server-side ancestry check refused ${diff.status} comparison with behind_by=${diff.behindBy}`,
           now,
+          recovery,
         });
         result.requeued += 1;
         continue;
@@ -323,7 +363,7 @@ export const readinessTick = async (
         }
         triggers.push(...resolutionTestTriggers(resolution.files));
       }
-      const review = await latestReviewState(db, readiness.id, verdict.verdict.headSha);
+      const review = await latestReviewState(db, readiness.id, verdict.verdict.headSha, snapshot.baseSha);
       if (triggers.length > 0 && review?.state !== "approved") {
         if (review?.state === "open") {
           await db.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW, failureReason: `independent-review-open:${String(review.reviewTaskId)}` } });
@@ -347,6 +387,7 @@ export const readinessTick = async (
           baseSha: snapshot.baseSha,
           headSha: verdict.verdict.headSha,
           triggers,
+          recovery,
         });
         if (!opened.ok) {
           await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: opened.reason });
@@ -363,7 +404,10 @@ export const readinessTick = async (
         continue;
       }
       await db.$transaction(async (tx) => {
-        const binding = `mechanical:${readiness.id}`;
+        // Every exact-head/current-base cycle gets a distinct binding. The
+        // obsolete authorization remains append-only evidence and cannot make a
+        // refreshed authorization ambiguous or be reused by the executor.
+        const binding = `mechanical:${readiness.id}:${randomUUID()}`;
         const payload = {
           ...evidence,
           mergeMethod: AUTHORIZED_MERGE_METHOD,
@@ -374,7 +418,7 @@ export const readinessTick = async (
           taskId: readiness.id,
           actorType: "control-plane",
           body: `Mechanical merge authorized for PR #${target.prNumber} at ${evidence.headSha}`,
-          metadata: authorizationMetadata(payload) as Prisma.InputJsonObject,
+          metadata: { ...authorizationMetadata(payload), recoverySourceStopId: recovery?.sourceStopId ?? null } as Prisma.InputJsonObject,
         } });
         await tx.taskStepOutput.upsert({
           where: { taskId: readiness.id },
@@ -386,7 +430,7 @@ export const readinessTick = async (
           taskId: readiness.id,
           actorType: "control-plane",
           body: `Merge readiness authorized exact head ${evidence.headSha}; merge execution queued`,
-          metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "authorized", headSha: evidence.headSha, authorizationActivityId: activity.id },
+          metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "authorized", headSha: evidence.headSha, authorizationActivityId: activity.id, recoverySourceStopId: recovery?.sourceStopId ?? null },
         } });
         await activateChainSuccessor(tx, readiness, {}, now);
       });

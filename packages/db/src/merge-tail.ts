@@ -3,12 +3,15 @@ import type { Prisma } from "@prisma/client";
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
 export const MERGE_TAIL_KIND = {
+  baseDriftRecovery: "mergeTail.baseDriftRecovery",
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
   reviewObligation: "mergeTail.reviewObligation",
   readiness: "mergeTail.readiness",
 } as const;
+
+export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
 
 const SHA = /^[0-9a-f]{40}$/u;
 

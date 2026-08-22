@@ -39,6 +39,7 @@ import {
   isTerminalDisposition,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
+import { MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -183,7 +184,13 @@ export const resolveChainTarget = async (
 // §D-P7 — the stop state, keyed on terminal dispositions
 // ---------------------------------------------------------------------------
 
-export type RecordedStop = { stopId: string; condition: StopCondition; createdAt: Date };
+export type RecordedStop = {
+  stopId: string;
+  condition: StopCondition;
+  evidence: string;
+  sourceRunId: string | null;
+  createdAt: Date;
+};
 
 /**
  * The latest entry of the append-only `mergeIntegrator.result` history, but
@@ -204,7 +211,13 @@ export const latestRecordedStop = async (tx: Tx, integratorTaskId: string): Prom
     // an older stop is still in the history.
     if (metadata.outcome !== "stopped") return null;
     if (!isStopCondition(metadata.condition)) return null;
-    return { stopId: row.id, condition: metadata.condition, createdAt: row.createdAt };
+    return {
+      stopId: row.id,
+      condition: metadata.condition,
+      evidence: typeof metadata.evidence === "string" ? metadata.evidence : "",
+      sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
+      createdAt: row.createdAt,
+    };
   }
   return null;
 };
@@ -241,6 +254,19 @@ export const stopStateFor = async (tx: Tx, taskId: string): Promise<StopState> =
   if (!stop) return null;
   const dispositions = await stopAnswerDispositions(tx, taskId, stop.stopId);
   if (dispositions.some((disposition) => isTerminalDisposition(disposition))) return null;
+  const recovered = await tx.taskActivity.findFirst({
+    where: {
+      taskId,
+      metadata: {
+        path: ["kind"],
+        equals: MERGE_TAIL_KIND.baseDriftRecovery,
+      },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { metadata: true },
+  });
+  const recoveryMetadata = asRecord(recovered?.metadata);
+  if (recoveryMetadata?.state === "queued" && recoveryMetadata.sourceStopId === stop.stopId) return null;
   return { stop, dispositions };
 };
 
@@ -767,8 +793,9 @@ export const recoverRefreshRequestedConfirmationCard = async (
 };
 
 /**
- * Records a stop the executor reported and lands the control-plane stop state:
- * task REVIEW, successor not activated, and a question the human must answer.
+ * Records a stop the executor reported and lands the control-plane stop state.
+ * Ordinary base drift is left for the server recovery worker; every other stop
+ * opens the evidence-backed question its condition supports.
  */
 export const recordIntegratorStop = async (
   tx: Tx,
@@ -778,6 +805,7 @@ export const recordIntegratorStop = async (
     evidence: string;
     agentId: string;
     sessionId: string | null;
+    sourceRunId: string;
   },
 ): Promise<{ stopId: string; questionId: string | null }> => {
   const stop = await tx.taskActivity.create({ data: {
@@ -790,13 +818,14 @@ export const recordIntegratorStop = async (
       outcome: "stopped",
       condition: input.condition,
       evidence: input.evidence,
+      sourceRunId: input.sourceRunId,
     },
   } });
   await tx.task.update({
     where: { id: input.integratorTaskId },
     data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${input.condition}` },
   });
-  const question = await openStopQuestion(tx, {
+  const question = input.condition === "base-drift" ? null : await openStopQuestion(tx, {
     integratorTaskId: input.integratorTaskId,
     stopId: stop.id,
     condition: input.condition,

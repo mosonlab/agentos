@@ -150,6 +150,73 @@ export interface LiveAppOptions {
 
 type DbTx = Prisma.TransactionClient;
 
+type BaseDriftRecoveryContext = {
+  attempt: number;
+  sourceStopId: string;
+  recoveryRunId: string;
+  readinessTaskId: string;
+  regressionTaskId: string;
+  integratorTaskId: string;
+  repository: string;
+  prNumber: number;
+  targetBranch: string;
+  authorizedHeadSha: string;
+  authorizedBaseSha: string;
+  currentBaseSha: string;
+};
+
+const baseDriftRecoveryContext = async (
+  tx: DbTx,
+  regressionTaskId: string,
+  recoveryRunId?: string,
+  sourceStopId?: string,
+): Promise<BaseDriftRecoveryContext | null> => {
+  const rows = await tx.taskActivity.findMany({
+    where: { taskId: regressionTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true },
+  });
+  for (const row of rows) {
+    const metadata = asJsonObject(row.metadata);
+    if (metadata?.state !== "queued") continue;
+    if (recoveryRunId && metadata.recoveryRunId !== recoveryRunId) continue;
+    if (sourceStopId && metadata.sourceStopId !== sourceStopId) continue;
+    if (typeof metadata.attempt !== "number" || typeof metadata.sourceStopId !== "string"
+      || typeof metadata.recoveryRunId !== "string" || typeof metadata.readinessTaskId !== "string"
+      || typeof metadata.regressionTaskId !== "string" || typeof metadata.integratorTaskId !== "string"
+      || typeof metadata.repository !== "string" || typeof metadata.prNumber !== "number"
+      || typeof metadata.targetBranch !== "string" || typeof metadata.authorizedHeadSha !== "string"
+      || typeof metadata.authorizedBaseSha !== "string" || typeof metadata.currentBaseSha !== "string") continue;
+    return metadata as BaseDriftRecoveryContext;
+  }
+  return null;
+};
+
+const stopBaseDriftRecoveryTail = async (
+  tx: DbTx,
+  context: BaseDriftRecoveryContext,
+  phase: "regression" | "independent-review",
+  reason: string,
+): Promise<void> => {
+  const body = `Automatic base-drift recovery ${context.attempt} stopped at ${phase}: ${reason}`;
+  await tx.task.updateMany({
+    where: { id: { in: [context.regressionTaskId, context.readinessTaskId, context.integratorTaskId] } },
+    data: { status: TaskStatus.REVIEW, failureReason: body },
+  });
+  const dedupeKey = `merge-base-drift-recovery-tail-stop:${context.sourceStopId}:${phase}`;
+  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
+    from: "AGENT", taskId: context.regressionTaskId, kind: "TEXT", body, dedupeKey,
+  }, update: {} });
+  const existing = await tx.taskActivity.findFirst({
+    where: { taskId: context.regressionTaskId, metadata: { path: ["dedupeKey"], equals: dedupeKey } },
+    select: { id: true },
+  });
+  if (!existing) await tx.taskActivity.create({ data: {
+    taskId: context.regressionTaskId, actorType: "control-plane", body,
+    metadata: { ...context, kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1,
+      state: "tail-stopped", phase, reason, dedupeKey },
+  } });
+};
+
 const openMergeTailInbox = async (
   tx: DbTx,
   input: { taskId: string; agentId: string; sessionId: string; reason: string },
@@ -293,6 +360,19 @@ export const handleRegressionCompletion = async (
     metadata: { kind: MERGE_TAIL_KIND.regression, ...verdict },
   } });
   if (verdict.outcome === "pass") return "advance";
+
+  const recovery = await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
+  if (recovery) {
+    await stopBaseDriftRecoveryTail(
+      tx,
+      recovery,
+      "regression",
+      verdict.outcome === "refresh-conflict"
+        ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+        : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+    );
+    return "handled";
+  }
 
   const attempts = await tx.taskActivity.findMany({
     where: { taskId: input.task.id }, select: { metadata: true }, orderBy: { createdAt: "asc" },
@@ -4227,16 +4307,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         status: { in: activeRunStatuses },
         ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
       },
-      select: { taskId: true },
+      select: {
+        taskId: true,
+        task: { select: { templateStep: { select: {
+          stepIndex: true,
+          outputKind: true,
+          taskTemplate: { select: { name: true } },
+        } } } },
+      },
     });
     if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
+    const metadata = body.metadata
+      ? {
+          ...body.metadata,
+          ...(((body.metadata.kind === MERGE_INTEGRATOR_KIND.intent
+            || body.metadata.kind === MERGE_INTEGRATOR_KIND.result)
+            && executionModeFor(run.task?.templateStep ?? null) === "mechanical")
+            ? { sourceRunId: runId }
+            : {}),
+        }
+      : undefined;
     return context.json(await db.taskActivity.create({
       data: {
         taskId: run.taskId,
         actorType: principal.kind,
         actorId: body.actorId ?? null,
         body: body.body,
-        ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+        ...(metadata ? { metadata: jsonValue(metadata) } : {}),
       },
     }), 201);
   };
@@ -4835,6 +4932,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               evidence: outcome.outcome === "stopped" ? outcome.evidence : outcome.reason,
               agentId: run.agentId,
               sessionId: run.session.id,
+              sourceRunId: run.id,
             });
           }
           await tx.taskActivity.create({ data: {
@@ -4959,7 +5057,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 },
               } });
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: `independent review rejected: ${summary}` } });
-              if (alreadyRejected) {
+              const driftRecovery = await baseDriftRecoveryContext(
+                tx,
+                reviewMarker.regressionTaskId,
+                undefined,
+                typeof reviewMarker.recoverySourceStopId === "string" ? reviewMarker.recoverySourceStopId : "no-recovery-context",
+              );
+              if (driftRecovery) {
+                await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewMarker.headSha}: ${summary}`);
+              } else if (alreadyRejected) {
                 const reason = `second independent review rejection at ${reviewMarker.headSha}: ${summary}`;
                 await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
                 await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
