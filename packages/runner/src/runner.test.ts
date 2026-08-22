@@ -9,7 +9,9 @@ import { adapters } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { executeClaim, reportCliAvailabilityHeartbeat, runStartupPreflight } from "./runner.js";
-import { cleanupAgentScratch } from "./workspace.js";
+import {
+  cleanupAgentScratch, provisionSessionConfig, type AgentScratch,
+} from "./workspace.js";
 
 const config = (workspaceRoot: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
@@ -247,6 +249,11 @@ const seedRemote = async (root: string): Promise<string> => {
 const seedCodexAuth = async (root: string): Promise<void> => {
   await mkdir(join(root, ".codex"), { recursive: true });
   await writeFile(join(root, ".codex", "auth.json"), '{"tokens":"test-only"}\n', { mode: 0o600 });
+};
+
+const seedPiAuth = async (root: string): Promise<void> => {
+  await mkdir(join(root, ".pi", "agent"), { recursive: true });
+  await writeFile(join(root, ".pi", "agent", "auth.json"), '{"openai-codex":{"type":"oauth"}}\n', { mode: 0o600 });
 };
 
 const removeRetainedSessionConfig = async (completion: { body: Record<string, unknown> }): Promise<void> => {
@@ -655,6 +662,40 @@ test("a failed first completion request restores and retains CODEX_HOME", async 
     assert.equal((await stat(configRoot)).isDirectory(), true);
     await removeRetainedSessionConfig(completions[1]!);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a suspended PI claim retains the session config root for reuse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pi-waiting-inbox-"));
+  const observed: { scratch?: AgentScratch } = {};
+  try {
+    const remote = await seedRemote(root);
+    await seedPiAuth(root);
+    const configured = config(join(root, "workspaces"));
+    configured.home = root;
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "PI",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "openai-codex/gpt-5.1-codex-max" },
+      run: { ...mechanicalClaim.run, model: "openai-codex/gpt-5.1-codex-max", maxRunsPerTask: 3 },
+      session: { id: "session-pi-waiting-inbox" },
+    }, {
+      provisionSessionConfig: async (runnerConfig, runner, provisionedScratch, options) => {
+        observed.scratch = provisionedScratch;
+        await provisionSessionConfig(runnerConfig, runner, provisionedScratch, options);
+        throw Object.assign(new Error("run suspended for Inbox reply"), { status: 409, code: "WAITING_INBOX" });
+      },
+    });
+
+    assert.ok(observed.scratch);
+    assert.equal((await stat(observed.scratch.configRoot)).isDirectory(), true);
+    await provisionSessionConfig(configured, "PI", observed.scratch, { reuse: true });
+  } finally {
+    if (observed.scratch) await cleanupAgentScratch(config(join(root, "workspaces")), observed.scratch).catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });

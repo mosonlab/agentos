@@ -59,8 +59,10 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const runnerUsesSessionConfig = (runner: RunnerKind): boolean => runner !== "CLAUDE";
+
 const retainedSessionConfigPath = async (runner: RunnerKind, scratch: AgentScratch | null): Promise<string | null> =>
-  runner === "CODEX" && scratch && await sessionConfigRootExists(scratch) ? scratch.configRoot : null;
+  runnerUsesSessionConfig(runner) && scratch && await sessionConfigRootExists(scratch) ? scratch.configRoot : null;
 
 const appendRetainedSessionConfig = (reason: string, path: string | null): string =>
   `${reason}${path ? `; session CLI config retained at ${path}` : ""}`;
@@ -181,9 +183,9 @@ export const executeClaim = async (
   let fencingRejected = false;
   let waitingInbox = false;
   let budgetReason: string | null = null;
-  // Codex's root is retained until the run is known to have succeeded, so a
+  // A session CLI's root is retained until the run is known to have succeeded, so a
   // provisioning or execution failure can be inspected and resumed without
-  // ever falling back to the host ~/.codex.
+  // ever falling back to the host CLI configuration.
   let retainSessionConfig = false;
   let sessionConfigRemoved = false;
   // Where the run is, for the failure envelope. The API reads this to decide
@@ -290,7 +292,7 @@ export const executeClaim = async (
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
-    retainSessionConfig = claim.runner === "CODEX";
+    retainSessionConfig = runnerUsesSessionConfig(claim.runner);
     await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, { reuse: claim.resume !== null });
     const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
@@ -469,11 +471,11 @@ export const executeClaim = async (
     if (scratch) {
       try {
         await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig });
-        sessionConfigRemoved = claim.runner === "CODEX" && !retainSessionConfig;
+        sessionConfigRemoved = runnerUsesSessionConfig(claim.runner) && !retainSessionConfig;
       } catch (error: unknown) {
         scratchCleanupFailure = errorMessage(error);
         retainSessionConfig = true;
-        if (claim.runner === "CODEX" && !await sessionConfigRootExists(scratch)) {
+        if (runnerUsesSessionConfig(claim.runner) && !await sessionConfigRootExists(scratch)) {
           try {
             await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
           } catch (restoreError: unknown) {
@@ -565,7 +567,7 @@ export const executeClaim = async (
     const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
     const { salvage, ...finishedCleanup } = cleaned;
     let restorationFailure: string | null = null;
-    if (claim.runner === "CODEX" && scratch && sessionConfigRemoved) {
+    if (runnerUsesSessionConfig(claim.runner) && scratch && sessionConfigRemoved) {
       try {
         await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
         sessionConfigRemoved = false;
@@ -578,10 +580,10 @@ export const executeClaim = async (
     const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
     if (scratch) {
       try {
-        // An exception is a failed run, so the Codex root must remain available
-        // for diagnosis or resume. Claude has no provisioned config root, and
+        // An exception is a failed run, so the session CLI config must remain
+        // available for diagnosis or resume. Claude has no provisioned config root, and
         // cleanupAgentScratch safely removes its absent path.
-        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: claim.runner === "CODEX" });
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: runnerUsesSessionConfig(claim.runner) });
         scratch = null;
       } catch (cleanupError: unknown) {
         scratchCleanupFailure = errorMessage(cleanupError);
@@ -622,7 +624,7 @@ export const executeClaim = async (
     // behind would leak a directory per run.
     if (scratch) {
       await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig })
-        .catch((error: unknown) => console.error(`Agent scratch cleanup failed${claim.runner === "CODEX" ? `; session config ${scratch?.configRoot} retained or may require manual recovery` : ""}`, error));
+        .catch((error: unknown) => console.error(`Agent scratch cleanup failed${runnerUsesSessionConfig(claim.runner) ? `; session config ${scratch?.configRoot} retained or may require manual recovery` : ""}`, error));
     }
   }
 };
