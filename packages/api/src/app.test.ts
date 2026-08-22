@@ -1467,6 +1467,79 @@ test("a failing usage recompute does not fail the ingest", async () => {
   });
 });
 
+test("event ingestion makes literal NULs visible without changing seq order", async () => {
+  await withTokens(async () => {
+    const nul = "\u0000";
+    const visibleNul = "\\u0000";
+    const stored: Array<Record<string, unknown>> = [];
+    const database = {
+      run: {
+        findFirst: async () => ({ session: { id: "ses-1", providerConversationId: null } }),
+      },
+      sessionEvent: {
+        createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+          stored.push(...data);
+          return { count: data.length };
+        },
+        findMany: async (): Promise<Array<Record<string, unknown>>> => {
+          const rows = stored.map((event, index) => ({ id: `event-${index}`, ...event })) as Array<Record<string, unknown>>;
+          rows.sort((left, right) => Number(left.seq) - Number(right.seq));
+          return rows;
+        },
+        count: async () => stored.length,
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const response = await app.request("/runner/runs/run-1/events", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1",
+        fencingToken: "1:run-1:current",
+        events: [
+          {
+            seq: 4,
+            source: "CLAUDE",
+            type: `EVENT${nul}TYPE`,
+            providerEventId: `provider${nul}id`,
+            toolCallId: `tool${nul}id`,
+            payload: {
+              unchanged: "plain text",
+              nested: { message: `left${nul}right`, list: [`a${nul}b`, { deep: "value" }] },
+              [`field${visibleNul}`]: "literal key value",
+              [`field${nul}`]: "NUL key value",
+              [`key${nul}`]: "key value",
+            },
+          },
+          { seq: 9, source: "CLAUDE", type: "VALID", payload: { unchanged: "still exact" } },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: 2 });
+
+    const read = await app.request("/runs/run-1/events", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(read.status, 200);
+    const body = await read.json() as { events: Array<Record<string, any>>; total: number };
+    assert.deepEqual(body.events.map((event) => event.seq), [4, 9]);
+    assert.equal(body.total, 2);
+    assert.equal(body.events[0]?.type, `EVENT${visibleNul}TYPE`);
+    assert.equal(body.events[0]?.providerEventId, `provider${visibleNul}id`);
+    assert.equal(body.events[0]?.toolCallId, `tool${visibleNul}id`);
+    assert.deepEqual(body.events[0]?.payload, {
+      unchanged: "plain text",
+      nested: { message: `left${visibleNul}right`, list: [`a${visibleNul}b`, { deep: "value" }] },
+      [`field${visibleNul}`]: "literal key value",
+      [`field${visibleNul}${visibleNul}`]: "NUL key value",
+      [`key${visibleNul}`]: "key value",
+    });
+    assert.deepEqual(body.events[1]?.payload, { unchanged: "still exact" });
+    assert.equal(JSON.stringify(body).includes(nul), false);
+  });
+});
+
 test("partitionArchivable keeps the busy tasks out of the archive set and counts them as skipped", () => {
   assert.deepEqual(partitionArchivable(["a", "b", "c"], ["b"]), { archive: ["a", "c"], skipped: 1 });
   assert.deepEqual(partitionArchivable(["a", "b"], []), { archive: ["a", "b"], skipped: 0 });
