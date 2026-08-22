@@ -152,8 +152,8 @@ rotates weak credentials automatically. There is no overwrite or rotation flag.
 
 ```text
 Web console
-    |
-    v
+          |
+          v
 Control-plane API  <---->  PostgreSQL
           ^                    tasks, runs, leases,
           |                    events, grants, outputs
@@ -276,7 +276,6 @@ npm run typecheck
 npm run lint
 npm run build
 npm test
-npm run agentos -- help
 docker compose config --quiet
 npm run test:dependency-gate
 npm run test:snapshot-scan

@@ -135,8 +135,8 @@ token、session cookie secret、base64 编码的 32 字节加密密钥，以及�
 
 ```text
 Web 控制台
-    |
-    v
+          |
+          v
 控制平面 API  <---->  PostgreSQL
           ^                 任务、运行、租约、
           |                 事件、授权、输出
@@ -224,7 +224,6 @@ npm run typecheck
 npm run lint
 npm run build
 npm test
-npm run agentos -- help
 docker compose config --quiet
 npm run test:dependency-gate
 npm run test:snapshot-scan
