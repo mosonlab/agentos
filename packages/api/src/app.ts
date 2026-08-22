@@ -1594,9 +1594,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return deleted.count === 1 ? context.body(null, 204) : context.json({ error: "Filesystem grant not found" }, 404);
   });
 
-  app.get("/agents/:agentId/collaborators", async (context) => context.json(await db.agentCollaboration.findMany({
-    where: { agentId: id.parse(context.req.param("agentId")) }, include: { allowedAgent: true },
-  })));
   app.post("/agents/:agentId/collaborators", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const { allowedAgentId } = await readJson(context.req.raw, collaboratorInput);
@@ -1627,26 +1624,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       data: { projectId: id.parse(context.req.param("projectId")), ...body },
     }), 201);
   });
-  app.get("/agents/:agentId/skills", async (context) => context.json(await db.agentSkill.findMany({
-    where: { agentId: id.parse(context.req.param("agentId")) }, include: { skill: true },
-  })));
   app.post("/agents/:agentId/skills", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const { skillId } = await readJson(context.req.raw, skillBindingInput);
-    const [agent, skill] = await Promise.all([
-      db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
-      db.skill.findUnique({ where: { id: skillId }, select: { projectId: true } }),
-    ]);
-    if (!agent || !skill) return context.json({ error: "Agent or Skill not found" }, 404);
-    if (agent.projectId !== skill.projectId) return context.json({ error: "Agent and Skill belong to different projects" }, 400);
-    return context.json(await db.agentSkill.upsert({
-      where: { agentId_skillId: { agentId, skillId } },
-      create: { agentId, skillId, projectId: agent.projectId }, update: {},
-    }), 201);
-  });
-  app.post("/agents/:agentId/skills/:skillId", async (context) => {
-    const agentId = id.parse(context.req.param("agentId"));
-    const skillId = id.parse(context.req.param("skillId"));
     const [agent, skill] = await Promise.all([
       db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
       db.skill.findUnique({ where: { id: skillId }, select: { projectId: true } }),
@@ -1681,9 +1661,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       data: { ...body, config: jsonValue(body.config), projectId },
     }), 201);
   });
-  app.get("/agents/:agentId/mcp-connections", async (context) => context.json(await db.agentMCPConnection.findMany({
-    where: { agentId: id.parse(context.req.param("agentId")) }, include: { mcpConnection: true },
-  })));
   app.post("/agents/:agentId/mcp-connections", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const { mcpConnectionId } = await readJson(context.req.raw, mcpBindingInput);
@@ -1696,20 +1673,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return context.json(await db.agentMCPConnection.upsert({
       where: { agentId_mcpConnectionId: { agentId, mcpConnectionId } },
       create: { agentId, mcpConnectionId, projectId: agent.projectId }, update: {},
-    }), 201);
-  });
-  app.post("/agents/:agentId/mcp-connections/:connectionId", async (context) => {
-    const agentId = id.parse(context.req.param("agentId"));
-    const connectionId = id.parse(context.req.param("connectionId"));
-    const [agent, connection] = await Promise.all([
-      db.agent.findUnique({ where: { id: agentId }, select: { projectId: true } }),
-      db.mCPConnection.findUnique({ where: { id: connectionId }, select: { projectId: true } }),
-    ]);
-    if (!agent || !connection) return context.json({ error: "Agent or MCP connection not found" }, 404);
-    if (agent.projectId !== connection.projectId) return context.json({ error: "Agent and MCP connection belong to different projects" }, 400);
-    return context.json(await db.agentMCPConnection.upsert({
-      where: { agentId_mcpConnectionId: { agentId, mcpConnectionId: connectionId } },
-      create: { agentId, mcpConnectionId: connectionId, projectId: agent.projectId }, update: {},
     }), 201);
   });
   app.delete("/agents/:agentId/mcp-connections/:connectionId", async (context) => {
