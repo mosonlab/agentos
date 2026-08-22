@@ -63,6 +63,9 @@ const seed = async () => {
   const skill = await db.skill.create({
     data: { projectId: project.id, name: "Skill", slug: "skill", kind: "PROMPT", body: "body" },
   });
+  const unboundSkill = await db.skill.create({
+    data: { projectId: project.id, name: "Unbound skill", slug: "unbound-skill", kind: "PROMPT", body: "body" },
+  });
   const connection = await db.mCPConnection.create({
     data: {
       projectId: project.id,
@@ -72,7 +75,16 @@ const seed = async () => {
       allowedOperations: [],
     },
   });
-  return { agent, collaborator, skill, connection };
+  const unboundConnection = await db.mCPConnection.create({
+    data: {
+      projectId: project.id,
+      name: "Unbound connection",
+      transport: "stdio",
+      config: { command: "unbound-mcp-server" },
+      allowedOperations: [],
+    },
+  });
+  return { agent, collaborator, skill, unboundSkill, connection, unboundConnection };
 };
 
 const assertUnregistered = async (method: string, path: string, body?: unknown): Promise<void> => {
@@ -82,7 +94,7 @@ const assertUnregistered = async (method: string, path: string, body?: unknown):
 };
 
 test("capability routes retain detail/body-form/delete flows and reject removed forms", async () => {
-  const { agent, collaborator, skill, connection } = await seed();
+  const { agent, collaborator, skill, unboundSkill, connection, unboundConnection } = await seed();
 
   const skillBinding = await call("POST", `/agents/${agent.id}/skills`, { skillId: skill.id });
   assert.equal(skillBinding.status, 201);
@@ -115,11 +127,13 @@ test("capability routes retain detail/body-form/delete flows and reject removed 
     `/agents/${agent.id}/skills`,
     `/agents/${agent.id}/mcp-connections`,
   ]) await assertUnregistered("GET", path);
-  await assertUnregistered("POST", `/agents/${agent.id}/skills/${skill.id}`, { skillId: skill.id });
-  await assertUnregistered("POST", `/agents/${agent.id}/mcp-connections/${connection.id}`, { mcpConnectionId: connection.id });
+  await assertUnregistered("POST", `/agents/${agent.id}/skills/${unboundSkill.id}`, { skillId: unboundSkill.id });
+  await assertUnregistered("POST", `/agents/${agent.id}/mcp-connections/${unboundConnection.id}`, { mcpConnectionId: unboundConnection.id });
 
   assert.equal(await db.agentSkill.count({ where: { agentId: agent.id, skillId: skill.id } }), 1);
   assert.equal(await db.agentMCPConnection.count({ where: { agentId: agent.id, mcpConnectionId: connection.id } }), 1);
+  assert.equal(await db.agentSkill.count({ where: { agentId: agent.id, skillId: unboundSkill.id } }), 0);
+  assert.equal(await db.agentMCPConnection.count({ where: { agentId: agent.id, mcpConnectionId: unboundConnection.id } }), 0);
   assert.equal(await db.agentCollaboration.count({ where: { agentId: agent.id, allowedAgentId: collaborator.id } }), 1);
 
   const deletedSkill = await call("DELETE", `/agents/${agent.id}/skills/${skill.id}`);
