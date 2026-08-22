@@ -72,6 +72,8 @@ export const buildChildEnvironment = (
   const {
     CLAUDE_CONFIG_DIR: _claudeConfigDir,
     CODEX_HOME: _codexHome,
+    PI_CODING_AGENT_DIR: _piCodingAgentDir,
+    PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -94,11 +96,12 @@ export const buildChildEnvironment = (
     RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,
     CONTROL_PLANE_STATE_DIR: scratch.stateDir,
     ...(claim.runner === "CODEX" ? { CODEX_HOME: scratch.configRoot } : {}),
+    ...(claim.runner === "PI" ? { PI_CODING_AGENT_DIR: scratch.configRoot } : {}),
   };
 };
 
 const isolationVariables = [
-  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME",
+  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
 ] as const;
 
 /**
@@ -561,7 +564,7 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     // Disable host-level pi discovery. The explicit AgentOS extension remains
     // enabled below, while the reviewer's role prompt supplies its rules and
     // repository context files remain review material rather than instructions.
-    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
+    "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
     "--extension", piExtensionPath(),
     ...(resume ? ["--session", resume.providerConversationId] : []),
   ];
@@ -737,6 +740,15 @@ const codexExecHelpIsCompatible = (help: string, resumeHelp: string): boolean =>
   && resumeHelp.includes("SESSION_ID")
   && resumeHelp.includes("read from stdin");
 
+const piHelpIsCompatible = (help: string): boolean => [
+  "--no-extensions",
+  "--no-skills",
+  "--no-prompt-templates",
+  "--no-themes",
+  "--no-context-files",
+  "--no-approve",
+].every((flag) => help.includes(flag));
+
 const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
   const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
   if (spec.runner === "PI" && !spec.model.includes("/")) {
@@ -765,6 +777,19 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
       };
     }
     Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "exec-json-stdin-resume" });
+  }
+  if (spec.runner === "PI") {
+    const help = await capture(spec.config, spec.runner, ["--help"], spec.env);
+    if (help.code !== 0 || !piHelpIsCompatible(`${help.stdout}\n${help.stderr}`)) {
+      return {
+        ok: false,
+        cliVersion: version.stdout.trim() || version.stderr.trim(),
+        authMode: null,
+        capabilities,
+        error: PREFLIGHT_REASONS.cliIncompatible,
+      };
+    }
+    Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "json-stdin-resume-isolated" });
   }
   const authArgs = spec.runner === "CLAUDE" ? ["auth", "status"]
     : spec.runner === "CODEX" ? ["login", "status"]
