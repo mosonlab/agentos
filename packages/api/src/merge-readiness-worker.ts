@@ -96,7 +96,6 @@ const createReviewObligation = async (
   const task = await tx.task.create({ data: {
     projectId: input.readinessTask.projectId,
     repoId: input.readinessTask.repoId,
-    followUpTaskId: input.readinessTask.id,
     name: "Autonomous merge tail: independent review",
     description: [
       `Blindly review the exact diff ${input.baseSha}..${input.headSha}.`,

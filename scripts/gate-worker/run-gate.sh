@@ -15,12 +15,11 @@
 # credential and its mirror has no remote to fetch through. When it is given, it
 # is verified to be resolvable in the mirror before the gate starts.
 #
-# It is optional on purpose. This harness is installed by mirror-push.sh, so a
-# worker can be running an older copy than the commit being gated, and a
-# required argument here would mean a repository change could only be gated
-# after a deployment — the gate would be broken by its own improvement. Without
-# it, merge-gate.sh falls back to this mirror's own master refs, which are
-# verbatim copies of the operator's own push.
+# The supported remote path always supplies it: gate-dispatch.sh freezes the
+# baseline, mirror-push.sh transports that exact object, and remote-gate.sh
+# passes the oid here. The parser remains usable for a direct diagnostic
+# invocation without it, but that path has only merge-gate.sh's ordinary local
+# no-origin rules and is not the dispatch contract.
 #
 # This file is installed by mirror-push.sh from the local repository, not by
 # provision.sh. That is deliberate: the harness that decides what a verdict means
