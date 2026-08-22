@@ -12,8 +12,6 @@ import { zh } from "../locales/zh";
  */
 export type Locale = "en" | "zh";
 
-export const LOCALES: Locale[] = ["en", "zh"];
-
 export const LOCALE_KEY = "agentos.locale";
 
 export type Dictionary = Record<string, string>;

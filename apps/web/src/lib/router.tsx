@@ -9,13 +9,6 @@ const currentTarget = (): string => {
   return raw.length === 0 ? "/" : raw;
 };
 
-export const currentPath = (): string => currentTarget().split("?")[0] ?? "/";
-
-/** The hash's own query string. The Tasks board puts its selected status here so
- *  a phone's URL says which list is on screen, which is what makes it shareable
- *  and what makes a reload land back where the operator was. */
-export const currentQuery = (): URLSearchParams => new URLSearchParams(currentTarget().split("?")[1] ?? "");
-
 export const navigate = (target: string): void => {
   if (currentTarget() === target) return;
   window.location.hash = target;

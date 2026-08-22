@@ -36,6 +36,7 @@ import {
   recomputeSessionUsage,
   resolveRequeueBase,
   resolveRunBranches,
+  runnerFor,
   sessionUsageCost,
   sumUsageCosts,
   pinnedImplementationRange,
@@ -121,7 +122,6 @@ import {
   makeFencingToken,
   retryDelayMs,
   runBudgetCeiling,
-  runnerFor,
 } from "./execution.js";
 import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
 import {
