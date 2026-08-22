@@ -48,8 +48,8 @@ const main = async (): Promise<void> => {
     where: { chainId: result.chainId, chainIndex: 10 },
     include: { assigneeAgent: true, runs: true },
   });
-  if (result.tasks.length !== 10 || !run || run.runner !== "CLAUDE"
-    || run.model !== "claude-fable-5:medium" || first.assigneeAgent?.name !== "spec") {
+  if (result.tasks.length !== 10 || !run || run.runner !== "CODEX"
+    || run.model !== "gpt-5.6-sol:high" || first.assigneeAgent?.name !== "spec") {
     throw new Error(`Unexpected dry-run result: ${JSON.stringify({
       taskCount: result.tasks.length,
       agent: first.assigneeAgent?.name,
