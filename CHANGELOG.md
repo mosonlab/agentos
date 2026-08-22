@@ -66,6 +66,8 @@ is no upgrade path between previews other than a fresh install.
 - `npm run setup:local` can repair an existing local configuration safely.
 - Public snapshot scanning is hardened, template release gaps are closed, and
   the v0.1.0 install guidance corrections are folded into the released docs.
+- The help-only repository command-line interface is retired; AgentOS no longer
+  builds or ships an `agentos` binary.
 - The README shows the task board and agents screens.
 
 ## v0.1.0 — Developer Preview
@@ -251,8 +253,8 @@ behaviour.
   workspace, the build, every workspace's unit tests, the gate schema's
   migration, the database package's preflight tests, the API's database tests,
   and a final check that the commit it gated is the commit it started from. It
-  does not run the snapshot scan, the dependency gate, the CLI help check or the
-  Compose validation; those are in the verification list a developer runs, and
+  does not run the snapshot scan, the dependency gate or the Compose validation;
+  those are in the verification list a developer runs, and
   this entry does not promise a gate that has them.
 
 ### Known limitations
@@ -300,8 +302,8 @@ behaviour.
 - **No upgrade path between preview builds** other than a fresh install. Nothing
   is packaged, notarized or self-updating.
 - **Goals have no execution model**, as described above.
-- **The command-line interface exposes only `agentos help`.** Broader command
-  families are not part of this release.
+- **The v0.1.0 command-line interface was help-only.** It is retired in v0.2.0;
+  the current release does not ship a repository command-line interface.
 - **Five surfaces merged without an independent implementation review.** Four —
   the control plane's workspace ownership change, the public snapshot mechanism,
   the templates release closure, and the documentation factual-accuracy pass —

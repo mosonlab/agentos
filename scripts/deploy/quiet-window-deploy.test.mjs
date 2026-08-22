@@ -36,6 +36,7 @@ import {
   acquireProcessLock,
   blockingRunsStatement,
   deployArtifactPaths,
+  DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
   publishDirectories,
   workspaceDependencyPaths,
@@ -112,6 +113,16 @@ test("published artifacts derive every workspace dependency tree from the target
   const nested = workspaceDependencyPaths(root);
   assert.deepEqual(nested, ["apps/web/node_modules", "packages/api/node_modules", "packages/runner/node_modules"]);
   const artifacts = deployArtifactPaths(root);
+  assert.deepEqual(DEPLOY_REQUIRED_ARTIFACT_PATHS, [
+    "packages/github-client/dist",
+    "packages/db/dist",
+    "packages/api/dist",
+    "packages/runner/dist",
+    "packages/inbox/dist",
+    "packages/merge-executor/dist",
+    "apps/web/dist",
+    "node_modules",
+  ]);
   assert.equal(artifacts.at(-1), "node_modules");
   assert.ok(artifacts.includes("packages/api/dist"));
   for (const path of nested) assert.ok(artifacts.includes(path));

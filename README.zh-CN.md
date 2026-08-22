@@ -134,9 +134,9 @@ token、session cookie secret、base64 编码的 32 字节加密密钥，以及�
 ## 以当前代码为依据的架构
 
 ```text
-Web 控制台 / phase-0 CLI
-          |
-          v
+Web 控制台
+    |
+    v
 控制平面 API  <---->  PostgreSQL
           ^                 任务、运行、租约、
           |                 事件、授权、输出
@@ -157,7 +157,8 @@ Web 控制台 / phase-0 CLI
   provider 事件。
 - Codex 和 Claude 通过每次运行专属的 stdio MCP server 获得 AgentOS session
   工具；Pi 通过 extension 获得对应的任务工具。
-- 仓库 CLI 当前只提供 `agentos help`；本发布候选不声称拥有更多 CLI 命令族。
+- AgentOS 不再提供仓库命令行界面。操作者通过 Web 控制台以及文档中说明的 service、
+  database 和 runner 脚本操作。
 
 ## 一个真实任务的工作流
 

@@ -11,7 +11,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/api && npm run build -w @agentos/runner && npm run build -w @agentos/inbox && npm run build -w @agentos/merge-executor && npm run build -w @agentos/cli && npm run build -w @agentos/web",
+    "build": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/api && npm run build -w @agentos/runner && npm run build -w @agentos/inbox && npm run build -w @agentos/merge-executor && npm run build -w @agentos/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "typecheck:cli": "npm run typecheck:cli -w @agentos/db",
     "lint": "npm run lint:biome && npm run lint:types",
@@ -44,7 +44,6 @@
     "dev:web": "npm run dev -w @agentos/web",
     "dev:runner": "npm run dev -w @agentos/runner",
     "dev:inbox": "npm run dev -w @agentos/inbox",
-    "agentos": "npm run start -w @agentos/cli --",
     "db:generate": "npm run db:generate -w @agentos/db",
     "db:migrate": "npm run db:migrate -w @agentos/db",
     "db:migrate:release": "npm run db:migrate:release -w @agentos/db --",

@@ -23,7 +23,6 @@ export const DEPLOY_REQUIRED_ARTIFACT_PATHS = Object.freeze([
   "packages/runner/dist",
   "packages/inbox/dist",
   "packages/merge-executor/dist",
-  "packages/cli/dist",
   "apps/web/dist",
   "node_modules",
 ]);
