@@ -52,6 +52,7 @@ import {
   mechanicalPrincipalRefusal,
   executionModeFor,
   gateFeedsIntegratorStep,
+  isMergeConfirmationError,
   integratorBindingRefusal,
   integratorBindingRefusalFor,
   mergeExecutorRunnerIds,
@@ -78,8 +79,10 @@ import {
   asJsonObject,
   isMergeReadinessStep,
   MERGE_TAIL_KIND,
+  parseBaseDriftRecoveryActivity,
   parseRegressionVerdict,
   parseResolverResult,
+  type BaseDriftRecoveryMetadata,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -148,6 +151,72 @@ export interface LiveAppOptions {
 }
 
 type DbTx = Prisma.TransactionClient;
+
+type QueuedBaseDriftRecoveryContext = Extract<BaseDriftRecoveryMetadata, { state: "queued" }>;
+
+const baseDriftRecoveryContext = async (
+  tx: DbTx,
+  regressionTaskId: string,
+  recoveryRunId?: string,
+  sourceStopId?: string,
+): Promise<QueuedBaseDriftRecoveryContext | null> => {
+  const rows = await tx.taskActivity.findMany({
+    where: { taskId: regressionTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { taskId: true, actorType: true, metadata: true },
+  });
+  for (const row of rows) {
+    const metadata = parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: regressionTaskId,
+      regressionTaskId,
+      ...(recoveryRunId ? { recoveryRunId } : {}),
+      ...(sourceStopId ? { sourceStopId } : {}),
+    });
+    if (metadata?.state === "queued") return metadata;
+  }
+  return null;
+};
+
+const stopBaseDriftRecoveryTail = async (
+  tx: DbTx,
+  context: QueuedBaseDriftRecoveryContext,
+  phase: "regression" | "independent-review",
+  reason: string,
+): Promise<void> => {
+  const body = `Automatic base-drift recovery ${context.attempt} stopped at ${phase}: ${reason}`;
+  await tx.task.updateMany({
+    where: { id: { in: [context.regressionTaskId, context.readinessTaskId, context.integratorTaskId] } },
+    data: { status: TaskStatus.REVIEW, failureReason: body },
+  });
+  const dedupeKey = `merge-base-drift-recovery-tail-stop:${context.sourceStopId}:${phase}`;
+  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
+    from: "AGENT", taskId: context.regressionTaskId, kind: "TEXT", body, dedupeKey,
+  }, update: {} });
+  const existingRows = await tx.taskActivity.findMany({
+    where: {
+      taskId: context.integratorTaskId,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery },
+    },
+    select: { taskId: true, actorType: true, metadata: true },
+  });
+  const existing = existingRows.some((row) => {
+    const metadata = parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: context.integratorTaskId,
+      integratorTaskId: context.integratorTaskId,
+      sourceStopId: context.sourceStopId,
+      recoveryRunId: context.recoveryRunId,
+    });
+    return metadata?.state === "tail-stopped" && metadata.phase === phase;
+  });
+  if (!existing) {
+    const metadata = { ...context, kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1,
+      state: "tail-stopped", phase, reason, dedupeKey } as Prisma.InputJsonObject;
+    await tx.taskActivity.createMany({ data: [
+      { taskId: context.integratorTaskId, actorType: "control-plane", body, metadata },
+      { taskId: context.regressionTaskId, actorType: "control-plane", body, metadata },
+    ] });
+  }
+};
 
 const openMergeTailInbox = async (
   tx: DbTx,
@@ -292,6 +361,19 @@ export const handleRegressionCompletion = async (
     metadata: { kind: MERGE_TAIL_KIND.regression, ...verdict },
   } });
   if (verdict.outcome === "pass") return "advance";
+
+  const recovery = await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
+  if (recovery) {
+    await stopBaseDriftRecoveryTail(
+      tx,
+      recovery,
+      "regression",
+      verdict.outcome === "refresh-conflict"
+        ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+        : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+    );
+    return "handled";
+  }
 
   const attempts = await tx.taskActivity.findMany({
     where: { taskId: input.task.id }, select: { metadata: true }, orderBy: { createdAt: "asc" },
@@ -3450,7 +3532,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       } });
       // The operator's next action is the ordinary "see the evidence, approve"
       // path: the correction alone authorizes nothing.
-      const cardId = await requestConfirmationCard(tx, task, stopped.stop.stopId, new Date());
+      let cardId: string;
+      try {
+        cardId = await requestConfirmationCard(tx, task, stopped.stop.stopId, new Date());
+      } catch (error: unknown) {
+        if (isMergeConfirmationError(error)) {
+          return { error: error.message, code: 409 as const };
+        }
+        throw error;
+      }
       return { correction: { id: activity.id, prNumber: body.prNumber, observed, confirmationCardId: cardId } };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if ("error" in result) return context.json({ error: result.error }, result.code);
@@ -3508,7 +3598,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)
+        || isMergeConfirmationError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -3530,7 +3621,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)
+        || isMergeConfirmationError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -4216,16 +4308,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         status: { in: activeRunStatuses },
         ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
       },
-      select: { taskId: true },
+      select: {
+        taskId: true,
+        task: { select: { templateStep: { select: {
+          stepIndex: true,
+          outputKind: true,
+          taskTemplate: { select: { name: true } },
+        } } } },
+      },
     });
     if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
+    const metadata = body.metadata
+      ? {
+          ...body.metadata,
+          ...(((body.metadata.kind === MERGE_INTEGRATOR_KIND.intent
+            || body.metadata.kind === MERGE_INTEGRATOR_KIND.result)
+            && executionModeFor(run.task?.templateStep ?? null) === "mechanical")
+            ? { sourceRunId: runId }
+            : {}),
+        }
+      : undefined;
     return context.json(await db.taskActivity.create({
       data: {
         taskId: run.taskId,
         actorType: principal.kind,
         actorId: body.actorId ?? null,
         body: body.body,
-        ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+        ...(metadata ? { metadata: jsonValue(metadata) } : {}),
       },
     }), 201);
   };
@@ -4824,6 +4933,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               evidence: outcome.outcome === "stopped" ? outcome.evidence : outcome.reason,
               agentId: run.agentId,
               sessionId: run.session.id,
+              sourceRunId: run.id,
             });
           }
           await tx.taskActivity.create({ data: {
@@ -4948,7 +5058,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 },
               } });
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: `independent review rejected: ${summary}` } });
-              if (alreadyRejected) {
+              const driftRecovery = await baseDriftRecoveryContext(
+                tx,
+                reviewMarker.regressionTaskId,
+                undefined,
+                typeof reviewMarker.recoverySourceStopId === "string" ? reviewMarker.recoverySourceStopId : "no-recovery-context",
+              );
+              if (driftRecovery) {
+                await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewMarker.headSha}: ${summary}`);
+              } else if (alreadyRejected) {
                 const reason = `second independent review rejection at ${reviewMarker.headSha}: ${summary}`;
                 await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
                 await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });

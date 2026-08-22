@@ -118,8 +118,13 @@ order, in three terminals, and open `http://127.0.0.1:5173`.
 `npm ci` must be allowed to run the lockfile's lifecycle scripts — this
 repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
 is not supported. The Inbox service is optional. No launchd definition is
-shipped or supported in v0.1.0; remote access and this repository's internal
-task-chain templates are also outside the supported sequence.
+shipped for the foreground Developer Preview sequence; remote access and this
+repository's internal task-chain templates are also outside that sequence. A
+separate self-hosted merge executor instead has documented but unverified macOS
+LaunchDaemon and Linux systemd profiles in the public
+[`docs/runbooks/merge-executor.md`](docs/runbooks/merge-executor.md) runbook.
+Those procedures do not change the platform classifications above or the
+authoritative support matrix.
 
 Read [`docs/release/v0.1.0-security.md`](docs/release/v0.1.0-security.md)
 before pointing this at anything, and
@@ -147,6 +152,19 @@ key, and one database password written identically into `POSTGRES_PASSWORD` and
 preserves every assignment and adds only missing safe-to-generate keys; it never
 rotates weak credentials automatically. There is no overwrite or rotation flag.
 `.env.example` documents the keys; it is not a file to copy.
+
+To provision the fail-closed merge executor, first read its
+[operator runbook](docs/runbooks/merge-executor.md), then run the repeatable
+human-owned capture wizard from the repository root:
+
+```sh
+bash scripts/setup-merge-executor.sh
+```
+
+The wizard registers no App and performs no administrator action itself. It
+captures the installation-local private GitHub App configuration, validates the
+dedicated OS-user/key boundary without reading key bytes, and leaves explicit
+root-owned service adoption to the matching runbook profile.
 
 ## Architecture grounded in the current code
 
