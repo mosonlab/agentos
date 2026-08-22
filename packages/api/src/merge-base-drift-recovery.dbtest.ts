@@ -70,9 +70,13 @@ const snapshot = (baseSha: string, overrides: Partial<PullRequestSnapshot> = {})
   readAt: new Date("2026-08-22T01:00:00.000Z").toISOString(), ...overrides,
 });
 
-const reader = (current: PullRequestSnapshot, files: Array<{ filename: string; previousFilename: string | null; patch: string | null }> = []): GitHubReader => ({
+const reader = (
+  current: PullRequestSnapshot,
+  files: Array<{ filename: string; previousFilename: string | null; patch: string | null }> = [],
+  filesComplete = true,
+): GitHubReader => ({
   readPullRequest: async () => current,
-  compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files }),
+  compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete, files }),
 });
 
 const authorize = async (readinessTaskId: string, baseSha: string) => {
@@ -403,6 +407,44 @@ test("a recovery regression conflict or gate failure stops without an auxiliary 
     await assertIntegratorGuarded(seeded.integratorTask!.id);
     await resetTestDb(db);
   }
+});
+
+test("a recovery-cycle readiness failure restores the integrator stop guard", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "tail-readiness-stop");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const regressionRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id },
+    orderBy: { runNumber: "desc" },
+  });
+  const verdict = JSON.stringify({
+    schemaVersion: 1,
+    outcome: "pass",
+    headSha: HEAD,
+    baseHeadSha: BASE_2,
+    gateVerdict: "PASS",
+  });
+  await db.run.update({ where: { id: regressionRun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.upsert({
+    where: { taskId: seeded.gateTask.id },
+    create: {
+      taskId: seeded.gateTask.id,
+      runId: regressionRun.id,
+      kind: "regression-verification",
+      body: verdict,
+      commitSha: HEAD,
+    },
+    update: { runId: regressionRun.id, body: verdict, commitSha: HEAD },
+  });
+  await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
+
+  const readiness = await readinessTick(db, reader(snapshot(BASE_2), [], false));
+  assert.equal(readiness.stopped, 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.integratorTask!.id,
+    metadata: { path: ["state"], equals: "tail-stopped" },
+  } }), 1);
+  await assertIntegratorGuarded(seeded.integratorTask!.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 1);
 });
 
 test("a recovery-cycle independent-review rejection stops once without a review-fix task", async () => {

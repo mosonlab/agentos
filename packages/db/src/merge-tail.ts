@@ -43,7 +43,7 @@ export type BaseDriftRecoveryMetadata =
   | (BaseDriftRecoveryContext & {
       state: "tail-stopped";
       recoveryRunId: string;
-      phase: "regression" | "independent-review";
+      phase: "regression" | "readiness" | "independent-review";
       reason: string;
       dedupeKey: string;
     })
@@ -123,7 +123,7 @@ export const parseBaseDriftRecoveryActivity = (
   if ((value.state !== "queued" && value.state !== "tail-stopped") || !nonempty(value.recoveryRunId)) return null;
   if (expected.recoveryRunId !== undefined && value.recoveryRunId !== expected.recoveryRunId) return null;
   if (value.state === "queued") return value as BaseDriftRecoveryMetadata;
-  return (value.phase === "regression" || value.phase === "independent-review")
+  return (value.phase === "regression" || value.phase === "readiness" || value.phase === "independent-review")
     && nonempty(value.reason) && nonempty(value.dedupeKey)
     ? value as BaseDriftRecoveryMetadata
     : null;
