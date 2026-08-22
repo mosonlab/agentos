@@ -52,6 +52,7 @@ import {
   mechanicalPrincipalRefusal,
   executionModeFor,
   gateFeedsIntegratorStep,
+  isMergeConfirmationError,
   integratorBindingRefusal,
   integratorBindingRefusalFor,
   mergeExecutorRunnerIds,
@@ -3450,7 +3451,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       } });
       // The operator's next action is the ordinary "see the evidence, approve"
       // path: the correction alone authorizes nothing.
-      const cardId = await requestConfirmationCard(tx, task, stopped.stop.stopId, new Date());
+      let cardId: string;
+      try {
+        cardId = await requestConfirmationCard(tx, task, stopped.stop.stopId, new Date());
+      } catch (error: unknown) {
+        if (isMergeConfirmationError(error)) {
+          return { error: error.message, code: 409 as const };
+        }
+        throw error;
+      }
       return { correction: { id: activity.id, prNumber: body.prNumber, observed, confirmationCardId: cardId } };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if ("error" in result) return context.json({ error: result.error }, result.code);
@@ -3508,7 +3517,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)
+        || isMergeConfirmationError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }
@@ -3530,7 +3540,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
+      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)
+        || isMergeConfirmationError(error)) return context.json({ error: error.message }, 409);
       if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
         return context.json({ error: error.message }, 409);
       }

@@ -31,6 +31,7 @@ import {
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
   parseStopQuestionKey,
+  recoverRefreshRequestedConfirmationCard,
   requestMergeEvidence,
   resolveChainTarget,
   stopStateFor,
@@ -1119,7 +1120,12 @@ export const applyInboxDecisionTx = async (
     where: { id: input.inboxMessageId },
     include: {
       session: { include: { run: true } },
-      gateTask: { include: { previousTask: true } },
+      gateTask: {
+        include: {
+          previousTask: true,
+          templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
+        },
+      },
       thread: true,
     },
   });
@@ -1148,7 +1154,16 @@ export const applyInboxDecisionTx = async (
       where: { id: question.id, status: InboxStatus.OPEN },
       data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
     });
-    if (claimedStop.count !== 1) return { duplicate: true, resumed: false };
+    if (claimedStop.count !== 1) {
+      // A replay is the supported repair for the legacy state where the first
+      // transaction durably recorded refresh-requested but returned without a
+      // confirmation card. Re-read the append-only disposition under the
+      // integrator Task mutex; every other duplicate remains a no-op.
+      if (question.status === InboxStatus.ANSWERED && question.selectedChoiceId === input.decision && question.taskId) {
+        await recoverRefreshRequestedConfirmationCard(tx, question.taskId, now);
+      }
+      return { duplicate: true, resumed: false };
+    }
     await tx.inboxMessage.create({ data: {
       from: InboxSender.HUMAN,
       agentId: question.agentId,
@@ -1182,14 +1197,16 @@ export const applyInboxDecisionTx = async (
     });
     return { duplicate: false, resumed: false, messageId: question.id };
   }
-  // A HUMAN-gate rejection can queue the executable predecessor. Resolve that
-  // target before taking either mutex, then lock predecessor -> gate: PATCH on
-  // the predecessor takes that same order when it activates the HUMAN
+  // A HUMAN gate or server-owned readiness rejection can queue the executable
+  // predecessor. Ordinary AGENT gates remain executable themselves. Resolve
+  // that target before taking either mutex, then lock predecessor -> gate:
+  // PATCH on the predecessor takes that same order when it activates the
   // successor. Taking gate -> predecessor here would make the two legitimate
   // operations deadlock.
   let rejectionTarget: { id: string; name: string } | null = null;
   if (gateDecision && question.gateTask && input.decision === "reject") {
-    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT
+    const readiness = isMergeReadinessStep(question.gateTask.templateStep);
+    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT && !readiness
       ? question.gateTask
       : question.gateTask.previousTask;
     if (!rejectionTarget && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
