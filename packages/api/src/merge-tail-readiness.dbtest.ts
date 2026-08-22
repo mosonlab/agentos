@@ -128,6 +128,8 @@ const seedReadiness = async () => {
     assigneeAgentId: integratorAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 7,
     targetBranch: "main", opensPullRequest: false,
   } });
+  await db.task.update({ where: { id: regression.id }, data: { followUpTaskId: readiness.id } });
+  await db.task.update({ where: { id: readiness.id }, data: { followUpTaskId: integrator.id } });
   const run = await db.run.create({ data: {
     projectId: project.id, taskId: regression.id, agentId: regressionAgent.id, repoId: repo.id,
     runNumber: 1, dedupeKey: `task:${regression.id}:run:1`, runner: "CODEX", model: regressionAgent.model,
@@ -159,7 +161,8 @@ test("a defense-list diff opens one blind review and blocks authorization until 
   const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
   assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.readiness.id } }), 0);
-  const review = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.readiness.id, name: "Autonomous merge tail: independent review" } });
+  const review = await db.task.findFirstOrThrow({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: independent review" } });
+  assert.equal(review.followUpTaskId, null);
   const reviewRun = await db.run.findFirstOrThrow({ where: { taskId: review.id } });
   assert.equal(reviewRun.model, "gpt-5.6-sol:medium");
   await db.taskActivity.create({ data: {
@@ -206,6 +209,41 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.equal(readiness.status, TaskStatus.TODO);
   assert.equal(regression.status, TaskStatus.TODO);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+});
+
+test("ordinary base requeue reuses an approved exact-head review", async () => {
+  const seeded = await seedReadiness();
+  const driftedBase = "d".repeat(40);
+  await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    body: `Independent review approved exact head ${HEAD}`,
+    metadata: {
+      kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "approved",
+      reviewTaskId: "prior-review", headSha: HEAD, baseSha: BASE,
+    },
+  } });
+  assert.equal((await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })))).requeued, 1);
+  const freshRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: freshRun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: freshRun.id,
+    body: JSON.stringify({
+      schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: driftedBase, gateVerdict: "PASS",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  const guarded = reader(
+    [{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }],
+    snapshot({ baseSha: driftedBase }),
+  );
+  assert.deepEqual(await readinessTick(db, guarded), {
+    claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0,
+  });
+  assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
 });
 
 test("future and wrong-index readiness steps are never claimed", async () => {

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   FORBIDDEN_BUNDLE_SHAPES,
+  FORBIDDEN_REPOSITORY_SHAPES,
   REPOSITORY_ROOT,
   scanFiles,
   secretValuesFromEnv,
@@ -81,6 +82,26 @@ test("those shapes are not refused in tracked source, where they are ordinary wo
     tracked: [join(root, "auth.ts")],
   });
   assert.deepEqual(result.findings, []);
+});
+
+test("GitHub App private-key material is refused in tracked files without echoing it", (t) => {
+  const root = fixture(t);
+  writeFileSync(join(root, "dist", "assets", "index.js"), 'export const apiBase="/api";');
+  const material = [
+    ["-----", "BEGIN RSA ", "PRIVATE KEY", "-----"].join(""),
+    "synthetic-private-bytes",
+    ["-----", "END RSA ", "PRIVATE KEY", "-----"].join(""),
+  ].join("\n");
+  writeFileSync(join(root, "tracked.txt"), material);
+  const result = verifySecretHygiene({
+    root,
+    distDirectory: join(root, "dist"),
+    envPath: join(root, ".env"),
+    tracked: [join(root, "tracked.txt")],
+  });
+  assert.deepEqual(result.findings, ["private-key-material:tracked.txt"]);
+  assert.equal(JSON.stringify(result).includes("synthetic-private-bytes"), false);
+  assert.equal(FORBIDDEN_REPOSITORY_SHAPES.length, 1);
 });
 
 test("a missing or empty bundle fails closed instead of skipping", (t) => {

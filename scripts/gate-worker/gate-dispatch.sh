@@ -29,9 +29,9 @@
 # Otherwise merge-gate.sh would refuse anyway, so the dispatch goes straight to
 # the worker, which can gate any pushed oid without a local checkout.
 #
-# A remote slot pushes first, always: mirror-push.sh is idempotent, a stale
-# mirror is the one failure the runbook calls both most common and always
-# benign, and automating the fix is cheaper than documenting it.
+# A remote slot pushes first, always. The dispatcher fixes the candidate and
+# baseline oids before taking a slot; mirror-push.sh transports exactly those
+# objects under immutable cache refs and never mirrors the checkout's ref set.
 #
 # When every slot is taken, this blocks and re-polls — the caller wanted a
 # verdict, not an errand. It gives up after --timeout-minutes, because a wait
@@ -71,6 +71,7 @@ SLOT_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch"
 
 OID=""
 MASTER_OID=""
+DEFAULT_REF=""
 
 usage() {
   sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
@@ -131,6 +132,37 @@ if [ -n "$MASTER_OID" ]; then
   [ "${#MASTER_OID}" -eq 40 ] || die "not a full 40-character object id: $MASTER_OID"
 fi
 
+git -C "$REPO_ROOT" cat-file -e "${OID}^{commit}" 2>/dev/null \
+  || die "candidate ${OID} is not in ${REPO_ROOT}; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
+
+# Freeze the integration baseline before slot selection. Without an explicit
+# --master, origin's HEAD is the authority: fetch its branch without creating a
+# local tracking ref, then read HEAD again and accept only the exact oid now
+# advertised. If the branch moved beyond the fetched object, this dispatch stops
+# loudly and can be retried; it never substitutes a stale local ref.
+if [ -z "$MASTER_OID" ]; then
+  symref="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)" \
+    || die "could not read HEAD from origin; pass --master <oid> to state the baseline" "$EXIT_NO_VERDICT"
+  DEFAULT_REF="$(printf '%s\n' "$symref" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
+  [ -n "$DEFAULT_REF" ] \
+    || die "origin did not name its default branch; pass --master <oid> to state the baseline" "$EXIT_NO_VERDICT"
+  gate_valid_ref "$DEFAULT_REF" >/dev/null \
+    || die "origin named a default branch this dispatcher will not fetch: ${DEFAULT_REF}" "$EXIT_NO_VERDICT"
+  GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" fetch --no-tags --no-write-fetch-head origin "$DEFAULT_REF" >/dev/null 2>&1 \
+    || die "could not refresh ${DEFAULT_REF} from origin; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
+  refreshed="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)" \
+    || die "could not re-read HEAD from origin after refresh; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
+  refreshed_ref="$(printf '%s\n' "$refreshed" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
+  MASTER_OID="$(printf '%s\n' "$refreshed" | awk '$2 == "HEAD" {print $1; exit}')"
+  [ "$refreshed_ref" = "$DEFAULT_REF" ] \
+    || die "origin changed its default branch during refresh (${DEFAULT_REF} -> ${refreshed_ref:-unknown}); retry dispatch" "$EXIT_NO_VERDICT"
+  case "$MASTER_OID" in *[!0-9a-f]* | "") die "origin answered with no full baseline oid for ${DEFAULT_REF}" "$EXIT_NO_VERDICT" ;; esac
+  [ "${#MASTER_OID}" -eq 40 ] \
+    || die "origin answered with a short baseline oid for ${DEFAULT_REF}: ${MASTER_OID}" "$EXIT_NO_VERDICT"
+fi
+git -C "$REPO_ROOT" cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null \
+  || die "baseline ${MASTER_OID} is not in ${REPO_ROOT}; refresh the integration branch and retry" "$EXIT_NO_VERDICT"
+
 # --- slots -------------------------------------------------------------------
 
 HELD_SLOT=""
@@ -176,13 +208,13 @@ mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$EXIT_NO_VERDICT"
 
 printf 'gate-dispatch: %s, slots local(1) + %s(2), poll %ss, timeout %smin\n' \
   "$OID" "$SERVER" "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
+printf 'gate-dispatch: baseline %s%s\n' "$MASTER_OID" "${DEFAULT_REF:+ (${DEFAULT_REF})}" >&2
 
 # --- dispatch ----------------------------------------------------------------
 
 run_local() {
   printf 'gate-dispatch: running in the local slot\n' >&2
-  ( cd "$REPO_ROOT" && bash scripts/merge-gate.sh --expect-head "$OID" \
-      ${MASTER_OID:+--master "$MASTER_OID"} )
+  ( cd "$REPO_ROOT" && bash scripts/merge-gate.sh --expect-head "$OID" --master "$MASTER_OID" )
 }
 
 run_remote() {
@@ -196,13 +228,13 @@ run_remote() {
   # so there is no verdict to report and 76 says exactly that; returning the
   # gate's FAIL code here would have dressed a transport or mirror problem up as
   # a judgement about the commit.
-  bash "${SCRIPT_DIR}/mirror-push.sh" "$SERVER" >&2 || {
+  bash "${SCRIPT_DIR}/mirror-push.sh" "$SERVER" \
+    --candidate "$OID" --baseline "$MASTER_OID" >&2 || {
     printf 'gate-dispatch: mirror-push failed; no gate was run and no verdict exists\n' >&2
     printf 'GATE NOT RUN: the mirror push failed, so nothing was gated\n'
     return "$EXIT_NO_VERDICT"
   }
-  bash "${SCRIPT_DIR}/remote-gate.sh" "$SERVER" "$OID" \
-    ${MASTER_OID:+--master "$MASTER_OID"}
+  bash "${SCRIPT_DIR}/remote-gate.sh" "$SERVER" "$OID" --master "$MASTER_OID"
 }
 
 no_verdict() {

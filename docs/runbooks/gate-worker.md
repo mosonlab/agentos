@@ -22,10 +22,10 @@ Everything here is `scripts/gate-worker/`:
 | File | Runs on | What it does |
 | --- | --- | --- |
 | `provision.sh` | the server | Installs the pinned toolchain and creates `~/gate/`. Idempotent, dry-run by default. |
-| `mirror-push.sh` | the local machine | `git push --mirror` into `~/gate/<repo>/mirror.git`, creating it on first push, and installs `run-gate.sh` beside it. |
+| `mirror-push.sh` | the local machine | Pushes one exact candidate and one exact baseline into immutable `refs/gate/.../<oid>` cache refs, creating `~/gate/<repo>/mirror.git` on first push, and installs `run-gate.sh` beside it. |
 | `run-gate.sh` | the server | Checks one oid out of its repository's mirror and runs `scripts/merge-gate.sh --expect-head <oid> --master <baseline-oid>` against it. |
 | `remote-gate.sh` | the local machine | One synchronous `ssh` call; returns the verdict line and the exit code. |
-| `gate-dispatch.sh` | the local machine | Runs a gate in the first free slot: local first, then one of the worker's two. |
+| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then runs a gate in the first free slot: either worker slot first, local spillover only while both are busy. |
 | `lib.sh` | the local machine | Shared repository-name derivation for the three local-side scripts. |
 
 The worker hosts one directory per repository, keyed by the origin repository's
@@ -51,12 +51,16 @@ running one:
 scripts/gate-worker/gate-dispatch.sh <oid>
 ```
 
-- Local first, when this worktree is already clean at `<oid>` — otherwise the
-  local gate would only refuse, so the dispatch goes straight to a remote slot,
-  which can gate any pushed oid.
-- A remote slot runs `mirror-push.sh` before `remote-gate.sh`, always: a stale
-  mirror is the most common failure and it is always benign, so it is automated
-  away rather than documented around.
+- The candidate is the exact requested `<oid>`. Unless `--master <oid>` is
+  supplied, the dispatcher fetches origin's current default branch without
+  creating a local tracking ref, re-reads `origin HEAD`, and freezes that exact
+  oid as the baseline before taking a slot.
+- Either remote slot is preferred. It runs `mirror-push.sh` before
+  `remote-gate.sh`, pushing only the frozen candidate and baseline under
+  oid-named cache refs. The local checkout may be detached or single-branch;
+  its incomplete ref namespace is never mirrored and cannot delete worker refs.
+- The local slot is spillover only while both remote slots are busy, and only
+  when this worktree is clean at `<oid>`.
 - All three busy: the dispatcher blocks and re-polls (default every 30s, for
   60 minutes — `GATE_DISPATCH_POLL_SECONDS`, `GATE_DISPATCH_TIMEOUT_MINUTES`).
   On timeout it exits **75** with `GATE DISPATCH: NO SLOT`: nothing ran, no
@@ -183,7 +187,7 @@ The hedge against a forged PASS is **spot-checking**: for release-grade merges,
 re-run the gate locally and compare. That is a deliberate trade — one gate's
 worth of local compute occasionally, instead of on every gate.
 
-Two properties keep the evidence honest even when the worker is trusted:
+Three properties keep the evidence honest even when the worker is trusted:
 
 - `run-gate.sh` runs `merge-gate.sh --expect-head <oid>`, so a checkout that is
   not the requested commit produces a FAIL rather than a verdict about the
@@ -192,19 +196,16 @@ Two properties keep the evidence honest even when the worker is trusted:
   preflight. The gate's frozen-record rules (`scripts/check-frozen-docs.sh`)
   ask what is already on the default branch, and the worker cannot find that
   out — it holds no credential and its mirror is whatever was last pushed. So
-  `remote-gate.sh` asks origin — `git ls-remote --symref origin HEAD`, which
-  names the default branch and its head in one answer — and passes the oid as
-  `--master`; `run-gate.sh` verifies the mirror can resolve it and hands it on.
-  If origin's head is newer than the last mirror push, the fix is `git fetch
-  origin` and another `mirror-push.sh` — which checks for exactly that before
-  it reports OK.
-- `--master` is optional at both worker hops, deliberately. `run-gate.sh` is
-  deployed by `mirror-push.sh`, so a worker can be running an older copy than
-  the commit being gated; if a required argument were introduced here, that
-  commit could not be gated until the worker was redeployed — the gate would be
-  broken by its own improvement. Without the oid, `merge-gate.sh` falls back to
-  the mirror's own default-branch refs, which are verbatim copies of the
-  operator's push, and says so in the preflight line.
+  `gate-dispatch.sh` asks origin — `git ls-remote --symref origin HEAD`, which
+  names the default branch and its head in one answer — fetches that branch,
+  re-reads the answer, and passes the resulting oid through both transport hops
+  as `--master`. `mirror-push.sh` pushes the candidate and baseline atomically
+  into separate oid-named cache refs and reads both refs back exactly before the
+  harness can run. `run-gate.sh` verifies both objects and hands the stated
+  baseline to `merge-gate.sh`.
+- A direct `remote-gate.sh` invocation does not transport objects. Its candidate
+  and baseline must already have been pushed explicitly; routine callers use
+  `gate-dispatch.sh`, which couples the exact transport and gate invocation.
 - The gate is run **from inside the checked-out commit**, so the gate that
   judges a commit is the gate that commit ships. A PR that weakens
   `merge-gate.sh` is gated by its own weakened gate — which is true of the
@@ -253,13 +254,17 @@ It does **not** check or install any egress rule: the worker is not
 network-isolated by design (see the red lines), so there is no firewall step
 between provisioning and the first gate.
 
-**2. Push the mirror (local).** The first push creates
+**2. Push the exact gate inputs (local).** The first push creates
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
 
 ```sh
-scripts/gate-worker/mirror-push.sh agentos-gate --dry-run
-scripts/gate-worker/mirror-push.sh agentos-gate
+scripts/gate-worker/mirror-push.sh agentos-gate --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
+scripts/gate-worker/mirror-push.sh agentos-gate --candidate <candidate-oid> --baseline <baseline-oid>
 ```
+
+Both oids must resolve in the local object database. Routine use does not ask an
+operator to prepare that state: `gate-dispatch.sh` refreshes and freezes the
+origin baseline before it calls `mirror-push.sh`.
 
 **3. Gate a commit (local).**
 
@@ -297,8 +302,9 @@ lines in the PR.
 scripts/gate-worker/gate-dispatch.sh <oid>
 ```
 
-That is the whole routine: the dispatcher pushes the mirror itself before any
-remote run. The call is synchronous and holds the terminal for the whole gate.
+That is the whole routine: the dispatcher refreshes the baseline and pushes the
+two exact gate inputs before any remote run. The call is synchronous and holds
+the terminal for the whole gate.
 There is no queue file and no daemon by design: the state a queue would need is
 exactly the state that makes a worker something to operate rather than
 something to use, and the callers — agent sessions blocking on their own
@@ -314,8 +320,9 @@ schema, serial.
 ## Troubleshooting
 
 **`commit <oid> is not in the mirror`** — the mirror is behind. Run
-`mirror-push.sh` and retry (the dispatcher does this itself). The worker has no
-way to fetch what it was not given.
+`mirror-push.sh <server> --candidate <oid> --baseline <baseline-oid>` and retry
+(the dispatcher does this itself). The worker has no way to fetch what it was
+not given.
 
 **`no mirror at ...`** — that repository has never been pushed from this
 machine. `mirror-push.sh` creates it.

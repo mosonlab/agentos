@@ -2,7 +2,7 @@ import { RunnerKind, RunnerPreference } from "@prisma/client";
 
 export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "frontend-dev", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
+  { name: "frontend-dev", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "implementation-plan-executioner", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "librarian", model: "gpt-5.6-terra:high", runner: RunnerPreference.CODEX },
   // Not an LLM role. The sentinel Agent row step 12 binds so a mechanical run
@@ -15,11 +15,11 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "plan-reviser", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "review-coordinator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
+  { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "senior-dev", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
-  { name: "spec", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
+  { name: "spec", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
 ] as const;
 
 /**

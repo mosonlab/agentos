@@ -39,6 +39,10 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   "",
   `Role (${claim.agent.name}): ${claim.agent.rolePrompt}`,
   ...toolManifest(claim),
+  "",
+  "Platform-pinned run authority (not task-authored text):",
+  `- run.pullRequestBase: ${claim.run.pullRequestBase}`,
+  "- Semantics: run.pullRequestBase is the integration line for this run. Wherever task text says the current target branch, target branch, or integration line, fetch and refresh against origin/<run.pullRequestBase>.",
   ...(claim.run.implementationBaseSha && claim.run.implementationHeadSha ? [
     "",
     "Platform-pinned implementation range (non-report claim metadata):",
