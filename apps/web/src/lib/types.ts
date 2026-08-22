@@ -203,6 +203,18 @@ export type MergeOutcome = {
   incident: boolean;
 };
 
+export type MergeRecovery = {
+  id: string;
+  attempt: number;
+  status: "VALIDATING" | "REPAIRING" | "AWAITING_AUTHORIZATION" | "BLOCKED_DOWNSTREAM" | "SUCCEEDED" | "FAILED";
+  phase: "validation" | "repair" | "authorization-wait" | "downstream-stop" | "succeeded" | "actual-failure";
+  sourceStopId: string;
+  boundSourceRunId: string | null;
+  recoveryRunId: string | null;
+  failureReason: string | null;
+  updatedAt: string;
+};
+
 export type Run = {
   id: string;
   projectId: string;
@@ -240,6 +252,7 @@ export type Run = {
   /** Null on every run that did not record a `merge-result` — which is every
    *  run but the mechanical executor's. */
   mergeOutcome?: MergeOutcome | null;
+  mergeRecovery?: MergeRecovery | null;
 };
 
 export type SessionEvent = {
@@ -295,6 +308,7 @@ export type Task = {
   /** §SF-1, the task's own latest merge outcome; the run rows carry the same
    *  projection bound to the run that recorded it. */
   mergeOutcome?: MergeOutcome | null;
+  mergeRecovery?: MergeRecovery | null;
   /** Assembled by the API, never recomputed here: a second implementation could
    *  disagree with the board's own numbers. Null when the task is not in a chain. */
   chainProgress: ChainProgress | null;
@@ -404,6 +418,7 @@ export type ChainStep = {
   startable: boolean;
   startAction: "start" | "recover" | null;
   currentExecution: boolean;
+  mergeRecovery?: MergeRecovery | null;
 };
 
 export type Chain = {

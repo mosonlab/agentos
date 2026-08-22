@@ -38,7 +38,7 @@ before(() => { db = setupTestDb(); });
 beforeEach(async () => { await resetTestDb(db); });
 after(async () => { await db.$disconnect(); });
 
-const operatorRequest = async (path: string, method: "PATCH" | "POST", body?: unknown) => {
+const operatorRequest = async (path: string, method: "GET" | "PATCH" | "POST", body?: unknown) => {
   const prior = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
   try {
@@ -181,6 +181,13 @@ test("queued recovery keeps generic PATCH, retry, and enqueue blocked until read
   const seeded = await seedStopped("twelve-step-readiness", "queued-recovery-guard");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
 
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.recoveryRunId !== null, true);
+  const detail = await operatorRequest(`/tasks/${seeded.gateTask.id}`, "GET");
+  assert.equal(detail.status, 200);
+  assert.equal((await detail.json() as any).mergeRecovery.phase, "repair");
+
   await assertIntegratorGuarded(seeded.integratorTask!.id);
   assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.REVIEW);
@@ -207,6 +214,10 @@ test("fresh server-owned readiness authorization alone activates the recovery me
   assert.equal(runs.length, 2);
   assert.equal(runs[1]!.status, "QUEUED");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.TODO);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } });
+  assert.equal(aggregate.status, "SUCCEEDED");
+  assert.equal(aggregate.authorizationActivityId, authorization.id);
+  assert.equal(aggregate.endedAt !== null, true);
 });
 
 test("recovery freshness requeue preserves the run binding through fresh authorization and executor activation", async () => {
@@ -221,6 +232,10 @@ test("recovery freshness requeue preserves the run binding through fresh authori
     orderBy: { runNumber: "desc" },
   });
   assert.notEqual(secondRecoveryRun.id, firstRecoveryRun.id);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } });
+  assert.equal(aggregate.status, "REPAIRING");
+  assert.equal(aggregate.recoveryRunId, secondRecoveryRun.id);
+  assert.equal(aggregate.currentBaseSha, BASE_3);
   const integratorBinding = await db.taskActivity.findFirst({
     where: {
       taskId: seeded.integratorTask!.id,
@@ -429,9 +444,32 @@ test("operator-authored recovery metadata cannot clear the stop guard or suppres
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
   } });
+  assert.equal(await db.mergeRecoveryAttempt.count({ where: { integratorTaskId: seeded.integratorTask!.id } }), 0,
+    "legacy activity is not backfilled or treated as aggregate authority");
   assert.equal((await operatorRequest(`/tasks/${seeded.integratorTask!.id}`, "PATCH", { status: "DONE" })).status, 409);
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 2);
+});
+
+test("the aggregate rejects a duplicate source-stop attempt identity", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "aggregate-unique");
+  const stop = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  }, orderBy: { createdAt: "desc" } });
+  await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+  } });
+  await assert.rejects(
+    db.mergeRecoveryAttempt.create({ data: {
+      integratorTaskId: seeded.integratorTask!.id,
+      sourceStopId: stop.id,
+      attempt: 1,
+    } }),
+    (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002",
+  );
 });
 
 test("operator-authored recovery metadata cannot suppress an ordinary gate repair", async () => {
@@ -494,6 +532,9 @@ test("a recovery regression conflict or gate failure stops without an auxiliary 
     assert.equal(await db.task.count({ where: { name: { startsWith: "Autonomous merge tail:" } } }), 0);
     assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.gateTask.id } }), 1);
     await assertIntegratorGuarded(seeded.integratorTask!.id);
+    assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+      where: { integratorTaskId: seeded.integratorTask!.id },
+    })).status, "BLOCKED_DOWNSTREAM");
     await resetTestDb(db);
   }
 });

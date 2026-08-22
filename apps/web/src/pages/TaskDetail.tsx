@@ -305,6 +305,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
         <Link to="/tasks" className={BACK_LINK}><IconArrowLeft /></Link>
         <h1 className={DETAIL_HEAD_H1}>{task.name}</h1>
         <TaskPill status={task.status} />
+        {task.mergeRecovery === null || task.mergeRecovery === undefined ? null : (
+          <Pill tone={task.mergeRecovery.phase === "actual-failure" || task.mergeRecovery.phase === "downstream-stop"
+            ? "red"
+            : task.mergeRecovery.phase === "succeeded" ? "green" : "amber"}>
+            {t(`taskDetail.recovery.${task.mergeRecovery.phase}`, { n: task.mergeRecovery.attempt })}
+          </Pill>
+        )}
         {task.templateId === null ? null : <Pill tone="violet">{t("tasks.pill.template")}</Pill>}
         {task.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
         <span className="flex-1" />
