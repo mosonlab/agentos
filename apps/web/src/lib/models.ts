@@ -18,7 +18,7 @@ const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 export const MODELS: CatalogModel[] = [
   { id: "claude-fable-5", label: "Claude Fable 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "medium" },
-  { id: "claude-opus-5", label: "Claude Opus 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
+  { id: "claude-opus-5", label: "Claude Opus 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "medium" },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "high" },
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "high" },

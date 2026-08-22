@@ -7,11 +7,23 @@ const base = {
   MERGE_EXECUTOR_TOKEN: "executor-only-token",
   MERGE_EXECUTOR_RUNNER_ID: "merge-executor-1",
   MERGE_EXECUTOR_IDENTITY_LOGIN: "agentos-merge",
+  MERGE_EXECUTOR_GITHUB_APP_ID: "12345",
+  MERGE_EXECUTOR_GITHUB_APP_INSTALLATION_ID: "67890",
 };
 
 test("the executor carries its own credential, never the fleet-wide runner token", () => {
   const config = loadExecutorConfig({ ...base, RUNNER_TOKEN: "fleet-wide" });
   assert.equal(config.executorToken, "executor-only-token");
+});
+
+test("GitHub App identifiers are required public configuration", () => {
+  const config = loadExecutorConfig(base);
+  assert.equal(config.githubAppId, "12345");
+  assert.equal(config.githubAppInstallationId, "67890");
+  assert.equal(config.githubAppAuthTimeoutMs, 15_000);
+  assert.throws(() => loadExecutorConfig({ ...base, MERGE_EXECUTOR_GITHUB_APP_ID: "" }), /GITHUB_APP_ID is required/u);
+  assert.throws(() => loadExecutorConfig({ ...base, MERGE_EXECUTOR_GITHUB_APP_ID: "app-id" }), /positive decimal identifier/u);
+  assert.throws(() => loadExecutorConfig({ ...base, MERGE_EXECUTOR_GITHUB_APP_INSTALLATION_ID: "0" }), /positive decimal identifier/u);
 });
 
 test("a missing or aliased executor token refuses the start", () => {

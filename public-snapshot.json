@@ -42,8 +42,8 @@
     { "glob": "docker-compose.yml", "purpose": "local development services" },
     { "glob": "eslint.config.mjs", "purpose": "type-aware lint gate rule" },
     { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by AGENTS.md" },
-    { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents view, each role with its model, reasoning effort, runner and inbox access" },
-    { "glob": "docs/media/tasks-board.png", "purpose": "README screenshot: the task board with a twelve-step template chain in flight" },
+    { "glob": "docs/media/chain.png", "purpose": "README screenshot: a twelve-step assurance chain with assigned agent roles" },
+    { "glob": "docs/media/tasks.png", "purpose": "README screenshot: the task board with a twelve-step template chain in flight" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/demos/templates-release-demo.md", "purpose": "templates release-demo operator contract" },
     { "glob": "docs/demos/templates-release-evidence.schema.json", "purpose": "templates release-demo verification schema" },
@@ -58,6 +58,8 @@
     { "glob": "docs/release/v0.1.0-support-matrix.md", "purpose": "the authoritative support statement: what is Verified, Maintainer-verified, Experimental, Unverified and Unsupported, with the evidence boundary for each row" },
     { "glob": "docs/release/v0.2.0-release-notes.md", "purpose": "the release notes for v0.2.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/runbooks/gate-worker.md", "purpose": "the offshore merge-gate worker and gate dispatcher runbook: slot model, red lines, deployment, troubleshooting" },
+    { "glob": "docs/runbooks/legacy-integrator-stop.md", "purpose": "fail-closed operator recovery procedure for legacy merge-integrator stops through fresh Inbox re-authorization evidence" },
+    { "glob": "docs/runbooks/merge-executor.md", "purpose": "public GitHub App merge-executor provisioning, service isolation, verification, rotation, upgrade, and recovery authority" },
     { "glob": "docs/runbooks/quiet-window-auto-deploy.md", "purpose": "production macOS quiet-window auto-deploy installation, refusal, observation and recovery runbook" },
     { "glob": "package-lock.json", "purpose": "reproducible dependency graph" },
     { "glob": "package.json", "purpose": "workspace definition" },
@@ -139,6 +141,8 @@
     { "glob": "scripts/release-docs.test.mjs", "purpose": "executable release documentation contract tests" },
     { "glob": "scripts/setup-local.mjs", "purpose": "atomic local configuration generator" },
     { "glob": "scripts/setup-local.test.mjs", "purpose": "local configuration generator regression tests" },
+    { "glob": "scripts/setup-merge-executor.sh", "purpose": "repeatable human-owned GitHub App and isolated merge-executor configuration capture wizard" },
+    { "glob": "scripts/setup-merge-executor.test.mjs", "purpose": "deterministic merge-executor wizard, permission-map, service-isolation, and public-link contract tests" },
     { "glob": "scripts/templates-release-demo.mjs", "purpose": "guarded templates release-demo harness" },
     { "glob": "scripts/templates-release-demo.test.mjs", "purpose": "templates release-demo regression tests" },
     { "glob": "scripts/verify-secret-hygiene.mjs", "purpose": "bundle and tracked-file secret hygiene scan" },
@@ -284,12 +288,12 @@
   "approvedFindings": [
     {
       "category": "binary-material",
-      "glob": "docs/media/agents.png",
-      "reason": "reviewed README screenshot of the agents view, published with v0.2.0"
+      "glob": "docs/media/chain.png",
+      "reason": "reviewed README screenshot of the assurance chain, published with v0.2.0"
     },
     {
       "category": "binary-material",
-      "glob": "docs/media/tasks-board.png",
+      "glob": "docs/media/tasks.png",
       "reason": "reviewed README screenshot of the task board, published with v0.2.0"
     },
     {
