@@ -50,6 +50,8 @@ export type ExecutorLog = {
   info: (message: string, context?: Record<string, unknown>) => void;
   warn: (message: string, context?: Record<string, unknown>) => void;
   error: (message: string, context?: Record<string, unknown>) => void;
+  /** Derive a logger for a run-scoped secret without changing the sink. */
+  withSecrets: (...secrets: Array<string | null | undefined>) => ExecutorLog;
 };
 
 export const makeLog = (redact: Redactor, sink: Pick<Console, "log" | "warn" | "error"> = console): ExecutorLog => {
@@ -59,5 +61,9 @@ export const makeLog = (redact: Redactor, sink: Pick<Console, "log" | "warn" | "
     info: (message, context) => { sink.log(line(message, context)); },
     warn: (message, context) => { sink.warn(line(message, context)); },
     error: (message, context) => { sink.error(line(message, context)); },
+    withSecrets: (...secrets) => {
+      const secretRedactor = makeRedactor(...secrets);
+      return makeLog((value) => redact(secretRedactor(value)), sink);
+    },
   };
 };

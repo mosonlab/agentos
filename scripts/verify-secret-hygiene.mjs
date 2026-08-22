@@ -33,6 +33,14 @@ export const FORBIDDEN_BUNDLE_SHAPES = Object.freeze([
   { label: "authorization-header", pattern: /Authorization/u },
 ]);
 
+/** Key bytes have no legitimate place in a tracked file or browser bundle. */
+export const FORBIDDEN_REPOSITORY_SHAPES = Object.freeze([
+  {
+    label: "private-key-material",
+    pattern: new RegExp(["-----", "BEGIN ", "(?:RSA |EC |OPENSSH )?", "PRIVATE KEY", "-----"].join(""), "u"),
+  },
+]);
+
 /** Variables whose value is a secret. `DATABASE_URL` is included through its
  *  password, which is `POSTGRES_PASSWORD` and is checked under that name. */
 export const SECRET_VARIABLES = Object.freeze([
@@ -44,6 +52,7 @@ export const SECRET_VARIABLES = Object.freeze([
   "MERGE_EXECUTOR_TOKEN",
   "GITHUB_READ_TOKEN",
   "GITHUB_SCHEMA_GATE_TOKEN",
+  "MERGE_EXECUTOR_GITHUB_APP_PRIVATE_KEY",
   "FEISHU_APP_SECRET",
 ]);
 
@@ -141,13 +150,13 @@ export const verifySecretHygiene = ({ root = REPOSITORY_ROOT, distDirectory, env
     return { ok: false, findings: ["bundle-empty:apps/web/dist"], scanned: { bundle: 0, tracked: 0, secretValues: 0 } };
   }
   const secrets = secretValuesFromEnv(envPath ?? join(root, ".env"));
-  findings.push(...scanFiles(bundle, root, secrets, FORBIDDEN_BUNDLE_SHAPES));
+  findings.push(...scanFiles(bundle, root, secrets, [...FORBIDDEN_BUNDLE_SHAPES, ...FORBIDDEN_REPOSITORY_SHAPES]));
 
   const trackedPaths = tracked ?? trackedFiles(root);
-  // Tracked files get the value scan only: `Bearer` and `Authorization` are
-  // ordinary words in source, tests and documentation, and the bundle is where
-  // their presence is the problem.
-  findings.push(...scanFiles(trackedPaths, root, secrets));
+  // Tracked files get configured-value and private-key-material scans. `Bearer`
+  // and `Authorization` are ordinary words in source, tests and documentation;
+  // the browser bundle is where their presence is itself the problem.
+  findings.push(...scanFiles(trackedPaths, root, secrets, FORBIDDEN_REPOSITORY_SHAPES));
 
   return {
     ok: findings.length === 0,
