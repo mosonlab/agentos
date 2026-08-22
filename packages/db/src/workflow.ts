@@ -6,6 +6,7 @@ import {
   InboxKind,
   InboxSender,
   InboxStatus,
+  MergeRecoveryStatus,
   Prisma,
   RunStatus,
   RunnerKind,
@@ -37,7 +38,7 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { isMergeReadinessStep, MERGE_TAIL_KIND, parseBaseDriftRecoveryActivity } from "./merge-tail.js";
+import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -1062,20 +1063,20 @@ export const activateRecoveryIntegratorSuccessor = async (
   },
   now = new Date(),
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
-  const [readiness, stopped, recoveryRows, authorization, output] = await Promise.all([
+  const [readiness, stopped, recovery, authorization, output] = await Promise.all([
     tx.task.findUnique({
       where: { id: input.readinessTaskId },
       include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
     }),
     stopStateFor(tx, input.integratorTaskId),
-    tx.taskActivity.findMany({
+    tx.mergeRecoveryAttempt.findFirst({
       where: {
-        taskId: input.integratorTaskId,
-        actorType: "control-plane",
-        metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery },
+        integratorTaskId: input.integratorTaskId,
+        sourceStopId: input.sourceStopId,
+        recoveryRunId: input.recoveryRunId,
+        status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
       },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      select: { taskId: true, actorType: true, metadata: true },
+      orderBy: [{ attempt: "desc" }, { id: "desc" }],
     }),
     tx.taskActivity.findUnique({
       where: { id: input.authorizationActivityId },
@@ -1092,16 +1093,8 @@ export const activateRecoveryIntegratorSuccessor = async (
   if (!stopped || stopped.stop.stopId !== input.sourceStopId) {
     throw new Error("Recovery activation is not bound to the current unresolved integrator stop");
   }
-  const recovery = recoveryRows
-    .map((row) => parseBaseDriftRecoveryActivity(row, {
-      activityTaskId: input.integratorTaskId,
-      integratorTaskId: input.integratorTaskId,
-      sourceStopId: input.sourceStopId,
-      recoveryRunId: input.recoveryRunId,
-    }))
-    .find((metadata) => metadata?.state === "queued");
-  if (!recovery || recovery.state !== "queued" || recovery.readinessTaskId !== input.readinessTaskId) {
-    throw new Error("Recovery activation has no matching control-plane queued recovery");
+  if (!recovery || recovery.readinessTaskId !== input.readinessTaskId) {
+    throw new Error("Recovery activation has no matching canonical recovery aggregate");
   }
 
   const parsedAuthorization = parseAuthorizationMetadata(authorization?.metadata);
@@ -1114,7 +1107,9 @@ export const activateRecoveryIntegratorSuccessor = async (
     throw new Error("Recovery activation requires a control-plane authorization bound to its source stop");
   }
   const payload = parsedAuthorization.payload;
-  if (payload.repository !== recovery.repository
+  if (!recovery.repository || recovery.prNumber === null || !recovery.targetBranch
+    || !recovery.authorizedHeadSha || !recovery.currentBaseSha
+    || payload.repository !== recovery.repository
     || payload.prNumber !== recovery.prNumber
     || payload.baseRef !== recovery.targetBranch
     || payload.headSha !== recovery.authorizedHeadSha
@@ -1149,6 +1144,12 @@ export const activateRecoveryIntegratorSuccessor = async (
   if (activated.nextTaskId !== input.integratorTaskId) {
     throw new Error("Recovery activation did not resolve the expected merge-integrator successor");
   }
+  await tx.mergeRecoveryAttempt.update({ where: { id: recovery.id }, data: {
+    status: MergeRecoveryStatus.SUCCEEDED,
+    authorizationActivityId: authorization.id,
+    failureReason: null,
+    endedAt: now,
+  } });
   return activated;
 };
 
