@@ -56,10 +56,3 @@ export {
   type HttpResponse,
   type HttpTrace,
 } from "./http.js";
-export {
-  carriesIdempotencyKey,
-  idempotencyKeyIn,
-  idempotencyMarker,
-  InvalidIdempotencyKeyError,
-  withIdempotencyMarker,
-} from "./idempotency.js";
