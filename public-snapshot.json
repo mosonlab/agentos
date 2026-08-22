@@ -3,6 +3,9 @@
   "source": "git-tracked-files+minted-artifacts",
   "defaultDisposition": "blocker",
   "include": [
+    { "glob": ".agents/skills/agentos-find-simplifications/SKILL.md", "purpose": "manual AgentOS simplification discovery workflow and approval boundary" },
+    { "glob": ".agents/skills/agentos-find-simplifications/agents/openai.yaml", "purpose": "Codex display metadata and explicit-only invocation policy for the simplification skill" },
+    { "glob": ".agents/skills/agentos-find-simplifications/references/candidate-report.md", "purpose": "evidence and decision contract for AgentOS simplification candidate reports" },
     { "glob": ".env.example", "purpose": "safe configuration template" },
     { "glob": ".github/workflows/ci.yml", "purpose": "continuous integration definition" },
     { "glob": ".gitignore", "purpose": "source hygiene" },
