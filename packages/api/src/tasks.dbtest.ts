@@ -66,12 +66,69 @@ const seedTask = async (label: string, overrides: Record<string, unknown> = {}) 
 const seedRun = async (
   context: Awaited<ReturnType<typeof seedTask>>,
   runNumber: number,
-  status: "QUEUED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX" | "SUCCEEDED" | "FAILED",
+  status: "QUEUED" | "CLAIMED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX" | "SUCCEEDED" | "FAILED" | "CANCELLED",
 ) => db.run.create({ data: {
   projectId: context.project.id, taskId: context.task.id, agentId: context.agent.id, repoId: context.repo.id,
   runNumber, dedupeKey: `task:${context.task.id}:run:${runNumber}`, runner: "CLAUDE", model: "claude",
   promptHash: "hash", status, maxRunsPerTask: context.task.maxSessionsPerTask,
 } });
+
+// --- POST /runs/:runId/cancel ----------------------------------------------
+
+test("operator cancellation terminates an unclaimed queued run and lands its task in Review", async () => {
+  const context = await seedTask("cancel-queued", { status: "DOING" });
+  const run = await seedRun(context, 1, "QUEUED");
+
+  const response = await call("POST", `/runs/${run.id}/cancel`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, { runId: run.id, taskId: context.task.id, status: "CANCELLED" });
+
+  const cancelled = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(cancelled.status, "CANCELLED");
+  assert.notEqual(cancelled.endedAt, null);
+  assert.equal(cancelled.failureClass, "CANCELLED_OR_TIMED_OUT");
+  assert.equal(cancelled.failureReason, "Cancelled by operator before runner claim");
+  assert.equal(cancelled.retryable, false);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).status, "REVIEW");
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: context.task.id,
+    actorType: "operator",
+    body: "Run 1 cancelled before runner claim",
+    metadata: { path: ["runId"], equals: run.id },
+  } }), 1);
+});
+
+test("operator cancellation refuses a claimed run without changing run or task", async () => {
+  const context = await seedTask("cancel-claimed", { status: "DOING" });
+  const run = await seedRun(context, 1, "CLAIMED");
+  await db.run.update({ where: { id: run.id }, data: {
+    runnerId: "runner-1",
+    fencingToken: `fence-${run.id}`,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    claimedAt: new Date(),
+  } });
+
+  const response = await call("POST", `/runs/${run.id}/cancel`);
+  assert.equal(response.status, 409);
+  assert.match(response.body.error, /only an unclaimed queued run/);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, "CLAIMED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: context.task.id } })).status, "DOING");
+  assert.equal(await db.taskActivity.count({ where: { taskId: context.task.id } }), 0);
+});
+
+test("repeated queued-run cancellation returns 409 and records one terminal transition", async () => {
+  const context = await seedTask("cancel-repeat", { status: "TODO" });
+  const run = await seedRun(context, 1, "QUEUED");
+
+  assert.equal((await call("POST", `/runs/${run.id}/cancel`)).status, 200);
+  const replay = await call("POST", `/runs/${run.id}/cancel`);
+  assert.equal(replay.status, 409);
+  assert.match(replay.body.error, /only an unclaimed queued run/);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: context.task.id,
+    body: "Run 1 cancelled before runner claim",
+  } }), 1);
+});
 
 // --- POST /tasks/:taskId/start ----------------------------------------------
 

@@ -14,7 +14,9 @@ import {
   applyInboxDecisionTx,
   EVIDENCE_PLACEHOLDER_BODY,
   enqueueTaskRun,
+  legacyHumanTwelveStepTemplateName,
   MERGE_INTEGRATOR_KIND,
+  MERGE_INTEGRATOR_SCHEMA_VERSION,
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
   PrismaClient,
@@ -133,6 +135,128 @@ test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, ques
   assert.equal(activities.filter((row) => (row.metadata as any)?.kind === MERGE_INTEGRATOR_KIND.result).length, 1);
   assert.equal(activities.filter((row) => row.body.includes("Chain complete")).length, 0);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1, "no automatic retry");
+});
+
+test("a legacy integrator base-drift stop retains an abandon-only manual exit", async () => {
+  const chain = await seedIntegratorChain(db, { label: "legacy-base-drift-exit" });
+  await db.taskTemplate.update({
+    where: { id: chain.template.id },
+    data: { name: legacyHumanTwelveStepTemplateName(chain.template.id) },
+  });
+  const run = await liveIntegratorRun(chain);
+  await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
+    outcome: "stopped",
+    condition: "base-drift",
+    evidence: JSON.stringify({ observed: "c".repeat(40), authorized: "b".repeat(40) }),
+  }));
+  assert.equal((await completeRun(run)).status, 200);
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  assert.ok(question, "legacy base-drift stop keeps a manual exit because it is not an automatic-recovery candidate");
+  assert.deepEqual((question!.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+});
+
+test("a fresh regression completion preserves success and parks a legacy-stopped integrator", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "completion-legacy-stop-park",
+    shape: "legacy-seven-step-direct",
+  });
+  assert.ok(chain.readinessTask, "the historical readiness step exists");
+  assert.equal(chain.readinessTask.status, "DONE", "readiness was already complete before the fresh regression");
+  assert.ok(chain.integratorTask, "the integrator successor exists");
+
+  const stop = await db.taskActivity.create({ data: {
+    taskId: chain.integratorTask.id,
+    actorType: "control-plane",
+    body: "Mechanical merge stopped: base-drift",
+    metadata: {
+      kind: MERGE_INTEGRATOR_KIND.result,
+      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+      outcome: "stopped",
+      condition: "base-drift",
+      evidence: "legacy stop without server-owned binding",
+    },
+  } });
+  await db.task.update({
+    where: { id: chain.integratorTask.id },
+    data: { status: "REVIEW", failureReason: "Mechanical merge stopped: base-drift" },
+  });
+
+  const regression = await db.run.create({ data: {
+    projectId: chain.project.id,
+    taskId: chain.gateTask.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${chain.gateTask.id}:run:2`,
+    runner: "CLAUDE",
+    model: chain.agent.model,
+    promptHash: "fresh-regression",
+    status: "RUNNING",
+    runnerId: RUNNER,
+    maxRunsPerTask: 5,
+    fencingToken: `1:${chain.gateTask.id}:2`,
+    leaseExpiresAt: new Date(Date.now() + 600_000),
+  } });
+  await db.session.create({ data: {
+    runId: regression.id,
+    projectId: chain.project.id,
+    taskId: chain.gateTask.id,
+    agentId: chain.agent.id,
+    runner: "CLAUDE",
+    executionStatus: "RUNNING",
+  } });
+  const regressionOutput = JSON.stringify({
+    schemaVersion: 1,
+    outcome: "pass",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+    gateVerdict: "PASS",
+  });
+  await db.taskStepOutput.upsert({
+    where: { taskId: chain.gateTask.id },
+    create: {
+      taskId: chain.gateTask.id,
+      runId: regression.id,
+      kind: "regression-verification",
+      body: regressionOutput,
+      commitSha: "a".repeat(40),
+    },
+    update: {
+      runId: regression.id,
+      kind: "regression-verification",
+      body: regressionOutput,
+      commitSha: "a".repeat(40),
+    },
+  });
+  await db.task.update({ where: { id: chain.gateTask.id }, data: { status: "DOING" } });
+
+  const completion = await call("POST", `/runner/runs/${regression.id}/complete`, {
+    runnerId: RUNNER,
+    fencingToken: regression.fencingToken,
+    exitCode: 0,
+    terminalEventSeen: true,
+    terminalSuccess: true,
+    cleanupStatus: "SUCCEEDED",
+    headSha: "a".repeat(40),
+    output: regressionOutput,
+  }, RUNNER);
+
+  assert.equal(completion.status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: regression.id } })).status, "SUCCEEDED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, "DONE");
+  const parked = await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask.id } });
+  assert.equal(parked.status, "REVIEW");
+  assert.match(parked.failureReason ?? "", /predecessor success preserved/u);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask.id } }), 0, "the stopped successor was not queued");
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id } }), 2, "no automatic regression retry was scheduled");
+  const activity = await db.taskActivity.findFirst({
+    where: { taskId: chain.integratorTask.id, metadata: { path: ["sourceRunId"], equals: regression.id } },
+    orderBy: { createdAt: "desc" },
+  });
+  assert.ok(activity, "the park is auditable from the successful predecessor run");
+  assert.match(activity.body, /completed successfully and was preserved/u);
+  assert.equal((activity.metadata as any).condition, "base-drift");
+  assert.equal((activity.metadata as any).sourceStopId, stop.id);
 });
 
 test("Y1 the append-only stop history survives an output replacement", async () => {
@@ -267,7 +391,7 @@ test("N19 re-authorize creates no run and writes no authorization; it asks for e
 });
 
 test("legacy seven-step re-authorize binds the card to readiness and evidence to the nearest Run/Session", async () => {
-  const { chain } = await stoppedChain("legacy-seven-reauth", "base-drift", "legacy-seven-step-direct");
+  const { chain } = await stoppedChain("legacy-seven-reauth", "head-drift", "legacy-seven-step-direct");
   assert.ok(chain.readinessTask, "the legacy shape has an immediate Merge readiness predecessor");
   assert.equal(await db.run.count({ where: { taskId: chain.readinessTask!.id } }), 0);
   assert.equal(await db.session.count({ where: { taskId: chain.readinessTask!.id } }), 0);
@@ -302,7 +426,7 @@ test("legacy seven-step re-authorize binds the card to readiness and evidence to
 });
 
 test("legacy seven-step re-authorize fails loudly rather than crossing chains for evidence", async () => {
-  const { chain } = await stoppedChain("legacy-seven-no-source", "base-drift", "legacy-seven-step-direct");
+  const { chain } = await stoppedChain("legacy-seven-no-source", "head-drift", "legacy-seven-step-direct");
   await db.session.delete({ where: { id: chain.gateSession.id } });
   const foreignTask = await db.task.create({ data: {
     projectId: chain.project.id, repoId: chain.repo.id, name: "Foreign evidence", description: "unrelated chain",
@@ -335,7 +459,7 @@ test("legacy seven-step re-authorize fails loudly rather than crossing chains fo
 });
 
 test("safe replay repairs refresh-requested without a card exactly once under concurrent attempts", async () => {
-  const { chain } = await stoppedChain("legacy-seven-recovery", "base-drift", "legacy-seven-step-direct");
+  const { chain } = await stoppedChain("legacy-seven-recovery", "head-drift", "legacy-seven-step-direct");
   const question = await stopQuestionFor(chain.integratorTask!.id);
   await db.$transaction((tx) => applyInboxDecisionTx(tx, {
     inboxMessageId: question!.id, externalEventId: "evt-legacy-seven-old-answer", decision: "re-authorize",
@@ -388,7 +512,7 @@ test("safe replay repairs refresh-requested without a card exactly once under co
 
 test("recovered confirmation approval renews authorization through real seven- and twelve-step readiness tails", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
-    const { chain } = await stoppedChain(`renew-${shape}`, "base-drift", shape, 5, 5);
+    const { chain } = await stoppedChain(`renew-${shape}`, "head-drift", shape, 5, 5);
     assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
     const question = await stopQuestionFor(chain.integratorTask!.id);
     await db.$transaction((tx) => applyInboxDecisionTx(tx, {
@@ -467,7 +591,7 @@ test("recovered confirmation approval renews authorization through real seven- a
 
 test("fresh confirmation rejection reruns regression, never server-owned readiness, for seven- and twelve-step tails", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
-    const { chain } = await stoppedChain(`reject-${shape}`, "base-drift", shape);
+    const { chain } = await stoppedChain(`reject-${shape}`, "head-drift", shape);
     assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
     const question = await stopQuestionFor(chain.integratorTask!.id);
     await db.$transaction((tx) => applyInboxDecisionTx(tx, {

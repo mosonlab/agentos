@@ -211,6 +211,41 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
 });
 
+test("ordinary base requeue reuses an approved exact-head review", async () => {
+  const seeded = await seedReadiness();
+  const driftedBase = "d".repeat(40);
+  await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    body: `Independent review approved exact head ${HEAD}`,
+    metadata: {
+      kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "approved",
+      reviewTaskId: "prior-review", headSha: HEAD, baseSha: BASE,
+    },
+  } });
+  assert.equal((await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })))).requeued, 1);
+  const freshRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: freshRun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: freshRun.id,
+    body: JSON.stringify({
+      schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: driftedBase, gateVerdict: "PASS",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  const guarded = reader(
+    [{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }],
+    snapshot({ baseSha: driftedBase }),
+  );
+  assert.deepEqual(await readinessTick(db, guarded), {
+    claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0,
+  });
+  assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
+});
+
 test("future and wrong-index readiness steps are never claimed", async () => {
   const future = await seedReadiness();
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.TODO } });

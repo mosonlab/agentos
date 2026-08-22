@@ -452,9 +452,11 @@ export const selectAuthorization = (
     if (parsed.status === "malformed") { nearMatchCount += 1; continue; }
     const payload = parsed.payload;
     if (payload.decision.channel === "mechanical") {
-      const binding = `mechanical:${chainStep9TaskId}`;
+      const bindingPrefix = `mechanical:${chainStep9TaskId}:`;
+      const binding = payload.decision.inboxDecisionId;
+      const legacyBinding = `mechanical:${chainStep9TaskId}`;
       if (candidate.actorType !== "control-plane"
-        || payload.decision.inboxDecisionId !== binding
+        || (binding !== legacyBinding && (!binding.startsWith(bindingPrefix) || binding.length === bindingPrefix.length))
         || payload.decision.inboxMessageId !== binding
         || (decisionUse.get(binding) ?? 0) > 1) {
         ignoredCount += 1;
@@ -562,7 +564,10 @@ const RESUMABLE: StopChoice[] = ["re-authorize", "abandon"];
  */
 export const STOP_CHOICES: Record<StopCondition, StopChoice[]> = {
   "head-drift": RESUMABLE,
-  "base-drift": RESUMABLE,
+  // Ordinary pre-merge base drift is recovered by the control plane. When the
+  // evidence is ineligible or the automatic budget is exhausted, abandoning
+  // remains possible but re-authorization must not bypass the fresh tail.
+  "base-drift": ["abandon"],
   "check-failure-or-absence": RESUMABLE,
   "non-clean-mergeability": RESUMABLE,
   "missing-authorization": RESUMABLE,

@@ -432,6 +432,146 @@ const codexOnly = (workspaceRoot: string, root: string, codexBinary: string): Ru
   binaries: { CLAUDE: join(root, "no-claude-here"), CODEX: codexBinary, PI: join(root, "no-pi-here") },
 });
 
+test("event delivery failures do not starve heartbeats and recover in seq order", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-event-heartbeat-isolation-"));
+  const originalPreflight = adapters.CLAUDE.preflight;
+  const originalStart = adapters.CLAUDE.start;
+  const originalHeartbeat = adapters.CLAUDE.heartbeat;
+  const originalKill = adapters.CLAUDE.kill;
+  try {
+    const remote = await seedRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      apiTimeoutMs: 100,
+      failedWorkspaceRetention: 0,
+      binaries: { CLAUDE: join(root, "unused-claude"), CODEX: join(root, "unused-codex"), PI: join(root, "unused-pi") },
+    };
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    let started = false;
+    let heartbeatAttempts = 0;
+    let eventAttempts = 0;
+    let eventFailures = 0;
+    let processExited = false;
+    let recoverEvents = false;
+    let resolveExit!: (evidence: Record<string, unknown>) => void;
+    let resolveActiveFailures!: () => void;
+    let resolveDeliveryHeartbeat!: () => void;
+    let resolvePostExitFailure!: () => void;
+    const exit = new Promise<Record<string, unknown>>((resolve) => { resolveExit = resolve; });
+    const activeFailures = new Promise<void>((resolve) => { resolveActiveFailures = resolve; });
+    const deliveryHeartbeat = new Promise<void>((resolve) => { resolveDeliveryHeartbeat = resolve; });
+    const postExitFailure = new Promise<void>((resolve) => { resolvePostExitFailure = resolve; });
+    const acceptedBatches: number[][] = [];
+    const maybeResolveActiveFailures = (): void => {
+      if (heartbeatAttempts >= 2 && eventFailures >= 2) resolveActiveFailures();
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
+      posts.push({ path, body });
+      if (path.endsWith("/start")) started = true;
+      if (started && path.endsWith("/heartbeat")) {
+        heartbeatAttempts += 1;
+        if ((body.inFlightTool as { name?: string } | null)?.name === "delivery") resolveDeliveryHeartbeat();
+        maybeResolveActiveFailures();
+      }
+      if (started && path.endsWith("/events")) {
+        eventAttempts += 1;
+        if (!recoverEvents) {
+          eventFailures += 1;
+          maybeResolveActiveFailures();
+          if (processExited) resolvePostExitFailure();
+          return new Response(JSON.stringify({ error: "events temporarily unavailable" }), { status: 503 });
+        }
+        acceptedBatches.push((body.events as Array<{ seq: number }>).map((event) => event.seq));
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    adapters.CLAUDE.preflight = (async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} })) as typeof originalPreflight;
+    adapters.CLAUDE.start = (async (_spec, sink) => {
+      const now = new Date();
+      sink({ source: "CLAUDE", type: "EVENT_A", payload: { text: "first" } });
+      sink({ source: "CLAUDE", type: "EVENT_B", providerEventId: "provider-b", toolCallId: "tool-b", payload: { text: "second" } });
+      sink({ source: "CLAUDE", type: "EVENT_C", payload: { text: "third" } });
+      return {
+        runner: "CLAUDE",
+        child: { exitCode: null, signalCode: null } as never,
+        pid: null,
+        startedAt: now,
+        lastProcessAliveAt: now,
+        lastProgressEventAt: now,
+        inFlightTool: null,
+        providerConversationId: null,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        terminationReason: null,
+        sawError: false,
+        providerError: null,
+        piTurnCompleted: false,
+        finalOutput: null,
+        stdout: "",
+        stderr: "",
+        exit,
+      } as never;
+    }) as typeof originalStart;
+    adapters.CLAUDE.heartbeat = (async (handle) => ({
+      processAlive: true,
+      lastProcessAliveAt: handle.lastProcessAliveAt,
+      lastProgressEventAt: handle.lastProgressEventAt,
+      inFlightTool: null,
+    })) as typeof originalHeartbeat;
+    adapters.CLAUDE.kill = (async () => ({ signal: null, processAlive: false })) as typeof originalKill;
+
+    const execution = executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CLAUDE",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    });
+
+    await activeFailures;
+    processExited = true;
+    resolveExit({
+      exitCode: 0,
+      signal: null,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      terminationReason: null,
+      finalOutput: null,
+      providerError: null,
+      stdout: "",
+      stderr: "",
+    });
+    await Promise.all([deliveryHeartbeat, postExitFailure]);
+    recoverEvents = true;
+    await execution;
+
+    assert.ok(heartbeatAttempts >= 3, `expected active heartbeats plus a delivery heartbeat, got ${heartbeatAttempts}`);
+    assert.ok(eventFailures >= 3, `expected failures across two active intervals and after exit, got ${eventFailures}`);
+    assert.ok(eventAttempts > eventFailures, "the recovered endpoint must receive a retry");
+    assert.deepEqual(acceptedBatches, [[0, 1, 2]], "the accepted retry must preserve order and carry each event once");
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.equal(completion?.body.terminalSuccess, true, "event recovery must preserve successful completion");
+    assert.equal(completion?.body.pushStatus, "SUCCEEDED", "the successful branch must still be delivered");
+    const startIndex = posts.findIndex((post) => post.path.endsWith("/start"));
+    const firstActiveHeartbeat = posts.findIndex((post, index) => index > startIndex && post.path.endsWith("/heartbeat") && post.body.processAlive === true);
+    const eventAfterHeartbeat = posts.findIndex((post, index) => index > firstActiveHeartbeat && post.path.endsWith("/events"));
+    assert.ok(firstActiveHeartbeat >= 0 && eventAfterHeartbeat > firstActiveHeartbeat, "heartbeat must be attempted before the interval event flush");
+  } finally {
+    adapters.CLAUDE.preflight = originalPreflight;
+    adapters.CLAUDE.start = originalStart;
+    adapters.CLAUDE.heartbeat = originalHeartbeat;
+    adapters.CLAUDE.kill = originalKill;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("startup reports Claude and Pi blocked, keeps their telemetry, and passes Codex", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-gate-"));
   try {

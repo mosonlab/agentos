@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 
+import { MergeRecoveryStatus } from "@prisma/client";
+
 import {
   defenseListReason,
   defenseTriggers,
   isTestPath,
   isMergeReadinessStep,
+  mergeRecoveryPhase,
+  mergeRecoveryTransitionAllowed,
   parseResolverResult,
   parseRegressionVerdict,
   resolutionTestTriggers,
@@ -14,6 +18,24 @@ import {
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
+
+test("merge recovery state transitions and operator phases are explicit", () => {
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.VALIDATING, MergeRecoveryStatus.REPAIRING), true);
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.VALIDATING, MergeRecoveryStatus.FAILED), true);
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION), true);
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.AWAITING_AUTHORIZATION, MergeRecoveryStatus.REPAIRING), true);
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.AWAITING_AUTHORIZATION, MergeRecoveryStatus.SUCCEEDED), true);
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.SUCCEEDED, MergeRecoveryStatus.REPAIRING), false);
+  assert.equal(mergeRecoveryTransitionAllowed(MergeRecoveryStatus.FAILED, MergeRecoveryStatus.VALIDATING), false);
+  assert.deepEqual(Object.values(MergeRecoveryStatus).map((status) => mergeRecoveryPhase(status)), [
+    "validation",
+    "repair",
+    "authorization-wait",
+    "downstream-stop",
+    "succeeded",
+    "actual-failure",
+  ]);
+});
 
 test("regression verdicts are exact-head, versioned, and fail closed", () => {
   const pass = parseRegressionVerdict(JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "PASS" }));
