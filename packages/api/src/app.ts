@@ -5341,6 +5341,81 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return session ? context.json(withMergeOutcome(session)) : context.json({ error: "Session not found" }, 404);
   });
 
+  app.post("/runs/:runId/cancel", async (context) => {
+    const runId = id.parse(context.req.param("runId"));
+    const result = await db.$transaction(async (tx) => {
+      const run = await tx.run.findUnique({
+        where: { id: runId },
+        select: {
+          id: true,
+          status: true,
+          taskId: true,
+          runNumber: true,
+          runnerId: true,
+          fencingToken: true,
+          leaseExpiresAt: true,
+          claimedAt: true,
+          session: { select: { id: true } },
+        },
+      });
+      if (!run) return { error: "Run not found", code: 404 as const };
+      if (run.status !== RunStatus.QUEUED) {
+        return { error: `Run is ${run.status}; only an unclaimed queued run can be cancelled`, code: 409 as const };
+      }
+      if (run.runnerId !== null || run.fencingToken !== null || run.leaseExpiresAt !== null
+        || run.claimedAt !== null || run.session !== null) {
+        return { error: "Run has already been claimed or leased", code: 409 as const };
+      }
+      if (!run.taskId) return { error: "Run is not attached to a Task", code: 409 as const };
+
+      const now = new Date();
+      const reason = "Cancelled by operator before runner claim";
+      // Run is the race authority. A runner claim and this cancellation both
+      // compare-and-set QUEUED, so exactly one can win without trusting the
+      // unlocked read above. The ownership-null predicates also fail closed if
+      // an inconsistent writer ever attaches a claim while leaving QUEUED.
+      const cancelled = await tx.run.updateMany({
+        where: {
+          id: run.id,
+          status: RunStatus.QUEUED,
+          runnerId: null,
+          fencingToken: null,
+          leaseExpiresAt: null,
+          claimedAt: null,
+          session: { is: null },
+        },
+        data: {
+          status: RunStatus.CANCELLED,
+          endedAt: now,
+          failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
+          failureReason: reason,
+          retryable: false,
+          retryAt: null,
+          sessionTokenRevokedAt: now,
+        },
+      });
+      if (cancelled.count !== 1) {
+        return { error: "Run was claimed while cancellation was being applied", code: 409 as const };
+      }
+
+      // Cancellation is terminal for this attempt. Live work lands in Review,
+      // matching other non-retry terminal paths; historical DONE/BACKLOG is
+      // not resurrected merely because an anomalous queued row was removed.
+      await tx.task.updateMany({
+        where: { id: run.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] } },
+        data: { status: TaskStatus.REVIEW, failureReason: reason },
+      });
+      await tx.taskActivity.create({ data: {
+        taskId: run.taskId,
+        actorType: "operator",
+        body: `Run ${run.runNumber} cancelled before runner claim`,
+        metadata: { runId: run.id, priorStatus: RunStatus.QUEUED, status: RunStatus.CANCELLED },
+      } });
+      return { runId: run.id, taskId: run.taskId, status: RunStatus.CANCELLED };
+    });
+    return "error" in result ? context.json({ error: result.error }, result.code) : context.json(result);
+  });
+
   app.get("/runs/:runId/events", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const afterSeq = Number.parseInt(context.req.query("afterSeq") ?? "", 10);
