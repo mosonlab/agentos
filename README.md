@@ -32,7 +32,7 @@ from the ideas in the video.
 
 ![Task board: a twelve-step template chain in flight, with per-run status and cost on each card](docs/media/tasks-board.png)
 
-![Agents: each role with its model, reasoning effort, runner and inbox access](docs/media/agents.png)
+![Chain: a twelve-step assurance workflow with assigned agent roles](docs/media/chain.png)
 
 ## Release-candidate evidence status
 
