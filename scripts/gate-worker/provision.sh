@@ -337,7 +337,7 @@ if [ "$failures" -gt 0 ]; then
 fi
 if [ "$APPLY" = 1 ]; then
   printf 'PROVISION: OK\n'
-  printf 'Next, from the local machine: scripts/gate-worker/mirror-push.sh <server>\n'
+  printf 'Next, from the local machine: scripts/gate-worker/gate-dispatch.sh <candidate-oid>\n'
 else
   printf 'PROVISION: DRY RUN OK — re-run with --apply\n'
 fi

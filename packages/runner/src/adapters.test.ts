@@ -84,6 +84,20 @@ test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
+test("buildPrompt makes the platform-pinned pull request base the integration-line authority on every attempt", () => {
+  const retriedClaim = {
+    ...claim,
+    task: { ...claim.task, targetBranch: "stale-task-value", description: "Refresh onto the current target branch." },
+    run: { ...claim.run, runNumber: 2, pullRequestBase: "release/1.x" },
+  };
+  const prompt = buildPrompt(retriedClaim);
+  assert.match(prompt, /Platform-pinned run authority \(not task-authored text\):/u);
+  assert.match(prompt, /run\.pullRequestBase: release\/1\.x/u);
+  assert.match(prompt, /run\.pullRequestBase is the integration line for this run/u);
+  assert.match(prompt, /current target branch[\s\S]*origin\/<run\.pullRequestBase>/u);
+  assert.match(prompt, /Task: Ship it[\s\S]*Refresh onto the current target branch\./u);
+});
+
 test("buildPrompt exposes a pinned implementation range without predecessor outputs", () => {
   const pinned = {
     ...claim,
