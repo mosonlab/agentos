@@ -134,13 +134,12 @@ preflight against a real database in all three lineages to prove it.
 
 ## What is open under `docs/`
 
-`docs/` is closed by default. Eight paths open part of it, and they are named one
-at a time rather than by a `docs/release/*` glob: this page, the six v0.1.0
-release documents — `v0.1.0-developer-preview.md`, `v0.1.0-release-notes.md`,
-`v0.1.0-support-matrix.md`, `v0.1.0-security.md`,
-`v0.1.0-migration-and-recovery.md` and `v0.1.0-license-and-assets.md` — and the
-non-secret fixture `docs/release/fixtures/oss-b0-smoke-task.json`, the frozen
-smoke task that the published UI and API parity tests read.
+`docs/` is closed by default. Every path that opens part of it is named one at a
+time rather than by a directory glob. The public set includes this page, the
+named release documents and fixtures, the public governance/demo pages, and the
+individually reviewed operator runbooks. The merge-executor authority is
+`docs/runbooks/merge-executor.md`; its repeatable wizard and deterministic test
+are separately named source entries in `public-snapshot.json`.
 
 The exact list is the point. A directory glob would publish anything dropped into
 `docs/release/` afterwards, which is how `docs/release/v0.1.0-evidence-template.md`
@@ -151,9 +150,9 @@ nobody looked at, and a scanner test asserts that the open list is exactly the
 eight paths above and that none of them is a directory glob.
 
 These pages were written as public artifacts rather than moved from internal
-documentation — plans, reviews, specifications, runbooks, governance and briefs
-stay excluded. Publishing user documentation is not a reason to publish what it
-was written from.
+documentation. Plans, reviews, specifications, and unlisted runbooks stay
+excluded. Publishing user documentation is not a reason to publish what it was
+written from.
 
 Do not copy a directory wholesale. Reviewed source and configuration patterns
 form a bounded allowlist. Repository-wide `deny` rules take precedence over an
