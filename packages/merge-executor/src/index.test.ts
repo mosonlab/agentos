@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import type { Stats } from "node:fs";
 import { test } from "node:test";
 
 import type { MechanicalClaim } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
+import { mintInstallationToken } from "./github-app-auth.js";
 import { claimOnce, runClaim } from "./index.js";
 import { makeLog, makeRedactor } from "./redaction.js";
 
@@ -99,6 +101,73 @@ test("any mint failure completes retryably before a GitHub surface or merge writ
   assert.equal(completion.retryable, true);
   assert.match(String(completion.failureReason), /private-key-read-failed/u);
   assert.equal(requests.some((request) => request.body.includes(secret)), false);
+});
+
+test("a bounded non-settling key read cannot reach a GitHub surface, activity, or output", async () => {
+  const requests: Array<{ url: string; body: string }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
+    return new Response(null, { status: 204 });
+  };
+  let surfaceCalls = 0;
+  let executeCalls = 0;
+  const startedAt = Date.now();
+  await runClaim({ ...config, githubAppAuthTimeoutMs: 10 }, "/private/app.pem", claimed("stalled-key-run"), log, fetchImpl, {
+    mintToken: async (options) => await mintInstallationToken({
+      ...options,
+      currentUid: () => 501,
+      statPrivateKey: async () => ({ uid: 501, mode: 0o100600, size: 1_700, isFile: () => true } as Stats),
+      readPrivateKey: async () => await new Promise<string>(() => {}),
+    }),
+    makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
+    executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
+  });
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(surfaceCalls, 0);
+  assert.equal(executeCalls, 0);
+  assert.deepEqual(requests.map((request) => request.url), [
+    "https://agentos.test/runner/runs/stalled-key-run/start",
+    "https://agentos.test/runner/runs/stalled-key-run/complete",
+  ]);
+  assert.equal(requests.some((request) => request.url.includes("/activity") || request.url.includes("/output")), false);
+  assert.match(requests[1]!.body, /private-key-read-failed/u);
+});
+
+test("escaped malformed token responses cannot enter logs, completion, activity, or output", async () => {
+  for (const invalidToken of [`${"A".repeat(24)}\"escaped`, `${"A".repeat(24)}\\escaped`]) {
+    const requests: Array<{ url: string; body: string }> = [];
+    const lines: string[] = [];
+    const capturedLog = makeLog(makeRedactor(), {
+      log: (line: string) => lines.push(line),
+      warn: (line: string) => lines.push(line),
+      error: (line: string) => lines.push(line),
+    });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
+      return new Response(null, { status: 204 });
+    };
+    let surfaceCalls = 0;
+    await runClaim(config, "/private/app.pem", claimed(`malformed-${requests.length}`), capturedLog, fetchImpl, {
+      mintToken: async (options) => await mintInstallationToken({
+        ...options,
+        currentUid: () => 501,
+        statPrivateKey: async () => ({ uid: 501, mode: 0o100600, size: 1_700, isFile: () => true } as Stats),
+        readPrivateKey: async () => "private-key-bytes",
+        signer: () => "signature",
+        now: () => new Date("2026-08-21T12:00:00.000Z"),
+        http: async () => ({
+          status: 201,
+          body: JSON.stringify({ token: invalidToken, expires_at: "2026-08-21T13:00:00.000Z" }),
+        }),
+      }),
+      makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
+    });
+    assert.equal(surfaceCalls, 0);
+    assert.ok(lines.every((line) => !line.includes(invalidToken)));
+    assert.ok(requests.every((request) => !request.body.includes(invalidToken)));
+    assert.equal(requests.some((request) => request.url.includes("/activity") || request.url.includes("/output")), false);
+    assert.match(requests.at(-1)!.body, /installation-token-response-malformed/u);
+  }
 });
 
 test("a minted installation token cannot escape through run evidence or completion errors", async () => {

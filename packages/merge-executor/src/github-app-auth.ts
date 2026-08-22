@@ -6,15 +6,20 @@
  * response body are ever included in a returned failure.
  */
 
-import { readFile } from "node:fs/promises";
 import { sign } from "node:crypto";
+import type { Stats } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 
 import { NO_RESPONSE, callWithTimeout, type Http } from "@agentos/github-client";
 
 const APP_JWT_BACKDATE_SECONDS = 60;
 const APP_JWT_LIFETIME_SECONDS = 9 * 60;
-const MINIMUM_TOKEN_LIFETIME_MS = 60_000;
+// GitHub issues installation tokens for one hour. Five minutes of tolerance
+// covers request latency and clock skew while rejecting a replayed near-expiry
+// response that cannot represent a fresh mint.
+const MINIMUM_TOKEN_LIFETIME_MS = 55 * 60_000;
 const MAXIMUM_TOKEN_LIFETIME_MS = 65 * 60_000;
+export const MAXIMUM_PRIVATE_KEY_BYTES = 64 * 1_024;
 
 const base64Url = (value: string): string => Buffer.from(value, "utf8").toString("base64url");
 
@@ -62,7 +67,9 @@ export type InstallationTokenOptions = {
   timeoutMs: number;
   http: Http;
   now?: () => Date;
-  readPrivateKey?: (path: string) => Promise<string>;
+  currentUid?: () => number;
+  statPrivateKey?: (path: string) => Promise<Stats>;
+  readPrivateKey?: (path: string, signal: AbortSignal) => Promise<string>;
   signer?: AppJwtSigner;
 };
 
@@ -75,16 +82,45 @@ const validToken = (value: unknown): value is string =>
   typeof value === "string"
   && value.length >= 20
   && value.length <= 4_096
-  && [...value].every((character) => {
-    const codePoint = character.codePointAt(0)!;
-    return codePoint >= 0x21 && codePoint <= 0x7e;
+  // RFC 6750 b64token: rejecting JSON-escaped punctuation is also required for
+  // the decoded-token redactor to match every accepted wire representation.
+  && /^[A-Za-z0-9._~+/-]+={0,}$/u.test(value);
+
+const readBoundedPrivateKey = async (options: InstallationTokenOptions): Promise<string> => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("private key acquisition timed out"));
+    }, options.timeoutMs);
   });
+  const acquisition = async (): Promise<string> => {
+    const stats = await (options.statPrivateKey ?? stat)(options.privateKeyFile);
+    const uid = (options.currentUid ?? (() => process.getuid?.() ?? -1))();
+    if (!stats.isFile()
+        || stats.uid !== uid
+        || (stats.mode & 0o077) !== 0
+        || stats.size <= 0
+        || stats.size > MAXIMUM_PRIVATE_KEY_BYTES) {
+      throw new Error("private key metadata is unsafe");
+    }
+    return await (options.readPrivateKey
+      ?? ((path, signal) => readFile(path, { encoding: "utf8", signal })))(options.privateKeyFile, controller.signal);
+  };
+  try {
+    return await Promise.race([acquisition(), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
+  }
+};
 
 export const mintInstallationToken = async (options: InstallationTokenOptions): Promise<InstallationTokenResult> => {
   const now = options.now ?? (() => new Date());
   let privateKey: string;
   try {
-    privateKey = await (options.readPrivateKey ?? ((path) => readFile(path, "utf8")))(options.privateKeyFile);
+    privateKey = await readBoundedPrivateKey(options);
   } catch {
     return { ok: false, failure: "private-key-read-failed" };
   }

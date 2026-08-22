@@ -4,7 +4,12 @@ import { test } from "node:test";
 
 import { REFUSED_ENVIRONMENT_NAMES, evaluatePreconditions, type PreconditionDeps } from "./preconditions.js";
 
-const statsFor = (mode: number, uid: number): Stats => ({ mode, uid } as Stats);
+const statsFor = (mode: number, uid: number, options: { regular?: boolean; size?: number } = {}): Stats => ({
+  mode,
+  uid,
+  size: options.size ?? 1_700,
+  isFile: () => options.regular ?? true,
+} as Stats);
 
 const deps = (overrides: {
   env?: Record<string, string | undefined>;
@@ -13,6 +18,8 @@ const deps = (overrides: {
   fileMode?: number;
   fileUid?: number;
   directoryMode?: number;
+  fileIsRegular?: boolean;
+  fileSize?: number;
 } = {}): PreconditionDeps => {
   const uid = overrides.uid ?? 501;
   return {
@@ -23,7 +30,10 @@ const deps = (overrides: {
       ...overrides.env,
     },
     stat: (path) => path.endsWith(".pem")
-      ? statsFor(overrides.fileMode ?? 0o100600, overrides.fileUid ?? uid)
+      ? statsFor(overrides.fileMode ?? 0o100600, overrides.fileUid ?? uid, {
+        ...(overrides.fileIsRegular === undefined ? {} : { regular: overrides.fileIsRegular }),
+        ...(overrides.fileSize === undefined ? {} : { size: overrides.fileSize }),
+      })
       : statsFor(overrides.directoryMode ?? 0o40700, uid),
     currentUser: () => ({ username: overrides.username ?? "agentos-merge", uid }),
     homeDirectory: () => "/Users/agentos-merge",
@@ -67,6 +77,14 @@ test("a group-readable private-key file, a foreign owner, and a writable parent 
 
   const writableDirectory = evaluatePreconditions(deps({ directoryMode: 0o40777 }));
   assert.ok(!writableDirectory.ok && writableDirectory.failures.some((failure) => failure.includes("group- or world-writable")));
+});
+
+test("a non-regular or oversized private-key path is refused before any read", () => {
+  const fifo = evaluatePreconditions(deps({ fileIsRegular: false }));
+  assert.ok(!fifo.ok && fifo.failures.some((failure) => failure.includes("not a regular file")));
+
+  const oversized = evaluatePreconditions(deps({ fileSize: 64 * 1_024 + 1 }));
+  assert.ok(!oversized.ok && oversized.failures.some((failure) => failure.includes("invalid size")));
 });
 
 test("an unset or unreadable private-key file is refused at startup", () => {

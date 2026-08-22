@@ -14,6 +14,8 @@ import { statSync, type Stats } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 
+import { MAXIMUM_PRIVATE_KEY_BYTES } from "./github-app-auth.js";
+
 /**
  * A process environment is the surface a same-uid reader inspects (`ps eww`,
  * `launchctl print`). The executor therefore refuses to start if a GitHub
@@ -109,6 +111,10 @@ export const evaluatePreconditions = (deps: PreconditionDeps): PreconditionResul
     return { ok: false, failures };
   }
   const uid = deps.currentUser().uid;
+  if (!stats.isFile()) failures.push(`private-key path ${privateKeyFile} is not a regular file`);
+  if (stats.size <= 0 || stats.size > MAXIMUM_PRIVATE_KEY_BYTES) {
+    failures.push(`private-key file ${privateKeyFile} has an invalid size; it must be between 1 and ${MAXIMUM_PRIVATE_KEY_BYTES} bytes`);
+  }
   if (stats.uid !== uid) failures.push(`private-key file ${privateKeyFile} is owned by uid ${stats.uid}, not by this process's uid ${uid}`);
   if ((stats.mode & 0o077) !== 0) {
     failures.push(`private-key file ${privateKeyFile} is mode ${(stats.mode & 0o777).toString(8)}; it must be accessible by its owner only`);
