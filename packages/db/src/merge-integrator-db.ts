@@ -645,25 +645,66 @@ export const requestConfirmationCard = async (
   integratorTask: IntegratorTask,
   stopId: string,
   now = new Date(),
-): Promise<string | null> => {
-  if (!integratorTask.chainId || integratorTask.chainIndex === null) return null;
-  const gate = await tx.task.findFirst({
+): Promise<string> => {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${integratorTask.id} FOR UPDATE
+  `;
+  if (!locked[0]) throw new Error(`Merge integrator task ${integratorTask.id} no longer exists`);
+  return ensureConfirmationCard(tx, integratorTask, stopId, now);
+};
+
+const confirmationKey = (integratorTaskId: string, stopId: string): string =>
+  `confirmation:${integratorTaskId}:${stopId}`;
+
+/**
+ * The integrator Task mutex serializes the initial request and every replay or
+ * control-plane repair. The Inbox card's unique dedupe key is the durable backstop;
+ * taking the lock also lets every successful caller return the winner instead
+ * of surfacing a uniqueness race.
+ */
+const ensureConfirmationCard = async (
+  tx: Tx,
+  integratorTask: IntegratorTask,
+  stopId: string,
+  now: Date,
+): Promise<string> => {
+  if (!integratorTask.chainId || integratorTask.chainIndex === null) {
+    throw new Error(`Merge integrator task ${integratorTask.id} has no chain identity for confirmation evidence`);
+  }
+  const dedupeKey = confirmationKey(integratorTask.id, stopId);
+  const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { id: true } });
+  if (existing) return existing.id;
+
+  const target = await resolveChainTarget(tx, integratorTask);
+  if (!target.resolved) {
+    throw new Error(
+      `Merge confirmation target for task ${integratorTask.id} is ${target.unresolvable}; refusing unrelated evidence`,
+    );
+  }
+  const predecessors = await tx.task.findMany({
     where: {
       projectId: integratorTask.projectId,
       chainId: integratorTask.chainId,
       chainIndex: { lt: integratorTask.chainIndex },
     },
+    include: {
+      templateStep: { include: { taskTemplate: { select: { name: true } } } },
+      runs: {
+        where: { session: { isNot: null } },
+        include: { session: { select: { id: true } } },
+        orderBy: [{ runNumber: "desc" }, { createdAt: "desc" }],
+        take: 1,
+      },
+    },
     orderBy: { chainIndex: "desc" },
   });
-  if (!gate) return null;
-  const target = await resolveChainTarget(tx, integratorTask);
-  if (!target.resolved) return null;
-  const source = await tx.run.findFirst({
-    where: { taskId: gate.id, session: { isNot: null } },
-    include: { session: { select: { id: true } } },
-    orderBy: { runNumber: "desc" },
-  });
-  if (!source?.session) return null;
+  const gate = predecessors.find((candidate) => !taskIsIntegratorStep(candidate) && candidate.runs[0]?.session);
+  const source = gate?.runs[0];
+  if (!gate || !source?.session) {
+    throw new Error(
+      `Merge confirmation for task ${integratorTask.id} has no preceding same-chain Run with a Session`,
+    );
+  }
   const requested = await requestMergeEvidence(tx, {
     gateTaskId: gate.id,
     integratorTaskId: integratorTask.id,
@@ -673,9 +714,33 @@ export const requestConfirmationCard = async (
     purpose: "confirmation",
     repository: target.repository,
     prNumber: target.prNumber,
-    dedupeKey: `confirmation:${integratorTask.id}:${stopId}`,
+    dedupeKey,
   }, now);
   return requested.cardId;
+};
+
+/**
+ * Repairs the historical state in which the append-only stop answer says
+ * refresh-requested but its Phase-A confirmation request is absent. This is
+ * deliberately a no-op for every other stop disposition and for a request
+ * that already exists.
+ */
+export const recoverRefreshRequestedConfirmationCard = async (
+  tx: Tx,
+  integratorTaskId: string,
+  now = new Date(),
+): Promise<string | null> => {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE
+  `;
+  if (!locked[0]) throw new Error(`Merge integrator task ${integratorTaskId} no longer exists`);
+  const task = await loadIntegratorTask(tx, integratorTaskId);
+  if (!task || !taskIsIntegratorStep(task)) {
+    throw new Error(`Task ${integratorTaskId} is not a merge integrator step`);
+  }
+  const state = await stopStateFor(tx, integratorTaskId);
+  if (!state || !state.dispositions.includes("refresh-requested")) return null;
+  return ensureConfirmationCard(tx, task, state.stop.stopId, now);
 };
 
 /**

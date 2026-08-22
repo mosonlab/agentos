@@ -12,6 +12,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   applyInboxDecisionTx,
+  EVIDENCE_PLACEHOLDER_BODY,
   enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
   parseStopAnswerMetadata,
@@ -91,8 +92,12 @@ const persistOutcome = async (taskId: string, runId: string, body: string) => {
 const stopQuestionFor = async (taskId: string) =>
   db.inboxMessage.findFirst({ where: { taskId, status: "OPEN", kind: "MULTIPLE_CHOICE" }, orderBy: { createdAt: "desc" } });
 
-const stoppedChain = async (label: string, condition = "head-drift") => {
-  const chain = await seedIntegratorChain(db, { label });
+const stoppedChain = async (
+  label: string,
+  condition = "head-drift",
+  shape: "twelve-step" | "legacy-seven-step-direct" = "twelve-step",
+) => {
+  const chain = await seedIntegratorChain(db, { label, shape });
   const run = await liveIntegratorRun(chain);
   await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
     outcome: "stopped", condition, evidence: "authorized head a…, live head c…",
@@ -245,6 +250,123 @@ test("N19 re-authorize creates no run and writes no authorization; it asks for e
   assert.equal(requests.length, 1);
   // The guard is still in force: refresh-requested is not terminal.
   assert.equal((await call("PATCH", `/tasks/${chain.integratorTask!.id}`, { status: "DONE" })).status, 409);
+});
+
+test("legacy seven-step re-authorize skips server-owned readiness and binds evidence to the nearest Run/Session", async () => {
+  const { chain } = await stoppedChain("legacy-seven-reauth", "base-drift", "legacy-seven-step-direct");
+  assert.ok(chain.readinessTask, "the legacy shape has an immediate Merge readiness predecessor");
+  assert.equal(await db.run.count({ where: { taskId: chain.readinessTask!.id } }), 0);
+  assert.equal(await db.session.count({ where: { taskId: chain.readinessTask!.id } }), 0);
+
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question!.id, externalEventId: "evt-legacy-seven-reauth", decision: "re-authorize",
+  }));
+
+  const cards = await db.inboxMessage.findMany({
+    where: { dedupeKey: `confirmation:${chain.integratorTask!.id}:` + (question!.dedupeKey!.split(":").at(-1)!) },
+  });
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]!.status, "OPEN");
+  assert.equal(cards[0]!.body, EVIDENCE_PLACEHOLDER_BODY);
+  assert.equal(cards[0]!.gateTaskId, chain.gateTask.id);
+  assert.equal(cards[0]!.sessionId, chain.gateSession.id);
+  const requests = (await db.taskActivity.findMany({ where: { taskId: chain.gateTask.id } }))
+    .filter((row) => (row.metadata as any)?.purpose === "confirmation");
+  assert.equal(requests.length, 1);
+  assert.equal((requests[0]!.metadata as any).sourceRunId, chain.gateRun.id);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1);
+  assert.equal(
+    await db.taskActivity.count({
+      where: { taskId: chain.gateTask.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } },
+    }),
+    0,
+  );
+});
+
+test("legacy seven-step re-authorize fails loudly rather than crossing chains for evidence", async () => {
+  const { chain } = await stoppedChain("legacy-seven-no-source", "base-drift", "legacy-seven-step-direct");
+  await db.session.delete({ where: { id: chain.gateSession.id } });
+  const foreignTask = await db.task.create({ data: {
+    projectId: chain.project.id, repoId: chain.repo.id, name: "Foreign evidence", description: "unrelated chain",
+    assigneeType: "AGENT", assigneeAgentId: chain.agent.id, chainId: "foreign-chain", chainIndex: 5,
+    status: "DONE", targetBranch: "master",
+  } });
+  const foreignRun = await db.run.create({ data: {
+    projectId: chain.project.id, taskId: foreignTask.id, repoId: chain.repo.id, agentId: chain.agent.id,
+    runNumber: 1, dedupeKey: `task:${foreignTask.id}:run:1`, runner: "CLAUDE", model: chain.agent.model,
+    promptHash: "foreign", status: "SUCCEEDED", pullRequestNumber: 123,
+  } });
+  await db.session.create({ data: {
+    runId: foreignRun.id, projectId: chain.project.id, taskId: foreignTask.id, agentId: chain.agent.id,
+    runner: "CLAUDE", executionStatus: "SUCCEEDED",
+  } });
+
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  await assert.rejects(
+    db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: question!.id, externalEventId: "evt-legacy-seven-foreign", decision: "re-authorize",
+    })),
+    /no preceding same-chain Run with a Session/u,
+  );
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: question!.id } })).status, "OPEN");
+  assert.equal(
+    (await db.taskActivity.findMany({ where: { taskId: chain.integratorTask!.id } }))
+      .filter((row) => parseStopAnswerMetadata(row.metadata)).length,
+    0,
+  );
+});
+
+test("safe replay repairs refresh-requested without a card exactly once under concurrent attempts", async () => {
+  const { chain } = await stoppedChain("legacy-seven-recovery", "base-drift", "legacy-seven-step-direct");
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question!.id, externalEventId: "evt-legacy-seven-old-answer", decision: "re-authorize",
+  }));
+
+  // Reproduce the durable legacy state: the stop and refresh-requested answer
+  // remain append-only authority, while the null-card outcome left no Phase-A
+  // request/card behind.
+  const initialRequests = (await db.taskActivity.findMany({ where: { taskId: chain.gateTask.id } }))
+    .filter((row) => (row.metadata as any)?.purpose === "confirmation");
+  assert.equal(initialRequests.length, 1);
+  const initialCardId = (initialRequests[0]!.metadata as any).cardId as string;
+  await db.taskActivity.delete({ where: { id: initialRequests[0]!.id } });
+  await db.inboxMessage.delete({ where: { id: initialCardId } });
+  assert.equal(
+    (await db.taskActivity.findMany({ where: { taskId: chain.integratorTask!.id } }))
+      .filter((row) => parseStopAnswerMetadata(row.metadata)?.disposition === "refresh-requested").length,
+    1,
+  );
+
+  const replays = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+    db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: question!.id,
+      externalEventId: `evt-legacy-seven-replay-${index}`,
+      decision: "re-authorize",
+    })),
+  ));
+  assert.ok(replays.every((result) => result.duplicate));
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question!.id, externalEventId: "evt-legacy-seven-replay-again", decision: "re-authorize",
+  }));
+
+  const recoveredRequests = (await db.taskActivity.findMany({ where: { taskId: chain.gateTask.id } }))
+    .filter((row) => (row.metadata as any)?.purpose === "confirmation");
+  assert.equal(recoveredRequests.length, 1);
+  const recoveredCards = await db.inboxMessage.findMany({
+    where: { dedupeKey: `confirmation:${chain.integratorTask!.id}:` + (question!.dedupeKey!.split(":").at(-1)!) },
+  });
+  assert.equal(recoveredCards.length, 1);
+  assert.equal(recoveredCards[0]!.status, "OPEN");
+  assert.equal((recoveredRequests[0]!.metadata as any).cardId, recoveredCards[0]!.id);
+  assert.equal((recoveredRequests[0]!.metadata as any).sourceRunId, chain.gateRun.id);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1);
+  assert.equal(
+    (await db.taskActivity.findMany({ where: { taskId: chain.gateTask.id } }))
+      .filter((row) => (row.metadata as any)?.kind === MERGE_INTEGRATOR_KIND.authorization).length,
+    0,
+  );
 });
 
 test("N20 an external failure at the ceiling buys an integrator step no extra run", async () => {

@@ -31,6 +31,7 @@ import {
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
   parseStopQuestionKey,
+  recoverRefreshRequestedConfirmationCard,
   requestMergeEvidence,
   resolveChainTarget,
   stopStateFor,
@@ -1148,7 +1149,16 @@ export const applyInboxDecisionTx = async (
       where: { id: question.id, status: InboxStatus.OPEN },
       data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
     });
-    if (claimedStop.count !== 1) return { duplicate: true, resumed: false };
+    if (claimedStop.count !== 1) {
+      // A replay is the supported repair for the legacy state where the first
+      // transaction durably recorded refresh-requested but returned without a
+      // confirmation card. Re-read the append-only disposition under the
+      // integrator Task mutex; every other duplicate remains a no-op.
+      if (question.status === InboxStatus.ANSWERED && question.selectedChoiceId === input.decision && question.taskId) {
+        await recoverRefreshRequestedConfirmationCard(tx, question.taskId, now);
+      }
+      return { duplicate: true, resumed: false };
+    }
     await tx.inboxMessage.create({ data: {
       from: InboxSender.HUMAN,
       agentId: question.agentId,
