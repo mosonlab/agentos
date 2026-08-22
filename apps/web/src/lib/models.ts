@@ -24,6 +24,7 @@ export const MODELS: CatalogModel[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "high" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "medium" },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "max" },
+  { id: "openai-codex/gpt-5.6-sol", label: "GPT-5.6 Sol (pi)", runner: "PI", efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], defaultEffort: "high" },
   { id: "openai-codex/gpt-5.6-luna", label: "GPT-5.6 Luna (pi)", runner: "PI", efforts: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], defaultEffort: "max" },
 ];
 
