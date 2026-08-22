@@ -84,6 +84,20 @@ test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
+test("buildPrompt makes the platform-pinned pull request base the integration-line authority on every attempt", () => {
+  const retriedClaim = {
+    ...claim,
+    task: { ...claim.task, targetBranch: "stale-task-value", description: "Refresh onto the current target branch." },
+    run: { ...claim.run, runNumber: 2, pullRequestBase: "release/1.x" },
+  };
+  const prompt = buildPrompt(retriedClaim);
+  assert.match(prompt, /Platform-pinned run authority \(not task-authored text\):/u);
+  assert.match(prompt, /run\.pullRequestBase: release\/1\.x/u);
+  assert.match(prompt, /run\.pullRequestBase is the integration line for this run/u);
+  assert.match(prompt, /current target branch[\s\S]*origin\/<run\.pullRequestBase>/u);
+  assert.match(prompt, /Task: Ship it[\s\S]*Refresh onto the current target branch\./u);
+});
+
 test("buildPrompt exposes a pinned implementation range without predecessor outputs", () => {
   const pinned = {
     ...claim,
@@ -259,8 +273,19 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
   ]);
   assert.deepEqual(stableArgv(argsForRunner("PI", spec)), [
     "-p", "--mode", "json", "--session-dir", "/work/.agentos-pi", "--model", "codex",
+    "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
     "--extension", "<PI_EXTENSION>",
   ]);
+});
+
+test("Pi relies on its isolated config root while retaining the explicit AgentOS extension", () => {
+  const args = argsForRunner("PI", runSpec());
+  assert.equal(args.includes("--no-extensions"), false, "the global extension kill switch would cancel the AgentOS extension");
+  for (const flag of ["--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve"]) {
+    assert.equal(args.filter((arg) => arg === flag).length, 1, `${flag} must be unconditional`);
+  }
+  assert.equal(args.filter((arg) => arg === "--extension").length, 1);
+  assert.equal(args[args.indexOf("--extension") + 1], piExtensionPath());
 });
 
 test("no runner carries the prompt or the resume input in argv", () => {
@@ -450,6 +475,26 @@ test("agent session environment pins both roots inside the run's disposable scra
   assert.notEqual(env.CONTROL_PLANE_STATE_DIR, productionRoot);
 });
 
+test("PI config overrides are stripped and the isolated config root is runner-pinned", () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    {
+      ...claim,
+      runner: "PI",
+      secrets: {
+        ...claim.secrets,
+        PI_CODING_AGENT_DIR: "/hostile/pi-agent",
+        PI_CODING_AGENT_SESSION_DIR: "/hostile/pi-sessions",
+      },
+    },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.PI_CODING_AGENT_DIR, scratch.configRoot);
+  assert.equal(env.PI_CODING_AGENT_SESSION_DIR, undefined);
+  assert.notEqual(env.PI_CODING_AGENT_DIR, "/hostile/pi-agent");
+});
+
 test("child environment is an explicit allowlist and excludes host variables", () => {
   const previous = process.env.HOST_ONLY_CREDENTIAL;
   process.env.HOST_ONLY_CREDENTIAL = "must-not-leak";
@@ -477,7 +522,7 @@ const rootReportingStub = [
   "#!/bin/sh",
   // Drain the prompt so the parent never sees EPIPE instead of the report.
   "while read -r _line; do :; done",
-  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s"}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR"',
+  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","piConfigRoot":"%s"}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$PI_CODING_AGENT_DIR"',
   "",
 ].join("\n");
 
@@ -498,11 +543,12 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   } as unknown as RunnerConfig;
   const runScratch = await provisionAgentScratch(config);
   try {
-    const env = buildChildEnvironment(config, claim, runScratch, fixture);
     for (const runner of ["CLAUDE", "CODEX", "PI"] satisfies RunnerKind[]) {
+      const runnerClaim = { ...claim, runner };
+      const env = buildChildEnvironment(config, runnerClaim, runScratch, fixture);
       const spec = {
         config,
-        claim: { ...claim, runner },
+        claim: runnerClaim,
         workingDirectory: fixture,
         env,
         prompt: buildPrompt(claim),
@@ -521,16 +567,70 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         const report = JSON.parse(evidence.stdout.trim().split("\n").at(-1) ?? "{}") as {
           workspaceRoot?: string;
           stateDir?: string;
+          piConfigRoot?: string;
         };
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
         assert.equal(report.stateDir, runScratch.stateDir, `${runner} ${mode} lost CONTROL_PLANE_STATE_DIR across the launcher`);
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);
+        if (runner === "PI") assert.equal(report.piConfigRoot, runScratch.configRoot, `${mode} lost PI_CODING_AGENT_DIR across the launcher`);
       }
     }
   } finally {
     await cleanupAgentScratch(config, runScratch);
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("PI preflight fails closed when the CLI omits an isolation capability", { timeout: 30_000 }, async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "agentos-pi-capability-"));
+  const stub = join(fixture, "pi-stub.sh");
+  await writeFile(stub, [
+    "#!/bin/sh",
+    'if [ "$1" = "--version" ]; then echo "0.1.0"; exit 0; fi',
+    'if [ "$1" = "--help" ]; then echo "--no-skills --no-prompt-templates --no-themes --no-approve"; exit 0; fi',
+    'if [ "$1" = "auth" ]; then exit 0; fi',
+    "exit 1",
+    "",
+  ].join("\n"));
+  await chmod(stub, 0o755);
+  try {
+    const config = {
+      binaries: { CLAUDE: stub, CODEX: stub, PI: stub },
+      runAsPrefix: [],
+    } as unknown as RunnerConfig;
+    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "cli-incompatible: the CLI does not expose the required AgentOS exec protocol");
+    assert.equal(result.authMode, null);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("PI preflight verifies every isolation capability before authentication", { timeout: 30_000 }, async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "agentos-pi-capability-"));
+  const stub = join(fixture, "pi-stub.sh");
+  await writeFile(stub, [
+    "#!/bin/sh",
+    'if [ "$1" = "--version" ]; then echo "0.84.2"; exit 0; fi',
+    'if [ "$1" = "--help" ]; then echo "--no-skills --no-prompt-templates --no-themes --no-context-files --no-approve"; exit 0; fi',
+    'if [ "$1" = "auth" ]; then exit 0; fi',
+    "exit 1",
+    "",
+  ].join("\n"));
+  await chmod(stub, 0o755);
+  try {
+    const config = {
+      binaries: { CLAUDE: stub, CODEX: stub, PI: stub },
+      runAsPrefix: [],
+    } as unknown as RunnerConfig;
+    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
+    assert.equal(result.ok, true);
+    assert.equal(result.authMode, "openai-codex");
+    assert.equal(result.capabilities.cliProtocol, "json-stdin-resume-isolated");
+  } finally {
     await rm(fixture, { recursive: true, force: true });
   }
 });

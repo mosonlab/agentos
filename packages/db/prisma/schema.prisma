@@ -141,6 +141,15 @@ enum RunStatus {
   LOST          @map("lost")
 }
 
+enum MergeRecoveryStatus {
+  VALIDATING             @map("validating")
+  REPAIRING              @map("repairing")
+  AWAITING_AUTHORIZATION @map("awaiting-authorization")
+  BLOCKED_DOWNSTREAM     @map("blocked-downstream")
+  SUCCEEDED              @map("succeeded")
+  FAILED                 @map("failed")
+}
+
 enum SessionExecutionStatus {
   REQUESTED     @map("requested")
   PROVISIONING  @map("provisioning")
@@ -558,6 +567,7 @@ model Task {
   goalLineageRuns         Run[]                @relation("RunGoalLineageIdentity")
   goalEventIdentities     GoalExecutionEvent[] @relation("GoalEventTaskIdentity")
   goalExecutionEvents     GoalExecutionEvent[]
+  mergeRecoveryAttempts   MergeRecoveryAttempt[]
 
   @@unique([chainId, chainIndex])
   @@unique([id, projectId])
@@ -576,6 +586,40 @@ model Task {
   @@index([recurringSourceTaskId])
   @@index([goalId, goalDispatchState])
   @@index([goalPredecessorTaskId])
+}
+
+/// Canonical authority for one automatic pre-merge base-drift recovery.
+/// TaskActivity and Inbox rows derived from this record are audit and
+/// notification projections only; they are never read back as authority.
+model MergeRecoveryAttempt {
+  id                      String              @id @default(cuid())
+  integratorTaskId        String
+  sourceStopId            String
+  attempt                 Int
+  status                  MergeRecoveryStatus @default(VALIDATING)
+  validationAttempts      Int                 @default(0)
+  boundSourceRunId        String?
+  authorizationActivityId String?
+  recoveryRunId           String?
+  readinessTaskId         String?
+  regressionTaskId        String?
+  repository              String?
+  prNumber                Int?
+  targetBranch            String?
+  authorizedHeadSha       String?
+  authorizedBaseSha       String?
+  observedBaseSha         String?
+  currentBaseSha          String?
+  failureReason           String?
+  startedAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  endedAt                 DateTime?
+  integratorTask          Task                @relation(fields: [integratorTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceStopId, attempt])
+  @@index([integratorTaskId, status])
+  @@index([recoveryRunId])
+  @@index([repository, prNumber, targetBranch])
 }
 
 /// Append-only ledger of trigger fires. Nothing reads it but the Triggers UI,

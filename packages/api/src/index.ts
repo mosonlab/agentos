@@ -29,6 +29,7 @@ let server: ServerType | undefined;
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let evidenceTimer: ReturnType<typeof setInterval> | null = null;
 let readinessTimer: ReturnType<typeof setInterval> | null = null;
+let baseDriftRecoveryTimer: ReturnType<typeof setInterval> | null = null;
 let prisma: (typeof import("@agentos/db"))["prisma"] | undefined;
 let cleanupPromise: Promise<void> | undefined;
 let requestedSignal: NodeJS.Signals | undefined;
@@ -68,6 +69,8 @@ const cleanup = (exitCode: number): Promise<void> => {
     evidenceTimer = null;
     if (readinessTimer) clearInterval(readinessTimer);
     readinessTimer = null;
+    if (baseDriftRecoveryTimer) clearInterval(baseDriftRecoveryTimer);
+    baseDriftRecoveryTimer = null;
     await closeServer().catch((error: unknown) => failures.push(error));
     if (prisma) await prisma.$disconnect().catch((error: unknown) => failures.push(error));
     // After the listener is closed and the client is disconnected, and not
@@ -162,6 +165,7 @@ const main = async (): Promise<void> => {
     { startScheduler },
     { startEvidenceWorker },
     { startReadinessWorker },
+    { startBaseDriftRecoveryWorker },
     files,
     { serve },
   ] = await Promise.all([
@@ -171,6 +175,7 @@ const main = async (): Promise<void> => {
     import("./scheduler.js"),
     import("./merge-evidence-worker.js"),
     import("./merge-readiness-worker.js"),
+    import("./merge-base-drift-worker.js"),
     import("./files/config.js"),
     import("@hono/node-server"),
   ]);
@@ -214,6 +219,7 @@ const main = async (): Promise<void> => {
   // a fourth service.
   evidenceTimer = startEvidenceWorker(prisma);
   readinessTimer = startReadinessWorker(prisma);
+  baseDriftRecoveryTimer = startBaseDriftRecoveryWorker(prisma);
   startupBusy = false;
 };
 

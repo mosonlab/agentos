@@ -1,15 +1,17 @@
 /**
  * Shared fixture for the Merge Integrator v1.1 database tests.
  *
- * These compatibility tests deliberately model a pre-autonomous-tail chain
- * whose snapshot still has a human gate at step 11 and a mechanical integrator
- * at step 12. The shape is load-bearing: `isIntegratorStep` is a conjunction
- * over the template name, step index, and output kind, so a fixture that gets
- * any of them wrong silently tests the ordinary non-integrator path instead.
+ * The default compatibility shape models the pre-autonomous human gate at step
+ * 11. Tests that need production topology opt into the server-owned readiness
+ * row between the nearest session-bearing source and the integrator. Both are
+ * load-bearing: `isIntegratorStep` is a conjunction over template name, step
+ * index, and output kind, so a bad fixture silently tests an ordinary task.
  */
 
 import {
   AssigneeType,
+  DIRECT_INTEGRATOR_STEP_INDEX,
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_SENTINEL_MODEL,
@@ -29,9 +31,17 @@ export type IntegratorChain = Awaited<ReturnType<typeof seedIntegratorChain>>;
 
 export const seedIntegratorChain = async (
   db: PrismaClient,
-  options: { label?: string; prNumbers?: number[]; withIntegrator?: boolean } = {},
+  options: {
+    label?: string;
+    prNumbers?: number[];
+    withIntegrator?: boolean;
+    shape?: "twelve-step" | "twelve-step-readiness" | "legacy-seven-step-direct";
+  } = {},
 ) => {
   const label = options.label ?? "mi";
+  const direct = options.shape === "legacy-seven-step-direct";
+  const realReadinessTail = direct || options.shape === "twelve-step-readiness";
+  const integratorIndex = direct ? DIRECT_INTEGRATOR_STEP_INDEX : INTEGRATOR_STEP_INDEX;
   const project = await db.project.create({ data: { name: label, slug: unique(label) } });
   const environment = await db.environment.create({
     data: { projectId: project.id, name: "local", allowedHosts: [] },
@@ -54,24 +64,41 @@ export const seedIntegratorChain = async (
     } });
   }
   const template = await db.taskTemplate.create({ data: {
-    projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME, description: "Twelve-step Full Assurance workflow", variables: [],
+    projectId: project.id,
+    name: direct ? DIRECT_INTEGRATOR_TEMPLATE_NAME : INTEGRATOR_TEMPLATE_NAME,
+    description: direct ? "Legacy seven-step Direct workflow" : "Twelve-step Full Assurance workflow",
+    variables: [],
   } });
   const gateStep = await db.taskTemplateStep.create({ data: {
-    taskTemplateId: template.id, stepIndex: INTEGRATOR_STEP_INDEX - 1, name: "Approval",
-    assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "deliver", approvalGate: true,
-    outputKind: "delivery", opensPullRequest: true,
+    taskTemplateId: template.id, stepIndex: realReadinessTail ? integratorIndex - 2 : integratorIndex - 1,
+    name: realReadinessTail ? "Regression" : "Approval",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "deliver", approvalGate: !realReadinessTail,
+    outputKind: realReadinessTail ? "regression-verification" : "delivery", opensPullRequest: !direct,
   } });
+  const readinessStep = realReadinessTail ? await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id, stepIndex: integratorIndex - 1, name: "Merge readiness",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "server-owned", approvalGate: false,
+    outputKind: "merge-authorization", opensPullRequest: false,
+  } }) : null;
   const integratorStep = options.withIntegrator === false ? null : await db.taskTemplateStep.create({ data: {
-    taskTemplateId: template.id, stepIndex: INTEGRATOR_STEP_INDEX, name: "Merge",
+    taskTemplateId: template.id, stepIndex: integratorIndex, name: "Merge",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: integratorAgent.id, prompt: "merge", approvalGate: false,
     outputKind: INTEGRATOR_OUTPUT_KIND, opensPullRequest: false,
   } });
   const chainId = unique("chain");
   const gateTask = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: gateStep.id,
-    name: "Approval", description: "approve", assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id,
-    approvalGate: true, chainId, chainIndex: gateStep.stepIndex, status: TaskStatus.DOING, targetBranch: "master",
+    name: realReadinessTail ? "Regression" : "Approval", description: "approve",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id,
+    approvalGate: !realReadinessTail, chainId, chainIndex: gateStep.stepIndex,
+    status: realReadinessTail ? TaskStatus.DONE : TaskStatus.DOING, targetBranch: "master",
   } });
+  const readinessTask = readinessStep ? await db.task.create({ data: {
+    projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: readinessStep.id,
+    name: "Merge readiness", description: "server-owned", assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: agent.id, approvalGate: false, opensPullRequest: false,
+    chainId, chainIndex: readinessStep.stepIndex, status: TaskStatus.DONE, targetBranch: "master",
+  } }) : null;
   const integratorTask = integratorStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: integratorStep.id,
     name: "Merge", description: "merge", assigneeType: AssigneeType.AGENT, assigneeAgentId: integratorAgent.id,
@@ -79,13 +106,21 @@ export const seedIntegratorChain = async (
     status: TaskStatus.TODO, targetBranch: "master",
   } }) : null;
   if (integratorTask) {
-    await db.task.update({ where: { id: gateTask.id }, data: { followUpTaskId: integratorTask.id } });
+    if (readinessTask) {
+      await db.task.update({ where: { id: gateTask.id }, data: { followUpTaskId: readinessTask.id } });
+      await db.task.update({ where: { id: readinessTask.id }, data: { followUpTaskId: integratorTask.id } });
+    } else {
+      await db.task.update({ where: { id: gateTask.id }, data: { followUpTaskId: integratorTask.id } });
+    }
   }
   const delivered = await seedDeliveredRun(db, {
     project: project.id, task: gateTask.id, agent: agent.id, repo: repo.id,
     prNumbers: options.prNumbers ?? [123],
   });
-  return { project, environment, agent, integratorAgent, repo, template, gateStep, integratorStep, chainId, gateTask, integratorTask, ...delivered };
+  return {
+    project, environment, agent, integratorAgent, repo, template, gateStep, readinessStep, integratorStep,
+    chainId, gateTask, readinessTask, integratorTask, ...delivered,
+  };
 };
 
 /**

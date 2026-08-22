@@ -31,9 +31,9 @@ test("catalog models render a default effort without rewriting a bare stored val
   );
   assert.equal(changes, 0);
   assert.match(markup, /Claude Opus 5/);
-  assert.match(markup, /<option value="high" selected="">high<\/option>/);
+  assert.match(markup, /<option value="medium" selected="">medium<\/option>/);
   assert.match(markup, /<select[^>]*disabled=""[^>]*>[\s\S]*?<option value="CLAUDE" selected="">Claude<\/option>/);
-  assert.equal(modelForSave("claude-opus-5"), "claude-opus-5:high");
+  assert.equal(modelForSave("claude-opus-5"), "claude-opus-5:medium");
   assert.equal(modelForSave("private/model:turbo"), "private/model:turbo");
 });
 

@@ -11,7 +11,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/api && npm run build -w @agentos/runner && npm run build -w @agentos/inbox && npm run build -w @agentos/merge-executor && npm run build -w @agentos/cli && npm run build -w @agentos/web",
+    "build": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/api && npm run build -w @agentos/runner && npm run build -w @agentos/inbox && npm run build -w @agentos/merge-executor && npm run build -w @agentos/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "typecheck:cli": "npm run typecheck:cli -w @agentos/db",
     "lint": "npm run lint:biome && npm run lint:types",
@@ -22,6 +22,7 @@
     "test:setup-local": "node --test scripts/setup-local.test.mjs",
     "verify:secret-hygiene": "node scripts/verify-secret-hygiene.mjs",
     "test:secret-hygiene": "node --test scripts/verify-secret-hygiene.test.mjs",
+    "test:merge-executor-setup": "node --test scripts/setup-merge-executor.test.mjs",
     "verify:oss-b0": "node scripts/verify-oss-b0.mjs",
     "test:oss-b0-harness": "node --test scripts/verify-oss-b0.test.mjs",
     "verify:compose-binding": "node scripts/compose-binding.mjs",
@@ -33,7 +34,7 @@
     "snapshot:authority-keygen": "npm run snapshot:authority-keygen -w @agentos/db --",
     "snapshot:scan": "node scripts/public-snapshot-scan.mjs",
     "test:snapshot-scan": "node --test scripts/public-snapshot-scan.test.mjs",
-    "test:release-docs": "node --test scripts/release-docs.test.mjs",
+    "test:release-docs": "node --test scripts/release-docs.test.mjs scripts/setup-merge-executor.test.mjs",
     "demo:templates": "node scripts/templates-release-demo.mjs",
     "test:demo-templates": "node --test scripts/templates-release-demo.test.mjs",
     "test:dependency-gate": "node --test scripts/goal-5a0-dependency-gate.test.mjs scripts/goal-5a0-handoff-preimage.test.mjs",
@@ -44,7 +45,6 @@
     "dev:web": "npm run dev -w @agentos/web",
     "dev:runner": "npm run dev -w @agentos/runner",
     "dev:inbox": "npm run dev -w @agentos/inbox",
-    "agentos": "npm run start -w @agentos/cli --",
     "db:generate": "npm run db:generate -w @agentos/db",
     "db:migrate": "npm run db:migrate -w @agentos/db",
     "db:migrate:release": "npm run db:migrate:release -w @agentos/db --",

@@ -4,10 +4,12 @@ import {
   AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   MERGE_TAIL_KIND,
+  MergeRecoveryStatus,
   Prisma,
   RunnerPreference,
   TaskStatus,
   activateChainSuccessor,
+  activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   defenseTriggers,
   enqueueTaskRun,
@@ -17,6 +19,7 @@ import {
   resolutionTestTriggers,
   runnerFor,
   type PrismaClient,
+  type MergeRecoveryAttempt,
 } from "@agentos/db";
 
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
@@ -30,6 +33,66 @@ export const readinessPollIntervalMs = (): number => {
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 const READINESS_LEASE_MS = 30_000;
 
+type RecoveryContext = {
+  aggregateId: string;
+  attempt: number;
+  sourceStopId: string;
+  sourceRunId: string;
+  authorizationActivityId: string;
+  repository: string;
+  prNumber: number;
+  targetBranch: string;
+  authorizedHeadSha: string;
+  authorizedBaseSha: string;
+  observedBaseSha: string;
+  currentBaseSha: string;
+  readinessTaskId: string;
+  regressionTaskId: string;
+  integratorTaskId: string;
+  recoveryRunId: string;
+};
+
+const recoveryContext = (row: MergeRecoveryAttempt | null): RecoveryContext | null => {
+  if (!row?.boundSourceRunId || !row.authorizationActivityId || !row.recoveryRunId
+    || !row.readinessTaskId || !row.regressionTaskId || !row.repository
+    || row.prNumber === null || !row.targetBranch || !row.authorizedHeadSha
+    || !row.authorizedBaseSha || !row.observedBaseSha || !row.currentBaseSha) return null;
+  return {
+    aggregateId: row.id,
+    attempt: row.attempt,
+    sourceStopId: row.sourceStopId,
+    sourceRunId: row.boundSourceRunId,
+    authorizationActivityId: row.authorizationActivityId,
+    repository: row.repository,
+    prNumber: row.prNumber,
+    targetBranch: row.targetBranch,
+    authorizedHeadSha: row.authorizedHeadSha,
+    authorizedBaseSha: row.authorizedBaseSha,
+    observedBaseSha: row.observedBaseSha,
+    currentBaseSha: row.currentBaseSha,
+    readinessTaskId: row.readinessTaskId,
+    regressionTaskId: row.regressionTaskId,
+    integratorTaskId: row.integratorTaskId,
+    recoveryRunId: row.recoveryRunId,
+  };
+};
+
+const recoveryContextFor = async (
+  db: PrismaClient,
+  regressionTaskId: string,
+  readinessTaskId: string,
+  recoveryRunId: string | null,
+): Promise<RecoveryContext | null> => {
+  if (!recoveryRunId) return null;
+  const row = await db.mergeRecoveryAttempt.findFirst({ where: {
+    regressionTaskId,
+    readinessTaskId,
+    recoveryRunId,
+    status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
+  }, orderBy: [{ attempt: "desc" }, { id: "desc" }] });
+  return recoveryContext(row);
+};
+
 const readinessClaim = (now: Date): string => (
   `${READINESS_CLAIM_PREFIX}${randomUUID()}|${new Date(now.getTime() + READINESS_LEASE_MS).toISOString()}`
 );
@@ -42,12 +105,44 @@ const expiredReadinessClaim = (reason: string | null, now: Date): boolean => {
 
 const stopReadiness = async (
   db: PrismaClient,
-  input: { readinessTaskId: string; regressionTaskId: string; reason: string },
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    reason: string;
+    recovery: RecoveryContext | null;
+  },
 ): Promise<void> => {
-  const dedupeKey = `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
+  const recoveryBody = input.recovery
+    ? `Automatic base-drift recovery ${input.recovery.attempt} stopped at readiness: ${input.reason}`
+    : null;
+  const dedupeKey = input.recovery
+    ? `merge-base-drift-recovery-tail-stop:${input.recovery.sourceStopId}:readiness`
+    : `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
   await db.$transaction(async (tx) => {
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
+    if (input.recovery) {
+      await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
+        status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+        failureReason: input.reason,
+        endedAt: new Date(),
+      } });
+      await tx.task.update({
+        where: { id: input.recovery.integratorTaskId },
+        data: { status: TaskStatus.REVIEW, failureReason: recoveryBody },
+      });
+      const metadata = {
+        ...input.recovery,
+        state: "tail-stopped",
+        phase: "readiness",
+        reason: input.reason,
+        dedupeKey,
+      } as Prisma.InputJsonObject;
+      await tx.taskActivity.createMany({ data: [
+        { taskId: input.recovery.integratorTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
+        { taskId: input.regressionTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
+      ] });
+    }
     await tx.taskActivity.create({ data: {
       taskId: input.regressionTaskId,
       actorType: "control-plane",
@@ -60,7 +155,7 @@ const stopReadiness = async (
         from: "AGENT",
         taskId: input.regressionTaskId,
         kind: "TEXT",
-        body: `Autonomous merge readiness stopped: ${input.reason}`,
+        body: recoveryBody ?? `Autonomous merge readiness stopped: ${input.reason}`,
         dedupeKey,
       },
       update: {},
@@ -68,11 +163,18 @@ const stopReadiness = async (
   });
 };
 
-const latestReviewState = async (db: PrismaClient, readinessTaskId: string, headSha: string) => {
+const latestReviewState = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+  headSha: string,
+  recoveryBaseSha: string | null,
+) => {
   const rows = await db.taskActivity.findMany({ where: { taskId: readinessTaskId }, orderBy: { createdAt: "desc" }, select: { metadata: true } });
   for (const row of rows) {
     const metadata = row.metadata as Record<string, unknown> | null;
-    if (metadata?.kind === MERGE_TAIL_KIND.reviewObligation && metadata.headSha === headSha) return metadata;
+    if (metadata?.kind === MERGE_TAIL_KIND.reviewObligation
+      && metadata.headSha === headSha
+      && (recoveryBaseSha === null || metadata.baseSha === recoveryBaseSha)) return metadata;
   }
   return null;
 };
@@ -86,6 +188,7 @@ const createReviewObligation = async (
     baseSha: string;
     headSha: string;
     triggers: Array<{ path: string; reason: string }>;
+    recovery: RecoveryContext | null;
   },
 ): Promise<{ ok: true } | { ok: false; reason: string }> => db.$transaction(async (tx) => {
   if (!input.readinessTask.repoId) return { ok: false as const, reason: "readiness task has no repository" };
@@ -96,7 +199,6 @@ const createReviewObligation = async (
   const task = await tx.task.create({ data: {
     projectId: input.readinessTask.projectId,
     repoId: input.readinessTask.repoId,
-    followUpTaskId: input.readinessTask.id,
     name: "Autonomous merge tail: independent review",
     description: [
       `Blindly review the exact diff ${input.baseSha}..${input.headSha}.`,
@@ -131,6 +233,7 @@ const createReviewObligation = async (
         baseSha: input.baseSha,
         reviewTaskId: task.id,
         triggers: input.triggers,
+        recoverySourceStopId: input.recovery?.sourceStopId ?? null,
       },
     },
     {
@@ -145,6 +248,7 @@ const createReviewObligation = async (
         regressionTaskId: input.regressionTaskId,
         headSha: input.headSha,
         baseSha: input.baseSha,
+        recoverySourceStopId: input.recovery?.sourceStopId ?? null,
       },
     },
   ] });
@@ -166,12 +270,42 @@ const requeueRegression = async (
     currentBaseSha: string;
     reason: string;
     now: Date;
+    recovery: RecoveryContext | null;
   },
 ): Promise<void> => {
   await db.$transaction(async (tx) => {
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
-    await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    if (input.recovery) {
+      await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
+        status: MergeRecoveryStatus.REPAIRING,
+        recoveryRunId: run.id,
+        currentBaseSha: input.currentBaseSha,
+        failureReason: null,
+        endedAt: null,
+      } });
+      const body = `Automatic base-drift recovery ${String(input.recovery.attempt)} context carried through readiness requeue`;
+      const metadata = {
+        ...input.recovery,
+        currentBaseSha: input.currentBaseSha,
+        recoveryRunId: run.id,
+      } as Prisma.InputJsonObject;
+      await tx.taskActivity.createMany({ data: [
+        {
+          taskId: input.recovery.integratorTaskId,
+          actorType: "control-plane",
+          body,
+          metadata,
+        },
+        {
+          taskId: input.regressionTaskId,
+          actorType: "control-plane",
+          body,
+          metadata,
+        },
+      ] });
+    }
     await tx.taskActivity.create({ data: {
       taskId: input.regressionTaskId,
       actorType: "control-plane",
@@ -217,7 +351,10 @@ export const readinessTick = async (
         templateId: readiness.templateId,
         templateStep: { outputKind: "regression-verification" },
       },
-      include: { stepOutput: true },
+      include: {
+        stepOutput: true,
+        runs: { orderBy: { runNumber: "desc" }, take: 1, select: { id: true } },
+      },
     });
     if (!regression || regression.status !== TaskStatus.DONE) continue;
     const claimReason = readinessClaim(now);
@@ -231,26 +368,34 @@ export const readinessTick = async (
     if (claimed.count !== 1) continue;
     result.claimed += 1;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let recovery: RecoveryContext | null = null;
     try {
+      recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
+      if (recovery) {
+        await db.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
+          status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+          failureReason: null,
+        } });
+      }
     if (!regression?.stepOutput) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression?.id ?? readiness.id, reason: "missing head-bound regression PASS evidence" });
+      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression?.id ?? readiness.id, reason: "missing head-bound regression PASS evidence", recovery });
       result.stopped += 1;
       continue;
     }
     const verdict = parseRegressionVerdict(regression.stepOutput.body);
     if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass" || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "missing or stale head-bound regression PASS evidence" });
+      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "missing or stale head-bound regression PASS evidence", recovery });
       result.stopped += 1;
       continue;
     }
     if (!reader?.compareCommits) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "server-side GitHub comparison reader is unavailable" });
+      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "server-side GitHub comparison reader is unavailable", recovery });
       result.stopped += 1;
       continue;
     }
     const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
     if (!target.resolved) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `pull-request target is ${target.unresolvable}` });
+      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `pull-request target is ${target.unresolvable}`, recovery });
       result.stopped += 1;
       continue;
     }
@@ -265,12 +410,13 @@ export const readinessTick = async (
           currentBaseSha: snapshot.baseSha ?? "missing",
           reason: `stale PASS head ${verdict.verdict.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
           now,
+          recovery,
         });
         result.requeued += 1;
         continue;
       }
       if (!snapshot.baseSha || !snapshot.baseRefName) {
-        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "pull request base identity is unavailable" });
+        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "pull request base identity is unavailable", recovery });
         result.stopped += 1;
         continue;
       }
@@ -282,6 +428,7 @@ export const readinessTick = async (
           currentBaseSha: snapshot.baseSha,
           reason: "target base advanced after regression PASS",
           now,
+          recovery,
         });
         result.requeued += 1;
         continue;
@@ -292,6 +439,7 @@ export const readinessTick = async (
           readinessTaskId: readiness.id,
           regressionTaskId: regression.id,
           reason: "GitHub comparison file list is truncated or completeness is unproven",
+          recovery,
         });
         result.stopped += 1;
         continue;
@@ -304,6 +452,7 @@ export const readinessTick = async (
           currentBaseSha: snapshot.baseSha,
           reason: `server-side ancestry check refused ${diff.status} comparison with behind_by=${diff.behindBy}`,
           now,
+          recovery,
         });
         result.requeued += 1;
         continue;
@@ -324,7 +473,12 @@ export const readinessTick = async (
         }
         triggers.push(...resolutionTestTriggers(resolution.files));
       }
-      const review = await latestReviewState(db, readiness.id, verdict.verdict.headSha);
+      const review = await latestReviewState(
+        db,
+        readiness.id,
+        verdict.verdict.headSha,
+        recovery ? snapshot.baseSha : null,
+      );
       if (triggers.length > 0 && review?.state !== "approved") {
         if (review?.state === "open") {
           await db.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW, failureReason: `independent-review-open:${String(review.reviewTaskId)}` } });
@@ -337,7 +491,7 @@ export const readinessTick = async (
           orderBy: { createdAt: "desc" },
         });
         if (!branchRun?.branch) {
-          await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "chain branch is unavailable for independent review" });
+          await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "chain branch is unavailable for independent review", recovery });
           result.stopped += 1;
           continue;
         }
@@ -348,9 +502,10 @@ export const readinessTick = async (
           baseSha: snapshot.baseSha,
           headSha: verdict.verdict.headSha,
           triggers,
+          recovery,
         });
         if (!opened.ok) {
-          await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: opened.reason });
+          await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: opened.reason, recovery });
           result.stopped += 1;
         } else {
           result.reviewing += 1;
@@ -359,12 +514,15 @@ export const readinessTick = async (
       }
       const evidence = evidenceFromSnapshot(snapshot, randomUUID());
       if ("error" in evidence) {
-        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: evidence.error });
+        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: evidence.error, recovery });
         result.stopped += 1;
         continue;
       }
       await db.$transaction(async (tx) => {
-        const binding = `mechanical:${readiness.id}`;
+        // Every exact-head/current-base cycle gets a distinct binding. The
+        // obsolete authorization remains append-only evidence and cannot make a
+        // refreshed authorization ambiguous or be reused by the executor.
+        const binding = `mechanical:${readiness.id}:${randomUUID()}`;
         const payload = {
           ...evidence,
           mergeMethod: AUTHORIZED_MERGE_METHOD,
@@ -375,7 +533,7 @@ export const readinessTick = async (
           taskId: readiness.id,
           actorType: "control-plane",
           body: `Mechanical merge authorized for PR #${target.prNumber} at ${evidence.headSha}`,
-          metadata: authorizationMetadata(payload) as Prisma.InputJsonObject,
+          metadata: { ...authorizationMetadata(payload), recoverySourceStopId: recovery?.sourceStopId ?? null } as Prisma.InputJsonObject,
         } });
         await tx.taskStepOutput.upsert({
           where: { taskId: readiness.id },
@@ -387,13 +545,23 @@ export const readinessTick = async (
           taskId: readiness.id,
           actorType: "control-plane",
           body: `Merge readiness authorized exact head ${evidence.headSha}; merge execution queued`,
-          metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "authorized", headSha: evidence.headSha, authorizationActivityId: activity.id },
+          metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "authorized", headSha: evidence.headSha, authorizationActivityId: activity.id, recoverySourceStopId: recovery?.sourceStopId ?? null },
         } });
-        await activateChainSuccessor(tx, readiness, {}, now);
+        if (recovery) {
+          await activateRecoveryIntegratorSuccessor(tx, {
+            readinessTaskId: readiness.id,
+            integratorTaskId: recovery.integratorTaskId,
+            sourceStopId: recovery.sourceStopId,
+            recoveryRunId: recovery.recoveryRunId,
+            authorizationActivityId: activity.id,
+          }, now);
+        } else {
+          await activateChainSuccessor(tx, readiness, {}, now);
+        }
       });
       result.authorized += 1;
     } catch (error: unknown) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}` });
+      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`, recovery });
       result.stopped += 1;
     } finally {
       if (timer) clearTimeout(timer);

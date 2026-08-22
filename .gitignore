@@ -2,7 +2,12 @@ node_modules/
 dist/
 .merge-gate.lock/
 .agentos-deploy/
+.agentos-pi/
 .env
+# Human-captured merge-executor service input. It contains the executor API
+# bearer and is installed separately from the repository configuration.
+.merge-executor.env
+.merge-executor.env.tmp.*
 # `npm run setup:local` writes the complete bytes of an unpublished .env to a
 # same-directory temporary file before it links them into place. An interrupted
 # run leaves one behind, holding every generated credential.

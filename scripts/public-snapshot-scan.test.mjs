@@ -348,20 +348,26 @@ test("every Goal 5a0 manifest entry survives, by exact glob", () => {
   assert.equal(GOAL_5A0_MANIFEST_ENTRIES.filter((entry) => entry.endsWith(".test.mjs")).length, 2);
 });
 
+test("the retired repository CLI is absent from snapshot authority", () => {
+  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
+  const globs = manifest.include.map((entry) => entry.glob);
+  assert.equal(globs.some((glob) => glob === "packages/cli" || glob.startsWith("packages/cli/")), false);
+});
+
 test("the docs surface is closed and named one file at a time", () => {
   const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
   const docs = manifest.include.map((entry) => entry.glob).filter((glob) => glob.startsWith("docs/"));
   // `docs/` is closed by default and this is the whole of what is open in it.
   // Publishing one reviewed document must not become a reason to publish
-  // unrelated plans, reviews, specifications, or runbooks alongside it.
+  // unrelated plans, reviews, specifications, or unlisted runbooks alongside it.
   assert.deepEqual(docs.sort(), [
     "docs/BRIEF-TEMPLATE.md",
     "docs/demos/templates-release-demo.md",
     "docs/demos/templates-release-evidence.schema.json",
     "docs/governance/review-role-convergence-v1.md",
     "docs/governance/task-routing-v1.md",
-    "docs/media/agents.png",
-    "docs/media/tasks-board.png",
+    "docs/media/chain.png",
+    "docs/media/tasks.png",
     "docs/public-snapshot.md",
     "docs/release/fixtures/oss-b0-smoke-task.json",
     "docs/release/v0.1.0-developer-preview.md",
@@ -372,6 +378,8 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/release/v0.1.0-support-matrix.md",
     "docs/release/v0.2.0-release-notes.md",
     "docs/runbooks/gate-worker.md",
+    "docs/runbooks/legacy-integrator-stop.md",
+    "docs/runbooks/merge-executor.md",
     "docs/runbooks/quiet-window-auto-deploy.md",
   ]);
   // Named one at a time rather than by `docs/release/*.md`, because a directory
@@ -430,7 +438,7 @@ test("every workspace manifest records the same first-party version", () => {
   // away from a registry entry nobody decided to create.
   const manifests = execFileSync("git", ["ls-files", "package.json", "apps/*/package.json", "packages/*/package.json"])
     .toString("utf8").trim().split("\n");
-  assert.ok(manifests.length >= 10, "expected the root manifest and every workspace manifest");
+  assert.equal(manifests.length, 9, "expected the root manifest and eight workspace manifests");
   const releaseVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
   for (const path of manifests) {
     const pkg = JSON.parse(readFileSync(path, "utf8"));

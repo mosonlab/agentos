@@ -23,9 +23,12 @@ export const DEPLOY_REQUIRED_ARTIFACT_PATHS = Object.freeze([
   "packages/runner/dist",
   "packages/inbox/dist",
   "packages/merge-executor/dist",
-  "packages/cli/dist",
   "apps/web/dist",
   "node_modules",
+]);
+
+export const DEPLOY_OPTIONAL_ARTIFACT_PATHS = Object.freeze([
+  "packages/cli/dist",
 ]);
 
 export const workspaceDependencyPaths = (root) => {
@@ -61,6 +64,7 @@ export const workspaceDependencyPaths = (root) => {
 
 export const deployArtifactPaths = (root) => Object.freeze([
   ...DEPLOY_REQUIRED_ARTIFACT_PATHS.slice(0, -1),
+  ...DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   ...workspaceDependencyPaths(root),
   "node_modules",
 ]);

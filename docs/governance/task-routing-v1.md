@@ -54,15 +54,15 @@ This is the target shape of the seeded `compound-engineer-workflow` template and
 
 | 步 | 角色 | (入口, model, effort) | 要点 |
 | --- | --- | --- | --- |
-| ① spec | spec | CLAUDE, fable-5, medium | 不变；product owner 与 Fable 对话产出；人工闸 |
+| ① spec | spec | CODEX, sol, high | 根据 Product Contract 产出可供 plan agent 直接执行的完整 specification；人工闸 |
 | ② plan | plan | CLAUDE, fable-5, medium | 产物=垂直切片集，一片一文件：{id, title, delivers, blocked_by[], acceptance[], files_hint[]}；切片判据：纵穿全层、独立可演示、单上下文窗装得下；宽重构走 expand→migrate（分批）→contract；plan 会话 session-id 落链分支文件 |
-| ③ 计划评审 | review-coordinator | CODEX, sol, high | 作者为 Fable，评审异厂；检查：粒度/依赖边真伪/该合该拆三问、每片「能演示什么」、每条验收判据在基点 commit 为红 |
+| ③ 计划评审 | review-coordinator | PI, openai-codex/gpt-5.6-sol, high | 作者为 Fable，评审异厂；检查：粒度/依赖边真伪/该合该拆三问、每片「能演示什么」、每条验收判据在基点 commit 为红 |
 | ④ 计划修订 | plan-reviser | CLAUDE, fable-5, medium | resume ②会话（同模型同档；显式 session-id，禁 `--last`）；跨链步 resume 实测不通过则新窗读②③产出；不服 findings 须列明理由不得静默略过；实施授权闸在本步后 |
 | ⑤ 实现 | executioner | CODEX 父会话 sol, medium + 子代理 luna, max | 切片逐片按正典入口 (a)/(b) 路由（链即入口 (b) 结构），触及 persisted data 或不可回滚外部动作的切片改 sol:high；父会话按 blocked_by 拓扑分层 wave 调度，同 wave 并行，每子代理一 worktree，屏障处串行合入并跑测试，整案单次 push；子代理经 multi_agent_v2 spawn 且档位写死。fan-out 启用 hard gate（先实测：spawn schema、子代理 model/effort 生效证据、worktree 创建/回收、并发上限、失败清理），任一项不可证明则过渡态=逐片 luna:max 串行（一片一新进程） |
-| ⑥a 代码评审（Sol 路） | review-coordinator-sol | CODEX, sol, high | base=⑤启动前冻结 commit，head=⑤记录的结束 commit，审完整 integrated diff；`codex exec review`，custom prompt 注入 Fowler smell 基线与「Spec 轴每条 finding 引 spec 原文」；findings 仅持久化为 TaskStepOutput，不写入或推送链分支 |
-| ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, high | workspace 以⑤记录的结束 commit 做 fetch-level isolated detached checkout；claim 以 non-report metadata 提供 immutable base/head；先将独立 Standards/Spec 评审持久化为 intermediate TaskStepOutput，成功写入后才解锁并读取⑥a，再按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；最终报告与 provider session id 仅落 platform output |
+| ⑥a 代码评审（Sol 路） | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | base=⑤启动前冻结 commit，head=⑤记录的结束 commit，审完整 integrated diff；同一会话先完成 Standards pass 并闭合 findings，再单独执行逐项引用治理文本的 Spec pass，合并为一份报告；findings 仅持久化为 TaskStepOutput，不写入或推送链分支 |
+| ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, medium | workspace 以⑤记录的结束 commit 做 fetch-level isolated detached checkout；claim 以 non-report metadata 提供 immutable base/head；先将独立 Standards/Spec 评审持久化为 intermediate TaskStepOutput，成功写入后才解锁并读取⑥a，再按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；最终报告与 provider session id 仅落 platform output |
 | ⑦ 修复 | senior-dev | CODEX, sol, medium | 按封闭 must-fix 清单修；修复 diff 触及任一结构风险升 sol:high（本合同的 product-owner 裁定） |
-| ⑥c 回归核销 | review-coordinator-sol | CODEX, sol, high | 从完整 persisted review package 读取闭合 must-fix、⑥b 终裁与修复结果，对完整修复 diff 整体回归核销并绑定 exact head；不 resume ⑥b 的 Opus session |
+| ⑥c 回归核销 | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | 从完整 persisted review package 读取闭合 must-fix、⑥b 终裁与修复结果，对完整修复 diff 整体回归核销并绑定 exact head；不 resume ⑥b 的 Opus session |
 | ⑧ wiki | librarian | CODEX, terra, medium | 自 luna:high 改此（luna:high 违「Luna 一律 max」硬禁令；Terra $2/$12） |
 | ⑨ 人工 PR 审查 | 人工闸 | — | 不变 |
 

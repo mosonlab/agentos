@@ -3,9 +3,8 @@
 # Push this repository into the gate worker's bare mirror. Runs ON THE LOCAL
 # MACHINE (issue #132):
 #
-#   scripts/gate-worker/mirror-push.sh <server>            # push refs + harness
-#   scripts/gate-worker/mirror-push.sh <server> --dry-run  # show what would go
-#   AGENTOS_GATE_SERVER=<server> scripts/gate-worker/mirror-push.sh
+#   scripts/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <oid>
+#   scripts/gate-worker/mirror-push.sh <server> --candidate <oid> --baseline <oid> --dry-run
 #
 # <server> is anything ssh accepts: a Host alias from ~/.ssh/config (preferred —
 # it keeps the address, the user, the port and the key in one place that is not
@@ -26,28 +25,21 @@
 # constrains what that code connects to. docs/runbooks/gate-worker.md states the
 # boundary.
 #
-# Two things are pushed:
+# Three things are pushed:
 #
-#   1. every ref, with --mirror, so any commit reachable from a ref here can be
-#      gated by object id without naming a branch. Reachable from a ref: an oid
-#      that only a reflog or a detached HEAD holds has no ref to carry it and
-#      does not travel, which the local-HEAD readback below is what catches;
-#   2. scripts/gate-worker/run-gate.sh, installed at ~/gate/<repo>/run-gate.sh,
+#   1. the exact candidate object, retained at refs/gate/candidates/<oid>;
+#   2. the exact baseline object, retained at refs/gate/baselines/<oid>;
+#   3. scripts/gate-worker/run-gate.sh, installed at ~/gate/<repo>/run-gate.sh,
 #      so the harness on the worker is the one in this checkout. The install is
 #      a copy to a temporary name in that directory followed by a rename, so the
 #      harness a gate reads is always a whole file even if two pushes race.
 #
-# One thing is checked: that origin's current default-branch head is among the
-# objects that arrived. The gate's frozen-record rules are evaluated against a
-# baseline oid that remote-gate.sh reads from origin, and the worker cannot
-# fetch it later — so a mirror without it can only produce a gate that refuses
-# to run. Catching that here, where the fix is one fetch, is the whole reason
-# to look.
-#
-# --mirror deletes refs on the worker that no longer exist here. That is correct
-# for a mirror whose only reader is a gate that resolves object ids: the worker
-# is a cache of this repository's ref graph, never a place work is authored, and
-# a ref that only exists on the worker is drift, not data.
+# The caller resolves both oids before taking a worker slot. This script refuses
+# an oid the checkout cannot resolve, pushes only those two immutable cache refs,
+# and reads both refs back exactly. It never treats this checkout's ref namespace
+# as authority and never deletes a worker ref. A detached or single-branch clone
+# is therefore a complete transport source as long as it contains the requested
+# candidate and the caller refreshed the requested baseline object.
 #
 # Sends no credential of any kind. The push is git-over-ssh; the ssh key stays on
 # this machine and is used for authentication, never copied.
@@ -62,6 +54,8 @@ SERVER="${AGENTOS_GATE_SERVER:-}"
 GATE_HOME="${GATE_HOME:-gate}"   # relative to the remote account's $HOME
 SSH_PORT=""
 DRY_RUN=0
+CANDIDATE_OID=""
+BASELINE_OID=""
 
 usage() {
   sed -n '2,58p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
@@ -80,6 +74,14 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die "--gate-home needs a path" 64
       GATE_HOME="$2"; shift ;;
     --gate-home=*) GATE_HOME="${1#--gate-home=}" ;;
+    --candidate)
+      [ $# -ge 2 ] || die "--candidate needs an object id" 64
+      CANDIDATE_OID="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift ;;
+    --candidate=*) CANDIDATE_OID="$(printf '%s' "${1#--candidate=}" | tr '[:upper:]' '[:lower:]')" ;;
+    --baseline)
+      [ $# -ge 2 ] || die "--baseline needs an object id" 64
+      BASELINE_OID="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift ;;
+    --baseline=*) BASELINE_OID="$(printf '%s' "${1#--baseline=}" | tr '[:upper:]' '[:lower:]')" ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage 0 ;;
     -*) printf 'mirror-push: unknown argument %s\n\n' "$1" >&2; usage 64 ;;
@@ -91,6 +93,14 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$SERVER" ] || { printf 'mirror-push: no server given\n\n' >&2; usage 64; }
+[ -n "$CANDIDATE_OID" ] || die "--candidate is required" 64
+[ -n "$BASELINE_OID" ] || die "--baseline is required" 64
+for named_oid in "candidate:${CANDIDATE_OID}" "baseline:${BASELINE_OID}"; do
+  oid_name="${named_oid%%:*}"
+  oid_value="${named_oid#*:}"
+  case "$oid_value" in *[!0-9a-f]*) die "not a full object id for ${oid_name}: ${oid_value}" 64 ;; esac
+  [ "${#oid_value}" -eq 40 ] || die "not a full 40-character object id for ${oid_name}: ${oid_value}" 64
+done
 case "$SERVER" in
   -*) die "server looks like an option: $SERVER" 64 ;;
 esac
@@ -108,6 +118,10 @@ git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
 # A repository without it has nothing for the worker to run.
 [ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
   || die "${REPO_ROOT} has no scripts/merge-gate.sh; the worker gates repositories that ship their own gate"
+git -C "$REPO_ROOT" cat-file -e "${CANDIDATE_OID}^{commit}" 2>/dev/null \
+  || die "candidate ${CANDIDATE_OID} is not in ${REPO_ROOT}"
+git -C "$REPO_ROOT" cat-file -e "${BASELINE_OID}^{commit}" 2>/dev/null \
+  || die "baseline ${BASELINE_OID} is not in ${REPO_ROOT}; refresh it before pushing"
 
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
@@ -143,11 +157,15 @@ fi
 # which is the behaviour this wants.
 REMOTE_MIRROR="${SERVER}:${REPO_HOME}/mirror.git"
 REMOTE_HARNESS="${SERVER}:${REPO_HOME}/run-gate.sh"
+CANDIDATE_REF="refs/gate/candidates/${CANDIDATE_OID}"
+BASELINE_REF="refs/gate/baselines/${BASELINE_OID}"
 
 printf '== Gate worker mirror push\n'
 printf '   repository: %s (%s)\n' "$REPO_ROOT" "$REPO_NAME"
 printf '   server:     %s%s\n' "$SERVER" "${SSH_PORT:+ (port ${SSH_PORT})}"
 printf '   mirror:     %s\n' "$REMOTE_MIRROR"
+printf '   candidate:  %s\n' "$CANDIDATE_OID"
+printf '   baseline:   %s\n' "$BASELINE_OID"
 
 # First push of a repository creates its mirror; anything else standing at that
 # path is refused rather than pushed into. `git init` on an existing bare
@@ -187,15 +205,35 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '\n== Dry run: refs that would be pushed\n'
-  git -C "$REPO_ROOT" push --mirror --dry-run "$REMOTE_MIRROR" || die "dry-run push failed"
+  printf '\n== Dry run: exact cache refs that would be pushed\n'
+  git -C "$REPO_ROOT" push --atomic --dry-run "$REMOTE_MIRROR" \
+    "${CANDIDATE_OID}:${CANDIDATE_REF}" \
+    "${BASELINE_OID}:${BASELINE_REF}" || die "dry-run push failed"
   printf '\n   would also install scripts/gate-worker/run-gate.sh at %s (copy to a\n   temporary name in the same directory, then rename into place)\n' "$REMOTE_HARNESS"
   printf '\nMIRROR PUSH: DRY RUN OK\n'
   exit 0
 fi
 
-printf '\n== Pushing every ref (--mirror)\n'
-git -C "$REPO_ROOT" push --mirror "$REMOTE_MIRROR" || die "the mirror push failed"
+printf '\n== Pushing exact candidate and baseline refs\n'
+push_status=0
+git -C "$REPO_ROOT" push --atomic "$REMOTE_MIRROR" \
+  "${CANDIDATE_OID}:${CANDIDATE_REF}" \
+  "${BASELINE_OID}:${BASELINE_REF}" || push_status=$?
+if [ "$push_status" -ne 0 ]; then
+  # Two dispatches for the same oids can both advertise an absent immutable ref,
+  # then race to create it. The loser may be rejected even though the exact
+  # requested state is now present. Accept only an exact two-ref readback; any
+  # transport error or different value remains the original loud push failure.
+  candidate_after_race="$(ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
+    "git -C ${REPO_HOME}/mirror.git rev-parse ${CANDIDATE_REF}^{commit}" 2>/dev/null || true)"
+  baseline_after_race="$(ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
+    "git -C ${REPO_HOME}/mirror.git rev-parse ${BASELINE_REF}^{commit}" 2>/dev/null || true)"
+  if [ "$candidate_after_race" = "$CANDIDATE_OID" ] && [ "$baseline_after_race" = "$BASELINE_OID" ]; then
+    printf '   concurrent push already installed both exact refs\n'
+  else
+    die "the exact-ref push failed"
+  fi
+fi
 
 printf '\n== Installing the gate harness\n'
 # scp truncates its target and then streams into it, so copying straight onto
@@ -205,9 +243,9 @@ printf '\n== Installing the gate harness\n'
 # happens to be there — which has already corrupted the worker's run-gate.sh
 # once. So the copy lands on a name nobody else uses and a rename moves it into
 # place: rename(2) within one directory is atomic, and a reader either gets the
-# whole old file or the whole new one, never a mixture. A concurrent push then
-# only decides which complete harness wins, which is harmless because both are
-# the same file, and an already-running gate keeps executing the inode it opened.
+# whole old file or the whole new one, never a mixture. A concurrent install only
+# decides which complete harness is available to the next invocation; a gate
+# already executing keeps the inode it opened.
 HARNESS_TMP_NAME="run-gate.sh.tmp.$$.${RANDOM}"
 REMOTE_HARNESS_TMP="${SERVER}:${REPO_HOME}/${HARNESS_TMP_NAME}"
 
@@ -229,58 +267,21 @@ ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
 }
 printf '   %s\n' "$REMOTE_HARNESS"
 
-# Read back rather than trust the push: a --mirror push that succeeded but landed
-# in the wrong repository, or a mirror that was rewound afterwards, both look
-# identical from here until something is resolved against it.
-LOCAL_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
-if [ -n "$LOCAL_HEAD" ]; then
-  printf '\n== Verifying the local HEAD arrived\n'
-  if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
-      "git -C ${REPO_HOME}/mirror.git cat-file -e ${LOCAL_HEAD}^{commit}" 2>/dev/null; then
-    printf '   %s is in the mirror\n' "$LOCAL_HEAD"
-  else
-    die "pushed, but ${LOCAL_HEAD} is not resolvable in ${REMOTE_MIRROR}"
-  fi
-fi
-
-# Origin's default-branch head, asked of origin rather than read from a local
-# ref: the local ref is a cache, and a mirror that carries a stale one is
-# exactly how a frozen record's modification gets read as an addition. The
-# branch's name is read from origin's HEAD symref in the same call, so the name
-# and the oid cannot come from two different moments — this repository's is
-# `main`, but that is origin's to say, not this script's.
-printf '\n== Verifying the gate baseline arrived\n'
-symref="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)"
-DEFAULT_REF="$(printf '%s\n' "$symref" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
-BASELINE_OID="$(printf '%s\n' "$symref" | awk '$2 == "HEAD" {print $1; exit}')"
-if [ -z "$DEFAULT_REF" ] || [ -z "$BASELINE_OID" ]; then
-  printf '   could not read the default branch from origin; remote-gate.sh will need --master <oid>\n' >&2
-else
-  # Origin answered, so this is input: the ref name is named in a remote command
-  # string below and gets the same allowlist as everything else that travels.
-  gate_valid_ref "$DEFAULT_REF" >/dev/null \
-    || die "origin named a default branch this script will not send: ${DEFAULT_REF}"
-  case "$BASELINE_OID" in *[!0-9a-f]*) die "origin answered with something that is not an object id: ${BASELINE_OID}" ;; esac
-  [ "${#BASELINE_OID}" -eq 40 ] || die "origin answered with a short object id: ${BASELINE_OID}"
-  git -C "$REPO_ROOT" cat-file -e "${BASELINE_OID}^{commit}" 2>/dev/null \
-    || die "origin's ${DEFAULT_REF} ${BASELINE_OID} is not in ${REPO_ROOT}; run: git fetch origin, then push again"
-  if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
-      "git -C ${REPO_HOME}/mirror.git cat-file -e ${BASELINE_OID}^{commit}" 2>/dev/null; then
-    printf '   %s %s is in the mirror\n' "$DEFAULT_REF" "$BASELINE_OID"
-  else
-    die "pushed, but origin's ${DEFAULT_REF} ${BASELINE_OID} is not resolvable in ${REMOTE_MIRROR}"
-  fi
-
-  # `git push --mirror` writes refs and never touches the receiving repository's
-  # HEAD, so a mirror created by `git init --bare` keeps pointing at whatever
-  # that git's init.defaultBranch was — a ref the mirror may not even have. The
-  # gate never reads it (every path here names an oid) but a dangling HEAD is a
-  # trap for anything that does, so it is converged to the branch origin just
-  # named. Convergent: set only when it differs.
-  ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
-      "test \"\$(git -C ${REPO_HOME}/mirror.git symbolic-ref -q HEAD)\" = ${DEFAULT_REF} || git -C ${REPO_HOME}/mirror.git symbolic-ref HEAD ${DEFAULT_REF}" \
-    || die "could not point ${REPO_HOME}/mirror.git HEAD at ${DEFAULT_REF} on ${SERVER}"
-fi
+# Read the refs back rather than trusting the push. Object existence alone would
+# not prove that the immutable cache name carries the oid it claims to name.
+printf '\n== Verifying exact cache refs\n'
+for named_ref in "candidate:${CANDIDATE_OID}:${CANDIDATE_REF}" "baseline:${BASELINE_OID}:${BASELINE_REF}"; do
+  ref_kind="${named_ref%%:*}"
+  ref_rest="${named_ref#*:}"
+  expected_oid="${ref_rest%%:*}"
+  cache_ref="${ref_rest#*:}"
+  actual_oid="$(ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
+    "git -C ${REPO_HOME}/mirror.git rev-parse ${cache_ref}^{commit}" 2>/dev/null)" \
+    || die "could not read back ${cache_ref} from ${REMOTE_MIRROR}"
+  [ "$actual_oid" = "$expected_oid" ] \
+    || die "${ref_kind} ref ${cache_ref} read back as ${actual_oid}, expected ${expected_oid}"
+  printf '   %s %s\n' "$cache_ref" "$actual_oid"
+done
 
 printf '\nMIRROR PUSH: OK\n'
-printf 'Next: scripts/gate-worker/remote-gate.sh %s %s\n' "$SERVER" "${LOCAL_HEAD:-<oid>}"
+printf 'Next: scripts/gate-worker/remote-gate.sh %s %s --master %s\n' "$SERVER" "$CANDIDATE_OID" "$BASELINE_OID"

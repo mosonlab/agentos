@@ -3,8 +3,9 @@
  * unconfigured deployment claims no integrator run and merges nothing, rather
  * than merging with weaker guarantees.
  *
- * The merge credential is deliberately absent from this file. It arrives only
- * through `preconditions.ts`, from a file, after the isolation gate passes.
+ * Private key bytes are deliberately absent from this file. Only the public
+ * GitHub App identifiers are environment configuration; `preconditions.ts`
+ * supplies the owner-only key path after the isolation gate passes.
  */
 
 export type ExecutorConfig = {
@@ -17,6 +18,9 @@ export type ExecutorConfig = {
   githubRestUrl: string;
   githubGraphqlUrl: string;
   githubTimeoutMs: number;
+  githubAppAuthTimeoutMs: number;
+  githubAppId: string;
+  githubAppInstallationId: string;
   /** The login of the dedicated merge identity, for the §5.1 replay determination. */
   mergeIdentityLogin: string;
   mergeabilityPollAttempts: number;
@@ -35,6 +39,12 @@ const positiveInteger = (name: string, raw: string | undefined, fallback: number
 const required = (name: string, raw: string | undefined): string => {
   const value = raw?.trim();
   if (!value) throw new Error(`${name} is required; the merge executor refuses to start without it`);
+  return value;
+};
+
+const requiredIdentifier = (name: string, raw: string | undefined): string => {
+  const value = required(name, raw);
+  if (!/^[1-9][0-9]*$/u.test(value)) throw new Error(`${name} must be a positive decimal identifier`);
   return value;
 };
 
@@ -74,6 +84,16 @@ export const loadExecutorConfig = (env: Record<string, string | undefined> = pro
     githubRestUrl: env.GITHUB_REST_URL?.trim() || "https://api.github.com",
     githubGraphqlUrl: env.GITHUB_GRAPHQL_URL?.trim() || "https://api.github.com/graphql",
     githubTimeoutMs: positiveInteger("MERGE_EXECUTOR_GITHUB_TIMEOUT_MS", env.MERGE_EXECUTOR_GITHUB_TIMEOUT_MS, 15_000),
+    githubAppAuthTimeoutMs: positiveInteger(
+      "MERGE_EXECUTOR_GITHUB_APP_AUTH_TIMEOUT_MS",
+      env.MERGE_EXECUTOR_GITHUB_APP_AUTH_TIMEOUT_MS,
+      15_000,
+    ),
+    githubAppId: requiredIdentifier("MERGE_EXECUTOR_GITHUB_APP_ID", env.MERGE_EXECUTOR_GITHUB_APP_ID),
+    githubAppInstallationId: requiredIdentifier(
+      "MERGE_EXECUTOR_GITHUB_APP_INSTALLATION_ID",
+      env.MERGE_EXECUTOR_GITHUB_APP_INSTALLATION_ID,
+    ),
     mergeIdentityLogin: required("MERGE_EXECUTOR_IDENTITY_LOGIN", env.MERGE_EXECUTOR_IDENTITY_LOGIN),
     mergeabilityPollAttempts: attempts,
     mergeabilityPollMs: intervalMs,

@@ -1,14 +1,56 @@
-import type { Prisma } from "@prisma/client";
+import { MergeRecoveryStatus, type Prisma } from "@prisma/client";
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
 export const MERGE_TAIL_KIND = {
+  baseDriftRecovery: "mergeTail.baseDriftRecovery",
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
   reviewObligation: "mergeTail.reviewObligation",
   readiness: "mergeTail.readiness",
 } as const;
+
+export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
+export const MAX_BASE_DRIFT_CLASSIFICATION_RETRIES = 30;
+
+export type MergeRecoveryPhase =
+  | "validation"
+  | "repair"
+  | "authorization-wait"
+  | "downstream-stop"
+  | "succeeded"
+  | "actual-failure";
+
+const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<MergeRecoveryStatus>> = {
+  [MergeRecoveryStatus.VALIDATING]: new Set([MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.FAILED]),
+  [MergeRecoveryStatus.REPAIRING]: new Set([
+    MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+  ]),
+  [MergeRecoveryStatus.AWAITING_AUTHORIZATION]: new Set([
+    MergeRecoveryStatus.REPAIRING,
+    MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+    MergeRecoveryStatus.SUCCEEDED,
+  ]),
+  [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set(),
+  [MergeRecoveryStatus.SUCCEEDED]: new Set(),
+  [MergeRecoveryStatus.FAILED]: new Set(),
+};
+
+export const mergeRecoveryTransitionAllowed = (
+  from: MergeRecoveryStatus,
+  to: MergeRecoveryStatus,
+): boolean => from === to || RECOVERY_TRANSITIONS[from].has(to);
+
+export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPhase => (
+  status === MergeRecoveryStatus.VALIDATING ? "validation"
+    : status === MergeRecoveryStatus.REPAIRING ? "repair"
+      : status === MergeRecoveryStatus.AWAITING_AUTHORIZATION ? "authorization-wait"
+        : status === MergeRecoveryStatus.BLOCKED_DOWNSTREAM ? "downstream-stop"
+          : status === MergeRecoveryStatus.SUCCEEDED ? "succeeded"
+            : "actual-failure"
+);
 
 const SHA = /^[0-9a-f]{40}$/u;
 

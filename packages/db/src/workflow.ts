@@ -6,6 +6,7 @@ import {
   InboxKind,
   InboxSender,
   InboxStatus,
+  MergeRecoveryStatus,
   Prisma,
   RunStatus,
   RunnerKind,
@@ -22,6 +23,7 @@ import {
   type AuthorizationPayload,
   type DecisionChannel,
   authorizationMetadata,
+  parseAuthorizationMetadata,
   parseEvidence,
 } from "./merge-integrator.js";
 import {
@@ -31,6 +33,7 @@ import {
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
   parseStopQuestionKey,
+  recoverRefreshRequestedConfirmationCard,
   requestMergeEvidence,
   resolveChainTarget,
   stopStateFor,
@@ -490,7 +493,14 @@ export const resolveRunBranches = async (
   return { branch: shared, targetBranch };
 };
 
-export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) => {
+type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: string };
+
+const enqueueTaskRunInternal = async (
+  tx: Tx,
+  taskId: string,
+  now: Date,
+  stopBypass: IntegratorStopBypass | null,
+) => {
   const task = await tx.task.findUniqueOrThrow({
     where: { id: taskId },
     include: {
@@ -514,7 +524,9 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
   // answer transaction, so a route added later inherits the refusal by
   // construction rather than by remembering to ask.
   const stopped = await stopStateFor(tx, task.id);
-  if (stopped) throw new IntegratorStoppedError(task.id, stopped.stop.condition);
+  if (stopped && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
+    throw new IntegratorStoppedError(task.id, stopped.stop.condition);
+  }
   // §D-P4, the last line of the binding invariant, for the same reason: this is
   // the shared enqueue path, so a route added later inherits the refusal.
   await assertIntegratorBinding(tx, {
@@ -565,6 +577,9 @@ export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =
     readyAt: now,
   } });
 };
+
+export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =>
+  enqueueTaskRunInternal(tx, taskId, now, null);
 
 const GATE_OUTPUT_PREVIEW = 1_000;
 
@@ -745,12 +760,48 @@ const parkedReason = (successor: { status: TaskStatus; archivedAt?: Date | null 
   return null;
 };
 
+type ChainSuccessorOptions = {
+  sourceRunId?: string | null;
+  chatId?: string | null;
+  archivedAssignee?: "park" | "throw";
+};
+
+const parkStoppedIntegratorSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  stopped: NonNullable<Awaited<ReturnType<typeof stopStateFor>>>,
+  sourceRunId: string | null,
+): Promise<{ nextTaskId: string; gated: false }> => {
+  await tx.task.update({
+    where: { id: successor.id },
+    data: {
+      status: TaskStatus.REVIEW,
+      failureReason: `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`,
+    },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor ${predecessor.name} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
+      metadata: {
+        condition: stopped.stop.condition,
+        sourceRunId,
+        sourceStopId: stopped.stop.stopId,
+      },
+    },
+  });
+  return { nextTaskId: successor.id, gated: false };
+};
+
 /** Activates at most one chain/follow-up successor using the observed updatedAt as a CAS token. */
-export const activateChainSuccessor = async (
+const activateChainSuccessorInternal = async (
   tx: Tx,
   task: ChainTask,
-  options: { sourceRunId?: string | null; chatId?: string | null; archivedAssignee?: "park" | "throw" } = {},
-  now = new Date(),
+  options: ChainSuccessorOptions,
+  now: Date,
+  stopBypass: IntegratorStopBypass | null,
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
   let successor: ChainSuccessor | null = null;
   if (task.chainId && task.chainIndex !== null) {
@@ -848,7 +899,7 @@ export const activateChainSuccessor = async (
       // A chain row that disappeared or became DONE is no longer the candidate.
       // Re-entering the function resolves the next surviving non-DONE row.
       if (task.chainId && task.chainIndex !== null) {
-        return activateChainSuccessor(tx, task, options, now);
+        return activateChainSuccessorInternal(tx, task, options, now, stopBypass);
       }
       return { nextTaskId: current?.id ?? null, gated: false };
     }
@@ -911,6 +962,15 @@ export const activateChainSuccessor = async (
     return { nextTaskId: successor.id, gated: false };
   }
 
+  // Completion-triggered activation treats an unresolved downstream merge
+  // stop as a parked successor, not as a failure of the predecessor that just
+  // completed. Generic enqueue still throws IntegratorStoppedError, which is
+  // why interactive callers continue to receive their named 409 refusal.
+  const stopped = await stopStateFor(tx, successor.id);
+  if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
+    return parkStoppedIntegratorSuccessor(tx, task, successor, stopped, options.sourceRunId ?? null);
+  }
+
   // An archived assignee parks the successor instead of throwing. enqueueTaskRun
   // raises ArchivedAssigneeError, which is not a P2002 and would escape the
   // savepoint catch below and roll back the caller's whole transaction — for
@@ -944,13 +1004,28 @@ export const activateChainSuccessor = async (
   const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
   if (hasSavepoint) await rawTx.$executeRawUnsafe!("SAVEPOINT chain_successor_enqueue");
   try {
-    await enqueueTaskRun(tx, successor.id, now);
+    await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
     if (hasSavepoint) await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
   } catch (error: unknown) {
-    if (!isUniqueConflict(error)) throw error;
+    // The preflight above is the normal path. The named-error branch is
+    // defense in depth for a stop recorded between that read and enqueue: both
+    // outcomes stay inside the savepoint so predecessor completion cannot be
+    // rolled back by downstream activation.
+    if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
     if (hasSavepoint) {
       await rawTx.$executeRawUnsafe!("ROLLBACK TO SAVEPOINT chain_successor_enqueue");
       await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
+    }
+    if (isIntegratorStoppedError(error)) {
+      const stoppedAfterRollback = await stopStateFor(tx, successor.id);
+      if (!stoppedAfterRollback) throw error;
+      return parkStoppedIntegratorSuccessor(
+        tx,
+        task,
+        successor,
+        stoppedAfterRollback,
+        options.sourceRunId ?? null,
+      );
     }
     return { nextTaskId: successor.id, gated: false };
   }
@@ -960,6 +1035,122 @@ export const activateChainSuccessor = async (
     body: `Predecessor ${task.name} completed; step queued`,
   } });
   return { nextTaskId: successor.id, gated: false };
+};
+
+export const activateChainSuccessor = async (
+  tx: Tx,
+  task: ChainTask,
+  options: ChainSuccessorOptions = {},
+  now = new Date(),
+): Promise<{ nextTaskId: string | null; gated: boolean }> =>
+  activateChainSuccessorInternal(tx, task, options, now, null);
+
+/**
+ * The only automatic exit through an unresolved integrator stop. The caller is
+ * the server-owned readiness worker, but authority comes from durable rows: an
+ * exact queued recovery bound to the latest stop and a fresh mechanical
+ * authorization for that recovery's current base. Generic activation and
+ * enqueue APIs never receive the resulting one-stop bypass.
+ */
+export const activateRecoveryIntegratorSuccessor = async (
+  tx: Tx,
+  input: {
+    readinessTaskId: string;
+    integratorTaskId: string;
+    sourceStopId: string;
+    recoveryRunId: string;
+    authorizationActivityId: string;
+  },
+  now = new Date(),
+): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+  const [readiness, stopped, recovery, authorization, output] = await Promise.all([
+    tx.task.findUnique({
+      where: { id: input.readinessTaskId },
+      include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+    }),
+    stopStateFor(tx, input.integratorTaskId),
+    tx.mergeRecoveryAttempt.findFirst({
+      where: {
+        integratorTaskId: input.integratorTaskId,
+        sourceStopId: input.sourceStopId,
+        recoveryRunId: input.recoveryRunId,
+        status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+      },
+      orderBy: [{ attempt: "desc" }, { id: "desc" }],
+    }),
+    tx.taskActivity.findUnique({
+      where: { id: input.authorizationActivityId },
+      select: { id: true, taskId: true, actorType: true, metadata: true },
+    }),
+    tx.taskStepOutput.findUnique({
+      where: { taskId: input.readinessTaskId },
+      select: { kind: true, body: true, commitSha: true },
+    }),
+  ]);
+  if (!readiness || readiness.status !== TaskStatus.DONE || !isMergeReadinessStep(readiness.templateStep)) {
+    throw new Error("Recovery activation requires a completed server-owned merge-readiness step");
+  }
+  if (!stopped || stopped.stop.stopId !== input.sourceStopId) {
+    throw new Error("Recovery activation is not bound to the current unresolved integrator stop");
+  }
+  if (!recovery || recovery.readinessTaskId !== input.readinessTaskId) {
+    throw new Error("Recovery activation has no matching canonical recovery aggregate");
+  }
+
+  const parsedAuthorization = parseAuthorizationMetadata(authorization?.metadata);
+  const authorizationMetadataValue = authorization?.metadata as Record<string, unknown> | null | undefined;
+  if (!authorization
+    || authorization.taskId !== input.readinessTaskId
+    || authorization.actorType !== "control-plane"
+    || parsedAuthorization.status !== "ok"
+    || authorizationMetadataValue?.recoverySourceStopId !== input.sourceStopId) {
+    throw new Error("Recovery activation requires a control-plane authorization bound to its source stop");
+  }
+  const payload = parsedAuthorization.payload;
+  if (!recovery.repository || recovery.prNumber === null || !recovery.targetBranch
+    || !recovery.authorizedHeadSha || !recovery.currentBaseSha
+    || payload.repository !== recovery.repository
+    || payload.prNumber !== recovery.prNumber
+    || payload.baseRef !== recovery.targetBranch
+    || payload.headSha !== recovery.authorizedHeadSha
+    || payload.baseSha !== recovery.currentBaseSha
+    || payload.decision.channel !== "mechanical") {
+    throw new Error("Recovery activation authorization is not fresh for the recovered exact head and current base");
+  }
+
+  let outputBinding: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(output?.body ?? "null") as unknown;
+    outputBinding = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    outputBinding = null;
+  }
+  if (output?.kind !== "merge-authorization"
+    || output.commitSha !== payload.headSha
+    || outputBinding?.authorizationActivityId !== authorization.id
+    || outputBinding?.headSha !== payload.headSha) {
+    throw new Error("Recovery activation readiness output does not select the fresh authorization");
+  }
+
+  const activated = await activateChainSuccessorInternal(
+    tx,
+    readiness,
+    {},
+    now,
+    { integratorTaskId: input.integratorTaskId, sourceStopId: input.sourceStopId },
+  );
+  if (activated.nextTaskId !== input.integratorTaskId) {
+    throw new Error("Recovery activation did not resolve the expected merge-integrator successor");
+  }
+  await tx.mergeRecoveryAttempt.update({ where: { id: recovery.id }, data: {
+    status: MergeRecoveryStatus.SUCCEEDED,
+    authorizationActivityId: authorization.id,
+    failureReason: null,
+    endedAt: now,
+  } });
+  return activated;
 };
 
 /** Marks a completed template task done and activates exactly one successor or gate. */
@@ -1119,7 +1310,12 @@ export const applyInboxDecisionTx = async (
     where: { id: input.inboxMessageId },
     include: {
       session: { include: { run: true } },
-      gateTask: { include: { previousTask: true } },
+      gateTask: {
+        include: {
+          previousTask: true,
+          templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
+        },
+      },
       thread: true,
     },
   });
@@ -1148,7 +1344,16 @@ export const applyInboxDecisionTx = async (
       where: { id: question.id, status: InboxStatus.OPEN },
       data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
     });
-    if (claimedStop.count !== 1) return { duplicate: true, resumed: false };
+    if (claimedStop.count !== 1) {
+      // A replay is the supported repair for the legacy state where the first
+      // transaction durably recorded refresh-requested but returned without a
+      // confirmation card. Re-read the append-only disposition under the
+      // integrator Task mutex; every other duplicate remains a no-op.
+      if (question.status === InboxStatus.ANSWERED && question.selectedChoiceId === input.decision && question.taskId) {
+        await recoverRefreshRequestedConfirmationCard(tx, question.taskId, now);
+      }
+      return { duplicate: true, resumed: false };
+    }
     await tx.inboxMessage.create({ data: {
       from: InboxSender.HUMAN,
       agentId: question.agentId,
@@ -1182,14 +1387,16 @@ export const applyInboxDecisionTx = async (
     });
     return { duplicate: false, resumed: false, messageId: question.id };
   }
-  // A HUMAN-gate rejection can queue the executable predecessor. Resolve that
-  // target before taking either mutex, then lock predecessor -> gate: PATCH on
-  // the predecessor takes that same order when it activates the HUMAN
+  // A HUMAN gate or server-owned readiness rejection can queue the executable
+  // predecessor. Ordinary AGENT gates remain executable themselves. Resolve
+  // that target before taking either mutex, then lock predecessor -> gate:
+  // PATCH on the predecessor takes that same order when it activates the
   // successor. Taking gate -> predecessor here would make the two legitimate
   // operations deadlock.
   let rejectionTarget: { id: string; name: string } | null = null;
   if (gateDecision && question.gateTask && input.decision === "reject") {
-    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT
+    const readiness = isMergeReadinessStep(question.gateTask.templateStep);
+    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT && !readiness
       ? question.gateTask
       : question.gateTask.previousTask;
     if (!rejectionTarget && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
