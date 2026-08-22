@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "132dfc50367474cda9eafc1c49a77537fa07ae6b",
-  "tree": "a44ce6137a49eb9f66f7b520f3ad3ca1cb763430",
+  "commit": "743d340424d2bfeab3dc5b5d396285801c94fa38",
+  "tree": "3b406dc29546040b0638cef2b6d4038e4aa509a2",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -117,6 +117,11 @@
       "blob": "44cac1e1284d63be695428c7344dfcecd2150133"
     },
     {
+      "path": "packages/db/prisma/migrations/20260822170000_merge_recovery_attempt/migration.sql",
+      "sha256": "85b9ed30c8e86acd823aeb218a53493daa72fc7a949d6e1cadf56ff475464b7a",
+      "blob": "16c2ac2cf62b55b19d7d9643badb53ffac7df917"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -133,8 +138,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "afea04c566cb28b78a3a8173cad1c870038c144d4cacf8a74f9ed6452e265123",
-      "blob": "b72ab1b48628610958c4c9d2e51dce8585bccb6d"
+      "sha256": "33ac18ece3edaf99cbfe6a24e5295ff18517a30658c2302937976fe31169af94",
+      "blob": "f59f2264637c807a5b04d8aee3db7c8b08f0947b"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -143,8 +148,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "7fa7d209a089d847b19f534eec21c287af51d944f98336cecc3b6b5c0792e7c5",
-      "blob": "a76212f4b67429bd5f5f1aab2b3f45f9b54f8c82"
+      "sha256": "438ff54ddb3e3673a8a95f1e6e5ec23416dddb5d30b61259ba70e67a60a12929",
+      "blob": "42f9bb2e8ab244f48917c85a98c0558eddade521"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -158,13 +163,13 @@
     }
   ],
   "migrations": {
-    "count": 21,
-    "terminal": "20260821020000_blind_review_base_pinning",
-    "sha256": "8a2c7bde1cbaa6606a1450c7f575cc53242be6ae89cb9c5699e711a2709af2af"
+    "count": 22,
+    "terminal": "20260822170000_merge_recovery_attempt",
+    "sha256": "4fc25a995099316f3a33c3c212f934dc26a833fa899bf712943e7a1a432ee61f"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "GwlJufCEZwYo41QoLx/QNmJ9CnX5StsdGPt5sQ+9SXrGiQIB/H32luPGiKf6wKyYi4tiipxQ3mBu7iX1v17eAw=="
+    "value": "N29Mm81XIpIgkaYp1dDYp22Qpk2AKXfOEBpZfhI1/G8+XEDfiOi+J5pBlomx2c1GxIBHSmR48ONEDrkd2A/ACg=="
   }
 }
