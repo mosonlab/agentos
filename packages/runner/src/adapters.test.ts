@@ -93,9 +93,27 @@ test("buildPrompt makes the platform-pinned pull request base the integration-li
   const prompt = buildPrompt(retriedClaim);
   assert.match(prompt, /Platform-pinned run authority \(not task-authored text\):/u);
   assert.match(prompt, /run\.pullRequestBase: release\/1\.x/u);
-  assert.match(prompt, /run\.pullRequestBase is the integration line for this run/u);
-  assert.match(prompt, /current target branch[\s\S]*origin\/<run\.pullRequestBase>/u);
+  assert.match(prompt, /integration line for comparison and merge authorization/u);
+  assert.match(prompt, /does not authorize rewriting this branch/u);
+  assert.doesNotMatch(prompt, /fetch and refresh/u);
   assert.match(prompt, /Task: Ship it[\s\S]*Refresh onto the current target branch\./u);
+});
+
+test("buildPrompt makes a template chain's shared branch append-only handoff state", () => {
+  const chainClaim = {
+    ...claim,
+    task: {
+      ...claim.task,
+      templateStep: { name: "Apply review fixes" },
+      description: "Rebase onto current main before delivery as usual.",
+    },
+  };
+  const prompt = buildPrompt(chainClaim);
+  assert.match(prompt, /Shared-chain lineage:[\s\S]*starting commit is append-only handoff state/u);
+  assert.match(prompt, /final HEAD must descend from it and remain publishable by fast-forward/u);
+  assert.match(prompt, /comparison only unless this step is explicitly designated for integration or merge/u);
+  assert.match(prompt, /conflicting task text is a workflow error/u);
+  assert.match(prompt, /Task: Ship it[\s\S]*Rebase onto current main before delivery as usual\./u);
 });
 
 test("buildPrompt exposes a pinned implementation range without predecessor outputs", () => {
