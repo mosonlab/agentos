@@ -765,6 +765,35 @@ type ChainSuccessorOptions = {
   archivedAssignee?: "park" | "throw";
 };
 
+const parkStoppedIntegratorSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  stopped: NonNullable<Awaited<ReturnType<typeof stopStateFor>>>,
+  sourceRunId: string | null,
+): Promise<{ nextTaskId: string; gated: false }> => {
+  await tx.task.update({
+    where: { id: successor.id },
+    data: {
+      status: TaskStatus.REVIEW,
+      failureReason: `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`,
+    },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor ${predecessor.name} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
+      metadata: {
+        condition: stopped.stop.condition,
+        sourceRunId,
+        sourceStopId: stopped.stop.stopId,
+      },
+    },
+  });
+  return { nextTaskId: successor.id, gated: false };
+};
+
 /** Activates at most one chain/follow-up successor using the observed updatedAt as a CAS token. */
 const activateChainSuccessorInternal = async (
   tx: Tx,
@@ -932,6 +961,15 @@ const activateChainSuccessorInternal = async (
     return { nextTaskId: successor.id, gated: false };
   }
 
+  // Completion-triggered activation treats an unresolved downstream merge
+  // stop as a parked successor, not as a failure of the predecessor that just
+  // completed. Generic enqueue still throws IntegratorStoppedError, which is
+  // why interactive callers continue to receive their named 409 refusal.
+  const stopped = await stopStateFor(tx, successor.id);
+  if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
+    return parkStoppedIntegratorSuccessor(tx, task, successor, stopped, options.sourceRunId ?? null);
+  }
+
   // An archived assignee parks the successor instead of throwing. enqueueTaskRun
   // raises ArchivedAssigneeError, which is not a P2002 and would escape the
   // savepoint catch below and roll back the caller's whole transaction — for
@@ -968,10 +1006,25 @@ const activateChainSuccessorInternal = async (
     await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
     if (hasSavepoint) await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
   } catch (error: unknown) {
-    if (!isUniqueConflict(error)) throw error;
+    // The preflight above is the normal path. The named-error branch is
+    // defense in depth for a stop recorded between that read and enqueue: both
+    // outcomes stay inside the savepoint so predecessor completion cannot be
+    // rolled back by downstream activation.
+    if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
     if (hasSavepoint) {
       await rawTx.$executeRawUnsafe!("ROLLBACK TO SAVEPOINT chain_successor_enqueue");
       await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
+    }
+    if (isIntegratorStoppedError(error)) {
+      const stoppedAfterRollback = await stopStateFor(tx, successor.id);
+      if (!stoppedAfterRollback) throw error;
+      return parkStoppedIntegratorSuccessor(
+        tx,
+        task,
+        successor,
+        stoppedAfterRollback,
+        options.sourceRunId ?? null,
+      );
     }
     return { nextTaskId: successor.id, gated: false };
   }
