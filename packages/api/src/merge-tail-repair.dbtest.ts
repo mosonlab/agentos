@@ -60,7 +60,7 @@ const seedRegression = async () => {
     } }),
   ]);
   const chainId = `chain-${Date.now()}`;
-  await db.task.create({ data: {
+  const fix = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: fixStep.id,
     name: "Fix", description: "fix", assigneeType: AssigneeType.AGENT, assigneeAgentId: fixAgent.id,
     status: TaskStatus.DONE, chainId, chainIndex: 4, targetBranch: "main",
@@ -70,6 +70,7 @@ const seedRegression = async () => {
     name: "Regression", description: "verify", assigneeType: AssigneeType.AGENT, assigneeAgentId: regressionAgent.id,
     status: TaskStatus.DOING, chainId, chainIndex: 5, targetBranch: "main",
   } });
+  await db.task.update({ where: { id: fix.id }, data: { followUpTaskId: regression.id } });
   const run = await db.run.create({ data: {
     projectId: project.id, taskId: regression.id, agentId: regressionAgent.id, repoId: repo.id,
     runNumber: 1, dedupeKey: `task:${regression.id}:run:1`, runner: "CODEX", model: regressionAgent.model,
@@ -101,6 +102,19 @@ const exercise = async (outcome: "refresh-conflict" | "gate-fail") => {
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, input)), "handled");
   return { ...seeded, input };
 };
+
+const repairFor = (
+  seeded: Awaited<ReturnType<typeof exercise>>,
+  repairKind: "refresh-conflict" | "gate-fix",
+) => db.task.findFirstOrThrow({ where: {
+  projectId: seeded.project.id,
+  name: `Autonomous merge tail: ${repairKind}`,
+} });
+
+const repairCount = (seeded: Awaited<ReturnType<typeof exercise>>) => db.task.count({ where: {
+  projectId: seeded.project.id,
+  name: { startsWith: "Autonomous merge tail:" },
+} });
 
 const completeRepair = async (
   seeded: Awaited<ReturnType<typeof exercise>>,
@@ -143,9 +157,10 @@ const completeRepair = async (
 
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
   const seeded = await exercise("refresh-conflict");
-  const repair = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.regression.id } });
+  const repair = await repairFor(seeded, "refresh-conflict");
+  assert.equal(repair.followUpTaskId, null);
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "merge-resolver");
-  assert.equal(await db.task.count({ where: { followUpTaskId: seeded.regression.id } }), 1);
+  assert.equal(await repairCount(seeded), 1);
   await completeRepair(seeded, repair.id, JSON.stringify({
     schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE,
     resolvedHeadSha: RESOLVED, tradeOffs: [], changedTestExpectations: [],
@@ -159,18 +174,19 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
   assert.match(result.body, new RegExp(`${HEAD}.*${RESOLVED}`));
 
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
-  assert.equal(await db.task.count({ where: { followUpTaskId: seeded.regression.id } }), 1);
+  assert.equal(await repairCount(seeded), 1);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 
 test("a gate FAIL creates one fix-agent task and a second FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
-  const repair = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.regression.id } });
+  const repair = await repairFor(seeded, "gate-fix");
+  assert.equal(repair.followUpTaskId, null);
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
   await completeRepair(seeded, repair.id, "Fixed the failing regression and reran the affected suite.");
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
-  assert.equal(await db.task.count({ where: { followUpTaskId: seeded.regression.id } }), 1);
+  assert.equal(await repairCount(seeded), 1);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
   const trail = await db.taskActivity.findMany({ where: { taskId: seeded.regression.id }, select: { body: true } });
   assert.match(trail.map(({ body }) => body).join("\n"), new RegExp(`${HEAD}.*${BASE}`, "s"));
@@ -187,7 +203,7 @@ test("malformed, unknown, and head-unbound resolver outputs stop loudly", async 
   ];
   for (const [label, output, headSha] of cases) {
     const seeded = await exercise("refresh-conflict");
-    const repair = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.regression.id } });
+    const repair = await repairFor(seeded, "refresh-conflict");
     await completeRepair(seeded, repair.id, output, headSha);
     const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
     assert.equal(regression.status, TaskStatus.REVIEW, label);
@@ -200,7 +216,7 @@ test("malformed, unknown, and head-unbound resolver outputs stop loudly", async 
 test("successful resolver and gate-fix completions rerun regression with exact-head PASS evidence", async () => {
   for (const outcome of ["refresh-conflict", "gate-fail"] as const) {
     const seeded = await exercise(outcome);
-    const repair = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.regression.id } });
+    const repair = await repairFor(seeded, outcome === "gate-fail" ? "gate-fix" : outcome);
     const output = outcome === "refresh-conflict"
       ? JSON.stringify({
         schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE,
@@ -226,7 +242,7 @@ test("successful resolver and gate-fix completions rerun regression with exact-h
 
 test("a resolver process failure escalates instead of leaving regression silently parked", async () => {
   const seeded = await exercise("refresh-conflict");
-  const repair = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.regression.id } });
+  const repair = await repairFor(seeded, "refresh-conflict");
   const run = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
   const runnerId = "merge-tail-repair-runner";
   const fencingToken = `repair:${run.id}:1`;

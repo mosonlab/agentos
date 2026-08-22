@@ -128,6 +128,8 @@ const seedReadiness = async () => {
     assigneeAgentId: integratorAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 7,
     targetBranch: "main", opensPullRequest: false,
   } });
+  await db.task.update({ where: { id: regression.id }, data: { followUpTaskId: readiness.id } });
+  await db.task.update({ where: { id: readiness.id }, data: { followUpTaskId: integrator.id } });
   const run = await db.run.create({ data: {
     projectId: project.id, taskId: regression.id, agentId: regressionAgent.id, repoId: repo.id,
     runNumber: 1, dedupeKey: `task:${regression.id}:run:1`, runner: "CODEX", model: regressionAgent.model,
@@ -159,7 +161,8 @@ test("a defense-list diff opens one blind review and blocks authorization until 
   const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
   assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.readiness.id } }), 0);
-  const review = await db.task.findFirstOrThrow({ where: { followUpTaskId: seeded.readiness.id, name: "Autonomous merge tail: independent review" } });
+  const review = await db.task.findFirstOrThrow({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: independent review" } });
+  assert.equal(review.followUpTaskId, null);
   const reviewRun = await db.run.findFirstOrThrow({ where: { taskId: review.id } });
   assert.equal(reviewRun.model, "gpt-5.6-sol:medium");
   await db.taskActivity.create({ data: {
