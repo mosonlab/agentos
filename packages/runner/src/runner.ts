@@ -246,6 +246,28 @@ export const executeClaim = async (
     if (!isFencingError(error)) console.error("Event flush failed", error);
   };
 
+  const drainEventsUnderLease = async (openLease: DeliveryLease): Promise<void> => {
+    let lastError: unknown = null;
+    while (pendingEvents.length > 0 && !fencingRejected && !openLease.rejected) {
+      try {
+        // This may first await an active-run flush. Recheck the retained queue
+        // after it settles so its rejection can never become the terminal
+        // verdict without a fresh delivery-phase attempt.
+        await flushEvents();
+        lastError = null;
+      } catch (error: unknown) {
+        lastError = error;
+        await observeEventFlush(error);
+      }
+      if (pendingEvents.length === 0 || fencingRejected || openLease.rejected) break;
+      const remainingMs = openLease.deadline - Date.now();
+      if (remainingMs <= 0) throw lastError ?? new Error("Event delivery lease expired with events still pending");
+      // Reuse the lease's heartbeat cadence instead of introducing a separate
+      // retry budget. Its renewal loop continues independently during the wait.
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(config.heartbeatIntervalMs, remainingMs)));
+    }
+  };
+
   try {
     // §D-P1 rule 4 — defence in depth behind the claim-side allowlist, and the
     // FIRST thing this function does. Everything below it constructs something a
@@ -433,7 +455,7 @@ export const executeClaim = async (
       waitingInbox = openLease.waitingInbox;
     };
     adoptLeaseVerdict(lease);
-    await flushEvents();
+    await drainEventsUnderLease(lease);
     // Re-read: a periodic renewal may have been rejected while the events above
     // were still draining, and everything past this point writes to a remote.
     adoptLeaseVerdict(lease);

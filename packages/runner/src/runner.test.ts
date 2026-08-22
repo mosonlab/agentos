@@ -446,24 +446,39 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     let heartbeatAttempts = 0;
     let eventAttempts = 0;
     let eventFailures = 0;
-    const persisted: number[] = [];
+    let processExited = false;
+    let recoverEvents = false;
+    let resolveExit!: (evidence: Record<string, unknown>) => void;
+    let resolveActiveFailures!: () => void;
+    let resolveDeliveryHeartbeat!: () => void;
+    let resolvePostExitFailure!: () => void;
+    const exit = new Promise<Record<string, unknown>>((resolve) => { resolveExit = resolve; });
+    const activeFailures = new Promise<void>((resolve) => { resolveActiveFailures = resolve; });
+    const deliveryHeartbeat = new Promise<void>((resolve) => { resolveDeliveryHeartbeat = resolve; });
+    const postExitFailure = new Promise<void>((resolve) => { resolvePostExitFailure = resolve; });
+    const acceptedBatches: number[][] = [];
+    const maybeResolveActiveFailures = (): void => {
+      if (heartbeatAttempts >= 2 && eventFailures >= 2) resolveActiveFailures();
+    };
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
       posts.push({ path, body });
       if (path.endsWith("/start")) started = true;
-      if (started && path.endsWith("/heartbeat")) heartbeatAttempts += 1;
+      if (started && path.endsWith("/heartbeat")) {
+        heartbeatAttempts += 1;
+        if ((body.inFlightTool as { name?: string } | null)?.name === "delivery") resolveDeliveryHeartbeat();
+        maybeResolveActiveFailures();
+      }
       if (started && path.endsWith("/events")) {
         eventAttempts += 1;
-        for (const event of (body.events as Array<{ seq: number }>)) {
-          // This is the API's existing skipDuplicates contract: a retry after
-          // an ambiguous failed response must not create a second row.
-          if (!persisted.includes(event.seq)) persisted.push(event.seq);
-        }
-        if (heartbeatAttempts < 3) {
+        if (!recoverEvents) {
           eventFailures += 1;
+          maybeResolveActiveFailures();
+          if (processExited) resolvePostExitFailure();
           return new Response(JSON.stringify({ error: "events temporarily unavailable" }), { status: 503 });
         }
+        acceptedBatches.push((body.events as Array<{ seq: number }>).map((event) => event.seq));
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
@@ -492,17 +507,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
         finalOutput: null,
         stdout: "",
         stderr: "",
-        exit: new Promise((resolve) => setTimeout(() => resolve({
-          exitCode: 0,
-          signal: null,
-          terminalEventSeen: true,
-          terminalSuccess: true,
-          terminationReason: null,
-          finalOutput: null,
-          providerError: null,
-          stdout: "",
-          stderr: "",
-        }), 160)),
+        exit,
       } as never;
     }) as typeof originalStart;
     adapters.CLAUDE.heartbeat = (async (handle) => ({
@@ -513,7 +518,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     })) as typeof originalHeartbeat;
     adapters.CLAUDE.kill = (async () => ({ signal: null, processAlive: false })) as typeof originalKill;
 
-    await executeClaim(configured, {
+    const execution = executeClaim(configured, {
       ...mechanicalClaim,
       executionMode: "agent",
       runner: "CLAUDE",
@@ -523,10 +528,30 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
       session: testSession(root),
     });
 
-    assert.ok(heartbeatAttempts >= 3, `expected at least three successful heartbeats, got ${heartbeatAttempts}`);
-    assert.ok(eventFailures >= 3, `expected event failure across two intervals, got ${eventFailures}`);
+    await activeFailures;
+    processExited = true;
+    resolveExit({
+      exitCode: 0,
+      signal: null,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      terminationReason: null,
+      finalOutput: null,
+      providerError: null,
+      stdout: "",
+      stderr: "",
+    });
+    await Promise.all([deliveryHeartbeat, postExitFailure]);
+    recoverEvents = true;
+    await execution;
+
+    assert.ok(heartbeatAttempts >= 3, `expected active heartbeats plus a delivery heartbeat, got ${heartbeatAttempts}`);
+    assert.ok(eventFailures >= 3, `expected failures across two active intervals and after exit, got ${eventFailures}`);
     assert.ok(eventAttempts > eventFailures, "the recovered endpoint must receive a retry");
-    assert.deepEqual(persisted, [0, 1, 2]);
+    assert.deepEqual(acceptedBatches, [[0, 1, 2]], "the accepted retry must preserve order and carry each event once");
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.equal(completion?.body.terminalSuccess, true, "event recovery must preserve successful completion");
+    assert.equal(completion?.body.pushStatus, "SUCCEEDED", "the successful branch must still be delivered");
     const startIndex = posts.findIndex((post) => post.path.endsWith("/start"));
     const firstActiveHeartbeat = posts.findIndex((post, index) => index > startIndex && post.path.endsWith("/heartbeat") && post.body.processAlive === true);
     const eventAfterHeartbeat = posts.findIndex((post, index) => index > firstActiveHeartbeat && post.path.endsWith("/events"));
