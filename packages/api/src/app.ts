@@ -204,7 +204,6 @@ const createMergeTailRepairTask = async (
   const task = await tx.task.create({ data: {
     projectId: regressionTask.projectId,
     repoId: regressionTask.repoId,
-    followUpTaskId: regressionTask.id,
     name: `Autonomous merge tail: ${input.repairKind}`,
     description: prompt,
     assigneeType: "AGENT",
@@ -4595,6 +4594,30 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // envelope's verdict decides *whether* the failure was external; it does
       // not get to raise the ceiling on this step either.
       const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
+      const tailRows = succeeded && run.task
+        && !run.task.templateId && !run.task.chainId && !run.task.followUpTaskId
+        ? await tx.taskActivity.findMany({
+            where: { taskId: run.task.id },
+            select: { metadata: true },
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          })
+        : [];
+      const repairMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
+        metadata?.kind === MERGE_TAIL_KIND.repairAttempt && typeof metadata.regressionTaskId === "string"
+      ));
+      const reviewMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
+        metadata?.kind === MERGE_TAIL_KIND.reviewObligation
+        && metadata.state === "open"
+        && typeof metadata.readinessTaskId === "string"
+        && typeof metadata.regressionTaskId === "string"
+      ));
+      const mergeTailAuxiliary = Boolean(repairMarker || reviewMarker);
+      const auxiliaryFollowUpTaskId = typeof repairMarker?.regressionTaskId === "string"
+        ? repairMarker.regressionTaskId
+        : typeof reviewMarker?.readinessTaskId === "string"
+          ? reviewMarker.readinessTaskId
+          : null;
       const refunded = external && !mechanical ? 1 : 0;
       const budgetCeiling = run.maxRunsPerTask + refunded;
       // The same refund, recorded apart from the ceiling it produced. The gates
@@ -4604,7 +4627,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // row: a task's budget being edited mid-run must not retroactively refuse
       // an attempt already authorized.
       const budgetGrants = run.budgetGrants + refunded;
-      if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
+      if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
         await lockTask(tx, run.task.id);
       }
       // Join the Task-row exclusion protocol only when this completion can
@@ -4812,7 +4835,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               : `Run ${run.runNumber} stopped before merging`,
             metadata: jsonValue({ exitCode: body.exitCode, mergeOutcome: outcome.outcome }),
           } });
-        } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId)) {
+        } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
           // A row that already exists is left exactly as its author wrote it.
           // This branch used to restamp `runId` and `metadata` onto a body it
           // did not touch, so a task whose run 1 wrote a real output and whose
@@ -4870,22 +4893,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           } else {
             await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
           }
-        } else if (succeeded && (run.task?.chainId || run.task?.followUpTaskId)) {
-          const tailRows = await tx.taskActivity.findMany({
-            where: { taskId: run.taskId },
-            select: { metadata: true },
-            orderBy: { createdAt: "desc" },
-            take: 20,
-          });
-          const repairMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
-            metadata?.kind === MERGE_TAIL_KIND.repairAttempt && typeof metadata.regressionTaskId === "string"
-          ));
-          const reviewMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
-            metadata?.kind === MERGE_TAIL_KIND.reviewObligation
-            && metadata.state === "open"
-            && typeof metadata.readinessTaskId === "string"
-            && typeof metadata.regressionTaskId === "string"
-          ));
+        } else if (succeeded && run.task && (run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
           let repairUnable = false;
           let reviewRejected = false;
           if (reviewMarker
@@ -5052,7 +5060,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               where: { id: run.taskId, status: run.task.status }, data: { status: TaskStatus.DONE, failureReason: null },
             });
             if (completed.count === 1) {
-              await activateChainSuccessor(tx, run.task, {
+              await activateChainSuccessor(tx, auxiliaryFollowUpTaskId
+                ? { ...run.task, followUpTaskId: auxiliaryFollowUpTaskId }
+                : run.task, {
                 sourceRunId: run.id,
                 chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
               }, now);
@@ -5074,7 +5084,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             taskId: run.taskId,
             actorType: "runner",
             actorId: body.runnerId,
-            body: succeeded && (run.task?.templateId || run.task?.chainId || run.task?.followUpTaskId) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
+            body: succeeded && (run.task?.templateId || run.task?.chainId || run.task?.followUpTaskId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
               : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
               : retryCreated ? `Run ${run.runNumber} failed; retry queued`
                 : `Run ${run.runNumber} failed; task moved to review`,
