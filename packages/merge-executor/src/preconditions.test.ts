@@ -4,9 +4,12 @@ import { test } from "node:test";
 
 import { REFUSED_ENVIRONMENT_NAMES, evaluatePreconditions, type PreconditionDeps } from "./preconditions.js";
 
-const TOKEN = `ghp_${"A".repeat(36)}`;
-
-const statsFor = (mode: number, uid: number): Stats => ({ mode, uid } as Stats);
+const statsFor = (mode: number, uid: number, options: { regular?: boolean; size?: number } = {}): Stats => ({
+  mode,
+  uid,
+  size: options.size ?? 1_700,
+  isFile: () => options.regular ?? true,
+} as Stats);
 
 const deps = (overrides: {
   env?: Record<string, string | undefined>;
@@ -15,40 +18,38 @@ const deps = (overrides: {
   fileMode?: number;
   fileUid?: number;
   directoryMode?: number;
-  content?: string;
+  fileIsRegular?: boolean;
+  fileSize?: number;
 } = {}): PreconditionDeps => {
   const uid = overrides.uid ?? 501;
   return {
     env: {
       MERGE_EXECUTOR_OS_USER: "agentos-merge",
       MERGE_EXECUTOR_PEER_USERS: "agentos-api,agentos-runner",
-      MERGE_INTEGRATOR_TOKEN_FILE: "/Users/agentos-merge/secrets/merge.token",
+      MERGE_EXECUTOR_GITHUB_APP_PRIVATE_KEY_FILE: "/Users/agentos-merge/secrets/github-app.pem",
       ...overrides.env,
     },
-    stat: (path) => path.endsWith(".token")
-      ? statsFor(overrides.fileMode ?? 0o100600, overrides.fileUid ?? uid)
+    stat: (path) => path.endsWith(".pem")
+      ? statsFor(overrides.fileMode ?? 0o100600, overrides.fileUid ?? uid, {
+        ...(overrides.fileIsRegular === undefined ? {} : { regular: overrides.fileIsRegular }),
+        ...(overrides.fileSize === undefined ? {} : { size: overrides.fileSize }),
+      })
       : statsFor(overrides.directoryMode ?? 0o40700, uid),
-    readFile: () => overrides.content ?? TOKEN,
     currentUser: () => ({ username: overrides.username ?? "agentos-merge", uid }),
     homeDirectory: () => "/Users/agentos-merge",
   };
 };
 
-test("a correctly isolated deployment passes and yields the token", () => {
+test("a correctly isolated deployment passes and yields only the private-key path", () => {
   const result = evaluatePreconditions(deps());
   assert.equal(result.ok, true);
-  assert.equal(result.ok && result.token, TOKEN);
+  assert.equal(result.ok && result.privateKeyFile, "/Users/agentos-merge/secrets/github-app.pem");
 });
 
-test("running as the runner's OS user is refused, and the token is not read", () => {
-  let read = false;
-  const base = deps({ username: "agentos-runner" });
-  const result = evaluatePreconditions({ ...base, readFile: () => { read = true; return TOKEN; } });
+test("running as the runner's OS user is refused", () => {
+  const result = evaluatePreconditions(deps({ username: "agentos-runner" }));
   assert.equal(result.ok, false);
   assert.ok(!result.ok && result.failures.some((failure) => failure.includes("runs as agentos-runner")));
-  // Nothing below check 4 runs once check 1 fails on identity — but the point
-  // this test pins is the one that matters: the credential is not loaded.
-  assert.equal(read, false);
 });
 
 test("a deployment that has not separated the principals cannot start", () => {
@@ -67,7 +68,7 @@ test("a GitHub credential in the process environment is refused, under every hon
   }
 });
 
-test("a group-readable token file, a foreign owner, and a writable parent directory are each refused", () => {
+test("a group-readable private-key file, a foreign owner, and a writable parent directory are each refused", () => {
   const mode644 = evaluatePreconditions(deps({ fileMode: 0o100644 }));
   assert.ok(!mode644.ok && mode644.failures.some((failure) => failure.includes("mode 644")));
 
@@ -78,18 +79,22 @@ test("a group-readable token file, a foreign owner, and a writable parent direct
   assert.ok(!writableDirectory.ok && writableDirectory.failures.some((failure) => failure.includes("group- or world-writable")));
 });
 
-test("an unset token file, an unreadable one, and a wrong-shaped one are refused at startup", () => {
-  const unset = evaluatePreconditions(deps({ env: { MERGE_INTEGRATOR_TOKEN_FILE: "" } }));
-  assert.ok(!unset.ok && unset.failures.some((failure) => failure.includes("MERGE_INTEGRATOR_TOKEN_FILE is not set")));
+test("a non-regular or oversized private-key path is refused before any read", () => {
+  const fifo = evaluatePreconditions(deps({ fileIsRegular: false }));
+  assert.ok(!fifo.ok && fifo.failures.some((failure) => failure.includes("not a regular file")));
+
+  const oversized = evaluatePreconditions(deps({ fileSize: 64 * 1_024 + 1 }));
+  assert.ok(!oversized.ok && oversized.failures.some((failure) => failure.includes("invalid size")));
+});
+
+test("an unset or unreadable private-key file is refused at startup", () => {
+  const unset = evaluatePreconditions(deps({ env: { MERGE_EXECUTOR_GITHUB_APP_PRIVATE_KEY_FILE: "" } }));
+  assert.ok(!unset.ok && unset.failures.some((failure) => failure.includes("GITHUB_APP_PRIVATE_KEY_FILE is not set")));
 
   const base = deps();
   const unreadable = evaluatePreconditions({ ...base, stat: () => { throw new Error("ENOENT"); } });
   assert.ok(!unreadable.ok && unreadable.failures.some((failure) => failure.includes("unreadable")));
 
-  const wrongShape = evaluatePreconditions(deps({ content: "CHANGE_ME" }));
-  assert.ok(!wrongShape.ok && wrongShape.failures.some((failure) => failure.includes("expected shape")));
-  // The refusal never quotes the value it rejected.
-  assert.ok(!wrongShape.ok && wrongShape.failures.every((failure) => !failure.includes("CHANGE_ME")));
 });
 
 test("the directory walk stops at the executor's home rather than climbing to /", () => {
@@ -98,8 +103,8 @@ test("the directory walk stops at the executor's home rather than climbing to /"
   evaluatePreconditions({
     ...base,
     stat: (path) => {
-      if (!path.endsWith(".token")) seen.push(path);
-      return path.endsWith(".token") ? statsFor(0o100600, 501) : statsFor(0o40700, 501);
+      if (!path.endsWith(".pem")) seen.push(path);
+      return path.endsWith(".pem") ? statsFor(0o100600, 501) : statsFor(0o40700, 501);
     },
   });
   assert.deepEqual(seen, ["/Users/agentos-merge/secrets", "/Users/agentos-merge"]);
