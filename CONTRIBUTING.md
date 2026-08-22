@@ -46,8 +46,8 @@ commit it names — not to an earlier one on the same branch, and not to "the
 branch".
 
 Some checks are deliberately outside the gate and belong to the list a developer
-runs: `npm run snapshot:scan`, `npm run test:dependency-gate`, the CLI help check
-and `npm run verify:compose-binding`.
+runs: `npm run snapshot:scan`, `npm run test:dependency-gate` and
+`npm run verify:compose-binding`.
 
 ### Testing red lines
 

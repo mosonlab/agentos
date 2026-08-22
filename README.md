@@ -169,7 +169,7 @@ root-owned service adoption to the matching runbook profile.
 ## Architecture grounded in the current code
 
 ```text
-Web console / phase-0 CLI
+Web console
           |
           v
 Control-plane API  <---->  PostgreSQL
@@ -192,8 +192,8 @@ Local runner -----> ephemeral git workspace
   branch, preflights the selected CLI, and records structured provider events.
 - Codex and Claude receive the AgentOS session tools over a per-run stdio MCP
   server. Pi receives the corresponding task tools through an extension.
-- The repository CLI currently exposes only `agentos help`; broader CLI command
-  families are not claimed by this release candidate.
+- AgentOS does not ship a repository command-line interface. Operators use the
+  web console and the documented service, database, and runner scripts.
 
 ## A real task workflow
 
@@ -294,7 +294,6 @@ npm run typecheck
 npm run lint
 npm run build
 npm test
-npm run agentos -- help
 docker compose config --quiet
 npm run test:dependency-gate
 npm run test:snapshot-scan

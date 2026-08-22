@@ -36,6 +36,8 @@ import {
   acquireProcessLock,
   blockingRunsStatement,
   deployArtifactPaths,
+  DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+  DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
   publishDirectories,
   workspaceDependencyPaths,
@@ -124,8 +126,20 @@ test("published artifacts derive every workspace dependency tree from the target
   const nested = workspaceDependencyPaths(root);
   assert.deepEqual(nested, ["apps/web/node_modules", "packages/api/node_modules", "packages/runner/node_modules"]);
   const artifacts = deployArtifactPaths(root);
+  assert.deepEqual(DEPLOY_REQUIRED_ARTIFACT_PATHS, [
+    "packages/github-client/dist",
+    "packages/db/dist",
+    "packages/api/dist",
+    "packages/runner/dist",
+    "packages/inbox/dist",
+    "packages/merge-executor/dist",
+    "apps/web/dist",
+    "node_modules",
+  ]);
+  assert.deepEqual(DEPLOY_OPTIONAL_ARTIFACT_PATHS, ["packages/cli/dist"]);
   assert.equal(artifacts.at(-1), "node_modules");
   assert.ok(artifacts.includes("packages/api/dist"));
+  assert.ok(artifacts.includes("packages/cli/dist"));
   for (const path of nested) assert.ok(artifacts.includes(path));
   rmSync(root, { recursive: true, force: true });
 });
@@ -381,6 +395,35 @@ test("publication replaces or removes every workspace-local dependency tree tran
   await publication.rollback();
   assert.equal(readFileSync(join(root, "packages/api/node_modules/value"), "utf8"), "old-packages/api/node_modules");
   assert.equal(readFileSync(join(root, "packages/runner/node_modules/value"), "utf8"), "old-packages/runner/node_modules");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("publication removes a retired CLI dist on commit and restores it on rollback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-retired-cli-"));
+  const cliDist = join(root, "packages/cli/dist");
+  mkdirSync(cliDist, { recursive: true });
+  writeFileSync(join(cliDist, "index.js"), "old-cli");
+
+  const rollbackPublication = publishDirectories({
+    root,
+    stage: join(root, "stage"),
+    previousDirectory: join(root, "previous-rollback"),
+    paths: DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+    optionalMissingPaths: DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+  });
+  assert.equal(existsSync(cliDist), false);
+  await rollbackPublication.rollback();
+  assert.equal(readFileSync(join(cliDist, "index.js"), "utf8"), "old-cli");
+
+  const commitPublication = publishDirectories({
+    root,
+    stage: join(root, "stage"),
+    previousDirectory: join(root, "previous-commit"),
+    paths: DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+    optionalMissingPaths: DEPLOY_OPTIONAL_ARTIFACT_PATHS,
+  });
+  await commitPublication.commit();
+  assert.equal(existsSync(cliDist), false);
   rmSync(root, { recursive: true, force: true });
 });
 
