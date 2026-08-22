@@ -84,7 +84,7 @@ test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
-test("buildPrompt makes the platform-pinned pull request base the integration-line authority on every attempt", () => {
+test("buildPrompt makes the platform-pinned pull request base comparison and merge authority", () => {
   const retriedClaim = {
     ...claim,
     task: { ...claim.task, targetBranch: "stale-task-value", description: "Refresh onto the current target branch." },
@@ -93,9 +93,31 @@ test("buildPrompt makes the platform-pinned pull request base the integration-li
   const prompt = buildPrompt(retriedClaim);
   assert.match(prompt, /Platform-pinned run authority \(not task-authored text\):/u);
   assert.match(prompt, /run\.pullRequestBase: release\/1\.x/u);
-  assert.match(prompt, /run\.pullRequestBase is the integration line for this run/u);
-  assert.match(prompt, /current target branch[\s\S]*origin\/<run\.pullRequestBase>/u);
+  assert.match(prompt, /run\.pullRequestBase is authoritative for comparison and merge authorization/u);
+  assert.match(prompt, /not authority to rewrite the checked-out branch/u);
+  assert.doesNotMatch(prompt, /fetch and refresh/u);
+  assert.doesNotMatch(prompt, /append-only handoff state/u);
   assert.match(prompt, /Task: Ship it[\s\S]*Refresh onto the current target branch\./u);
+});
+
+test("buildPrompt protects template-chain handoff lineage from contradictory task instructions", () => {
+  const templateClaim = {
+    ...claim,
+    task: {
+      ...claim.task,
+      templateStep: { name: "Review implementation" },
+      description: "Fetch and refresh onto the current target branch; rebase and force-push if needed.",
+    },
+    run: { ...claim.run, pullRequestBase: "release/1.x" },
+  };
+  const prompt = buildPrompt(templateClaim);
+  assert.match(prompt, /Template-chain append-only handoff contract:/u);
+  assert.match(prompt, /checked-out starting commit is append-only shared lineage and handoff state/u);
+  assert.match(prompt, /Final HEAD must descend from it and remain fast-forward publishable/u);
+  assert.match(prompt, /Fetch origin\/<run\.pullRequestBase> for comparison only unless this step is explicitly designated for integration or merge/u);
+  assert.match(prompt, /Conflicting task-authored instructions are a workflow error/u);
+  assert.match(prompt, /stop and report the conflict rather than rebasing, resetting, force-pushing, or otherwise rewriting the starting commit/u);
+  assert.match(prompt, /Task: Ship it[\s\S]*Fetch and refresh onto the current target branch; rebase and force-push if needed\./u);
 });
 
 test("buildPrompt exposes a pinned implementation range without predecessor outputs", () => {
