@@ -169,6 +169,38 @@ const finishRecoveryPass = async (
   });
 };
 
+test("queued recovery keeps generic PATCH, retry, and enqueue blocked until readiness completes", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "queued-recovery-guard");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+
+  await assertIntegratorGuarded(seeded.integratorTask!.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.REVIEW);
+});
+
+test("fresh server-owned readiness authorization alone activates the recovery merge executor", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "readiness-recovery-activation");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await assertIntegratorGuarded(seeded.integratorTask!.id);
+
+  const authorization = await finishRecoveryPass(seeded, BASE_2);
+  const parsed = parseAuthorizationMetadata(authorization.metadata);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status === "ok") {
+    assert.equal(parsed.payload.baseSha, BASE_2);
+    assert.equal(parsed.payload.headSha, HEAD);
+    assert.equal(parsed.payload.decision.channel, "mechanical");
+  }
+  assert.equal(typeof (authorization.metadata as any).recoverySourceStopId, "string");
+  const runs = await db.run.findMany({
+    where: { taskId: seeded.integratorTask!.id },
+    orderBy: { runNumber: "asc" },
+  });
+  assert.equal(runs.length, 2);
+  assert.equal(runs[1]!.status, "QUEUED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.TODO);
+});
+
 test("eligible direct and compound stops recover once under duplicate ticks and issue a fresh authorization", async () => {
   for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
     const seeded = await seedStopped(shape, `recover-${shape}`);

@@ -40,7 +40,6 @@ import {
   isTerminalDisposition,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
-import { MERGE_TAIL_KIND, parseBaseDriftRecoveryActivity } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -255,25 +254,6 @@ export const stopStateFor = async (tx: Tx, taskId: string): Promise<StopState> =
   if (!stop) return null;
   const dispositions = await stopAnswerDispositions(tx, taskId, stop.stopId);
   if (dispositions.some((disposition) => isTerminalDisposition(disposition))) return null;
-  const recoveryRows = await tx.taskActivity.findMany({
-    where: {
-      taskId,
-      metadata: {
-        path: ["kind"],
-        equals: MERGE_TAIL_KIND.baseDriftRecovery,
-      },
-    },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { taskId: true, actorType: true, metadata: true },
-  });
-  const recovery = recoveryRows
-    .map((row) => parseBaseDriftRecoveryActivity(row, {
-      activityTaskId: taskId,
-      integratorTaskId: taskId,
-      sourceStopId: stop.stopId,
-    }))
-    .find((metadata) => metadata !== null && metadata.state !== "classification-retry");
-  if (recovery?.state === "queued") return null;
   return { stop, dispositions };
 };
 

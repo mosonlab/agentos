@@ -8,6 +8,7 @@ import {
   RunnerPreference,
   TaskStatus,
   activateChainSuccessor,
+  activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   defenseTriggers,
   enqueueTaskRun,
@@ -483,7 +484,17 @@ export const readinessTick = async (
           body: `Merge readiness authorized exact head ${evidence.headSha}; merge execution queued`,
           metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "authorized", headSha: evidence.headSha, authorizationActivityId: activity.id, recoverySourceStopId: recovery?.sourceStopId ?? null },
         } });
-        await activateChainSuccessor(tx, readiness, {}, now);
+        if (recovery) {
+          await activateRecoveryIntegratorSuccessor(tx, {
+            readinessTaskId: readiness.id,
+            integratorTaskId: recovery.integratorTaskId,
+            sourceStopId: recovery.sourceStopId,
+            recoveryRunId: recovery.recoveryRunId,
+            authorizationActivityId: activity.id,
+          }, now);
+        } else {
+          await activateChainSuccessor(tx, readiness, {}, now);
+        }
       });
       result.authorized += 1;
     } catch (error: unknown) {
