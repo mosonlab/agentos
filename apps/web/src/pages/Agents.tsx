@@ -34,7 +34,7 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
 }): ReactNode => {
   const environments = usePoll<Environment[]>(`/projects/${projectId}/environments`, 30_000);
   const [form, setForm] = useState({
-    name: initial?.name ?? "", title: initial?.title ?? "", model: initial?.model ?? "claude-opus-5:high", environmentId: initial?.environmentId ?? "",
+    name: initial?.name ?? "", title: initial?.title ?? "", model: initial?.model ?? "claude-opus-5:medium", environmentId: initial?.environmentId ?? "",
     runnerPreference: initial?.runnerPreference ?? "CLAUDE" as RunnerPreference, inboxAccess: false,
     rolePrompt: initial?.rolePrompt ?? "",
   });
