@@ -360,7 +360,7 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/demos/templates-release-evidence.schema.json",
     "docs/governance/review-role-convergence-v1.md",
     "docs/governance/task-routing-v1.md",
-    "docs/media/agents.png",
+    "docs/media/chain.png",
     "docs/media/tasks-board.png",
     "docs/public-snapshot.md",
     "docs/release/fixtures/oss-b0-smoke-task.json",

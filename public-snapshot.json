@@ -42,7 +42,7 @@
     { "glob": "docker-compose.yml", "purpose": "local development services" },
     { "glob": "eslint.config.mjs", "purpose": "type-aware lint gate rule" },
     { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by AGENTS.md" },
-    { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents view, each role with its model, reasoning effort, runner and inbox access" },
+    { "glob": "docs/media/chain.png", "purpose": "README screenshot: a twelve-step assurance chain with assigned agent roles" },
     { "glob": "docs/media/tasks-board.png", "purpose": "README screenshot: the task board with a twelve-step template chain in flight" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },
     { "glob": "docs/demos/templates-release-demo.md", "purpose": "templates release-demo operator contract" },
@@ -284,8 +284,8 @@
   "approvedFindings": [
     {
       "category": "binary-material",
-      "glob": "docs/media/agents.png",
-      "reason": "reviewed README screenshot of the agents view, published with v0.2.0"
+      "glob": "docs/media/chain.png",
+      "reason": "reviewed README screenshot of the assurance chain, published with v0.2.0"
     },
     {
       "category": "binary-material",
