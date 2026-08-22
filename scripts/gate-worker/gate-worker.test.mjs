@@ -33,6 +33,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -49,6 +50,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const libPath = join(here, "lib.sh");
 const runGatePath = join(here, "run-gate.sh");
+const dispatchPath = join(here, "gate-dispatch.sh");
 const provisionPath = join(here, "provision.sh");
 const runbookPath = join(here, "..", "..", "docs", "runbooks", "gate-worker.md");
 
@@ -210,6 +212,119 @@ test("gate_repo_name refuses a name carrying remote shell syntax", (t) => {
   ]) {
     assert.equal(repoNameOf(t, url).status, 1, `accepted ${url}`);
   }
+});
+
+// --- exact-ref transport -----------------------------------------------------
+
+test("dispatch transports a detached candidate and current baseline without mirroring an incomplete ref namespace", (t) => {
+  const root = scratch(t);
+  const origin = join(root, "origin.git");
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: GIT_ENV });
+  execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
+
+  const source = join(root, "source");
+  mkdirSync(join(source, "scripts", "gate-worker"), { recursive: true });
+  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh", "lib.sh"]) {
+    cpSync(join(here, name), join(source, "scripts", "gate-worker", name));
+  }
+  writeFileSync(
+    join(source, "scripts", "merge-gate.sh"),
+    '#!/usr/bin/env bash\nprintf "MERGE GATE: PASS %s\\n" "$(git rev-parse HEAD)"\n',
+  );
+  chmodSync(join(source, "scripts", "merge-gate.sh"), 0o755);
+  git(source, "init", "-q", "-b", "main");
+  git(source, "remote", "add", "origin", origin);
+  git(source, "add", "-A");
+  git(source, "commit", "-q", "-m", "base");
+  const oldMain = git(source, "rev-parse", "HEAD");
+  git(source, "push", "-q", "origin", "main");
+
+  git(source, "checkout", "-q", "-b", "feature");
+  writeFileSync(join(source, "candidate.txt"), "candidate\n");
+  git(source, "add", "candidate.txt");
+  git(source, "commit", "-q", "-m", "candidate");
+  const candidate = git(source, "rev-parse", "HEAD");
+  git(source, "push", "-q", "origin", "feature");
+
+  git(source, "checkout", "-q", "main");
+  writeFileSync(join(source, "baseline.txt"), "current baseline\n");
+  git(source, "add", "baseline.txt");
+  git(source, "commit", "-q", "-m", "advance baseline");
+  const baseline = git(source, "rev-parse", "HEAD");
+  git(source, "push", "-q", "origin", "main");
+
+  const checkout = join(root, "checkout");
+  execFileSync("git", ["clone", "-q", "--single-branch", "--branch", "feature", origin, checkout], { env: GIT_ENV });
+  git(checkout, "checkout", "-q", "--detach", candidate);
+  git(checkout, "branch", "-D", "feature");
+  git(checkout, "update-ref", "-d", "refs/remotes/origin/feature");
+  assert.equal(git(checkout, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"), "");
+
+  const fakeHome = join(root, "worker-home");
+  const mirror = join(fakeHome, "gate", "origin", "mirror.git");
+  mkdirSync(join(fakeHome, "gate", "origin"), { recursive: true });
+  execFileSync("git", ["init", "-q", "--bare", mirror], { env: GIT_ENV });
+  execFileSync("git", ["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
+  git(source, "push", "-q", mirror, `${oldMain}:refs/heads/main`);
+
+  const fakeBin = join(root, "fake-bin");
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "ssh"), `#!/usr/bin/env bash
+set -uo pipefail
+if [ "\${1:-}" = "-G" ]; then exit 1; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|-o|-i|-F) shift 2 ;;
+    -n|-T|-x) shift ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || exit 2
+shift
+cd "$FAKE_SSH_HOME"
+exec bash -c "$*"
+`);
+  writeFileSync(join(fakeBin, "scp"), `#!/usr/bin/env bash
+set -uo pipefail
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -P) shift 2 ;;
+    -q) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -eq 2 ] || exit 2
+destination="\${2#*:}"
+cp "$1" "$FAKE_SSH_HOME/$destination"
+`);
+  chmodSync(join(fakeBin, "ssh"), 0o755);
+  chmodSync(join(fakeBin, "scp"), 0o755);
+
+  const cache = join(root, "cache");
+  const result = spawnSync("bash", [dispatchPath.replace(here, join(checkout, "scripts", "gate-worker")), candidate, "--server", "fake"], {
+    cwd: checkout,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: {
+      ...GIT_ENV,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      FAKE_SSH_HOME: fakeHome,
+      XDG_CACHE_HOME: cache,
+      OPERATOR_TOKEN: "",
+      RUNNER_TOKEN: "",
+      GH_TOKEN: "",
+      GITHUB_TOKEN: "",
+    },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, new RegExp(`MERGE GATE: PASS ${candidate}`));
+  assert.equal(git(mirror, "rev-parse", `refs/gate/candidates/${candidate}^{commit}`), candidate);
+  assert.equal(git(mirror, "rev-parse", `refs/gate/baselines/${baseline}^{commit}`), baseline);
+  assert.equal(git(mirror, "rev-parse", "refs/heads/main^{commit}"), oldMain, "transport rewrote or deleted the worker's main ref");
+  assert.equal(git(mirror, "remote"), "", "the worker cache acquired a remote");
+  assert.equal(readFileSync(join(fakeHome, "gate", "origin", "run-gate.sh"), "utf8"), readFileSync(runGatePath, "utf8"));
 });
 
 // --- run-gate.sh: the worker's state is never a verdict ----------------------

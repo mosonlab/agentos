@@ -69,7 +69,7 @@ const call = async (
 });
 
 let sequence = 0;
-const seedTask = async (options: { chained: boolean }) => {
+const seedTask = async (options: { chained: boolean; outputKind?: string }) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Run output", slug: `run-output-${suffix}` } });
@@ -85,9 +85,26 @@ const seedTask = async (options: { chained: boolean }) => {
   await db.agentRepoAccess.create({ data: {
     projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",
   } });
+  const template = options.outputKind ? await db.taskTemplate.create({ data: {
+    projectId: project.id,
+    name: `template-${suffix}`,
+    description: "completion boundary fixture",
+    variables: [],
+  } }) : null;
+  const templateStep = template ? await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    stepIndex: 0,
+    name: "Regression verification",
+    assigneeType: "AGENT",
+    assigneeAgentId: agent.id,
+    prompt: "verify",
+    approvalGate: false,
+    outputKind: options.outputKind!,
+  } }) : null;
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Find the inbox deadlock", description: "work", assigneeAgentId: agent.id,
     repoId: repo.id, status: TaskStatus.TODO, targetBranch: "master",
+    ...(template && templateStep ? { templateId: template.id, templateStepId: templateStep.id } : {}),
     ...(options.chained ? { chainId: `chain-${suffix}`, chainIndex: 0 } : {}),
   } });
   return { project, agent, repo, task };
@@ -262,6 +279,47 @@ test("a successful run's output is kept on its run as well", async () => {
   // discarded too — success was no protection, only a different branch of the
   // same omission.
   assert.equal(closed.output, SUCCEEDED_TAIL);
+});
+
+test("ordinary chained steps retain completion-time output synthesis", async () => {
+  const { task } = await seedTask({ chained: true });
+  const runId = await enqueue(task.id);
+  const { run, fencingToken } = await claimRun(runId, "runner-ordinary-chain");
+  const completed = await call(
+    "POST", `/runner/runs/${runId}/complete`, RUNNER,
+    succeededCompletion("runner-ordinary-chain", fencingToken, run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: task.id } });
+  assert.equal(output.runId, runId);
+  assert.equal(output.body, SUCCEEDED_TAIL);
+});
+
+test("regression completion keeps final prose as Run.output but requires this run's explicit task_output", async () => {
+  const { task } = await seedTask({ chained: true, outputKind: "regression-verification" });
+  const runId = await enqueue(task.id);
+  const { run, sessionToken, fencingToken } = await claimRun(runId, "runner-regression");
+  const nonVerdict = "GATE NOT RUN: the exact candidate was not transported";
+  const activity = await call("POST", `/session/runs/${runId}/activity`, sessionToken, {
+    fencingToken,
+    body: nonVerdict,
+  });
+  assert.equal(activity.status, 201, JSON.stringify(activity.body));
+
+  const completed = await call(
+    "POST", `/runner/runs/${runId}/complete`, RUNNER,
+    { ...succeededCompletion("runner-regression", fencingToken, run.branch ?? "master"), output: "I could not obtain a gate verdict." },
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: runId } })).output, "I could not obtain a gate verdict.");
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: task.id } }), 0, "completion prose became structured output");
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(stopped.status, TaskStatus.REVIEW);
+  assert.equal(stopped.failureReason, "missing regression output");
+  const activities = await db.taskActivity.findMany({ where: { taskId: task.id }, orderBy: { createdAt: "asc" } });
+  assert.ok(activities.some(({ body }) => body === nonVerdict), "the agent's original non-verdict activity was lost");
+  assert.ok(activities.some(({ body }) => body === "Regression did not advance: missing regression output"));
 });
 
 test("a runner too old to send an output completes exactly as it always did", async () => {

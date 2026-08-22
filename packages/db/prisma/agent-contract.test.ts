@@ -121,6 +121,9 @@ test("the canonical twelve-step template sources split code review and preserve 
   assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
+  const compoundRegression = templateSteps.find((step) => step.stepIndex === 9)!.prompt;
+  assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
+  assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
   assert.match(templateSteps[1]!.prompt, /this run's id/u);
@@ -164,6 +167,9 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
+  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
+  assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
+  assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
   assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
   assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
