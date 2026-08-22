@@ -147,7 +147,7 @@ const seedStopped = async (shape: "legacy-seven-step-direct" | "twelve-step-read
   return seeded;
 };
 
-const finishRecoveryPass = async (
+const recordRecoveryPass = async (
   seeded: Awaited<ReturnType<typeof seedIntegratorChain>>,
   baseSha: string,
 ) => {
@@ -161,6 +161,14 @@ const finishRecoveryPass = async (
     body: JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: baseSha, gateVerdict: "PASS" }), commitSha: HEAD,
   } });
   await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
+  return run;
+};
+
+const finishRecoveryPass = async (
+  seeded: Awaited<ReturnType<typeof seedIntegratorChain>>,
+  baseSha: string,
+) => {
+  await recordRecoveryPass(seeded, baseSha);
   const tick = await readinessTick(db, reader(snapshot(baseSha)));
   assert.equal(tick.authorized, 1);
   return db.taskActivity.findFirstOrThrow({
@@ -198,6 +206,55 @@ test("fresh server-owned readiness authorization alone activates the recovery me
   });
   assert.equal(runs.length, 2);
   assert.equal(runs[1]!.status, "QUEUED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.TODO);
+});
+
+test("recovery freshness requeue preserves the run binding through fresh authorization and executor activation", async () => {
+  const seeded = await seedStopped("twelve-step-readiness", "readiness-recovery-second-freshness");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+
+  const firstRecoveryRun = await recordRecoveryPass(seeded, BASE_2);
+
+  assert.equal((await readinessTick(db, reader(snapshot(BASE_3)))).requeued, 1);
+  const secondRecoveryRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id },
+    orderBy: { runNumber: "desc" },
+  });
+  assert.notEqual(secondRecoveryRun.id, firstRecoveryRun.id);
+  const integratorBinding = await db.taskActivity.findFirst({
+    where: {
+      taskId: seeded.integratorTask!.id,
+      actorType: "control-plane",
+      metadata: { path: ["recoveryRunId"], equals: secondRecoveryRun.id },
+    },
+  });
+  assert.ok(integratorBinding, "the canonical integrator recovery surface binds the requeued run");
+  assert.equal((integratorBinding.metadata as Record<string, unknown>).currentBaseSha, BASE_3);
+  const queuedBindings = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.integratorTask!.id,
+      actorType: "control-plane",
+      metadata: { path: ["state"], equals: "queued" },
+    },
+    select: { metadata: true },
+  });
+  assert.deepEqual(
+    [...new Set(queuedBindings.map(({ metadata }) => (metadata as Record<string, unknown>).attempt))],
+    [1],
+    "a readiness refresh appends evidence without spending another executor-drift attempt",
+  );
+  await assertIntegratorGuarded(seeded.integratorTask!.id);
+
+  const authorization = await finishRecoveryPass(seeded, BASE_3);
+  const parsed = parseAuthorizationMetadata(authorization.metadata);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status === "ok") assert.equal(parsed.payload.baseSha, BASE_3);
+  const executorRuns = await db.run.findMany({
+    where: { taskId: seeded.integratorTask!.id },
+    orderBy: { runNumber: "asc" },
+  });
+  assert.equal(executorRuns.length, 2);
+  assert.equal(executorRuns[1]!.status, "QUEUED");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).status, TaskStatus.TODO);
 });
 

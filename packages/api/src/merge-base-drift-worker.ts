@@ -348,15 +348,21 @@ const queueRecovery = async (
     where: { taskId: expected.integratorTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
     select: { taskId: true, actorType: true, metadata: true },
   });
-  const attempts = history.map((row) => parseBaseDriftRecoveryActivity(row, {
-    activityTaskId: expected.integratorTaskId,
-    integratorTaskId: expected.integratorTaskId,
-  })).filter((metadata) => (
-    metadata?.state === "queued"
-    && metadata.repository === expected.repository
-    && metadata.prNumber === expected.prNumber
-    && metadata.targetBranch === expected.targetBranch
-  )).length;
+  // Readiness may refresh the same recovery attempt more than once before the
+  // executor is activated. Each refresh appends a new canonical queued binding
+  // for its run/base pair, but must not spend another executor-drift attempt.
+  const attempts = new Set(history.flatMap((row) => {
+    const metadata = parseBaseDriftRecoveryActivity(row, {
+      activityTaskId: expected.integratorTaskId,
+      integratorTaskId: expected.integratorTaskId,
+    });
+    return metadata?.state === "queued"
+      && metadata.repository === expected.repository
+      && metadata.prNumber === expected.prNumber
+      && metadata.targetBranch === expected.targetBranch
+      ? [metadata.attempt]
+      : [];
+  })).size;
   const attempt = attempts + 1;
   const common = {
     kind: MERGE_TAIL_KIND.baseDriftRecovery,

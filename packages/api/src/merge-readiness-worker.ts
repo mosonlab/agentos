@@ -243,12 +243,28 @@ const requeueRegression = async (
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
-    if (input.recovery) await tx.taskActivity.create({ data: {
-      taskId: input.regressionTaskId,
-      actorType: "control-plane",
-      body: `Automatic base-drift recovery ${String(input.recovery.attempt)} context carried through readiness requeue`,
-      metadata: { ...input.recovery, recoveryRunId: run.id },
-    } });
+    if (input.recovery) {
+      const body = `Automatic base-drift recovery ${String(input.recovery.attempt)} context carried through readiness requeue`;
+      const metadata = {
+        ...input.recovery,
+        currentBaseSha: input.currentBaseSha,
+        recoveryRunId: run.id,
+      } as Prisma.InputJsonObject;
+      await tx.taskActivity.createMany({ data: [
+        {
+          taskId: input.recovery.integratorTaskId,
+          actorType: "control-plane",
+          body,
+          metadata,
+        },
+        {
+          taskId: input.regressionTaskId,
+          actorType: "control-plane",
+          body,
+          metadata,
+        },
+      ] });
+    }
     await tx.taskActivity.create({ data: {
       taskId: input.regressionTaskId,
       actorType: "control-plane",
