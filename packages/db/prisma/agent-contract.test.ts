@@ -80,6 +80,9 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(firstReview, /quote the exact governing\s+specification text/u);
   assert.match(firstReview, /codex exec review -m gpt-5\.6-sol -c model_reasoning_effort=high/u);
   assert.match(firstReview, /review the changes from <implementation base sha> to <delivered head sha>/u);
+  assert.match(firstReview, /post-fix regression verification/u);
+  assert.match(firstReview, /entire fix diff as one unit/u);
+  assert.match(firstReview, /exact fixed head/u);
 
   const blindWrite = finalReview.indexOf("intermediate AgentOS task output");
   const firstReportRead = finalReview.indexOf("predecessor step outputs", blindWrite);
@@ -109,7 +112,7 @@ test("the canonical twelve-step template sources split code review and preserve 
       { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 9, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
+      { stepIndex: 9, agentName: "review-coordinator-sol", outputKind: "regression-verification" },
       { stepIndex: 10, agentName: "librarian", outputKind: "documentation" },
       { stepIndex: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
@@ -151,7 +154,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
       { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 5, agentName: "review-coordinator-opus", outputKind: "regression-verification" },
+      { stepIndex: 5, agentName: "review-coordinator-sol", outputKind: "regression-verification" },
       { stepIndex: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],

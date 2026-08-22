@@ -68,7 +68,7 @@ const seedReadiness = async () => {
     rolePrompt: "role",
   } });
   const [regressionAgent, reviewAgent, integratorAgent] = await Promise.all([
-    makeAgent("review-coordinator-opus"),
+    makeAgent("review-coordinator-sol"),
     makeAgent("review-coordinator"),
     makeAgent("merge-integrator", INTEGRATOR_SENTINEL_MODEL),
   ]);

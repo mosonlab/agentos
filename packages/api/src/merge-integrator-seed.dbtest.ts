@@ -156,6 +156,47 @@ test("canonical sync restores step, merge-resolver role, and foundational prompt
   assert.equal(persistedAgent.rolePrompt, expectedRole.rolePrompt);
 });
 
+test("canonical sync adopts the declared Sol regression assignee transition without rewriting instantiated tasks", async () => {
+  assert.equal((await seed()).code, 0);
+  const direct = await directTemplate();
+  const compound = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: direct.projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  const regressionSteps = [
+    direct.steps.find(({ stepIndex }) => stepIndex === 5)!,
+    compound.steps.find(({ stepIndex }) => stepIndex === 9)!,
+  ];
+  const opus = await db.agent.findFirstOrThrow({
+    where: { projectId: direct.projectId, name: "review-coordinator-opus" },
+  });
+  await Promise.all(regressionSteps.map((step) => db.taskTemplateStep.update({
+    where: { id: step.id }, data: { assigneeAgentId: opus.id, prompt: "previous release prompt" },
+  })));
+  const existingTasks = await Promise.all(regressionSteps.map((step, index) => db.task.create({ data: {
+    projectId: direct.projectId,
+    templateId: step.taskTemplateId,
+    templateStepId: step.id,
+    name: `Already instantiated regression ${index + 1}`,
+    description: "legacy assignment",
+    assigneeType: "AGENT",
+    assigneeAgentId: opus.id,
+    status: "TODO",
+    chainId: `legacy-chain-${index + 1}`,
+    chainIndex: step.stepIndex,
+  } })));
+
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  assert.match(synced.output, /"adoptedAssignees":2/u);
+  const [adoptedSteps, preservedTasks] = await Promise.all([
+    db.taskTemplateStep.findMany({ where: { id: { in: regressionSteps.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
+    db.task.findMany({ where: { id: { in: existingTasks.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
+  ]);
+  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["review-coordinator-sol", "review-coordinator-sol"]);
+  assert.deepEqual(preservedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["review-coordinator-opus", "review-coordinator-opus"]);
+});
+
 test("canonical sync rejects template structure drift without applying its prompt", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();

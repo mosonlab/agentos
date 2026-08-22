@@ -1,6 +1,6 @@
 ---
 stepIndex: 5
-agent: review-coordinator-opus
+agent: review-coordinator-sol
 approvalGate: false
 outputKind: regression-verification
 attachmentsFromPrevious: true
