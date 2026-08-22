@@ -20,7 +20,7 @@ Use the current repository instructions as authority. Bind every report to an ex
 
 ## Model and delegation contract
 
-Run the discovery parent and final adjudication with `gpt-5.6-sol` at `high` reasoning effort. Confirm the effective parent model and effort before surveying; if either is different or cannot be established, stop before the scan and tell Leo which launch settings are required.
+Launch the discovery task with `gpt-5.6-sol` at `high` reasoning effort; the skill cannot reconfigure its parent task. If runtime metadata explicitly exposes the effective parent model and effort, record them and stop before surveying only when they conflict with this launch contract. If the runtime does not expose either field, record `requested gpt-5.6-sol/high; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
 
 When the runtime supports subagents, use available capacity to widen the read-only survey:
 
