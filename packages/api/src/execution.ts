@@ -2,8 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { FailureClass, type FailureEnvelope, type Prisma } from "@agentos/db";
 
-export { runnerFor } from "@agentos/db";
-
 export type ExitEvidence = {
   exitCode: number | null;
   signal?: string | null;

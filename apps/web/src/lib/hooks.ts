@@ -187,13 +187,3 @@ export const useMediaQuery = (query: string): boolean => {
   }, [query]);
   return matches;
 };
-
-/** Closes menus/popovers on outside click. */
-export const useDismiss = (onDismiss: () => void, active: boolean): void => {
-  useEffect(() => {
-    if (!active) return;
-    const handler = (): void => onDismiss();
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
-  }, [active, onDismiss]);
-};
