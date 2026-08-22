@@ -3,6 +3,11 @@ import { PrismaClient } from "@prisma/client";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
 
+const ASSIGNEE_TRANSITIONS = new Map([
+  ["compound-engineer-workflow:9", { from: "review-coordinator-opus", to: "review-coordinator-sol" }],
+  ["direct-engineer-workflow:5", { from: "review-coordinator-opus", to: "review-coordinator-sol" }],
+]);
+
 // Every canonical template, every step of each, and every role under agents/
 // is synced. Omitting any source here would let a prompt edit silently miss
 // production, so the loader owns the complete template inventory.
@@ -20,11 +25,12 @@ const main = async (): Promise<void> => {
       });
       if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
       const updatedSteps: Record<string, Record<number, number>> = {};
+      let adoptedAssignees = 0;
       let templateCount = 0;
       for (const [templateName, steps] of templateSources) {
         const templates = await tx.taskTemplate.findMany({
           where: { name: templateName },
-          select: { id: true },
+          select: { id: true, projectId: true },
         });
         if (templates.length === 0) throw new Error(`Template ${templateName} was not found`);
         templateCount += templates.length;
@@ -40,6 +46,7 @@ const main = async (): Promise<void> => {
           const persistedSteps = await tx.taskTemplateStep.findMany({
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex },
             select: {
+              id: true,
               taskTemplateId: true,
               assigneeAgent: { select: { name: true } },
               assigneeType: true,
@@ -56,8 +63,30 @@ const main = async (): Promise<void> => {
           }
           for (const persisted of persistedSteps) {
             const differences = templateStepStructureDifferences(persisted, step);
-            if (differences.length > 0) {
+            const transition = ASSIGNEE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
+            const adoptsCanonicalAssignee = differences.length === 1
+              && differences[0] === "agent"
+              && transition?.from === (persisted.assigneeAgent?.name ?? null)
+              && transition.to === step.agentName;
+            if (differences.length > 0 && !adoptsCanonicalAssignee) {
               throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
+            }
+            if (adoptsCanonicalAssignee) {
+              const projectId = templates.find(({ id }) => id === persisted.taskTemplateId)?.projectId;
+              const assignee = projectId
+                ? await tx.agent.findFirst({
+                  where: { projectId, name: transition.to, archivedAt: null },
+                  select: { id: true },
+                })
+                : null;
+              if (!assignee) {
+                throw new Error(`${templateName} step ${step.stepIndex} cannot adopt ${transition.to}: active target Agent was not found in the template project`);
+              }
+              await tx.taskTemplateStep.update({
+                where: { id: persisted.id },
+                data: { assigneeAgentId: assignee.id },
+              });
+              adoptedAssignees += 1;
             }
           }
           updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
@@ -111,9 +140,9 @@ const main = async (): Promise<void> => {
           data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
         })).count;
       }
-      return { templates: templateCount, updatedSteps, updatedRoles };
+      return { templates: templateCount, adoptedAssignees, updatedSteps, updatedRoles };
     });
-    const updated = Object.values(result.updatedSteps)
+    const updated = result.adoptedAssignees + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);

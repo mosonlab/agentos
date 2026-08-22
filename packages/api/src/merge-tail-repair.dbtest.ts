@@ -35,7 +35,7 @@ const seedRegression = async () => {
     model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const [regressionAgent, resolverAgent, fixAgent] = await Promise.all([
-    makeAgent("review-coordinator-opus"), makeAgent("merge-resolver"), makeAgent("senior-dev"),
+    makeAgent("review-coordinator-sol"), makeAgent("merge-resolver"), makeAgent("senior-dev"),
   ]);
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "widgets", remoteUrl: "https://github.com/acme/widgets.git",

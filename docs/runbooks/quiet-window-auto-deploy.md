@@ -125,7 +125,8 @@ The job then performs exactly this sequence and stops at the first failure:
    only after a zero exit and non-empty output;
 5. run `npm run db:migrate-goal-execution` from staging with the two authority
    SHAs read from that revision's `release-authority.json`;
-6. run `npm run db:sync-canonical-prompts`; structural drift is a terminal
+6. run `npm run db:sync-canonical-prompts`; structural drift outside an
+   explicitly source-declared assignee transition is a terminal
    refusal and is never changed with SQL;
 7. verify the staged generated Prisma client, recheck the barrier and blocking
    statuses, swap the staged `dist/` trees and target `node_modules`, and

@@ -26,12 +26,14 @@ red at the frozen base.
 
 `review-coordinator-sol` performs the first implementation review over the
 complete integrated diff from the frozen pre-implementation base. It persists
-stable findings as its committed task output.
+stable findings as its committed task output. After adjudication and fixes it
+performs the whole-diff regression verification over every must-fix and binds
+its verdict to the exact head eligible for merge readiness.
 
 `review-coordinator-opus` first persists an independent blind review, then reads
 the first report and applies the canonical merge matrix to close the must-fix
-list. After fixes it owns one whole-diff regression verification over every
-must-fix and binds its verdict to the exact head eligible for human review.
+list. Its role prompt retains post-fix regression instructions only for task
+rows instantiated before the canonical template moved that phase to Sol.
 
 Security and risk-focused verification follow an evidence ladder: inspect the
 implementation and existing tests, run the narrow named regressions, and report
@@ -61,8 +63,8 @@ Roster convergence does not rewrite or interrupt an active chain.
 
 - Exactly twelve role files pass the canonical source contract, including the
   mechanical merge sentinel.
-- Full Assurance step 3 binds `review-coordinator`; steps 6, 7, and 9 bind the
-  first reviewer and final reviewer as specified by the canonical contract.
+- Full Assurance step 3 binds `review-coordinator`; steps 6 and 9 bind
+  `review-coordinator-sol`, and step 7 binds `review-coordinator-opus`.
 - The first report is durable before the final reviewer reads it.
 - The closed must-fix list follows the canonical merge matrix and the post-fix
   verdict accounts for every must-fix at one exact head.

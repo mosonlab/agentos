@@ -56,7 +56,10 @@ no longer needed so a seed cannot silently turn an experiment into a release
 default.
 
 `review-coordinator` reviews plans only. `review-coordinator-sol` performs the
-first integrated-diff review. `review-coordinator-opus` performs the blind final
-review, must-fix adjudication, and post-fix exact-head regression verification.
+first integrated-diff review and post-fix exact-head regression verification.
+`review-coordinator-opus` performs the blind final review and must-fix
+adjudication. Existing task rows keep the assignee captured when their chain was
+created, so the Opus role retains regression instructions for legacy chains
+that were instantiated before the template binding changed.
 Legacy reviewer roles remain only as archived database history and must not be
 assigned to new tasks or templates.
