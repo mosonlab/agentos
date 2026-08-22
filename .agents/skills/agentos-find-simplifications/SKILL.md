@@ -18,6 +18,19 @@ This skill is discovery-only.
 
 Use the current repository instructions as authority. Bind every report to an exact commit and state whether it represents `HEAD`, `origin/main`, or a dirty working tree. The serving checkout remains read-only; if later work must persist an artifact or run mutating validation, use an isolated worktree.
 
+## Model and delegation contract
+
+Run the discovery parent and final adjudication with `gpt-5.6-sol` at `high` reasoning effort. Confirm the effective parent model and effort before surveying; if either is different or cannot be established, stop before the scan and tell Leo which launch settings are required.
+
+When the runtime supports subagents, use available capacity to widen the read-only survey:
+
+- Spawn every survey worker with explicit `gpt-5.6-luna` and `max`; never rely on inherited or default model settings.
+- Give each worker a disjoint tracked corpus or subsystem and the same evidence fields required by the candidate report.
+- Workers gather coverage, consumers, dynamic entrypoints, intent, history, candidate leads, and unresolved ambiguity. They do not assign final verdicts or authorize deletion.
+- Wait for every worker, then have the Sol parent inspect the returned evidence, fill coverage gaps, reject thin leads, deduplicate candidates, and assign the final classifications.
+
+Choose the worker count from the available runtime capacity and independently useful partitions; do not encode a product version or fixed pool size. If subagents are unavailable, the Sol parent completes the same coverage serially and records that fact. Delegation changes throughput, not the evidence bar.
+
 ## Survey the whole tracked tree
 
 First establish the repository's actual shape with `git status`, `git rev-parse`, `git ls-files`, workspace manifests, package scripts, and current architecture or operating docs. Derive areas from the repository rather than relying on a cached package list.
@@ -83,6 +96,8 @@ Representative defense paths include `packages/db/prisma/**`, `scripts/merge-gat
 Read [references/candidate-report.md](references/candidate-report.md) before writing the result. Give each candidate a stable ID and group related candidates into bounded themes that can later be implemented and validated independently.
 
 The report must account for every surveyed area, including areas with no accepted candidate, and must distinguish exclusions from completed coverage. Prefer a few high-confidence themes over a long list of guesses.
+
+For each theme, read the current `AGENTS.md` `Dispatching chains` rules and recommend a chain type plus one implementation route: `Luna Max eligible` or `Sol High required`. State the exact routing reason. Treat this as a post-approval handoff recommendation, not implementation authority. A Luna subagent dispatched outside the required AgentOS chain does not inherit the chain's permission to implement.
 
 End with only the consequential decisions Leo must make:
 
