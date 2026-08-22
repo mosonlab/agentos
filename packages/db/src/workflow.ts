@@ -1120,7 +1120,12 @@ export const applyInboxDecisionTx = async (
     where: { id: input.inboxMessageId },
     include: {
       session: { include: { run: true } },
-      gateTask: { include: { previousTask: true } },
+      gateTask: {
+        include: {
+          previousTask: true,
+          templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
+        },
+      },
       thread: true,
     },
   });
@@ -1192,14 +1197,16 @@ export const applyInboxDecisionTx = async (
     });
     return { duplicate: false, resumed: false, messageId: question.id };
   }
-  // A HUMAN-gate rejection can queue the executable predecessor. Resolve that
-  // target before taking either mutex, then lock predecessor -> gate: PATCH on
-  // the predecessor takes that same order when it activates the HUMAN
+  // A HUMAN gate or server-owned readiness rejection can queue the executable
+  // predecessor. Ordinary AGENT gates remain executable themselves. Resolve
+  // that target before taking either mutex, then lock predecessor -> gate:
+  // PATCH on the predecessor takes that same order when it activates the
   // successor. Taking gate -> predecessor here would make the two legitimate
   // operations deadlock.
   let rejectionTarget: { id: string; name: string } | null = null;
   if (gateDecision && question.gateTask && input.decision === "reject") {
-    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT
+    const readiness = isMergeReadinessStep(question.gateTask.templateStep);
+    rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT && !readiness
       ? question.gateTask
       : question.gateTask.previousTask;
     if (!rejectionTarget && question.gateTask.chainId && question.gateTask.chainIndex !== null) {

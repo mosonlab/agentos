@@ -465,6 +465,47 @@ test("recovered confirmation approval renews authorization through real seven- a
   }
 });
 
+test("fresh confirmation rejection reruns regression, never server-owned readiness, for seven- and twelve-step tails", async () => {
+  for (const shape of ["legacy-seven-step-direct", "twelve-step-readiness"] as const) {
+    const { chain } = await stoppedChain(`reject-${shape}`, "base-drift", shape);
+    assert.ok(chain.readinessTask, `${shape} has a server-owned readiness gate`);
+    const question = await stopQuestionFor(chain.integratorTask!.id);
+    await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: question!.id, externalEventId: `evt-${shape}-reauth-for-reject`, decision: "re-authorize",
+    }));
+
+    const request = (await db.taskActivity.findMany({ where: { taskId: chain.readinessTask!.id } }))
+      .find((row) => (row.metadata as any)?.purpose === "confirmation");
+    assert.ok(request, `${shape}: confirmation evidence was requested on readiness`);
+    const card = await db.inboxMessage.findUniqueOrThrow({
+      where: { id: (request.metadata as any).cardId as string },
+    });
+    const filled = await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date());
+    assert.deepEqual(filled, { claimed: 1, filled: 1, unavailable: 0 });
+
+    const rejected = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: card.id, externalEventId: `evt-${shape}-reject`, decision: "reject",
+    }));
+    assert.equal(rejected.gateAction, "rejected");
+    assert.equal(await db.run.count({ where: { taskId: chain.readinessTask!.id } }), 0,
+      `${shape}: readiness never receives a model Run`);
+    const regressionRuns = await db.run.findMany({
+      where: { taskId: chain.gateTask.id }, orderBy: { runNumber: "asc" },
+    });
+    assert.equal(regressionRuns.length, 2, `${shape}: regression receives exactly one recovery Run`);
+    assert.equal(regressionRuns[1]!.status, "QUEUED", `${shape}: regression is queued again`);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, "TODO");
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask!.id } })).status, "TODO");
+    assert.equal(
+      await db.taskActivity.count({
+        where: { taskId: chain.gateTask.id, body: "Approval gate rejected; step queued again" },
+      }),
+      1,
+      `${shape}: rejection records the regression recovery`,
+    );
+  }
+});
+
 test("N20 an external failure at the ceiling buys an integrator step no extra run", async () => {
   const chain = await seedIntegratorChain(db, { label: "n20-external" });
   const run = await liveIntegratorRun(chain, 5, 5);
