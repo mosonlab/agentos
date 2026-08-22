@@ -31,7 +31,6 @@ import {
   acquireProcessLock,
   blockingRunsStatement,
   deployArtifactPaths,
-  DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
   publishDirectories,
@@ -498,7 +497,7 @@ const main = async () => {
 
     let stage = null;
     let artifactPaths = null;
-    let optionalArtifacts = null;
+    let optionalWorkspaceArtifacts = null;
     let barrier = null;
     const transactionId = randomUUID();
     const backupDirectory = join(STATE_DIR, "backups");
@@ -540,7 +539,7 @@ const main = async () => {
         await checked("build-failed", loadBinaries().node, [loadBinaries().npm, "run", "build"], { cwd: stage });
         const stamp = readJson(join(stage, "packages/api/dist/build-info.json"), "build-stamp-invalid");
         if (stamp.commit !== to || stamp.dirty !== false) fail("build-stamp-invalid", "staged-api-dist-does-not-match-target");
-        optionalArtifacts = [...DEPLOY_OPTIONAL_ARTIFACT_PATHS, ...workspaceDependencyPaths(stage)];
+        optionalWorkspaceArtifacts = workspaceDependencyPaths(stage);
         artifactPaths = deployArtifactPaths(stage);
         for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) if (!existsSync(join(stage, path))) fail("build-output-missing", path);
       },
@@ -584,13 +583,13 @@ const main = async () => {
         if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
       },
       publishBuild: async () => {
-        if (!artifactPaths || !optionalArtifacts) fail("build-output-missing", "artifact-inventory-not-prepared");
+        if (!artifactPaths || !optionalWorkspaceArtifacts) fail("build-output-missing", "artifact-inventory-not-prepared");
         return publishDirectories({
           root: REPOSITORY_ROOT,
           stage,
           previousDirectory,
           paths: artifactPaths,
-          optionalMissingPaths: optionalArtifacts,
+          optionalMissingPaths: optionalWorkspaceArtifacts,
         });
       },
       restartServices: async () => {
