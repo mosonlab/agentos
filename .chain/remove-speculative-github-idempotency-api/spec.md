@@ -1,14 +1,35 @@
+Adopt the already reviewed PR #46 implementation into a fresh canonical direct-chain merge tail without changing its product scope.
+
+Authority and current candidate:
+- Pull request: https://github.com/mosonlab/agentos/pull/46
+- Branch: `remove-speculative-github-idempotency-api`
+- Candidate head at dispatch: `13d9b9519625b295b1f6bce13c5c7fb3355fb932`
+- Current target base at dispatch: `main@4f99672914cf1f7c418460bc0b59d64d37ae043f`
+- The legacy chain `0b9f2063-ee6a-4d06-b53a-0a2b3344c995` is parked at an old base-drift executor stop whose server-owned binding is absent. The official runtime refuses its stale `re-authorize` choice. Do not mutate or fabricate that legacy evidence; this new chain is the canonical delivery path.
+
+Product behavior:
 Remove the approved speculative GitHub idempotency marker API from the next-minor public surface while preserving every active GitHub write and read-back defense.
 
-Background: two independent Sol High investigations at eff35471496e401c22bd3aa1a7d6a1864d3ca291 found that InvalidIdempotencyKeyError, idempotencyMarker, withIdempotencyMarker, idempotencyKeyIn, and carriesIdempotencyKey have no production consumer, dynamic entrypoint, roadmap owner, or live remote-branch consumer. They are exported from the private workspace package root and were present in public v0.1.0 and v0.2.0 source releases, so Leo separately approved their next-minor breaking removal. Active confirmedWrite, runner PR creation/read-back, merge-executor CAS/intent/disarm logic, API GitHub reads, and Goal 5a0 markers do not depend on them.
+Required existing change surface:
+1. `packages/github-client/src/idempotency.ts` and `packages/github-client/src/idempotency.test.ts` remain deleted.
+2. `packages/github-client/src/index.ts` removes exactly `InvalidIdempotencyKeyError`, `idempotencyMarker`, `withIdempotencyMarker`, `idempotencyKeyIn`, and `carriesIdempotencyKey`, preserving every surviving package-root export.
+3. `packages/github-client/src/confirmed-write.ts` removes only speculative prose pointing to the deleted marker module. Its implementation, types, failure taxonomy, resend guards, and read-back contract remain unchanged.
 
-Changes:
-1. Delete packages/github-client/src/idempotency.ts and packages/github-client/src/idempotency.test.ts in full.
-2. Remove exactly InvalidIdempotencyKeyError, idempotencyMarker, withIdempotencyMarker, idempotencyKeyIn, and carriesIdempotencyKey from packages/github-client/src/index.ts. Preserve every surviving package-root export.
-3. In packages/github-client/src/confirmed-write.ts, remove or rewrite only speculative prose that points to the deleted marker module. Preserve the confirmedWrite implementation, types, failure taxonomy, resend guards, and read-back contract byte-for-byte except where formatting makes that impossible.
+Implementation-step instruction:
+The branch already contains the intended implementation. Re-read the complete diff against the current `main`. Preserve the existing implementation when it satisfies this brief. Update `.chain/remove-speculative-github-idempotency-api/spec.md` to this exact canonical brief if needed; do not make unrelated code changes. If base drift requires integrating current `main`, use append-only branch history and preserve the product diff.
 
-Out of scope: changes to package.json or package version; release notes or release authority; confirmedWrite behavior; HTTP transport or classifiers; packages/runner, packages/api, packages/merge-executor, packages/db, Goal 5a0 marker formats, merge intent idempotencyKey fields, merge gate, migrations, or any other dead-code cleanup. If any current consumer requires one of these paths, stop and report rather than widening scope.
+Out of scope:
+Package/version changes, release notes, confirmedWrite behavior, HTTP transport or classifiers, runner/API/merge-executor/DB behavior, Goal 5a0 formats, merge intent fields, merge machinery, migrations, compatibility shims, replacement markers, and unrelated cleanup.
 
-Constraints: this is a one-cut next-minor public-interface removal with no compatibility alias, shim, deprecated re-export, replacement marker, or silent fallback. The required current-chain .chain/remove-speculative-github-idempotency-api/spec.md is authority, not a surviving product consumer. Active GitHub mutation defenses and credential-custody boundaries must remain unchanged.
+Acceptance:
+- Outside `.chain/`, tracked-tree exact search finds none of the five removed symbols, the deleted idempotency module path, or `agentos-idempotency-key`.
+- Both deleted files are absent.
+- The built package root omits the five names and retains all other exports.
+- The product diff outside `.chain/` touches only `packages/github-client/src/index.ts`, `packages/github-client/src/confirmed-write.ts`, and deletion of the two named files.
+- `@agentos/github-client` typecheck/build/unit tests pass; focused runner delivery, API GitHub-read, and merge-executor GitHub/decision-table/isolation tests pass with a disposable runner workspace; API, runner, and merge-executor typecheck pass.
+- Both canonical reviews report no unresolved must-fix finding.
+- Regression verification runs `scripts/gate-worker/gate-dispatch.sh <exact-final-head>` and persists `MERGE GATE: PASS <exact-final-head>` for the current head/base.
+- Server-owned readiness authorizes the same head, and only the GitHub App merge executor performs the positive merge.
 
-Acceptance: outside the required current-chain .chain directory, tracked-tree exact search finds none of the five removed symbols, the idempotency module path, or agentos-idempotency-key; both deleted files are absent; the built package root omits the five names and retains all other exports; the final diff outside the current-chain spec touches only packages/github-client/src/index.ts and packages/github-client/src/confirmed-write.ts plus deletion of the two named files; @agentos/github-client typecheck/build/unit tests pass; focused runner delivery, API GitHub-read, and merge-executor GitHub/decision-table/isolation tests pass with disposable runner workspace configuration; API, runner, and merge-executor typecheck pass; scripts/merge-gate.sh --expect-head <exact candidate head> reports MERGE GATE: PASS for the final head.
+Evidence invalidation:
+Any candidate head, target base, review decision, gate verdict, PR identity, or incident drift must be refreshed through the official chain. Never reuse stale evidence and never write production DB state directly.
