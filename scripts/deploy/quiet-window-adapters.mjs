@@ -27,6 +27,10 @@ export const DEPLOY_REQUIRED_ARTIFACT_PATHS = Object.freeze([
   "node_modules",
 ]);
 
+export const DEPLOY_OPTIONAL_ARTIFACT_PATHS = Object.freeze([
+  "packages/cli/dist",
+]);
+
 export const workspaceDependencyPaths = (root) => {
   let manifest;
   try {
@@ -60,6 +64,7 @@ export const workspaceDependencyPaths = (root) => {
 
 export const deployArtifactPaths = (root) => Object.freeze([
   ...DEPLOY_REQUIRED_ARTIFACT_PATHS.slice(0, -1),
+  ...DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   ...workspaceDependencyPaths(root),
   "node_modules",
 ]);
