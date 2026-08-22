@@ -62,6 +62,22 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
 });
 
+test("signed AgentOS model routing stays pinned in the canonical contract", () => {
+  const canonical = new Map(CANONICAL_AGENT_DEFAULTS.map((role) => [role.name, role]));
+  assert.deepEqual(canonical.get("spec"), {
+    name: "spec",
+    model: "gpt-5.6-sol:high",
+    runner: RunnerPreference.CODEX,
+  });
+  for (const name of ["frontend-dev", "review-coordinator-opus"] as const) {
+    assert.deepEqual(canonical.get(name), {
+      name,
+      model: "claude-opus-5:medium",
+      runner: RunnerPreference.CLAUDE,
+    });
+  }
+});
+
 test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
   const [planReview, firstReview, finalReview] = await Promise.all([
     roleSource("review-coordinator"),
