@@ -117,12 +117,17 @@ export MERGE_SYSTEM_TEST_PR_NUMBER=<a real delivered PR on the scratch repo>
 export MERGE_SYSTEM_TEST_READ_TOKEN_FILE=<path-to-mode-0600-credential-file>
 export MERGE_SYSTEM_TEST_CHANNEL=web                        # feishu is NOT IMPLEMENTED (below)
 export MERGE_EXECUTOR_OS_USER=agentos-merge
-export MERGE_EXECUTOR_IDENTITY_LOGIN=<the dedicated merge identity's login>
+export MERGE_EXECUTOR_GITHUB_APP_ID=<public-app-id>
+export MERGE_EXECUTOR_GITHUB_APP_INSTALLATION_ID=<public-installation-id>
+export MERGE_EXECUTOR_GITHUB_APP_PRIVATE_KEY_FILE=<owner-only-path-visible-to-the-dedicated-user>
+export MERGE_EXECUTOR_IDENTITY_LOGIN='<configured-app-slug>[bot]'
 export MERGE_SYSTEM_TEST_EXECUTOR_COMMAND='<service-manager command for the dedicated merge user>'
 
 node scripts/merge-integrator-system-test.mjs --out merge-integrator-v1-1-system-test.md
 ```
 
+The executor service mints a fresh installation token only after it claims the
+mechanical Run; the private key remains file-backed under its dedicated OS user.
 The script refuses to run as the executor's own OS user. Phase 5 is the custody
 claim, and a phase 5 executed by the same uid that drove phases 1–4 demonstrates
 nothing about principal separation.

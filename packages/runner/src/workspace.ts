@@ -84,7 +84,7 @@ export type AgentScratch = {
   base: string;
   workspaceRoot: string;
   stateDir: string;
-  /** A per-session Codex config root; it is outside `base` so failures can retain it. */
+  /** A per-session CLI config root; it is outside `base` so failures can retain it. */
   configRoot: string;
 };
 
@@ -216,11 +216,10 @@ const validateSessionConfigRoot = async (configRoot: string, expectedOwnerUid: n
 };
 
 /**
- * Provision only the configuration Codex is allowed to see. The repository
- * baseline contributes config.toml; the runner host contributes auth.json and
- * nothing else. Claude deliberately has no config-home provisioner: its
- * authentication remains the operator Keychain flow and its settings sources
- * are selected in the adapter argv.
+ * Provision only the configuration a CLI is allowed to see. Codex receives the
+ * repository baseline plus host auth; PI receives host auth only, deliberately
+ * excluding host settings and every other discovery surface. Claude has no
+ * config-home provisioner because its authentication remains in Keychain.
  */
 export const provisionSessionConfig = async (
   config: RunnerConfig,
@@ -228,14 +227,15 @@ export const provisionSessionConfig = async (
   scratch: AgentScratch,
   options: { reuse?: boolean } = {},
 ): Promise<void> => {
-  if (runner !== "CODEX") return;
+  if (runner === "CLAUDE") return;
+  const runnerLabel = runner === "CODEX" ? "Codex" : "PI";
   if (options.reuse) {
     try {
       const info = await lstat(scratch.configRoot);
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("existing session config root is not a real directory");
       return;
     } catch (error: unknown) {
-      throw new Error(`Unable to reuse Codex session CLI config root ${scratch.configRoot}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      throw new Error(`Unable to reuse ${runnerLabel} session CLI config root ${scratch.configRoot}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   }
 
@@ -261,19 +261,27 @@ export const provisionSessionConfig = async (
     }
 
     await validateSessionConfigRoot(scratch.configRoot, expectedOwnerUid);
-    if (config.runAsPrefix.length > 0) {
-      await command(config, "/bin/cp", [baseline, join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
-      await command(config, "/bin/chmod", ["600", join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
-    } else {
-      await copyFile(baseline, join(scratch.configRoot, "config.toml"));
-      await chmod(join(scratch.configRoot, "config.toml"), 0o600);
+    if (runner === "CODEX") {
+      if (config.runAsPrefix.length > 0) {
+        await command(config, "/bin/cp", [baseline, join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
+        await command(config, "/bin/chmod", ["600", join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
+      } else {
+        await copyFile(baseline, join(scratch.configRoot, "config.toml"));
+        await chmod(join(scratch.configRoot, "config.toml"), 0o600);
+      }
     }
   } catch (error: unknown) {
     await chmod(configParent, 0o711).catch(() => undefined);
-    throw new Error(`Unable to create session CLI config root ${scratch.configRoot} from baseline ${baseline}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    const sourceDescription = runner === "CODEX" ? ` from baseline ${baseline}` : "";
+    const createFailure = runner === "CODEX"
+      ? "Unable to create session CLI config root"
+      : "Unable to create PI session CLI config root";
+    throw new Error(`${createFailure} ${scratch.configRoot}${sourceDescription}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 
-  const source = join(config.home, ".codex", "auth.json");
+  const source = runner === "CODEX"
+    ? join(config.home, ".codex", "auth.json")
+    : join(config.home, ".pi", "agent", "auth.json");
   const destination = join(scratch.configRoot, "auth.json");
   try {
     if (config.runAsPrefix.length > 0) {
@@ -284,7 +292,7 @@ export const provisionSessionConfig = async (
       await chmod(destination, 0o600);
     }
   } catch (error: unknown) {
-    throw new Error(`Unable to establish Codex authentication in ${scratch.configRoot} from ${source}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    throw new Error(`Unable to establish ${runnerLabel} authentication in ${scratch.configRoot} from ${source}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   } finally {
     // The target account needed write access only long enough to create its
     // own 0700 root. Afterwards other runner accounts may traverse the

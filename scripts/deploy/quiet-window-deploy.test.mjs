@@ -49,6 +49,18 @@ import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 
+test("quiet-window runbook pins source-declared Agent-default transitions", () => {
+  const repositoryRoot = realpathSync(new URL("../../", import.meta.url));
+  const syncSource = readFileSync(join(repositoryRoot, "packages/db/prisma/sync-canonical-prompts.ts"), "utf8");
+  const runbook = readFileSync(join(repositoryRoot, "docs/runbooks/quiet-window-auto-deploy.md"), "utf8");
+  if (/const AGENT_TRANSITIONS = new Map\(\[\s*\[/u.test(syncSource)) {
+    assert.match(runbook, /source-declared assignee or Agent-default transition/u);
+    assert.match(runbook, /review-coordinator` and `review-coordinator-sol/u);
+    assert.match(runbook, /from model\s+`gpt-5\.6-sol:high` with `runnerPreference` `CODEX` to model\s+`openai-codex\/gpt-5\.6-sol:high` with `runnerPreference` `PI`/u);
+    assert.match(runbook, /both persisted fields exactly match that `from` state/u);
+  }
+});
+
 const fixture = (failure = null) => {
   const calls = [];
   const state = { serving: "previous", escalated: null, notification: null, restarted: false };

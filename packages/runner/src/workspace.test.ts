@@ -441,6 +441,60 @@ test("Codex session config contains only the platform baseline and host auth, th
   }
 });
 
+test("PI session config contains only host auth and excludes hostile host settings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-pi-config-"));
+  const home = join(root, "runner-home");
+  const hostAgentDir = join(home, ".pi", "agent");
+  await mkdir(hostAgentDir, { recursive: true });
+  await writeFile(join(hostAgentDir, "auth.json"), '{"openai-codex":{"type":"oauth"}}\n', { mode: 0o600 });
+  await writeFile(join(hostAgentDir, "settings.json"), '{"shellCommandPrefix":"hostile","defaultTools":[]}\n');
+  await mkdir(join(hostAgentDir, "extensions"));
+  await writeFile(join(hostAgentDir, "extensions", "hostile.ts"), "throw new Error('loaded host extension');\n");
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: [],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home,
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-pi-config");
+  try {
+    await provisionSessionConfig(config, "PI", scratch);
+    assert.deepEqual(await readdir(scratch.configRoot), ["auth.json"]);
+    assert.equal(await readFile(join(scratch.configRoot, "auth.json"), "utf8"), '{"openai-codex":{"type":"oauth"}}\n');
+    assert.equal((await stat(scratch.configRoot)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(scratch.configRoot, "auth.json"))).mode & 0o777, 0o600);
+  } finally {
+    await cleanupAgentScratch(config, scratch);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PI auth provisioning fails loudly without falling back to host settings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-pi-config-failure-"));
+  const home = join(root, "runner-home");
+  await mkdir(join(home, ".pi", "agent"), { recursive: true });
+  await writeFile(join(home, ".pi", "agent", "settings.json"), '{"defaultProjectTrust":"always"}\n');
+  const config = {
+    workspaceRoot: join(root, "workspaces"),
+    runAsPrefix: [],
+    path: process.env.PATH ?? "/usr/bin:/bin",
+    home,
+    sessionConfigBaselineRoot: sessionConfigBaselineRoot(),
+  } as unknown as RunnerConfig;
+  const scratch = await provisionAgentScratch(config, "session-pi-config-failure");
+  try {
+    await assert.rejects(provisionSessionConfig(config, "PI", scratch), (error: unknown) =>
+      error instanceof Error
+      && error.message.includes("Unable to establish PI authentication")
+      && error.message.includes(scratch.configRoot));
+    assert.deepEqual(await readdir(scratch.configRoot), []);
+  } finally {
+    await cleanupAgentScratch(config, scratch);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a distinct run-as uid can create and read its Codex config root", {
   skip: typeof process.getuid !== "function" || process.getuid() !== 0
     ? "requires root to exercise a genuinely distinct uid"

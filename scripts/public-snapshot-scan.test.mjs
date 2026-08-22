@@ -353,7 +353,7 @@ test("the docs surface is closed and named one file at a time", () => {
   const docs = manifest.include.map((entry) => entry.glob).filter((glob) => glob.startsWith("docs/"));
   // `docs/` is closed by default and this is the whole of what is open in it.
   // Publishing one reviewed document must not become a reason to publish
-  // unrelated plans, reviews, specifications, or runbooks alongside it.
+  // unrelated plans, reviews, specifications, or unlisted runbooks alongside it.
   assert.deepEqual(docs.sort(), [
     "docs/BRIEF-TEMPLATE.md",
     "docs/demos/templates-release-demo.md",
@@ -372,6 +372,8 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/release/v0.1.0-support-matrix.md",
     "docs/release/v0.2.0-release-notes.md",
     "docs/runbooks/gate-worker.md",
+    "docs/runbooks/legacy-integrator-stop.md",
+    "docs/runbooks/merge-executor.md",
     "docs/runbooks/quiet-window-auto-deploy.md",
   ]);
   // Named one at a time rather than by `docs/release/*.md`, because a directory

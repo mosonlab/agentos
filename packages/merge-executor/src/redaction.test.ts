@@ -36,3 +36,14 @@ test("overlapping secrets redact longest-first, so no fragment survives", () => 
   const redact = makeRedactor("prefix-secret", "prefix-secret-and-more");
   assert.equal(redact("value=prefix-secret-and-more").includes("and-more"), false);
 });
+
+test("a run-scoped logger adds installation-token redaction on the same sink", () => {
+  const lines: string[] = [];
+  const sink = { log: (line: string) => lines.push(line), warn: (line: string) => lines.push(line), error: (line: string) => lines.push(line) };
+  const startupSecret = "startup-secret-value";
+  const installationToken = "installation-token-value";
+  const log = makeLog(makeRedactor(startupSecret), sink).withSecrets(installationToken);
+  log.error(`${startupSecret} ${installationToken}`);
+  assert.equal(lines[0]!.includes(startupSecret), false);
+  assert.equal(lines[0]!.includes(installationToken), false);
+});

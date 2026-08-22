@@ -150,6 +150,23 @@ test("a server-owned readiness authorization needs no human decision and cannot 
   assert.equal(selectAuthorization([mechanical], [], [], "another-readiness").authorization, null);
 });
 
+test("fresh mechanical cycles keep prior authorization evidence while selecting the newest unique binding", () => {
+  const firstBinding = "mechanical:readiness-1:first";
+  const secondBinding = "mechanical:readiness-1:second";
+  const candidate = (id: string, createdAt: string, binding: string, baseSha: string): CandidateActivity => ({
+    id, createdAt: new Date(createdAt), actorType: "control-plane",
+    metadata: authorizationMetadata({
+      ...evidence({ baseSha }), issuedAt: createdAt,
+      decision: { channel: "mechanical", inboxDecisionId: binding, inboxMessageId: binding },
+    }),
+  });
+  const first = candidate("first", "2026-08-18T02:00:01.100Z", firstBinding, BASE);
+  const second = candidate("second", "2026-08-18T02:01:01.100Z", secondBinding, "d".repeat(40));
+  const selected = selectAuthorization([first, second], [], [], "readiness-1");
+  assert.equal(selected.authorization?.activityId, "second");
+  assert.equal(selected.authorization?.baseSha, "d".repeat(40));
+});
+
 test("rule 1: a non-operator actorType is ignored", () => {
   const result = selectAuthorization([activity(evidence(), { actorType: "session" })], [decision()], [card()], "step9");
   assert.equal(result.authorization, null);
@@ -315,6 +332,11 @@ test("target-unresolvable does not offer re-authorize, which could not change it
   assert.ok(!STOP_CHOICES["target-unresolvable"].includes("re-authorize"));
   assert.equal(dispositionFor("target-unresolvable", "re-authorize"), null);
   assert.equal(dispositionFor("target-unresolvable", "open-repair"), "repair-requested");
+});
+
+test("ordinary pre-merge base drift cannot enter the manual re-authorization path", () => {
+  assert.deepEqual(STOP_CHOICES["base-drift"], ["abandon"]);
+  assert.equal(dispositionFor("base-drift", "re-authorize"), null);
 });
 
 test("flag-incident is nonterminal and its follow-up offers the terminal exits", () => {

@@ -42,6 +42,44 @@ test("GET /agents/:id requests every capability binding used by the frontend", a
   });
 });
 
+test("agent capability route inventory keeps supported forms and unregisters redundant forms", async () => {
+  await withOperator(async () => {
+    const app = createApp({} as PrismaClient);
+    const inventory = app.routes.map(({ method, path }) => `${method} ${path}`);
+    const removed = [
+      "GET /agents/:agentId/collaborators",
+      "GET /agents/:agentId/skills",
+      "GET /agents/:agentId/mcp-connections",
+      "POST /agents/:agentId/skills/:skillId",
+      "POST /agents/:agentId/mcp-connections/:connectionId",
+    ];
+    const retained = [
+      "GET /agents/:agentId",
+      "POST /agents/:agentId/collaborators",
+      "DELETE /agents/:agentId/collaborators/:allowedAgentId",
+      "POST /agents/:agentId/skills",
+      "DELETE /agents/:agentId/skills/:skillId",
+      "POST /agents/:agentId/mcp-connections",
+      "DELETE /agents/:agentId/mcp-connections/:connectionId",
+    ];
+    assert.deepEqual(inventory.filter((route) => removed.includes(route)), []);
+    for (const route of retained) assert.ok(inventory.includes(route), `${route} is not registered`);
+
+    for (const [method, path] of removed.map((route) => route.split(" ") as [string, string])) {
+      const response = await app.request(path, {
+        method,
+        headers: {
+          Authorization: "Bearer control-plane-test-operator",
+          "Content-Type": "application/json",
+        },
+        ...(method === "POST" ? { body: JSON.stringify({ skillId: "skill-1", mcpConnectionId: "connection-1" }) } : {}),
+      });
+      assert.equal(response.status, 404, `${method} ${path}`);
+      assert.deepEqual(await response.json(), { error: "Not found" });
+    }
+  });
+});
+
 test("Secrets encrypt writes and never return plaintext or ciphertext", async () => {
   await withOperator(async () => {
     const previousKey = process.env.AGENTOS_SECRET_ENCRYPTION_KEY;

@@ -34,6 +34,7 @@ import {
   githubRepositoryFromRemote,
   integratorBindingRefusal,
   stopChoicePayload,
+  isCanonicalIntegratorStep,
   isIntegratorStep,
   isStopCondition,
   isTerminalDisposition,
@@ -183,7 +184,13 @@ export const resolveChainTarget = async (
 // §D-P7 — the stop state, keyed on terminal dispositions
 // ---------------------------------------------------------------------------
 
-export type RecordedStop = { stopId: string; condition: StopCondition; createdAt: Date };
+export type RecordedStop = {
+  stopId: string;
+  condition: StopCondition;
+  evidence: string;
+  sourceRunId: string | null;
+  createdAt: Date;
+};
 
 /**
  * The latest entry of the append-only `mergeIntegrator.result` history, but
@@ -204,7 +211,13 @@ export const latestRecordedStop = async (tx: Tx, integratorTaskId: string): Prom
     // an older stop is still in the history.
     if (metadata.outcome !== "stopped") return null;
     if (!isStopCondition(metadata.condition)) return null;
-    return { stopId: row.id, condition: metadata.condition, createdAt: row.createdAt };
+    return {
+      stopId: row.id,
+      condition: metadata.condition,
+      evidence: typeof metadata.evidence === "string" ? metadata.evidence : "",
+      sourceRunId: typeof metadata.sourceRunId === "string" ? metadata.sourceRunId : null,
+      createdAt: row.createdAt,
+    };
   }
   return null;
 };
@@ -635,35 +648,99 @@ export const applyStopAnswer = async (
   return outcome;
 };
 
+/** Refusals raised while resolving the gate, target, or source of confirmation evidence. */
+export class MergeConfirmationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MergeConfirmationError";
+  }
+}
+
+export const isMergeConfirmationError = (error: unknown): error is MergeConfirmationError =>
+  error instanceof Error && error.name === "MergeConfirmationError";
+
 /**
- * The confirmation card a renewal or a repair asks for. It is a real gate card
- * on the step-11 task, so it travels the identical production path — the same
- * worker fills it and the same transaction reads it back.
+ * The confirmation card a renewal or repair asks for. The card is bound to the
+ * immediate same-chain predecessor that feeds the integrator, while its agent,
+ * Session and source Run come from the newest eligible same-chain predecessor.
+ * Keeping those identities separate lets server-owned readiness steps share the
+ * normal authorization path without pretending they executed an agent Run.
  */
 export const requestConfirmationCard = async (
   tx: Tx,
   integratorTask: IntegratorTask,
   stopId: string,
   now = new Date(),
-): Promise<string | null> => {
-  if (!integratorTask.chainId || integratorTask.chainIndex === null) return null;
-  const gate = await tx.task.findFirst({
+): Promise<string> => {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${integratorTask.id} FOR UPDATE
+  `;
+  if (!locked[0]) throw new MergeConfirmationError(`Merge integrator task ${integratorTask.id} no longer exists`);
+  return ensureConfirmationCard(tx, integratorTask, stopId, now);
+};
+
+const confirmationKey = (integratorTaskId: string, stopId: string): string =>
+  `confirmation:${integratorTaskId}:${stopId}`;
+
+/**
+ * The integrator Task mutex serializes the initial request and every replay or
+ * control-plane repair. The Inbox card's unique dedupe key is the durable backstop;
+ * taking the lock also lets every successful caller return the winner instead
+ * of surfacing a uniqueness race.
+ */
+const ensureConfirmationCard = async (
+  tx: Tx,
+  integratorTask: IntegratorTask,
+  stopId: string,
+  now: Date,
+): Promise<string> => {
+  if (!integratorTask.chainId || integratorTask.chainIndex === null) {
+    throw new MergeConfirmationError(
+      `Merge integrator task ${integratorTask.id} has no chain identity for confirmation evidence`,
+    );
+  }
+  const dedupeKey = confirmationKey(integratorTask.id, stopId);
+  const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { id: true } });
+  if (existing) return existing.id;
+
+  const target = await resolveChainTarget(tx, integratorTask);
+  if (!target.resolved) {
+    throw new MergeConfirmationError(
+      `Merge confirmation target for task ${integratorTask.id} is ${target.unresolvable}; refusing unrelated evidence`,
+    );
+  }
+  const predecessors = await tx.task.findMany({
     where: {
       projectId: integratorTask.projectId,
       chainId: integratorTask.chainId,
       chainIndex: { lt: integratorTask.chainIndex },
     },
+    include: {
+      templateStep: { include: { taskTemplate: { select: { name: true } } } },
+      runs: {
+        where: { session: { isNot: null } },
+        include: { session: { select: { id: true } } },
+        orderBy: [{ runNumber: "desc" }, { createdAt: "desc" }],
+        take: 1,
+      },
+    },
     orderBy: { chainIndex: "desc" },
   });
-  if (!gate) return null;
-  const target = await resolveChainTarget(tx, integratorTask);
-  if (!target.resolved) return null;
-  const source = await tx.run.findFirst({
-    where: { taskId: gate.id, session: { isNot: null } },
-    include: { session: { select: { id: true } } },
-    orderBy: { runNumber: "desc" },
-  });
-  if (!source?.session) return null;
+  const gate = predecessors[0];
+  if (!gate) {
+    throw new MergeConfirmationError(
+      `Merge confirmation for task ${integratorTask.id} has no immediate same-chain predecessor`,
+    );
+  }
+  const sourceTask = predecessors.find(
+    (candidate) => !taskIsIntegratorStep(candidate) && candidate.runs[0]?.session,
+  );
+  const source = sourceTask?.runs[0];
+  if (!sourceTask || !source?.session) {
+    throw new MergeConfirmationError(
+      `Merge confirmation for task ${integratorTask.id} has no preceding same-chain Run with a Session`,
+    );
+  }
   const requested = await requestMergeEvidence(tx, {
     gateTaskId: gate.id,
     integratorTaskId: integratorTask.id,
@@ -673,14 +750,39 @@ export const requestConfirmationCard = async (
     purpose: "confirmation",
     repository: target.repository,
     prNumber: target.prNumber,
-    dedupeKey: `confirmation:${integratorTask.id}:${stopId}`,
+    dedupeKey,
   }, now);
   return requested.cardId;
 };
 
 /**
- * Records a stop the executor reported and lands the control-plane stop state:
- * task REVIEW, successor not activated, and a question the human must answer.
+ * Repairs the historical state in which the append-only stop answer says
+ * refresh-requested but its Phase-A confirmation request is absent. This is
+ * deliberately a no-op for every other stop disposition and for a request
+ * that already exists.
+ */
+export const recoverRefreshRequestedConfirmationCard = async (
+  tx: Tx,
+  integratorTaskId: string,
+  now = new Date(),
+): Promise<string | null> => {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE
+  `;
+  if (!locked[0]) throw new Error(`Merge integrator task ${integratorTaskId} no longer exists`);
+  const task = await loadIntegratorTask(tx, integratorTaskId);
+  if (!task || !taskIsIntegratorStep(task)) {
+    throw new Error(`Task ${integratorTaskId} is not a merge integrator step`);
+  }
+  const state = await stopStateFor(tx, integratorTaskId);
+  if (!state || !state.dispositions.includes("refresh-requested")) return null;
+  return ensureConfirmationCard(tx, task, state.stop.stopId, now);
+};
+
+/**
+ * Records a stop the executor reported and lands the control-plane stop state.
+ * Ordinary base drift is left for the server recovery worker; every other stop
+ * opens the evidence-backed question its condition supports.
  */
 export const recordIntegratorStop = async (
   tx: Tx,
@@ -690,6 +792,7 @@ export const recordIntegratorStop = async (
     evidence: string;
     agentId: string;
     sessionId: string | null;
+    sourceRunId: string;
   },
 ): Promise<{ stopId: string; questionId: string | null }> => {
   const stop = await tx.taskActivity.create({ data: {
@@ -702,13 +805,17 @@ export const recordIntegratorStop = async (
       outcome: "stopped",
       condition: input.condition,
       evidence: input.evidence,
+      sourceRunId: input.sourceRunId,
     },
   } });
   await tx.task.update({
     where: { id: input.integratorTaskId },
     data: { status: TaskStatus.REVIEW, failureReason: `Mechanical merge stopped: ${input.condition}` },
   });
-  const question = await openStopQuestion(tx, {
+  const task = await loadIntegratorTask(tx, input.integratorTaskId);
+  const automaticBaseDriftCandidate = input.condition === "base-drift"
+    && isCanonicalIntegratorStep(task?.templateStep);
+  const question = automaticBaseDriftCandidate ? null : await openStopQuestion(tx, {
     integratorTaskId: input.integratorTaskId,
     stopId: stop.id,
     condition: input.condition,
