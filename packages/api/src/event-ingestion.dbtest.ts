@@ -75,7 +75,12 @@ test("mixed literal-NUL events persist in order without PostgreSQL 22P05", async
             type: `NUL${nul}EVENT`,
             providerEventId: `provider${nul}13`,
             toolCallId: `tool${nul}13`,
-            payload: { nested: { text: `before${nul}after` }, values: [`one${nul}two`, { text: "plain" }] },
+            payload: {
+              nested: { text: `before${nul}after` },
+              values: [`one${nul}two`, { text: "plain" }],
+              [`field${visibleNul}`]: "literal key value",
+              [`field${nul}`]: "NUL key value",
+            },
           },
           { seq: 14, source: "CLAUDE", type: "VALID_AFTER", payload: { text: "also unchanged" } },
         ],
@@ -94,6 +99,8 @@ test("mixed literal-NUL events persist in order without PostgreSQL 22P05", async
     assert.deepEqual(rows[1]?.payload, {
       nested: { text: `before${visibleNul}after` },
       values: [`one${visibleNul}two`, { text: "plain" }],
+      [`field${visibleNul}`]: "literal key value",
+      [`field${visibleNul}${visibleNul}`]: "NUL key value",
     });
     assert.equal(JSON.stringify(rows).includes(nul), false);
     assert.deepEqual(rows[2]?.payload, { text: "also unchanged" });

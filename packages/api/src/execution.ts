@@ -98,7 +98,16 @@ export const normalizeSessionEventValue = (value: unknown): unknown => {
   if (typeof value === "string") return replaceNul(value);
   if (Array.isArray(value)) return value.map(normalizeSessionEventValue);
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, nested]) => [replaceNul(key), normalizeSessionEventValue(nested)]));
+    const entries = Object.entries(value);
+    const usedKeys = new Set(entries.flatMap(([key]) => key.includes("\u0000") ? [] : [key]));
+    return Object.fromEntries(entries.map(([key, nested]) => {
+      if (!key.includes("\u0000")) return [key, normalizeSessionEventValue(nested)];
+
+      let normalizedKey = replaceNul(key);
+      while (usedKeys.has(normalizedKey)) normalizedKey += "\\u0000";
+      usedKeys.add(normalizedKey);
+      return [normalizedKey, normalizeSessionEventValue(nested)];
+    }));
   }
   return value;
 };

@@ -1506,6 +1506,8 @@ test("event ingestion makes literal NULs visible without changing seq order", as
             payload: {
               unchanged: "plain text",
               nested: { message: `left${nul}right`, list: [`a${nul}b`, { deep: "value" }] },
+              [`field${visibleNul}`]: "literal key value",
+              [`field${nul}`]: "NUL key value",
               [`key${nul}`]: "key value",
             },
           },
@@ -1529,6 +1531,8 @@ test("event ingestion makes literal NULs visible without changing seq order", as
     assert.deepEqual(body.events[0]?.payload, {
       unchanged: "plain text",
       nested: { message: `left${visibleNul}right`, list: [`a${visibleNul}b`, { deep: "value" }] },
+      [`field${visibleNul}`]: "literal key value",
+      [`field${visibleNul}${visibleNul}`]: "NUL key value",
       [`key${visibleNul}`]: "key value",
     });
     assert.deepEqual(body.events[1]?.payload, { unchanged: "still exact" });
