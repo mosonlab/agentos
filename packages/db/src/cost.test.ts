@@ -16,6 +16,17 @@ test("Codex tokens use the model table, cached rate, and ignore the effort suffi
   assert.equal(cost.estimated, true);
 });
 
+test("a provider-prefixed model uses the existing bare model price row", () => {
+  const cost = sessionUsageCost("openai-codex/gpt-5.6-sol:high", {
+    costUsd: null,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 400_000,
+    outputTokens: 100_000,
+  });
+  assert.equal(cost.costUsd?.toString(), "6.2");
+  assert.equal(cost.estimated, true);
+});
+
 test("an unpriced model exposes tokens and no dollar figure", () => {
   const cost = sessionUsageCost("future-model:high", {
     costUsd: null,

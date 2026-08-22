@@ -39,5 +39,6 @@ export const I18N_ALLOWLIST: I18nAllowlistEntry[] = [
   { file: "lib/models.ts", text: "GPT-5.6 Sol (codex)", why: "Model product name" },
   { file: "lib/models.ts", text: "GPT-5.6 Terra (codex)", why: "Model product name" },
   { file: "lib/models.ts", text: "GPT-5.6 Luna (codex)", why: "Model product name" },
+  { file: "lib/models.ts", text: "GPT-5.6 Sol (pi)", why: "Model product name" },
   { file: "lib/models.ts", text: "GPT-5.6 Luna (pi)", why: "Model product name" },
 ];

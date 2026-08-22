@@ -16,6 +16,7 @@ import {
   enqueueTaskRun,
   legacyHumanTwelveStepTemplateName,
   MERGE_INTEGRATOR_KIND,
+  MERGE_INTEGRATOR_SCHEMA_VERSION,
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
   PrismaClient,
@@ -152,6 +153,110 @@ test("a legacy integrator base-drift stop retains an abandon-only manual exit", 
   const question = await stopQuestionFor(chain.integratorTask!.id);
   assert.ok(question, "legacy base-drift stop keeps a manual exit because it is not an automatic-recovery candidate");
   assert.deepEqual((question!.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+});
+
+test("a fresh regression completion preserves success and parks a legacy-stopped integrator", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "completion-legacy-stop-park",
+    shape: "legacy-seven-step-direct",
+  });
+  assert.ok(chain.readinessTask, "the historical readiness step exists");
+  assert.equal(chain.readinessTask.status, "DONE", "readiness was already complete before the fresh regression");
+  assert.ok(chain.integratorTask, "the integrator successor exists");
+
+  const stop = await db.taskActivity.create({ data: {
+    taskId: chain.integratorTask.id,
+    actorType: "control-plane",
+    body: "Mechanical merge stopped: base-drift",
+    metadata: {
+      kind: MERGE_INTEGRATOR_KIND.result,
+      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+      outcome: "stopped",
+      condition: "base-drift",
+      evidence: "legacy stop without server-owned binding",
+    },
+  } });
+  await db.task.update({
+    where: { id: chain.integratorTask.id },
+    data: { status: "REVIEW", failureReason: "Mechanical merge stopped: base-drift" },
+  });
+
+  const regression = await db.run.create({ data: {
+    projectId: chain.project.id,
+    taskId: chain.gateTask.id,
+    agentId: chain.agent.id,
+    repoId: chain.repo.id,
+    runNumber: 2,
+    dedupeKey: `task:${chain.gateTask.id}:run:2`,
+    runner: "CLAUDE",
+    model: chain.agent.model,
+    promptHash: "fresh-regression",
+    status: "RUNNING",
+    runnerId: RUNNER,
+    maxRunsPerTask: 5,
+    fencingToken: `1:${chain.gateTask.id}:2`,
+    leaseExpiresAt: new Date(Date.now() + 600_000),
+  } });
+  await db.session.create({ data: {
+    runId: regression.id,
+    projectId: chain.project.id,
+    taskId: chain.gateTask.id,
+    agentId: chain.agent.id,
+    runner: "CLAUDE",
+    executionStatus: "RUNNING",
+  } });
+  const regressionOutput = JSON.stringify({
+    schemaVersion: 1,
+    outcome: "pass",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+    gateVerdict: "PASS",
+  });
+  await db.taskStepOutput.upsert({
+    where: { taskId: chain.gateTask.id },
+    create: {
+      taskId: chain.gateTask.id,
+      runId: regression.id,
+      kind: "regression-verification",
+      body: regressionOutput,
+      commitSha: "a".repeat(40),
+    },
+    update: {
+      runId: regression.id,
+      kind: "regression-verification",
+      body: regressionOutput,
+      commitSha: "a".repeat(40),
+    },
+  });
+  await db.task.update({ where: { id: chain.gateTask.id }, data: { status: "DOING" } });
+
+  const completion = await call("POST", `/runner/runs/${regression.id}/complete`, {
+    runnerId: RUNNER,
+    fencingToken: regression.fencingToken,
+    exitCode: 0,
+    terminalEventSeen: true,
+    terminalSuccess: true,
+    cleanupStatus: "SUCCEEDED",
+    headSha: "a".repeat(40),
+    output: regressionOutput,
+  }, RUNNER);
+
+  assert.equal(completion.status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: regression.id } })).status, "SUCCEEDED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, "DONE");
+  const parked = await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask.id } });
+  assert.equal(parked.status, "REVIEW");
+  assert.match(parked.failureReason ?? "", /predecessor success preserved/u);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask.id } }), 0, "the stopped successor was not queued");
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id } }), 2, "no automatic regression retry was scheduled");
+  const activity = await db.taskActivity.findFirst({
+    where: { taskId: chain.integratorTask.id, metadata: { path: ["sourceRunId"], equals: regression.id } },
+    orderBy: { createdAt: "desc" },
+  });
+  assert.ok(activity, "the park is auditable from the successful predecessor run");
+  assert.match(activity.body, /completed successfully and was preserved/u);
+  assert.equal((activity.metadata as any).condition, "base-drift");
+  assert.equal((activity.metadata as any).sourceStopId, stop.id);
 });
 
 test("Y1 the append-only stop history survives an output replacement", async () => {

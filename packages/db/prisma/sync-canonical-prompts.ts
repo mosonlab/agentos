@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, RunnerPreference } from "@prisma/client";
 
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
@@ -6,6 +6,17 @@ import { loadAllTemplateStepSources, templateStepStructureDifferences } from "..
 const ASSIGNEE_TRANSITIONS = new Map([
   ["compound-engineer-workflow:9", { from: "review-coordinator-opus", to: "review-coordinator-sol" }],
   ["direct-engineer-workflow:5", { from: "review-coordinator-opus", to: "review-coordinator-sol" }],
+]);
+
+const AGENT_TRANSITIONS = new Map([
+  ["review-coordinator", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
+  ["review-coordinator-sol", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
 ]);
 
 // Every canonical template, every step of each, and every role under agents/
@@ -119,12 +130,28 @@ const main = async (): Promise<void> => {
         if (!agentsByName.has(name)) throw new Error(`Agent ${name} was not found`);
       }
       const updatedRoles: Record<string, number> = {};
+      let adoptedAgentDefaults = 0;
       for (const name of roleNames) {
         const role = rolesByName.get(name)!;
         for (const agent of agentsByName.get(name)!) {
           const differences = roleSourceStructureDifferences(agent, role);
-          if (differences.length > 0) {
+          const transition = AGENT_TRANSITIONS.get(name);
+          const adoptsCanonicalDefaults = differences.length === 2
+            && differences.includes("model")
+            && differences.includes("runnerPreference")
+            && transition?.from.model === agent.model
+            && transition.from.runnerPreference === agent.runnerPreference
+            && transition.to.model === role.model
+            && transition.to.runnerPreference === role.runnerPreference;
+          if (differences.length > 0 && !adoptsCanonicalDefaults) {
             throw new Error(`Agent ${name} (${agent.id}) differs from canonical Markdown structure: ${differences.join(", ")}`);
+          }
+          if (adoptsCanonicalDefaults) {
+            await tx.agent.update({
+              where: { id: agent.id },
+              data: transition.to,
+            });
+            adoptedAgentDefaults += 1;
           }
         }
         updatedRoles[name] = (await tx.agent.updateMany({
@@ -140,9 +167,9 @@ const main = async (): Promise<void> => {
           data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
         })).count;
       }
-      return { templates: templateCount, adoptedAssignees, updatedSteps, updatedRoles };
+      return { templates: templateCount, adoptedAssignees, adoptedAgentDefaults, updatedSteps, updatedRoles };
     });
-    const updated = result.adoptedAssignees + Object.values(result.updatedSteps)
+    const updated = result.adoptedAssignees + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);

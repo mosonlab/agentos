@@ -3,6 +3,7 @@ import {
   INTEGRATOR_OUTPUT_KIND,
   MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+  MergeRecoveryStatus,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
   Prisma,
@@ -12,7 +13,6 @@ import {
   isMergeReadinessStep,
   latestRecordedStop,
   openStopQuestion,
-  parseBaseDriftRecoveryActivity,
   parseMergeResult,
   resolveChainTarget,
   selectAuthorization,
@@ -21,6 +21,7 @@ import {
   type CandidateActivity,
   type DecisionRow,
   type PrismaClient,
+  type MergeRecoveryAttempt,
 } from "@agentos/db";
 
 import { createGitHubReader, type GitHubReader, type PullRequestSnapshot } from "./github-read.js";
@@ -57,19 +58,45 @@ type CandidateLoad =
   | { ok: true; candidate: RecoveryCandidate }
   | { ok: false; reason: string; stopId: string; retryable: boolean };
 
-const recoveryMarkerFor = async (db: DbReader, taskId: string, stopId: string) => {
-  const rows = await db.taskActivity.findMany({
-    where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { taskId: true, actorType: true, metadata: true },
+const recoveryAttemptFor = async (
+  db: DbReader,
+  integratorTaskId: string,
+  sourceStopId: string,
+): Promise<MergeRecoveryAttempt | null> => db.mergeRecoveryAttempt.findFirst({
+  where: { integratorTaskId, sourceStopId },
+  orderBy: [{ attempt: "desc" }, { id: "desc" }],
+});
+
+const ensureValidationAttemptLocked = async (
+  tx: Prisma.TransactionClient,
+  integratorTaskId: string,
+  sourceStopId: string,
+  candidate?: RecoveryCandidate,
+): Promise<MergeRecoveryAttempt> => {
+  const existing = await recoveryAttemptFor(tx, integratorTaskId, sourceStopId);
+  if (existing) return existing;
+  const latest = await tx.mergeRecoveryAttempt.aggregate({
+    where: { integratorTaskId },
+    _max: { attempt: true },
   });
-  return rows
-    .map((row) => parseBaseDriftRecoveryActivity(row, {
-      activityTaskId: taskId,
-      integratorTaskId: taskId,
-      sourceStopId: stopId,
-    }))
-    .find((metadata) => metadata !== null && metadata.state !== "classification-retry") ?? null;
+  return tx.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId,
+    sourceStopId,
+    attempt: (latest._max.attempt ?? 0) + 1,
+    status: MergeRecoveryStatus.VALIDATING,
+    ...(candidate ? {
+      boundSourceRunId: candidate.sourceRunId,
+      authorizationActivityId: candidate.authorizationActivityId,
+      readinessTaskId: candidate.readinessTaskId,
+      regressionTaskId: candidate.regressionTaskId,
+      repository: candidate.repository,
+      prNumber: candidate.prNumber,
+      targetBranch: candidate.targetBranch,
+      authorizedHeadSha: candidate.authorizedHeadSha,
+      authorizedBaseSha: candidate.authorizedBaseSha,
+      observedBaseSha: candidate.observedBaseSha,
+    } : {}),
+  } });
 };
 
 const parseBaseDriftEvidence = (evidence: string): { observed: string; authorized: string } | null => {
@@ -92,7 +119,8 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
   if (!task || !taskIsIntegratorStep(task)) return null;
   const stop = await latestRecordedStop(db as Prisma.TransactionClient, task.id);
   if (!stop || stop.condition !== "base-drift") return null;
-  if (await recoveryMarkerFor(db, task.id, stop.stopId)) return null;
+  const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
+  if (existingAttempt && existingAttempt.status !== MergeRecoveryStatus.VALIDATING) return null;
   const fail = (reason: string, retryable = false): CandidateLoad => ({
     ok: false, reason, stopId: stop.stopId, retryable,
   });
@@ -248,6 +276,18 @@ const settleIneligibleLocked = async (
   reason: string,
   identity?: Partial<RecoveryIdentity>,
 ): Promise<void> => {
+  const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
+  await tx.mergeRecoveryAttempt.update({ where: { id: attempt.id }, data: {
+    status: MergeRecoveryStatus.FAILED,
+    failureReason: reason,
+    endedAt: new Date(),
+    ...(identity?.repository ? { repository: identity.repository } : {}),
+    ...(identity?.prNumber ? { prNumber: identity.prNumber } : {}),
+    ...(identity?.targetBranch ? { targetBranch: identity.targetBranch } : {}),
+    ...(identity?.authorizedHeadSha ? { authorizedHeadSha: identity.authorizedHeadSha } : {}),
+    ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
+    ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
+  } });
   await tx.taskActivity.create({ data: {
     taskId: integratorTaskId, actorType: "control-plane",
     body: `Automatic pre-merge base-drift recovery refused: ${reason}`,
@@ -277,7 +317,8 @@ const settleIneligible = async (
   await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE`;
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
   if (currentStop?.stopId !== stopId) return false;
-  if (await recoveryMarkerFor(tx, integratorTaskId, stopId)) return false;
+  const existing = await recoveryAttemptFor(tx, integratorTaskId, stopId);
+  if (existing && existing.status !== MergeRecoveryStatus.VALIDATING) return false;
   await settleIneligibleLocked(tx, integratorTaskId, stopId, reason, identity);
   return true;
 });
@@ -290,16 +331,10 @@ const recordClassificationRetry = async (
 ): Promise<"retryable" | "ineligible" | "skipped"> => db.$transaction(async (tx) => {
   await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE`;
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
-  if (currentStop?.stopId !== stopId || await recoveryMarkerFor(tx, integratorTaskId, stopId)) return "skipped";
-  const rows = await tx.taskActivity.findMany({
-    where: { taskId: integratorTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    select: { taskId: true, actorType: true, metadata: true },
-  });
-  const prior = rows.map((row) => parseBaseDriftRecoveryActivity(row, {
-    activityTaskId: integratorTaskId, integratorTaskId, sourceStopId: stopId,
-  })).filter((metadata) => metadata?.state === "classification-retry").length;
-  const classificationAttempt = prior + 1;
+  if (currentStop?.stopId !== stopId) return "skipped";
+  const attempt = await ensureValidationAttemptLocked(tx, integratorTaskId, stopId);
+  if (attempt.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
+  const classificationAttempt = attempt.validationAttempts + 1;
   if (classificationAttempt > MAX_BASE_DRIFT_CLASSIFICATION_RETRIES) {
     await settleIneligibleLocked(
       tx,
@@ -309,6 +344,10 @@ const recordClassificationRetry = async (
     );
     return "ineligible";
   }
+  await tx.mergeRecoveryAttempt.update({
+    where: { id: attempt.id },
+    data: { validationAttempts: classificationAttempt, failureReason: reason },
+  });
   await tx.taskActivity.create({ data: {
     taskId: integratorTaskId,
     actorType: "control-plane",
@@ -333,7 +372,8 @@ const queueRecovery = async (
   now: Date,
 ): Promise<"recovered" | "exhausted" | "skipped" | "ineligible" | "retryable"> => db.$transaction(async (tx) => {
   await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${expected.integratorTaskId} FOR UPDATE`;
-  if (await recoveryMarkerFor(tx, expected.integratorTaskId, expected.stopId)) return "skipped";
+  const aggregate = await ensureValidationAttemptLocked(tx, expected.integratorTaskId, expected.stopId, expected);
+  if (aggregate.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
   const loaded = await loadCandidate(tx, expected.integratorTaskId);
   if (!loaded) return "ineligible";
   if (!loaded.ok) return loaded.retryable ? "retryable" : "ineligible";
@@ -344,26 +384,19 @@ const queueRecovery = async (
   ];
   if (fields.some((field) => loaded.candidate[field] !== expected[field])) return "ineligible";
 
-  const history = await tx.taskActivity.findMany({
-    where: { taskId: expected.integratorTaskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    select: { taskId: true, actorType: true, metadata: true },
-  });
-  // Readiness may refresh the same recovery attempt more than once before the
-  // executor is activated. Each refresh appends a new canonical queued binding
-  // for its run/base pair, but must not spend another executor-drift attempt.
-  const attempts = new Set(history.flatMap((row) => {
-    const metadata = parseBaseDriftRecoveryActivity(row, {
-      activityTaskId: expected.integratorTaskId,
-      integratorTaskId: expected.integratorTaskId,
-    });
-    return metadata?.state === "queued"
-      && metadata.repository === expected.repository
-      && metadata.prNumber === expected.prNumber
-      && metadata.targetBranch === expected.targetBranch
-      ? [metadata.attempt]
-      : [];
-  })).size;
-  const attempt = attempts + 1;
+  // A recovery spends an attempt only once it owns a fresh regression Run.
+  // Validation refusals remain visible aggregate rows but do not consume the
+  // two executor-drift attempts. Historical TaskActivity rows are deliberately
+  // ignored: the migration has no backfill, so absence here means zero.
+  const attempts = await tx.mergeRecoveryAttempt.count({ where: {
+    id: { not: aggregate.id },
+    integratorTaskId: expected.integratorTaskId,
+    repository: expected.repository,
+    prNumber: expected.prNumber,
+    targetBranch: expected.targetBranch,
+    recoveryRunId: { not: null },
+  } });
+  const attempt = aggregate.attempt;
   const common = {
     kind: MERGE_TAIL_KIND.baseDriftRecovery,
     schemaVersion: 1,
@@ -382,8 +415,24 @@ const queueRecovery = async (
     readinessTaskId: expected.readinessTaskId,
     regressionTaskId: expected.regressionTaskId,
   };
-  if (attempt > MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) {
+  if (attempts >= MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) {
     const reason = `automatic recovery limit ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES} reached for ${expected.repository}#${expected.prNumber} targeting ${expected.targetBranch}`;
+    await tx.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
+      status: MergeRecoveryStatus.FAILED,
+      failureReason: reason,
+      endedAt: now,
+      boundSourceRunId: expected.sourceRunId,
+      authorizationActivityId: expected.authorizationActivityId,
+      readinessTaskId: expected.readinessTaskId,
+      regressionTaskId: expected.regressionTaskId,
+      repository: expected.repository,
+      prNumber: expected.prNumber,
+      targetBranch: expected.targetBranch,
+      authorizedHeadSha: expected.authorizedHeadSha,
+      authorizedBaseSha: expected.authorizedBaseSha,
+      observedBaseSha: expected.observedBaseSha,
+      currentBaseSha,
+    } });
     await tx.taskActivity.create({ data: {
       taskId: expected.integratorTaskId, actorType: "control-plane",
       body: `Automatic pre-merge base-drift recovery exhausted at attempt ${attempt}`,
@@ -408,6 +457,23 @@ const queueRecovery = async (
     failureReason: `Automatic base-drift recovery ${attempt} queued from stop ${expected.stopId}`,
   } });
   const run = await enqueueTaskRun(tx, expected.regressionTaskId, now);
+  await tx.mergeRecoveryAttempt.update({ where: { id: aggregate.id }, data: {
+    status: MergeRecoveryStatus.REPAIRING,
+    failureReason: null,
+    endedAt: null,
+    boundSourceRunId: expected.sourceRunId,
+    authorizationActivityId: expected.authorizationActivityId,
+    recoveryRunId: run.id,
+    readinessTaskId: expected.readinessTaskId,
+    regressionTaskId: expected.regressionTaskId,
+    repository: expected.repository,
+    prNumber: expected.prNumber,
+    targetBranch: expected.targetBranch,
+    authorizedHeadSha: expected.authorizedHeadSha,
+    authorizedBaseSha: expected.authorizedBaseSha,
+    observedBaseSha: expected.observedBaseSha,
+    currentBaseSha,
+  } });
   const metadata = { ...common, state: "queued", recoveryRunId: run.id,
   };
   await tx.taskActivity.createMany({ data: [
@@ -468,6 +534,12 @@ export const baseDriftRecoveryTick = async (
         continue;
       }
       const candidate = loaded.candidate;
+      const validation = await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${candidate.integratorTaskId} FOR UPDATE`;
+        const attempt = await ensureValidationAttemptLocked(tx, candidate.integratorTaskId, candidate.stopId, candidate);
+        return attempt.status === MergeRecoveryStatus.VALIDATING;
+      });
+      if (!validation) continue;
       if (!reader) {
         const outcome = await recordClassificationRetry(
           db, task.id, candidate.stopId, "server-side GitHub reader is unavailable",

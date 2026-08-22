@@ -6,6 +6,7 @@ import {
   InboxKind,
   InboxSender,
   InboxStatus,
+  MergeRecoveryStatus,
   Prisma,
   RunStatus,
   RunnerKind,
@@ -37,7 +38,7 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { isMergeReadinessStep, MERGE_TAIL_KIND, parseBaseDriftRecoveryActivity } from "./merge-tail.js";
+import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -765,6 +766,35 @@ type ChainSuccessorOptions = {
   archivedAssignee?: "park" | "throw";
 };
 
+const parkStoppedIntegratorSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  stopped: NonNullable<Awaited<ReturnType<typeof stopStateFor>>>,
+  sourceRunId: string | null,
+): Promise<{ nextTaskId: string; gated: false }> => {
+  await tx.task.update({
+    where: { id: successor.id },
+    data: {
+      status: TaskStatus.REVIEW,
+      failureReason: `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`,
+    },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor ${predecessor.name} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
+      metadata: {
+        condition: stopped.stop.condition,
+        sourceRunId,
+        sourceStopId: stopped.stop.stopId,
+      },
+    },
+  });
+  return { nextTaskId: successor.id, gated: false };
+};
+
 /** Activates at most one chain/follow-up successor using the observed updatedAt as a CAS token. */
 const activateChainSuccessorInternal = async (
   tx: Tx,
@@ -932,6 +962,15 @@ const activateChainSuccessorInternal = async (
     return { nextTaskId: successor.id, gated: false };
   }
 
+  // Completion-triggered activation treats an unresolved downstream merge
+  // stop as a parked successor, not as a failure of the predecessor that just
+  // completed. Generic enqueue still throws IntegratorStoppedError, which is
+  // why interactive callers continue to receive their named 409 refusal.
+  const stopped = await stopStateFor(tx, successor.id);
+  if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
+    return parkStoppedIntegratorSuccessor(tx, task, successor, stopped, options.sourceRunId ?? null);
+  }
+
   // An archived assignee parks the successor instead of throwing. enqueueTaskRun
   // raises ArchivedAssigneeError, which is not a P2002 and would escape the
   // savepoint catch below and roll back the caller's whole transaction — for
@@ -968,10 +1007,25 @@ const activateChainSuccessorInternal = async (
     await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
     if (hasSavepoint) await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
   } catch (error: unknown) {
-    if (!isUniqueConflict(error)) throw error;
+    // The preflight above is the normal path. The named-error branch is
+    // defense in depth for a stop recorded between that read and enqueue: both
+    // outcomes stay inside the savepoint so predecessor completion cannot be
+    // rolled back by downstream activation.
+    if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
     if (hasSavepoint) {
       await rawTx.$executeRawUnsafe!("ROLLBACK TO SAVEPOINT chain_successor_enqueue");
       await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
+    }
+    if (isIntegratorStoppedError(error)) {
+      const stoppedAfterRollback = await stopStateFor(tx, successor.id);
+      if (!stoppedAfterRollback) throw error;
+      return parkStoppedIntegratorSuccessor(
+        tx,
+        task,
+        successor,
+        stoppedAfterRollback,
+        options.sourceRunId ?? null,
+      );
     }
     return { nextTaskId: successor.id, gated: false };
   }
@@ -1009,20 +1063,20 @@ export const activateRecoveryIntegratorSuccessor = async (
   },
   now = new Date(),
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
-  const [readiness, stopped, recoveryRows, authorization, output] = await Promise.all([
+  const [readiness, stopped, recovery, authorization, output] = await Promise.all([
     tx.task.findUnique({
       where: { id: input.readinessTaskId },
       include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
     }),
     stopStateFor(tx, input.integratorTaskId),
-    tx.taskActivity.findMany({
+    tx.mergeRecoveryAttempt.findFirst({
       where: {
-        taskId: input.integratorTaskId,
-        actorType: "control-plane",
-        metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery },
+        integratorTaskId: input.integratorTaskId,
+        sourceStopId: input.sourceStopId,
+        recoveryRunId: input.recoveryRunId,
+        status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
       },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      select: { taskId: true, actorType: true, metadata: true },
+      orderBy: [{ attempt: "desc" }, { id: "desc" }],
     }),
     tx.taskActivity.findUnique({
       where: { id: input.authorizationActivityId },
@@ -1039,16 +1093,8 @@ export const activateRecoveryIntegratorSuccessor = async (
   if (!stopped || stopped.stop.stopId !== input.sourceStopId) {
     throw new Error("Recovery activation is not bound to the current unresolved integrator stop");
   }
-  const recovery = recoveryRows
-    .map((row) => parseBaseDriftRecoveryActivity(row, {
-      activityTaskId: input.integratorTaskId,
-      integratorTaskId: input.integratorTaskId,
-      sourceStopId: input.sourceStopId,
-      recoveryRunId: input.recoveryRunId,
-    }))
-    .find((metadata) => metadata?.state === "queued");
-  if (!recovery || recovery.state !== "queued" || recovery.readinessTaskId !== input.readinessTaskId) {
-    throw new Error("Recovery activation has no matching control-plane queued recovery");
+  if (!recovery || recovery.readinessTaskId !== input.readinessTaskId) {
+    throw new Error("Recovery activation has no matching canonical recovery aggregate");
   }
 
   const parsedAuthorization = parseAuthorizationMetadata(authorization?.metadata);
@@ -1061,7 +1107,9 @@ export const activateRecoveryIntegratorSuccessor = async (
     throw new Error("Recovery activation requires a control-plane authorization bound to its source stop");
   }
   const payload = parsedAuthorization.payload;
-  if (payload.repository !== recovery.repository
+  if (!recovery.repository || recovery.prNumber === null || !recovery.targetBranch
+    || !recovery.authorizedHeadSha || !recovery.currentBaseSha
+    || payload.repository !== recovery.repository
     || payload.prNumber !== recovery.prNumber
     || payload.baseRef !== recovery.targetBranch
     || payload.headSha !== recovery.authorizedHeadSha
@@ -1096,6 +1144,12 @@ export const activateRecoveryIntegratorSuccessor = async (
   if (activated.nextTaskId !== input.integratorTaskId) {
     throw new Error("Recovery activation did not resolve the expected merge-integrator successor");
   }
+  await tx.mergeRecoveryAttempt.update({ where: { id: recovery.id }, data: {
+    status: MergeRecoveryStatus.SUCCEEDED,
+    authorizationActivityId: authorization.id,
+    failureReason: null,
+    endedAt: now,
+  } });
   return activated;
 };
 

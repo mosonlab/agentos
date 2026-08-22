@@ -59,8 +59,10 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const runnerUsesSessionConfig = (runner: RunnerKind): boolean => runner !== "CLAUDE";
+
 const retainedSessionConfigPath = async (runner: RunnerKind, scratch: AgentScratch | null): Promise<string | null> =>
-  runner === "CODEX" && scratch && await sessionConfigRootExists(scratch) ? scratch.configRoot : null;
+  runnerUsesSessionConfig(runner) && scratch && await sessionConfigRootExists(scratch) ? scratch.configRoot : null;
 
 const appendRetainedSessionConfig = (reason: string, path: string | null): string =>
   `${reason}${path ? `; session CLI config retained at ${path}` : ""}`;
@@ -181,9 +183,9 @@ export const executeClaim = async (
   let fencingRejected = false;
   let waitingInbox = false;
   let budgetReason: string | null = null;
-  // Codex's root is retained until the run is known to have succeeded, so a
+  // A session CLI's root is retained until the run is known to have succeeded, so a
   // provisioning or execution failure can be inspected and resumed without
-  // ever falling back to the host ~/.codex.
+  // ever falling back to the host CLI configuration.
   let retainSessionConfig = false;
   let sessionConfigRemoved = false;
   // Where the run is, for the failure envelope. The API reads this to decide
@@ -204,7 +206,7 @@ export const executeClaim = async (
   let leaseRenewedAt = Date.now();
   let seq = claim.nextEventSeq;
   let pendingEvents: SessionEventPayload[] = [];
-  let eventWrites = Promise.resolve();
+  let eventFlushPromise: Promise<void> | null = null;
   const sink = (event: AdapterEvent): void => {
     pendingEvents.push({
       seq: seq++,
@@ -216,12 +218,56 @@ export const executeClaim = async (
       ...(event.toolCallId !== undefined ? { toolCallId: event.toolCallId } : {}),
     });
   };
-  const flushEvents = async (): Promise<void> => {
-    if (pendingEvents.length === 0 || fencingRejected) return;
-    const batch = pendingEvents.splice(0, 250);
-    eventWrites = eventWrites.then(() => appendEvents(config, claim, batch, handle?.providerConversationId));
-    await eventWrites;
-    if (pendingEvents.length > 0) await flushEvents();
+  const flushEvents = (): Promise<void> => {
+    if (eventFlushPromise) return eventFlushPromise;
+    eventFlushPromise = (async () => {
+      while (pendingEvents.length > 0 && !fencingRejected) {
+        // Keep the batch in the queue until the API accepts it. A failed append
+        // therefore remains the head of the queue for the next flush attempt,
+        // while the single worker prevents a later batch overtaking it.
+        const batch = pendingEvents.slice(0, 250);
+        await appendEvents(config, claim, batch, handle?.providerConversationId);
+        pendingEvents.splice(0, batch.length);
+      }
+    })().finally(() => { eventFlushPromise = null; });
+    return eventFlushPromise;
+  };
+
+  const isFencingError = (error: unknown): error is { status: number; code?: string } =>
+    typeof error === "object" && error !== null && (error as { status?: number }).status === 409;
+
+  const noteFencingError = async (error: unknown): Promise<void> => {
+    if (!isFencingError(error)) return;
+    waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
+    fencingRejected = true;
+    if (handle) await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
+  };
+
+  const observeEventFlush = async (error: unknown): Promise<void> => {
+    await noteFencingError(error);
+    if (!isFencingError(error)) console.error("Event flush failed", error);
+  };
+
+  const drainEventsUnderLease = async (openLease: DeliveryLease): Promise<void> => {
+    let lastError: unknown = null;
+    while (pendingEvents.length > 0 && !fencingRejected && !openLease.rejected) {
+      try {
+        // This may first await an active-run flush. Recheck the retained queue
+        // after it settles so its rejection can never become the terminal
+        // verdict without a fresh delivery-phase attempt.
+        await flushEvents();
+        lastError = null;
+      } catch (error: unknown) {
+        lastError = error;
+        await observeEventFlush(error);
+      }
+      if (pendingEvents.length === 0 || fencingRejected || openLease.rejected) break;
+      const remainingMs = openLease.deadline - Date.now();
+      if (remainingMs <= 0) throw lastError ?? new Error("Event delivery lease expired with events still pending");
+      // Reuse the lease's heartbeat cadence instead of introducing a separate
+      // retry budget. Its renewal loop continues independently during the wait.
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(config.heartbeatIntervalMs, remainingMs)));
+    }
   };
 
   try {
@@ -280,7 +326,7 @@ export const executeClaim = async (
           lastProgressAt: provisionStartedAt.toISOString(),
         },
       }).then(() => { leaseRenewedAt = Date.now(); }).catch((error: unknown) => {
-        if ((error as { status?: number; code?: string }).status === 409) {
+        if (isFencingError(error)) {
           waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
           fencingRejected = true;
         }
@@ -290,7 +336,7 @@ export const executeClaim = async (
     workspace = claim.resume ? await reuseWorkspace(config, claim) : await provisionWorkspace(config, claim);
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
-    retainSessionConfig = claim.runner === "CODEX";
+    retainSessionConfig = runnerUsesSessionConfig(claim.runner);
     await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, { reuse: claim.resume !== null });
     const env = buildChildEnvironment(config, claim, scratch, workspace.path);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
@@ -346,7 +392,10 @@ export const executeClaim = async (
       baseSha: workspace.baseSha,
       runtimeHandle: handle.pid ? `${config.runnerId}:${handle.pid}` : `${config.runnerId}:pending`,
     });
-    await flushEvents();
+    // The first append is also best-effort from the heartbeat loop's point of
+    // view. If the endpoint is down, keep the batch queued and let the active
+    // heartbeat timer renew the lease while later flushes retry it.
+    void flushEvents().catch(observeEventFlush);
 
     heartbeatTimer = setInterval(() => {
       if (!handle || heartbeatBusy || fencingRejected) return;
@@ -369,19 +418,24 @@ export const executeClaim = async (
           budgetReason = `${decision.gate}: ${decision.reason}`;
           await adapter.kill(handle!, budgetReason);
         }
-        await flushEvents();
-        await sendHeartbeat(config, claim, {
-          processAlive: snapshot.processAlive,
-          lastProgressEventAt: snapshot.lastProgressEventAt,
-          inFlightTool: serializeTool(snapshot.inFlightTool),
-        });
-        if (snapshot.processAlive) leaseRenewedAt = Date.now();
+        try {
+          await sendHeartbeat(config, claim, {
+            processAlive: snapshot.processAlive,
+            lastProgressEventAt: snapshot.lastProgressEventAt,
+            inFlightTool: serializeTool(snapshot.inFlightTool),
+          });
+          if (snapshot.processAlive) leaseRenewedAt = Date.now();
+        } catch (error: unknown) {
+          await noteFencingError(error);
+          if (!isFencingError(error)) console.error("Run heartbeat failed", error);
+        }
+        // Event delivery is deliberately detached from the heartbeat attempt:
+        // a failed or slow append must not occupy heartbeatBusy or suppress the
+        // next lease renewal. The queue itself remains ordered and retryable.
+        if (!fencingRejected) void flushEvents().catch(observeEventFlush);
       })().catch(async (error: unknown) => {
-        if ((error as { status?: number; code?: string }).status === 409 && handle) {
-          waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
-          fencingRejected = true;
-          await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
-        } else console.error("Run heartbeat failed", error);
+        await noteFencingError(error);
+        if (!isFencingError(error)) console.error("Run heartbeat failed", error);
       }).finally(() => { heartbeatBusy = false; });
     }, config.heartbeatIntervalMs);
 
@@ -403,8 +457,7 @@ export const executeClaim = async (
       waitingInbox = openLease.waitingInbox;
     };
     adoptLeaseVerdict(lease);
-    await flushEvents();
-    await eventWrites;
+    await drainEventsUnderLease(lease);
     // Re-read: a periodic renewal may have been rejected while the events above
     // were still draining, and everything past this point writes to a remote.
     adoptLeaseVerdict(lease);
@@ -469,11 +522,11 @@ export const executeClaim = async (
     if (scratch) {
       try {
         await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig });
-        sessionConfigRemoved = claim.runner === "CODEX" && !retainSessionConfig;
+        sessionConfigRemoved = runnerUsesSessionConfig(claim.runner) && !retainSessionConfig;
       } catch (error: unknown) {
         scratchCleanupFailure = errorMessage(error);
         retainSessionConfig = true;
-        if (claim.runner === "CODEX" && !await sessionConfigRootExists(scratch)) {
+        if (runnerUsesSessionConfig(claim.runner) && !await sessionConfigRootExists(scratch)) {
           try {
             await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
           } catch (restoreError: unknown) {
@@ -565,7 +618,7 @@ export const executeClaim = async (
     const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
     const { salvage, ...finishedCleanup } = cleaned;
     let restorationFailure: string | null = null;
-    if (claim.runner === "CODEX" && scratch && sessionConfigRemoved) {
+    if (runnerUsesSessionConfig(claim.runner) && scratch && sessionConfigRemoved) {
       try {
         await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch);
         sessionConfigRemoved = false;
@@ -578,10 +631,10 @@ export const executeClaim = async (
     const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
     if (scratch) {
       try {
-        // An exception is a failed run, so the Codex root must remain available
-        // for diagnosis or resume. Claude has no provisioned config root, and
+        // An exception is a failed run, so the session CLI config must remain
+        // available for diagnosis or resume. Claude has no provisioned config root, and
         // cleanupAgentScratch safely removes its absent path.
-        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: claim.runner === "CODEX" });
+        await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: runnerUsesSessionConfig(claim.runner) });
         scratch = null;
       } catch (cleanupError: unknown) {
         scratchCleanupFailure = errorMessage(cleanupError);
@@ -622,7 +675,7 @@ export const executeClaim = async (
     // behind would leak a directory per run.
     if (scratch) {
       await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, { retainConfigRoot: retainSessionConfig })
-        .catch((error: unknown) => console.error(`Agent scratch cleanup failed${claim.runner === "CODEX" ? `; session config ${scratch?.configRoot} retained or may require manual recovery` : ""}`, error));
+        .catch((error: unknown) => console.error(`Agent scratch cleanup failed${runnerUsesSessionConfig(claim.runner) ? `; session config ${scratch?.configRoot} retained or may require manual recovery` : ""}`, error));
     }
   }
 };

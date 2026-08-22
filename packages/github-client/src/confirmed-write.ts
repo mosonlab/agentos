@@ -30,9 +30,7 @@
  *
  * `resend: "never"` is how a non-idempotent operation is expressed. A comment
  * has no natural key, so a second POST is a second comment; such a write is
- * read back and then either accepted or reported, but never repeated. Where a
- * key can be carried in the payload instead, see `idempotency.ts` — that is
- * what turns a comment into something a read-back can recognise.
+ * read back and then either accepted or reported, but never repeated.
  */
 
 /** What one attempt at the write reported. See classify.ts for the taxonomy. */
