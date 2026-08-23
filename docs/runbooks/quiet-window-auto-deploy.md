@@ -25,6 +25,43 @@ The checkout must have:
 The job reads `masterSha` and `controlPlaneASha` from the tracked
 `release-authority.json`; do not add those values to a plist or `.env`.
 
+## Appliance checkout
+
+The production checkout is a dedicated clone owned by the loaded AgentOS
+services and auto-deploy. Keep it on `main` with a clean tracked and untracked
+tree. Development happens in a different clone or worktree; no interactive
+agent task uses the production checkout as its working directory. A worktree of
+the development clone is not a production clone because it still shares branch
+and worktree administration with interactive work.
+
+Before installing or restoring auto-deploy, prove all three conditions:
+
+```sh
+test "$(git branch --show-current)" = main
+test -z "$(git status --porcelain)"
+git merge-base --is-ancestor HEAD origin/main
+```
+
+Relocating an existing installation is a controlled cutover:
+
+1. Prepare an independent clone at the target `main`, copy the existing mode-0600
+   `.env` without printing it, install dependencies, generate Prisma Client, and
+   build the exact stamped commit already running.
+2. Stage replacement LaunchAgent definitions from the loaded definitions,
+   preserving their environment and changing only paths rooted in the old
+   checkout. Validate every staged plist before touching launchd.
+3. At a quiet window, replace all nine service definitions and the auto-deploy
+   definition as one change. Restart the services from the dedicated clone.
+4. Require all labels to be running, `/health` to pass, `/version` to report the
+   prepared commit, every loaded program and working directory to resolve inside
+   the dedicated clone, and the clone to be clean `main`.
+5. Retain the old definitions and checkout until every criterion in step 4 has
+   passed. Restore the old definitions and services if any criterion fails.
+
+The cutover is complete only when the development checkout is absent from every
+loaded `com.agentos.*` definition. After that point it is ordinary development
+state and may use task worktrees without coordinating with auto-deploy.
+
 ## Read-only verification
 
 The production host has no host `pg_dump`. Define the exact container backup
@@ -114,8 +151,8 @@ recovery. The job does not stop runner processes while it waits.
 
 The job then performs exactly this sequence and stops at the first failure:
 
-1. refuse a dirty checkout; fetch `origin/main`; prove the current source is
-   its ancestor; fast-forward with `git merge --ff-only`;
+1. require branch `main`, refuse a dirty checkout, fetch `origin/main`, prove the
+   current source is its ancestor, and fast-forward with `git merge --ff-only`;
 2. create a detached staging worktree under `.agentos-deploy/`, run `npm ci`
    against the target lockfile, and run `npm run db:generate`;
 3. run `npm run build` in staging and verify its API build stamp;

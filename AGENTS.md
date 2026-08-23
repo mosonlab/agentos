@@ -52,10 +52,10 @@ acceptance criterion or caller requires it.
   `packages/api/src/test-startup-environment.ts`. The entrypoint loads the root
   `.env`, and dotenv restores omitted credentials unless the helper pins them
   from the test URL.
-- Treat a running installation's API, configuration, service definitions, and
-  built output as owned state. Work in a separate worktree. Bootstrap a fresh
-  worktree with `npm install`, `npm run db:generate`, and
-  `npm run build -w @agentos/db`.
+- **Appliance checkout:** before changing files or branches in a checkout named
+  by a loaded `com.agentos.*` service, read
+  [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md).
+  Leave that checkout on clean `main`; do the work in a separate worktree.
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) owns the full test-safety rules, disposable
 development-database bootstrap, public-snapshot policy, and repository style.
