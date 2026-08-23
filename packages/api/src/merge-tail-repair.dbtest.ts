@@ -84,11 +84,13 @@ const seedRegression = async () => {
   return { project, template, repo, regressionAgent, regression, run, session };
 };
 
-const verdict = (outcome: "refresh-conflict" | "gate-fail") => JSON.stringify(outcome === "refresh-conflict"
+const verdict = (outcome: "refresh-conflict" | "review-fail" | "gate-fail") => JSON.stringify(outcome === "refresh-conflict"
   ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: "merge conflict" }
-  : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
+  : outcome === "review-fail"
+    ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: "MF-2 remains open" }
+    : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
 
-const exercise = async (outcome: "refresh-conflict" | "gate-fail") => {
+const exercise = async (outcome: "refresh-conflict" | "review-fail" | "gate-fail") => {
   const seeded = await seedRegression();
   await db.taskStepOutput.create({ data: {
     taskId: seeded.regression.id, runId: seeded.run.id, kind: "regression-verification",
@@ -105,7 +107,7 @@ const exercise = async (outcome: "refresh-conflict" | "gate-fail") => {
 
 const repairFor = (
   seeded: Awaited<ReturnType<typeof exercise>>,
-  repairKind: "refresh-conflict" | "gate-fix",
+  repairKind: "refresh-conflict" | "review-fix" | "gate-fix",
 ) => db.task.findFirstOrThrow({ where: {
   projectId: seeded.project.id,
   name: `Autonomous merge tail: ${repairKind}`,
@@ -192,6 +194,19 @@ test("a gate FAIL creates one fix-agent task and a second FAIL escalates with bo
   assert.match(trail.map(({ body }) => body).join("\n"), new RegExp(`${HEAD}.*${BASE}`, "s"));
 });
 
+test("a semantic FAIL skips the gate path and creates one review-fix task", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  assert.equal(repair.followUpTaskId, null);
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
+  assert.match(repair.description, /MF-2 remains open/u);
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  assert.equal(await repairCount(seeded), 1);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
 test("malformed, unknown, and head-unbound resolver outputs stop loudly", async () => {
   const cases: Array<[string, string, string | null]> = [
     ["prose", "resolved it", RESOLVED],
@@ -213,10 +228,10 @@ test("malformed, unknown, and head-unbound resolver outputs stop loudly", async 
   }
 });
 
-test("successful resolver and gate-fix completions rerun regression with exact-head PASS evidence", async () => {
-  for (const outcome of ["refresh-conflict", "gate-fail"] as const) {
+test("successful resolver, review-fix, and gate-fix completions rerun regression with exact-head PASS evidence", async () => {
+  for (const outcome of ["refresh-conflict", "review-fail", "gate-fail"] as const) {
     const seeded = await exercise(outcome);
-    const repair = await repairFor(seeded, outcome === "gate-fail" ? "gate-fix" : outcome);
+    const repair = await repairFor(seeded, outcome === "gate-fail" ? "gate-fix" : outcome === "review-fail" ? "review-fix" : outcome);
     const output = outcome === "refresh-conflict"
       ? JSON.stringify({
         schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE,
