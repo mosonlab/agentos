@@ -4701,6 +4701,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
       task: run.task!,
       runId,
+      fencingToken: body.fencingToken!,
       kind: body.kind,
       body: body.body,
       commitSha: body.commitSha ?? null,
@@ -5142,10 +5143,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             metadata: jsonValue({ exitCode: body.exitCode, mergeOutcome: outcome.outcome }),
           } });
         } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
-          // Body, runId and metadata describe one act of authorship and only
-          // move together through task_output. Completion may bind that same
-          // Run's row to its delivered head, but it never restamps a prior
-          // Run's body or synthesizes a canonical step's deliverable.
+          // Body, runId, metadata, and commit binding describe one act of
+          // authorship and only move together through task_output. Completion
+          // validates that immutable binding; it never restamps an authored
+          // body or synthesizes a canonical step's deliverable.
           let existingOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } });
           const canonicalAgentStep = isCanonicalAgentStep(run.task.templateStep);
           const requiresExplicitOutput = canonicalAgentStep
@@ -5159,11 +5160,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               metadata: jsonValue({ branch: body.branch ?? run.branch, headSha: body.headSha }),
               commitSha: body.headSha ?? null,
             } });
-          } else if (existingOutput?.runId === run.id && body.headSha) {
-            // The MCP records the live HEAD at authorship time. Delivery may
-            // commit remaining tracked changes afterwards, so completion
-            // advances that same run's output to the actual end commit before
-            // successor activation reads it.
+          } else if (!canonicalAgentStep && existingOutput?.runId === run.id && body.headSha) {
+            // Legacy and noncanonical steps retain their prose-compatible
+            // completion-time binding. Canonical artifacts are immutable and
+            // must already name the delivered head when authored.
             existingOutput = await tx.taskStepOutput.update({
               where: { id: existingOutput.id }, data: { commitSha: body.headSha },
             });
