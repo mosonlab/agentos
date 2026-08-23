@@ -225,9 +225,13 @@ const canonicalBodyRefusal = (
   if (!parsed.success) {
     const issues = parsed.error.issues.slice(0, 8).map((issue) => {
       const location = issue.path.length ? issue.path.join(".") : "body";
-      return `${location}: ${issue.message}`;
+      return { location, message: issue.message };
     });
-    return `${kind} task output body violates schemaVersion 1: ${issues.join("; ")}`;
+    const [first, ...remaining] = issues;
+    const additional = remaining.length > 0
+      ? `; additional violations: ${remaining.map((issue) => `${issue.location}: ${issue.message}`).join("; ")}`
+      : "";
+    return `${kind} task output body violates schemaVersion 1 at ${first?.location ?? "body"}: ${first?.message ?? "invalid value"}${additional}`;
   }
   const bodyHead = (parsed.data as { headSha: string }).headSha;
   if (bodyHead !== authoredHead) {
