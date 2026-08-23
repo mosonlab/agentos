@@ -138,6 +138,15 @@ test("sync creates the narrow verifier and migrates only never-run TODO regressi
     where: { id: { in: regressionSteps.map(({ id }) => id) } },
     data: { assigneeAgentId: source.id },
   });
+  const reviewSteps = await prisma.taskTemplateStep.findMany({
+    where: { taskTemplateId: { in: templateIds }, outputKind: "sol-findings" },
+    select: { id: true },
+  });
+  assert.equal(reviewSteps.length, 2);
+  await prisma.taskTemplateStep.updateMany({
+    where: { id: { in: reviewSteps.map(({ id }) => id) } },
+    data: { baseFromStepIndex: null },
+  });
   const readinessSteps = await prisma.taskTemplateStep.findMany({
     where: { taskTemplateId: { in: templateIds }, outputKind: "merge-authorization" },
     select: { id: true },
@@ -186,6 +195,7 @@ test("sync creates the narrow verifier and migrates only never-run TODO regressi
   assert.match(synced.output, /"createdAgents":1/u);
   assert.match(synced.output, /"createdAgentRepoGrants":1/u);
   assert.match(synced.output, /"adoptedAssignees":2/u);
+  assert.match(synced.output, /"adoptedStepBases":2/u);
   assert.match(synced.output, /"renamedSteps":2/u);
   assert.match(synced.output, /"migratedTasks":1/u);
   assert.match(synced.output, /"started":1/u);
@@ -200,6 +210,14 @@ test("sync creates the narrow verifier and migrates only never-run TODO regressi
   assert.equal(await prisma.agentRepoAccess.count({ where: { agentId: verifier.id, repoId: repo.id } }), 1);
   assert.equal(await prisma.taskTemplateStep.count({
     where: { id: { in: regressionSteps.map(({ id }) => id) }, assigneeAgentId: verifier.id },
+  }), 2);
+  assert.equal(await prisma.taskTemplateStep.count({
+    where: {
+      OR: [
+        { taskTemplateId: templates.find(({ name }) => name === "compound-engineer-workflow")!.id, stepIndex: 6, baseFromStepIndex: 5 },
+        { taskTemplateId: direct.id, stepIndex: 2, baseFromStepIndex: 1 },
+      ],
+    },
   }), 2);
   assert.equal(await prisma.taskTemplateStep.count({
     where: { id: { in: readinessSteps.map(({ id }) => id) }, name: "Merge authorization" },

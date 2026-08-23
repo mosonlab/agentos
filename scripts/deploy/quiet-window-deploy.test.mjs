@@ -51,17 +51,21 @@ import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 
-test("quiet-window runbook pins source-declared Agent-default transitions", () => {
+test("quiet-window runbook pins source-declared canonical transitions", () => {
   const repositoryRoot = realpathSync(new URL("../../", import.meta.url));
   const syncSource = readFileSync(join(repositoryRoot, "packages/db/prisma/sync-canonical-prompts.ts"), "utf8");
   const runbook = readFileSync(join(repositoryRoot, "docs/runbooks/quiet-window-auto-deploy.md"), "utf8");
   if (/const AGENT_TRANSITIONS = new Map\(\[\s*\[/u.test(syncSource)) {
-    assert.match(runbook, /source-declared assignee or Agent-default transition/u);
+    assert.match(runbook, /source-declared assignee, review-base, or Agent-default transition/u);
     assert.match(runbook, /review-coordinator` and `review-coordinator-sol/u);
     assert.match(runbook, /from model\s+`gpt-5\.6-sol:high` with `runnerPreference` `CODEX` to model\s+`openai-codex\/gpt-5\.6-sol:high` with `runnerPreference` `PI`/u);
     assert.match(runbook, /both persisted fields exactly match that `from` state/u);
   }
   assert.match(syncSource, /const REGRESSION_AGENT_NAME = "regression-verifier"/u);
+  assert.match(syncSource, /"compound-engineer-workflow:6", \{ from: null, to: 5 \}/u);
+  assert.match(syncSource, /"direct-engineer-workflow:2", \{ from: null, to: 1 \}/u);
+  assert.match(runbook, /`compound-engineer-workflow:6` from `null` to step 5/u);
+  assert.match(runbook, /`direct-engineer-workflow:2` from `null` to step 1/u);
   assert.match(runbook, /`regression-verifier` is the one source-declared role creation/u);
   assert.match(runbook, /TODO, and free of every Run, Session, and step output/u);
 });
