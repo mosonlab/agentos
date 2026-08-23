@@ -38,6 +38,14 @@ const claimed = (id: string): MechanicalClaim => ({
 
 const log = makeLog(makeRedactor(), { log: () => {}, warn: () => {}, error: () => {} });
 
+const compatibleAgentOsResponse = (input: string | URL | Request): Response =>
+  String(input).endsWith("/heartbeat")
+    ? new Response(JSON.stringify({ ok: true, cancellation: null, mechanicalCancellationPolicy: "refused" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    : new Response(null, { status: 204 });
+
 test("an idle claim poll never enters the run-scoped mint path", async () => {
   let runCalls = 0;
   const fetchImpl: typeof fetch = async () => new Response(null, { status: 204 });
@@ -46,11 +54,73 @@ test("an idle claim poll never enters the run-scoped mint path", async () => {
   assert.equal(runCalls, 0);
 });
 
-test("each claimed Run mints once, immediately before constructing its GitHub surface", async () => {
+test("a persisted mechanical cancellation is acknowledged before GitHub authority is minted", async () => {
+  const requests: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("/heartbeat")) {
+      return new Response(JSON.stringify({
+        ok: false,
+        cancellation: { requestId: "legacy-cancel", reason: "operator stop", requestedAt: new Date(0).toISOString() },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return compatibleAgentOsResponse(input);
+  };
+  let mintCalls = 0;
+  let surfaceCalls = 0;
+  let executeCalls = 0;
+  await runClaim(config, "/private/app.pem", claimed("legacy-cancelled-run"), log, fetchImpl, {
+    mintToken: async () => {
+      mintCalls += 1;
+      return { ok: false, failure: "private-key-read-failed" };
+    },
+    makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
+    executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
+  });
+  assert.equal(mintCalls, 0);
+  assert.equal(surfaceCalls, 0);
+  assert.equal(executeCalls, 0);
+  assert.deepEqual(requests, [
+    "https://agentos.test/runner/runs/legacy-cancelled-run/start",
+    "https://agentos.test/runner/runs/legacy-cancelled-run/heartbeat",
+    "https://agentos.test/runner/runs/legacy-cancelled-run/cancel/acknowledge",
+  ]);
+});
+
+test("a control plane without the mechanical-cancellation policy cannot reach GitHub", async () => {
   const requests: Array<{ url: string; body: string }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
     return new Response(null, { status: 204 });
+  };
+  let mintCalls = 0;
+  let surfaceCalls = 0;
+  let executeCalls = 0;
+  await runClaim(config, "/private/app.pem", claimed("old-control-plane"), log, fetchImpl, {
+    mintToken: async () => {
+      mintCalls += 1;
+      return { ok: false, failure: "private-key-read-failed" };
+    },
+    makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
+    executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
+  });
+  assert.equal(mintCalls, 0);
+  assert.equal(surfaceCalls, 0);
+  assert.equal(executeCalls, 0);
+  assert.deepEqual(requests.map((request) => request.url), [
+    "https://agentos.test/runner/runs/old-control-plane/start",
+    "https://agentos.test/runner/runs/old-control-plane/heartbeat",
+    "https://agentos.test/runner/runs/old-control-plane/complete",
+  ]);
+  assert.match(requests[2]!.body, /does not enforce mechanical cancellation refusal/u);
+});
+
+test("each claimed Run mints once, immediately before constructing its GitHub surface", async () => {
+  const requests: Array<{ url: string; body: string }> = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
+    return compatibleAgentOsResponse(input);
   };
   let mintCalls = 0;
   let surfaceCalls = 0;
@@ -82,7 +152,7 @@ test("any mint failure completes retryably before a GitHub surface or merge writ
   const requests: Array<{ url: string; body: string }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
-    return new Response(null, { status: 204 });
+    return compatibleAgentOsResponse(input);
   };
   let surfaceCalls = 0;
   let executeCalls = 0;
@@ -95,9 +165,10 @@ test("any mint failure completes retryably before a GitHub surface or merge writ
   assert.equal(executeCalls, 0);
   assert.deepEqual(requests.map((request) => request.url), [
     "https://agentos.test/runner/runs/failed-run/start",
+    "https://agentos.test/runner/runs/failed-run/heartbeat",
     "https://agentos.test/runner/runs/failed-run/complete",
   ]);
-  const completion = JSON.parse(requests[1]!.body) as Record<string, unknown>;
+  const completion = JSON.parse(requests[2]!.body) as Record<string, unknown>;
   assert.equal(completion.retryable, true);
   assert.match(String(completion.failureReason), /private-key-read-failed/u);
   assert.equal(requests.some((request) => request.body.includes(secret)), false);
@@ -107,7 +178,7 @@ test("a bounded non-settling key read cannot reach a GitHub surface, activity, o
   const requests: Array<{ url: string; body: string }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
-    return new Response(null, { status: 204 });
+    return compatibleAgentOsResponse(input);
   };
   let surfaceCalls = 0;
   let executeCalls = 0;
@@ -127,10 +198,11 @@ test("a bounded non-settling key read cannot reach a GitHub surface, activity, o
   assert.equal(executeCalls, 0);
   assert.deepEqual(requests.map((request) => request.url), [
     "https://agentos.test/runner/runs/stalled-key-run/start",
+    "https://agentos.test/runner/runs/stalled-key-run/heartbeat",
     "https://agentos.test/runner/runs/stalled-key-run/complete",
   ]);
   assert.equal(requests.some((request) => request.url.includes("/activity") || request.url.includes("/output")), false);
-  assert.match(requests[1]!.body, /private-key-read-failed/u);
+  assert.match(requests[2]!.body, /private-key-read-failed/u);
 });
 
 test("escaped malformed token responses cannot enter logs, completion, activity, or output", async () => {
@@ -144,7 +216,7 @@ test("escaped malformed token responses cannot enter logs, completion, activity,
     });
     const fetchImpl: typeof fetch = async (input, init) => {
       requests.push({ url: String(input), body: typeof init?.body === "string" ? init.body : "" });
-      return new Response(null, { status: 204 });
+      return compatibleAgentOsResponse(input);
     };
     let surfaceCalls = 0;
     await runClaim(config, "/private/app.pem", claimed(`malformed-${requests.length}`), capturedLog, fetchImpl, {
@@ -179,7 +251,7 @@ test("a minted installation token cannot escape through run evidence or completi
     if (url.startsWith("https://api.github.test")) {
       return new Response(JSON.stringify({ errors: [{ message: installationToken }] }), { status: 200 });
     }
-    return new Response(null, { status: 204 });
+    return compatibleAgentOsResponse(input);
   };
   await runClaim(config, "/private/app.pem", claimed("redacted-run"), log, fetchImpl, {
     mintToken: async () => ({ ok: true, token: installationToken, expiresAt: new Date(Date.now() + 60 * 60_000) }),

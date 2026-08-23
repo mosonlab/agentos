@@ -138,15 +138,33 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
         : run.heartbeatAt === null
           ? `Platform lease expired at ${run.leaseExpiresAt.toISOString()} without a recorded runner heartbeat`
           : `Runner heartbeat starved after ${run.heartbeatAt.toISOString()}; platform lease expired at ${run.leaseExpiresAt.toISOString()}`;
+      // Run is the authority for cancellation, fencing, and terminalization.
+      // Re-read it under its mutex before Task: the candidate list is only a
+      // hint and may predate a cancellation that committed while this sweep
+      // was starting.
+      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${run.id} FOR UPDATE`;
+      const current = await tx.run.findFirst({
+        where: {
+          id: run.id,
+          status: { in: [...activeStatuses] },
+          OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
+        },
+        select: {
+          cancelRequestId: true,
+          cancelReason: true,
+          cancelRequestedAt: true,
+        },
+      });
+      if (!current) continue;
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
-      if (run.cancelRequestId && run.cancelRequestedAt) {
-        const reason = run.cancelReason ?? "Cancelled by operator";
+      if (current.cancelRequestId && current.cancelRequestedAt) {
+        const reason = current.cancelReason ?? "Cancelled by operator";
         const cancelled = await tx.run.updateMany({
           where: {
             id: run.id,
-            cancelRequestId: run.cancelRequestId,
+            cancelRequestId: current.cancelRequestId,
             status: { in: [...activeStatuses] },
             OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
           },
@@ -185,7 +203,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
             taskId: run.taskId,
             actorType: "control-plane",
             body: `Run ${run.runNumber} cancellation settled after its lease expired; evidence retained`,
-            metadata: { runId: run.id, requestId: run.cancelRequestId, status: RunStatus.CANCELLED },
+            metadata: { runId: run.id, requestId: current.cancelRequestId, status: RunStatus.CANCELLED },
           } });
         }
         continue;
@@ -197,7 +215,12 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       // after that budget changes. See `runBudgetCeiling`.
       const budgetGrants = run.budgetGrants + 1;
       const lost = await tx.run.updateMany({
-        where: { id: run.id, status: { in: [...activeStatuses] } },
+        where: {
+          id: run.id,
+          cancelRequestedAt: null,
+          status: { in: [...activeStatuses] },
+          OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
+        },
         data: {
           status: RunStatus.LOST,
           endedAt: now,

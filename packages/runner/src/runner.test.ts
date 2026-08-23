@@ -10,7 +10,7 @@ import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { executeClaim, reportCliAvailabilityHeartbeat, runStartupPreflight } from "./runner.js";
 import {
-  cleanupAgentScratch, provisionSessionConfig, type AgentScratch,
+  cleanupAgentScratch, provisionSessionConfig, writeSessionCredentials, type AgentScratch,
 } from "./workspace.js";
 
 const config = (workspaceRoot: string): RunnerConfig => ({
@@ -1021,8 +1021,67 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
     const acknowledgements = posts.filter((post) => post.path.endsWith("/cancel/acknowledge"));
     assert.equal(acknowledgements.length, 1);
     assert.equal(acknowledgements[0]?.body.requestId, "cancel-1");
+    assert.equal(acknowledgements[0]?.body.workspacePath, join(workspaces, "run-10"));
+    assert.equal(acknowledgements[0]?.body.branch, "agentos/task-10/run-1");
     assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
     assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
+    await access(join(workspaces, "run-10"));
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a provisioning cancellation is acknowledged only after provider launch is closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-prelaunch-cancellation-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, successfulCodexMutationStub(log, "sleep 30"));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    let credentialsWriting = false;
+    let cancellationSent = false;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      if (credentialsWriting && path.endsWith("/heartbeat") && !cancellationSent) {
+        cancellationSent = true;
+        return new Response(JSON.stringify({
+          ok: false,
+          cancellation: { requestId: "cancel-before-launch", reason: "operator stop", requestedAt: new Date(0).toISOString() },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true, cancellation: null }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = { ...codexOnly(workspaces, root, binary), heartbeatIntervalMs: 20 };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      session: testSession(root),
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    }, {
+      writeSessionCredentials: async (...args) => {
+        const path = await writeSessionCredentials(...args);
+        credentialsWriting = true;
+        await new Promise<void>((resolve) => setTimeout(resolve, 80));
+        return path;
+      },
+    });
+
+    const acknowledgements = posts.filter((post) => post.path.endsWith("/cancel/acknowledge"));
+    assert.equal(cancellationSent, true);
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0]?.body.workspacePath, join(workspaces, "run-10"));
+    assert.equal(posts.some((post) => post.path.endsWith("/start")), false);
+    assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
     await access(join(workspaces, "run-10"));
   } finally {
     await cleanupTestSession(root);

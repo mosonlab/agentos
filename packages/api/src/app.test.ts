@@ -522,6 +522,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
     $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
       $queryRaw: async () => [{ id: "task-2", archivedAt: null }],
       run: {
+        findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
         updateMany: async ({ where }: { where: { id: string } }) => { lost.push(where.id); return { count: 1 }; },
         create: async () => ({}),
       },
@@ -1561,6 +1562,7 @@ test("event ingestion makes literal NULs visible without changing seq order", as
     const visibleNul = "\\u0000";
     const stored: Array<Record<string, unknown>> = [];
     const database = {
+      $queryRaw: async () => [{ id: "run-1" }],
       run: {
         findFirst: async () => ({ session: { id: "ses-1", providerConversationId: null } }),
       },
@@ -1576,8 +1578,9 @@ test("event ingestion makes literal NULs visible without changing seq order", as
         },
         count: async () => stored.length,
       },
-    } as unknown as PrismaClient;
-    const app = createApp(database);
+    } as Record<string, unknown>;
+    database.$transaction = async (operation: (tx: unknown) => Promise<unknown>) => operation(database);
+    const app = createApp(database as unknown as PrismaClient);
     const response = await app.request("/runner/runs/run-1/events", {
       method: "POST",
       headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },

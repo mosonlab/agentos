@@ -238,6 +238,7 @@ export const acknowledgeCancellation = async (
   config: RunnerConfig,
   claim: ClaimedTask,
   cancellation: CancellationRequest,
+  workspace?: { path: string; branch: string; baseSha: string } | null,
 ): Promise<void> => {
   await request(config, `/runner/runs/${claim.run.id}/cancel/acknowledge`, {
     method: "POST",
@@ -245,6 +246,7 @@ export const acknowledgeCancellation = async (
       runnerId: config.runnerId,
       fencingToken: claim.fencingToken,
       requestId: cancellation.requestId,
+      ...(workspace ? { workspacePath: workspace.path, branch: workspace.branch, baseSha: workspace.baseSha } : {}),
     }),
   });
 };

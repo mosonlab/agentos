@@ -315,7 +315,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const totalTokens = counted.length === 0 ? null : counted.reduce((sum, value) => sum + value, 0);
   // `app.ts` orders runs `runNumber desc`, so the newest run is the head.
   const newest = runs[0];
-  const newestIsActive = newest !== undefined
+  const newestIsActive = task.executionOwner === "agent" && newest !== undefined
     && ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"].includes(newest.status);
   const newestIsCancelling = newestIsActive && newest.cancelRequestedAt !== null && newest.cancelAcknowledgedAt === null;
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;

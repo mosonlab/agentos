@@ -266,7 +266,7 @@ const stopBaseDriftRecoveryTail = async (
   ] });
 };
 
-const openMergeTailInbox = async (
+const openMergeTailReviewDecisionInbox = async (
   tx: DbTx,
   input: { taskId: string; agentId: string; sessionId?: string; reason: string },
 ): Promise<void> => {
@@ -285,6 +285,21 @@ const openMergeTailInbox = async (
       { id: "adopt-head", label: "Adopt current exact head and rerun Regression" },
       { id: "operator-takeover", label: "Park autonomous tail for operator takeover" },
     ],
+    dedupeKey: `merge-tail-review-rejection:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`,
+  } });
+};
+
+const openMergeTailStopNotice = async (
+  tx: DbTx,
+  input: { taskId: string; agentId: string; sessionId?: string; reason: string },
+): Promise<void> => {
+  await tx.inboxMessage.create({ data: {
+    from: "AGENT",
+    agentId: input.agentId,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    taskId: input.taskId,
+    kind: "TEXT",
+    body: `Autonomous merge tail stopped: ${input.reason}`,
     dedupeKey: `merge-tail-stop:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`,
   } });
 };
@@ -390,7 +405,7 @@ const applyMergeTailOperatorDecision = async (
       task: { include: { templateStep: true, runs: { orderBy: { runNumber: "desc" }, take: 5 } } },
     },
   });
-  if (!card?.dedupeKey?.startsWith("merge-tail-stop:")) return null;
+  if (!card?.dedupeKey?.startsWith("merge-tail-review-rejection:")) return null;
   if (!card.task || !card.session?.run) return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail decision is missing its Regression task or source Run" };
   if (!["create-repair", "adopt-head", "operator-takeover"].includes(input.decision)) {
     return { duplicate: false, resumed: false, messageId: card.id, error: "Unknown merge-tail operator decision" };
@@ -544,7 +559,7 @@ export const handleRegressionCompletion = async (
       body: `Regression did not advance: ${reason}`,
       metadata: { kind: MERGE_TAIL_KIND.regression, schemaVersion: 1, state: "stopped", reason },
     } });
-    await openMergeTailInbox(tx, { taskId: input.task.id, agentId: input.run.agentId, sessionId: input.run.sessionId, reason });
+    await openMergeTailStopNotice(tx, { taskId: input.task.id, agentId: input.run.agentId, sessionId: input.run.sessionId, reason });
     return "handled";
   };
   if (parsed.status === "invalid") return stop(parsed.reason);
@@ -947,6 +962,9 @@ const cancelAcknowledgeInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
   requestId: z.string().trim().min(1).max(160),
+  workspacePath: z.string().min(1).optional(),
+  branch: z.string().min(1).optional(),
+  baseSha: z.string().min(1).optional(),
 });
 const publicationInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -1282,7 +1300,17 @@ type CancellationSettlement =
  * writer. No retry or successor is created on this path. */
 const settleCancellation = async (
   tx: Prisma.TransactionClient,
-  input: { runId: string; requestId: string; now: Date; runnerId?: string; fencingToken?: string; actorId?: string },
+  input: {
+    runId: string;
+    requestId: string;
+    now: Date;
+    runnerId?: string;
+    fencingToken?: string;
+    actorId?: string;
+    workspacePath?: string;
+    branch?: string;
+    baseSha?: string;
+  },
 ): Promise<CancellationSettlement> => {
   await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${input.runId} FOR UPDATE`;
   const run = await tx.run.findUnique({
@@ -1299,6 +1327,19 @@ const settleCancellation = async (
     return { error: "Cancellation acknowledgement is not owned by this runner", code: 409 };
   }
   if (run.status === RunStatus.CANCELLED && run.cancelAcknowledgedAt) {
+    // Reconciliation can settle an expired cancellation before the runner's
+    // final ACK arrives. That ACK is still the only durable account of a
+    // workspace provisioned before /start, so idempotence must backfill its
+    // evidence instead of discarding it.
+    if (input.workspacePath !== undefined) await tx.run.updateMany({
+      where: { id: run.id, workspacePath: null }, data: { workspacePath: input.workspacePath },
+    });
+    if (input.branch !== undefined) await tx.run.updateMany({
+      where: { id: run.id, branch: null }, data: { branch: input.branch },
+    });
+    if (input.baseSha !== undefined) await tx.run.updateMany({
+      where: { id: run.id, baseSha: null }, data: { baseSha: input.baseSha },
+    });
     return { runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged", requestId: input.requestId };
   }
   const settled = await tx.run.updateMany({
@@ -1320,6 +1361,9 @@ const settleCancellation = async (
       retryable: false,
       retryAt: null,
       workspaceRetained: true,
+      ...(input.workspacePath === undefined ? {} : { workspacePath: input.workspacePath }),
+      ...(input.branch === undefined ? {} : { branch: input.branch }),
+      ...(input.baseSha === undefined ? {} : { baseSha: input.baseSha }),
     },
   });
   if (settled.count !== 1) return { error: `Run is already ${run.status}`, code: 409 };
@@ -4421,7 +4465,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               where: { runId: regressionRepairHandoff.previousRunId },
               select: { id: true },
             });
-            await openMergeTailInbox(tx, {
+            await openMergeTailStopNotice(tx, {
               taskId: candidate.task.id,
               agentId: candidate.agentId,
               ...(sourceSession ? { sessionId: sourceSession.id } : {}),
@@ -4605,39 +4649,44 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, startInput);
     const now = new Date();
-    const updated = await db.run.updateMany({
-      where: {
-        id: runId,
-        runnerId: body.runnerId,
-        fencingToken: body.fencingToken,
-        cancelRequestedAt: null,
-        leaseExpiresAt: { gt: now },
-        status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING] },
-      },
-      data: {
-        status: RunStatus.RUNNING,
-        startedAt: now,
-        adapterVersion: body.adapterVersion,
-        cliVersion: body.cliVersion,
-        authMode: body.authMode ?? null,
-        manifest: jsonValue(body.manifest),
-        workspacePath: body.workspacePath,
-        branch: body.branch ?? null,
-        baseSha: body.baseSha ?? null,
-      },
+    const started = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      const updated = await tx.run.updateMany({
+        where: {
+          id: runId,
+          runnerId: body.runnerId,
+          fencingToken: body.fencingToken,
+          cancelRequestedAt: null,
+          leaseExpiresAt: { gt: now },
+          status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING] },
+        },
+        data: {
+          status: RunStatus.RUNNING,
+          startedAt: now,
+          adapterVersion: body.adapterVersion,
+          cliVersion: body.cliVersion,
+          authMode: body.authMode ?? null,
+          manifest: jsonValue(body.manifest),
+          workspacePath: body.workspacePath,
+          branch: body.branch ?? null,
+          baseSha: body.baseSha ?? null,
+        },
+      });
+      if (updated.count !== 1) return false;
+      const session = await tx.session.updateMany({
+        where: { runId, executionStatus: SessionExecutionStatus.PROVISIONING },
+        data: {
+          executionStatus: SessionExecutionStatus.RUNNING,
+          runtimeHandle: body.runtimeHandle ?? null,
+          resumeInput: null,
+          provisionedAt: now,
+          startedAt: now,
+        },
+      });
+      if (session.count !== 1) throw new Error(`Run ${runId} has no startable Session`);
+      return true;
     });
-    if (updated.count !== 1) return context.json({ error: "Stale fencing token" }, 409);
-    await db.session.update({
-      where: { runId },
-      data: {
-        executionStatus: SessionExecutionStatus.RUNNING,
-        runtimeHandle: body.runtimeHandle ?? null,
-        resumeInput: null,
-        provisionedAt: now,
-        startedAt: now,
-      },
-    });
-    return context.json({ ok: true });
+    return started ? context.json({ ok: true }) : context.json({ error: "Stale fencing token" }, 409);
   });
 
   app.post("/runner/runs/:runId/heartbeat", async (context) => {
@@ -4664,7 +4713,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         ...(body.inFlightTool !== undefined ? { inFlightTool: body.inFlightTool ? jsonValue(body.inFlightTool) : Prisma.JsonNull } : {}),
       },
     });
-    if (updated.count === 1) return context.json({ ok: true, cancellation: null });
+    if (updated.count === 1) return context.json({
+      ok: true,
+      cancellation: null,
+      mechanicalCancellationPolicy: "refused",
+    });
     const cancelling = await db.run.findFirst({
       where: {
         id: runId,
@@ -4678,6 +4731,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (cancelling?.cancelRequestId && cancelling.cancelReason && cancelling.cancelRequestedAt) {
       return context.json({
         ok: false,
+        mechanicalCancellationPolicy: "refused",
         cancellation: {
           requestId: cancelling.cancelRequestId,
           reason: cancelling.cancelReason,
@@ -4701,6 +4755,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       fencingToken: body.fencingToken,
       actorId: body.runnerId,
       now: new Date(),
+      ...(body.workspacePath === undefined ? {} : { workspacePath: body.workspacePath }),
+      ...(body.branch === undefined ? {} : { branch: body.branch }),
+      ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
     }));
     return "error" in result ? context.json({ error: result.error }, result.code) : context.json(result);
   });
@@ -4802,34 +4859,46 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/events", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, eventsInput);
-    const run = await db.run.findFirst({
-      where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
-      include: { session: true },
+    const result = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      const run = await tx.run.findFirst({
+        where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
+        include: { session: true },
+      });
+      if (!run?.session) {
+        const waiting = await tx.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
+        return waiting
+          ? { error: "Run suspended for Inbox", code: "WAITING_INBOX" as const }
+          : { error: "Stale fencing token", code: "STALE" as const };
+      }
+      await tx.sessionEvent.createMany({
+        data: body.events.map((event) => ({
+          sessionId: run.session!.id,
+          runId,
+          seq: event.seq,
+          at: event.at ?? new Date(),
+          source: event.source,
+          type: normalizeSessionEventValue(event.type) as string,
+          providerEventId: event.providerEventId === undefined || event.providerEventId === null
+            ? null
+            : normalizeSessionEventValue(event.providerEventId) as string,
+          toolCallId: event.toolCallId === undefined || event.toolCallId === null
+            ? null
+            : normalizeSessionEventValue(event.toolCallId) as string,
+          payload: jsonValue(normalizeSessionEventValue(event.payload)),
+        })),
+        skipDuplicates: true,
+      });
+      if (body.providerConversationId && !run.session.providerConversationId) {
+        await tx.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
+      }
+      return { sessionId: run.session.id };
     });
-    if (!run?.session) {
-      const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
-      return waiting
-        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-        : context.json({ error: "Stale fencing token" }, 409);
+    if ("error" in result) {
+      return result.code === "WAITING_INBOX"
+        ? context.json({ error: result.error, code: result.code }, 409)
+        : context.json({ error: result.error }, 409);
     }
-    await db.sessionEvent.createMany({
-      data: body.events.map((event) => ({
-        sessionId: run.session!.id,
-        runId,
-        seq: event.seq,
-        at: event.at ?? new Date(),
-        source: event.source,
-        type: normalizeSessionEventValue(event.type) as string,
-        providerEventId: event.providerEventId === undefined || event.providerEventId === null
-          ? null
-          : normalizeSessionEventValue(event.providerEventId) as string,
-        toolCallId: event.toolCallId === undefined || event.toolCallId === null
-          ? null
-          : normalizeSessionEventValue(event.toolCallId) as string,
-        payload: jsonValue(normalizeSessionEventValue(event.payload)),
-      })),
-      skipDuplicates: true,
-    });
     // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
     // whose event was already stored still recomputes, which is what self-heals a
     // write lost between createMany and here. The guard reads the request body
@@ -4844,13 +4913,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // lock-wait timeout is one more throw this catch absorbs — same repair path.
     if (body.events.some((event) => event.type === "FINAL_OUTPUT")) {
       try {
-        await recomputeSessionUsage(db, run.session.id);
+        await recomputeSessionUsage(db, result.sessionId);
       } catch (error) {
-        console.error(`Session usage recompute failed for ${run.session.id}`, error);
+        console.error(`Session usage recompute failed for ${result.sessionId}`, error);
       }
-    }
-    if (body.providerConversationId && !run.session.providerConversationId) {
-      await db.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
     }
     return context.json({ accepted: body.events.length });
   });
@@ -4859,43 +4925,48 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, fencedActivityInput);
     const principal = context.get("principal");
-    const run = await db.run.findFirst({
-      where: {
-        id: runId,
-        fencingToken: body.fencingToken,
-        leaseExpiresAt: { gt: new Date() },
-        status: { in: activeRunStatuses },
-        ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
-      },
-      select: {
-        taskId: true,
-        task: { select: { templateStep: { select: {
-          stepIndex: true,
-          outputKind: true,
-          taskTemplate: { select: { name: true } },
-        } } } },
-      },
+    const result = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      const run = await tx.run.findFirst({
+        where: {
+          id: runId,
+          fencingToken: body.fencingToken,
+          cancelRequestedAt: null,
+          leaseExpiresAt: { gt: new Date() },
+          status: { in: activeRunStatuses },
+          ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
+        },
+        select: {
+          taskId: true,
+          task: { select: { templateStep: { select: {
+            stepIndex: true,
+            outputKind: true,
+            taskTemplate: { select: { name: true } },
+          } } } },
+        },
+      });
+      if (!run?.taskId) return null;
+      const metadata = body.metadata
+        ? {
+            ...body.metadata,
+            ...(((body.metadata.kind === MERGE_INTEGRATOR_KIND.intent
+              || body.metadata.kind === MERGE_INTEGRATOR_KIND.result)
+              && executionModeFor(run.task?.templateStep ?? null) === "mechanical")
+              ? { sourceRunId: runId }
+              : {}),
+          }
+        : undefined;
+      return tx.taskActivity.create({
+        data: {
+          taskId: run.taskId,
+          actorType: principal.kind,
+          actorId: body.actorId ?? null,
+          body: body.body,
+          ...(metadata ? { metadata: jsonValue(metadata) } : {}),
+        },
+      });
     });
-    if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
-    const metadata = body.metadata
-      ? {
-          ...body.metadata,
-          ...(((body.metadata.kind === MERGE_INTEGRATOR_KIND.intent
-            || body.metadata.kind === MERGE_INTEGRATOR_KIND.result)
-            && executionModeFor(run.task?.templateStep ?? null) === "mechanical")
-            ? { sourceRunId: runId }
-            : {}),
-        }
-      : undefined;
-    return context.json(await db.taskActivity.create({
-      data: {
-        taskId: run.taskId,
-        actorType: principal.kind,
-        actorId: body.actorId ?? null,
-        body: body.body,
-        ...(metadata ? { metadata: jsonValue(metadata) } : {}),
-      },
-    }), 201);
+    return result ? context.json(result, 201) : context.json({ error: "Stale fencing token" }, 409);
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
   app.post("/session/runs/:runId/activity", appendFencedActivity);
@@ -5198,6 +5269,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (refusal) return context.json({ error: refusal }, 403);
     }
     const result = await db.$transaction(async (tx) => {
+      // Run owns fencing, cancellation, and terminalization. Take that mutex
+      // before Task so completion, cancellation, and canonical output writes
+      // cannot deadlock by entering the same two rows in opposite orders.
+      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
       const run = await tx.run.findFirst({
         where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
         include: {
@@ -5459,14 +5534,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 state: "failed",
               }),
             } });
-            await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+            await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
           } else if (reviewMarker
             && typeof reviewMarker.readinessTaskId === "string"
             && typeof reviewMarker.regressionTaskId === "string") {
             const reason = `independent review ${run.taskId} failed without an exact-head decision for ${String(reviewMarker.headSha)}`;
             await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
             await tx.task.update({ where: { id: reviewMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+            await openMergeTailStopNotice(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
           }
         }
         // §4.0 outcome branching. The executor's own fenced write is the only
@@ -5591,7 +5666,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               const reason = `independent review returned missing, malformed, or stale decision for ${reviewMarker.headSha}`;
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
               await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-              await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+              await openMergeTailStopNotice(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
             } else if (decision.outcome === "approved") {
               await tx.taskActivity.create({ data: {
                 taskId: reviewMarker.readinessTaskId,
@@ -5642,12 +5717,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               } else if (alreadyRejected) {
                 const reason = `second independent review rejection at ${reviewMarker.headSha}: ${summary}`;
                 await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                await openMergeTailReviewDecisionInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
               } else {
                 const reason = `independent review rejected exact head ${reviewMarker.headSha}: ${summary}`;
                 await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
                 await tx.task.update({ where: { id: reviewMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await openMergeTailInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                await openMergeTailReviewDecisionInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
               }
             }
           }
@@ -5687,7 +5762,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                     reason: bindingError,
                   }),
                 } });
-                await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
               } else if (parsedResolver.status === "ok") {
                 reportedUnable = parsedResolver.result.outcome === "unable";
                 resolvedHeadSha = parsedResolver.result.outcome === "resolved" ? parsedResolver.result.resolvedHeadSha : null;
@@ -5700,7 +5775,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               const reason = `${String(repairMarker.repairKind)} repair ${run.taskId} reported unable at ${String(repairMarker.headSha)}`;
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
               await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-              await openMergeTailInbox(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+              await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
             } else if (!repairUnable) {
               await tx.taskActivity.create({ data: {
                 taskId: repairMarker.regressionTaskId,
@@ -5911,6 +5986,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           cancelRequestedAt: true,
           cancelAcknowledgedAt: true,
           session: { select: { id: true } },
+          task: { select: { templateStep: { select: {
+            stepIndex: true,
+            outputKind: true,
+            taskTemplate: { select: { name: true } },
+          } } } },
         },
       });
       if (!run) return { error: "Run not found", code: 404 as const };
@@ -5926,6 +6006,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           requestId: run.cancelRequestId,
           reason: run.cancelReason,
         };
+      }
+      if (executionModeFor(run.task?.templateStep ?? null) === "mechanical") {
+        return { error: "Mechanical merge Runs cannot be cancelled after authorization", code: 409 as const };
       }
       if (!([RunStatus.QUEUED, ...activeRunStatuses] as RunStatus[]).includes(run.status)) {
         return {

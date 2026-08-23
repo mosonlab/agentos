@@ -185,6 +185,7 @@ test("lease-loss requeue for an archived agent becomes visible through the sweep
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
       run: {
+        findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { lostUpdate = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
       },
