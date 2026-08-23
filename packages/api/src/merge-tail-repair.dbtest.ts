@@ -147,10 +147,27 @@ const completeRepair = async (
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         runnerId, fencingToken, exitCode: 0, terminalEventSeen: true, terminalSuccess: true,
-        cleanupStatus: "SUCCEEDED", branch: BRANCH, headSha,
+        cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+        pushStatus: "SUCCEEDED", headSha,
       }),
     });
     assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+};
+
+const claimNext = async () => {
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "merge-tail-claim-token";
+  try {
+    const response = await createApp(db).request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-claim-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: "merge-tail-claim-runner", leaseSeconds: 60 }),
+    });
+    return { status: response.status, body: response.status === 200 ? await response.json() : null };
   } finally {
     if (prior === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = prior;
@@ -204,6 +221,52 @@ test("a semantic FAIL skips the gate path and creates one review-fix task", asyn
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
   assert.equal(await repairCount(seeded), 1);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("a fresh Regression claim carries the prior verdict and exact published repair without resuming context", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  const repairOutput = "Closed MF-2 and reran its focused regression.";
+  await completeRepair(seeded, repair.id, repairOutput);
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as {
+    run: { id: string };
+    resume: unknown;
+    regressionRepairHandoff: {
+      previousVerdict: { outcome: string; headSha: string; baseHeadSha: string; summary: string };
+      repair: { kind: string; taskId: string; startHeadSha: string; targetHeadSha: string; resolvedHeadSha: string; outputBody: string };
+    };
+  };
+  assert.equal(body.run.id, run2.id);
+  assert.equal(body.resume, null);
+  assert.deepEqual(body.regressionRepairHandoff.previousVerdict, {
+    schemaVersion: 1, outcome: "review-fail", headSha: HEAD, baseHeadSha: BASE, summary: "MF-2 remains open",
+  });
+  assert.deepEqual(body.regressionRepairHandoff.repair, {
+    kind: "review-fix", taskId: repair.id, startHeadSha: HEAD, targetHeadSha: BASE,
+    resolvedHeadSha: RESOLVED, outputKind: "result", outputBody: repairOutput,
+  });
+});
+
+test("a stale repair output stops the queued Regression Run before a provider session starts", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2.");
+  await db.taskStepOutput.update({ where: { taskId: repair.id }, data: { commitSha: "d".repeat(40) } });
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 204);
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: run2.id } });
+  assert.equal(stopped.status, "FAILED");
+  assert.match(stopped.failureReason ?? "", /output and Run do not bind resolved head/u);
+  const task = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(task.status, TaskStatus.REVIEW);
+  assert.equal(await db.session.count({ where: { runId: run2.id } }), 0);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 

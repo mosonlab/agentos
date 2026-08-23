@@ -132,6 +132,7 @@ import {
   runBudgetCeiling,
 } from "./execution.js";
 import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
+import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js";
 import {
   acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
 } from "./workspace-reclaim.js";
@@ -261,12 +262,12 @@ const stopBaseDriftRecoveryTail = async (
 
 const openMergeTailInbox = async (
   tx: DbTx,
-  input: { taskId: string; agentId: string; sessionId: string; reason: string },
+  input: { taskId: string; agentId: string; sessionId?: string; reason: string },
 ): Promise<void> => {
   await tx.inboxMessage.create({ data: {
     from: "AGENT",
     agentId: input.agentId,
-    sessionId: input.sessionId,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     taskId: input.taskId,
     kind: "TEXT",
     body: `Autonomous merge tail stopped: ${input.reason}`,
@@ -4119,6 +4120,56 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           });
           if (activePeers.some((peer) => taskIsIntegratorStep(peer.task))) continue;
         }
+        const regressionRepairHandoff = await regressionRepairHandoffForClaim(tx, {
+          taskId: candidate.task.id,
+          projectId: candidate.projectId,
+          repoId: candidate.repo.id,
+          runId: candidate.id,
+          branch: candidate.branch,
+          outputKind: candidate.task.templateStep?.outputKind ?? null,
+        });
+        if (regressionRepairHandoff.status === "invalid") {
+          const stopped = await tx.run.updateMany({
+            where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+            data: {
+              status: RunStatus.FAILED,
+              failureClass: FailureClass.TASK_FAILED,
+              failureReason: regressionRepairHandoff.reason,
+              retryable: false,
+              endedAt: now,
+            },
+          });
+          if (stopped.count === 1) {
+            await tx.task.update({
+              where: { id: candidate.task.id },
+              data: { status: TaskStatus.REVIEW, failureReason: regressionRepairHandoff.reason },
+            });
+            await tx.taskActivity.create({ data: {
+              taskId: candidate.task.id,
+              actorType: "control-plane",
+              body: `Fresh Regression Run stopped: ${regressionRepairHandoff.reason}`,
+              metadata: {
+                kind: MERGE_TAIL_KIND.repairResult,
+                schemaVersion: 1,
+                state: "handoff-invalid",
+                runId: candidate.id,
+                previousRunId: regressionRepairHandoff.previousRunId,
+                reason: regressionRepairHandoff.reason,
+              },
+            } });
+            const sourceSession = await tx.session.findUnique({
+              where: { runId: regressionRepairHandoff.previousRunId },
+              select: { id: true },
+            });
+            await openMergeTailInbox(tx, {
+              taskId: candidate.task.id,
+              agentId: candidate.agentId,
+              ...(sourceSession ? { sessionId: sourceSession.id } : {}),
+              reason: regressionRepairHandoff.reason,
+            });
+          }
+          continue;
+        }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
         const sessionCredential = issueSessionToken();
@@ -4260,6 +4311,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           sessionToken: sessionCredential.token,
           secrets,
           priorOutputs,
+          regressionRepairHandoff: regressionRepairHandoff.status === "ok"
+            ? regressionRepairHandoff.handoff
+            : null,
           resume: priorResume,
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };

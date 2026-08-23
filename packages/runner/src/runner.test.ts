@@ -91,6 +91,7 @@ const mechanicalClaim: ClaimedTask = {
   sessionToken: "session-token",
   secrets: {},
   priorOutputs: [],
+  regressionRepairHandoff: null,
 };
 
 const originalFetch = globalThis.fetch;
