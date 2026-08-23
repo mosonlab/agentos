@@ -69,21 +69,11 @@
 # configuration, and every unknown path use the full profile below. There is no
 # flag that lets a caller request the cheaper profile.
 #
-# Two content-addressed caches change latency, never the question the gate asks.
-# The dependency snapshot key covers every package manifest, package-lock.json,
-# npm configuration, the Prisma schema consumed by postinstall, and the exact
-# Node/npm/macOS toolchain tuple. On Darwin, a miss runs npm ci; a hit first
-# deletes, then restores with APFS clones, every node_modules tree npm ci can
-# create at the root and directly below apps/* and packages/*. The entry carries
-# an exact manifest of those trees. The clones are copy-on-write, so later tools
-# can mutate this worktree without changing the cache. Linux deliberately stays
-# on npm ci and its content-addressed npm cache: copying the much larger
-# node_modules tree without APFS clonefile support costs more than this install.
-# Neither path can inherit root or nested node_modules state from this or another
-# gate, and a doubtful or incomplete Darwin snapshot is always a miss.
-#
-# The build snapshot adds the pinned git tree plus every environment input read
-# by the web build to that dependency key. It contains only dist outputs from a
+# One content-addressed cache changes latency, never the question the gate asks.
+# Every full run executes npm ci, including its lifecycle scripts and Prisma
+# generation, under the environment being gated. The build snapshot key covers
+# that dependency specification, the pinned git tree, and every environment
+# input read by the web build. It contains only dist outputs from a
 # successful full build, is published atomically, and is never executed in place.
 # A miss is first captured in this run's private temp directory; it is not made
 # globally visible until the final HEAD/worktree drift check passes. Thus outputs
@@ -315,11 +305,12 @@ cache_copy_description() {
   esac
 }
 
-# The key names inputs as well as hashing their bytes, so adding/removing a
-# manifest or npm configuration file cannot collide with merely changing one.
-dependency_cache_key() {
+# The build key names dependency inputs as well as hashing their bytes, so
+# adding/removing a manifest or npm configuration file cannot collide with
+# merely changing one.
+dependency_state_key() {
   {
-    printf 'format=all-workspace-node-modules-v3\n'
+    printf 'format=build-dependency-state-v1\n'
     printf 'node=%s\nnpm=%s\nplatform=%s\n' \
       "$(node --version)" "$(npm --version)" "$(uname -sm)"
     git -C "${REPO_ROOT}" ls-files \
@@ -338,62 +329,6 @@ dependency_cache_key() {
   } | sha256
 }
 
-# npm workspaces may install a dependency tree at the repository root or at an
-# immediate app/package workspace. The outer tree covers anything nested inside
-# it, so pruning at the first node_modules makes this the complete output set.
-node_modules_targets() {
-  node -e '
-    const fs = require("node:fs");
-    process.stdout.write("node_modules\n");
-    for (const parent of ["apps", "packages"]) {
-      for (const child of fs.readdirSync(parent).sort()) {
-        if (fs.statSync(`${parent}/${child}`).isDirectory()) {
-          process.stdout.write(`${parent}/${child}/node_modules\n`);
-        }
-      }
-    }
-  '
-}
-
-node_modules_target_allowed() {
-  local wanted="$1" candidate="" targets=""
-  targets="$(cd "${REPO_ROOT}" && node_modules_targets)" || return 1
-  while IFS= read -r candidate; do
-    [ "${candidate}" = "${wanted}" ] && return 0
-  done <<< "${targets}"
-  return 1
-}
-
-clear_all_node_modules() {
-  local target=""
-  while IFS= read -r target; do
-    [ -n "${target}" ] || continue
-    rm -rf -- "${REPO_ROOT}/${target}" || return 1
-  done < <(cd "${REPO_ROOT}" && node_modules_targets)
-}
-
-# Record exactly which candidate trees npm ci produced, then independently scan
-# the workspace parents. An unexpected outer node_modules means our model is no
-# longer complete, so publication is refused and future runs stay on npm ci.
-write_node_modules_manifest() {
-  local manifest="$1" target="" absolute="" relative=""
-  : > "${manifest}" || return 1
-  while IFS= read -r target; do
-    [ -n "${target}" ] || continue
-    [ -d "${REPO_ROOT}/${target}" ] && printf '%s\n' "${target}" >> "${manifest}"
-  done < <(cd "${REPO_ROOT}" && node_modules_targets)
-  LC_ALL=C sort -u -o "${manifest}" "${manifest}" || return 1
-  grep -Fxq 'node_modules' "${manifest}" || return 1
-
-  while IFS= read -r absolute; do
-    relative="${absolute#${REPO_ROOT}/}"
-    grep -Fxq "${relative}" "${manifest}" || {
-      note "dependency snapshot refused unexpected tree: ${relative}"
-      return 1
-    }
-  done < <(find "${REPO_ROOT}/apps" "${REPO_ROOT}/packages" -type d -name node_modules -prune -print)
-}
-
 take_cache_writer_lock() {
   local lock="$1" holder=""
   if mkdir "${lock}" 2>/dev/null; then
@@ -407,111 +342,62 @@ take_cache_writer_lock() {
   printf '%s\n' "$$" > "${lock}/pid"
 }
 
-dependency_cache_entry_valid() {
-  local entry="$1" key="$2" target="" saw_root=0
-  [ -d "${entry}" ] && [ ! -L "${entry}" ] \
-    && [ -d "${entry}/tree" ] && [ ! -L "${entry}/tree" ] \
-    && [ -f "${entry}/NODE_MODULES" ] && [ ! -L "${entry}/NODE_MODULES" ] \
-    && [ -f "${entry}/READY" ] && [ ! -L "${entry}/READY" ] \
-    && [ "$(cat "${entry}/READY" 2>/dev/null || true)" = "${key}" ] || return 1
-  [ "$(LC_ALL=C sort -u "${entry}/NODE_MODULES")" = "$(cat "${entry}/NODE_MODULES")" ] || return 1
-  while IFS= read -r target; do
-    [ -n "${target}" ] || return 1
-    node_modules_target_allowed "${target}" || return 1
-    [ -d "${entry}/tree/${target}" ] && [ ! -L "${entry}/tree/${target}" ] || return 1
-    [ "${target}" = node_modules ] && saw_root=1
-  done < "${entry}/NODE_MODULES"
-  [ "${saw_root}" -eq 1 ]
-}
-
-publish_dependency_snapshot() {
-  local entry="$1" key="$2" lock="${entry}.writer" staging=""
-  take_cache_writer_lock "${lock}" || return 0
-  if dependency_cache_entry_valid "${entry}" "${key}"; then
-    rm -rf -- "${lock}"
-    return 0
-  fi
-  # A named but invalid entry is doubtful state. Never overwrite or repair it
-  # in place: this run already has fresh npm-ci output and future runs stay on
-  # the slow path until an operator deliberately clears the suspect entry.
-  if [ -e "${entry}" ]; then
-    note "dependency cache entry ${key} is incomplete; leaving it unused"
-    rm -rf -- "${lock}"
-    return 0
-  fi
-  staging="$(mktemp -d "${CACHE_ROOT}/.node-modules.${key}.XXXXXXXX")"
-  mkdir -p "${staging}/tree"
-  if write_node_modules_manifest "${staging}/NODE_MODULES"; then
-    while IFS= read -r target; do
-      mkdir -p "${staging}/tree/$(dirname "${target}")" || break
-      copy_cache_tree "${REPO_ROOT}/${target}" "${staging}/tree/${target}" || break
-    done < "${staging}/NODE_MODULES"
-    if [ "$(find "${staging}/tree" -type d -name node_modules -prune | wc -l | tr -d ' ')" \
-         = "$(wc -l < "${staging}/NODE_MODULES" | tr -d ' ')" ] \
-      && printf '%s\n' "${key}" > "${staging}/READY" \
-      && chmod -R a-w "${staging}/tree" "${staging}/NODE_MODULES" "${staging}/READY" \
-      && mv "${staging}" "${entry}" \
-      && chmod a-w "${entry}"; then
-      note "dependency cache stored: ${key}"
-    else
-      chmod -R u+w "${staging}" 2>/dev/null || true
-      chmod -R u+w "${entry}" 2>/dev/null || true
-      rm -rf -- "${staging}" "${entry}"
-      note "dependency snapshot could not be published; this run keeps fresh npm-ci state"
-    fi
-  else
-    rm -rf -- "${staging}"
-    note "dependency snapshot could not be cloned; this run keeps fresh npm-ci state"
-  fi
-  rm -rf -- "${lock}"
-}
-
 install_dependencies() {
-  local entry="" dependency_key="" target="" clone_failed=0 platform=""
-  platform="$(uname -s)"
-  if [ "${platform}" != Darwin ]; then
-    note "dependency snapshot skipped on ${platform}; using npm ci with the npm download cache"
-    clear_all_node_modules || return 1
-    npm ci --prefer-offline --no-audit --no-fund || return 1
-    verify_generated_prisma_client
-    return
-  fi
-  mkdir -p "${CACHE_ROOT}/node-modules" || return 1
-  dependency_key="$(dependency_cache_key)" || return 1
-  entry="${CACHE_ROOT}/node-modules/${dependency_key}"
-  if dependency_cache_entry_valid "${entry}" "${dependency_key}"; then
-    clear_all_node_modules || return 1
-    while IFS= read -r target; do
-      mkdir -p "${REPO_ROOT}/$(dirname "${target}")" || { clone_failed=1; break; }
-      copy_cache_tree "${entry}/tree/${target}" "${REPO_ROOT}/${target}" \
-        || { clone_failed=1; break; }
-      chmod -R u+w "${REPO_ROOT}/${target}" || { clone_failed=1; break; }
-    done < "${entry}/NODE_MODULES"
-    if [ "${clone_failed}" -eq 0 ]; then
-      # Snapshot permissions enforce write-once storage. The APFS clone is this
-      # worktree's private COW materialisation and Prisma may update it.
-      note "dependency cache hit: ${dependency_key} (APFS clone)"
-      verify_generated_prisma_client
-      return
-    fi
-    note "dependency cache clone failed; falling back to npm ci"
-    clear_all_node_modules || return 1
-  else
-    note "dependency cache miss: ${dependency_key}"
-  fi
-  # Match npm ci's clean boundary even after a failed cache materialisation.
-  clear_all_node_modules || return 1
   npm ci --prefer-offline --no-audit --no-fund || return 1
-  verify_generated_prisma_client || return 1
-  publish_dependency_snapshot "${entry}" "${dependency_key}" \
-    || note "dependency cache publication failed; this run keeps fresh npm-ci state"
-  return 0
+  verify_generated_prisma_client
 }
 
 verify_generated_prisma_client() {
   [ -f "${REPO_ROOT}/node_modules/.prisma/client/index.js" ] \
     && [ -f "${REPO_ROOT}/node_modules/.prisma/client/schema.prisma" ] \
     || { printf 'npm ci did not produce the generated Prisma client\n' >&2; return 1; }
+}
+
+esbuild_binary_key() {
+  local path="${ESBUILD_BINARY_PATH-}" selected=""
+  if [ "${ESBUILD_BINARY_PATH+x}" != x ]; then
+    printf 'ESBUILD_BINARY_PATH.state=unset\n'
+    return
+  fi
+  printf 'ESBUILD_BINARY_PATH.path=%s\n' "${path}"
+  if [ -z "${path}" ]; then
+    printf 'ESBUILD_BINARY_PATH.kind=empty\n'
+    return
+  fi
+  selected="${path}"
+  case "${path}" in
+    */*) ;;
+    *)
+      selected="$(command -v -- "${path}" 2>/dev/null || true)"
+      if [ -z "${selected}" ]; then
+        printf 'ESBUILD_BINARY_PATH.kind=unresolved-command\n'
+        return
+      fi
+      printf 'ESBUILD_BINARY_PATH.resolution=PATH\n'
+      ;;
+  esac
+  if [ -L "${selected}" ]; then
+    printf 'ESBUILD_BINARY_PATH.kind=symlink\n'
+    printf 'ESBUILD_BINARY_PATH.link=%s\n' "$(readlink "${selected}")"
+  elif [ -f "${selected}" ]; then
+    printf 'ESBUILD_BINARY_PATH.kind=regular\n'
+  elif [ -e "${selected}" ]; then
+    printf 'ESBUILD_BINARY_PATH.kind=other\n'
+    return
+  else
+    printf 'ESBUILD_BINARY_PATH.kind=missing\n'
+    return
+  fi
+  if [ -f "${selected}" ]; then
+    printf 'ESBUILD_BINARY_PATH.sha256=%s\n' "$(sha256 < "${selected}")"
+    if [ -x "${selected}" ]; then
+      printf 'ESBUILD_BINARY_PATH.executable=yes\n'
+    else
+      printf 'ESBUILD_BINARY_PATH.executable=no\n'
+    fi
+  else
+    printf 'ESBUILD_BINARY_PATH.target=missing-or-nonregular\n'
+  fi
 }
 
 BUILD_OUTPUTS=(
@@ -521,10 +407,11 @@ BUILD_OUTPUTS=(
 
 build_cache_key() {
   {
-    printf 'commit=%s\ndependencies=%s\n' "${GATED_HEAD}" "$(dependency_cache_key)"
+    printf 'commit=%s\ndependencies=%s\n' "${GATED_HEAD}" "$(dependency_state_key)"
     for name in NODE_ENV API_PORT WEB_API_URL OPERATOR_TOKEN; do
       printf '%s=%s\n' "${name}" "${!name-}"
     done
+    esbuild_binary_key
     for input in .env .env.local .env.production .env.production.local; do
       printf 'file=%s\n' "${input}"
       if [ -f "${REPO_ROOT}/${input}" ]; then
@@ -1149,9 +1036,9 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 # change *which* versions land: `npm ci` installs the closed set in
 # `package-lock.json` and fails rather than resolving anything, and a cached
 # tarball is keyed by the integrity hash the lockfile records — a cache hit is
-# therefore a hit on exactly the bytes the lockfile names. The immutable
-# node_modules snapshot preserves the delete-and-repopulate boundary on Darwin;
-# Linux uses npm's download cache because copying that tree is slower than npm ci.
+# therefore a hit on exactly the bytes the lockfile names. Every full run invokes
+# npm ci so lifecycle scripts and Prisma generation run under this run's actual
+# environment; only npm's tarball cache is reused.
 step "npm ci" install_dependencies
 # These execute project binaries, so they belong after dependencies. Keeping
 # them among the install-free frozen checks made a fresh clone fail on `tsx`
