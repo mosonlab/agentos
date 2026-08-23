@@ -239,6 +239,10 @@ export type Run = {
   elevatedSubprocessModel: string | null;
   elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
   leaseGeneration: number;
+  cancelRequestId: string | null;
+  cancelReason: string | null;
+  cancelRequestedAt: string | null;
+  cancelAcknowledgedAt: string | null;
   workspacePath: string | null;
   workspaceRetained: boolean;
   targetBranch: string | null;

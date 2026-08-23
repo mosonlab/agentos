@@ -8,6 +8,7 @@ export const MERGE_TAIL_KIND = {
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
   reviewObligation: "mergeTail.reviewObligation",
+  operatorDecision: "mergeTail.operatorDecision",
   readiness: "mergeTail.readiness",
 } as const;
 

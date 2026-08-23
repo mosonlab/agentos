@@ -86,6 +86,9 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       select: {
         heartbeatAt: true,
         leaseExpiresAt: true,
+        cancelRequestId: true,
+        cancelReason: true,
+        cancelRequestedAt: true,
         id: true,
         projectId: true,
         taskId: true,
@@ -124,7 +127,7 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
   // An api restart outlives a lease (60s) but not a heartbeat cycle. A run whose
   // runner is still checking in is alive — it renews its own lease on the next
   // heartbeat — so only silence beyond the stall timeout counts as death.
-  const orphans = candidates.filter((run) => !(
+  const orphans = candidates.filter((run) => run.cancelRequestedAt !== null || !(
     run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
   ));
   if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
@@ -138,6 +141,55 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
       // Order PATCH and retry creation through the same Task-row mutex. The
       // task is re-read after this lock before opensPullRequest is snapshotted.
       if (run.taskId) await lockTaskRow(tx, run.taskId);
+      if (run.cancelRequestId && run.cancelRequestedAt) {
+        const reason = run.cancelReason ?? "Cancelled by operator";
+        const cancelled = await tx.run.updateMany({
+          where: {
+            id: run.id,
+            cancelRequestId: run.cancelRequestId,
+            status: { in: [...activeStatuses] },
+            OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
+          },
+          data: {
+            status: RunStatus.CANCELLED,
+            endedAt: now,
+            leaseExpiresAt: null,
+            sessionTokenRevokedAt: now,
+            cancelAcknowledgedAt: now,
+            failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
+            failureReason: reason,
+            retryable: false,
+            retryAt: null,
+            terminationReason: reason,
+            workspaceRetained: true,
+          },
+        });
+        if (cancelled.count !== 1) continue;
+        await tx.session.updateMany({
+          where: { runId: run.id },
+          data: {
+            executionStatus: SessionExecutionStatus.CANCELLED,
+            cleanupStatus: CleanupStatus.RETAINED,
+            endedAt: now,
+            cleanupEndedAt: now,
+            failureReason: reason,
+            terminationReason: reason,
+          },
+        });
+        if (run.taskId) {
+          await tx.task.updateMany({
+            where: { id: run.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] } },
+            data: { status: TaskStatus.REVIEW, failureReason: reason },
+          });
+          await tx.taskActivity.create({ data: {
+            taskId: run.taskId,
+            actorType: "control-plane",
+            body: `Run ${run.runNumber} cancellation settled after its lease expired; evidence retained`,
+            metadata: { runId: run.id, requestId: run.cancelRequestId, status: RunStatus.CANCELLED },
+          } });
+        }
+        continue;
+      }
       // Losing a lease is an external failure: it buys an attempt, never spends one.
       const budgetCeiling = run.maxRunsPerTask + 1;
       // The same grant, recorded apart from the ceiling it produced, so the

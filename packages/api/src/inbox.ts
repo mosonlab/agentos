@@ -22,6 +22,7 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
       where: {
         id: input.runId,
         fencingToken: input.fencingToken,
+        cancelRequestedAt: null,
         leaseExpiresAt: { gt: now },
         status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
       },
@@ -47,7 +48,12 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
       deliveryStatus: InboxDeliveryStatus.PENDING,
     } });
     const suspended = await tx.run.updateMany({
-      where: { id: run.id, fencingToken: input.fencingToken, status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] } },
+      where: {
+        id: run.id,
+        fencingToken: input.fencingToken,
+        cancelRequestedAt: null,
+        status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
+      },
       data: {
         status: RunStatus.WAITING_INBOX,
         leaseExpiresAt: null,

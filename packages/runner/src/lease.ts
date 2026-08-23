@@ -1,4 +1,4 @@
-import { heartbeat as sendHeartbeat, type ClaimedTask } from "./api.js";
+import { heartbeat as sendHeartbeat, type CancellationRequest, type ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { deliveryDeadline, type RetryOptions } from "./network-retry.js";
 
@@ -25,6 +25,8 @@ export type DeliveryLease = {
   readonly rejected: boolean;
   /** The 409 was WAITING_INBOX: the run is suspended, not lost. */
   readonly waitingInbox: boolean;
+  /** Durable operator cancellation returned by the renewal, when present. */
+  readonly cancellation: CancellationRequest | null;
   /** Timestamp of the last renewal known to have landed, measured at *send*. */
   readonly renewedAt: number;
   close: () => void;
@@ -53,20 +55,27 @@ export const openDeliveryLease = async (
     startedAt: startedAt.toISOString(),
     lastProgressAt: startedAt.toISOString(),
   };
-  const state = { renewedAt: lastKnownRenewalAt, rejected: false, waitingInbox: false };
+  const state: { renewedAt: number; rejected: boolean; waitingInbox: boolean; cancellation: CancellationRequest | null } = {
+    renewedAt: lastKnownRenewalAt, rejected: false, waitingInbox: false, cancellation: null,
+  };
   const renew = async (): Promise<void> => {
     // Stamped before the request, not after: the API sets leaseExpiresAt from
     // its own clock at or after this moment, so measuring from the response
     // would silently spend the round trip out of the reserve.
     const sentAt = now();
     try {
-      await send(config, claim, {
+      const result = await send(config, claim, {
         // Reads the same way it does in the provisioning heartbeat, where no
         // CLI process exists either: the runner is working this run.
         processAlive: true,
         lastProgressEventAt: startedAt,
         inFlightTool: tool,
       });
+      if (result.cancellation) {
+        state.rejected = true;
+        state.cancellation = result.cancellation;
+        return;
+      }
       state.renewedAt = sentAt;
     } catch (error: unknown) {
       if (statusOf(error) === 409) {
@@ -84,6 +93,7 @@ export const openDeliveryLease = async (
     deadline,
     get rejected() { return state.rejected; },
     get waitingInbox() { return state.waitingInbox; },
+    get cancellation() { return state.cancellation; },
     get renewedAt() { return state.renewedAt; },
     close: () => clearInterval(timer),
   };

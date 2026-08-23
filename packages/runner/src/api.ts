@@ -18,6 +18,8 @@ export type FailureClass =
 
 export type CleanupStatus = "SUCCEEDED" | "FAILED" | "RETAINED";
 export type CodexServiceTier = "DEFAULT" | "FAST";
+export type CancellationRequest = { requestId: string; reason: string; requestedAt: string };
+export type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null };
 
 export type ClaimedTask = {
   /**
@@ -216,8 +218,8 @@ export const heartbeat = async (
   config: RunnerConfig,
   claim: ClaimedTask,
   state: { processAlive: boolean; lastProgressEventAt: Date | null; inFlightTool: Record<string, unknown> | null },
-): Promise<void> => {
-  await request(config, `/runner/runs/${claim.run.id}/heartbeat`, {
+): Promise<HeartbeatResult> => {
+  const response = await request(config, `/runner/runs/${claim.run.id}/heartbeat`, {
     method: "POST",
     body: JSON.stringify({
       runnerId: config.runnerId,
@@ -227,6 +229,22 @@ export const heartbeat = async (
       lastProgressEventAt: state.lastProgressEventAt?.toISOString() ?? null,
       inFlightTool: state.inFlightTool,
       ...await runnerTelemetryBody(config),
+    }),
+  });
+  return response.json() as Promise<HeartbeatResult>;
+};
+
+export const acknowledgeCancellation = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  cancellation: CancellationRequest,
+): Promise<void> => {
+  await request(config, `/runner/runs/${claim.run.id}/cancel/acknowledge`, {
+    method: "POST",
+    body: JSON.stringify({
+      runnerId: config.runnerId,
+      fencingToken: claim.fencingToken,
+      requestId: cancellation.requestId,
     }),
   });
 };

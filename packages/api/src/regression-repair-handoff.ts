@@ -132,6 +132,27 @@ export const regressionRepairHandoffForClaim = async (
       || decision.summary !== summary) {
       return invalid(`independent-review task ${reviewTaskId} output does not match its rejection record`);
     }
+    const operatorRows = await tx.taskActivity.findMany({
+      where: {
+        taskId: input.taskId,
+        actorType: "operator",
+        createdAt: { gte: rejectedRow.createdAt },
+        metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.operatorDecision },
+      },
+      select: { metadata: true },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 20,
+    });
+    const adopted = operatorRows.map((row) => asJsonObject(row.metadata)).some((metadata) => (
+      metadata?.action === "adopt-head"
+      && metadata.headSha === parsed.verdict.headSha
+      && metadata.baseHeadSha === parsed.verdict.baseHeadSha
+      && metadata.reviewTaskId === reviewTaskId
+    ));
+    // Explicit operator adoption licenses one fresh exact-head Regression run;
+    // it does not authorize readiness or merge. The fresh verdict must still
+    // bind the head/base pair before the autonomous tail can continue.
+    if (adopted) return { status: "none" };
     trigger = {
       kind: "independent-review-rejection",
       verdict: parsed.verdict,

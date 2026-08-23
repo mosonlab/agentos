@@ -980,6 +980,56 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
   }
 });
 
+test("a heartbeat cancellation kills the provider group, acknowledges once, and retains the workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-active-cancellation-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, successfulCodexMutationStub(log, "sleep 30"));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    let started = false;
+    let cancellationSent = false;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      if (path.endsWith("/start")) started = true;
+      if (started && path.endsWith("/heartbeat") && !cancellationSent) {
+        cancellationSent = true;
+        return new Response(JSON.stringify({
+          ok: false,
+          cancellation: { requestId: "cancel-1", reason: "operator stop", requestedAt: new Date(0).toISOString() },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ ok: true, cancellation: null }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = { ...codexOnly(workspaces, root, binary), heartbeatIntervalMs: 20 };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      session: testSession(root),
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+    });
+
+    const acknowledgements = posts.filter((post) => post.path.endsWith("/cancel/acknowledge"));
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0]?.body.requestId, "cancel-1");
+    assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
+    assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
+    await access(join(workspaces, "run-10"));
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a clean failed run records that there is nothing to salvage before cleanup", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-clean-failure-"));
   try {
