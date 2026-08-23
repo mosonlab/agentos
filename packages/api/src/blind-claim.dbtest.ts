@@ -323,6 +323,89 @@ test("canonical blind review cannot complete from intermediate findings", async 
   assert.match(task.failureReason ?? "", /closed-must-fix phase/u);
 });
 
+test("canonical blind review refuses incomplete and internally inconsistent final artifacts", async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const blind = await queueCanonicalStep(template, repo.id, 7);
+  const claimed = await claim();
+  const independentFinding = {
+    id: "OPUS-1",
+    severity: "P1",
+    file: "src/independent.ts",
+    line: 9,
+    title: "Independent defect",
+    evidence: "The blind review verified the defect independently.",
+    requiredFix: "Close the independent defect.",
+  } as const;
+  const independentBody = reviewBody(claimed.run.targetBranch, [independentFinding]);
+  for (const phase of ["independent-findings", "predecessor-evidence-unlocked"] as const) {
+    const response = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fencingToken: claimed.fencingToken,
+        kind: "must-fix",
+        body: independentBody,
+        commitSha: claimed.run.targetBranch,
+        metadata: { phase },
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
+
+  const stub = JSON.stringify({
+    schemaVersion: 1,
+    headSha: claimed.run.targetBranch,
+    reviewedBase: "b".repeat(40),
+    reviewedHead: claimed.run.targetBranch,
+    findings: [],
+    dispositions: [{ id: "PROBE", disposition: "REJECTED", reason: "placeholder" }],
+    mustFixIds: [],
+  });
+  const incomplete = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: claimed.fencingToken,
+      kind: "must-fix",
+      body: stub,
+      commitSha: claimed.run.targetBranch,
+      metadata: { phase: "closed-must-fix" },
+    }),
+  });
+  assert.equal(incomplete.status, 409);
+  assert.match(await incomplete.text(), /missing: OPUS-1/u);
+  const stillUnlocked = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: blind.run.taskId! } });
+  assert.deepEqual(stillUnlocked.metadata, { phase: "predecessor-evidence-unlocked" });
+  assert.equal(stillUnlocked.body, independentBody);
+
+  const wrongMustFix = JSON.stringify({
+    schemaVersion: 1,
+    headSha: claimed.run.targetBranch,
+    reviewedBase: "b".repeat(40),
+    reviewedHead: claimed.run.targetBranch,
+    findings: [independentFinding],
+    dispositions: [{ id: independentFinding.id, disposition: "ADOPTED", reason: "verified" }],
+    mustFixIds: [],
+  });
+  const inconsistent = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: claimed.fencingToken,
+      kind: "must-fix",
+      body: wrongMustFix,
+      commitSha: claimed.run.targetBranch,
+      metadata: { phase: "closed-must-fix" },
+    }),
+  });
+  assert.equal(inconsistent.status, 409);
+  assert.match(await inconsistent.text(), /mustFixIds must exactly equal final P0\/P1 finding ids/u);
+  assert.deepEqual(
+    (await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: blind.run.taskId! } })).metadata,
+    { phase: "predecessor-evidence-unlocked" },
+  );
+});
+
 test("operator retry re-resolves a pinned step to the recorded implementation commit", async () => {
   const { template, repo } = await seedCanonicalTemplate();
   const blind = await queueCanonicalStep(template, repo.id, 7);

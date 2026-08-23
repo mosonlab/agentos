@@ -19,7 +19,7 @@ const toolManifest = (claim: ClaimedTask): string[] => [
     ? "AgentOS tools attached to this session (pi extension tools):"
     : "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
   "- task_activity_log(body): record notable progress in the task activity log. Routine channel; never interrupts a human.",
-  "- task_output(kind, body, metadata?): persist this step's deliverable as the task output. Later steps and the approval gate read it.",
+  "- task_output(kind, body, metadata?): persist this step's deliverable using the task's exact output contract. Rejected writes change nothing; never submit placeholder probes. Closed final outputs may be immutable.",
   "- task_status(): read the current task and run status, budget, branch, and whether an output exists.",
   "- inbox_ask(body, choices?): ask the human. Suspends this session until they answer; you resume in place with the reply.",
   "- files_list(dir): list one Files Root directory non-recursively. Empty dir means the root.",
@@ -814,8 +814,8 @@ const capture = async (config: RunnerConfig, runner: RunnerKind, args: string[],
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      finish(1, "\npreflight timed out after 15 seconds");
-    }, 15_000);
+      finish(1, "\npreflight timed out after 30 seconds");
+    }, 30_000);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });

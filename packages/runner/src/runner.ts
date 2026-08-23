@@ -817,7 +817,7 @@ const reportAvailabilityWithRetry = async (
   options: StartupReportRetryOptions,
 ): Promise<void> => reportStartupStateWithRetry(
   availability.runner,
-  () => reportCliAvailability(config, availability),
+  async () => { await reportCliAvailability(config, availability); },
   options,
 );
 
@@ -844,9 +844,7 @@ export const runStartupPreflight = async (
       results[runner] = false;
       continue;
     }
-    const model = runner === "PI" ? "openai-codex/gpt-5.6-luna"
-      : runner === "CODEX" ? CODEX_STARTER_MODEL : runner.toLowerCase();
-    const result = await adapters[runner].preflight({ config, runner, model, env });
+    const result = await runBackendPreflight(config, runner, env);
     results[runner] = result.ok;
     await reportPreflightWithRetry(config, runner, result, retryOptions);
   }
@@ -855,6 +853,17 @@ export const runStartupPreflight = async (
 
 export type AvailabilityHeartbeatOptions = {
   onReportError?: (availability: CliAvailability, error: unknown) => void;
+  onPreflightError?: (availability: CliAvailability, error: unknown) => void;
+};
+
+const runBackendPreflight = async (
+  config: RunnerConfig,
+  runner: RunnerKind,
+  env = workspaceEnvironment(config),
+) => {
+  const model = runner === "PI" ? "openai-codex/gpt-5.6-luna"
+    : runner === "CODEX" ? CODEX_STARTER_MODEL : runner.toLowerCase();
+  return adapters[runner].preflight({ config, runner, model, env });
 };
 
 /** One cheap daemon heartbeat. Every backend is attempted independently so a
@@ -867,11 +876,23 @@ export const reportCliAvailabilityHeartbeat = async (
   const onReportError = options.onReportError ?? ((probe: CliAvailability, error: unknown) => {
     console.error(`Failed to report ${probe.runner.toLowerCase()} runner CLI availability`, error);
   });
+  const onPreflightError = options.onPreflightError ?? ((probe: CliAvailability, error: unknown) => {
+    console.error(`Failed to revalidate ${probe.runner.toLowerCase()} runner preflight`, error);
+  });
   for (const runner of SUPPORTED_RUNNERS) {
+    let revalidatePreflight = false;
     try {
-      await reportCliAvailability(config, availability[runner]);
+      ({ revalidatePreflight } = await reportCliAvailability(config, availability[runner]));
     } catch (error: unknown) {
       onReportError(availability[runner], error);
+      continue;
+    }
+    if (revalidatePreflight && availability[runner].available) {
+      try {
+        await reportPreflight(config, runner, await runBackendPreflight(config, runner));
+      } catch (error: unknown) {
+        onPreflightError(availability[runner], error);
+      }
     }
   }
 };

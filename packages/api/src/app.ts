@@ -21,6 +21,7 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   isIntegratorStoppedError,
+  isPinnedBaseCommitError,
   LIVE_TASK_STATUSES,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
@@ -70,6 +71,7 @@ import {
   loadIntegratorTask,
   observedChainPullRequests,
   parseMergeResult,
+  PinnedBaseCommitError,
   recordIntegratorStop,
   requestConfirmationCard,
   resolveChainTarget,
@@ -163,6 +165,20 @@ export interface LiveAppOptions {
 }
 
 type DbTx = Prisma.TransactionClient;
+
+class PinnedRunTargetError extends Error {
+  constructor(readonly runId: string, targetBranch: string | null, implementationHeadSha: string) {
+    super(`Pinned run ${runId} targets ${targetBranch ?? "no commit"}, but its source step now records ${implementationHeadSha}`);
+    this.name = "PinnedRunTargetError";
+  }
+}
+
+type CandidateActivationFailure = PinnedBaseCommitError | PinnedRunTargetError;
+
+const isCandidateActivationFailure = (error: unknown): error is CandidateActivationFailure =>
+  isPinnedBaseCommitError(error) || error instanceof PinnedRunTargetError;
+
+const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
 
 type QueuedBaseDriftRecoveryContext = {
   aggregateId: string;
@@ -1092,6 +1108,10 @@ const preflightInput = z.object({
   error: z.string().nullable().optional(),
 });
 const runnerAvailabilityInput = z.object({
+  // Optional only for the API-first half of a rolling deployment. A runner
+  // without an identity may still report binary health, but cannot receive a
+  // coordinated full-preflight retry directive.
+  runnerId: z.string().trim().min(1).max(120).optional(),
   runner: z.nativeEnum(RunnerKind),
   binary: z.string().trim().min(1).max(500),
   available: z.boolean(),
@@ -1571,6 +1591,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
   const runners = createRunnerRegistry();
+  // Authentication circuits are global backend state, so only one daemon must
+  // perform a recovery check. This short in-process lease prevents every idle
+  // daemon from invoking the same provider login command on each heartbeat.
+  // `lastPreflightAt` remains the durable retry clock, so an API restart may
+  // reassign an overdue check without changing what that timestamp means.
+  const preflightRecoveryLeases = new Map<RunnerKind, number>();
+  const preflightRecoveryIntervalMs = 5 * 60_000;
 
   // The supported browser path is same-origin through the Vite proxy, so this
   // allowlist is a boundary rather than a transport: it decides which *other*
@@ -4208,7 +4235,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       return available;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    return context.json(state);
+    const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
+    const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
+    const revalidatePreflight = body.available
+      && body.runnerId !== undefined
+      && state.circuitOpen
+      && now.getTime() - lastPreflightAt >= preflightRecoveryIntervalMs
+      && currentLease <= now.getTime();
+    if (revalidatePreflight) {
+      preflightRecoveryLeases.set(body.runner, now.getTime() + preflightRecoveryIntervalMs);
+    }
+    return context.json({ ...state, revalidatePreflight });
   });
 
   app.post("/runner/preflight", async (context) => {
@@ -4239,6 +4276,24 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           : { circuitOpen: true, circuitReason: body.error ?? "Preflight failed", circuitOpenedAt: now }),
       },
     });
+    preflightRecoveryLeases.delete(body.runner);
+    const blockedReason = body.error ?? "Preflight failed";
+    if (body.ok) {
+      if (previous?.circuitReason) {
+        await db.task.updateMany({
+          where: { failureReason: previous.circuitReason },
+          data: { failureReason: null },
+        });
+      }
+    } else {
+      await db.task.updateMany({
+        where: {
+          status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+          runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
+        },
+        data: { failureReason: blockedReason },
+      });
+    }
     if (!body.ok && !previous?.circuitOpen) {
       // Attach the operator chat so the alert can actually leave the web Inbox;
       // threadless messages are skipped by the Feishu outbox forever.
@@ -4474,6 +4529,75 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           continue;
         }
+        const grants = [
+          ...candidate.agent.environment.secrets,
+          ...candidate.agent.secretGrants,
+        ].filter(({ secret }) => !secret.disabledAt);
+        const grantedEnvironmentVariables = new Set<string>();
+        for (const { envVar } of grants) {
+          if (["OPERATOR_TOKEN", "RUNNER_TOKEN", "AGENTOS_API_TOKEN", "AGENTOS_SESSION_TOKEN", "AGENTOS_FENCING_TOKEN"].includes(envVar)) {
+            throw new Error(`Secret grant may not override reserved principal variable ${envVar}`);
+          }
+          if (grantedEnvironmentVariables.has(envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
+          grantedEnvironmentVariables.add(envVar);
+        }
+        let implementationRange: Awaited<ReturnType<typeof pinnedImplementationRange>>;
+        try {
+          implementationRange = await pinnedImplementationRange(tx, candidate.task);
+          if (implementationRange && implementationRange.implementationHeadSha !== candidate.targetBranch) {
+            throw new PinnedRunTargetError(
+              candidate.id,
+              candidate.targetBranch,
+              implementationRange.implementationHeadSha,
+            );
+          }
+        } catch (error: unknown) {
+          if (!isCandidateActivationFailure(error)) throw error;
+          const reason = namedFailureReason(error);
+          const stopped = await tx.run.updateMany({
+            where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+            data: {
+              status: RunStatus.FAILED,
+              failureClass: FailureClass.TASK_FAILED,
+              failureReason: reason,
+              retryable: false,
+              endedAt: now,
+            },
+          });
+          if (stopped.count === 1) {
+            await tx.task.update({
+              where: { id: candidate.task.id },
+              data: { status: TaskStatus.BACKLOG, failureReason: reason },
+            });
+            await tx.taskActivity.create({
+              data: {
+                taskId: candidate.task.id,
+                actorType: "control-plane",
+                body: `Queued run activation failed: ${reason}`,
+                metadata: {
+                  runId: candidate.id,
+                  condition: "candidate-activation-failed",
+                  failureType: error.name,
+                  reason,
+                },
+              },
+            });
+            const dedupeKey = `candidate-activation-failed:${candidate.id}`;
+            await tx.inboxMessage.upsert({
+              where: { dedupeKey },
+              create: {
+                from: "AGENT",
+                agentId: candidate.agentId,
+                taskId: candidate.task.id,
+                kind: "TEXT",
+                body: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
+                dedupeKey,
+              },
+              update: {},
+            });
+          }
+          continue;
+        }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
         const sessionCredential = issueSessionToken();
@@ -4529,16 +4653,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             body: `Run ${candidate.runNumber} claimed with fencing generation ${generation}`,
           },
         });
-        const grants = [
-          ...candidate.agent.environment.secrets,
-          ...candidate.agent.secretGrants,
-        ].filter(({ secret }) => !secret.disabledAt);
         const secrets: Record<string, string> = {};
         for (const { envVar, secret } of grants) {
-          if (["OPERATOR_TOKEN", "RUNNER_TOKEN", "AGENTOS_API_TOKEN", "AGENTOS_SESSION_TOKEN", "AGENTOS_FENCING_TOKEN"].includes(envVar)) {
-            throw new Error(`Secret grant may not override reserved principal variable ${envVar}`);
-          }
-          if (Object.hasOwn(secrets, envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
           secrets[envVar] = decryptSecret(secret.encryptedValue, secret.ciphertextVersion);
         }
         const run = await tx.run.findUniqueOrThrow({ where: { id: candidate.id } });
@@ -4576,12 +4692,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // write endpoint already caps each artifact at 500k; pass the durable
         // body verbatim until artifact references replace prompt embedding.
         const priorOutputs = priorOutputsRaw;
-        const implementationRange = await pinnedImplementationRange(tx, candidate.task);
-        if (implementationRange && implementationRange.implementationHeadSha !== run.targetBranch) {
-          throw new Error(
-            `Pinned run ${run.id} targets ${run.targetBranch ?? "no commit"}, but its source step now records ${implementationRange.implementationHeadSha}`,
-          );
-        }
         const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
           where: {
             repoId: candidate.repo.id,

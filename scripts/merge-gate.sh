@@ -82,8 +82,9 @@
 # copy-on-write primitive when available, and the two dated provenance files are
 # regenerated for this run. No test result or test verdict is cached: every
 # lint, database-CLI typecheck, unit test, migration and database test still
-# executes. Cache entries are write-once; a malformed entry falls back to the
-# original slow command rather than being repaired or guessed at.
+# executes. Cache entries are write-once, and at most 32 valid entries are
+# retained, including the entry serving the current run. A malformed entry
+# falls back to the original slow command rather than being repaired or guessed at.
 
 set -euo pipefail
 
@@ -92,6 +93,7 @@ EXPECT_HEAD=""
 MASTER_OID="${AGENTOS_MASTER_OID:-}"
 POSTGRES_IMAGE="${AGENTOS_GATE_POSTGRES_IMAGE:-postgres:16-alpine}"
 CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/agentos-merge-gate"
+BUILD_CACHE_MAX_ENTRIES=32
 
 EXIT_FAIL=1
 EXIT_NOT_AUTHORITATIVE=3
@@ -433,6 +435,45 @@ build_cache_entry_valid() {
   done
 }
 
+prune_build_cache() {
+  local protected_key="${1:-}" builds="${CACHE_ROOT}/builds"
+  local candidate="" key="" keep_limit="${BUILD_CACHE_MAX_ENTRIES}"
+  local valid_count=0 removed=0
+  [ -d "${builds}" ] || return 0
+
+  if [ -n "${protected_key}" ] \
+    && build_cache_entry_valid "${builds}/${protected_key}" "${protected_key}"; then
+    keep_limit=$((BUILD_CACHE_MAX_ENTRIES - 1))
+  else
+    protected_key=""
+  fi
+
+  # Final entries are immutable, hash-named directories. Sort those candidates
+  # by publication mtime and leave writer locks, symlinks, and doubtful state
+  # untouched. A concurrent reader whose old entry is pruned either finishes
+  # its clone or takes the existing clean-build fallback.
+  while IFS= read -r candidate; do
+    [ -d "${candidate}" ] && [ ! -L "${candidate}" ] || continue
+    key="${candidate##*/}"
+    [ "${#key}" -eq 64 ] || continue
+    case "${key}" in *[!0-9a-f]*) continue ;; esac
+    [ "${key}" = "${protected_key}" ] && continue
+    build_cache_entry_valid "${candidate}" "${key}" || continue
+    valid_count=$((valid_count + 1))
+    [ "${valid_count}" -le "${keep_limit}" ] && continue
+    if chmod -R u+w "${candidate}" 2>/dev/null && rm -rf -- "${candidate}"; then
+      removed=$((removed + 1))
+    else
+      note "build cache pruning could not remove ${key}; leaving it unused"
+    fi
+  done < <(LC_ALL=C ls -1dt -- "${builds}/"* 2>/dev/null || true)
+
+  if [ "${removed}" -gt 0 ]; then
+    note "build cache pruned: ${removed} old entries; retaining at most ${BUILD_CACHE_MAX_ENTRIES}"
+  fi
+  return 0
+}
+
 clear_build_outputs() {
   local output=""
   for output in "${BUILD_OUTPUTS[@]}"; do rm -rf -- "${REPO_ROOT}/${output}" || return 1; done
@@ -498,6 +539,7 @@ publish_deferred_build_snapshot() {
   entry="${CACHE_ROOT}/builds/${key}"
   publish_build_snapshot "${entry}" "${key}" "${snapshot}/tree" \
     || note "build cache publication failed; this run keeps fresh build output"
+  prune_build_cache "${key}"
 }
 
 build_all() {
@@ -527,6 +569,7 @@ build_all() {
     (cd "${REPO_ROOT}/packages/api" && node ../build-info/stamp.mjs dist) || return 1
     (cd "${REPO_ROOT}/packages/runner" && node ../build-info/stamp.mjs dist) || return 1
     note "build cache hit: ${key} ($(cache_copy_description), provenance restamped)"
+    prune_build_cache "${key}"
     return 0
   fi
   note "build cache miss: ${key}"
@@ -640,59 +683,6 @@ run_api_database_tests() {
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
     node --import tsx packages/api/scripts/dbtest.mjs
-}
-
-# Runs two verdict steps whose mutable state is disjoint, while retaining each
-# step's own stable log, duration and failure. Both complete even when one fails,
-# but the gate fails under the first label that did; parallelism can never turn a
-# red step green. Callers below pair only read-only validation, or unit fixtures
-# under mktemp with a DBTEST runner that owns private databases and host roots.
-parallel_two_steps() {
-  local first_label="$1" first_command="$2" second_label="$3" second_command="$4"
-  local started first_pid second_pid first_rc second_rc first_end second_end
-  local first_safe second_safe first_log second_log first_done second_done
-  first_safe="$(printf '%s' "${first_label}" | tr ' /' '__')"
-  second_safe="$(printf '%s' "${second_label}" | tr ' /' '__')"
-  first_log="${GATE_TMP}/${first_safe}.log"
-  second_log="${GATE_TMP}/${second_safe}.log"
-  first_done="${GATE_TMP}/${first_safe}.done"
-  second_done="${GATE_TMP}/${second_safe}.done"
-  started="$(date +%s)"
-  say "${first_label} (parallel)"
-  say "${second_label} (parallel)"
-  FAILED_STEP="${first_label} / ${second_label}"
-
-  (
-    if cd "${REPO_ROOT}" && "${first_command}"; then rc=0; else rc=$?; fi
-    date +%s > "${first_done}"
-    exit "${rc}"
-  ) >"${first_log}" 2>&1 & first_pid=$!
-  (
-    if cd "${REPO_ROOT}" && "${second_command}"; then rc=0; else rc=$?; fi
-    date +%s > "${second_done}"
-    exit "${rc}"
-  ) >"${second_log}" 2>&1 & second_pid=$!
-
-  if wait "${first_pid}"; then first_rc=0; else first_rc=$?; fi
-  if wait "${second_pid}"; then second_rc=0; else second_rc=$?; fi
-  first_end="$(cat "${first_done}" 2>/dev/null || date +%s)"
-  second_end="$(cat "${second_done}" 2>/dev/null || date +%s)"
-  printf '\n--- %s ---\n' "${first_label}"; cat "${first_log}" || first_rc=1
-  printf '\n--- %s ---\n' "${second_label}"; cat "${second_log}" || second_rc=1
-
-  if [ "${first_rc}" -eq 0 ]; then
-    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${first_label}" "$((first_end - started))")")
-  else
-    STEP_REPORT+=("FAIL  ${first_label}")
-  fi
-  if [ "${second_rc}" -eq 0 ]; then
-    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${second_label}" "$((second_end - started))")")
-  else
-    STEP_REPORT+=("FAIL  ${second_label}")
-  fi
-  if [ "${first_rc}" -ne 0 ]; then FAILED_STEP="${first_label}"; return 1; fi
-  if [ "${second_rc}" -ne 0 ]; then FAILED_STEP="${second_label}"; return 1; fi
-  FAILED_STEP=""
 }
 
 parallel_lint() {
@@ -979,7 +969,7 @@ fi
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
-DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 4))))')"
+DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 3))))')"
 export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
@@ -1007,7 +997,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, measured safe ceiling 4), via the per-file DBTEST plan)"
+note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, stable ceiling 3), via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -1064,12 +1054,12 @@ step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deplo
 # only evidence that an empty target passes and a non-empty one still refuses.
 # Both packages' pretest:db hooks only rebuild subsets of the full build that
 # just passed. Invoke the shared DBTEST runner directly so each file receives a
-# cloned database and private host roots. Keep preflight beside unit tests, then
-# run the API suite as its own wave: consolidating both suites measured below the
-# required 15% improvement and delayed every test behind all database clones.
-parallel_two_steps \
-  "unit tests (all workspaces)" parallel_unit_tests \
-  "database preflight tests" run_database_preflight_tests
+# cloned database and private host roots. Each wave already spends its own
+# bounded process budget. Running them together exceeded the machine budget and
+# turned passing standalone suites into transaction and unit-test timeouts, so
+# keep the proof waves serial and preserve their internal parallelism.
+step "unit tests (all workspaces)" parallel_unit_tests
+step "database preflight tests" run_database_preflight_tests
 step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift
 publish_deferred_build_snapshot

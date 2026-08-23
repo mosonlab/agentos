@@ -141,8 +141,8 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(finalReview, /reachable in the tree at `head`/u);
   assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
   assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
-  assert.match(finalReview, /stop in this step, and use Inbox to present both\s+bodies of evidence to the human/u);
-  assert.match(finalReview, /does not become effective\s+automatically/u);
+  assert.match(finalReview, /Use Inbox only when the contradiction can change\s+a P0\/P1 must-fix decision/u);
+  assert.match(finalReview, /P2-only contradiction[\s\S]*continue without interrupting the human/u);
   assert.match(finalReview, /entire fix diff as one\s+unit/u);
   assert.match(finalReview, /exact fixed head/u);
   assert.match(finalReview, /provider id in the platform output/u);

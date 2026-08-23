@@ -15,8 +15,11 @@ overlapping full gates took 8 minutes 14 seconds and 8 minutes 42 seconds on the
 same four vCPUs, which is why the worker now exposes one execution slot. The
 current gate removes the redundant whole-workspace typecheck and generates
 Prisma Client inside `npm ci`; an exact-head build-cache hit also removes the
-roughly 42-second build. The install-free `docs-only` profile takes about 4
-seconds. Use
+roughly 42-second build. Unit and database proof waves run serially because each
+already uses bounded internal concurrency; overlapping them caused passing
+standalone suites to time out under host contention. Database files use at most
+three workers for the same reason. The install-free `docs-only` profile takes
+about 4 seconds. Use
 `scripts/gate-worker/bench-postgres.sh` and
 `scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
 runner itself; each alternates its arms over one fixed commit so a tuning claim
