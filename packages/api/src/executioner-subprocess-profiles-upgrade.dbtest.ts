@@ -114,25 +114,31 @@ test("the subprocess-profile migration repairs only untouched inherited Luna Fas
     INSERT INTO "Agent" ("id", "projectId", "environmentId", "name", "title", "model",
                          "codexServiceTier", "runnerPreference", "foundationalPrompt", "rolePrompt",
                          "updatedAt", "archivedAt")
-    SELECT 'a-untouched', 'p-untouched', 'e-untouched', 'senior-dev-luna', 'Untouched',
-           'gpt-5.6-luna:max', 'fast', 'codex', '', '', migration."finished_at" - INTERVAL '1 second', NULL
-    FROM "_prisma_migrations" AS migration
-    WHERE migration."migration_name" = '${serviceTierMigration}' AND migration."finished_at" IS NOT NULL
-    UNION ALL
-    SELECT 'a-explicit', 'p-explicit', 'e-explicit', 'senior-dev-luna', 'Explicit',
-           'gpt-5.6-luna:max', 'fast', 'codex', '', '', migration."finished_at" + INTERVAL '1 second', NULL
-    FROM "_prisma_migrations" AS migration
-    WHERE migration."migration_name" = '${serviceTierMigration}' AND migration."finished_at" IS NOT NULL
-    UNION ALL
-    SELECT 'a-archived', 'p-archived', 'e-archived', 'senior-dev-luna', 'Archived',
-           'gpt-5.6-luna:max', 'fast', 'codex', '', '', migration."finished_at" - INTERVAL '1 second', NOW()
-    FROM "_prisma_migrations" AS migration
-    WHERE migration."migration_name" = '${serviceTierMigration}' AND migration."finished_at" IS NOT NULL
-    UNION ALL
-    SELECT 'a-unrelated', 'p-unrelated', 'e-unrelated', 'senior-dev-high', 'Unrelated',
-           'gpt-5.6-sol:high', 'fast', 'codex', '', '', migration."finished_at" - INTERVAL '1 second', NULL
-    FROM "_prisma_migrations" AS migration
-    WHERE migration."migration_name" = '${serviceTierMigration}' AND migration."finished_at" IS NOT NULL;
+    VALUES (
+      'a-untouched', 'p-untouched', 'e-untouched', 'senior-dev-luna', 'Untouched',
+      'gpt-5.6-luna:max', 'fast', 'codex', '', '',
+      (SELECT "finished_at" - INTERVAL '1 second' FROM "_prisma_migrations"
+       WHERE "migration_name" = '${serviceTierMigration}' AND "finished_at" IS NOT NULL),
+      NULL
+    ), (
+      'a-explicit', 'p-explicit', 'e-explicit', 'senior-dev-luna', 'Explicit',
+      'gpt-5.6-luna:max', 'fast', 'codex', '', '',
+      (SELECT "finished_at" + INTERVAL '1 second' FROM "_prisma_migrations"
+       WHERE "migration_name" = '${serviceTierMigration}' AND "finished_at" IS NOT NULL),
+      NULL
+    ), (
+      'a-archived', 'p-archived', 'e-archived', 'senior-dev-luna', 'Archived',
+      'gpt-5.6-luna:max', 'fast', 'codex', '', '',
+      (SELECT "finished_at" - INTERVAL '1 second' FROM "_prisma_migrations"
+       WHERE "migration_name" = '${serviceTierMigration}' AND "finished_at" IS NOT NULL),
+      NOW()
+    ), (
+      'a-unrelated', 'p-unrelated', 'e-unrelated', 'senior-dev-high', 'Unrelated',
+      'gpt-5.6-sol:high', 'fast', 'codex', '', '',
+      (SELECT "finished_at" - INTERVAL '1 second' FROM "_prisma_migrations"
+       WHERE "migration_name" = '${serviceTierMigration}' AND "finished_at" IS NOT NULL),
+      NULL
+    );
   `);
 
   const before = await query((client) => client.$queryRawUnsafe<Array<{ id: string; tier: string }>>(
