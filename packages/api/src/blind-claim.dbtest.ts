@@ -16,6 +16,37 @@ const execFileAsync = promisify(execFile);
 const DB_DIRECTORY = fileURLToPath(new URL("../../db", import.meta.url));
 const RUNNER_TOKEN = "blind-claim-runner-token";
 const OPERATOR_TOKEN = "blind-claim-operator-token";
+const UNIQUE_PREDECESSOR_FINDING = {
+  id: "SOL-UNIQUE-1",
+  severity: "P1",
+  file: "src/unique.ts",
+  line: 17,
+  title: "Unique predecessor defect",
+  evidence: "Only the predecessor review observed this defect.",
+  requiredFix: "Close the unique defect.",
+} as const;
+
+const reviewBody = (headSha: string, findings: unknown[] = []) => JSON.stringify({
+  schemaVersion: 1,
+  headSha,
+  reviewedBase: "b".repeat(40),
+  reviewedHead: headSha,
+  findings,
+});
+
+const closedReviewBody = (headSha: string, findings: unknown[]) => JSON.stringify({
+  schemaVersion: 1,
+  headSha,
+  reviewedBase: "b".repeat(40),
+  reviewedHead: headSha,
+  findings,
+  dispositions: findings.map((finding) => ({
+    id: (finding as { id: string }).id,
+    disposition: "ADOPTED",
+    reason: "Verified against the reviewed implementation.",
+  })),
+  mustFixIds: findings.map((finding) => (finding as { id: string }).id),
+});
 
 let db: PrismaClient;
 const priorRunnerToken = process.env.RUNNER_TOKEN;
@@ -146,6 +177,27 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
   assert.equal(blindClaim.run.targetBranch, blindClaim.run.pinnedBaseSha);
   assert.equal(blindClaim.run.implementationBaseSha, "b".repeat(40));
   assert.equal(blindClaim.run.implementationHeadSha, blindClaim.run.pinnedBaseSha);
+  const blindTask = await db.task.findUniqueOrThrow({ where: { id: blind.run.taskId! } });
+  const predecessor = await db.task.findFirstOrThrow({ where: {
+    chainId: blindTask.chainId,
+    chainIndex: 6,
+  } });
+  await db.taskStepOutput.update({
+    where: { taskId: predecessor.id },
+    data: {
+      kind: "sol-findings",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        headSha: blindClaim.run.targetBranch,
+        reviewedBase: "b".repeat(40),
+        reviewedHead: blindClaim.run.targetBranch,
+        findings: [UNIQUE_PREDECESSOR_FINDING],
+        commandsRun: ["git diff --check"],
+      }),
+    },
+  });
+  const independentBody = reviewBody(blindClaim.run.targetBranch);
+  const finalBody = closedReviewBody(blindClaim.run.targetBranch, [UNIQUE_PREDECESSOR_FINDING]);
 
   const prematureClose = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
     method: "PUT",
@@ -153,8 +205,8 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
     body: JSON.stringify({
       fencingToken: blindClaim.fencingToken,
       kind: "must-fix",
-      body: "attempted closed output without independent findings",
-      commitSha: "f".repeat(40),
+      body: finalBody,
+      commitSha: blindClaim.run.targetBranch,
       metadata: { phase: "closed-must-fix" },
     }),
   });
@@ -166,8 +218,8 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
     body: JSON.stringify({
       fencingToken: blindClaim.fencingToken,
       kind: "must-fix",
-      body: "independent findings persisted before adjudication",
-      commitSha: "f".repeat(40),
+      body: independentBody,
+      commitSha: blindClaim.run.targetBranch,
       metadata: { phase: "independent-findings" },
     }),
   });
@@ -175,28 +227,58 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
   const intermediate = await persisted.json() as { predecessorOutputs: Array<{ body: string }> };
   assert.deepEqual(intermediate.predecessorOutputs, []);
 
+  const unlock = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: blindClaim.fencingToken,
+      kind: "must-fix",
+      body: independentBody,
+      commitSha: blindClaim.run.targetBranch,
+      metadata: { phase: "predecessor-evidence-unlocked" },
+    }),
+  });
+  assert.equal(unlock.status, 200);
+  const unlocked = await unlock.json() as { predecessorOutputs: Array<{ body: string }> };
+  assert.equal(unlocked.predecessorOutputs.length, blind.expectedPriorOutputs);
+  assert.ok(unlocked.predecessorOutputs.some((output) => output.body.includes(UNIQUE_PREDECESSOR_FINDING.id)));
+  const unlockedOutput = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: blind.run.taskId! } });
+  assert.equal(unlockedOutput.body, independentBody, "unlock must not publish a pre-adjudication final body");
+  assert.deepEqual(unlockedOutput.metadata, { phase: "predecessor-evidence-unlocked" });
+
   const closed = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       fencingToken: blindClaim.fencingToken,
       kind: "must-fix",
-      body: "closed must-fix list after adjudication",
-      commitSha: "f".repeat(40),
+      body: finalBody,
+      commitSha: blindClaim.run.targetBranch,
       metadata: { phase: "closed-must-fix" },
     }),
   });
   assert.equal(closed.status, 200);
-  const unlocked = await closed.json() as { predecessorOutputs: Array<{ body: string }> };
-  assert.equal(unlocked.predecessorOutputs.length, blind.expectedPriorOutputs);
-  assert.ok(unlocked.predecessorOutputs.some((output) => output.body === "persisted output from step 6"));
   const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: blind.run.taskId! } });
   assert.deepEqual(output.metadata, { phase: "closed-must-fix" });
+  assert.ok((JSON.parse(output.body) as { mustFixIds: string[] }).mustFixIds.includes(UNIQUE_PREDECESSOR_FINDING.id));
+  const rewrite = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: blindClaim.fencingToken,
+      kind: "must-fix",
+      body: closedReviewBody(blindClaim.run.targetBranch, []),
+      commitSha: blindClaim.run.targetBranch,
+      metadata: { phase: "closed-must-fix" },
+    }),
+  });
+  assert.equal(rewrite.status, 409);
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: blind.run.taskId! } })).body, finalBody);
   const archived = await db.taskActivity.findFirstOrThrow({ where: {
     taskId: blind.run.taskId!,
     metadata: { path: ["kind"], equals: "canonicalTaskOutput.blindIndependentFindings" },
   } });
-  assert.equal(archived.body, "independent findings persisted before adjudication");
+  assert.equal(archived.body, independentBody);
 });
 
 test("canonical blind review cannot complete from intermediate findings", async () => {
@@ -209,7 +291,7 @@ test("canonical blind review cannot complete from intermediate findings", async 
     body: JSON.stringify({
       fencingToken: claimed.fencingToken,
       kind: "must-fix",
-      body: "independent findings only",
+      body: reviewBody(claimed.run.targetBranch),
       commitSha: claimed.run.targetBranch,
       metadata: { phase: "independent-findings" },
     }),

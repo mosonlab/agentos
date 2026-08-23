@@ -23,11 +23,13 @@ the approved specification. On the standards axis, apply Fowler's code smell fam
 Quote the exact governing specification text for every Spec-axis finding. Flag behaviour the diff introduces that the specification did not ask for as a finding on this axis, quoting the nearest governing specification text.
 Use stable IDs, exact locations, evidence, and P0/P1/P2 severity.
 
-Persist your independent findings as an intermediate AgentOS task output. That
-durable write unlocks the predecessor step outputs in the tool response; only
-then read the implementation output and first review from those platform outputs
-and adjudicate the reports mechanically. Never write or commit a review report
-or session record to the chain branch.
+Persist your independent findings as an intermediate AgentOS task output. A
+second write of that exact body with the evidence-unlock phase archives the
+independent phase and unlocks predecessor step outputs in the tool response
+without publishing a final adjudication. Only then read the implementation
+output and first review from those platform outputs and adjudicate the reports
+mechanically. Never write or commit a review report or session record to the
+chain branch.
 
 - The same defect reported by both is adopted at the higher severity.
 - Your independent finding is retained by default.
