@@ -187,6 +187,7 @@ test("the canonical twelve-step template sources split code review and preserve 
     ],
   );
   assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
+  assert.equal(templateSteps.find((step) => step.stepIndex === 6)?.baseFromStepIndex, 5);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 9)!.prompt;
@@ -234,6 +235,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
   // Only implementation opens the chain's pull request; the blind review
   // starts blind; regression verification reads the fix diff.
   assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 2)?.baseFromStepIndex, 1);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;

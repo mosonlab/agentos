@@ -97,6 +97,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   sessionToken: "session-token",
   secrets: {},
   priorOutputs: [],
+  previousRunHandoff: null,
   regressionRepairHandoff: null,
 });
 

@@ -61,6 +61,7 @@ const claim: ClaimedTask = {
   sessionToken: "agos_session_secret",
   secrets: { ALLOWED_SECRET: "secret" },
   priorOutputs: [],
+  previousRunHandoff: null,
   regressionRepairHandoff: null,
 };
 
@@ -151,12 +152,15 @@ test("buildPrompt gives a fresh Regression session only the head-bound repair ha
     priorOutputs: [{ kind: "must-fix", body: "MF-2", task: { name: "Adjudication", chainIndex: 3 } }],
     regressionRepairHandoff: {
       schemaVersion: 1 as const,
-      previousVerdict: {
-        schemaVersion: 1 as const,
-        outcome: "review-fail" as const,
-        headSha: "a".repeat(40),
-        baseHeadSha: "b".repeat(40),
-        summary: "MF-2 remains open",
+      trigger: {
+        kind: "regression-verdict" as const,
+        verdict: {
+          schemaVersion: 1 as const,
+          outcome: "review-fail" as const,
+          headSha: "a".repeat(40),
+          baseHeadSha: "b".repeat(40),
+          summary: "MF-2 remains open",
+        },
       },
       repair: {
         kind: "review-fix" as const,
@@ -176,6 +180,24 @@ test("buildPrompt gives a fresh Regression session only the head-bound repair ha
   assert.match(prompt, new RegExp(`resolvedHeadSha":"${"c".repeat(40)}`));
   assert.match(prompt, /Closed MF-2 and reran its focused regression/u);
   assert.match(prompt, /verify the checked-out starting HEAD equals repair\.resolvedHeadSha/u);
+});
+
+test("buildPrompt gives a retry the immediate prior output without reusing provider context", () => {
+  const prompt = buildPrompt({
+    ...claim,
+    previousRunHandoff: {
+      schemaVersion: 1,
+      previousRunId: "run-1",
+      status: "SUCCEEDED",
+      failureReason: null,
+      retryReason: "approval-rejected-without-feedback",
+      output: { kind: "plan", body: "Prior plan body", commitSha: "a".repeat(40) },
+    },
+  });
+  assert.match(prompt, /Platform-pinned previous-run handoff:[\s\S]*Prior plan body/u);
+  assert.match(prompt, /fresh provider Session/u);
+  assert.match(prompt, /approval-rejected-without-feedback/u);
+  assert.match(prompt, /Use inbox_ask to obtain the required change/u);
 });
 
 test("the prompt manifest names the AgentOS tools the session actually got", () => {

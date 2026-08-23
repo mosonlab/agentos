@@ -34,14 +34,14 @@ const seedRegression = async () => {
     projectId: project.id, environmentId: environment.id, name, title: name,
     model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
-  const [regressionAgent, resolverAgent, fixAgent] = await Promise.all([
-    makeAgent("review-coordinator-sol"), makeAgent("merge-resolver"), makeAgent("senior-dev"),
+  const [regressionAgent, resolverAgent, fixAgent, reviewAgent] = await Promise.all([
+    makeAgent("review-coordinator-sol"), makeAgent("merge-resolver"), makeAgent("senior-dev"), makeAgent("review-coordinator"),
   ]);
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "widgets", remoteUrl: "https://github.com/acme/widgets.git",
     mountPath: "/repo", defaultBranch: "main",
   } });
-  for (const agent of [regressionAgent, resolverAgent, fixAgent]) {
+  for (const agent of [regressionAgent, resolverAgent, fixAgent, reviewAgent]) {
     await db.agentRepoAccess.create({ data: {
       projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",
     } });
@@ -49,7 +49,7 @@ const seedRegression = async () => {
   const template = await db.taskTemplate.create({ data: {
     projectId: project.id, name: "direct-engineer-workflow", description: "tail", variables: [],
   } });
-  const [fixStep, regressionStep] = await Promise.all([
+  const [fixStep, regressionStep, readinessStep] = await Promise.all([
     db.taskTemplateStep.create({ data: {
       taskTemplateId: template.id, stepIndex: 4, name: "Fix", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: fixAgent.id, prompt: "fix", approvalGate: false, outputKind: "fixed-implementation",
@@ -57,6 +57,10 @@ const seedRegression = async () => {
     db.taskTemplateStep.create({ data: {
       taskTemplateId: template.id, stepIndex: 5, name: "Regression", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: regressionAgent.id, prompt: "verify", approvalGate: false, outputKind: "regression-verification",
+    } }),
+    db.taskTemplateStep.create({ data: {
+      taskTemplateId: template.id, stepIndex: 6, name: "Readiness", assigneeType: AssigneeType.AGENT,
+      assigneeAgentId: reviewAgent.id, prompt: "authorize", approvalGate: false, outputKind: "merge-authorization",
     } }),
   ]);
   const chainId = `chain-${Date.now()}`;
@@ -81,7 +85,7 @@ const seedRegression = async () => {
     runId: run.id, projectId: project.id, agentId: regressionAgent.id, taskId: regression.id,
     runner: "CODEX", executionStatus: "SUCCEEDED",
   } });
-  return { project, template, repo, regressionAgent, regression, run, session };
+  return { project, template, repo, regressionAgent, reviewAgent, readinessStep, regression, run, session };
 };
 
 const verdict = (outcome: "refresh-conflict" | "review-fail" | "gate-fail") => JSON.stringify(outcome === "refresh-conflict"
@@ -119,7 +123,7 @@ const repairCount = (seeded: Awaited<ReturnType<typeof exercise>>) => db.task.co
 } });
 
 const completeRepair = async (
-  seeded: Awaited<ReturnType<typeof exercise>>,
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
   repairId: string,
   output: string,
   headSha: string | null = RESOLVED,
@@ -172,6 +176,128 @@ const claimNext = async () => {
     if (prior === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = prior;
   }
+};
+
+const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeof seedRegression>>) => {
+  const pass = JSON.stringify({
+    schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "PASS",
+  });
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.regression.id,
+    runId: seeded.run.id,
+    kind: "regression-verification",
+    body: pass,
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  const readiness = await db.task.create({ data: {
+    projectId: seeded.project.id,
+    repoId: seeded.repo.id,
+    templateId: seeded.template.id,
+    templateStepId: seeded.readinessStep.id,
+    name: "Readiness",
+    description: "authorize",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.reviewAgent.id,
+    status: TaskStatus.REVIEW,
+    chainId: seeded.regression.chainId,
+    chainIndex: 6,
+    targetBranch: "main",
+  } });
+  const review = await db.task.create({ data: {
+    projectId: seeded.project.id,
+    repoId: seeded.repo.id,
+    name: "Autonomous merge tail: independent review",
+    description: "review exact head",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.reviewAgent.id,
+    status: TaskStatus.DOING,
+    targetBranch: BRANCH,
+    opensPullRequest: false,
+    maxSessionsPerTask: 1,
+  } });
+  const runnerId = "independent-review-runner";
+  const fencingToken = `review:${review.id}:1`;
+  const reviewRun = await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: review.id,
+    agentId: seeded.reviewAgent.id,
+    repoId: seeded.repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${review.id}:run:1`,
+    runner: "CODEX",
+    model: seeded.reviewAgent.model,
+    promptHash: "review",
+    status: "RUNNING",
+    runnerId,
+    fencingToken,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    branch: BRANCH,
+    targetBranch: BRANCH,
+  } });
+  await db.session.create({ data: {
+    runId: reviewRun.id,
+    projectId: seeded.project.id,
+    agentId: seeded.reviewAgent.id,
+    taskId: review.id,
+    runner: "CODEX",
+    executionStatus: "RUNNING",
+  } });
+  const summary = "defense-list change lacks a fail-closed regression";
+  await db.taskStepOutput.create({ data: {
+    taskId: review.id,
+    runId: reviewRun.id,
+    kind: "result",
+    body: JSON.stringify({ schemaVersion: 1, outcome: "rejected", headSha: HEAD, summary }),
+    commitSha: HEAD,
+  } });
+  await db.taskActivity.createMany({ data: [
+    {
+      taskId: readiness.id,
+      actorType: "control-plane",
+      body: `Independent review obligation opened for ${HEAD}`,
+      metadata: {
+        kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "open",
+        reviewTaskId: review.id, headSha: HEAD, baseSha: BASE,
+      },
+    },
+    {
+      taskId: review.id,
+      actorType: "control-plane",
+      body: `Blind review obligation for readiness task ${readiness.id}`,
+      metadata: {
+        kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "open",
+        readinessTaskId: readiness.id, regressionTaskId: seeded.regression.id,
+        headSha: HEAD, baseSha: BASE,
+      },
+    },
+  ] });
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "merge-tail-review-token";
+  try {
+    const response = await createApp(db).request(`/runner/runs/${reviewRun.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-review-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId,
+        fencingToken,
+        exitCode: 0,
+        signal: null,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        cleanupStatus: "SUCCEEDED",
+        branch: BRANCH,
+        pushStatus: "NOT_REQUESTED",
+        headSha: HEAD,
+        workspaceRetained: false,
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+  return { readiness, review, summary };
 };
 
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
@@ -237,18 +363,66 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
     run: { id: string };
     resume: unknown;
     regressionRepairHandoff: {
-      previousVerdict: { outcome: string; headSha: string; baseHeadSha: string; summary: string };
+      trigger: { kind: string; verdict: { outcome: string; headSha: string; baseHeadSha: string; summary: string } };
       repair: { kind: string; taskId: string; startHeadSha: string; targetHeadSha: string; resolvedHeadSha: string; outputBody: string };
     };
   };
   assert.equal(body.run.id, run2.id);
   assert.equal(body.resume, null);
-  assert.deepEqual(body.regressionRepairHandoff.previousVerdict, {
-    schemaVersion: 1, outcome: "review-fail", headSha: HEAD, baseHeadSha: BASE, summary: "MF-2 remains open",
+  assert.deepEqual(body.regressionRepairHandoff.trigger, {
+    kind: "regression-verdict",
+    verdict: { schemaVersion: 1, outcome: "review-fail", headSha: HEAD, baseHeadSha: BASE, summary: "MF-2 remains open" },
   });
   assert.deepEqual(body.regressionRepairHandoff.repair, {
     kind: "review-fix", taskId: repair.id, startHeadSha: HEAD, targetHeadSha: BASE,
     resolvedHeadSha: RESOLVED, outputKind: "result", outputBody: repairOutput,
+  });
+});
+
+test("a fresh Regression claim carries an exact independent-review rejection and its repair", async () => {
+  const seeded = await seedRegression();
+  const rejected = await rejectIndependentReviewAfterPass(seeded);
+  const repair = await db.task.findFirstOrThrow({ where: {
+    projectId: seeded.project.id,
+    name: "Autonomous merge tail: review-fix",
+  } });
+  const repairOutput = "Added the fail-closed regression and verified the defense-list path.";
+  await completeRepair(seeded, repair.id, repairOutput);
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as {
+    resume: unknown;
+    regressionRepairHandoff: {
+      trigger: {
+        kind: string;
+        verdict: { outcome: string; headSha: string; baseHeadSha: string };
+        review: { taskId: string; headSha: string; baseHeadSha: string; summary: string; outputBody: string };
+      };
+      repair: { taskId: string; resolvedHeadSha: string; outputBody: string };
+    };
+  };
+  assert.equal(body.resume, null);
+  assert.deepEqual(body.regressionRepairHandoff.trigger, {
+    kind: "independent-review-rejection",
+    verdict: { schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "PASS" },
+    review: {
+      taskId: rejected.review.id,
+      headSha: HEAD,
+      baseHeadSha: BASE,
+      summary: rejected.summary,
+      outputKind: "result",
+      outputBody: JSON.stringify({ schemaVersion: 1, outcome: "rejected", headSha: HEAD, summary: rejected.summary }),
+    },
+  });
+  assert.deepEqual(body.regressionRepairHandoff.repair, {
+    kind: "review-fix",
+    taskId: repair.id,
+    startHeadSha: HEAD,
+    targetHeadSha: BASE,
+    resolvedHeadSha: RESOLVED,
+    outputKind: "result",
+    outputBody: repairOutput,
   });
 });
 
