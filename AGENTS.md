@@ -1,109 +1,103 @@
 # Repository instructions
 
-These are the rules that hold for anyone changing this repository, including
-someone who arrived with a fork and no context. Anything specific to one
-operator's machine, hosts, or internal process lives in this repository's
-private operator documentation and is deliberately not here.
+These public rules apply to every repository change, including work in a fork.
+Host configuration, credentials, and private operator procedure belong in the
+operator documentation, not here.
 
-## Merge gate
+## Work directly
 
-`scripts/merge-gate.sh` is this repository's only CI. Present a branch for merge
-only with a `MERGE GATE: PASS <oid>` verdict for the exact commit being merged —
-not for an earlier one on the same branch, and not for "the branch".
+Work in the current session by default. Create or dispatch a task chain only
+when the human user explicitly requests one. Complexity may justify recommending
+a chain; it does not authorize one.
 
-```
+When the user requests a chain:
+
+- Use the direct chain when one implementation context window can deliver a
+  brief whose change points are enumerable. Its `description` is the
+  specification of record; write it using [`docs/BRIEF-TEMPLATE.md`](docs/BRIEF-TEMPLATE.md)
+  before instantiating the chain.
+- Use the full assurance chain when the work exceeds one implementation context
+  window or decomposes into independently demonstrable slices worth executing
+  in parallel. Its specification and plan stages own that decomposition.
+- Keep the direct template's implementation assignee when the brief enumerates
+  its change points. Assign `senior-dev-high` before the chain starts when the
+  work touches persisted data, a defense-list path, or a surface too large or
+  cross-cutting for the brief to enumerate. Defense-list paths are the merge
+  gate, gate worker, migrations, release authority, and merge automation. When
+  classification is uncertain, use `senior-dev-high`. Keep the review-fix
+  step's template assignee, raising it to `senior-dev-high` under the same
+  criteria.
+- Archive a backlog card in the same action that dispatches its work or records
+  the decisions that settle it. Leave only genuinely open questions on the
+  board.
+
+Before changing canonical Agents, roles, or task templates, read
+[`agents/README.md`](agents/README.md). Its source map and the contract files it
+names own canonical defaults; do not copy those defaults into another document.
+
+## Design simply
+
+Implement the simplest design that fully meets the current requirement. Add an
+abstraction, configuration option, or compatibility path only when a current
+acceptance criterion or caller requires it.
+
+## Test safely
+
+- Before tests outside the merge gate, set `RUNNER_WORKSPACE_ROOT` to a new
+  temporary directory. Runner tests provision real workspaces.
+- Run database tests only against a throwaway PostgreSQL server. Set
+  `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL`, and give each
+  worktree its own `?schema=`. `npm run test:db` drops and recreates its target.
+- Spawn the real API entrypoint in tests through
+  `packages/api/src/test-startup-environment.ts`. The entrypoint loads the root
+  `.env`, and dotenv restores omitted credentials unless the helper pins them
+  from the test URL.
+- Treat a running installation's API, configuration, service definitions, and
+  built output as owned state. Work in a separate worktree. Bootstrap a fresh
+  worktree with `npm install`, `npm run db:generate`, and
+  `npm run build -w @agentos/db`.
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) owns the full test-safety rules, disposable
+development-database bootstrap, public-snapshot policy, and repository style.
+Read the applicable section before acting on one of those surfaces.
+
+## Deliver an exact head
+
+`scripts/merge-gate.sh` is the only CI. A merge requires
+`MERGE GATE: PASS <oid>` for the exact commit being merged:
+
+```sh
 scripts/merge-gate.sh --expect-head <oid>
 ```
 
-It holds a lock, so run one gate per worktree. The script header documents its
-variants and what each stage proves. If you ran the gate somewhere other than
-the machine that will merge, say so in the pull request.
+The gate selects its proof profile from the exact baseline-to-candidate diff.
+Only content modifications to its explicit prose allowlist use the `docs-only`
+profile; structural changes, executable surfaces, and unknown paths use the full
+profile. Callers cannot request the cheaper profile.
 
-When anything else might also be running a gate, dispatch instead of running
-directly: `scripts/gate-worker/gate-dispatch.sh <oid>` runs the gate in the
-first free slot — this machine, then one of the offshore worker's two — and
-blocks until a slot frees up. `docs/runbooks/gate-worker.md` is the worker's
-runbook, including what a remote PASS is and is not worth.
+The gate owns an exclusive worktree lock. When another gate might be running,
+use `scripts/gate-worker/gate-dispatch.sh <oid>` so the first free local or
+remote slot runs it. Read [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md)
+before operating or troubleshooting a remote worker.
 
-## Dispatching chains
+## Frozen records
 
-Choosing a template: work that fits a single implementation context window
-goes through the direct chain — the discussion that produces its brief is the
-spec phase, done off the board. Work too large for one window, or that
-decomposes into independently demonstrable slices worth executing in
-parallel, goes through the full assurance chain, whose spec and plan steps
-perform that decomposition under human approval gates. Trivial chores stay
-off the board entirely.
+`docs/reviews/`, `docs/merge-notes/`, `docs/briefs/`, and
+`docs/plans/archive/` contain dated, append-only records and are never current
+authority. They live in the private operator repository and are not tracked by
+this public repository.
 
-Instantiating a direct chain: the `description` you pass is the chain's
-specification of record — write it as a feature brief per
-`docs/BRIEF-TEMPLATE.md` before instantiating.
+`scripts/check-frozen-docs.sh` enforces immutable merged records, dated names,
+byte-identical corrective renames, and the exact `> Superseded by
+<repository-root-relative path> (YYYY-MM-DD)` marker shape. The gate cannot
+detect a missing marker; reviewers must identify documents that stopped being
+authority.
 
-Implementation-step tier (Leo ruling 2026-08-21, two tiers): the template
-default is `senior-dev-luna` (gpt-5.6-luna:max) and it stays for work whose
-brief enumerates its change points. Patch the step's assignee to
-`senior-dev-high` (gpt-5.6-sol:high) before starting the chain when any of
-these holds: the change touches persisted data (Prisma schema or
-migrations), it touches a defense-list path (merge gate, gate worker,
-migrations, release authority, merge-automation machinery), or the change
-surface is large or cross-cutting enough that the brief cannot enumerate its
-change points. When unsure, treat as met and upgrade. The apply-review-fixes
-step is never reassigned to Luna: it keeps `senior-dev` (Sol), upgraded to
-`senior-dev-high` under the same criteria. The chain's dual blind review,
-closed must-fix fix step, and head-bound regression gate are what license
-the Luna default; a task dispatched outside a chain does not inherit it.
+## Editing these instructions
 
-A backlog card leaves the board the moment its content is taken over, and by
-whoever takes it over: dispatching a chain from a card, or recording the
-decisions that settle a discussion card, ends with archiving that card (with
-an activity pointing at the chain or brief) in the same action. Cards with
-genuinely open questions stay — that is what the backlog is for.
-
-## Testing red lines
-
-- `export RUNNER_WORKSPACE_ROOT=$(mktemp -d)` before any test run. The runner's
-  tests provision real workspaces, and without this they are provisioned
-  wherever the configuration points — which on a working checkout is a directory
-  holding someone's runs.
-- Database tests target a scratch PostgreSQL and nothing else. Point
-  `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL` at a throwaway server,
-  and give each worktree its own `?schema=` so parallel runs stay apart. Never
-  point them at a database whose contents you would miss: `npm run test:db`
-  drops and recreates what it is given.
-- The API entrypoint loads the repository root `.env` itself, and dotenv never
-  overwrites a variable that is already set. So a test that spawns the real
-  entrypoint cannot remove a variable by omitting it — the child refills it
-  from `.env` and fails validation on a value the test never chose, with an
-  error that looks nothing like the behaviour under test. Spawn through
-  `packages/api/src/test-startup-environment.ts`, which pins the credential
-  variables by deriving them from the URL the test hands it.
-- A running installation's API, its configuration directory, its service
-  definitions, and its built output belong to whoever is running it. Work in a
-  separate worktree, not in a checkout something is serving from. A fresh
-  worktree needs `npm install && npm run db:generate && npm run build -w
-  @agentos/db` before anything else works.
-- When a GitHub write (push, pull request, comment) returns an error, read the
-  remote back to check whether it landed before resending.
-
-## Records that do not change
-
-`docs/reviews/`, `docs/merge-notes/`, `docs/briefs/` and `docs/plans/archive/`
-are dated records of finished work: append-only, and never current authority.
-They are not kept here. They live in this project's private operator
-repository, and nothing in this repository is meant to be read against them.
-
-`scripts/check-frozen-docs.sh` runs in the gate and enforces exactly three
-things, no more: a file merged into one of those four directories is neither
-modified nor deleted; a file added to one is named `YYYY-MM-DD-…`; and any line in a tracked `*.md` file that begins
-`> Superseded by ` is that file's first line, is exactly the shape
-`> Superseded by <repository-root-relative path> (YYYY-MM-DD)`, appears once,
-and names a path the commit tracks. A record merged under a wrong name can be
-corrected only by a byte-identical rename inside its own directory to a dated
-name — nothing else about a merged record may change. The first two rules have
-nothing to act on while those directories are absent from this repository; the
-third applies to every tracked `*.md`, and is why the check stays in the gate.
-
-What the gate cannot decide is whether a document that *should* carry a
-supersession marker does: no diff says "this stopped being authority". That half
-stays human, so do not quote the gate as proof that a document is correctly
-filed.
+Keep this file as the repository-wide routing and guardrail layer. Put
+branch-specific detail in its owning document and add a trigger-first pointer
+here only when agents must discover it. Treat `package.json`, configuration,
+the directory tree, and command `--help` output as live authority instead of
+caching them here. Keep every rule in one authoritative place and remove an
+obsolete path when its replacement lands.

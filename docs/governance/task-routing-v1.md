@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.0
+Version: 1.1
 
 Status: Active
 
@@ -11,6 +11,8 @@ This contract governs the design, creation, dispatch, and routing of AgentOS tas
 ## Authority boundaries
 
 The Product Contract fixes the objective, scope, acceptance criteria, evidence, risk boundaries, stopping conditions, and dependencies. Within those boundaries, the dispatcher and execution chain may choose implementation details.
+
+The human user holds dispatch authority. Work stays in the current session unless the user explicitly requests a task chain. Complexity, risk, or an available template may support recommending a chain, but none authorizes creating or dispatching one.
 
 Changing the objective, scope, acceptance criteria, required evidence, authority, or risk boundary requires a new Product Contract version and product-owner approval. Any downshift of the selected route, effort, or safeguards requires the same approval.
 
@@ -32,7 +34,7 @@ SPEC and Plan are optional. The Product Contract is not.
 
 ## Task tiers
 
-Incidental work done directly in the current session is not a runnable task. The Product Contract requirement applies starting with the Direct tier.
+Work done directly in the current session is outside these tiers and does not require a Product Contract. The tiers apply only after the human user explicitly requests a task chain.
 
 Choose the shortest tier that satisfies the Product Contract. This contract defines three tiers:
 
@@ -92,7 +94,7 @@ Direct normally has only ⑨ when it opens a pull request. Gate selection is rec
 Record this block when creating or materially rerouting a chain:
 
 ```text
-Routing Contract: v1.0
+Routing Contract: v1.1
 Tier: Direct
 Implementation Agent: senior-dev
 Critical: no

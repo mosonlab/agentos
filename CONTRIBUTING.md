@@ -30,12 +30,16 @@ who arrived with a fork and no context.
 
 ### The gate
 
-`scripts/merge-gate.sh` is this repository's only CI. It runs, in order: the
-append-only check on frozen records and that checker's own fixtures, a clean
-`npm ci`, database client generation, typecheck and lint across every workspace,
-the build, every workspace's unit tests, the gate schema's migration, the
-database package's preflight tests, the API's database tests, and a final check
-that the commit it gated is the commit it started from.
+`scripts/merge-gate.sh` is this repository's only CI. It pins the candidate and
+baseline, enforces frozen records, tests its automatic profile classifier, and
+selects evidence from that exact diff. Content-only modifications to an explicit
+prose allowlist use the `docs-only` profile: diff hygiene, the closed public
+snapshot scan, and final HEAD/worktree drift. Adds, deletes, renames, mode
+changes, runtime-coupled documentation, code, configuration, and unknown paths
+use the full profile: a clean `npm ci`, database client generation, typecheck and
+lint across every workspace, the build, unit tests, the gate schema's migration,
+database preflight tests, API database tests, and final drift verification. A
+caller cannot select the cheaper profile.
 
 ```sh
 scripts/merge-gate.sh --expect-head <oid>
@@ -46,8 +50,7 @@ commit it names — not to an earlier one on the same branch, and not to "the
 branch".
 
 Some checks are deliberately outside the gate and belong to the list a developer
-runs: `npm run snapshot:scan`, `npm run test:dependency-gate` and
-`npm run verify:compose-binding`.
+runs: `npm run test:dependency-gate` and `npm run verify:compose-binding`.
 
 ### Testing red lines
 

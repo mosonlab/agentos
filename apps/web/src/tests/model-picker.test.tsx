@@ -178,8 +178,10 @@ test("the executioner Setup page shows and edits independent ordinary and elevat
     });
     assert.match(dom.window.document.body.textContent ?? "", /Ordinary Codex subprocess/u);
     assert.match(dom.window.document.body.textContent ?? "", /Elevated Codex subprocess/u);
-    assert.match(dom.window.document.body.textContent ?? "", /gpt-5\.6-luna:max/u);
-    assert.match(dom.window.document.body.textContent ?? "", /gpt-5\.6-sol:high/u);
+    const ordinary = dom.window.document.querySelector('[data-subprocess-profile="ordinary"]');
+    const elevated = dom.window.document.querySelector('[data-subprocess-profile="elevated"]');
+    assert.match(ordinary?.textContent ?? "", /GPT-5\.6 Luna \(codex\).*Reasoning effort.*max/us);
+    assert.match(elevated?.textContent ?? "", /GPT-5\.6 Sol \(codex\).*Reasoning effort.*high/us);
 
     const edit = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Edit");
     assert.ok(edit);
@@ -193,6 +195,61 @@ test("the executioner Setup page shows and edits independent ordinary and elevat
       assert.equal(section.querySelectorAll("select").length, 4);
       assert.match(section.textContent ?? "", /Codex service tier/u);
     }
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("the executioner Setup page exposes an older API without inventing edit defaults", async () => {
+  const { dom, container } = installDom();
+  const root = createRoot(container);
+  const agent = {
+    id: "a", projectId: "p", environmentId: "e", name: "implementation-plan-executioner", title: "Implementation Plan Executioner",
+    model: "gpt-5.6-sol:medium", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
+    ordinarySubprocessModel: null, ordinarySubprocessCodexServiceTier: null,
+    elevatedSubprocessModel: null, elevatedSubprocessCodexServiceTier: null,
+    foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), archivedAt: null,
+  };
+  const legacyAgent = { ...agent } as Partial<Agent>;
+  delete legacyAgent.ordinarySubprocessModel;
+  delete legacyAgent.ordinarySubprocessCodexServiceTier;
+  delete legacyAgent.elevatedSubprocessModel;
+  delete legacyAgent.elevatedSubprocessCodexServiceTier;
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string | URL | Request) => {
+    const path = String(input);
+    return new Response(JSON.stringify(path.endsWith("/agents/a") ? legacyAgent : [legacyAgent]), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  } });
+  try {
+    await act(async () => {
+      root.render(<AgentDetailPage agentId="a" />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    for (const profile of ["ordinary", "elevated"]) {
+      const section = dom.window.document.querySelector(`[data-subprocess-profile="${profile}"]`);
+      assert.ok(section);
+      assert.match(section.textContent ?? "", /The API has not deployed subprocess profiles yet/u);
+      assert.match(section.textContent ?? "", /Model—.*Reasoning effort—.*Codex service tier—/us);
+    }
+
+    const edit = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Edit");
+    assert.ok(edit);
+    await act(async () => edit.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    for (const profile of ["ordinary", "elevated"]) {
+      const selects = dom.window.document.querySelectorAll(`[data-subprocess-profile="${profile}"] select`);
+      assert.equal(selects.length, 4);
+      assert.equal((selects[0] as HTMLSelectElement).value, "__custom__");
+      assert.equal((selects[1] as HTMLSelectElement).value, "");
+      assert.equal((selects[3] as HTMLSelectElement).value, "");
+    }
+    const save = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    assert.ok(save);
+    assert.equal(save.disabled, true);
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
     await act(async () => root.unmount());

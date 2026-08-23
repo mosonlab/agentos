@@ -16,6 +16,11 @@ const STEP_NAME_TRANSITIONS = new Map([
   ["direct-engineer-workflow:6", { from: "Merge readiness", to: "Merge authorization" }],
 ]);
 
+const STEP_BASE_TRANSITIONS = new Map([
+  ["compound-engineer-workflow:6", { from: null, to: 5 }],
+  ["direct-engineer-workflow:2", { from: null, to: 1 }],
+]);
+
 const AGENT_TRANSITIONS = new Map([
   ["review-coordinator", {
     from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
@@ -89,6 +94,7 @@ const main = async (): Promise<void> => {
       }
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
+      let adoptedStepBases = 0;
       let renamedSteps = 0;
       let templateCount = 0;
       const regressionSteps: Array<{ id: string; projectId: string }> = [];
@@ -130,11 +136,18 @@ const main = async (): Promise<void> => {
           for (const persisted of persistedSteps) {
             const differences = templateStepStructureDifferences(persisted, step);
             const transition = ASSIGNEE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
-            const adoptsCanonicalAssignee = differences.length === 1
-              && differences[0] === "agent"
+            const adoptsCanonicalAssignee = differences.includes("agent")
               && transition?.from.includes(persisted.assigneeAgent?.name ?? "") === true
               && transition.to === step.agentName;
-            if (differences.length > 0 && !adoptsCanonicalAssignee) {
+            const baseTransition = STEP_BASE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
+            const adoptsCanonicalBase = differences.includes("baseFromStepIndex")
+              && baseTransition?.from === persisted.baseFromStepIndex
+              && baseTransition.to === step.baseFromStepIndex;
+            const adoptedDifferences = new Set([
+              ...(adoptsCanonicalAssignee ? ["agent"] : []),
+              ...(adoptsCanonicalBase ? ["baseFromStepIndex"] : []),
+            ]);
+            if (differences.some((difference) => !adoptedDifferences.has(difference))) {
               throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
             }
             if (adoptsCanonicalAssignee) {
@@ -153,6 +166,13 @@ const main = async (): Promise<void> => {
                 data: { assigneeAgentId: assignee.id },
               });
               adoptedAssignees += 1;
+            }
+            if (adoptsCanonicalBase) {
+              await tx.taskTemplateStep.update({
+                where: { id: persisted.id },
+                data: { baseFromStepIndex: baseTransition.to },
+              });
+              adoptedStepBases += 1;
             }
             const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             if (nameTransition?.from === persisted.name) {
@@ -307,6 +327,7 @@ const main = async (): Promise<void> => {
         createdAgents,
         createdAgentRepoGrants,
         adoptedAssignees,
+        adoptedStepBases,
         renamedSteps,
         migratedTasks,
         preservedTaskAssignments,
@@ -315,7 +336,7 @@ const main = async (): Promise<void> => {
         updatedRoles,
       };
     });
-    const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees
+    const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
       + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
