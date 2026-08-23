@@ -139,6 +139,15 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.doesNotMatch(regressionVerification, /blind reports mechanically/u);
 });
 
+test("the executioner launches ordinary and risk subprocesses with explicit service tiers", async () => {
+  const executioner = await roleSource("implementation-plan-executioner");
+  assert.match(executioner, /AGENTOS_SUBORDINATE_CODEX_MODEL/u);
+  assert.match(executioner, /AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT/u);
+  assert.match(executioner, /AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER/u);
+  assert.match(executioner, /service_tier="default"/u);
+  assert.doesNotMatch(executioner, /service_tier="standard"/u);
+});
+
 test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {
   const templateSteps = await loadTemplateStepSources();
   assert.equal(templateSteps.length, 12);

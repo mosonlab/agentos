@@ -123,6 +123,9 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     // One run, so nothing in this test depends on a retry being created.
     maxRunsPerTask: 1,
     model: "claude",
+    codexServiceTier: "DEFAULT",
+    subprocessModel: null,
+    subprocessCodexServiceTier: null,
     targetBranch: "master",
     targetBranchPublished: false,
     pinnedBaseSha: null,

@@ -56,6 +56,15 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     `- implementationBaseSha: ${claim.run.implementationBaseSha}`,
     `- implementationHeadSha: ${claim.run.implementationHeadSha}`,
   ] : []),
+  ...(claim.run.subprocessModel && claim.run.subprocessCodexServiceTier ? [
+    "",
+    "Platform-pinned ordinary Codex subprocess profile:",
+    `- model: ${modelSpec(claim.run.subprocessModel).model}`,
+    `- reasoning effort: ${modelSpec(claim.run.subprocessModel).effort ?? "high"}`,
+    `- service tier: ${claim.run.subprocessCodexServiceTier.toLowerCase()}`,
+    "- The runner exposes the same values as AGENTOS_SUBORDINATE_CODEX_MODEL, AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT, and AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER. Use all three on every ordinary launch and resume.",
+    "- Risk-flagged slices remain pinned by the role contract to Sol High with service tier default.",
+  ] : []),
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
@@ -81,6 +90,10 @@ export const buildChildEnvironment = (
     CODEX_HOME: _codexHome,
     PI_CODING_AGENT_DIR: _piCodingAgentDir,
     PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
+    AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
+    AGENTOS_SUBORDINATE_CODEX_MODEL: _subprocessModel,
+    AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT: _subprocessEffort,
+    AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER: _subprocessServiceTier,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -97,6 +110,12 @@ export const buildChildEnvironment = (
     AGENTOS_RUN_ID: claim.run.id,
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
+    AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
+    ...(claim.run.subprocessModel && claim.run.subprocessCodexServiceTier ? {
+      AGENTOS_SUBORDINATE_CODEX_MODEL: modelSpec(claim.run.subprocessModel).model,
+      AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT: modelSpec(claim.run.subprocessModel).effort ?? "high",
+      AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER: claim.run.subprocessCodexServiceTier.toLowerCase(),
+    } : {}),
     // Last on purpose, so no task secret can point a session back at the
     // production roots. See provisionAgentScratch for why this containment has
     // to live in the runner rather than in the run's checkout.
@@ -109,6 +128,8 @@ export const buildChildEnvironment = (
 
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
+  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_SUBORDINATE_CODEX_MODEL",
+  "AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT", "AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER",
 ] as const;
 
 /**
@@ -126,7 +147,8 @@ const isolationVariables = [
  * Everything else a scrubbing launcher drops — PATH, HOME,
  * AGENTOS_SESSION_TOKEN — fails loudly and immediately instead.
  *
- * So the containment variables are set again by `/usr/bin/env`, which runs after
+ * So the containment variables and the non-secret, Run-snapshotted Codex
+ * profile are set again by `/usr/bin/env`, which runs after
  * the launcher and immediately before the CLI. That also makes the contract
  * fail-closed: a launcher that will not exec `/usr/bin/env` cannot start the
  * session at all, rather than starting it pointed at production.
@@ -539,6 +561,7 @@ export const inputForRunner = (spec: RunSpec, resume?: ResumeSpec): string => re
 
 export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
   const { model, effort } = modelSpec(spec.claim.run.model);
+  const serviceTier = spec.claim.run.codexServiceTier.toLowerCase();
   if (runner === "CLAUDE") return [
     "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
     // Model must be pinned explicitly; the CLI otherwise inherits the
@@ -556,10 +579,16 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
     ...(resume ? ["--resume", resume.providerConversationId] : []),
   ];
   if (runner === "CODEX") return resume
-    ? ["exec", "resume", ...codexMcpArgs(spec.credentialsPath), "--json", resume.providerConversationId, "-"]
+    ? [
+      "exec", "resume", "--json", "-m", model,
+      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      "-c", `service_tier="${serviceTier}"`,
+      ...codexMcpArgs(spec.credentialsPath), resume.providerConversationId, "-",
+    ]
     : [
       "exec", "--json", "-m", model,
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      "-c", `service_tier="${serviceTier}"`,
       ...codexMcpArgs(spec.credentialsPath),
       "--dangerously-bypass-approvals-and-sandbox", "-",
     ];
@@ -928,6 +957,9 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   binary: spec.config.binaries[spec.claim.runner],
   runAsPrefix: spec.config.runAsPrefix,
   model: spec.claim.run.model,
+  codexServiceTier: spec.claim.run.codexServiceTier,
+  subprocessModel: spec.claim.run.subprocessModel,
+  subprocessCodexServiceTier: spec.claim.run.subprocessCodexServiceTier,
   promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
   promptTransport: "stdin",
   structuredEvents: true,

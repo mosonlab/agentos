@@ -1,4 +1,4 @@
-import { AssigneeType, Prisma, PrismaClient } from "@prisma/client";
+import { AssigneeType, CodexServiceTier, Prisma, PrismaClient } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
@@ -73,6 +73,7 @@ const main = async (): Promise<void> => {
         name: role.name,
         title: role.title,
         model: role.model,
+        codexServiceTier: role.name === "senior-dev-luna" ? CodexServiceTier.FAST : CodexServiceTier.DEFAULT,
         runnerPreference: role.runnerPreference,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,

@@ -6,10 +6,10 @@ import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
-import type { Agent, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
+import type { Agent, CodexServiceTier, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
-import { resolveRunner, runnerForModel, validateModelPair } from "../lib/models";
+import { resolveRunner, runnerForModel, supportsCodexServiceTier, validateModelPair } from "../lib/models";
 import { isEnforced, TOOL_KEYS, TOOL_LABEL_KEYS, type ToolKey } from "../lib/tools";
 import { cn } from "../lib/utils";
 import {
@@ -30,12 +30,13 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
   onClose: () => void;
   onCreated: () => void;
   /** Deterministic starting values for focused form tests; production omits it. */
-  initial?: Partial<{ name: string; title: string; model: string; environmentId: string; runnerPreference: RunnerPreference; rolePrompt: string }>;
+  initial?: Partial<{ name: string; title: string; model: string; environmentId: string; runnerPreference: RunnerPreference; codexServiceTier: CodexServiceTier; rolePrompt: string }>;
 }): ReactNode => {
   const environments = usePoll<Environment[]>(`/projects/${projectId}/environments`, 30_000);
   const [form, setForm] = useState({
     name: initial?.name ?? "", title: initial?.title ?? "", model: initial?.model ?? "claude-opus-5:medium", environmentId: initial?.environmentId ?? "",
     runnerPreference: initial?.runnerPreference ?? "CLAUDE" as RunnerPreference, inboxAccess: false,
+    codexServiceTier: initial?.codexServiceTier ?? "DEFAULT" as CodexServiceTier,
     rolePrompt: initial?.rolePrompt ?? "",
   });
   const { pending, error, run } = useAction();
@@ -71,7 +72,20 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
               <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("agents.field.title.placeholder")} />
             </Field>
           </div>
-          <ModelPicker model={form.model} runnerPreference={form.runnerPreference} onChange={(next) => setForm({ ...form, ...next })} />
+          <ModelPicker model={form.model} runnerPreference={form.runnerPreference} onChange={(next) => setForm({
+            ...form,
+            ...next,
+            codexServiceTier: supportsCodexServiceTier(next.runnerPreference, next.model) ? form.codexServiceTier : "DEFAULT",
+          })} />
+          <Field label={t("agents.field.codexServiceTier")} hint={t(supportsCodexServiceTier(form.runnerPreference, form.model)
+            ? "agents.serviceTier.hint"
+            : "agents.serviceTier.unavailable")}>
+            <Select disabled={!supportsCodexServiceTier(form.runnerPreference, form.model)} value={form.codexServiceTier}
+              onChange={(event) => setForm({ ...form, codexServiceTier: event.target.value as CodexServiceTier })}>
+              <option value="DEFAULT">{t("serviceTier.DEFAULT")}</option>
+              <option value="FAST">{t("serviceTier.FAST")}</option>
+            </Select>
+          </Field>
           <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
           <Field label={t("agents.field.environment.label")} hint={t(environments.missing
             ? "agents.field.environment.hint.missing"
@@ -505,12 +519,19 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   if (!agent) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const view = draft ?? agent;
-  const patch = (changes: Partial<Agent>): void => setDraft({ ...view, ...changes });
+  const patch = (changes: Partial<Agent>): void => {
+    const next = { ...view, ...changes };
+    setDraft({
+      ...next,
+      codexServiceTier: supportsCodexServiceTier(next.runnerPreference, next.model) ? next.codexServiceTier : "DEFAULT",
+    });
+  };
   const save = async (): Promise<void> => {
     if (!draft) return;
     const ok = await run(() => api.patch(`/agents/${agentId}`, {
       name: draft.name, title: draft.title, model: modelForSave(draft.model),
       runnerPreference: runnerForModel(draft.model) ?? draft.runnerPreference, inboxAccess: draft.inboxAccess,
+      codexServiceTier: draft.codexServiceTier,
       rolePrompt: draft.rolePrompt,
     }));
     if (ok) { setDraft(null); reload(); }
@@ -524,6 +545,9 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         <h1 className={DETAIL_HEAD_H1}>{view.title}</h1>
         <Pill tone="grey"><ModelLabel model={view.model} /></Pill>
         <Pill tone="violet">{t("agents.runnerPill", { runner: t(`runner.preference.${view.runnerPreference}`) })}</Pill>
+        {supportsCodexServiceTier(view.runnerPreference, view.model)
+          ? <Pill tone={view.codexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${view.codexServiceTier}`)}</Pill>
+          : null}
         <span className="flex-1" />
         {draft === null
           ? <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(agent)}>{t("common.edit")}</Button>
@@ -557,6 +581,9 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                 { k: t("agents.field.title"), v: view.title },
                 { k: t("agents.field.model"), v: <ModelLabel model={view.model} /> },
                 { k: t("agents.field.runnerPreference"), v: t(`runner.preference.${view.runnerPreference}`) },
+                { k: t("agents.field.codexServiceTier"), v: supportsCodexServiceTier(view.runnerPreference, view.model)
+                  ? t(`serviceTier.${view.codexServiceTier}`)
+                  : t("agents.serviceTier.unavailableValue") },
                 { k: t("agents.field.environment"), v: <span className="text-[11.5px]">{view.environmentId}</span> },
                 { k: t("agents.inbox.label"), v: t(view.inboxAccess ? "agents.inbox.on" : "agents.inbox.off") },
                 { k: t("common.created"), v: formatDateTime(view.createdAt) },
@@ -569,6 +596,15 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                   <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
                 <ModelPicker model={view.model} runnerPreference={view.runnerPreference} onChange={patch} />
+                <Field label={t("agents.field.codexServiceTier")} hint={t(supportsCodexServiceTier(view.runnerPreference, view.model)
+                  ? "agents.serviceTier.hint"
+                  : "agents.serviceTier.unavailable")}>
+                  <Select disabled={!supportsCodexServiceTier(view.runnerPreference, view.model)} value={view.codexServiceTier}
+                    onChange={(event) => patch({ codexServiceTier: event.target.value as CodexServiceTier })}>
+                    <option value="DEFAULT">{t("serviceTier.DEFAULT")}</option>
+                    <option value="FAST">{t("serviceTier.FAST")}</option>
+                  </Select>
+                </Field>
                 <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
                 <div className={ROW}>
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label={t("agents.inbox.label")} />

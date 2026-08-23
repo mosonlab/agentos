@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "bddfb9b38342249085be0a6830bae331a65f66be",
-  "tree": "a13a4acafb03f5d4e87ca8a4e45484804e98d131",
+  "commit": "6839f93cb5bf233cfd669043a6e1f2ef551e029e",
+  "tree": "9e4bf5c1aff1f414f0a4a976a21a33e6f290e73d",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -122,6 +122,11 @@
       "blob": "16c2ac2cf62b55b19d7d9643badb53ffac7df917"
     },
     {
+      "path": "packages/db/prisma/migrations/20260823010000_codex_service_tier/migration.sql",
+      "sha256": "9586fe464011aef5281cbcd905c1d46f8ae708547724e50e059e5e1d17e1c427",
+      "blob": "ffc7de94df349cd4281c315374e10ace320dd282"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -138,8 +143,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "33ac18ece3edaf99cbfe6a24e5295ff18517a30658c2302937976fe31169af94",
-      "blob": "f59f2264637c807a5b04d8aee3db7c8b08f0947b"
+      "sha256": "9d9106a243fc776a96c9e0b3b6ad2e6c073425ec6a1bf67d53dd4a83630999e9",
+      "blob": "c4ec1240b63a6673bc91eb97c97f63d946d9d158"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -148,8 +153,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "438ff54ddb3e3673a8a95f1e6e5ec23416dddb5d30b61259ba70e67a60a12929",
-      "blob": "42f9bb2e8ab244f48917c85a98c0558eddade521"
+      "sha256": "32e443f0f891cbb09f24e3b821f51c0a959042e1154c706c9e97dd7f04e050c2",
+      "blob": "326a21c98b8b0b8b72943a63c4df0b67cec60c54"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -163,13 +168,13 @@
     }
   ],
   "migrations": {
-    "count": 22,
-    "terminal": "20260822170000_merge_recovery_attempt",
-    "sha256": "4fc25a995099316f3a33c3c212f934dc26a833fa899bf712943e7a1a432ee61f"
+    "count": 23,
+    "terminal": "20260823010000_codex_service_tier",
+    "sha256": "9b2af74a65d26d539e3149d8153b9803959f487441f70b8598d997fe5ce0b63b"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "oA6SQGDCsrRD+NmRIXHcY/EKgzJykc47w85r/ZMmPd2P4YEjajKSBGj7XjQK+TPBJD0p9xa+kkFjSrVVd3ZvCg=="
+    "value": "l8c3l/9SGYHrbgK423J0ezyidr1Dqla5mFwvuQf423hyhXvi97M/nd0V2jWqHmAtYan7eJ5tXYRaiFKP0HqcBg=="
   }
 }

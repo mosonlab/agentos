@@ -10,6 +10,7 @@ import {
   applyInboxDecisionTx,
   ArchivedAssigneeError,
   AssigneeType,
+  CodexServiceTier,
   deriveRunConfig,
   enqueueTaskRun,
   InboxKind,
@@ -20,6 +21,7 @@ import {
   resolveRunBranches,
   RunStatus,
   runnerFor,
+  subprocessRunConfig,
   RunnerKind,
   RunnerPreference,
   TaskStatus,
@@ -53,6 +55,7 @@ test("deriveRunConfig preserves model, template override, and exact prompt hash"
   const agent = {
     runnerPreference: RunnerPreference.PI,
     model: "current-model",
+    codexServiceTier: CodexServiceTier.DEFAULT,
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   };
@@ -60,7 +63,27 @@ test("deriveRunConfig preserves model, template override, and exact prompt hash"
   assert.deepEqual(deriveRunConfig(agent, { runner: RunnerKind.CODEX }, task), {
     runner: RunnerKind.CODEX,
     model: "current-model",
+    codexServiceTier: CodexServiceTier.DEFAULT,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
+  });
+});
+
+test("executioner snapshots the active Luna subprocess profile while other agents do not", async () => {
+  let query: Record<string, unknown> | undefined;
+  const tx = {
+    agent: { findFirst: async (input: Record<string, unknown>) => {
+      query = input;
+      return { model: "gpt-5.6-luna:max", codexServiceTier: CodexServiceTier.FAST };
+    } },
+  } as never;
+  assert.equal(await subprocessRunConfig(tx, "project-1", "senior-dev"), null);
+  assert.deepEqual(await subprocessRunConfig(tx, "project-1", "implementation-plan-executioner"), {
+    subprocessModel: "gpt-5.6-luna:max",
+    subprocessCodexServiceTier: CodexServiceTier.FAST,
+  });
+  assert.deepEqual(query, {
+    where: { projectId: "project-1", name: "senior-dev-luna", archivedAt: null },
+    select: { model: true, codexServiceTier: true },
   });
 });
 
@@ -72,6 +95,7 @@ test("task creation keeps its runner, model, and promptHash output while derivat
     const agent = {
       id: "agent-1",
       model: "OpenAI-CoDeX/GPT",
+      codexServiceTier: CodexServiceTier.DEFAULT,
       runnerPreference: RunnerPreference.INHERIT,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
@@ -101,11 +125,13 @@ test("task creation keeps its runner, model, and promptHash output while derivat
     assert.deepEqual({
       runner: runData?.runner,
       model: runData?.model,
+      codexServiceTier: runData?.codexServiceTier,
       promptHash: runData?.promptHash,
       maxDurationMin: runData?.maxDurationMin,
     }, {
       runner: RunnerKind.CODEX,
       model: agent.model,
+      codexServiceTier: CodexServiceTier.DEFAULT,
       promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
       maxDurationMin: 240,
     });

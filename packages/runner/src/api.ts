@@ -15,6 +15,7 @@ export type FailureClass =
   | "BUDGET_EXCEEDED";
 
 export type CleanupStatus = "SUCCEEDED" | "FAILED" | "RETAINED";
+export type CodexServiceTier = "DEFAULT" | "FAST";
 
 export type ClaimedTask = {
   /**
@@ -79,6 +80,9 @@ export type ClaimedTask = {
     stallTimeoutMin: number;
     maxRunsPerTask: number;
     model: string;
+    codexServiceTier: CodexServiceTier;
+    subprocessModel: string | null;
+    subprocessCodexServiceTier: CodexServiceTier | null;
     targetBranch: string | null;
     /** Whether targetBranch was selected from durable Run.pushedBranch evidence.
      * When true, provisioning must not replace it with an older declared head. */

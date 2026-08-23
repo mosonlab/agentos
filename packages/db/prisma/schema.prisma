@@ -43,6 +43,11 @@ enum RunnerPreference {
   INHERIT @map("inherit")
 }
 
+enum CodexServiceTier {
+  DEFAULT @map("default")
+  FAST    @map("fast")
+}
+
 enum TaskStatus {
   // BACKLOG is first so the datamodel's value order matches the database's:
   // its migration adds the value with `BEFORE 'todo'`.
@@ -242,6 +247,7 @@ model Agent {
   name               String
   title              String
   model              String
+  codexServiceTier   CodexServiceTier     @default(DEFAULT)
   foundationalPrompt String
   rolePrompt         String
   runnerPreference   RunnerPreference     @default(INHERIT)
@@ -798,6 +804,13 @@ model Run {
   adapterVersion        String?
   cliVersion            String?
   model                 String
+  /// Immutable launch snapshot. DEFAULT is explicit rather than an omitted
+  /// provider value, so AgentOS never delegates this choice to `auto`.
+  codexServiceTier      CodexServiceTier     @default(DEFAULT)
+  /// The ordinary implementation subprocess profile for an executioner Run.
+  /// Null for every Agent that does not schedule its own Codex subprocesses.
+  subprocessModel       String?
+  subprocessCodexServiceTier CodexServiceTier?
   authMode              String?
   manifest              Json?
   promptHash            String

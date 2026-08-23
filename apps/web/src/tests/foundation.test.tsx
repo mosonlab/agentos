@@ -11,7 +11,7 @@ import { AgentDetailPage, NewAgent } from "../pages/Agents";
 
 const value: Agent = {
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
-  model: "claude-opus-5:high", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
+  model: "claude-opus-5:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
   foundationalPrompt: "the canonical foundation", rolePrompt: "role", createdAt: "2026-08-16T00:00:00.000Z",
   updatedAt: "2026-08-16T00:00:00.000Z", archivedAt: null,
 };
@@ -108,7 +108,7 @@ test("edit mode keeps Foundation read-only and the save payload omits it", async
     const patch = requests.find((request) => request.method === "PATCH");
     assert.ok(patch);
     const body = JSON.parse(String(patch.body)) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(body).sort(), ["inboxAccess", "model", "name", "rolePrompt", "runnerPreference", "title"]);
+    assert.deepEqual(Object.keys(body).sort(), ["codexServiceTier", "inboxAccess", "model", "name", "rolePrompt", "runnerPreference", "title"]);
     assert.equal("foundationalPrompt" in body, false);
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });

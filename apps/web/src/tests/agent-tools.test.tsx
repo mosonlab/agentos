@@ -12,7 +12,7 @@ import type { Agent, RunnerPreference } from "../lib/types";
 
 const agent = (overrides: Partial<Agent> = {}): Agent => ({
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
-  model: "claude-opus-5:high", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
+  model: "claude-opus-5:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
   foundationalPrompt: "foundation", rolePrompt: "role", createdAt: "2026-08-16T00:00:00.000Z",
   updatedAt: "2026-08-16T00:00:00.000Z", archivedAt: null, ...overrides,
 });
