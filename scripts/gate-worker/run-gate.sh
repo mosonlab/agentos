@@ -43,11 +43,12 @@
 #      judgement about the commit exits 1, so a caller reading exit codes can
 #      tell a verdict from an errand.
 #
-# The worktree is per-run and unique, so two gates for different commits can run
-# concurrently and neither waits for the other. #131's per-worktree lock still
-# applies inside each one; because no two runs share a worktree, a live-lock FAIL
-# here means a previous run in the same directory was killed, which the sweep at
-# the top of this script is what clears.
+# The worktree is per-run and unique, but the worker is a whole-machine slot:
+# one worker-wide flock is held by the real process for its entire run. A second
+# invocation waits before creating a worktree. That lock is worker-wide rather
+# than repository-wide so two repositories cannot silently oversubscribe the
+# same four vCPUs, and it survives a dropped ssh connection for as long as the
+# remote gate process survives.
 #
 # Stateless: nothing is remembered between runs except the mirror and the logs.
 # Re-running the same oid after a dropped connection is the supported recovery,
@@ -177,6 +178,7 @@ no_verdict() {
 [ -d "$MIRROR_DIR" ] || no_verdict "no mirror at ${MIRROR_DIR}; run scripts/gate-worker/mirror-push.sh from the local machine first"
 command -v git >/dev/null 2>&1 || no_verdict "git is not installed on the worker"
 command -v node >/dev/null 2>&1 || no_verdict "node is not installed on the worker"
+command -v flock >/dev/null 2>&1 || no_verdict "flock is not installed on the worker"
 # Docker is deliberately not pre-checked here. merge-gate.sh requires it too, and
 # does so after the frozen-record rules, which need neither a daemon nor an
 # install: a documentation branch that rewrites history should be told that,
@@ -198,6 +200,17 @@ if [ -n "$MASTER_OID" ] && ! git -C "$MIRROR_DIR" cat-file -e "${MASTER_OID}^{co
 fi
 
 mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || no_verdict "could not create the gate directories under ${GATE_HOME}"
+
+# The repository directory is one level below the worker root installed by
+# mirror-push.sh. Keep the lock there so every repository on this machine
+# contends for the same physical capacity. flock owns the lifecycle correctly:
+# the kernel releases it only when the run and any surviving child holding the
+# descriptor are gone, not when the caller's ssh connection disappears.
+WORKER_LOCK="$(dirname "$GATE_HOME")/.full-gate.lock"
+exec 9>"$WORKER_LOCK" || no_verdict "could not open the worker lock at ${WORKER_LOCK}"
+printf 'run-gate: waiting for the worker slot\n' >&2
+flock 9 || no_verdict "could not acquire the worker lock at ${WORKER_LOCK}"
+printf 'run-gate: acquired the worker slot\n' >&2
 
 # --- reclaim what earlier runs abandoned ------------------------------------
 

@@ -331,10 +331,10 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
 
 // A gate home the way mirror-push.sh leaves one: run-gate.sh beside a bare
 // mirror, deriving its own GATE_HOME from where it was installed.
-const gateHome = (t, { verdict } = {}) => {
-  const root = scratch(t);
-  const work = join(root, "work");
-  const home = join(root, "home");
+const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
+  const root = workerRoot ?? scratch(t);
+  const work = join(root, `${name}-work`);
+  const home = join(root, name);
   mkdirSync(join(work, "scripts"), { recursive: true });
   writeFileSync(
     join(work, "scripts", "merge-gate.sh"),
@@ -414,6 +414,62 @@ test("a malformed STALE_WORKTREE_MINUTES is refused rather than passed to find",
   const result = runGate(fixture.home, [fixture.oid], { STALE_WORKTREE_MINUTES: "-1; id" });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /STALE_WORKTREE_MINUTES/);
+});
+
+test("the worker lock serializes gates from different repositories", (t) => {
+  const workerRoot = scratch(t);
+  const starts = join(workerRoot, "starts");
+  const release = join(workerRoot, "release");
+  const verdict = `
+    printf '%s\\n' "$$" >> "$WORKER_LOCK_STARTS"
+    while [ ! -f "$WORKER_LOCK_RELEASE" ]; do sleep 0.05; done
+    printf 'MERGE GATE: PASS fixture\\n'
+  `;
+  const first = gateHome(t, { verdict, workerRoot, name: "repo-a" });
+  const second = gateHome(t, { verdict, workerRoot, name: "repo-b" });
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      `
+        set -uo pipefail
+        "$FIRST_HOME/run-gate.sh" "$FIRST_OID" > "$WORKER_ROOT/first.out" 2>&1 &
+        first_pid=$!
+        for _ in $(seq 1 100); do
+          [ -s "$WORKER_LOCK_STARTS" ] && break
+          sleep 0.05
+        done
+        [ -s "$WORKER_LOCK_STARTS" ] || exit 90
+
+        "$SECOND_HOME/run-gate.sh" "$SECOND_OID" > "$WORKER_ROOT/second.out" 2>&1 &
+        second_pid=$!
+        sleep 0.3
+        [ "$(wc -l < "$WORKER_LOCK_STARTS" | tr -d ' ')" = 1 ] || exit 91
+
+        : > "$WORKER_LOCK_RELEASE"
+        wait "$first_pid"
+        wait "$second_pid"
+        cat "$WORKER_ROOT/first.out" "$WORKER_ROOT/second.out"
+      `,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: {
+        ...GIT_ENV,
+        FIRST_HOME: first.home,
+        FIRST_OID: first.oid,
+        SECOND_HOME: second.home,
+        SECOND_OID: second.oid,
+        WORKER_ROOT: workerRoot,
+        WORKER_LOCK_STARTS: starts,
+        WORKER_LOCK_RELEASE: release,
+      },
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 2);
+  assert.equal((result.stdout.match(/MERGE GATE: PASS/g) ?? []).length, 2);
 });
 
 // --- the stale-worktree sweep ------------------------------------------------

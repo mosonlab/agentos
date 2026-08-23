@@ -157,7 +157,7 @@ gate_slot_try() {
   # A lock directory left by the pre-#132 dispatcher, which this shape cannot
   # see and which an older dispatcher may still be holding. Refusing is the only
   # safe reading: the two implementations do not exclude each other, so treating
-  # it as absent is how three slots become six.
+  # it as absent is how one physical slot becomes two concurrent gates.
   # Broken rather than busy: an old dispatcher may or may not be holding it, and
   # this implementation cannot tell which. "I cannot determine whether this slot
   # is occupied" is a mechanism failure that a person has to clear, not a queue

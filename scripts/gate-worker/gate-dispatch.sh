@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Run one merge gate in the first free slot: the offshore worker's two first,
-# then this machine only while both worker slots are busy. Runs ON THE LOCAL MACHINE:
+# Run one merge gate in the first free slot: the offshore worker first, then
+# this machine while the worker is busy. Runs ON THE LOCAL MACHINE:
 #
 #   scripts/gate-worker/gate-dispatch.sh                    # gate the local HEAD
 #   scripts/gate-worker/gate-dispatch.sh <oid>              # gate that commit
@@ -11,18 +11,17 @@
 # The slot model: gates are whole-machine loads, so what is being rationed is
 # machines, not processes. This machine contributes one slot — a gate saturates
 # every core, and the machine is also where the agent sessions and the local
-# services live — and the worker contributes two, which is what its four vCPUs
-# were measured to carry. Three slots, machine-wide, shared by every repository
-# that dispatches from this machine.
+# services live — and the four-vCPU worker contributes one. Two slots,
+# machine-wide, shared by every repository that dispatches from this machine.
 #
-# The accounting is three lock files under ${XDG_CACHE_HOME:-~/.cache}/
+# The accounting is two lock files under ${XDG_CACHE_HOME:-~/.cache}/
 # gate-dispatch/, outside any repository because the slots belong to the
 # machines, not to a checkout. lib.sh holds the locking itself and says why it
 # is shaped the way it is. Every dispatch on this machine contends for the same
-# three, which makes the local locks the whole truth — with one honest
-# exception: a merge-gate.sh or remote-gate.sh run directly, without this
-# script, is invisible to it. That is an operator overriding the rationing, and
-# the override is theirs to answer for; nothing here tries to detect it.
+# two. A direct merge-gate.sh is invisible to this accounting. A direct
+# remote-gate.sh bypasses the local accounting too, but run-gate.sh holds the
+# worker-wide execution lock for the real process lifetime, so it can wait but
+# cannot turn one worker slot into concurrent full gates.
 #
 # The local slot is only eligible when this worktree is already the thing a
 # local gate would test: HEAD at the requested commit and the tree clean.
@@ -206,7 +205,7 @@ local_eligible() {
 
 mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$EXIT_NO_VERDICT"
 
-printf 'gate-dispatch: %s, slots local(1) + %s(2), poll %ss, timeout %smin\n' \
+printf 'gate-dispatch: %s, slots %s(1) then local(1), poll %ss, timeout %smin\n' \
   "$OID" "$SERVER" "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
 printf 'gate-dispatch: baseline %s%s\n' "$MASTER_OID" "${DEFAULT_REF:+ (${DEFAULT_REF})}" >&2
 
@@ -257,20 +256,19 @@ while :; do
   round_broken=""
   outcome=0
 
-  for slot in remote-1 remote-2; do
-    outcome=0
-    try_slot "$slot" || outcome=$?
-    case "$outcome" in
-      0) run_remote "$slot"; exit $? ;;
-      1) round_busy=$(( round_busy + 1 )) ;;
-      *) round_broken="${round_broken} ${slot}" ;;
-    esac
-  done
-  # Local capacity protects the production machine from agent-driven gate
-  # load. It is spillover only: both remote slots must be positively busy in
-  # this round. A broken remote lock is not "busy" and never unlocks local as a
-  # silent fallback.
-  if [ "$round_busy" -eq 2 ] && local_eligible; then
+  outcome=0
+  try_slot remote-1 || outcome=$?
+  case "$outcome" in
+    0) run_remote remote-1; exit $? ;;
+    1) round_busy=$(( round_busy + 1 )) ;;
+    *) round_broken="${round_broken} remote-1" ;;
+  esac
+
+  # Local capacity protects the user's machine from concurrent gate load. It
+  # is spillover only: the worker must be positively busy in this round. A
+  # broken remote lock is not "busy" and never unlocks local as a silent
+  # fallback.
+  if [ "$round_busy" -eq 1 ] && local_eligible; then
     outcome=0
     try_slot local || outcome=$?
     case "$outcome" in
