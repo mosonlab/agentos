@@ -70,6 +70,7 @@ import {
   loadIntegratorTask,
   observedChainPullRequests,
   parseMergeResult,
+  PinnedBaseCommitError,
   recordIntegratorStop,
   requestConfirmationCard,
   resolveChainTarget,
@@ -163,6 +164,20 @@ export interface LiveAppOptions {
 }
 
 type DbTx = Prisma.TransactionClient;
+
+class PinnedRunTargetError extends Error {
+  constructor(readonly runId: string) {
+    super(`Pinned run ${runId} target is inconsistent with its source step implementation head`);
+    this.name = "PinnedRunTargetError";
+  }
+}
+
+type CandidateActivationFailure = PinnedBaseCommitError | PinnedRunTargetError;
+
+const isCandidateActivationFailure = (error: unknown): error is CandidateActivationFailure =>
+  error instanceof PinnedBaseCommitError || error instanceof PinnedRunTargetError;
+
+const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
 
 type QueuedBaseDriftRecoveryContext = {
   aggregateId: string;
@@ -4474,6 +4489,71 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           continue;
         }
+        const grants = [
+          ...candidate.agent.environment.secrets,
+          ...candidate.agent.secretGrants,
+        ].filter(({ secret }) => !secret.disabledAt);
+        const grantedEnvironmentVariables = new Set<string>();
+        for (const { envVar } of grants) {
+          if (["OPERATOR_TOKEN", "RUNNER_TOKEN", "AGENTOS_API_TOKEN", "AGENTOS_SESSION_TOKEN", "AGENTOS_FENCING_TOKEN"].includes(envVar)) {
+            throw new Error(`Secret grant may not override reserved principal variable ${envVar}`);
+          }
+          if (grantedEnvironmentVariables.has(envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
+          grantedEnvironmentVariables.add(envVar);
+        }
+        let implementationRange: Awaited<ReturnType<typeof pinnedImplementationRange>>;
+        try {
+          implementationRange = await pinnedImplementationRange(tx, candidate.task);
+          if (implementationRange && implementationRange.implementationHeadSha !== candidate.targetBranch) {
+            throw new PinnedRunTargetError(candidate.id);
+          }
+        } catch (error: unknown) {
+          if (!isCandidateActivationFailure(error)) throw error;
+          const reason = namedFailureReason(error);
+          const stopped = await tx.run.updateMany({
+            where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+            data: {
+              status: RunStatus.FAILED,
+              failureClass: FailureClass.TASK_FAILED,
+              failureReason: reason,
+              retryable: false,
+              endedAt: now,
+            },
+          });
+          if (stopped.count === 1) {
+            await tx.task.update({
+              where: { id: candidate.task.id },
+              data: { status: TaskStatus.BACKLOG, failureReason: reason },
+            });
+            await tx.taskActivity.create({
+              data: {
+                taskId: candidate.task.id,
+                actorType: "control-plane",
+                body: `Queued run activation failed: ${reason}`,
+                metadata: {
+                  runId: candidate.id,
+                  condition: "candidate-activation-failed",
+                  failureType: error.name,
+                  reason,
+                },
+              },
+            });
+            const dedupeKey = `candidate-activation-failed:${candidate.id}`;
+            await tx.inboxMessage.upsert({
+              where: { dedupeKey },
+              create: {
+                from: "AGENT",
+                agentId: candidate.agentId,
+                taskId: candidate.task.id,
+                kind: "TEXT",
+                body: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
+                dedupeKey,
+              },
+              update: {},
+            });
+          }
+          continue;
+        }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
         const sessionCredential = issueSessionToken();
@@ -4529,16 +4609,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             body: `Run ${candidate.runNumber} claimed with fencing generation ${generation}`,
           },
         });
-        const grants = [
-          ...candidate.agent.environment.secrets,
-          ...candidate.agent.secretGrants,
-        ].filter(({ secret }) => !secret.disabledAt);
         const secrets: Record<string, string> = {};
         for (const { envVar, secret } of grants) {
-          if (["OPERATOR_TOKEN", "RUNNER_TOKEN", "AGENTOS_API_TOKEN", "AGENTOS_SESSION_TOKEN", "AGENTOS_FENCING_TOKEN"].includes(envVar)) {
-            throw new Error(`Secret grant may not override reserved principal variable ${envVar}`);
-          }
-          if (Object.hasOwn(secrets, envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
           secrets[envVar] = decryptSecret(secret.encryptedValue, secret.ciphertextVersion);
         }
         const run = await tx.run.findUniqueOrThrow({ where: { id: candidate.id } });
@@ -4576,12 +4648,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // write endpoint already caps each artifact at 500k; pass the durable
         // body verbatim until artifact references replace prompt embedding.
         const priorOutputs = priorOutputsRaw;
-        const implementationRange = await pinnedImplementationRange(tx, candidate.task);
-        if (implementationRange && implementationRange.implementationHeadSha !== run.targetBranch) {
-          throw new Error(
-            `Pinned run ${run.id} targets ${run.targetBranch ?? "no commit"}, but its source step now records ${implementationRange.implementationHeadSha}`,
-          );
-        }
         const targetBranchPublished = run.targetBranch !== null && await tx.run.findFirst({
           where: {
             repoId: candidate.repo.id,

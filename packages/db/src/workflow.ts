@@ -216,13 +216,13 @@ export const pinnedImplementationRange = async (
     throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded commitSha");
   }
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.commitSha)) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid commitSha ${source.commitSha}`);
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has invalid commitSha");
   }
   if (!source.run?.baseSha) {
     throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded implementation baseSha");
   }
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.run.baseSha)) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, `referenced step has invalid implementation baseSha ${source.run.baseSha}`);
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has invalid implementation baseSha");
   }
   return { implementationBaseSha: source.run.baseSha, implementationHeadSha: source.commitSha };
 };
