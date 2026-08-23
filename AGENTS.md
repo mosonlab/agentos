@@ -4,9 +4,14 @@ These public rules apply to every repository change, including work in a fork.
 Host configuration, credentials, and private operator procedure belong in the
 operator documentation, not here.
 
-## Route the work
+## Work directly
 
-- Keep trivial chores off the board.
+Work in the current session by default. Create or dispatch a task chain only
+when the human user explicitly requests one. Complexity may justify recommending
+a chain; it does not authorize one.
+
+When the user requests a chain:
+
 - Use the direct chain when one implementation context window can deliver a
   brief whose change points are enumerable. Its `description` is the
   specification of record; write it using [`docs/BRIEF-TEMPLATE.md`](docs/BRIEF-TEMPLATE.md)
@@ -21,8 +26,7 @@ operator documentation, not here.
   gate, gate worker, migrations, release authority, and merge automation. When
   classification is uncertain, use `senior-dev-high`. Keep the review-fix
   step's template assignee, raising it to `senior-dev-high` under the same
-  criteria. Work dispatched outside a chain does not inherit the direct
-  implementation tier.
+  criteria.
 - Archive a backlog card in the same action that dispatches its work or records
   the decisions that settle it. Leave only genuinely open questions on the
   board.
@@ -30,6 +34,12 @@ operator documentation, not here.
 Before changing canonical Agents, roles, or task templates, read
 [`agents/README.md`](agents/README.md). Its source map and the contract files it
 names own canonical defaults; do not copy those defaults into another document.
+
+## Design simply
+
+Implement the simplest design that fully meets the current requirement. Add an
+abstraction, configuration option, or compatibility path only when a current
+acceptance criterion or caller requires it.
 
 ## Test safely
 
@@ -59,6 +69,11 @@ Read the applicable section before acting on one of those surfaces.
 ```sh
 scripts/merge-gate.sh --expect-head <oid>
 ```
+
+The gate selects its proof profile from the exact baseline-to-candidate diff.
+Only content modifications to its explicit prose allowlist use the `docs-only`
+profile; structural changes, executable surfaces, and unknown paths use the full
+profile. Callers cannot request the cheaper profile.
 
 The gate owns an exclusive worktree lock. When another gate might be running,
 use `scripts/gate-worker/gate-dispatch.sh <oid>` so the first free local or

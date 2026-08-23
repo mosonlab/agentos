@@ -1,8 +1,14 @@
 # Runbook — the offshore merge-gate worker and the gate dispatcher
 
-A full merge gate is `npm ci`, a whole-workspace compile, unit tests, a
-throwaway PostgreSQL and the api dbtests — about 4 minutes on an idle worker,
-of which the dbtests are about 1½ and everything else together is about 2½. The
+A merge gate selects its own profile from the exact baseline-to-candidate diff.
+Content-only modifications to the gate's explicit prose allowlist use the
+install-free `docs-only` profile; callers cannot request it. Every structural,
+runtime-coupled, executable, configuration, or unknown change uses the full
+profile.
+
+A full profile is `npm ci`, a whole-workspace compile, unit tests, a throwaway
+PostgreSQL and the api dbtests — about 4 minutes on an idle worker, of which the
+dbtests are about 1½ and everything else together is about 2½. The
 dbtests were about 7 minutes until #146 moved that database's data directory
 into RAM and stopped it paying for durability it deletes seconds later, and
 about 3½ after that until they stopped queueing behind the one schema every
@@ -37,8 +43,9 @@ ships.
 
 ## The slot model
 
-A gate saturates every core of whatever machine runs it, so what the dispatcher
-rations is machines, not processes: the local machine contributes **one** slot —
+A full gate saturates every core of whatever machine runs it. The dispatcher
+cannot know the candidate-selected profile before running it, so it rations
+machines, not processes: the local machine contributes **one** slot —
 it is also where the agent sessions and the local services live — and the
 worker contributes **two**, which is what its four vCPUs were measured to
 carry. Three slots, machine-wide, shared by every repository that dispatches
