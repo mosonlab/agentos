@@ -412,6 +412,17 @@ test("executioner child environment exposes both snapshotted subprocess profiles
     () => buildPrompt({ ...executioner, run: { ...claim.run } }),
     /missing its Codex subprocess snapshot/u,
   );
+  assert.throws(
+    () => buildPrompt({
+      ...executioner,
+      run: {
+        ...executioner.run,
+        elevatedSubprocessModel: null,
+        elevatedSubprocessCodexServiceTier: null,
+      },
+    }),
+    /incomplete Codex subprocess snapshot/u,
+  );
 });
 
 test("the PI extension injects the explicit tier only into openai-codex requests", async () => {

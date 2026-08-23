@@ -8,6 +8,7 @@ import { after, test } from "node:test";
 
 import { PrismaClient } from "@agentos/db";
 
+import { createApp } from "./test-app.js";
 import { testDatabaseUrl } from "./testdb.js";
 
 /**
@@ -162,4 +163,82 @@ test("the subprocess-profile migration repairs only untouched inherited Luna Fas
     { id: "a-unrelated", tier: "fast" },
     { id: "a-untouched", tier: "default" },
   ]);
+});
+
+test("a pre-migration executioner Run stays historical while operator retry snapshots both current profiles", async () => {
+  fixture.cleanup();
+  fixture = stageBeforeTargetMigration();
+  fixture.execute(`
+    INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
+    VALUES ('p-run', 'run upgrade', 'run-upgrade', NOW());
+
+    INSERT INTO "Environment" ("id", "projectId", "name", "updatedAt")
+    VALUES ('e-run', 'p-run', 'env', NOW());
+
+    INSERT INTO "Agent" ("id", "projectId", "environmentId", "name", "title", "model",
+                         "codexServiceTier", "runnerPreference", "foundationalPrompt", "rolePrompt",
+                         "updatedAt")
+    VALUES (
+      'a-run', 'p-run', 'e-run', 'implementation-plan-executioner', 'Executioner',
+      'gpt-5.6-sol:medium', 'default', 'codex', 'foundation', 'role', NOW()
+    );
+
+    INSERT INTO "Task" ("id", "projectId", "assigneeAgentId", "name", "description", "status", "updatedAt")
+    VALUES ('t-run', 'p-run', 'a-run', 'Execution', 'work', 'doing', NOW());
+
+    INSERT INTO "Run" (
+      "id", "projectId", "taskId", "agentId", "runNumber", "dedupeKey", "status",
+      "runner", "model", "codexServiceTier", "subprocessModel", "subprocessCodexServiceTier",
+      "promptHash", "updatedAt"
+    ) VALUES (
+      'r-old', 'p-run', 't-run', 'a-run', 1, 'task:t-run:run:1', 'queued',
+      'codex', 'gpt-5.6-sol:medium', 'default', 'gpt-5.6-luna:max', 'default',
+      'historical-prompt', NOW()
+    );
+  `);
+
+  fixture.applyTargetMigration();
+
+  const historical = await query((client) => client.run.findUniqueOrThrow({ where: { id: "r-old" } }));
+  assert.equal(historical.subprocessModel, "gpt-5.6-luna:max");
+  assert.equal(historical.subprocessCodexServiceTier, "DEFAULT");
+  assert.equal(historical.elevatedSubprocessModel, null);
+  assert.equal(historical.elevatedSubprocessCodexServiceTier, null);
+
+  await query(async (client) => {
+    await client.run.update({
+      where: { id: "r-old" },
+      data: { status: "FAILED", failureClass: "TASK_FAILED", retryable: false, endedAt: new Date() },
+    });
+    await client.task.update({ where: { id: "t-run" }, data: { status: "REVIEW" } });
+  });
+
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "subprocess-upgrade-workspace."));
+  const priorToken = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "subprocess-upgrade-operator-token";
+  try {
+    const response = await query(async (client) => await createApp(client, { workspaceRoot }).request(
+      "/tasks/t-run/retry",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer subprocess-upgrade-operator-token" },
+      },
+    ));
+    assert.equal(response.status, 201, await response.text());
+  } finally {
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorToken;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+
+  const retried = await query((client) => client.run.findFirstOrThrow({
+    where: { taskId: "t-run", runNumber: 2 },
+  }));
+  assert.equal(retried.runner, "CODEX");
+  assert.equal(retried.model, "gpt-5.6-sol:medium");
+  assert.equal(retried.codexServiceTier, "DEFAULT");
+  assert.equal(retried.subprocessModel, "gpt-5.6-luna:max");
+  assert.equal(retried.subprocessCodexServiceTier, "DEFAULT");
+  assert.equal(retried.elevatedSubprocessModel, "gpt-5.6-sol:high");
+  assert.equal(retried.elevatedSubprocessCodexServiceTier, "DEFAULT");
 });
