@@ -128,6 +128,14 @@ test("executioner snapshots both configured Codex subprocess profiles while othe
     () => subprocessRunConfig({ ...executioner, elevatedSubprocessModel: "openai-codex/gpt-5.6-sol:high" } as never),
     /must use a Codex gpt-\* model/u,
   );
+  await assert.rejects(
+    () => subprocessRunConfig(ordinary as never, {
+      stepIndex: 5,
+      outputKind: "implementation",
+      taskTemplate: { name: "compound-engineer-workflow" },
+    }),
+    /must remain assigned to implementation-plan-executioner/u,
+  );
 });
 
 test("task creation keeps its runner, model, and promptHash output while derivation is shared", async () => {

@@ -360,6 +360,7 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
 test("executioner child environment exposes both snapshotted subprocess profiles", () => {
   const executioner = {
     ...claim,
+    agent: { ...claim.agent, name: "implementation-plan-executioner" },
     run: {
       ...claim.run,
       subprocessModel: "gpt-5.6-luna:max",
@@ -385,6 +386,10 @@ test("executioner child environment exposes both snapshotted subprocess profiles
   assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT, "high");
   assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER, "default");
   assert.match(buildPrompt(executioner), /service tier: fast/u);
+  assert.throws(
+    () => buildPrompt({ ...executioner, run: { ...claim.run } }),
+    /missing its Codex subprocess snapshot/u,
+  );
 });
 
 test("the PI extension injects the explicit tier only into openai-codex requests", async () => {
@@ -402,6 +407,7 @@ test("the PI extension injects the explicit tier only into openai-codex requests
   });
   assert.ok(handler);
   const previous = process.env.AGENTOS_CODEX_SERVICE_TIER;
+  const previousExpectedProvider = process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX;
   let aborted = 0;
   let shutdown = 0;
   const context = (provider: string): ProviderContext => ({
@@ -416,6 +422,12 @@ test("the PI extension injects the explicit tier only into openai-codex requests
       service_tier: "priority",
     });
     assert.equal(handler({ type: "before_provider_request", payload: {} }, context("anthropic")), undefined);
+    process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX = "1";
+    assert.deepEqual(handler({ type: "before_provider_request", payload: {} }, {
+      abort: () => { aborted += 1; },
+      shutdown: () => { shutdown += 1; },
+    }), { service_tier: "agentos-provider-mismatch" });
+    delete process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX;
     process.env.AGENTOS_CODEX_SERVICE_TIER = "default";
     assert.deepEqual(handler({ type: "before_provider_request", payload: {} }, context("openai-codex")), {
       service_tier: "default",
@@ -424,15 +436,29 @@ test("the PI extension injects the explicit tier only into openai-codex requests
     assert.deepEqual(handler({ type: "before_provider_request", payload: {} }, context("openai-codex")), {
       service_tier: "agentos-invalid-service-tier",
     });
-    assert.equal(aborted, 1);
-    assert.equal(shutdown, 1);
+    assert.equal(aborted, 2);
+    assert.equal(shutdown, 2);
   } finally {
+    if (previousExpectedProvider === undefined) delete process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX;
+    else process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX = previousExpectedProvider;
     if (previous === undefined) delete process.env.AGENTOS_CODEX_SERVICE_TIER;
     else process.env.AGENTOS_CODEX_SERVICE_TIER = previous;
   }
 });
 
 test("PI runtime preflight rejects an openai-codex Run whose explicit service tier is absent", async () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    {
+      ...claim,
+      runner: "PI",
+      run: { ...claim.run, model: "openai-codex/gpt-5.6-sol:high" },
+      secrets: { ...claim.secrets, AGENTOS_PI_EXPECTS_OPENAI_CODEX: "0" },
+    },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_PI_EXPECTS_OPENAI_CODEX, "1");
   const result = await adapters.PI.preflight({
     config: {} as RunnerConfig,
     runner: "PI",

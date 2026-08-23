@@ -1671,6 +1671,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const before = await lockAgentRow(tx, agentId);
       if (!before) return { error: "Agent not found", code: 404 as const };
       const merged = { ...before, ...withoutUndefined(body) };
+      if (before.name === "implementation-plan-executioner" && merged.name !== before.name) {
+        return { error: "implementation-plan-executioner is a canonical Agent name and cannot be changed", code: 400 as const };
+      }
       const modelRefusal = runnerModelRefusal(merged);
       if (modelRefusal) return { error: modelRefusal, code: 400 as const };
       const tierRefusal = codexServiceTierRefusal(merged);
@@ -3310,7 +3313,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const currentBinding = integratorBindingRefusal(lockedAgent.name, integratorStepShape);
       if (currentBinding) return { error: currentBinding, code: 400 as const };
       const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-      const subprocess = await subprocessRunConfig(lockedAgent);
+      const subprocess = await subprocessRunConfig(lockedAgent, task.templateStep);
       // A task with no repo cannot be a chain step with a branch, and this route
       // already tolerates a null repoId — so it keeps inheriting run-1's fields.
       const branches = task.repo

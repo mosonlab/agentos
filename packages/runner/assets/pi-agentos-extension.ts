@@ -59,7 +59,14 @@ export default function (pi: {
   ): void;
 }): void {
   pi.on("before_provider_request", (event, context) => {
-    if (context.model?.provider !== "openai-codex") return undefined;
+    const provider = context.model?.provider;
+    const expectsOpenAICodex = process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX === "1";
+    if (provider !== "openai-codex") {
+      if (!expectsOpenAICodex) return undefined;
+      context.abort();
+      context.shutdown();
+      return { service_tier: "agentos-provider-mismatch" };
+    }
     const configured = process.env.AGENTOS_CODEX_SERVICE_TIER;
     if (configured !== "default" && configured !== "fast") {
       context.abort();

@@ -616,7 +616,9 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
             ) : (
               <div className={STACK}>
                 <div className={FIELD_ROW}>
-                  <Field label={t("agents.field.name.label")}><Input type="text" value={view.name} onChange={(event) => patch({ name: event.target.value })} /></Field>
+                  <Field label={t("agents.field.name.label")}><Input type="text" value={view.name}
+                    disabled={agent.name === "implementation-plan-executioner"}
+                    onChange={(event) => patch({ name: event.target.value })} /></Field>
                   <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
                 <ModelPicker model={view.model} runnerPreference={view.runnerPreference} onChange={patch} />

@@ -73,9 +73,7 @@ export const deriveRunConfig = (
   } | null,
   task: { name: string; description: string },
 ): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier; promptHash: string } => {
-  const compoundExecutioner = templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
-    && templateStep.stepIndex === 5
-    && templateStep.outputKind === "implementation";
+  const compoundExecutioner = isCompoundExecutionerStep(templateStep);
   return {
     runner: compoundExecutioner ? RunnerKind.CODEX : (templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model)),
     model: compoundExecutioner ? "gpt-5.6-sol:medium" : agent.model,
@@ -88,6 +86,14 @@ export const deriveRunConfig = (
   ]),
   };
 };
+
+const isCompoundExecutionerStep = (templateStep: {
+  stepIndex?: number;
+  outputKind?: string;
+  taskTemplate?: { name: string } | null;
+} | null): boolean => templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
+  && templateStep.stepIndex === 5
+  && templateStep.outputKind === "implementation";
 
 const CODEX_SUBPROCESS_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -110,13 +116,22 @@ export const subprocessRunConfig = async (
     | "elevatedSubprocessModel"
     | "elevatedSubprocessCodexServiceTier"
   >,
+  templateStep: {
+    stepIndex?: number;
+    outputKind?: string;
+    taskTemplate?: { name: string } | null;
+  } | null = null,
 ): Promise<{
   subprocessModel: string;
   subprocessCodexServiceTier: CodexServiceTier;
   elevatedSubprocessModel: string;
   elevatedSubprocessCodexServiceTier: CodexServiceTier;
 } | null> => {
-  if (agent.name !== "implementation-plan-executioner") return null;
+  const compoundExecutioner = isCompoundExecutionerStep(templateStep);
+  if (!compoundExecutioner && agent.name !== "implementation-plan-executioner") return null;
+  if (compoundExecutioner && agent.name !== "implementation-plan-executioner") {
+    throw new Error("Compound implementation step must remain assigned to implementation-plan-executioner");
+  }
   const ordinaryModel = validatedCodexSubprocessModel("ordinary", agent.ordinarySubprocessModel);
   const elevatedModel = validatedCodexSubprocessModel("elevated", agent.elevatedSubprocessModel);
   if (!agent.ordinarySubprocessCodexServiceTier || !agent.elevatedSubprocessCodexServiceTier) {
@@ -603,7 +618,7 @@ const enqueueTaskRunInternal = async (
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-  const subprocess = await subprocessRunConfig(lockedAgent);
+  const subprocess = await subprocessRunConfig(lockedAgent, task.templateStep);
   const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
   return tx.run.create({ data: {
     projectId: task.projectId,

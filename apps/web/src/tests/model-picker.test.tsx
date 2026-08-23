@@ -184,6 +184,9 @@ test("the executioner Setup page shows and edits independent ordinary and elevat
     const edit = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Edit");
     assert.ok(edit);
     await act(async () => edit.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    const canonicalName = dom.window.document.querySelector('input[value="implementation-plan-executioner"]') as HTMLInputElement | null;
+    assert.ok(canonicalName);
+    assert.equal(canonicalName.disabled, true);
     for (const profile of ["ordinary", "elevated"]) {
       const section = dom.window.document.querySelector(`[data-subprocess-profile="${profile}"]`);
       assert.ok(section);

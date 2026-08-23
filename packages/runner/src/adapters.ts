@@ -34,7 +34,7 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
 ];
 
-const subprocessProfiles = (run: ClaimedTask["run"]): {
+const subprocessProfiles = (run: ClaimedTask["run"], required = false): {
   ordinary: { model: string; effort: string; tier: string };
   elevated: { model: string; effort: string; tier: string };
 } | null => {
@@ -44,7 +44,10 @@ const subprocessProfiles = (run: ClaimedTask["run"]): {
     run.elevatedSubprocessModel,
     run.elevatedSubprocessCodexServiceTier,
   ];
-  if (values.every((value) => value === null)) return null;
+  if (values.every((value) => value === null)) {
+    if (required) throw new Error("Implementation Plan Executioner Run is missing its Codex subprocess snapshot");
+    return null;
+  }
   if (values.some((value) => value === null)) throw new Error("Run contains an incomplete Codex subprocess snapshot");
   const ordinary = modelSpec(run.subprocessModel!);
   const elevated = modelSpec(run.elevatedSubprocessModel!);
@@ -59,7 +62,7 @@ const subprocessProfiles = (run: ClaimedTask["run"]): {
 };
 
 export const buildPrompt = (claim: ClaimedTask): string => {
-  const profiles = subprocessProfiles(claim.run);
+  const profiles = subprocessProfiles(claim.run, claim.agent.name === "implementation-plan-executioner");
   return [
   claim.agent.foundationalPrompt,
   "",
@@ -124,11 +127,11 @@ export const buildPrompt = (claim: ClaimedTask): string => {
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
     & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner">,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent">,
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => {
-  const profiles = subprocessProfiles(claim.run);
+  const profiles = subprocessProfiles(claim.run, claim.agent.name === "implementation-plan-executioner");
   // These names are runner-owned. In particular, a task secret must never be
   // able to reintroduce the host Codex home or the CLAUDE_CONFIG_DIR path that
   // this chain deliberately does not use.
@@ -138,6 +141,7 @@ export const buildChildEnvironment = (
     PI_CODING_AGENT_DIR: _piCodingAgentDir,
     PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
+    AGENTOS_PI_EXPECTS_OPENAI_CODEX: _piExpectsOpenAICodex,
     AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL: _ordinarySubprocessModel,
     AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT: _ordinarySubprocessEffort,
     AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: _ordinarySubprocessServiceTier,
@@ -161,6 +165,9 @@ export const buildChildEnvironment = (
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
     AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
+    ...(claim.runner === "PI" && claim.run.model.startsWith("openai-codex/")
+      ? { AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1" }
+      : {}),
     ...(profiles ? {
       AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL: profiles.ordinary.model,
       AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT: profiles.ordinary.effort,
@@ -181,7 +188,7 @@ export const buildChildEnvironment = (
 
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
-  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL",
+  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL",
   "AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER",
   "AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL", "AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT",
   "AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER",
