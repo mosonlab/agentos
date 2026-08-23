@@ -89,6 +89,7 @@ const mechanicalClaim: ClaimedTask = {
   sessionToken: "session-token",
   secrets: {},
   priorOutputs: [],
+  previousRunHandoff: null,
   regressionRepairHandoff: null,
 };
 

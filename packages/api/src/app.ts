@@ -98,6 +98,12 @@ import { authenticate, issueSessionToken, principalMayAccess, type Principal } f
 import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
+import {
+  canonicalOutputRefusal,
+  isCanonicalAgentStep,
+  persistSessionTaskOutput,
+  previousRunHandoffForClaim,
+} from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
@@ -4174,6 +4180,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           secrets[envVar] = decryptSecret(secret.encryptedValue, secret.ciphertextVersion);
         }
         const run = await tx.run.findUniqueOrThrow({ where: { id: candidate.id } });
+        const previousRunHandoff = await previousRunHandoffForClaim(tx, {
+          taskId: candidate.task.id,
+          runId: candidate.id,
+          runNumber: candidate.runNumber,
+          templateStep: candidate.task.templateStep,
+        });
         const chainFirstRun = candidate.task.chainId && candidate.task.chainIndex !== null
           ? await tx.run.findFirst({
             where: {
@@ -4247,6 +4259,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           sessionToken: sessionCredential.token,
           secrets,
           priorOutputs,
+          previousRunHandoff,
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff
             : null,
@@ -4661,6 +4674,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // allowlisted merge executor cannot author a `merge-result`, and the
         // executor's session cannot author an ordinary step's output.
         task: { select: {
+          id: true,
           projectId: true,
           chainId: true,
           chainIndex: true,
@@ -4684,29 +4698,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       run.runnerId ?? "",
     );
     if (outputRefusal) return context.json({ error: outputRefusal }, 403);
-    const output = await db.taskStepOutput.upsert({
-      where: { taskId: run.taskId },
-      create: { taskId: run.taskId, runId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-      update: { runId, kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-    });
-    // A blind step's claim deliberately carried no predecessor output. Its
-    // first task_output call durably records the independent review; only then
-    // does the same platform endpoint reveal earlier outputs for adjudication.
-    const predecessorOutputs = run.task?.templateStep?.baseFromStepIndex != null
-      && run.task.chainId && run.task.chainIndex !== null
-      ? await db.taskStepOutput.findMany({
-        where: {
-          task: {
-            projectId: run.task.projectId,
-            chainId: run.task.chainId,
-            chainIndex: { lt: run.task.chainIndex },
-          },
-        },
-        select: { kind: true, body: true, commitSha: true, task: { select: { name: true, chainIndex: true } } },
-        orderBy: { task: { chainIndex: "asc" } },
-      })
-      : [];
-    return context.json({ ...output, predecessorOutputs });
+    const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
+      task: run.task!,
+      runId,
+      kind: body.kind,
+      body: body.body,
+      commitSha: body.commitSha ?? null,
+      ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+    }));
+    if (!persisted.ok) return context.json({ error: persisted.reason }, 409);
+    return context.json({ ...persisted.output, predecessorOutputs: persisted.predecessorOutputs });
   });
 
   app.post("/session/runs/:runId/inbox/questions", async (context) => {
@@ -5065,6 +5066,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
+        let canonicalOutputFailure: string | null = null;
         if (!succeeded && !retryCreated && run.task) {
           const tailRows = await tx.taskActivity.findMany({
             where: { taskId: run.taskId },
@@ -5140,23 +5142,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             metadata: jsonValue({ exitCode: body.exitCode, mergeOutcome: outcome.outcome }),
           } });
         } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
-          // A row that already exists is left exactly as its author wrote it.
-          // This branch used to restamp `runId` and `metadata` onto a body it
-          // did not touch, so a task whose run 1 wrote a real output and whose
-          // run 2 completed without writing one ended up with a row that
-          // claimed to be run 2's while its text was run 1's — the identity lie
-          // #114 names. Body, runId and metadata describe one act of authorship
-          // and may only move together; since moving the body here would
-          // replace a real deliverable with this run's completion tail, none of
-          // the three moves. Which run's output *counts* when several have one
-          // is a cardinality question this table cannot yet express, and it is
-          // answered by #121 (per-run rows plus an explicit selection pointer),
-          // not by a silent overwrite. The tail this completion carries is
-          // recorded on `Run.output` above regardless.
-          const existingOutput = await tx.taskStepOutput.findUnique({
-            where: { taskId: run.taskId }, select: { id: true, runId: true },
-          });
-          const requiresExplicitOutput = run.task.templateStep?.outputKind === "regression-verification";
+          // Body, runId and metadata describe one act of authorship and only
+          // move together through task_output. Completion may bind that same
+          // Run's row to its delivered head, but it never restamps a prior
+          // Run's body or synthesizes a canonical step's deliverable.
+          let existingOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } });
+          const canonicalAgentStep = isCanonicalAgentStep(run.task.templateStep);
+          const requiresExplicitOutput = canonicalAgentStep
+            || run.task.templateStep?.outputKind === "regression-verification";
           if (!existingOutput && !requiresExplicitOutput) {
             await tx.taskStepOutput.create({ data: {
               taskId: run.taskId,
@@ -5171,15 +5164,43 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             // commit remaining tracked changes afterwards, so completion
             // advances that same run's output to the actual end commit before
             // successor activation reads it.
-            await tx.taskStepOutput.update({
+            existingOutput = await tx.taskStepOutput.update({
               where: { id: existingOutput.id }, data: { commitSha: body.headSha },
             });
           }
+          const outputRefusal = canonicalOutputRefusal(
+            run.task.templateStep,
+            existingOutput,
+            run.id,
+            body.headSha ?? null,
+          );
+          if (outputRefusal) {
+            await tx.task.update({
+              where: { id: run.taskId },
+              data: { status: TaskStatus.REVIEW, failureReason: outputRefusal },
+            });
+            await tx.taskActivity.create({ data: {
+              taskId: run.taskId,
+              actorType: "control-plane",
+              body: `Canonical task output refused: ${outputRefusal}`,
+              metadata: {
+                kind: "canonicalTaskOutput.refusal",
+                schemaVersion: 1,
+                runId: run.id,
+                reason: outputRefusal,
+              },
+            } });
+          }
+          canonicalOutputFailure = outputRefusal;
         }
         if (succeeded && mechanical) {
           // Already branched above; the mechanical path owns its own advance.
         } else if (succeeded && run.task?.templateId) {
-          if (run.task.templateStep?.outputKind === "regression-verification") {
+          if (canonicalOutputFailure) {
+            // The current Run succeeded as a process, but it did not publish a
+            // canonical deliverable bound to that Run and head. The REVIEW
+            // state written above is the terminal control-plane outcome.
+          } else if (run.task.templateStep?.outputKind === "regression-verification") {
             const result = await handleRegressionCompletion(tx, {
               task: run.task,
               run: {
@@ -5248,6 +5269,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                   state: "rejected",
                   reviewTaskId: run.taskId,
                   headSha: reviewMarker.headSha,
+                  baseSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null,
                   summary,
                 },
               } });
@@ -5396,7 +5418,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             taskId: run.taskId,
             actorType: "runner",
             actorId: body.runnerId,
-            body: succeeded && (run.task?.templateId || run.task?.chainId || run.task?.followUpTaskId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
+            body: canonicalOutputFailure ? `Run ${run.runNumber} succeeded but canonical task output was refused`
+              : succeeded && (run.task?.templateId || run.task?.chainId || run.task?.followUpTaskId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
               : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
               : retryCreated ? `Run ${run.runNumber} failed; retry queued`
                 : `Run ${run.runNumber} failed; task moved to review`,

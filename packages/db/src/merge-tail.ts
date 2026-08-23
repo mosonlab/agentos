@@ -62,7 +62,20 @@ export type RegressionVerdict =
 
 export type RegressionRepairHandoff = {
   schemaVersion: 1;
-  previousVerdict: Exclude<RegressionVerdict, { outcome: "pass" }>;
+  trigger:
+    | { kind: "regression-verdict"; verdict: Exclude<RegressionVerdict, { outcome: "pass" }> }
+    | {
+      kind: "independent-review-rejection";
+      verdict: Extract<RegressionVerdict, { outcome: "pass" }>;
+      review: {
+        taskId: string;
+        headSha: string;
+        baseHeadSha: string;
+        summary: string;
+        outputKind: string;
+        outputBody: string;
+      };
+    };
   repair: {
     kind: "review-fix" | "gate-fix" | "refresh-conflict";
     taskId: string;
