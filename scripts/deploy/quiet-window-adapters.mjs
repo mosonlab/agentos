@@ -77,18 +77,36 @@ export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES) => {
   };
 };
 
-export const inspectGitPreflight = ({ git, root, target }) => {
+const inspectCheckout = ({ git, root }) => {
   const text = (...args) => execFileSync(git, ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   const head = text("rev-parse", "HEAD");
   let branch = null;
   try { branch = text("symbolic-ref", "--short", "HEAD"); } catch { /* detached HEAD is not the production main branch */ }
   const dirty = text("status", "--porcelain").length > 0;
+  return { branch, head, dirty };
+};
+
+export const inspectProductionCheckout = ({ git, root }) => {
+  const state = inspectCheckout({ git, root });
+  return {
+    ...state,
+    refusal: gitPreflightFailure({ ...state, target: state.head, fastForward: true }),
+  };
+};
+
+export const inspectGitPreflight = ({ git, root, target }) => {
+  const state = inspectCheckout({ git, root });
   let fastForward = false;
   try {
-    execFileSync(git, ["-C", root, "merge-base", "--is-ancestor", head, target], { stdio: "ignore" });
+    execFileSync(git, ["-C", root, "merge-base", "--is-ancestor", state.head, target], { stdio: "ignore" });
     fastForward = true;
   } catch { /* a non-zero merge-base verdict is the refusal */ }
-  return { branch, head, target, dirty, fastForward, refusal: gitPreflightFailure({ branch, dirty, head, target, fastForward }) };
+  return {
+    ...state,
+    target,
+    fastForward,
+    refusal: gitPreflightFailure({ ...state, target, fastForward }),
+  };
 };
 
 export const processStartIdentity = (pid) => {
