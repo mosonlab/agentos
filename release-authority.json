@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "41f755abb627e58ae95ec14a4e685c1fbfcc7e1a",
-  "tree": "397965581cb8ed93ba14452b660aab619e3f28a9",
+  "commit": "602c91258a106b588135830602517e3761e4f129",
+  "tree": "28708223389bd279e501a47f4185ece74bbd7e60",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -123,8 +123,13 @@
     },
     {
       "path": "packages/db/prisma/migrations/20260823010000_codex_service_tier/migration.sql",
-      "sha256": "97fd3274861be2b6ebb193ee4b5a48031d7b835020853ae2a0e9325573cb8487",
-      "blob": "bb8b30e44563c2c30fdfdfae6d12c1dceaed07ba"
+      "sha256": "9586fe464011aef5281cbcd905c1d46f8ae708547724e50e059e5e1d17e1c427",
+      "blob": "ffc7de94df349cd4281c315374e10ace320dd282"
+    },
+    {
+      "path": "packages/db/prisma/migrations/20260823033000_executioner_subprocess_profiles/migration.sql",
+      "sha256": "1e98d465ae260bb01d3bcadf4aeb18b76da12d04a127fbc253a3624a3528b30f",
+      "blob": "914bd529b33e5209ad457e09e600b80328cd02d0"
     },
     {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
@@ -143,8 +148,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "9d9106a243fc776a96c9e0b3b6ad2e6c073425ec6a1bf67d53dd4a83630999e9",
-      "blob": "c4ec1240b63a6673bc91eb97c97f63d946d9d158"
+      "sha256": "46a76f74ebdaeb815f940523ed9460edf0c6fc155ac652b5069814df16f27552",
+      "blob": "e0970e276dc3484bd4222e912b0cfddca7cf26b8"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -153,8 +158,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "32e443f0f891cbb09f24e3b821f51c0a959042e1154c706c9e97dd7f04e050c2",
-      "blob": "326a21c98b8b0b8b72943a63c4df0b67cec60c54"
+      "sha256": "d0d19efaaa4bd8a082081b136110f2d5bb50469474df6bc11e001a3e027a09b6",
+      "blob": "1f215e94be3f85d13608a5a901491b76b4599772"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -168,13 +173,13 @@
     }
   ],
   "migrations": {
-    "count": 23,
-    "terminal": "20260823010000_codex_service_tier",
-    "sha256": "92d7fbc70846cabbdb490c35c5b61a21c9ad8e155709d361338c6e90560ec5bd"
+    "count": 24,
+    "terminal": "20260823033000_executioner_subprocess_profiles",
+    "sha256": "0a64b246e5fd0893c0781f5709086aa24b273aa71c33857a4f706377a47da4e1"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "7qD1IHMKP5uT2xOeY6weCPrPhOmvHCKTjn5VL0JT56epxMq4DUcJWM1fY18woc/x90699R3naSFErM/QUyQIBA=="
+    "value": "E1xSpv47pW0fDXSOkminRWYO1t11qqyrgWYE9UVBKi0yzdvrIC59Df9xzPi9NKSteBRLTcYGcRwux3PrUOJ4BQ=="
   }
 }
