@@ -166,7 +166,14 @@ test("runner completion and manual successor start serialize to one run without 
       const [completed, started] = await Promise.all([completion, manualStart]);
       assert.equal(completed.status, 200);
       assert.equal(started.status, 409);
-      assert.equal((await started.json() as { error: string }).error, "Task already has an active run");
+      // Completion now locks Run before Task so cancellation and completion
+      // share one global order. The manual start may therefore observe either
+      // side of the same safe boundary: the predecessor is not done yet, or
+      // completion has advanced it and already queued the successor Run.
+      assert.match(
+        (await started.json() as { error: string }).error,
+        /^(?:Cannot start Second; predecessor First is not done|Task already has an active run)$/,
+      );
     });
   } finally {
     if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorOperator;
