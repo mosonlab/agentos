@@ -72,14 +72,15 @@
 # Two content-addressed caches change latency, never the question the gate asks.
 # The dependency snapshot key covers every package manifest, package-lock.json,
 # npm configuration, the Prisma schema consumed by postinstall, and the exact
-# Node/npm/macOS toolchain tuple. A miss runs npm ci; a hit first deletes, then
-# restores with APFS clones, every node_modules tree npm ci can create at the root
-# and directly below apps/* and packages/*. The entry carries an exact manifest
-# of those trees. The clones are copy-on-write, so later tools can mutate this
-# worktree without changing the cache. This is equivalent to npm ci's delete-and-
-# repopulate guarantee under the exclusive worktree lock: neither path can inherit
-# root or nested node_modules state from this or another gate, and a doubtful or
-# incomplete snapshot is always a miss.
+# Node/npm/macOS toolchain tuple. On Darwin, a miss runs npm ci; a hit first
+# deletes, then restores with APFS clones, every node_modules tree npm ci can
+# create at the root and directly below apps/* and packages/*. The entry carries
+# an exact manifest of those trees. The clones are copy-on-write, so later tools
+# can mutate this worktree without changing the cache. Linux deliberately stays
+# on npm ci and its content-addressed npm cache: copying the much larger
+# node_modules tree without APFS clonefile support costs more than this install.
+# Neither path can inherit root or nested node_modules state from this or another
+# gate, and a doubtful or incomplete Darwin snapshot is always a miss.
 #
 # The build snapshot adds the pinned git tree plus every environment input read
 # by the web build to that dependency key. It contains only dist outputs from a
@@ -87,9 +88,10 @@
 # A miss is first captured in this run's private temp directory; it is not made
 # globally visible until the final HEAD/worktree drift check passes. Thus outputs
 # built from a mid-run edit can never be published under the pinned clean OID.
-# On a hit outputs are cloned into an empty destination and the two dated
-# provenance files are regenerated for this run. No test result or test verdict
-# is cached: every lint, typecheck, unit test, migration and database test still
+# On a hit outputs are copied into an empty destination with the platform's
+# copy-on-write primitive when available, and the two dated provenance files are
+# regenerated for this run. No test result or test verdict is cached: every
+# lint, database-CLI typecheck, unit test, migration and database test still
 # executes. Cache entries are write-once; a malformed entry falls back to the
 # original slow command rather than being repaired or guessed at.
 
@@ -297,11 +299,27 @@ step() {
 
 sha256() { shasum -a 256 | awk '{print $1}'; }
 
+copy_cache_tree() {
+  case "$(uname -s)" in
+    Darwin) cp -c -R "$1" "$2" ;;
+    Linux) cp -a --reflink=auto "$1" "$2" ;;
+    *) cp -R -p "$1" "$2" ;;
+  esac
+}
+
+cache_copy_description() {
+  case "$(uname -s)" in
+    Darwin) printf 'APFS clones' ;;
+    Linux) printf 'reflink when supported, portable copy otherwise' ;;
+    *) printf 'portable copies' ;;
+  esac
+}
+
 # The key names inputs as well as hashing their bytes, so adding/removing a
 # manifest or npm configuration file cannot collide with merely changing one.
 dependency_cache_key() {
   {
-    printf 'format=all-workspace-node-modules-v2\n'
+    printf 'format=all-workspace-node-modules-v3\n'
     printf 'node=%s\nnpm=%s\nplatform=%s\n' \
       "$(node --version)" "$(npm --version)" "$(uname -sm)"
     git -C "${REPO_ROOT}" ls-files \
@@ -309,7 +327,7 @@ dependency_cache_key() {
       '.npmrc' 'apps/*/.npmrc' 'packages/*/.npmrc' 'packages/db/prisma/schema.prisma' \
       | LC_ALL=C sort | while IFS= read -r input; do
         printf 'file=%s\n' "${input}"
-        shasum -a 256 "${REPO_ROOT}/${input}"
+        printf 'sha256=%s\n' "$(sha256 < "${REPO_ROOT}/${input}")"
       done
     # npm configuration can change platform packages and lifecycle behaviour.
     # It is fed only into the digest; credentials are never printed or stored.
@@ -426,7 +444,7 @@ publish_dependency_snapshot() {
   if write_node_modules_manifest "${staging}/NODE_MODULES"; then
     while IFS= read -r target; do
       mkdir -p "${staging}/tree/$(dirname "${target}")" || break
-      cp -c -R "${REPO_ROOT}/${target}" "${staging}/tree/${target}" || break
+      copy_cache_tree "${REPO_ROOT}/${target}" "${staging}/tree/${target}" || break
     done < "${staging}/NODE_MODULES"
     if [ "$(find "${staging}/tree" -type d -name node_modules -prune | wc -l | tr -d ' ')" \
          = "$(wc -l < "${staging}/NODE_MODULES" | tr -d ' ')" ] \
@@ -449,7 +467,15 @@ publish_dependency_snapshot() {
 }
 
 install_dependencies() {
-  local entry="" dependency_key="" target="" clone_failed=0
+  local entry="" dependency_key="" target="" clone_failed=0 platform=""
+  platform="$(uname -s)"
+  if [ "${platform}" != Darwin ]; then
+    note "dependency snapshot skipped on ${platform}; using npm ci with the npm download cache"
+    clear_all_node_modules || return 1
+    npm ci --prefer-offline --no-audit --no-fund || return 1
+    verify_generated_prisma_client
+    return
+  fi
   mkdir -p "${CACHE_ROOT}/node-modules" || return 1
   dependency_key="$(dependency_cache_key)" || return 1
   entry="${CACHE_ROOT}/node-modules/${dependency_key}"
@@ -457,7 +483,7 @@ install_dependencies() {
     clear_all_node_modules || return 1
     while IFS= read -r target; do
       mkdir -p "${REPO_ROOT}/$(dirname "${target}")" || { clone_failed=1; break; }
-      cp -c -R "${entry}/tree/${target}" "${REPO_ROOT}/${target}" \
+      copy_cache_tree "${entry}/tree/${target}" "${REPO_ROOT}/${target}" \
         || { clone_failed=1; break; }
       chmod -R u+w "${REPO_ROOT}/${target}" || { clone_failed=1; break; }
     done < "${entry}/NODE_MODULES"
@@ -465,7 +491,8 @@ install_dependencies() {
       # Snapshot permissions enforce write-once storage. The APFS clone is this
       # worktree's private COW materialisation and Prisma may update it.
       note "dependency cache hit: ${dependency_key} (APFS clone)"
-      return 0
+      verify_generated_prisma_client
+      return
     fi
     note "dependency cache clone failed; falling back to npm ci"
     clear_all_node_modules || return 1
@@ -475,9 +502,16 @@ install_dependencies() {
   # Match npm ci's clean boundary even after a failed cache materialisation.
   clear_all_node_modules || return 1
   npm ci --prefer-offline --no-audit --no-fund || return 1
+  verify_generated_prisma_client || return 1
   publish_dependency_snapshot "${entry}" "${dependency_key}" \
     || note "dependency cache publication failed; this run keeps fresh npm-ci state"
   return 0
+}
+
+verify_generated_prisma_client() {
+  [ -f "${REPO_ROOT}/node_modules/.prisma/client/index.js" ] \
+    && [ -f "${REPO_ROOT}/node_modules/.prisma/client/schema.prisma" ] \
+    || { printf 'npm ci did not produce the generated Prisma client\n' >&2; return 1; }
 }
 
 BUILD_OUTPUTS=(
@@ -493,7 +527,11 @@ build_cache_key() {
     done
     for input in .env .env.local .env.production .env.production.local; do
       printf 'file=%s\n' "${input}"
-      if [ -f "${REPO_ROOT}/${input}" ]; then shasum -a 256 "${REPO_ROOT}/${input}"; else printf 'absent\n'; fi
+      if [ -f "${REPO_ROOT}/${input}" ]; then
+        printf 'sha256=%s\n' "$(sha256 < "${REPO_ROOT}/${input}")"
+      else
+        printf 'absent\n'
+      fi
     done
   } | sha256
 }
@@ -524,7 +562,7 @@ publish_build_snapshot() {
   mkdir -p "${staging}/tree"
   for output in "${BUILD_OUTPUTS[@]}"; do
     mkdir -p "${staging}/tree/$(dirname "${output}")"
-    cp -c -R "${source_tree}/${output}" "${staging}/tree/${output}" || {
+    copy_cache_tree "${source_tree}/${output}" "${staging}/tree/${output}" || {
       rm -rf -- "${staging}" "${lock}"
       note "build snapshot could not be cloned; this run keeps fresh build output"
       return 0
@@ -550,7 +588,7 @@ prepare_deferred_build_snapshot() {
   mkdir -p "${snapshot}/tree" || return 1
   for output in "${BUILD_OUTPUTS[@]}"; do
     mkdir -p "${snapshot}/tree/$(dirname "${output}")" || return 1
-    cp -c -R "${REPO_ROOT}/${output}" "${snapshot}/tree/${output}" || return 1
+    copy_cache_tree "${REPO_ROOT}/${output}" "${snapshot}/tree/${output}" || return 1
   done
   printf '%s\n' "${key}" > "${snapshot}/READY" || return 1
   chmod -R a-w "${snapshot}/tree" "${snapshot}/READY" || return 1
@@ -584,7 +622,7 @@ build_all() {
     clear_build_outputs || return 1
     for output in "${BUILD_OUTPUTS[@]}"; do
       mkdir -p "${REPO_ROOT}/$(dirname "${output}")" || return 1
-      cp -c -R "${entry}/tree/${output}" "${REPO_ROOT}/${output}" || {
+      copy_cache_tree "${entry}/tree/${output}" "${REPO_ROOT}/${output}" || {
         note "build cache clone failed at ${output}; falling back to a clean full build"
         clear_build_outputs || return 1
         npm run build || return 1
@@ -601,7 +639,7 @@ build_all() {
     # cached builtAt claim that this materialisation happened on an earlier run.
     (cd "${REPO_ROOT}/packages/api" && node ../build-info/stamp.mjs dist) || return 1
     (cd "${REPO_ROOT}/packages/runner" && node ../build-info/stamp.mjs dist) || return 1
-    note "build cache hit: ${key} (APFS clones, provenance restamped)"
+    note "build cache hit: ${key} ($(cache_copy_description), provenance restamped)"
     return 0
   fi
   note "build cache miss: ${key}"
@@ -627,10 +665,9 @@ workspace_names_with_script() {
   ' "$1"
 }
 
-# Each workspace gets its own process and log. Typechecks are noEmit (the web
-# project writes only its own node_modules/.tmp tsbuildinfo), so they share no
-# mutable output. Unit suites write fixtures under mktemp; they only read the
-# completed dist tree. Logs are replayed in stable workspace order.
+# Each workspace gets its own process and log. Unit suites write fixtures under
+# mktemp and only read the completed dist tree, so they share no mutable output.
+# Logs are replayed in stable workspace order.
 run_workspace_script_parallel() {
   local script="$1" ignore_lifecycle="${2:-0}" workspace="" safe="" log=""
   local index=0 next_wait=0 failed=0 max_jobs=1
@@ -773,8 +810,12 @@ parallel_two_steps() {
 
 parallel_lint() {
   local biome="${GATE_TMP}/lint-biome.log" types="${GATE_TMP}/lint-types.log" biome_pid types_pid failed=0
+  local eslint_node_options="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=2560"
   (cd "${REPO_ROOT}" && npm run lint:biome) >"${biome}" 2>&1 & biome_pid=$!
-  (cd "${REPO_ROOT}" && npm run lint:types) >"${types}" 2>&1 & types_pid=$!
+  # Node 26 caps its heap near 1.8 GiB on the 4 GiB worker; the type-aware
+  # project service now crosses that boundary before completing. Raise only
+  # this process's ceiling. The option is a limit, not a reservation.
+  (cd "${REPO_ROOT}" && NODE_OPTIONS="${eslint_node_options}" npm run lint:types) >"${types}" 2>&1 & types_pid=$!
   wait "${biome_pid}" || failed=1
   wait "${types_pid}" || failed=1
   printf '\n--- biome ---\n'; cat "${biome}"
@@ -1109,8 +1150,8 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 # `package-lock.json` and fails rather than resolving anything, and a cached
 # tarball is keyed by the integrity hash the lockfile records — a cache hit is
 # therefore a hit on exactly the bytes the lockfile names. The immutable
-# node_modules snapshot preserves the delete-and-repopulate boundary while APFS
-# clone-on-write avoids paying to recreate those same bytes on every clean run.
+# node_modules snapshot preserves the delete-and-repopulate boundary on Darwin;
+# Linux uses npm's download cache because copying that tree is slower than npm ci.
 step "npm ci" install_dependencies
 # These execute project binaries, so they belong after dependencies. Keeping
 # them among the install-free frozen checks made a fresh clone fail on `tsx`
@@ -1120,14 +1161,11 @@ step "templates release-demo harness" npm run test:demo-templates
 step "public snapshot scanner tests" npm run test:snapshot-scan
 step "public snapshot closed-scope scan" npm run snapshot:scan
 step "quiet-window auto-deploy harness" npm run test:auto-deploy
-step "prisma generate" npm run db:generate
-step "typecheck (all workspaces)" run_workspace_script_parallel typecheck
+step "typecheck (database CLI)" npm run typecheck:cli
 # The minimum lint gate (#143): Biome's opt-in safety rules, then the one
 # type-aware rule (no-floating-promises) through typescript-eslint. Both are
 # npm dependencies and nothing here shells out, so the remote gate worker runs
-# it unchanged. It sits after typecheck because both processes saturate the same
-# cores and concurrent eslint was slower than letting typecheck finish first.
-# Formatting is deliberately not checked — see biome.jsonc.
+# it unchanged. Formatting is deliberately not checked — see biome.jsonc.
 step "lint (biome + type-aware no-floating-promises)" parallel_lint
 # apps/web's CSS regression test reads the built stylesheet out of apps/web/dist,
 # and the dbtests spawn the real API out of packages/api/dist.
@@ -1139,8 +1177,9 @@ step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deplo
 # only evidence that an empty target passes and a non-empty one still refuses.
 # Both packages' pretest:db hooks only rebuild subsets of the full build that
 # just passed. Invoke the shared DBTEST runner directly so each file receives a
-# cloned database and private host roots, including the four packages/db files
-# that the old package script forced onto one shared schema serially.
+# cloned database and private host roots. Keep preflight beside unit tests, then
+# run the API suite as its own wave: consolidating both suites measured below the
+# required 15% improvement and delayed every test behind all database clones.
 parallel_two_steps \
   "unit tests (all workspaces)" parallel_unit_tests \
   "database preflight tests" run_database_preflight_tests

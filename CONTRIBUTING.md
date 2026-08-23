@@ -36,10 +36,10 @@ selects evidence from that exact diff. Content-only modifications to an explicit
 prose allowlist use the `docs-only` profile: diff hygiene, the closed public
 snapshot scan, and final HEAD/worktree drift. Adds, deletes, renames, mode
 changes, runtime-coupled documentation, code, configuration, and unknown paths
-use the full profile: a clean `npm ci`, database client generation, typecheck and
-lint across every workspace, the build, unit tests, the gate schema's migration,
-database preflight tests, API database tests, and final drift verification. A
-caller cannot select the cheaper profile.
+use the full profile: a clean `npm ci` whose postinstall generates the database
+client, the database CLI typecheck, repository lint, the whole-workspace build,
+unit tests, the gate schema's migration, database preflight tests, API database
+tests, and final drift verification. A caller cannot select the cheaper profile.
 
 ```sh
 scripts/merge-gate.sh --expect-head <oid>
