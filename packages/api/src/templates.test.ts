@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AssigneeType,
   CANONICAL_AGENT_DEFAULTS,
+  CodexServiceTier,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_SENTINEL_MODEL,
@@ -26,6 +27,11 @@ test("instantiating the canonical feature template creates twelve tasks includin
     name: string;
     model: string;
     runnerPreference: RunnerPreference;
+    codexServiceTier: CodexServiceTier;
+    ordinarySubprocessModel: string | null;
+    ordinarySubprocessCodexServiceTier: CodexServiceTier | null;
+    elevatedSubprocessModel: string | null;
+    elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
     foundationalPrompt: string;
     rolePrompt: string;
   }>(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
@@ -33,6 +39,11 @@ test("instantiating the canonical feature template creates twelve tasks includin
     name: contract.name,
     model: contract.model,
     runnerPreference: contract.runner,
+    codexServiceTier: CodexServiceTier.DEFAULT,
+    ordinarySubprocessModel: contract.name === "implementation-plan-executioner" ? "gpt-5.6-luna:max" : null,
+    ordinarySubprocessCodexServiceTier: contract.name === "implementation-plan-executioner" ? CodexServiceTier.DEFAULT : null,
+    elevatedSubprocessModel: contract.name === "implementation-plan-executioner" ? "gpt-5.6-sol:high" : null,
+    elevatedSubprocessCodexServiceTier: contract.name === "implementation-plan-executioner" ? CodexServiceTier.DEFAULT : null,
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   }]));
@@ -62,6 +73,10 @@ test("instantiating the canonical feature template creates twelve tasks includin
     $queryRaw: async () => [...agents.values()].map((agent) => ({
       id: agent.id, archivedAt: null, agentId: agent.id, repoId: "repo-1",
     })),
+    agent: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        [...agents.values()].find((agent) => agent.id === where.id) ?? null,
+    },
     task: {
       create: async ({ data }: { data: Record<string, any> }) => {
         const task = {
