@@ -3,7 +3,7 @@
 //
 // Two things are under test and both are mechanisms, not text.
 //
-// The first is the capacity invariant: three slots, and never a fourth. That is
+// The first is the capacity invariant: two slots, and never a third. That is
 // a concurrency property, so the cases here run real concurrent processes
 // against a real lock root. The bug they exist for is specific — a slot lock
 // that is created before it names its owner has a window in which a second
@@ -112,8 +112,8 @@ test("refuses a lock that names no pid rather than reclaiming it", (t) => {
 
 test("refuses a lock whose contents are not a pid", (t) => {
   const root = slotRoot(t);
-  writeFileSync(lockFile(root, "remote-2"), "held by somebody\n");
-  const result = runBash(`gate_slot_try "${root}" remote-2`);
+  writeFileSync(lockFile(root, "remote-1"), "held by somebody\n");
+  const result = runBash(`gate_slot_try "${root}" remote-1`);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /names no pid/);
 });
@@ -235,12 +235,12 @@ test("sixteen concurrent claimers on one slot produce exactly one holder", (t) =
   assert.equal(held.length, 1, `expected one holder, got ${held.length}: ${held.join(",")}`);
 });
 
-test("nine concurrent claimers across three slots produce exactly three holders", (t) => {
+test("eight concurrent claimers across two slots produce exactly two holders", (t) => {
   const root = slotRoot(t);
   const winners = join(root, "winners");
   const claimer = `
     . "${libPath}"
-    for slot in local remote-1 remote-2; do
+    for slot in remote-1 local; do
       if gate_slot_try "${root}" "$slot"; then
         printf '%s %s\\n' "$slot" "$$" >> "${winners}"
         sleep 2
@@ -254,7 +254,7 @@ test("nine concurrent claimers across three slots produce exactly three holders"
       "-c",
       `set -uo pipefail
        : > "${winners}"
-       for i in $(seq 1 9); do
+       for i in $(seq 1 8); do
          bash -c '${claimer.replace(/'/g, "'\\''")}' &
        done
        wait`,
@@ -263,8 +263,8 @@ test("nine concurrent claimers across three slots produce exactly three holders"
   );
   assert.equal(result.status, 0, result.stderr);
   const held = readFileSync(winners, "utf8").trim().split("\n").filter(Boolean);
-  assert.equal(held.length, 3, `expected three holders, got ${held.length}: ${held.join(" | ")}`);
-  assert.equal(new Set(held.map((line) => line.split(" ")[0])).size, 3);
+  assert.equal(held.length, 2, `expected two holders, got ${held.length}: ${held.join(" | ")}`);
+  assert.equal(new Set(held.map((line) => line.split(" ")[0])).size, 2);
 });
 
 test("a killed holder's lock is released by the signal traps", (t) => {
@@ -344,7 +344,7 @@ const dispatch = (t, repo, args, env = {}, busySlots = []) => {
 
 test("a local PASS comes back as 0 with the gate's own verdict line", (t) => {
   const repo = fixtureRepo(t, {});
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
 });
@@ -353,7 +353,7 @@ test("a local FAIL comes back as 1, unchanged", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: FAIL (stub)\\n"; exit 1',
   });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
 });
@@ -362,7 +362,7 @@ test("NOT AUTHORITATIVE keeps its own code", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: NOT AUTHORITATIVE\\n"; exit 3',
   });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
   assert.equal(result.status, 3);
 });
 
@@ -382,7 +382,7 @@ test("a failed mirror push is 76 and not a FAIL", (t) => {
   assert.doesNotMatch(result.stdout, /MERGE GATE: FAIL/);
 });
 
-test("dispatch tries a remote slot before an eligible local slot", (t) => {
+test("dispatch tries the remote slot before an eligible local slot", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "LOCAL SHOULD NOT RUN\\n"; exit 1',
     remoteGate: 'printf "MERGE GATE: PASS remote-first\\n"; exit 0',
@@ -394,12 +394,12 @@ test("dispatch tries a remote slot before an eligible local slot", (t) => {
   assert.match(result.stderr, /remote-1/);
 });
 
-test("dispatch uses local only when both remote slots are busy", (t) => {
+test("dispatch uses local only when the remote slot is busy", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: PASS local-spillover\\n"; exit 0',
     remoteGate: 'printf "REMOTE SHOULD NOT RUN\\n"; exit 1',
   });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /local-spillover/);
   assert.doesNotMatch(result.stdout, /REMOTE SHOULD NOT RUN/);
@@ -440,7 +440,7 @@ test("every slot busy times out at 75 with no verdict", (t) => {
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
-  for (const slot of ["local", "remote-1", "remote-2"]) {
+  for (const slot of ["local", "remote-1"]) {
     writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
   }
   const result = spawnSync(
@@ -498,17 +498,12 @@ test("locks that cannot be operated are 76 at once, not 75 after the timeout", (
   assert.ok(Date.now() - started < 20_000, "it polled instead of answering at once");
 });
 
-test("one broken lock does not cost the dispatch a slot that is free", (t) => {
-  // The other half: a broken lock must not be contagious. remote-1 is
-  // unusable, the local slot is ineligible because the tree is dirty, and
-  // remote-2 is free — so the gate runs in remote-2 and comes back with a
-  // verdict rather than an errand.
+test("a busy remote slot spills an eligible gate onto the free local slot", (t) => {
   const repo = fixtureRepo(t, {});
-  writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
-  mkdirSync(join(slots, "remote-1.lock"));
+  writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
   const result = spawnSync(
     "bash",
     [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
@@ -520,22 +515,21 @@ test("one broken lock does not cost the dispatch a slot that is free", (t) => {
   );
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
-  assert.match(result.stderr, /remote-2/);
+  assert.match(result.stderr, /local slot/);
 });
 
 test("busy plus broken waits out the timeout and then reports 76, not 75", (t) => {
   // The mixed case. One slot is genuinely busy, so waiting is justified and the
   // dispatch must not give up early — but when the wait ends empty, the answer
-  // is not "the queue was full": two of the three slots were never available to
+  // is not "the queue was full": one of the two slots was never available to
   // anybody, and 75 would send the operator to re-dispatch into the same broken
   // locks. Nothing may be taken here either, so the capacity limit holds.
   const repo = fixtureRepo(t, {});
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
-  writeFileSync(join(slots, "local.slot"), `${process.pid}\n`);
-  mkdirSync(join(slots, "remote-1.lock"));
-  mkdirSync(join(slots, "remote-2.lock"));
+  writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
+  mkdirSync(join(slots, "local.lock"));
   const result = spawnSync(
     "bash",
     [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head, "--timeout-minutes", "0"],
@@ -548,7 +542,7 @@ test("busy plus broken waits out the timeout and then reports 76, not 75", (t) =
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /^GATE NOT RUN: /m);
   assert.doesNotMatch(result.stdout, /GATE DISPATCH: NO SLOT/);
-  assert.equal(readFileSync(join(slots, "local.slot"), "utf8").trim(), String(process.pid));
+  assert.equal(readFileSync(join(slots, "remote-1.slot"), "utf8").trim(), String(process.pid));
 });
 
 test("a gate killed by SIGKILL comes back as 137 with no verdict line", (t) => {
@@ -558,7 +552,7 @@ test("a gate killed by SIGKILL comes back as 137 with no verdict line", (t) => {
   // sees no MERGE GATE line and must read the silence as "no verdict", never as
   // a pass, and never as the FAIL that a rewritten code would have implied.
   const repo = fixtureRepo(t, { mergeGate: "kill -9 $$" });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1", "remote-2"]);
+  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
   assert.equal(result.status, 137);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
 });

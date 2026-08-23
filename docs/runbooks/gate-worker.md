@@ -7,21 +7,15 @@ runtime-coupled, executable, configuration, or unknown change uses the full
 profile.
 
 A full profile is `npm ci`, a whole-workspace compile, unit tests, a throwaway
-PostgreSQL and the api dbtests — about 4 minutes on an idle worker, of which the
-dbtests are about 1½ and everything else together is about 2½. The
-dbtests were about 7 minutes until #146 moved that database's data directory
-into RAM and stopped it paying for durability it deletes seconds later, and
-about 3½ after that until they stopped queueing behind the one schema every
-file dropped and re-applied. The measurements are
-`scripts/gate-worker/bench-postgres.sh` (the container's settings) and
-`scripts/gate-worker/bench-dbtest-concurrency.sh` (how the files are executed);
-each alternates its two arms over one fixed commit, and they are the only thing
-these numbers should ever be updated from. The four minutes is those steps
-added up, not a stopwatch on a whole gate: two timed runs of one commit took
-4.8 and 5.3 minutes, and a second gate overlapped part of both — a busy worker
-is slower, because it permits two gates at once by design. That is pure
-compute, and it does not need to occupy the local machine. This runbook moves
-the compute to a remote server and leaves everything else where it was.
+PostgreSQL and the api dbtests. End-to-end worker logs measured on 2026-08-23
+were stable at about 6 minutes 7 seconds with the worker to themselves. Two
+overlapping full gates took 8 minutes 14 seconds and 8 minutes 42 seconds on the
+same four vCPUs, which is why the worker now exposes one execution slot. The
+install-free `docs-only` profile takes about 4 seconds. Use
+`scripts/gate-worker/bench-postgres.sh` and
+`scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
+runner itself; each alternates its arms over one fixed commit so a tuning claim
+is not inferred from unrelated gate runs.
 
 Everything here is `scripts/gate-worker/`:
 
@@ -29,9 +23,9 @@ Everything here is `scripts/gate-worker/`:
 | --- | --- | --- |
 | `provision.sh` | the server | Installs the pinned toolchain and creates `~/gate/`. Idempotent, dry-run by default. |
 | `mirror-push.sh` | the local machine | Pushes one exact candidate and one exact baseline into immutable `refs/gate/.../<oid>` cache refs, creating `~/gate/<repo>/mirror.git` on first push, and installs `run-gate.sh` beside it. |
-| `run-gate.sh` | the server | Checks one oid out of its repository's mirror and runs `scripts/merge-gate.sh --expect-head <oid> --master <baseline-oid>` against it. |
+| `run-gate.sh` | the server | Holds the worker-wide execution lock, checks one oid out of its repository's mirror and runs `scripts/merge-gate.sh --expect-head <oid> --master <baseline-oid>` against it. |
 | `remote-gate.sh` | the local machine | One synchronous `ssh` call; returns the verdict line and the exit code. |
-| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then runs a gate in the first free slot: either worker slot first, local spillover only while both are busy. |
+| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then tries the worker slot first and the local slot while the worker is busy. |
 | `lib.sh` | the local machine | Shared repository-name derivation for the three local-side scripts. |
 
 The worker hosts one directory per repository, keyed by the origin repository's
@@ -47,9 +41,8 @@ A full gate saturates every core of whatever machine runs it. The dispatcher
 cannot know the candidate-selected profile before running it, so it rations
 machines, not processes: the local machine contributes **one** slot —
 it is also where the agent sessions and the local services live — and the
-worker contributes **two**, which is what its four vCPUs were measured to
-carry. Three slots, machine-wide, shared by every repository that dispatches
-from this machine.
+four-vCPU worker contributes **one**. Two slots, machine-wide, shared by every
+repository that dispatches from this machine.
 
 `gate-dispatch.sh` is the way to run a gate when anything else might also be
 running one:
@@ -62,13 +55,13 @@ scripts/gate-worker/gate-dispatch.sh <oid>
   supplied, the dispatcher fetches origin's current default branch without
   creating a local tracking ref, re-reads `origin HEAD`, and freezes that exact
   oid as the baseline before taking a slot.
-- Either remote slot is preferred. It runs `mirror-push.sh` before
+- The remote slot is preferred. It runs `mirror-push.sh` before
   `remote-gate.sh`, pushing only the frozen candidate and baseline under
   oid-named cache refs. The local checkout may be detached or single-branch;
   its incomplete ref namespace is never mirrored and cannot delete worker refs.
-- The local slot is spillover only while both remote slots are busy, and only
-  when this worktree is clean at `<oid>`.
-- All three busy: the dispatcher blocks and re-polls (default every 30s, for
+- The local slot is spillover only while the remote slot is busy, and only when
+  this worktree is clean at `<oid>`.
+- Both busy: the dispatcher blocks and re-polls (default every 30s, for
   60 minutes — `GATE_DISPATCH_POLL_SECONDS`, `GATE_DISPATCH_TIMEOUT_MINUTES`).
   On timeout it exits **75** with `GATE DISPATCH: NO SLOT`: nothing ran, no
   verdict exists, and re-dispatching is the recovery. A timeout that recurs
@@ -82,11 +75,14 @@ scripts/gate-worker/gate-dispatch.sh <oid>
   around it exits 76 rather than 75. Waiting for a lock nobody can take is
   waiting for nothing, and reporting it as a full queue hides what to fix.
 
-The accounting is three lock files under `~/.cache/gate-dispatch/`, outside any
-repository because the slots belong to the machines. They are the whole truth
-about dispatched gates, with one honest exception: running `merge-gate.sh` or
-`remote-gate.sh` directly bypasses the rationing, is invisible to it, and is the
-operator's own override to answer for.
+The dispatcher accounts for `remote-1` and `local` under
+`~/.cache/gate-dispatch/`, outside any repository because the slots belong to
+the machines. A direct `merge-gate.sh` bypasses that accounting. A direct
+`remote-gate.sh` bypasses the local lock too, but it cannot add worker capacity:
+every installed `run-gate.sh` contends for the worker-wide
+`~/gate/.full-gate.lock`, held with `flock` for the real process lifetime. If an
+SSH connection drops while its remote process survives, that process keeps the
+worker lock and a later invocation waits instead of running beside it.
 
 A lock is a file created with `ln`, holding the pid of the dispatcher that owns
 it. That shape is deliberate and `scripts/gate-worker/lib.sh` explains it:
@@ -94,8 +90,8 @@ it. That shape is deliberate and `scripts/gate-worker/lib.sh` explains it:
 slot lock names its owner from the instant it exists. A lock *directory* with a
 pid file written a moment later has a window in which it names nobody, and a
 second dispatcher reading that window calls the lock abandoned, deletes it, and
-takes the slot its owner is already gating in — three slots silently becoming
-more than three. Reclaiming a lock whose pid is gone is done by hard-linking it
+takes the slot its owner is already gating in — one slot silently becoming two
+gates. Reclaiming a lock whose pid is gone is done by hard-linking it
 to a witness name first, so of two dispatchers that both see the holder dead
 exactly one may act; a lock whose pid is still alive is never touched, and a
 lock that names no pid at all is never reclaimed automatically — it blocks the
@@ -315,14 +311,15 @@ the terminal for the whole gate.
 There is no queue file and no daemon by design: the state a queue would need is
 exactly the state that makes a worker something to operate rather than
 something to use, and the callers — agent sessions blocking on their own
-merges — are the backpressure.
+merges — are the backpressure. When both slots are occupied, every later caller
+waits and re-polls; requests are not pinned to a machine and strict FIFO order
+is not promised. The first waiter to acquire whichever slot frees runs there.
 
 The database step runs cores-1 files at once — three on this worker — each with
 a database of its own and its own subdirectory of the roots the gate exports.
-The worker permits two gates at the same time by design, so that is up to six
-test processes on four vCPU; `AGENTOS_DBTEST_CONCURRENCY` lowers it on a busier
-worker and `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared
-schema, serial.
+The worker permits one gate at a time, so that is up to three test processes on
+four vCPU; `AGENTOS_DBTEST_CONCURRENCY` lowers it on a busier worker and
+`AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 
 ## Troubleshooting
 
@@ -358,7 +355,7 @@ ssh agentos-gate 'ls -la ~/gate/<repo>/worktrees'
 ssh agentos-gate 'rm -rf ~/gate/<repo>/worktrees/gate-<oid>-<stamp>-<pid> && git -C ~/gate/<repo>/mirror.git worktree prune'
 ```
 
-**`GATE DISPATCH: NO SLOT` keeps recurring** — the three slots are systemically
+**`GATE DISPATCH: NO SLOT` keeps recurring** — the two slots are systemically
 full. That is a capacity signal, not an error to retry harder: either stagger
 the merges, or revisit the worker's sizing with the bench scripts.
 
