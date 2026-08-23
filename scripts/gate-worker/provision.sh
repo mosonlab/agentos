@@ -178,7 +178,7 @@ done
 
 step "Base packages"
 missing_pkgs=""
-for pkg in git curl ca-certificates xz-utils; do
+for pkg in git curl ca-certificates xz-utils util-linux; do
   if dpkg -s "$pkg" >/dev/null 2>&1; then
     ok "$pkg"
   else
