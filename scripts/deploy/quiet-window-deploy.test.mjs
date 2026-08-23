@@ -152,10 +152,11 @@ test("published artifacts derive every workspace dependency tree from the target
 });
 
 test("git preflight names dirty and non-fast-forward refusals", () => {
-  assert.equal(gitPreflightFailure({ dirty: true, head: "a", target: "b", fastForward: true }), "dirty-working-tree");
-  assert.equal(gitPreflightFailure({ dirty: false, head: "a", target: "b", fastForward: false }), "non-fast-forward-main");
-  assert.equal(gitPreflightFailure({ dirty: false, head: "a", target: "b", fastForward: true }), null);
-  assert.equal(gitPreflightFailure({ dirty: false, head: "b", target: "b", fastForward: false }), null);
+  assert.equal(gitPreflightFailure({ branch: "feature", dirty: false, head: "a", target: "b", fastForward: true }), "production-checkout-not-main");
+  assert.equal(gitPreflightFailure({ branch: "main", dirty: true, head: "a", target: "b", fastForward: true }), "dirty-working-tree");
+  assert.equal(gitPreflightFailure({ branch: "main", dirty: false, head: "a", target: "b", fastForward: false }), "non-fast-forward-main");
+  assert.equal(gitPreflightFailure({ branch: "main", dirty: false, head: "a", target: "b", fastForward: true }), null);
+  assert.equal(gitPreflightFailure({ branch: "main", dirty: false, head: "b", target: "b", fastForward: false }), null);
 });
 
 test("dry-run failures never persist escalation state", () => {
@@ -321,8 +322,11 @@ test("production Git preflight refuses real dirty and divergent repositories", (
   writeFileSync(join(root, "file"), "target");
   run("commit", "-am", "target");
   const target = run("rev-parse", "HEAD");
-  run("checkout", "--detach", base);
+  run("checkout", "main");
   assert.equal(inspectGitPreflight({ git, root, target }).refusal, null);
+  run("checkout", "-b", "feature");
+  assert.equal(inspectGitPreflight({ git, root, target }).refusal, "production-checkout-not-main");
+  run("checkout", "main");
   writeFileSync(join(root, "dirty"), "dirty");
   assert.equal(inspectGitPreflight({ git, root, target }).refusal, "dirty-working-tree");
   rmSync(join(root, "dirty"));
@@ -439,7 +443,7 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
   const result = await dryRunDecision({
     revisions: async () => { calls.push("revisions"); return { from: "a", source: "a", to: "b" }; },
     blockingRuns: async () => { calls.push("runs"); return [{ id: "r1", status: "waiting-inbox" }]; },
-    repositoryState: async () => { calls.push("repository"); return { dirty: false, fastForward: "yes" }; },
+    repositoryState: async () => { calls.push("repository"); return { branch: "main", dirty: false, fastForward: "yes" }; },
     serviceState: async () => { calls.push("services"); return { ok: true }; },
     authorityState: async () => { calls.push("authority"); return { ok: true }; },
     backupState: async () => { calls.push("backup"); return { ok: true, mode: "container" }; },
@@ -454,7 +458,7 @@ test("dry-run reports a refused container backup contract as a named decision", 
   const result = await dryRunDecision({
     revisions: async () => ({ from: "a", source: "a", to: "b" }),
     blockingRuns: async () => [],
-    repositoryState: async () => ({ dirty: false, fastForward: "yes" }),
+    repositoryState: async () => ({ branch: "main", dirty: false, fastForward: "yes" }),
     serviceState: async () => ({ ok: true }),
     authorityState: async () => ({ ok: true }),
     backupState: async () => ({

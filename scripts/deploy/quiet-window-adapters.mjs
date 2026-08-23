@@ -80,13 +80,15 @@ export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES) => {
 export const inspectGitPreflight = ({ git, root, target }) => {
   const text = (...args) => execFileSync(git, ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   const head = text("rev-parse", "HEAD");
+  let branch = null;
+  try { branch = text("symbolic-ref", "--short", "HEAD"); } catch { /* detached HEAD is not the production main branch */ }
   const dirty = text("status", "--porcelain").length > 0;
   let fastForward = false;
   try {
     execFileSync(git, ["-C", root, "merge-base", "--is-ancestor", head, target], { stdio: "ignore" });
     fastForward = true;
   } catch { /* a non-zero merge-base verdict is the refusal */ }
-  return { head, target, dirty, fastForward, refusal: gitPreflightFailure({ dirty, head, target, fastForward }) };
+  return { branch, head, target, dirty, fastForward, refusal: gitPreflightFailure({ branch, dirty, head, target, fastForward }) };
 };
 
 export const processStartIdentity = (pid) => {

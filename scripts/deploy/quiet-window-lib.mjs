@@ -38,7 +38,8 @@ export class DeployFailure extends Error {
 export const quietWindowIsOpen = (runs) =>
   runs.every((run) => !BLOCKING_RUN_STATUSES.includes(String(run.status).toLowerCase()));
 
-export const gitPreflightFailure = ({ dirty, head, target, fastForward }) => {
+export const gitPreflightFailure = ({ branch, dirty, head, target, fastForward }) => {
+  if (branch !== "main") return "production-checkout-not-main";
   if (dirty) return "dirty-working-tree";
   if (head !== target && !fastForward) return "non-fast-forward-main";
   return null;
@@ -135,7 +136,7 @@ export const dryRunDecision = async (host) => {
   const lines = [
     `DRY-RUN revisions from=${revisions.from} source=${revisions.source} target=${revisions.to}`,
     `DRY-RUN quiet-window=${quiet ? "open" : "holding"} blockers=${runs.length}`,
-    `DRY-RUN repository dirty=${repository.dirty} fast-forward=${repository.fastForward}`,
+    `DRY-RUN repository branch=${repository.branch} dirty=${repository.dirty} fast-forward=${repository.fastForward}`,
     `DRY-RUN services=${services.ok ? "ready" : "not-ready"} authority=${authority.ok ? "valid" : "invalid"}`,
     `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
