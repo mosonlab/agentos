@@ -91,6 +91,64 @@ const closedReviewArtifact = reviewArtifact.extend({
   mustFixIds: stringList,
 });
 
+type ReviewArtifact = z.infer<typeof reviewArtifact>;
+type ClosedReviewArtifact = z.infer<typeof closedReviewArtifact>;
+
+const duplicateValues = (values: string[]): string[] => {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) duplicates.add(value);
+    seen.add(value);
+  }
+  return [...duplicates].sort();
+};
+
+const closedReviewSelfRefusal = (artifact: ClosedReviewArtifact): string | null => {
+  const duplicateFindings = duplicateValues(artifact.findings.map((finding) => finding.id));
+  if (duplicateFindings.length > 0) {
+    return `closed-must-fix findings contain duplicate ids: ${duplicateFindings.join(", ")}`;
+  }
+  const duplicateDispositions = duplicateValues(artifact.dispositions.map((disposition) => disposition.id));
+  if (duplicateDispositions.length > 0) {
+    return `closed-must-fix dispositions contain duplicate ids: ${duplicateDispositions.join(", ")}`;
+  }
+  const duplicateMustFixIds = duplicateValues(artifact.mustFixIds);
+  if (duplicateMustFixIds.length > 0) {
+    return `closed-must-fix mustFixIds contain duplicates: ${duplicateMustFixIds.join(", ")}`;
+  }
+  const expectedMustFixIds = new Set(
+    artifact.findings.filter((finding) => finding.severity === "P0" || finding.severity === "P1")
+      .map((finding) => finding.id),
+  );
+  const actualMustFixIds = new Set(artifact.mustFixIds);
+  const missing = [...expectedMustFixIds].filter((id) => !actualMustFixIds.has(id)).sort();
+  const unexpected = [...actualMustFixIds].filter((id) => !expectedMustFixIds.has(id)).sort();
+  if (missing.length > 0 || unexpected.length > 0) {
+    return `closed-must-fix mustFixIds must exactly equal final P0/P1 finding ids; missing: ${missing.join(", ") || "none"}; unexpected: ${unexpected.join(", ") || "none"}`;
+  }
+  return null;
+};
+
+const closedReviewRunRefusal = (
+  independent: ReviewArtifact,
+  closed: ClosedReviewArtifact,
+): string | null => {
+  if (closed.headSha !== independent.headSha
+    || closed.reviewedBase !== independent.reviewedBase
+    || closed.reviewedHead !== independent.reviewedHead) {
+    return "closed-must-fix review range must exactly match this Run's independent-findings range";
+  }
+  const dispositionIds = new Set(closed.dispositions.map((disposition) => disposition.id));
+  const missing = independent.findings.map((finding) => finding.id)
+    .filter((id) => !dispositionIds.has(id))
+    .sort();
+  if (missing.length > 0) {
+    return `closed-must-fix dispositions must cover every independent finding from this Run; missing: ${missing.join(", ")}`;
+  }
+  return null;
+};
+
 const canonicalOutputSchemas: Record<string, z.ZodType> = {
   spec: canonicalEnvelope.extend({ spec: nonEmptyString }),
   plan: canonicalEnvelope.extend({ summary: nonEmptyString, sliceIds: stringList }),
@@ -165,13 +223,18 @@ const canonicalBodyRefusal = (
   if (!schema) return `canonical output kind ${kind} has no versioned JSON contract`;
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    const location = issue?.path.length ? issue.path.join(".") : "body";
-    return `${kind} task output body violates schemaVersion 1 at ${location}: ${issue?.message ?? "invalid value"}`;
+    const issues = parsed.error.issues.slice(0, 8).map((issue) => {
+      const location = issue.path.length ? issue.path.join(".") : "body";
+      return `${location}: ${issue.message}`;
+    });
+    return `${kind} task output body violates schemaVersion 1: ${issues.join("; ")}`;
   }
   const bodyHead = (parsed.data as { headSha: string }).headSha;
   if (bodyHead !== authoredHead) {
     return `${kind} task output body headSha ${bodyHead} does not match authored commit ${authoredHead ?? "none"}`;
+  }
+  if (kind === "must-fix" && phase === BLIND_REVIEW_PHASE.closed) {
+    return closedReviewSelfRefusal(parsed.data as ClosedReviewArtifact);
   }
   return null;
 };
@@ -282,6 +345,23 @@ export const persistSessionTaskOutput = async (
     if (phase === BLIND_REVIEW_PHASE.closed
       && (existing?.runId !== input.runId || metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.evidenceUnlocked)) {
       return { ok: false, reason: `blind review must unlock predecessor evidence in this Run before ${BLIND_REVIEW_PHASE.closed}` };
+    }
+    if (phase === BLIND_REVIEW_PHASE.closed && existing) {
+      let independentValue: unknown;
+      let closedValue: unknown;
+      try {
+        independentValue = JSON.parse(existing.body);
+        closedValue = JSON.parse(input.body);
+      } catch {
+        return { ok: false, reason: "blind review output contract could not parse the persisted review sequence" };
+      }
+      const independent = reviewArtifact.safeParse(independentValue);
+      const closed = closedReviewArtifact.safeParse(closedValue);
+      if (!independent.success || !closed.success) {
+        return { ok: false, reason: "blind review output contract could not validate the persisted review sequence" };
+      }
+      const refusal = closedReviewRunRefusal(independent.data, closed.data);
+      if (refusal) return { ok: false, reason: refusal };
     }
     if (phase === BLIND_REVIEW_PHASE.independent
       && existing?.runId === input.runId && metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.independent) {
