@@ -15,8 +15,13 @@ export const BLIND_REVIEW_PHASE = {
 } as const;
 
 type TemplateStepIdentity = {
-  stepIndex: number;
+  stepIndex?: number;
   outputKind: string;
+  taskTemplate?: { name: string };
+};
+
+type CanonicalTemplateStepIdentity = TemplateStepIdentity & {
+  stepIndex: number;
   taskTemplate: { name: string };
 };
 
@@ -41,8 +46,8 @@ export type PreviousRunHandoff = {
   } | null;
 };
 
-export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): step is TemplateStepIdentity => {
-  if (!step) return false;
+export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): step is CanonicalTemplateStepIdentity => {
+  if (!step?.taskTemplate || step.stepIndex === undefined) return false;
   if (step.taskTemplate.name === DIRECT_TEMPLATE_NAME) return step.stepIndex >= 1 && step.stepIndex <= 5;
   if (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME) return step.stepIndex >= 1 && step.stepIndex <= 10;
   return false;
@@ -50,8 +55,8 @@ export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefin
 
 export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
   step?.outputKind === "must-fix"
-  && ((step.taskTemplate.name === DIRECT_TEMPLATE_NAME && step.stepIndex === 3)
-    || (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === 7))
+  && ((step.taskTemplate?.name === DIRECT_TEMPLATE_NAME && step.stepIndex === 3)
+    || (step.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === 7))
 );
 
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
