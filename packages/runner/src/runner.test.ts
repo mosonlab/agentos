@@ -1473,7 +1473,7 @@ test("an availability heartbeat reports a CLI recovery without restarting the ru
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(null, { status: 200 });
     }) as typeof fetch;
 
     await reportCliAvailabilityHeartbeat(configured);

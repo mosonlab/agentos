@@ -457,6 +457,12 @@ export const reportCliAvailability = async (
     method: "POST",
     body: JSON.stringify({ runnerId: config.runnerId, ...availability }),
   });
-  const body = await response.json() as { revalidatePreflight?: boolean };
+  // The established endpoint contract did not require a response body. During
+  // rollout, an older control plane (and narrow protocol fixtures) may still
+  // acknowledge the report with an empty 2xx response. Only a non-empty body
+  // carries the additive recovery directive; malformed JSON still fails.
+  const responseBody = await response.text();
+  if (!responseBody.trim()) return { revalidatePreflight: false };
+  const body = JSON.parse(responseBody) as { revalidatePreflight?: boolean };
   return { revalidatePreflight: body.revalidatePreflight === true };
 };
