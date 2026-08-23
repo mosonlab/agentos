@@ -60,6 +60,20 @@ export type RegressionVerdict =
   | { schemaVersion: 1; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
   | { schemaVersion: 1; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
 
+export type RegressionRepairHandoff = {
+  schemaVersion: 1;
+  previousVerdict: Exclude<RegressionVerdict, { outcome: "pass" }>;
+  repair: {
+    kind: "review-fix" | "gate-fix" | "refresh-conflict";
+    taskId: string;
+    startHeadSha: string;
+    targetHeadSha: string;
+    resolvedHeadSha: string;
+    outputKind: string;
+    outputBody: string;
+  };
+};
+
 export type ResolverResult =
   | { schemaVersion: 1; outcome: "resolved"; startHeadSha: string; targetHeadSha: string; resolvedHeadSha: string; tradeOffs: string[]; changedTestExpectations: string[] }
   | { schemaVersion: 1; outcome: "unable"; startHeadSha: string; targetHeadSha: string; blockingContradiction: string };
