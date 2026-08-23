@@ -39,6 +39,7 @@ import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
+  inspectProductionCheckout,
   publishDirectories,
   workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
@@ -157,6 +158,16 @@ test("git preflight names dirty and non-fast-forward refusals", () => {
   assert.equal(gitPreflightFailure({ branch: "main", dirty: false, head: "a", target: "b", fastForward: false }), "non-fast-forward-main");
   assert.equal(gitPreflightFailure({ branch: "main", dirty: false, head: "a", target: "b", fastForward: true }), null);
   assert.equal(gitPreflightFailure({ branch: "main", dirty: false, head: "b", target: "b", fastForward: false }), null);
+});
+
+test("the mutating entry checks checkout ownership before its already-deployed no-op", () => {
+  const source = readFileSync(new URL("./quiet-window-deploy.mjs", import.meta.url), "utf8");
+  const lockedEntry = source.indexOf("return runLocked(");
+  const checkoutPreflight = source.indexOf("assertProductionCheckout();", lockedEntry);
+  const alreadyDeployed = source.indexOf("if (from === to)", lockedEntry);
+  assert.ok(lockedEntry >= 0);
+  assert.ok(checkoutPreflight > lockedEntry);
+  assert.ok(alreadyDeployed > checkoutPreflight);
 });
 
 test("dry-run failures never persist escalation state", () => {
@@ -318,6 +329,7 @@ test("production Git preflight refuses real dirty and divergent repositories", (
   run("add", "file");
   run("commit", "-m", "base");
   const base = run("rev-parse", "HEAD");
+  assert.equal(inspectProductionCheckout({ git, root }).refusal, null);
   run("checkout", "-b", "target");
   writeFileSync(join(root, "file"), "target");
   run("commit", "-am", "target");
@@ -325,9 +337,11 @@ test("production Git preflight refuses real dirty and divergent repositories", (
   run("checkout", "main");
   assert.equal(inspectGitPreflight({ git, root, target }).refusal, null);
   run("checkout", "-b", "feature");
+  assert.equal(inspectProductionCheckout({ git, root }).refusal, "production-checkout-not-main");
   assert.equal(inspectGitPreflight({ git, root, target }).refusal, "production-checkout-not-main");
   run("checkout", "main");
   writeFileSync(join(root, "dirty"), "dirty");
+  assert.equal(inspectProductionCheckout({ git, root }).refusal, "dirty-working-tree");
   assert.equal(inspectGitPreflight({ git, root, target }).refusal, "dirty-working-tree");
   rmSync(join(root, "dirty"));
   writeFileSync(join(root, "file"), "divergent");

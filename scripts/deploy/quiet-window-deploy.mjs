@@ -23,7 +23,6 @@ import {
   SERVICE_LABELS,
   dryRunDecision,
   executeUpgrade,
-  gitPreflightFailure,
   runLocked,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
@@ -34,6 +33,7 @@ import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
+  inspectProductionCheckout,
   publishDirectories,
   workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
@@ -430,6 +430,19 @@ const commandSyncOk = (program, args) => {
   try { execFileSync(program, args, { stdio: "ignore" }); return true; } catch { return false; }
 };
 
+const assertProductionCheckout = () => {
+  const state = inspectProductionCheckout({ git: loadBinaries().git, root: REPOSITORY_ROOT });
+  if (state.refusal) {
+    fail(
+      state.refusal,
+      state.refusal === "production-checkout-not-main"
+        ? `branch-${state.branch ?? "detached"}`
+        : "checkout-has-uncommitted-content",
+    );
+  }
+  return state;
+};
+
 const dryRun = async () => {
   await loadEnvironment();
   loadBinaries();
@@ -486,6 +499,7 @@ const main = async () => {
     try {
       from = readDeployedRevision();
       to = await remoteMainRevision();
+      assertProductionCheckout();
     } catch (error) {
       const failure = error instanceof DeployFailure
         ? error
@@ -520,12 +534,7 @@ const main = async () => {
     }
     const host = createProductionHost({
       fastForward: async () => {
-        let branch = null;
-        try { branch = gitText("symbolic-ref", "--short", "HEAD"); } catch { /* detached HEAD is refused below */ }
-        const dirty = gitText("status", "--porcelain").length > 0;
-        const headBeforeFetch = gitText("rev-parse", "HEAD");
-        const preflight = gitPreflightFailure({ branch, dirty, head: headBeforeFetch, target: headBeforeFetch, fastForward: true });
-        if (preflight) fail(preflight, preflight === "production-checkout-not-main" ? `branch-${branch ?? "detached"}` : "checkout-has-uncommitted-content");
+        assertProductionCheckout();
         await checked("fetch-main-failed", loadBinaries().git, ["fetch", "origin", "main"]);
         to = gitText("rev-parse", "origin/main");
         const state = inspectGitPreflight({ git: loadBinaries().git, root: REPOSITORY_ROOT, target: to });
