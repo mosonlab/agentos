@@ -73,7 +73,7 @@ const main = async (): Promise<void> => {
         name: role.name,
         title: role.title,
         model: role.model,
-        codexServiceTier: role.name === "senior-dev-luna" ? CodexServiceTier.FAST : CodexServiceTier.DEFAULT,
+        codexServiceTier: CodexServiceTier.DEFAULT,
         runnerPreference: role.runnerPreference,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,

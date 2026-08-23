@@ -36,6 +36,7 @@ import {
 } from "../src/template-sources.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
+const prismaRoot = fileURLToPath(new URL("./", import.meta.url));
 
 const roleSource = (name: string): Promise<string> => readFile(`${rolesRoot}${name}.md`, "utf8");
 
@@ -60,6 +61,18 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 
   assert.doesNotThrow(() => assertCanonicalAgentSources(roles));
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
+});
+
+test("all canonical Agents start at Default without owning later operator changes", async () => {
+  const [seed, migration] = await Promise.all([
+    readFile(`${prismaRoot}seed.ts`, "utf8"),
+    readFile(`${prismaRoot}migrations/20260823010000_codex_service_tier/migration.sql`, "utf8"),
+  ]);
+
+  assert.match(seed, /create:\s*\{[\s\S]*codexServiceTier: CodexServiceTier\.DEFAULT,/u);
+  assert.doesNotMatch(seed, /CodexServiceTier\.FAST/u);
+  assert.doesNotMatch(migration, /UPDATE\s+"Agent"[\s\S]*"codexServiceTier"/u);
+  assert.match(migration, /ADD COLUMN "codexServiceTier" "CodexServiceTier" NOT NULL DEFAULT 'default'/u);
 });
 
 test("signed AgentOS model routing stays pinned in the canonical contract", () => {
