@@ -452,9 +452,11 @@ export const reportPreflight = async (
 export const reportCliAvailability = async (
   config: RunnerConfig,
   availability: { runner: RunnerKind; binary: string; available: boolean; resolvedPath: string | null },
-): Promise<void> => {
-  await request(config, "/runner/availability", {
+): Promise<{ revalidatePreflight: boolean }> => {
+  const response = await request(config, "/runner/availability", {
     method: "POST",
-    body: JSON.stringify(availability),
+    body: JSON.stringify({ runnerId: config.runnerId, ...availability }),
   });
+  const body = await response.json() as { revalidatePreflight?: boolean };
+  return { revalidatePreflight: body.revalidatePreflight === true };
 };

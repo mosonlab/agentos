@@ -1489,3 +1489,39 @@ test("an availability heartbeat reports a CLI recovery without restarting the ru
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("an availability heartbeat runs one requested preflight and reports its recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-auth-recovery-"));
+  try {
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(log));
+    await chmod(binary, 0o755);
+    const configured = codexOnly(join(root, "workspaces"), root, binary);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      posts.push({ path, body });
+      const revalidatePreflight = path.endsWith("/runner/availability") && body.runner === "CODEX";
+      return new Response(JSON.stringify({ revalidatePreflight }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await reportCliAvailabilityHeartbeat(configured);
+
+    assert.ok(posts.filter((post) => post.path.endsWith("/runner/availability"))
+      .every((post) => post.body.runnerId === configured.runnerId));
+    const reports = posts.filter((post) => post.path.endsWith("/runner/preflight"));
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0]?.body.runner, "CODEX");
+    assert.equal(reports[0]?.body.ok, true);
+    assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
+      "--version", "exec --help", "exec resume --help", "login status",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
