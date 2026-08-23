@@ -319,7 +319,7 @@ cache_copy_description() {
 # manifest or npm configuration file cannot collide with merely changing one.
 dependency_cache_key() {
   {
-    printf 'format=all-workspace-node-modules-v2\n'
+    printf 'format=all-workspace-node-modules-v3\n'
     printf 'node=%s\nnpm=%s\nplatform=%s\n' \
       "$(node --version)" "$(npm --version)" "$(uname -sm)"
     git -C "${REPO_ROOT}" ls-files \
@@ -327,7 +327,7 @@ dependency_cache_key() {
       '.npmrc' 'apps/*/.npmrc' 'packages/*/.npmrc' 'packages/db/prisma/schema.prisma' \
       | LC_ALL=C sort | while IFS= read -r input; do
         printf 'file=%s\n' "${input}"
-        shasum -a 256 "${REPO_ROOT}/${input}"
+        printf 'sha256=%s\n' "$(sha256 < "${REPO_ROOT}/${input}")"
       done
     # npm configuration can change platform packages and lifecycle behaviour.
     # It is fed only into the digest; credentials are never printed or stored.
@@ -527,7 +527,11 @@ build_cache_key() {
     done
     for input in .env .env.local .env.production .env.production.local; do
       printf 'file=%s\n' "${input}"
-      if [ -f "${REPO_ROOT}/${input}" ]; then shasum -a 256 "${REPO_ROOT}/${input}"; else printf 'absent\n'; fi
+      if [ -f "${REPO_ROOT}/${input}" ]; then
+        printf 'sha256=%s\n' "$(sha256 < "${REPO_ROOT}/${input}")"
+      else
+        printf 'absent\n'
+      fi
     done
   } | sha256
 }
@@ -731,15 +735,24 @@ verify_build_only_lifecycle_hooks() {
   ' "${hook}"
 }
 
-run_database_tests() {
+run_database_preflight_tests() {
   verify_build_only_lifecycle_hooks pretest:db || return 1
-  local suite_root="${GATE_TMP}/database-test-roots"
+  local suite_root="${GATE_TMP}/db-package-roots"
   mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
-    node --import tsx packages/api/scripts/dbtest.mjs \
-      packages/db/src/*.dbtest.ts packages/api/src/*.dbtest.ts
+    node --import tsx packages/api/scripts/dbtest.mjs packages/db/src/*.dbtest.ts
+}
+
+run_api_database_tests() {
+  verify_build_only_lifecycle_hooks pretest:db || return 1
+  local suite_root="${GATE_TMP}/api-dbtest-roots"
+  mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
+  RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
+  CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
+  FILES_ROOT="${suite_root}/files" \
+    node --import tsx packages/api/scripts/dbtest.mjs
 }
 
 # Runs two verdict steps whose mutable state is disjoint, while retaining each
@@ -1163,11 +1176,13 @@ step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deplo
 # The Goal 5a0 preflight's first-run boundary, against this throwaway server: the
 # only evidence that an empty target passes and a non-empty one still refuses.
 # Both packages' pretest:db hooks only rebuild subsets of the full build that
-# just passed. Invoke the shared DBTEST runner once for both suites so every
-# preflight and API file shares one migrated template and one concurrency budget
-# while retaining a cloned database and private host roots per file.
+# just passed. Invoke the shared DBTEST runner directly so each file receives a
+# cloned database and private host roots. Keep preflight beside unit tests, then
+# run the API suite as its own wave: consolidating both suites measured below the
+# required 15% improvement and delayed every test behind all database clones.
 parallel_two_steps \
   "unit tests (all workspaces)" parallel_unit_tests \
-  "database tests (preflight + API)" run_database_tests
+  "database preflight tests" run_database_preflight_tests
+step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift
 publish_deferred_build_snapshot
