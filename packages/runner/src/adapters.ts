@@ -34,7 +34,36 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
 ];
 
-export const buildPrompt = (claim: ClaimedTask): string => [
+const subprocessProfiles = (run: ClaimedTask["run"], required = false): {
+  ordinary: { model: string; effort: string; tier: string };
+  elevated: { model: string; effort: string; tier: string };
+} | null => {
+  const values = [
+    run.subprocessModel,
+    run.subprocessCodexServiceTier,
+    run.elevatedSubprocessModel,
+    run.elevatedSubprocessCodexServiceTier,
+  ];
+  if (values.every((value) => value === null)) {
+    if (required) throw new Error("Implementation Plan Executioner Run is missing its Codex subprocess snapshot");
+    return null;
+  }
+  if (values.some((value) => value === null)) throw new Error("Run contains an incomplete Codex subprocess snapshot");
+  const ordinary = modelSpec(run.subprocessModel!);
+  const elevated = modelSpec(run.elevatedSubprocessModel!);
+  if (!ordinary.model.startsWith("gpt-") || !ordinary.effort
+    || !elevated.model.startsWith("gpt-") || !elevated.effort) {
+    throw new Error("Run Codex subprocess snapshots require gpt-* models with explicit reasoning effort");
+  }
+  return {
+    ordinary: { model: ordinary.model, effort: ordinary.effort, tier: run.subprocessCodexServiceTier!.toLowerCase() },
+    elevated: { model: elevated.model, effort: elevated.effort, tier: run.elevatedSubprocessCodexServiceTier!.toLowerCase() },
+  };
+};
+
+export const buildPrompt = (claim: ClaimedTask): string => {
+  const profiles = subprocessProfiles(claim.run, claim.agent.name === "implementation-plan-executioner");
+  return [
   claim.agent.foundationalPrompt,
   "",
   `Role (${claim.agent.name}): ${claim.agent.rolePrompt}`,
@@ -56,14 +85,17 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     `- implementationBaseSha: ${claim.run.implementationBaseSha}`,
     `- implementationHeadSha: ${claim.run.implementationHeadSha}`,
   ] : []),
-  ...(claim.run.subprocessModel && claim.run.subprocessCodexServiceTier ? [
+  ...(profiles ? [
     "",
     "Platform-pinned ordinary Codex subprocess profile:",
-    `- model: ${modelSpec(claim.run.subprocessModel).model}`,
-    `- reasoning effort: ${modelSpec(claim.run.subprocessModel).effort ?? "high"}`,
-    `- service tier: ${claim.run.subprocessCodexServiceTier.toLowerCase()}`,
-    "- The runner exposes the same values as AGENTOS_SUBORDINATE_CODEX_MODEL, AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT, and AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER. Use all three on every ordinary launch and resume.",
-    "- Risk-flagged slices remain pinned by the role contract to Sol High with service tier default.",
+    `- model: ${profiles.ordinary.model}`,
+    `- reasoning effort: ${profiles.ordinary.effort}`,
+    `- service tier: ${profiles.ordinary.tier}`,
+    "Platform-pinned elevated Codex subprocess profile:",
+    `- model: ${profiles.elevated.model}`,
+    `- reasoning effort: ${profiles.elevated.effort}`,
+    `- service tier: ${profiles.elevated.tier}`,
+    "- The runner exposes both profiles as AGENTOS_ORDINARY_CODEX_SUBPROCESS_* and AGENTOS_ELEVATED_CODEX_SUBPROCESS_*. Use the matching model, reasoning effort, and service tier on every launch and resume.",
   ] : []),
   "",
   `Task: ${claim.task.name}`,
@@ -118,15 +150,17 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     "- Before refreshing the target branch, verify the checked-out starting HEAD equals repair.resolvedHeadSha. Stop loudly on any mismatch.",
     `- Repair task output (${claim.regressionRepairHandoff.repair.outputKind}):\n${claim.regressionRepairHandoff.repair.outputBody}`,
   ] : []),
-].join("\n");
+  ].join("\n");
+};
 
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
     & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner">,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent">,
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => {
+  const profiles = subprocessProfiles(claim.run, claim.agent.name === "implementation-plan-executioner");
   // These names are runner-owned. In particular, a task secret must never be
   // able to reintroduce the host Codex home or the CLAUDE_CONFIG_DIR path that
   // this chain deliberately does not use.
@@ -136,9 +170,13 @@ export const buildChildEnvironment = (
     PI_CODING_AGENT_DIR: _piCodingAgentDir,
     PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
-    AGENTOS_SUBORDINATE_CODEX_MODEL: _subprocessModel,
-    AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT: _subprocessEffort,
-    AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER: _subprocessServiceTier,
+    AGENTOS_PI_EXPECTS_OPENAI_CODEX: _piExpectsOpenAICodex,
+    AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL: _ordinarySubprocessModel,
+    AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT: _ordinarySubprocessEffort,
+    AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: _ordinarySubprocessServiceTier,
+    AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL: _elevatedSubprocessModel,
+    AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT: _elevatedSubprocessEffort,
+    AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER: _elevatedSubprocessServiceTier,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -156,10 +194,16 @@ export const buildChildEnvironment = (
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
     AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
-    ...(claim.run.subprocessModel && claim.run.subprocessCodexServiceTier ? {
-      AGENTOS_SUBORDINATE_CODEX_MODEL: modelSpec(claim.run.subprocessModel).model,
-      AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT: modelSpec(claim.run.subprocessModel).effort ?? "high",
-      AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER: claim.run.subprocessCodexServiceTier.toLowerCase(),
+    ...(claim.runner === "PI" && claim.run.model.startsWith("openai-codex/")
+      ? { AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1" }
+      : {}),
+    ...(profiles ? {
+      AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL: profiles.ordinary.model,
+      AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT: profiles.ordinary.effort,
+      AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: profiles.ordinary.tier,
+      AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL: profiles.elevated.model,
+      AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT: profiles.elevated.effort,
+      AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER: profiles.elevated.tier,
     } : {}),
     // Last on purpose, so no task secret can point a session back at the
     // production roots. See provisionAgentScratch for why this containment has
@@ -173,8 +217,10 @@ export const buildChildEnvironment = (
 
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
-  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_SUBORDINATE_CODEX_MODEL",
-  "AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT", "AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER",
+  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL",
+  "AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER",
+  "AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL", "AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT",
+  "AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER",
 ] as const;
 
 /**
@@ -842,6 +888,16 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
       error: PREFLIGHT_REASONS.unsupportedModel,
     };
   }
+  if (spec.runner === "PI" && spec.model.startsWith("openai-codex/") && spec.env.AGENTOS_RUN_ID
+    && spec.env.AGENTOS_CODEX_SERVICE_TIER !== "default" && spec.env.AGENTOS_CODEX_SERVICE_TIER !== "fast") {
+    return {
+      ok: false,
+      cliVersion: null,
+      authMode: null,
+      capabilities,
+      error: "PI openai-codex runs require an explicit AgentOS Codex service tier",
+    };
+  }
   const version = await capture(spec.config, spec.runner, ["--version"], spec.env);
   if (version.code !== 0) {
     return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
@@ -1005,6 +1061,8 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   codexServiceTier: spec.claim.run.codexServiceTier,
   subprocessModel: spec.claim.run.subprocessModel,
   subprocessCodexServiceTier: spec.claim.run.subprocessCodexServiceTier,
+  elevatedSubprocessModel: spec.claim.run.elevatedSubprocessModel,
+  elevatedSubprocessCodexServiceTier: spec.claim.run.elevatedSubprocessCodexServiceTier,
   promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
   promptTransport: "stdin",
   structuredEvents: true,

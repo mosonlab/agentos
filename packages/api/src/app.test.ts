@@ -30,6 +30,17 @@ const withTokens = async (callback: () => Promise<void>): Promise<void> => {
   }
 };
 
+const lockedAgent = <T extends Record<string, unknown>>(agent: T | null): (T & Record<string, unknown>) | null => agent ? ({
+  name: "Agent",
+  archivedAt: null,
+  codexServiceTier: "DEFAULT",
+  ordinarySubprocessModel: null,
+  ordinarySubprocessCodexServiceTier: null,
+  elevatedSubprocessModel: null,
+  elevatedSubprocessCodexServiceTier: null,
+  ...agent,
+}) : null;
+
 test("public root reports the execution kernel without touching Prisma", async () => {
   const response = await createApp({} as PrismaClient).request("/");
   assert.equal(response.status, 200);
@@ -229,6 +240,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       // findFirst answers resolveRunBranches' publication query: nothing in this
       // chain has pushed the shared branch, so the successor bases on the default.
       run: { create: async () => ({ id: "run-1" }), findFirst: async () => null, count: async () => 0 },
+      agent: { findUnique: async () => lockedAgent(successor.assigneeAgent) },
     };
     const database = {
       task: { findUniqueOrThrow: async () => before },
@@ -294,6 +306,7 @@ test("CRON create computes runAt, ignores caller runAt, and creates no immediate
     const repo = { id: "repo-1", defaultBranch: "main" };
     const tx = {
       $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
+      agent: { findUnique: async () => lockedAgent(agent) },
       task: { create: async ({ data }: { data: Record<string, any> }) => { stored = data; return { id: "task-1", ...data }; } },
       taskActivity: { create: async () => ({}) },
       run: { create: async () => { runs += 1; return {}; } },
@@ -354,6 +367,7 @@ test("AT create waits for the scheduler and merged-view patch cannot remove its 
       task: { findUniqueOrThrow: async () => before },
       $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
         $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
+        agent: { findUnique: async () => lockedAgent({ id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
         task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
         taskActivity: { create: async () => ({}) }, run: { create: async () => { runs += 1; return {}; } },
       }),
@@ -565,6 +579,7 @@ const retryRequest = async (
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       // Retry takes the shared task-row lock before it reads anything else.
       $queryRaw: async () => [{ id: "task-1" }],
+      agent: { findUnique: async () => lockedAgent(assigneeAgent as Record<string, unknown> | null) },
       task: {
         findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
         findUnique: async () => ({
@@ -789,6 +804,7 @@ test("archiving an agent fails closed on a live run or any live task", async () 
         $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
           $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
           agent: {
+            findUnique: async () => ({ id: "agent-1", name: "Agent", archivedAt: null }),
             findUniqueOrThrow: async () => ({ id: "agent-1", name: "Agent", archivedAt: null }),
             update: async () => { updates += 1; return {}; },
           },
@@ -818,6 +834,7 @@ test("a task creation that loses the Agent-row race writes neither task nor run"
       agentRepoAccess: { findFirst: async () => ({}) },
       $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation({
         $queryRaw: async () => [{ id: "agent-1", archivedAt: new Date() }],
+        agent: { findUnique: async () => lockedAgent({ id: "agent-1", name: "Agent", archivedAt: new Date(), runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
         task: { create: async () => { taskCreates += 1; return { id: "task-1" }; } },
         taskActivity: { create: async () => ({}) },
         run: { create: async () => { throw new Error("must not create run"); } },
@@ -937,6 +954,54 @@ test("Agent API refuses Fast for a non-Codex model", async () => {
     assert.deepEqual(await response.json(), {
       error: "Fast service tier requires a Codex gpt-* model or a PI openai-codex/* model",
     });
+  });
+});
+
+test("Agent API refuses an atomic executioner rename and subprocess-profile clear", async () => {
+  await withTokens(async () => {
+    let updated = false;
+    const executioner = lockedAgent({
+      id: "agent-executioner",
+      projectId: "project-1",
+      environmentId: "environment-1",
+      name: "implementation-plan-executioner",
+      title: "Implementation Plan Executioner",
+      model: "gpt-5.6-sol:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      ordinarySubprocessModel: "gpt-5.6-luna:max",
+      ordinarySubprocessCodexServiceTier: "DEFAULT",
+      elevatedSubprocessModel: "gpt-5.6-sol:high",
+      elevatedSubprocessCodexServiceTier: "DEFAULT",
+    });
+    const tx = {
+      $queryRaw: async () => [{ id: executioner!.id }],
+      agent: {
+        findUnique: async () => executioner,
+        update: async () => { updated = true; return executioner; },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "renamed-executioner",
+        ordinarySubprocessModel: null,
+        ordinarySubprocessCodexServiceTier: null,
+        elevatedSubprocessModel: null,
+        elevatedSubprocessCodexServiceTier: null,
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "implementation-plan-executioner is a canonical Agent name and cannot be changed",
+    });
+    assert.equal(updated, false);
   });
 });
 
@@ -1274,6 +1339,7 @@ test("archived successor errors from gate approve and reject map to named 409 re
           updateMany: async () => ({ count: 1 }),
         },
         taskActivity: { create: async () => ({}) },
+        agent: { findUnique: async () => lockedAgent(executable.assigneeAgent) },
         run: { create: async () => { throw new Error("must not create"); } },
       };
       const database = {

@@ -54,18 +54,29 @@ export default function (pi: {
     event: "before_provider_request",
     handler: (
       event: { type: "before_provider_request"; payload: unknown },
-      context: { model?: { provider?: string } },
+      context: { model?: { provider?: string }; abort(): void; shutdown(): void },
     ) => unknown,
   ): void;
 }): void {
   pi.on("before_provider_request", (event, context) => {
-    if (context.model?.provider !== "openai-codex") return undefined;
+    const provider = context.model?.provider;
+    const expectsOpenAICodex = process.env.AGENTOS_PI_EXPECTS_OPENAI_CODEX === "1";
+    if (provider !== "openai-codex") {
+      if (!expectsOpenAICodex) return undefined;
+      context.abort();
+      context.shutdown();
+      return { service_tier: "agentos-provider-mismatch" };
+    }
     const configured = process.env.AGENTOS_CODEX_SERVICE_TIER;
     if (configured !== "default" && configured !== "fast") {
-      throw new Error("AGENTOS_CODEX_SERVICE_TIER must be default or fast");
+      context.abort();
+      context.shutdown();
+      return { service_tier: "agentos-invalid-service-tier" };
     }
     if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
-      throw new Error("PI openai-codex provider request payload is not an object");
+      context.abort();
+      context.shutdown();
+      return { service_tier: "agentos-invalid-payload" };
     }
     return {
       ...event.payload,

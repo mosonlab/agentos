@@ -31,6 +31,7 @@ const sourceRun = (taskId: string): Run => ({
   id: `run-${taskId}`, projectId: "project-1", taskId, goalId: null, agentId: "agent-1", repoId: "repo-1",
   runNumber: 1, status: "SUCCEEDED", runner: "CLAUDE", runnerId: "runner-source", model: "claude",
   codexServiceTier: "DEFAULT", subprocessModel: null, subprocessCodexServiceTier: null,
+  elevatedSubprocessModel: null, elevatedSubprocessCodexServiceTier: null,
   leaseGeneration: 1, workspacePath: "/source-only-workspace", workspaceRetained: true,
   targetBranch: "main", branch: "source-branch", baseSha: "1111111111111111", headSha: "2222222222222222",
   pushStatus: "SUCCEEDED", pullRequestUrl: null, maxDurationMin: 120, stallTimeoutMin: 10,

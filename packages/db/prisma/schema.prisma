@@ -248,6 +248,12 @@ model Agent {
   title              String
   model              String
   codexServiceTier   CodexServiceTier     @default(DEFAULT)
+  /// Profiles used only by the compound implementation executioner. They are
+  /// nullable for every other Agent and snapshotted onto each Run.
+  ordinarySubprocessModel            String?
+  ordinarySubprocessCodexServiceTier CodexServiceTier?
+  elevatedSubprocessModel            String?
+  elevatedSubprocessCodexServiceTier CodexServiceTier?
   foundationalPrompt String
   rolePrompt         String
   runnerPreference   RunnerPreference     @default(INHERIT)
@@ -811,6 +817,8 @@ model Run {
   /// Null for every Agent that does not schedule its own Codex subprocesses.
   subprocessModel       String?
   subprocessCodexServiceTier CodexServiceTier?
+  elevatedSubprocessModel       String?
+  elevatedSubprocessCodexServiceTier CodexServiceTier?
   authMode              String?
   manifest              Json?
   promptHash            String

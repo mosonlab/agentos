@@ -36,6 +36,7 @@ import {
 } from "../src/template-sources.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
+const prismaRoot = fileURLToPath(new URL("./", import.meta.url));
 
 const roleSource = (name: string): Promise<string> => readFile(`${rolesRoot}${name}.md`, "utf8");
 
@@ -60,6 +61,23 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 
   assert.doesNotThrow(() => assertCanonicalAgentSources(roles));
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
+});
+
+test("canonical profiles start at Default and the published migration is repaired only forward", async () => {
+  const [seed, publishedMigration, forwardMigration] = await Promise.all([
+    readFile(`${prismaRoot}seed.ts`, "utf8"),
+    readFile(`${prismaRoot}migrations/20260823010000_codex_service_tier/migration.sql`, "utf8"),
+    readFile(`${prismaRoot}migrations/20260823033000_executioner_subprocess_profiles/migration.sql`, "utf8"),
+  ]);
+
+  assert.match(seed, /create:\s*\{[\s\S]*codexServiceTier: CodexServiceTier\.DEFAULT,/u);
+  assert.doesNotMatch(seed, /CodexServiceTier\.FAST/u);
+  assert.match(publishedMigration, /UPDATE\s+"Agent"[\s\S]*"codexServiceTier"\s*=\s*'fast'/u);
+  assert.match(publishedMigration, /ADD COLUMN "codexServiceTier" "CodexServiceTier" NOT NULL DEFAULT 'default'/u);
+  assert.match(forwardMigration, /migration\."finished_at" IS NOT NULL/u);
+  assert.match(forwardMigration, /agent\."updatedAt" < migration\."finished_at"/u);
+  assert.match(forwardMigration, /"ordinarySubprocessModel" = 'gpt-5\.6-luna:max'/u);
+  assert.match(forwardMigration, /"elevatedSubprocessModel" = 'gpt-5\.6-sol:high'/u);
 });
 
 test("signed AgentOS model routing stays pinned in the canonical contract", () => {
@@ -141,11 +159,11 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
 
 test("the executioner launches ordinary and risk subprocesses with explicit service tiers", async () => {
   const executioner = await roleSource("implementation-plan-executioner");
-  assert.match(executioner, /AGENTOS_SUBORDINATE_CODEX_MODEL/u);
-  assert.match(executioner, /AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT/u);
-  assert.match(executioner, /AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER/u);
-  assert.match(executioner, /service_tier="default"/u);
-  assert.doesNotMatch(executioner, /service_tier="standard"/u);
+  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL/u);
+  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT/u);
+  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER/u);
+  assert.match(executioner, /AGENTOS_ELEVATED_CODEX_SUBPROCESS_\*/u);
+  assert.doesNotMatch(executioner, /gpt-5\.6-sol.*model_reasoning_effort=high/u);
 });
 
 test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {
