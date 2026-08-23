@@ -1,5 +1,7 @@
 import { statfs } from "node:fs/promises";
 
+import type { RegressionRepairHandoff } from "@agentos/db";
+
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import type { FailureEnvelope } from "./envelope.js";
 
@@ -106,6 +108,9 @@ export type ClaimedTask = {
   sessionToken: string;
   secrets: Record<string, string>;
   priorOutputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number | null } }>;
+  /** A control-plane selected, exact-head handoff for a fresh Regression Run.
+   * It carries only durable verdict/repair evidence, never provider history. */
+  regressionRepairHandoff: RegressionRepairHandoff | null;
 };
 
 export type SessionEventPayload = {

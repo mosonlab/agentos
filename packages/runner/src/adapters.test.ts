@@ -59,6 +59,7 @@ const claim: ClaimedTask = {
   sessionToken: "agos_session_secret",
   secrets: { ALLOWED_SECRET: "secret" },
   priorOutputs: [],
+  regressionRepairHandoff: null,
 };
 
 const scratch = {
@@ -140,6 +141,39 @@ test("buildPrompt exposes a pinned implementation range without predecessor outp
   assert.match(prompt, new RegExp(`implementationBaseSha: ${"a".repeat(40)}`));
   assert.match(prompt, new RegExp(`implementationHeadSha: ${"b".repeat(40)}`));
   assert.doesNotMatch(prompt, /Persisted outputs from prior template steps/u);
+});
+
+test("buildPrompt gives a fresh Regression session only the head-bound repair handoff", () => {
+  const repaired = {
+    ...claim,
+    priorOutputs: [{ kind: "must-fix", body: "MF-2", task: { name: "Adjudication", chainIndex: 3 } }],
+    regressionRepairHandoff: {
+      schemaVersion: 1 as const,
+      previousVerdict: {
+        schemaVersion: 1 as const,
+        outcome: "review-fail" as const,
+        headSha: "a".repeat(40),
+        baseHeadSha: "b".repeat(40),
+        summary: "MF-2 remains open",
+      },
+      repair: {
+        kind: "review-fix" as const,
+        taskId: "repair-1",
+        startHeadSha: "a".repeat(40),
+        targetHeadSha: "b".repeat(40),
+        resolvedHeadSha: "c".repeat(40),
+        outputKind: "result",
+        outputBody: "Closed MF-2 and reran its focused regression.",
+      },
+    },
+  };
+  const prompt = buildPrompt(repaired);
+  assert.match(prompt, /Persisted outputs from prior template steps:[\s\S]*MF-2[\s\S]*Platform-pinned regression repair handoff:/u);
+  assert.match(prompt, /fresh provider session; do not assume any prior conversation state/u);
+  assert.match(prompt, /MF-2 remains open/u);
+  assert.match(prompt, new RegExp(`resolvedHeadSha":"${"c".repeat(40)}`));
+  assert.match(prompt, /Closed MF-2 and reran its focused regression/u);
+  assert.match(prompt, /verify the checked-out starting HEAD equals repair\.resolvedHeadSha/u);
 });
 
 test("the prompt manifest names the AgentOS tools the session actually got", () => {
@@ -514,6 +548,7 @@ test("every runner launches with the largest legal chain prompt and receives all
   const maximal: ClaimedTask = {
     ...claim,
     priorOutputs: Array.from({ length: MAX_PRIOR_OUTPUTS }, (_, index) => priorOutput(index)),
+    regressionRepairHandoff: null,
   };
   const prompt = buildPrompt(maximal);
   assert.ok(prompt.length > MAX_PRIOR_OUTPUTS * MAX_STEP_OUTPUT_CHARS, "the fixture must exceed every argv limit");

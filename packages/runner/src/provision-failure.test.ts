@@ -95,6 +95,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   sessionToken: "session-token",
   secrets: {},
   priorOutputs: [],
+  regressionRepairHandoff: null,
 });
 
 const originalFetch = globalThis.fetch;
