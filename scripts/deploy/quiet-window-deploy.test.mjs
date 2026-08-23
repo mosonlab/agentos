@@ -61,6 +61,9 @@ test("quiet-window runbook pins source-declared Agent-default transitions", () =
     assert.match(runbook, /from model\s+`gpt-5\.6-sol:high` with `runnerPreference` `CODEX` to model\s+`openai-codex\/gpt-5\.6-sol:high` with `runnerPreference` `PI`/u);
     assert.match(runbook, /both persisted fields exactly match that `from` state/u);
   }
+  assert.match(syncSource, /const REGRESSION_AGENT_NAME = "regression-verifier"/u);
+  assert.match(runbook, /`regression-verifier` is the one source-declared role creation/u);
+  assert.match(runbook, /TODO, and free of every Run, Session, and step output/u);
 });
 
 const fixture = (failure = null) => {

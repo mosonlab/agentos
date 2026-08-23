@@ -17,6 +17,7 @@ const detailSource = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx
 const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep => ({
   taskId: `t${position}`, position, chainIndex: position - 1, name: `Task ${position}`,
   stepName: `Step ${position}`, status: "TODO", approvalGate: false, assigneeType: "AGENT",
+  executionOwner: "agent",
   agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
   startable: false, startAction: null, currentExecution: false,
   ...overrides,
@@ -46,12 +47,23 @@ test("the gate's meaning is spelled out verbatim, once per gated step", () => {
 });
 
 test("a human step uses semantic human presentation and offers no start action", () => {
-  const markup = render(chain([step(1, { assigneeType: "HUMAN", agent: null, startable: false })]), "t1");
-  assert.match(markup, new RegExp(`>${en("chain.human")}<`));
-  assert.match(markup, /data-assignee-kind="human"/);
+  const markup = render(chain([step(1, { assigneeType: "HUMAN", executionOwner: "human", agent: null, startable: false })]), "t1");
+  assert.match(markup, new RegExp(`>${en("executionOwner.human")}<`));
+  assert.match(markup, /data-execution-owner="human"/);
   assert.match(markup, new RegExp(`aria-label="${en("chain.humanAssignee")}"`));
   assert.doesNotMatch(markup, new RegExp(en("chain.startNext")));
   assert.doesNotMatch(markup, /rect x="2\.6" y="5\.4"/);
+});
+
+test("server-owned tail steps show their actual execution owners", () => {
+  const markup = render(chain([
+    step(1, { executionOwner: "control-plane", agent: { id: "a1", title: "Review Coordinator" } }),
+    step(2, { executionOwner: "merge-executor", agent: { id: "a2", title: "Merge Integrator" } }),
+  ]), "t1");
+  assert.match(markup, new RegExp(`>${en("executionOwner.control-plane")}<`));
+  assert.match(markup, new RegExp(`>${en("executionOwner.merge-executor")}<`));
+  assert.doesNotMatch(markup, />Review Coordinator</);
+  assert.doesNotMatch(markup, />Merge Integrator</);
 });
 
 test("start and recovery copy appear only where the API supplied an action", () => {

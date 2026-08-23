@@ -14,6 +14,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "merge-resolver", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "plan-reviser", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
+  { name: "regression-verifier", model: "openai-codex/gpt-5.6-sol:medium", runner: RunnerPreference.PI },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:high", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:high", runner: RunnerPreference.PI },

@@ -62,7 +62,7 @@ This is the target shape of the seeded `compound-engineer-workflow` template and
 | ⑥a 代码评审（Sol 路） | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | base=⑤启动前冻结 commit，head=⑤记录的结束 commit，审完整 integrated diff；同一会话先完成 Standards pass 并闭合 findings，再单独执行逐项引用治理文本的 Spec pass，合并为一份报告；findings 仅持久化为 TaskStepOutput，不写入或推送链分支 |
 | ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, medium | workspace 以⑤记录的结束 commit 做 fetch-level isolated detached checkout；claim 以 non-report metadata 提供 immutable base/head；先将独立 Standards/Spec 评审持久化为 intermediate TaskStepOutput，成功写入后才解锁并读取⑥a，再按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；最终报告与 provider session id 仅落 platform output |
 | ⑦ 修复 | senior-dev | CODEX, sol, medium | 按封闭 must-fix 清单修；修复 diff 触及任一结构风险升 sol:high（本合同的 product-owner 裁定） |
-| ⑥c 回归核销 | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | 从完整 persisted review package 读取闭合 must-fix、⑥b 终裁与修复结果，对完整修复 diff 整体回归核销并绑定 exact head；不 resume ⑥b 的 Opus session |
+| ⑥c 回归核销 | regression-verifier | PI, openai-codex/gpt-5.6-sol, medium | 从完整 persisted review package 读取闭合 must-fix、⑥b 终裁与修复结果，对完整修复 diff 做窄范围 semantic verification；语义通过后只运行一次 exact-head mechanical gate，并绑定结构化 verdict；不 resume ⑥b 的 Opus session |
 | ⑧ wiki | librarian | CODEX, terra, medium | 自 luna:high 改此（luna:high 违「Luna 一律 max」硬禁令；Terra $2/$12） |
 | ⑨ 人工 PR 审查 | 人工闸 | — | 不变 |
 
@@ -70,9 +70,9 @@ In summary, Full Assurance runs specification and planning through implementatio
 
 ## Review structure
 
-Steps ⑥a, ⑥b, and ⑥c form the two-route blind-review flow. Review reports and session records live only in TaskStepOutput/platform output and never on the chain branch. ⑥a independently reviews the integrated diff and persists its findings there. ⑥b receives the immutable implementation base/head as non-report claim metadata and runs from a fetch-level isolated detached checkout pinned to ⑤'s recorded end commit; it completes and persists its own Standards/Spec review before the successful write unlocks ⑥a, then performs final adjudication. After ⑦ closes the must-fix list from predecessor outputs, ⑥c uses Sol to read the complete persisted review package, verifies the complete repair diff, and binds acceptance to the verified exact head.
+Steps ⑥a, ⑥b, and ⑥c form the two-route blind-review flow. Review reports and session records live only in TaskStepOutput/platform output and never on the chain branch. ⑥a independently reviews the integrated diff and persists its findings there. ⑥b receives the immutable implementation base/head as non-report claim metadata and runs from a fetch-level isolated detached checkout pinned to ⑤'s recorded end commit; it completes and persists its own Standards/Spec review before the successful write unlocks ⑥a, then performs final adjudication. After ⑦ closes the must-fix list from predecessor outputs, ⑥c uses the dedicated Sol-medium regression verifier to read the complete persisted review package, verify the complete repair diff, and run the one exact-head mechanical gate that binds acceptance to the verified head.
 
-Luna may write only when the dispatch route's safeguards and rollback conditions have been verified. Blind review requires the adjudicator to persist an independent review before reading the other route. Findings carry a stable ID, location, evidence, and severity; P0/P1 findings are must-fix. After repair, the Sol regression verifier accounts for the adjudicated must-fix list over the complete fix diff, and that verified exact head becomes the acceptance target.
+Luna may write only when the dispatch route's safeguards and rollback conditions have been verified. Blind review requires the adjudicator to persist an independent review before reading the other route. Findings carry a stable ID, location, evidence, and severity; P0/P1 findings are must-fix. After repair, the dedicated Sol-medium regression verifier accounts for the adjudicated must-fix list over the complete fix diff, and that verified exact head becomes the acceptance target.
 
 ## Human approval placement
 

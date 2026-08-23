@@ -8,7 +8,7 @@ import type { Task } from "../lib/types";
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "t1", projectId: "p1", assigneeAgentId: "a1", repoId: "r1", templateId: null, templateStepId: null,
   followUpTaskId: null, name: "Nightly digest", description: "d", workingDirectory: null, targetBranch: null,
-  failureReason: null, status: "TODO", assigneeType: "AGENT", approvalGate: false, scheduleKind: "CRON",
+  failureReason: null, status: "TODO", assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "CRON",
   runAt: new Date(Date.now() + 3_600_000).toISOString(), cron: "0 9 * * *", timezone: "Asia/Shanghai",
   maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",

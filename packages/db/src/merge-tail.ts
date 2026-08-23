@@ -56,6 +56,7 @@ const SHA = /^[0-9a-f]{40}$/u;
 
 export type RegressionVerdict =
   | { schemaVersion: 1; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
+  | { schemaVersion: 1; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
   | { schemaVersion: 1; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
   | { schemaVersion: 1; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
 
@@ -79,6 +80,9 @@ export const parseRegressionVerdict = (body: string | null | undefined): Regress
   if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return { status: "invalid", reason: "invalid regression headSha" };
   if (typeof value.baseHeadSha !== "string" || !SHA.test(value.baseHeadSha)) return { status: "invalid", reason: "invalid regression baseHeadSha" };
   if (value.outcome === "pass" && value.gateVerdict === "PASS") {
+    return { status: "ok", verdict: value as RegressionVerdict };
+  }
+  if (value.outcome === "review-fail" && typeof value.summary === "string" && value.summary.trim().length > 0) {
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   if (value.outcome === "gate-fail" && value.gateVerdict === "FAIL" && typeof value.summary === "string" && value.summary.length > 0) {

@@ -156,7 +156,7 @@ test("canonical sync restores step, merge-resolver role, and foundational prompt
   assert.equal(persistedAgent.rolePrompt, expectedRole.rolePrompt);
 });
 
-test("canonical sync adopts the declared Sol regression assignee transition without rewriting instantiated tasks", async () => {
+test("canonical sync adopts the dedicated regression verifier and migrates untouched TODO tasks", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
   const compound = await db.taskTemplate.findUniqueOrThrow({
@@ -189,12 +189,13 @@ test("canonical sync adopts the declared Sol regression assignee transition with
   const synced = await sync();
   assert.equal(synced.code, 0, synced.output);
   assert.match(synced.output, /"adoptedAssignees":2/u);
-  const [adoptedSteps, preservedTasks] = await Promise.all([
+  assert.match(synced.output, /"migratedTasks":2/u);
+  const [adoptedSteps, migratedTasks] = await Promise.all([
     db.taskTemplateStep.findMany({ where: { id: { in: regressionSteps.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
     db.task.findMany({ where: { id: { in: existingTasks.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
   ]);
-  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["review-coordinator-sol", "review-coordinator-sol"]);
-  assert.deepEqual(preservedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["review-coordinator-opus", "review-coordinator-opus"]);
+  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["regression-verifier", "regression-verifier"]);
+  assert.deepEqual(migratedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["regression-verifier", "regression-verifier"]);
 });
 
 test("canonical sync rejects template structure drift without applying its prompt", async () => {

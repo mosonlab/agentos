@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
-import { PrismaClient, RunnerPreference } from "@prisma/client";
+import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
 
@@ -102,4 +102,112 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   assert.equal(upgraded.length, 2);
   assert.ok(upgraded.every((agent) => agent.model === "openai-codex/gpt-5.6-sol:high"
     && agent.runnerPreference === RunnerPreference.PI));
+});
+
+test("sync creates the narrow verifier and migrates only never-run TODO regression tasks", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const source = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+  });
+  const existingVerifier = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+  });
+  const repo = await prisma.repo.create({ data: {
+    projectId: project.id,
+    name: "canonical-sync-repo",
+    remoteUrl: "https://github.com/acme/canonical-sync.git",
+    mountPath: "/repo",
+  } });
+  await prisma.agentRepoAccess.create({ data: {
+    projectId: project.id,
+    agentId: source.id,
+    repoId: repo.id,
+    mountPath: "/repo",
+    permissions: "GIT_WRITE",
+  } });
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: ["compound-engineer-workflow", "direct-engineer-workflow"] } },
+    select: { id: true, name: true },
+  });
+  const templateIds = templates.map(({ id }) => id);
+  const regressionSteps = await prisma.taskTemplateStep.findMany({
+    where: { taskTemplateId: { in: templateIds }, outputKind: "regression-verification" },
+  });
+  assert.equal(regressionSteps.length, 2);
+  await prisma.taskTemplateStep.updateMany({
+    where: { id: { in: regressionSteps.map(({ id }) => id) } },
+    data: { assigneeAgentId: source.id },
+  });
+  const readinessSteps = await prisma.taskTemplateStep.findMany({
+    where: { taskTemplateId: { in: templateIds }, outputKind: "merge-authorization" },
+    select: { id: true },
+  });
+  await prisma.taskTemplateStep.updateMany({
+    where: { id: { in: readinessSteps.map(({ id }) => id) } },
+    data: { name: "Merge readiness" },
+  });
+
+  const direct = templates.find(({ name }) => name === "direct-engineer-workflow")!;
+  const directRegression = regressionSteps.find(({ taskTemplateId }) => taskTemplateId === direct.id)!;
+  const makeTask = (name: string) => prisma.task.create({ data: {
+    projectId: project.id,
+    repoId: repo.id,
+    templateId: direct.id,
+    templateStepId: directRegression.id,
+    name,
+    description: "verify",
+    assigneeAgentId: source.id,
+    assigneeType: "AGENT",
+    status: TaskStatus.TODO,
+  } });
+  const eligible = await makeTask("Eligible regression");
+  const started = await makeTask("Started regression");
+  await prisma.run.create({ data: {
+    projectId: project.id,
+    taskId: started.id,
+    agentId: source.id,
+    repoId: repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${started.id}:run:1`,
+    runner: "PI",
+    model: source.model,
+    promptHash: "started",
+  } });
+  const outputBound = await makeTask("Output-bound regression");
+  await prisma.taskStepOutput.create({ data: {
+    taskId: outputBound.id,
+    kind: "regression-verification",
+    body: "legacy evidence",
+  } });
+
+  await prisma.agent.delete({ where: { id: existingVerifier.id } });
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdAgents":1/u);
+  assert.match(synced.output, /"createdAgentRepoGrants":1/u);
+  assert.match(synced.output, /"adoptedAssignees":2/u);
+  assert.match(synced.output, /"renamedSteps":2/u);
+  assert.match(synced.output, /"migratedTasks":1/u);
+  assert.match(synced.output, /"started":1/u);
+  assert.match(synced.output, /"output":1/u);
+
+  const verifier = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+  });
+  assert.equal(verifier.model, "openai-codex/gpt-5.6-sol:medium");
+  assert.equal(verifier.runnerPreference, RunnerPreference.PI);
+  assert.equal(verifier.inboxAccess, false);
+  assert.equal(await prisma.agentRepoAccess.count({ where: { agentId: verifier.id, repoId: repo.id } }), 1);
+  assert.equal(await prisma.taskTemplateStep.count({
+    where: { id: { in: regressionSteps.map(({ id }) => id) }, assigneeAgentId: verifier.id },
+  }), 2);
+  assert.equal(await prisma.taskTemplateStep.count({
+    where: { id: { in: readinessSteps.map(({ id }) => id) }, name: "Merge authorization" },
+  }), 2);
+  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: eligible.id } })).assigneeAgentId, verifier.id);
+  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: started.id } })).assigneeAgentId, source.id);
+  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: outputBound.id } })).assigneeAgentId, source.id);
+  assert.equal(await prisma.taskActivity.count({
+    where: { taskId: eligible.id, metadata: { path: ["kind"], equals: "canonicalRouting.regressionVerifier" } },
+  }), 1);
 });

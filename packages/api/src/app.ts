@@ -95,6 +95,7 @@ import { z } from "zod";
 import { authenticate, issueSessionToken, principalMayAccess, type Principal } from "./auth.js";
 import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
+import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
@@ -420,7 +421,9 @@ export const handleRegressionCompletion = async (
       "regression",
       verdict.outcome === "refresh-conflict"
         ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-        : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+        : verdict.outcome === "review-fail"
+          ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+          : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
     );
     return "handled";
   }
@@ -428,19 +431,23 @@ export const handleRegressionCompletion = async (
   const attempts = await tx.taskActivity.findMany({
     where: { taskId: input.task.id }, select: { metadata: true }, orderBy: { createdAt: "asc" },
   });
-  const repairKind = verdict.outcome === "refresh-conflict" ? "refresh-conflict" : "gate-fix";
+  const repairKind = verdict.outcome === "refresh-conflict"
+    ? "refresh-conflict"
+    : verdict.outcome === "review-fail" ? "review-fix" : "gate-fix";
   const alreadyAttempted = attempts.some((row) => {
     const metadata = asJsonObject(row.metadata);
     if (metadata?.kind !== MERGE_TAIL_KIND.repairAttempt || metadata.repairKind !== repairKind) return false;
-    return repairKind === "gate-fix" || metadata.headSha === verdict.headSha;
+    return repairKind !== "refresh-conflict" || metadata.headSha === verdict.headSha;
   });
   if (alreadyAttempted) {
     return stop(repairKind === "refresh-conflict"
       ? `second refresh conflict on chain head ${verdict.headSha}`
-      : `second merge gate FAIL on chain head ${verdict.headSha}`);
+      : repairKind === "review-fix"
+        ? `second semantic regression FAIL on chain head ${verdict.headSha}`
+        : `second merge gate FAIL on chain head ${verdict.headSha}`);
   }
   let agentName = "merge-resolver";
-  if (repairKind === "gate-fix") {
+  if (repairKind === "gate-fix" || repairKind === "review-fix") {
     const fixTask = await tx.task.findFirst({
       where: {
         projectId: input.task.projectId,
@@ -2551,7 +2558,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: {
         assigneeAgent: true,
         repo: true,
-        templateStep: { select: { name: true } },
+        templateStep: {
+          select: {
+            name: true,
+            stepIndex: true,
+            outputKind: true,
+            taskTemplate: { select: { name: true } },
+          },
+        },
         // `Run.output` is forensic bulk — up to 500k per run — and no client of
         // this list reads it. Omitted here and on the task detail below so that
         // recording a run's tail cannot inflate the responses the board polls.
@@ -2577,6 +2591,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
     return validated(context, tasks.map((task) => ({
       ...task,
+      executionOwner: chainExecutionOwner(task),
       chainProgress: progressFor(task),
       recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
       recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
@@ -2669,6 +2684,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: {
         assigneeAgent: true,
         repo: true,
+        templateStep: {
+          select: {
+            name: true,
+            stepIndex: true,
+            outputKind: true,
+            taskTemplate: { select: { name: true } },
+          },
+        },
         // Every run of the task, so the omitted `Run.output` matters most here:
         // five tails would dwarf everything else this route returns.
         runs: { orderBy: { runNumber: "desc" }, omit: { output: true }, include: { session: true } },
@@ -2694,6 +2717,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       : sessionUsageCost(run.model, run.session));
     return context.json({
       ...task,
+      executionOwner: chainExecutionOwner(task),
       taskCost: serializeUsageCost(sumUsageCosts(usageCosts.filter((cost) => cost !== null))),
       mergeOutcome,
       mergeRecovery,
@@ -2781,7 +2805,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         archivedAt: true,
         repoAccess: { where: { projectId: subject.projectId }, select: { repoId: true } },
       } },
-      templateStep: { select: { name: true } },
+      templateStep: {
+        select: {
+          name: true,
+          stepIndex: true,
+          outputKind: true,
+          taskTemplate: { select: { name: true } },
+        },
+      },
       runs: { orderBy: { runNumber: "desc" as const }, take: 1 },
     };
     // A chainId with a null chainIndex is a broken row the advancer already
@@ -2833,6 +2864,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         status: row.status,
         approvalGate: row.approvalGate,
         assigneeType: row.assigneeType,
+        executionOwner: chainExecutionOwner(row),
         agent: row.assigneeAgent ? { id: row.assigneeAgent.id, title: row.assigneeAgent.title } : null,
         archivedAt: row.archivedAt,
         failureReason: row.failureReason,
