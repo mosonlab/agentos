@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "602c91258a106b588135830602517e3761e4f129",
-  "tree": "28708223389bd279e501a47f4185ece74bbd7e60",
+  "commit": "2086f1dc0d23eeb823b1abd4dabc8913e37870b3",
+  "tree": "b22130c380b5192e1fd6c99d340ddb5c9a424c8d",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -132,6 +132,11 @@
       "blob": "914bd529b33e5209ad457e09e600b80328cd02d0"
     },
     {
+      "path": "packages/db/prisma/migrations/20260823070000_active_run_cancellation/migration.sql",
+      "sha256": "9004cb289e9e52d6dff612a450f0c3b7d0bc86bfc2e5e00c75c07e22586310a4",
+      "blob": "f32655e398eccf9ce5b5cbd363b446499686df91"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -148,8 +153,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "46a76f74ebdaeb815f940523ed9460edf0c6fc155ac652b5069814df16f27552",
-      "blob": "e0970e276dc3484bd4222e912b0cfddca7cf26b8"
+      "sha256": "435287657eee2cdc02253276e272c6c6a7e414edd0d418631c5980f289487b1f",
+      "blob": "74b670f8073df01277db0ce4b638e8cbd335e6c6"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -158,8 +163,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "d0d19efaaa4bd8a082081b136110f2d5bb50469474df6bc11e001a3e027a09b6",
-      "blob": "1f215e94be3f85d13608a5a901491b76b4599772"
+      "sha256": "29250a4852898d7e0c007e9eaeb4befe890a8aec79a3de0dffe335ba92def9ac",
+      "blob": "ce1619bc069435158fa2e27ae0363283f76441ec"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -173,13 +178,13 @@
     }
   ],
   "migrations": {
-    "count": 24,
-    "terminal": "20260823033000_executioner_subprocess_profiles",
-    "sha256": "0a64b246e5fd0893c0781f5709086aa24b273aa71c33857a4f706377a47da4e1"
+    "count": 25,
+    "terminal": "20260823070000_active_run_cancellation",
+    "sha256": "81114c3938c8d7a5e0dc839bdbdb141a7ff2586201a37e00bad5e8a2d08e97b9"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "E1xSpv47pW0fDXSOkminRWYO1t11qqyrgWYE9UVBKi0yzdvrIC59Df9xzPi9NKSteBRLTcYGcRwux3PrUOJ4BQ=="
+    "value": "OIaE6q03jw+DA5KFIi9tPaotXtlBQKsRHsSF7EIAcSz5x10Jlq2H1joxYxkkUayrOp7q467vuhtWhuf+nQ6LBA=="
   }
 }

@@ -74,8 +74,8 @@ export const FILES_PRECHECK_COMMAND = ["npm", "run", "db:files-precheck"] as con
  * match what is on disk.
  */
 export const RELEASE_CANDIDATE_MIGRATIONS = {
-  count: 24,
-  terminal: "20260823033000_executioner_subprocess_profiles",
+  count: 25,
+  terminal: "20260823070000_active_run_cancellation",
 } as const;
 
 /** Stable stop conditions owned by the orchestrator itself. */

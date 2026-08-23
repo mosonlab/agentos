@@ -230,6 +230,7 @@ export const persistSessionTaskOutput = async (
       id: input.runId,
       taskId: input.task.id,
       fencingToken: input.fencingToken,
+      cancelRequestedAt: null,
       leaseExpiresAt: { gt: new Date() },
       status: { in: ACTIVE_RUN_STATUSES },
     },

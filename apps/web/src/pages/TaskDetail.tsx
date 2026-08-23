@@ -289,6 +289,15 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const retry = (): void => {
     void run(async () => { await api.post(`/tasks/${taskId}/retry`, {}); reload(); });
   };
+  const cancelCurrentRun = (): void => {
+    if (!newest) return;
+    const reason = window.prompt(t("taskDetail.cancel.prompt"));
+    if (!reason?.trim()) return;
+    void run(async () => {
+      await api.post(`/runs/${newest.id}/cancel`, { requestId: crypto.randomUUID(), reason: reason.trim() });
+      reload();
+    });
+  };
   const startStep = (step: ChainStep): void => {
     void run(async () => { await api.post(`/tasks/${step.taskId}/start`, {}); reload(); chain.reload(); });
   };
@@ -306,6 +315,9 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const totalTokens = counted.length === 0 ? null : counted.reduce((sum, value) => sum + value, 0);
   // `app.ts` orders runs `runNumber desc`, so the newest run is the head.
   const newest = runs[0];
+  const newestIsActive = newest !== undefined
+    && ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"].includes(newest.status);
+  const newestIsCancelling = newestIsActive && newest.cancelRequestedAt !== null && newest.cancelAcknowledgedAt === null;
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
   const pullRequestUrl = newest?.pullRequestUrl ?? null;
@@ -340,6 +352,11 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
         ) : <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.chainStatusReadonly")}</span>}
         {retryable(task, task.runs[0]) ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
+        ) : null}
+        {newestIsActive ? (
+          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={cancelCurrentRun}>
+            {t(newestIsCancelling ? "taskDetail.cancel.cancelling" : "taskDetail.cancel.action")}
+          </Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>
           <IconArchive />{t(task.archivedAt === null ? "tasks.menu.archive" : "archived.menu.unarchive")}

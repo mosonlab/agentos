@@ -770,6 +770,14 @@ model Run {
   sessionTokenHash      String?              @unique
   sessionTokenExpiresAt DateTime?
   sessionTokenRevokedAt DateTime?
+  /// Operator cancellation is a durable intent before it is a terminal state.
+  /// The owning runner observes this through heartbeat, kills its provider
+  /// process group, then acknowledges the same request id. While intent is
+  /// present every ordinary lease-authorized write is fenced out.
+  cancelRequestId       String?              @unique
+  cancelReason          String?
+  cancelRequestedAt     DateTime?
+  cancelAcknowledgedAt  DateTime?
   workspacePath         String?
   workspaceRetained     Boolean              @default(false)
   /// Control-plane *intent*, not an action: "the runner that owns this run's

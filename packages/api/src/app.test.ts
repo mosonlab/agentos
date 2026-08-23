@@ -506,9 +506,9 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
   const now = new Date("2026-08-15T12:00:00Z");
   const candidates = [
     // Lease expired during an api restart, heartbeat 30s old: still alive.
-    { id: "run-live", heartbeatAt: new Date(now.getTime() - 30_000), stallTimeoutMin: 10, taskId: "task-1", runNumber: 1, maxRunsPerTask: 3 },
+    { id: "run-live", heartbeatAt: new Date(now.getTime() - 30_000), stallTimeoutMin: 10, taskId: "task-1", runNumber: 1, maxRunsPerTask: 3, cancelRequestId: null, cancelReason: null, cancelRequestedAt: null },
     // Silent for 20 minutes: really gone.
-    { id: "run-dead", heartbeatAt: new Date(now.getTime() - 20 * 60_000), stallTimeoutMin: 10, taskId: "task-2", runNumber: 1, maxRunsPerTask: 3 },
+    { id: "run-dead", heartbeatAt: new Date(now.getTime() - 20 * 60_000), stallTimeoutMin: 10, taskId: "task-2", runNumber: 1, maxRunsPerTask: 3, cancelRequestId: null, cancelReason: null, cancelRequestedAt: null },
   ];
   const lost: string[] = [];
   const database = {

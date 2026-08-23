@@ -16,6 +16,7 @@ import {
 import {
   appendActivity,
   appendEvents,
+  acknowledgeCancellation,
   claimTask,
   completeRun,
   heartbeat as sendHeartbeat,
@@ -25,6 +26,7 @@ import {
   reportPreflight,
   startRun,
   type ClaimedTask,
+  type CancellationRequest,
   type CleanupStatus,
   type SessionEventPayload,
 } from "./api.js";
@@ -182,6 +184,8 @@ export const executeClaim = async (
   let heartbeatBusy = false;
   let fencingRejected = false;
   let waitingInbox = false;
+  let cancellation: CancellationRequest | null = null;
+  let cancellationPromise: Promise<void> | null = null;
   let budgetReason: string | null = null;
   // A session CLI's root is retained until the run is known to have succeeded, so a
   // provisioning or execution failure can be inspected and resumed without
@@ -241,6 +245,17 @@ export const executeClaim = async (
     waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
     fencingRejected = true;
     if (handle) await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
+  };
+
+  const acceptCancellation = async (request: CancellationRequest | null): Promise<void> => {
+    if (!request) return;
+    cancellation = request;
+    fencingRejected = true;
+    cancellationPromise ??= (async () => {
+      if (handle) await adapter.kill(handle, request.reason);
+      await acknowledgeCancellation(config, claim, request);
+    })();
+    await cancellationPromise;
   };
 
   const observeEventFlush = async (error: unknown): Promise<void> => {
@@ -325,7 +340,10 @@ export const executeClaim = async (
           startedAt: provisionStartedAt.toISOString(),
           lastProgressAt: provisionStartedAt.toISOString(),
         },
-      }).then(() => { leaseRenewedAt = Date.now(); }).catch((error: unknown) => {
+      }).then(async (result) => {
+        if (result.cancellation) await acceptCancellation(result.cancellation);
+        else leaseRenewedAt = Date.now();
+      }).catch((error: unknown) => {
         if (isFencingError(error)) {
           waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
           fencingRejected = true;
@@ -342,6 +360,10 @@ export const executeClaim = async (
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (cancellation) {
+        await cancellationPromise;
+        return;
+      }
       const cleaned = await cleanup(config, claim, workspace, false);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
       await recordLeaseIndependentCleanup(config, claim, cleanupOutcome).catch((error: unknown) => {
@@ -419,12 +441,13 @@ export const executeClaim = async (
           await adapter.kill(handle!, budgetReason);
         }
         try {
-          await sendHeartbeat(config, claim, {
+          const result = await sendHeartbeat(config, claim, {
             processAlive: snapshot.processAlive,
             lastProgressEventAt: snapshot.lastProgressEventAt,
             inFlightTool: serializeTool(snapshot.inFlightTool),
           });
-          if (snapshot.processAlive) leaseRenewedAt = Date.now();
+          if (result.cancellation) await acceptCancellation(result.cancellation);
+          else if (snapshot.processAlive) leaseRenewedAt = Date.now();
         } catch (error: unknown) {
           await noteFencingError(error);
           if (!isFencingError(error)) console.error("Run heartbeat failed", error);
@@ -442,6 +465,10 @@ export const executeClaim = async (
     const evidence = await handle.exit;
     producedOutput = outputTail(evidence);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (cancellation) {
+      await cancellationPromise;
+      return;
+    }
     phase = "DELIVER";
     // The agent process is gone, but the runner is not done: it still has to
     // flush events, snapshot git, push, talk to GitHub, clean up the workspace
@@ -455,6 +482,7 @@ export const executeClaim = async (
       if (!openLease.rejected) return;
       fencingRejected = true;
       waitingInbox = openLease.waitingInbox;
+      if (openLease.cancellation) cancellation = openLease.cancellation;
     };
     adoptLeaseVerdict(lease);
     await drainEventsUnderLease(lease);
@@ -462,6 +490,10 @@ export const executeClaim = async (
     // were still draining, and everything past this point writes to a remote.
     adoptLeaseVerdict(lease);
     if (fencingRejected) {
+      if (cancellation) {
+        await acceptCancellation(cancellation);
+        return;
+      }
       if (waitingInbox) return;
       const cleaned = await cleanup(config, claim, workspace, false);
       const { salvage: _salvage, ...cleanupOutcome } = cleaned;
@@ -603,6 +635,10 @@ export const executeClaim = async (
     const message = errorMessage(error);
     if (handle) await adapter.kill(handle, RUNNER_EXCEPTION_REASON).catch(() => undefined);
     if (fencingRejected) {
+      if (cancellation) {
+        await acceptCancellation(cancellation);
+        return;
+      }
       if (waitingInbox) return;
       if (workspace) {
         const cleaned = await cleanup(config, claim, workspace, false);

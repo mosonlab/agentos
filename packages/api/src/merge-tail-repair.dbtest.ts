@@ -379,9 +379,25 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
   });
 });
 
-test("a fresh Regression claim carries an exact independent-review rejection and its repair", async () => {
+test("independent-review rejection stops for an explicit repair decision before a fresh Regression claim", async () => {
   const seeded = await seedRegression();
   const rejected = await rejectIndependentReviewAfterPass(seeded);
+  assert.equal(await db.task.count({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" } }), 0);
+  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
+  assert.equal(card.kind, "MULTIPLE_CHOICE");
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
+  try {
+    const response = await createApp(db).request(`/inbox/messages/${card.id}/decision`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-operator-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "create-repair-1", decision: "create-repair" }),
+    });
+    assert.equal(response.status, 201, await response.text());
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorOperator;
+  }
   const repair = await db.task.findFirstOrThrow({ where: {
     projectId: seeded.project.id,
     name: "Autonomous merge tail: review-fix",
@@ -424,6 +440,66 @@ test("a fresh Regression claim carries an exact independent-review rejection and
     outputKind: "result",
     outputBody: repairOutput,
   });
+});
+
+test("operator exact-head adoption re-runs Regression without manufacturing repair evidence", async () => {
+  const seeded = await seedRegression();
+  await rejectIndependentReviewAfterPass(seeded);
+  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
+  try {
+    const response = await createApp(db).request(`/inbox/messages/${card.id}/decision`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-operator-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "adopt-head-1", decision: "adopt-head" }),
+    });
+    assert.equal(response.status, 201, await response.text());
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorOperator;
+  }
+  assert.equal(await db.task.count({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" } }), 0);
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  assert.equal((claimed.body as { regressionRepairHandoff: unknown }).regressionRepairHandoff, null);
+  const decision = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["kind"], equals: "mergeTail.operatorDecision" },
+  } });
+  assert.match(decision.body, new RegExp(HEAD));
+});
+
+test("operator takeover parks the autonomous tail without creating work", async () => {
+  const seeded = await seedRegression();
+  const rejected = await rejectIndependentReviewAfterPass(seeded);
+  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
+  try {
+    const response = await createApp(db).request(`/inbox/messages/${card.id}/decision`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-operator-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "operator-takeover-1", decision: "operator-takeover" }),
+    });
+    assert.equal(response.status, 201, await response.text());
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorOperator;
+  }
+  const [regression, readiness] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+    db.task.findUniqueOrThrow({ where: { id: rejected.readiness.id } }),
+  ]);
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.match(regression.failureReason ?? "", /parked by operator/u);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: { startsWith: "Autonomous merge tail:" },
+    id: { not: rejected.review.id },
+  } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, runNumber: { gt: 1 } } }), 0);
 });
 
 test("a stale repair output stops the queued Regression Run before a provider session starts", async () => {

@@ -379,6 +379,7 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/release/v0.2.0-release-notes.md",
     "docs/runbooks/gate-worker.md",
     "docs/runbooks/legacy-integrator-stop.md",
+    "docs/runbooks/merge-delivery.md",
     "docs/runbooks/merge-executor.md",
     "docs/runbooks/quiet-window-auto-deploy.md",
   ]);

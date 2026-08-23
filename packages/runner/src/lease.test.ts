@@ -55,7 +55,7 @@ test("the phase deadline is measured from when the renewal was sent, not when it
   // spend the round trip out of the reserve the arithmetic depends on.
   let clock = 1_000;
   const lease = await openDeliveryLease(config, claim, 0, {
-    send: async () => { clock += 9_000; },
+    send: async () => { clock += 9_000; return { ok: true, cancellation: null }; },
     now: () => clock,
     startedAt: new Date(0),
   });
@@ -81,10 +81,27 @@ test("a failed opening renewal falls back to the last renewal that landed", asyn
   } finally { lease.close(); }
 });
 
+test("a typed cancellation rejects delivery without treating it as Inbox suspension", async () => {
+  const cancellation = { requestId: "cancel-1", reason: "operator stop", requestedAt: new Date(0).toISOString() };
+  const lease = await openDeliveryLease(config, claim, 0, {
+    send: async () => ({ ok: false, cancellation }),
+    now: () => 1_000,
+    startedAt: new Date(0),
+  });
+  try {
+    assert.equal(lease.rejected, true);
+    assert.equal(lease.waitingInbox, false);
+    assert.deepEqual(lease.cancellation, cancellation);
+    let delivered = 0;
+    await deliverUnderLease(lease, async () => { delivered += 1; return null; });
+    assert.equal(delivered, 0);
+  } finally { lease.close(); }
+});
+
 test("a lease rejected by a later heartbeat still blocks the next remote write", async () => {
   let calls = 0;
   const lease = await openDeliveryLease({ ...config, heartbeatIntervalMs: 5 }, claim, 0, {
-    send: async () => { calls += 1; if (calls > 1) throw rejection(409); },
+    send: async () => { calls += 1; if (calls > 1) throw rejection(409); return { ok: true, cancellation: null }; },
     now: () => 0,
     startedAt: new Date(0),
   });

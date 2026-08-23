@@ -23,6 +23,16 @@ test("the Runs section is rendered before the Chain section", () => {
   assert.ok(source.indexOf('t("taskDetail.runs.title")') < source.indexOf("<ChainList chain={chain.data}"));
 });
 
+test("active Runs expose cancellation and an outstanding intent renders Cancelling", () => {
+  for (const status of ["QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"]) {
+    assert.match(source, new RegExp(`"${status}"`, "u"));
+  }
+  assert.match(source, /newest\.cancelRequestedAt !== null/u);
+  assert.match(source, /newest\.cancelAcknowledgedAt === null/u);
+  assert.match(source, /taskDetail\.cancel\.cancelling/u);
+  assert.match(source, /\/runs\/\$\{newest\.id\}\/cancel/u);
+});
+
 const output = (body: string): TaskStepOutput => ({
   id: "o1", taskId: "t1", runId: "r1", kind: "review", body,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
