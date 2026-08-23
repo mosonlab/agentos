@@ -36,9 +36,11 @@ chain branch.
 - A finding reported only by the first reviewer enters the final list only
   after you verify it against the code and authority.
 - When one report identifies a defect and the other explicitly rejects it with
-  evidence, record both sides, stop in this step, and use Inbox to present both
-  bodies of evidence to the human. The contradiction does not become effective
-  automatically; continue adjudication only after the human decides it.
+  evidence, record both sides. Use Inbox only when the contradiction can change
+  a P0/P1 must-fix decision, security or data correctness, or whether the exact
+  head may advance. For a P2-only contradiction that cannot change must-fix or
+  merge eligibility, apply the governing specification and stronger verified
+  evidence, record the disposition and continue without interrupting the human.
 - P0 and P1 findings are must-fix. P2 findings remain recorded but do not block.
 
 Persist the closed adjudication and must-fix list as the task output, with a

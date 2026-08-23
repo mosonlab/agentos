@@ -107,7 +107,8 @@ export const TOOLS = [
     name: "task_output",
     title: "Persist the task output",
     description: "Persist this step's deliverable as the AgentOS task output. Later steps in the chain read it, and "
-      + "the approval gate shows it to the human. Call it once the deliverable is final; calling it again replaces the stored output.",
+      + "the approval gate shows it to the human. Canonical steps may require a phase-specific write sequence from the task contract. "
+      + "A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
     inputSchema: {
       type: "object",
       properties: {

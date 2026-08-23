@@ -5,6 +5,9 @@ import { loadAllTemplateStepSources, templateStepStructureDifferences } from "..
 
 const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
+const LEGACY_BLIND_REVIEW_PROMPTS = [
+  "Blind-review the complete integrated implementation diff using the immutable implementationBaseSha and implementationHeadSha in the platform-pinned claim metadata; verify both endpoints resolve in this detached checkout. Persist your independent findings as an intermediate AgentOS task output before reading the first review. The successful task_output response unlocks predecessor step outputs; only then read them, apply the canonical merge matrix, and replace the intermediate output with the closed must-fix list. Do not write or commit any review report file.",
+] as const;
 type AssigneeTransition = { from: readonly string[]; to: string };
 const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
   ["compound-engineer-workflow:9", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
@@ -98,6 +101,7 @@ const main = async (): Promise<void> => {
       let renamedSteps = 0;
       let templateCount = 0;
       const regressionSteps: Array<{ id: string; projectId: string }> = [];
+      const blindReviewSteps: Array<{ id: string; prompt: string }> = [];
       for (const [templateName, steps] of templateSources) {
         const templates = await tx.taskTemplate.findMany({
           where: { name: templateName },
@@ -187,6 +191,9 @@ const main = async (): Promise<void> => {
               if (!projectId) throw new Error(`Template project was not found for regression step ${persisted.id}`);
               regressionSteps.push({ id: persisted.id, projectId });
             }
+            if (step.outputKind === "must-fix") {
+              blindReviewSteps.push({ id: persisted.id, prompt: step.prompt });
+            }
           }
           updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex, prompt: { not: step.prompt } },
@@ -263,6 +270,69 @@ const main = async (): Promise<void> => {
         }
       }
 
+      let migratedTaskPrompts = 0;
+      const preservedBlindReviewPrompts = { archived: 0, nonTodo: 0, started: 0, output: 0, unrecognized: 0 };
+      for (const step of blindReviewSteps) {
+        const tasks = await tx.task.findMany({
+          where: { templateStepId: step.id },
+          select: {
+            id: true,
+            status: true,
+            archivedAt: true,
+            description: true,
+            _count: { select: { runs: true, sessions: true } },
+            stepOutput: { select: { id: true } },
+          },
+        });
+        for (const task of tasks) {
+          const legacyPrompt = LEGACY_BLIND_REVIEW_PROMPTS.find((prompt) => task.description.startsWith(prompt));
+          if (!legacyPrompt) {
+            if (!task.description.startsWith(step.prompt)) preservedBlindReviewPrompts.unrecognized += 1;
+            continue;
+          }
+          if (task.archivedAt) {
+            preservedBlindReviewPrompts.archived += 1;
+            continue;
+          }
+          if (task.status !== TaskStatus.TODO) {
+            preservedBlindReviewPrompts.nonTodo += 1;
+            continue;
+          }
+          if (task._count.runs > 0 || task._count.sessions > 0) {
+            preservedBlindReviewPrompts.started += 1;
+            continue;
+          }
+          if (task.stepOutput) {
+            preservedBlindReviewPrompts.output += 1;
+            continue;
+          }
+          const description = `${step.prompt}${task.description.slice(legacyPrompt.length)}`;
+          const adopted = await tx.task.updateMany({
+            where: {
+              id: task.id,
+              description: task.description,
+              status: TaskStatus.TODO,
+              archivedAt: null,
+              runs: { none: {} },
+              sessions: { none: {} },
+              stepOutput: { is: null },
+            },
+            data: { description },
+          });
+          if (adopted.count !== 1) throw new Error(`Blind-review task ${task.id} changed while its canonical prompt was being adopted`);
+          await tx.taskActivity.create({ data: {
+            taskId: task.id,
+            actorType: "control-plane",
+            body: "Canonical sync updated this unstarted blind-review step to the versioned output protocol",
+            metadata: {
+              kind: "canonicalTaskPrompt.blindReviewOutputV1",
+              schemaVersion: 1,
+            },
+          } });
+          migratedTaskPrompts += 1;
+        }
+      }
+
       const presentAgents = await tx.agent.findMany({
         where: { projectId: canonicalProject.id, archivedAt: null, name: { in: roleNames } },
         select: {
@@ -330,14 +400,16 @@ const main = async (): Promise<void> => {
         adoptedStepBases,
         renamedSteps,
         migratedTasks,
+        migratedTaskPrompts,
         preservedTaskAssignments,
+        preservedBlindReviewPrompts,
         adoptedAgentDefaults,
         updatedSteps,
         updatedRoles,
       };
-    });
+    }, { timeout: 30_000 });
     const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
-      + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
+      + result.renamedSteps + result.migratedTasks + result.migratedTaskPrompts + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);

@@ -170,3 +170,65 @@ test("CLI availability reports preserve an independent authentication circuit", 
   assert.equal(state.circuitOpen, true);
   assert.equal(state.circuitReason, "not-authenticated: run codex login");
 });
+
+test("an overdue authentication circuit assigns one recovery preflight and surfaces its blocker", async () => {
+  const seeded = await seedTask(RunnerPreference.CODEX);
+  const openedAt = new Date(Date.now() - 10 * 60_000);
+  await db.runnerBackendState.create({ data: {
+    runner: "CODEX",
+    lastPreflightAt: openedAt,
+    lastPreflightOk: false,
+    circuitOpen: true,
+    circuitReason: "not-authenticated: run codex login",
+    circuitOpenedAt: openedAt,
+  } });
+  const app = createApp(db);
+  const report = async (runnerId: string) => {
+    const response = await app.request("/runner/availability", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId,
+        runner: "CODEX",
+        binary: "codex",
+        available: true,
+        resolvedPath: "/opt/runner/bin/codex",
+      }),
+    });
+    assert.equal(response.status, 200);
+    return await response.json() as { revalidatePreflight: boolean };
+  };
+
+  assert.equal((await report("runner-a")).revalidatePreflight, true);
+  assert.equal((await report("runner-b")).revalidatePreflight, false);
+
+  await app.request("/runner/preflight", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runner: "CODEX",
+      ok: false,
+      cliVersion: "codex-cli test",
+      authMode: "chatgpt",
+      capabilities: {},
+      error: "not-authenticated: run codex login",
+    }),
+  });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).failureReason,
+    "not-authenticated: run codex login");
+  assert.equal((await report("runner-b")).revalidatePreflight, false, "a fresh failure must back off");
+
+  await app.request("/runner/preflight", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runner: "CODEX",
+      ok: true,
+      cliVersion: "codex-cli test",
+      authMode: "chatgpt",
+      capabilities: {},
+    }),
+  });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).failureReason, null);
+  assert.equal((await report("runner-a")).revalidatePreflight, false);
+});

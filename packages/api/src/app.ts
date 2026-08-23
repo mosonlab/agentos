@@ -1108,6 +1108,10 @@ const preflightInput = z.object({
   error: z.string().nullable().optional(),
 });
 const runnerAvailabilityInput = z.object({
+  // Optional only for the API-first half of a rolling deployment. A runner
+  // without an identity may still report binary health, but cannot receive a
+  // coordinated full-preflight retry directive.
+  runnerId: z.string().trim().min(1).max(120).optional(),
   runner: z.nativeEnum(RunnerKind),
   binary: z.string().trim().min(1).max(500),
   available: z.boolean(),
@@ -1587,6 +1591,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const app = new Hono<AppEnvironment>();
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
   const runners = createRunnerRegistry();
+  // Authentication circuits are global backend state, so only one daemon must
+  // perform a recovery check. This short in-process lease prevents every idle
+  // daemon from invoking the same provider login command on each heartbeat.
+  // `lastPreflightAt` remains the durable retry clock, so an API restart may
+  // reassign an overdue check without changing what that timestamp means.
+  const preflightRecoveryLeases = new Map<RunnerKind, number>();
+  const preflightRecoveryIntervalMs = 5 * 60_000;
 
   // The supported browser path is same-origin through the Vite proxy, so this
   // allowlist is a boundary rather than a transport: it decides which *other*
@@ -4224,7 +4235,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       return available;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    return context.json(state);
+    const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
+    const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
+    const revalidatePreflight = body.available
+      && body.runnerId !== undefined
+      && state.circuitOpen
+      && now.getTime() - lastPreflightAt >= preflightRecoveryIntervalMs
+      && currentLease <= now.getTime();
+    if (revalidatePreflight) {
+      preflightRecoveryLeases.set(body.runner, now.getTime() + preflightRecoveryIntervalMs);
+    }
+    return context.json({ ...state, revalidatePreflight });
   });
 
   app.post("/runner/preflight", async (context) => {
@@ -4255,6 +4276,24 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           : { circuitOpen: true, circuitReason: body.error ?? "Preflight failed", circuitOpenedAt: now }),
       },
     });
+    preflightRecoveryLeases.delete(body.runner);
+    const blockedReason = body.error ?? "Preflight failed";
+    if (body.ok) {
+      if (previous?.circuitReason) {
+        await db.task.updateMany({
+          where: { failureReason: previous.circuitReason },
+          data: { failureReason: null },
+        });
+      }
+    } else {
+      await db.task.updateMany({
+        where: {
+          status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+          runs: { some: { runner: body.runner, status: RunStatus.QUEUED } },
+        },
+        data: { failureReason: blockedReason },
+      });
+    }
     if (!body.ok && !previous?.circuitOpen) {
       // Attach the operator chat so the alert can actually leave the web Inbox;
       // threadless messages are skipped by the Feishu outbox forever.
