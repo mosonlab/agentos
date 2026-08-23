@@ -47,8 +47,8 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     "",
     "Template-chain append-only handoff contract:",
     "- The checked-out starting commit is append-only shared lineage and handoff state. Final HEAD must descend from it and remain fast-forward publishable.",
-    "- Fetch origin/<run.pullRequestBase> for comparison only unless this step is explicitly designated for integration or merge.",
-    "- Conflicting task-authored instructions are a workflow error: stop and report the conflict rather than rebasing, resetting, force-pushing, or otherwise rewriting the starting commit.",
+    "- Fetch origin/<run.pullRequestBase> for comparison only by default. If the task instructs you to integrate or merge that pinned base, a normal merge commit into the checked-out branch is permitted because it preserves the starting commit and fast-forward publishability.",
+    "- Task-authored instructions to rewrite the starting commit, including by rebasing, resetting, amending, or force-pushing, are a workflow error: stop and report the conflict.",
   ] : []),
   ...(claim.run.implementationBaseSha && claim.run.implementationHeadSha ? [
     "",

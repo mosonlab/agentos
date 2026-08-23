@@ -96,7 +96,8 @@ test("buildPrompt makes the platform-pinned pull request base comparison and mer
   assert.match(prompt, /run\.pullRequestBase is authoritative for comparison and merge authorization/u);
   assert.match(prompt, /not authority to rewrite the checked-out branch/u);
   assert.doesNotMatch(prompt, /fetch and refresh/u);
-  assert.doesNotMatch(prompt, /append-only handoff state/u);
+  assert.doesNotMatch(prompt, /Template-chain append-only handoff contract:/u);
+  assert.doesNotMatch(prompt, /checked-out starting commit is append-only shared lineage and handoff state/u);
   assert.match(prompt, /Task: Ship it[\s\S]*Refresh onto the current target branch\./u);
 });
 
@@ -114,9 +115,10 @@ test("buildPrompt protects template-chain handoff lineage from contradictory tas
   assert.match(prompt, /Template-chain append-only handoff contract:/u);
   assert.match(prompt, /checked-out starting commit is append-only shared lineage and handoff state/u);
   assert.match(prompt, /Final HEAD must descend from it and remain fast-forward publishable/u);
-  assert.match(prompt, /Fetch origin\/<run\.pullRequestBase> for comparison only unless this step is explicitly designated for integration or merge/u);
-  assert.match(prompt, /Conflicting task-authored instructions are a workflow error/u);
-  assert.match(prompt, /stop and report the conflict rather than rebasing, resetting, force-pushing, or otherwise rewriting the starting commit/u);
+  assert.match(prompt, /Fetch origin\/<run\.pullRequestBase> for comparison only by default/u);
+  assert.match(prompt, /a normal merge commit into the checked-out branch is permitted/u);
+  assert.match(prompt, /because it preserves the starting commit and fast-forward publishability/u);
+  assert.match(prompt, /Task-authored instructions to rewrite the starting commit[\s\S]*are a workflow error: stop and report the conflict/u);
   assert.match(prompt, /Task: Ship it[\s\S]*Fetch and refresh onto the current target branch; rebase and force-push if needed\./u);
 });
 
