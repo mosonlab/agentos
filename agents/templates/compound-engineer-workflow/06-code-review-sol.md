@@ -5,7 +5,7 @@ approvalGate: false
 outputKind: sol-findings
 attachmentsFromPrevious: true
 opensPullRequest: false
-baseFromStepIndex: null
+baseFromStepIndex: 5
 spawnPolicy: null
 ---
-Review the complete integrated implementation diff from the frozen pre-implementation base through the delivered head. Do not write or commit a report file; persist stable evidence-backed findings only as the AgentOS task output.
+Review the complete integrated implementation diff using the platform-pinned implementationBaseSha and implementationHeadSha. Do not write or commit a report file; persist stable evidence-backed findings only as the AgentOS task output.

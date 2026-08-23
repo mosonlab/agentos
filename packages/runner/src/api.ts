@@ -108,6 +108,15 @@ export type ClaimedTask = {
   sessionToken: string;
   secrets: Record<string, string>;
   priorOutputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number | null } }>;
+  /** Immediate prior attempt evidence for a fresh provider Session. */
+  previousRunHandoff: {
+    schemaVersion: 1;
+    previousRunId: string;
+    status: string;
+    failureReason: string | null;
+    retryReason: "approval-rejected-without-feedback" | "automatic-retry" | "operator-retry" | "retry";
+    output: { kind: string; body: string; commitSha: string | null } | null;
+  } | null;
   /** A control-plane selected, exact-head handoff for a fresh Regression Run.
    * It carries only durable verdict/repair evidence, never provider history. */
   regressionRepairHandoff: RegressionRepairHandoff | null;

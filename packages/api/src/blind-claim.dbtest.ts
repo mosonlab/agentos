@@ -147,6 +147,19 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
   assert.equal(blindClaim.run.implementationBaseSha, "b".repeat(40));
   assert.equal(blindClaim.run.implementationHeadSha, blindClaim.run.pinnedBaseSha);
 
+  const prematureClose = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: blindClaim.fencingToken,
+      kind: "must-fix",
+      body: "attempted closed output without independent findings",
+      commitSha: "f".repeat(40),
+      metadata: { phase: "closed-must-fix" },
+    }),
+  });
+  assert.equal(prematureClose.status, 409);
+
   const persisted = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
@@ -155,12 +168,77 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
       kind: "must-fix",
       body: "independent findings persisted before adjudication",
       commitSha: "f".repeat(40),
+      metadata: { phase: "independent-findings" },
     }),
   });
   assert.equal(persisted.status, 200);
-  const unlocked = await persisted.json() as { predecessorOutputs: Array<{ body: string }> };
+  const intermediate = await persisted.json() as { predecessorOutputs: Array<{ body: string }> };
+  assert.deepEqual(intermediate.predecessorOutputs, []);
+
+  const closed = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${blindClaim.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: blindClaim.fencingToken,
+      kind: "must-fix",
+      body: "closed must-fix list after adjudication",
+      commitSha: "f".repeat(40),
+      metadata: { phase: "closed-must-fix" },
+    }),
+  });
+  assert.equal(closed.status, 200);
+  const unlocked = await closed.json() as { predecessorOutputs: Array<{ body: string }> };
   assert.equal(unlocked.predecessorOutputs.length, blind.expectedPriorOutputs);
   assert.ok(unlocked.predecessorOutputs.some((output) => output.body === "persisted output from step 6"));
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: blind.run.taskId! } });
+  assert.deepEqual(output.metadata, { phase: "closed-must-fix" });
+  const archived = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: blind.run.taskId!,
+    metadata: { path: ["kind"], equals: "canonicalTaskOutput.blindIndependentFindings" },
+  } });
+  assert.equal(archived.body, "independent findings persisted before adjudication");
+});
+
+test("canonical blind review cannot complete from intermediate findings", async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const blind = await queueCanonicalStep(template, repo.id, 7);
+  const claimed = await claim();
+  const intermediate = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: claimed.fencingToken,
+      kind: "must-fix",
+      body: "independent findings only",
+      commitSha: claimed.run.targetBranch,
+      metadata: { phase: "independent-findings" },
+    }),
+  });
+  assert.equal(intermediate.status, 200);
+
+  const completed = await createApp(db).request(`/runner/runs/${blind.run.id}/complete`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "blind-claim-runner",
+      fencingToken: claimed.fencingToken,
+      exitCode: 0,
+      signal: null,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      terminationReason: null,
+      branch: blind.run.branch,
+      baseSha: "b".repeat(40),
+      headSha: claimed.run.targetBranch,
+      pushStatus: "NOT_REQUESTED",
+      cleanupStatus: "SUCCEEDED",
+      workspaceRetained: false,
+    }),
+  });
+  assert.equal(completed.status, 200, await completed.text());
+  const task = await db.task.findUniqueOrThrow({ where: { id: blind.run.taskId! } });
+  assert.equal(task.status, "REVIEW");
+  assert.match(task.failureReason ?? "", /closed-must-fix phase/u);
 });
 
 test("operator retry re-resolves a pinned step to the recorded implementation commit", async () => {

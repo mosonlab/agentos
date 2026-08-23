@@ -23,9 +23,10 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { enqueueTaskRun, PrismaClient, TaskStatus } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@agentos/db";
 
 import { hashToken } from "./auth.js";
+import { previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -69,7 +70,7 @@ const call = async (
 });
 
 let sequence = 0;
-const seedTask = async (options: { chained: boolean; outputKind?: string }) => {
+const seedTask = async (options: { chained: boolean; outputKind?: string; templateName?: string; stepIndex?: number }) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Run output", slug: `run-output-${suffix}` } });
@@ -87,13 +88,13 @@ const seedTask = async (options: { chained: boolean; outputKind?: string }) => {
   } });
   const template = options.outputKind ? await db.taskTemplate.create({ data: {
     projectId: project.id,
-    name: `template-${suffix}`,
+    name: options.templateName ?? `template-${suffix}`,
     description: "completion boundary fixture",
     variables: [],
   } }) : null;
   const templateStep = template ? await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id,
-    stepIndex: 0,
+    stepIndex: options.stepIndex ?? 0,
     name: "Regression verification",
     assigneeType: "AGENT",
     assigneeAgentId: agent.id,
@@ -391,4 +392,94 @@ test("a later run does not restamp the output row an earlier run wrote", async (
   // Neither run lost its own tail to the other's completion.
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: firstRunId } })).output, FAILED_TAIL);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: second.run.id } })).output, SUCCEEDED_TAIL);
+});
+
+test("a canonical step cannot advance from a prior Run's output", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "implementation",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 1,
+  });
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "canonical-runner-1");
+  const wrongKind = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "result",
+    body: "wrong canonical kind",
+    commitSha: SHA,
+  });
+  assert.equal(wrongKind.status, 409);
+  const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "implementation",
+    body: "Run 1 implementation",
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  assert.equal((await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    failedCompletion("canonical-runner-1", first.fencingToken, first.run.branch ?? "master"),
+  )).status, 200);
+
+  const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const second = await claimRun(retried.body.id as string, "canonical-runner-2");
+  const completed = await call(
+    "POST", `/runner/runs/${second.run.id}/complete`, RUNNER,
+    succeededCompletion("canonical-runner-2", second.fencingToken, second.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: task.id } });
+  assert.equal(output.runId, firstRunId);
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(stopped.status, TaskStatus.REVIEW);
+  assert.match(stopped.failureReason ?? "", /belongs to prior Run/u);
+});
+
+test("a canonical retry receives only the immediate prior Run output and retry reason", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "implementation",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 1,
+  });
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "handoff-runner-1");
+  assert.equal((await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "implementation",
+    body: "implementation rejected at approval",
+    commitSha: SHA,
+  })).status, 200);
+  assert.equal((await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    failedCompletion("handoff-runner-1", first.fencingToken, first.run.branch ?? "master"),
+  )).status, 200);
+  await db.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "operator",
+    body: "Approval gate rejected; step queued again",
+  } });
+  await db.task.update({ where: { id: task.id }, data: { status: TaskStatus.TODO } });
+  const second = await db.$transaction((tx) => enqueueTaskRun(tx as never, task.id));
+  const loaded = await db.task.findUniqueOrThrow({
+    where: { id: task.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
+    taskId: task.id,
+    runId: second.id,
+    runNumber: second.runNumber,
+    templateStep: loaded.templateStep,
+  }));
+  assert.deepEqual(handoff, {
+    schemaVersion: 1,
+    previousRunId: firstRunId,
+    status: "FAILED",
+    failureReason: "Error: session ended without a result",
+    retryReason: "approval-rejected-without-feedback",
+    output: { kind: "implementation", body: "implementation rejected at approval", commitSha: SHA },
+  });
 });
