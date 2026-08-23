@@ -143,6 +143,21 @@ const enqueue = async (taskId: string): Promise<string> => {
   return (run as { id: string }).id;
 };
 
+const addSuccessor = async (seed: Awaited<ReturnType<typeof seedTask>>) => {
+  assert.ok(seed.task.chainId);
+  return db.task.create({ data: {
+    projectId: seed.project.id,
+    name: "Canonical successor",
+    description: "must not start from refused output",
+    assigneeAgentId: seed.agent.id,
+    repoId: seed.repo.id,
+    status: TaskStatus.TODO,
+    targetBranch: "master",
+    chainId: seed.task.chainId,
+    chainIndex: 1,
+  } });
+};
+
 /**
  * Both payloads are the objects `packages/runner/src/run-output.test.ts`
  * observed on the wire out of a real `executeClaim`: a stub agent that prints
@@ -155,6 +170,13 @@ const FAILED_TAIL = "reproduced the deadlock: workers 3 and 7 both hold the inbo
   + "the fix needs the lock ordering inverted in reconcile.ts";
 const SUCCEEDED_TAIL = "inverted the lock ordering in reconcile.ts and added the regression test";
 const SHA = "02283bb8e9a08426394a5d2dc471b19bbaea22d7";
+const implementationOutput = (summary: string, headSha = SHA) => JSON.stringify({
+  schemaVersion: 1,
+  headSha,
+  baseSha: SHA,
+  summary,
+  testsRun: ["npm test -- focused"],
+});
 
 const failedCompletion = (runnerId: string, fencingToken: string, branch: string) => ({
   runnerId,
@@ -413,7 +435,7 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
     fencingToken: first.fencingToken,
     kind: "implementation",
-    body: "Run 1 implementation",
+    body: implementationOutput("Run 1 implementation"),
     commitSha: SHA,
   });
   assert.equal(written.status, 200, JSON.stringify(written.body));
@@ -438,6 +460,181 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   assert.match(stopped.failureReason ?? "", /belongs to prior Run/u);
 });
 
+test("canonical JSON contracts reject malformed bodies and never activate a successor", async () => {
+  const malformed = [
+    { name: "non-JSON", body: "implementation prose", error: /must be valid JSON/u },
+    {
+      name: "missing schemaVersion",
+      body: JSON.stringify({ headSha: SHA, baseSha: SHA, summary: "implemented", testsRun: ["focused"] }),
+      error: /schemaVersion 1 at schemaVersion/u,
+    },
+    {
+      name: "unsupported schemaVersion",
+      body: JSON.stringify({ schemaVersion: 2, headSha: SHA, baseSha: SHA, summary: "implemented", testsRun: ["focused"] }),
+      error: /schemaVersion 1 at schemaVersion/u,
+    },
+    {
+      name: "kind-specific malformed body",
+      body: JSON.stringify({ schemaVersion: 1, headSha: SHA, summary: "implemented", testsRun: ["focused"] }),
+      error: /schemaVersion 1 at baseSha/u,
+    },
+  ];
+  for (const fixture of malformed) {
+    const seed = await seedTask({
+      chained: true,
+      outputKind: "implementation",
+      templateName: DIRECT_TEMPLATE_NAME,
+      stepIndex: 1,
+    });
+    const successor = await addSuccessor(seed);
+    const runId = await enqueue(seed.task.id);
+    const claimed = await claimRun(runId, `contract-${fixture.name}`);
+    const refused = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
+      fencingToken: claimed.fencingToken,
+      kind: "implementation",
+      body: fixture.body,
+      commitSha: SHA,
+    });
+    assert.equal(refused.status, 409, fixture.name);
+    assert.match(refused.body.error, fixture.error, fixture.name);
+
+    const completed = await call(
+      "POST", `/runner/runs/${runId}/complete`, RUNNER,
+      succeededCompletion(`contract-${fixture.name}`, claimed.fencingToken, claimed.run.branch ?? "master"),
+    );
+    assert.equal(completed.status, 200, `${fixture.name}: ${JSON.stringify(completed.body)}`);
+    const stopped = await db.task.findUniqueOrThrow({ where: { id: seed.task.id } });
+    assert.equal(stopped.status, TaskStatus.REVIEW, fixture.name);
+    assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0, fixture.name);
+  }
+});
+
+test("a canonical output authored at an earlier head is not restamped at completion", async () => {
+  const authoredHead = "a".repeat(40);
+  const seed = await seedTask({
+    chained: true,
+    outputKind: "implementation",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 1,
+  });
+  const successor = await addSuccessor(seed);
+  const runId = await enqueue(seed.task.id);
+  const claimed = await claimRun(runId, "stale-authored-head");
+  const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
+    fencingToken: claimed.fencingToken,
+    kind: "implementation",
+    body: implementationOutput("authored before final delivery commit", authoredHead),
+    commitSha: authoredHead,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+
+  const completed = await call(
+    "POST", `/runner/runs/${runId}/complete`, RUNNER,
+    succeededCompletion("stale-authored-head", claimed.fencingToken, claimed.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seed.task.id } });
+  assert.equal(output.commitSha, authoredHead);
+  assert.equal((JSON.parse(output.body) as { headSha: string }).headSha, authoredHead);
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: seed.task.id } });
+  assert.equal(stopped.status, TaskStatus.REVIEW);
+  assert.match(stopped.failureReason ?? "", /not completion head/u);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+});
+
+test("completion makes an admitted replacement output lose atomically before successor activation", { timeout: 20_000 }, async () => {
+  const seed = await seedTask({
+    chained: true,
+    outputKind: "implementation",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 1,
+  });
+  const successor = await addSuccessor(seed);
+  const runId = await enqueue(seed.task.id);
+  const claimed = await claimRun(runId, "output-completion-race");
+  const originalBody = implementationOutput("the immutable accepted handoff");
+  assert.equal((await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
+    fencingToken: claimed.fencingToken,
+    kind: "implementation",
+    body: originalBody,
+    commitSha: SHA,
+  })).status, 200);
+
+  const completionClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  const outputClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  let completionLocked!: () => void;
+  let outputWaiting!: () => void;
+  let releaseCompletion!: () => void;
+  const completionHasLock = new Promise<void>((resolve) => { completionLocked = resolve; });
+  const outputReachedLock = new Promise<void>((resolve) => { outputWaiting = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+  const instrumentTransactions = (
+    client: PrismaClient,
+    intercept: (pending: Promise<unknown>) => Promise<unknown>,
+  ): PrismaClient => new Proxy(client, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return (...args: unknown[]) => intercept(Reflect.apply(txTarget.$queryRaw, txTarget, args));
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+  let completionIntercepted = false;
+  let outputIntercepted = false;
+  const completionDb = instrumentTransactions(completionClient, async (pending) => {
+    const result = await pending;
+    if (!completionIntercepted) {
+      completionIntercepted = true;
+      completionLocked();
+      await release;
+    }
+    return result;
+  });
+  const outputDb = instrumentTransactions(outputClient, async (pending) => {
+    if (!outputIntercepted) {
+      outputIntercepted = true;
+      outputWaiting();
+    }
+    return pending;
+  });
+  try {
+    await withTokens(async () => {
+      const completion = createApp(completionDb).request(`/runner/runs/${runId}/complete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+        body: JSON.stringify(succeededCompletion("output-completion-race", claimed.fencingToken, claimed.run.branch ?? "master")),
+      });
+      await completionHasLock;
+      const replacement = createApp(outputDb).request(`/session/runs/${runId}/output`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fencingToken: claimed.fencingToken,
+          kind: "implementation",
+          body: implementationOutput("late replacement must lose"),
+          commitSha: SHA,
+        }),
+      });
+      await outputReachedLock;
+      releaseCompletion();
+      const [completed, replaced] = await Promise.all([completion, replacement]);
+      assert.equal(completed.status, 200, await completed.text());
+      assert.equal(replaced.status, 409);
+      assert.match((await replaced.json() as { error: string }).error, /Stale fencing token/u);
+    });
+  } finally {
+    await Promise.all([completionClient.$disconnect(), outputClient.$disconnect()]);
+  }
+  const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seed.task.id } });
+  assert.equal(output.body, originalBody);
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
+});
+
 test("a canonical retry receives only the immediate prior Run output and retry reason", async () => {
   const { task } = await seedTask({
     chained: true,
@@ -450,7 +647,7 @@ test("a canonical retry receives only the immediate prior Run output and retry r
   assert.equal((await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
     fencingToken: first.fencingToken,
     kind: "implementation",
-    body: "implementation rejected at approval",
+    body: implementationOutput("implementation rejected at approval"),
     commitSha: SHA,
   })).status, 200);
   assert.equal((await call(
@@ -480,6 +677,6 @@ test("a canonical retry receives only the immediate prior Run output and retry r
     status: "FAILED",
     failureReason: "Error: session ended without a result",
     retryReason: "approval-rejected-without-feedback",
-    output: { kind: "implementation", body: "implementation rejected at approval", commitSha: SHA },
+    output: { kind: "implementation", body: implementationOutput("implementation rejected at approval"), commitSha: SHA },
   });
 });
