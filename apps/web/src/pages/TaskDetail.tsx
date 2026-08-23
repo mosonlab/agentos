@@ -116,6 +116,9 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
                 { k: t("taskDetail.run.subprocessProfile"), v: run.subprocessModel && run.subprocessCodexServiceTier
                   ? <span>{run.subprocessModel} · <Pill tone={run.subprocessCodexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.subprocessCodexServiceTier}`)}</Pill></span>
                   : "—" },
+                { k: t("taskDetail.run.elevatedSubprocessProfile"), v: run.elevatedSubprocessModel && run.elevatedSubprocessCodexServiceTier
+                  ? <span>{run.elevatedSubprocessModel} · <Pill tone={run.elevatedSubprocessCodexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.elevatedSubprocessCodexServiceTier}`)}</Pill></span>
+                  : "—" },
                 { k: t("taskDetail.run.leaseGeneration"), v: `${run.leaseGeneration}` },
                 { k: t("taskDetail.run.workspace"), v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? ` ${t("taskDetail.run.retained")}` : ""}</span> },
                 { k: t("taskDetail.run.budget"), v: t("taskDetail.run.budgetValue", { wall: run.maxDurationMin, stall: run.stallTimeoutMin, runs: run.maxRunsPerTask }) },

@@ -7,6 +7,7 @@ import {
   advanceTemplateTask,
   agentArchiveBlocker,
   applyInboxDecision,
+  catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
   deriveRunConfig,
@@ -123,7 +124,6 @@ import {
   completionSucceeded,
   externalFailure,
   failureIsRetryable,
-  hashPrompt,
   jsonValue,
   makeDedupeKey,
   makeFencingToken,
@@ -497,6 +497,10 @@ const agentFields = {
   title: z.string().trim().min(1).max(120),
   model: z.string().trim().min(1).max(120),
   codexServiceTier: z.nativeEnum(CodexServiceTier),
+  ordinarySubprocessModel: z.string().trim().min(1).max(120).nullable(),
+  ordinarySubprocessCodexServiceTier: z.nativeEnum(CodexServiceTier).nullable(),
+  elevatedSubprocessModel: z.string().trim().min(1).max(120).nullable(),
+  elevatedSubprocessCodexServiceTier: z.nativeEnum(CodexServiceTier).nullable(),
   foundationalPrompt: z.string().min(1),
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
@@ -508,6 +512,10 @@ const agentInput = z.object({
   ...agentFields,
   foundationalPrompt: agentFields.foundationalPrompt.optional(),
   codexServiceTier: agentFields.codexServiceTier.default(CodexServiceTier.DEFAULT),
+  ordinarySubprocessModel: agentFields.ordinarySubprocessModel.default(null),
+  ordinarySubprocessCodexServiceTier: agentFields.ordinarySubprocessCodexServiceTier.default(null),
+  elevatedSubprocessModel: agentFields.elevatedSubprocessModel.default(null),
+  elevatedSubprocessCodexServiceTier: agentFields.elevatedSubprocessCodexServiceTier.default(null),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
   // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
@@ -528,6 +536,50 @@ const codexServiceTierRefusal = (agent: {
   if (runner === RunnerKind.CODEX && model.startsWith("gpt-")) return null;
   if (runner === RunnerKind.PI && model.startsWith("openai-codex/")) return null;
   return "Fast service tier requires a Codex gpt-* model or a PI openai-codex/* model";
+};
+
+const runnerModelRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
+  const expected = catalogRunnerForModel(agent.model);
+  if (!expected || agent.runnerPreference === RunnerPreference.AUTO || agent.runnerPreference === RunnerPreference.INHERIT
+    || expected === agent.runnerPreference) return null;
+  return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
+};
+
+const codexSubprocessProfileRefusal = (label: string, model: string | null, tier: CodexServiceTier | null): string | null => {
+  if (model === null && tier === null) return `${label} Codex subprocess profile is required`;
+  if (model === null || tier === null) return `${label} Codex subprocess model and service tier must be configured together`;
+  const separator = model.lastIndexOf(":");
+  const baseModel = separator > 0 ? model.slice(0, separator) : model;
+  const effort = separator > 0 ? model.slice(separator + 1) : "";
+  if (!baseModel.startsWith("gpt-") || !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
+    return `${label} subprocess must use a Codex gpt-* model with an explicit reasoning effort`;
+  }
+  return null;
+};
+
+const executionerSubprocessRefusal = (agent: {
+  name: string;
+  ordinarySubprocessModel: string | null;
+  ordinarySubprocessCodexServiceTier: CodexServiceTier | null;
+  elevatedSubprocessModel: string | null;
+  elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
+}): string | null => {
+  const configured = agent.ordinarySubprocessModel !== null
+    || agent.ordinarySubprocessCodexServiceTier !== null
+    || agent.elevatedSubprocessModel !== null
+    || agent.elevatedSubprocessCodexServiceTier !== null;
+  if (agent.name !== "implementation-plan-executioner") {
+    return configured ? "Codex subprocess profiles belong only to implementation-plan-executioner" : null;
+  }
+  return codexSubprocessProfileRefusal(
+    "Ordinary",
+    agent.ordinarySubprocessModel,
+    agent.ordinarySubprocessCodexServiceTier,
+  ) ?? codexSubprocessProfileRefusal(
+    "Elevated",
+    agent.elevatedSubprocessModel,
+    agent.elevatedSubprocessCodexServiceTier,
+  );
 };
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
@@ -1578,8 +1630,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/projects/:projectId/agents", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, agentInput);
+    const modelRefusal = runnerModelRefusal(body);
+    if (modelRefusal) return context.json({ error: modelRefusal }, 400);
     const tierRefusal = codexServiceTierRefusal(body);
     if (tierRefusal) return context.json({ error: tierRefusal }, 400);
+    const subprocessRefusal = executionerSubprocessRefusal(body);
+    if (subprocessRefusal) return context.json({ error: subprocessRefusal }, 400);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
     const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
@@ -1609,19 +1665,28 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.patch("/agents/:agentId", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
-    const before = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     const body = await readJson(context.req.raw, agentPatch);
-    const tierRefusal = codexServiceTierRefusal({
-      model: body.model ?? before.model,
-      runnerPreference: body.runnerPreference ?? before.runnerPreference,
-      codexServiceTier: body.codexServiceTier ?? before.codexServiceTier,
+    const result = await db.$transaction(async (tx) => {
+      const before = await lockAgentRow(tx, agentId);
+      if (!before) return { error: "Agent not found", code: 404 as const };
+      const merged = { ...before, ...withoutUndefined(body) };
+      const modelRefusal = runnerModelRefusal(merged);
+      if (modelRefusal) return { error: modelRefusal, code: 400 as const };
+      const tierRefusal = codexServiceTierRefusal(merged);
+      if (tierRefusal) return { error: tierRefusal, code: 400 as const };
+      const subprocessRefusal = executionerSubprocessRefusal(merged);
+      if (subprocessRefusal) return { error: subprocessRefusal, code: 400 as const };
+      if (body.environmentId) {
+        const environment = await tx.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
+        if (!environment) return { error: "Environment does not belong to this project", code: 400 as const };
+      }
+      return { agent: await tx.agent.update({
+        where: { id: agentId },
+        data: withoutUndefined(body) as Prisma.AgentUncheckedUpdateInput,
+      }) };
     });
-    if (tierRefusal) return context.json({ error: tierRefusal }, 400);
-    if (body.environmentId) {
-      const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
-      if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
-    }
-    return context.json(await db.agent.update({ where: { id: agentId }, data: withoutUndefined(body) as Prisma.AgentUncheckedUpdateInput }));
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.agent);
   });
   app.delete("/agents/:agentId", async (context) => {
     try {
@@ -2649,15 +2714,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // The check above answered from an unlocked read. This one holds the
       // Agent-row mutex through the task — and the inline run below — so a
       // concurrent archive either loses the race or is refused for this run.
-      const blocked = await assignmentBlocked(tx, agent);
-      if (blocked) return { error: blocked, code: 400 as const };
+      const currentAgent = agent ? await lockAgentRow(tx, agent.id) : null;
+      if (agent && !currentAgent) return { error: "Assignee does not belong to this project", code: 400 as const };
+      if (currentAgent?.archivedAt) return { error: `Assignee ${currentAgent.name} is archived`, code: 400 as const };
       // §D-P4, inside the transaction and before `tx.task.create` and the inline
       // `tx.run.create` below. This route cannot set `templateStepId` at all, so
       // in practice it refuses the sentinel Agent outright — which is the point:
       // an ordinary task assigned to the sentinel would claim as `agent` and
       // spawn a model CLI with `mechanical/merge-executor-v1` as its model.
       const bindingRefusal = await integratorBindingRefusalFor(tx, {
-        assigneeAgentName: agent?.name ?? null,
+        assigneeAgentName: currentAgent?.name ?? null,
         templateStep: null,
       });
       if (bindingRefusal) return { error: bindingRefusal, code: 400 as const };
@@ -2671,9 +2737,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // Without this guard every POST snapshots the fallback base before step
       // 0 can publish, and all runners race the same new shared head.
       const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
-      if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
-        const runner = runnerFor(agent.runnerPreference, agent.model);
-        const subprocess = await subprocessRunConfig(tx, projectId, agent.name);
+      if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
+        const derived = deriveRunConfig(currentAgent, null, created);
+        const subprocess = await subprocessRunConfig(currentAgent);
         // This run is built inline rather than through enqueueTaskRun, so it is
         // one of the paths a chain fix can miss. Missing it puts step ① on a
         // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
@@ -2683,18 +2749,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           data: {
             projectId,
             taskId: created.id,
-            agentId: agent.id,
+            agentId: currentAgent.id,
             repoId: repo.id,
             runNumber: 1,
             dedupeKey: makeDedupeKey(created.id, 1),
-            runner,
-            model: agent.model,
-            codexServiceTier: agent.codexServiceTier,
+            runner: derived.runner,
+            model: derived.model,
+            codexServiceTier: derived.codexServiceTier,
             ...subprocess,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: created.opensPullRequest,
-            promptHash: hashPrompt([agent.foundationalPrompt, agent.rolePrompt, created.name, created.description]),
+            promptHash: derived.promptHash,
             maxDurationMin: body.maxDurationMin,
             stallTimeoutMin: body.stallTimeoutMin,
             maxRunsPerTask: body.maxSessionsPerTask,
@@ -3224,10 +3290,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       const stoppedForRetry = await stopStateFor(tx, taskId);
       if (stoppedForRetry) return { error: stopStateRefusal(stoppedForRetry), code: 409 as const };
-      // §D-P4 before the inline run create below, which does not travel through
-      // `enqueueTaskRun` and so does not inherit its assertion.
-      const retryBinding = integratorBindingRefusal(task.assigneeAgent?.name ?? null, integratorStepShape);
-      if (retryBinding) return { error: retryBinding, code: 400 as const };
       // The same ceiling the Start gate uses, for the same reason: the budget an
       // operator configured now, plus what has been granted on top of it. The
       // old `last.maxRunsPerTask` could not tell a refund from a budget that had
@@ -3241,11 +3303,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // Retry builds its Run inline rather than through enqueueTaskRun, so it
       // takes the Agent-row mutex itself — Task row first, Agent row second.
       const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
-      if (lockedAgent?.archivedAt ?? task.assigneeAgent.archivedAt) {
+      if (!lockedAgent || lockedAgent.archivedAt) {
         return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
       }
-      const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
-      const subprocess = await subprocessRunConfig(tx, task.projectId, task.assigneeAgent.name);
+      const currentBinding = integratorBindingRefusal(lockedAgent.name, integratorStepShape);
+      if (currentBinding) return { error: currentBinding, code: 400 as const };
+      const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
+      const subprocess = await subprocessRunConfig(lockedAgent);
       // A task with no repo cannot be a chain step with a branch, and this route
       // already tolerates a null repoId — so it keeps inheriting run-1's fields.
       const branches = task.repo
@@ -3256,7 +3320,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           projectId: last.projectId,
           taskId,
           goalId: last.goalId,
-          agentId: task.assigneeAgent.id,
+          agentId: lockedAgent.id,
           repoId: task.repoId,
           runNumber: last.runNumber + 1,
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
@@ -4996,6 +5060,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             codexServiceTier: run.codexServiceTier,
             subprocessModel: run.subprocessModel,
             subprocessCodexServiceTier: run.subprocessCodexServiceTier,
+            elevatedSubprocessModel: run.elevatedSubprocessModel,
+            elevatedSubprocessCodexServiceTier: run.elevatedSubprocessCodexServiceTier,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: currentTask.opensPullRequest,

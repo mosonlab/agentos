@@ -31,6 +31,29 @@ import {
 import { createApp } from "./test-app.js";
 import { noteArchivedQueuedRuns } from "./reconcile.js";
 
+const runAgent = (overrides: Record<string, unknown> = {}) => ({
+  id: "agent-1",
+  projectId: "project-1",
+  environmentId: "environment-1",
+  name: "senior-dev",
+  title: "Senior Developer",
+  model: "claude",
+  codexServiceTier: CodexServiceTier.DEFAULT,
+  ordinarySubprocessModel: null,
+  ordinarySubprocessCodexServiceTier: null,
+  elevatedSubprocessModel: null,
+  elevatedSubprocessCodexServiceTier: null,
+  runnerPreference: RunnerPreference.CLAUDE,
+  foundationalPrompt: "f",
+  rolePrompt: "r",
+  inboxAccess: false,
+  disabledTools: [],
+  createdAt: new Date(),
+  updatedAt: new Date(),
+  archivedAt: null,
+  ...overrides,
+});
+
 test("runnerFor preserves explicit preferences and every inherited model heuristic", () => {
   const cases: [RunnerPreference, string, RunnerKind][] = [
     [RunnerPreference.CLAUDE, "openai-codex", RunnerKind.CLAUDE],
@@ -51,7 +74,7 @@ test("runnerFor preserves explicit preferences and every inherited model heurist
   }
 });
 
-test("deriveRunConfig preserves model, template override, and exact prompt hash", () => {
+test("deriveRunConfig preserves ordinary config and fixes the compound executioner outer profile", () => {
   const agent = {
     runnerPreference: RunnerPreference.PI,
     model: "current-model",
@@ -66,25 +89,45 @@ test("deriveRunConfig preserves model, template override, and exact prompt hash"
     codexServiceTier: CodexServiceTier.DEFAULT,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
+  assert.deepEqual(deriveRunConfig(agent, {
+    runner: null,
+    stepIndex: 5,
+    outputKind: "implementation",
+    taskTemplate: { name: "compound-engineer-workflow" },
+  }, task), {
+    runner: RunnerKind.CODEX,
+    model: "gpt-5.6-sol:medium",
+    codexServiceTier: CodexServiceTier.DEFAULT,
+    promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
+  });
 });
 
-test("executioner snapshots the active Luna subprocess profile while other agents do not", async () => {
-  let query: Record<string, unknown> | undefined;
-  const tx = {
-    agent: { findFirst: async (input: Record<string, unknown>) => {
-      query = input;
-      return { model: "gpt-5.6-luna:max", codexServiceTier: CodexServiceTier.FAST };
-    } },
-  } as never;
-  assert.equal(await subprocessRunConfig(tx, "project-1", "senior-dev"), null);
-  assert.deepEqual(await subprocessRunConfig(tx, "project-1", "implementation-plan-executioner"), {
+test("executioner snapshots both configured Codex subprocess profiles while other agents do not", async () => {
+  const ordinary = {
+    name: "senior-dev",
+    ordinarySubprocessModel: null,
+    ordinarySubprocessCodexServiceTier: null,
+    elevatedSubprocessModel: null,
+    elevatedSubprocessCodexServiceTier: null,
+  };
+  const executioner = {
+    name: "implementation-plan-executioner",
+    ordinarySubprocessModel: "gpt-5.6-luna:max",
+    ordinarySubprocessCodexServiceTier: CodexServiceTier.FAST,
+    elevatedSubprocessModel: "gpt-5.6-sol:high",
+    elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
+  };
+  assert.equal(await subprocessRunConfig(ordinary as never), null);
+  assert.deepEqual(await subprocessRunConfig(executioner as never), {
     subprocessModel: "gpt-5.6-luna:max",
     subprocessCodexServiceTier: CodexServiceTier.FAST,
+    elevatedSubprocessModel: "gpt-5.6-sol:high",
+    elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
   });
-  assert.deepEqual(query, {
-    where: { projectId: "project-1", name: "senior-dev-luna", archivedAt: null },
-    select: { model: true, codexServiceTier: true },
-  });
+  await assert.rejects(
+    () => subprocessRunConfig({ ...executioner, elevatedSubprocessModel: "openai-codex/gpt-5.6-sol:high" } as never),
+    /must use a Codex gpt-\* model/u,
+  );
 });
 
 test("task creation keeps its runner, model, and promptHash output while derivation is shared", async () => {
@@ -92,20 +135,19 @@ test("task creation keeps its runner, model, and promptHash output while derivat
   process.env.OPERATOR_TOKEN = "operator-workflow-test";
   try {
     let runData: Record<string, unknown> | undefined;
-    const agent = {
-      id: "agent-1",
+    const agent = runAgent({
       model: "OpenAI-CoDeX/GPT",
-      codexServiceTier: CodexServiceTier.DEFAULT,
       runnerPreference: RunnerPreference.INHERIT,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
-    };
+    });
     const database = {
       agent: { findFirst: async () => agent },
       repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
       agentRepoAccess: { findFirst: async () => ({ id: "grant-1" }) },
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
         $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
+        agent: { findUnique: async () => agent },
         task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
         taskActivity: { create: async () => ({ id: "activity-1" }) },
         run: { create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; } },
@@ -148,11 +190,12 @@ test("chain successor lookup is project-scoped, gap tolerant, and CAS claimed be
     id: "task-3", projectId: "project-1", name: "Ship", description: "ship", chainId: "chain-1", chainIndex: 3,
     updatedAt: new Date(), assigneeType: AssigneeType.AGENT, assigneeAgentId: "agent-1", repoId: "repo-1",
     templateId: null, targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
-    assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r" },
+    assigneeAgent: runAgent(),
     repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null,
   };
   const tx = {
     $queryRaw: async () => [{ id: successor.id, archivedAt: null }],
+    agent: { findUnique: async () => runAgent() },
     task: {
       findFirst: async ({ where }: { where: Record<string, unknown> }) => { lookup = where; return successor; },
       updateMany: async () => ({ count: 1 }),
@@ -209,12 +252,13 @@ test("a later chain step runs on the chain's shared branch so the chain lands in
   const queued: Record<string, unknown>[] = [];
   const tx = {
     $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
+    agent: { findUnique: async () => runAgent() },
     task: {
       findUniqueOrThrow: async () => ({
         id: "task-2", projectId: "project-1", name: "Plan", description: "plan", assigneeType: AssigneeType.AGENT,
         assigneeAgentId: "agent-1", templateId: "template-1", targetBranch: "feat/lines", maxDurationMin: 120,
         stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
-        assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r" },
+        assigneeAgent: runAgent(),
         repo: { id: "repo-1", defaultBranch: "main" }, templateStep: { runner: null },
       }),
       // §D-P7's stop-state guard reads the task with its template step before
@@ -280,7 +324,7 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
     id: "task-1", projectId: "project-1", name: "Write spec", description: "spec", assigneeType: AssigneeType.AGENT,
     assigneeAgentId: "agent-1", repoId: "repo-1", targetBranch: "main", maxDurationMin: 120, stallTimeoutMin: 10,
     maxSessionsPerTask: 3, archivedAt: null,
-    assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "f", rolePrompt: "r" },
+    assigneeAgent: runAgent(),
     repo: { id: "repo-1", defaultBranch: "main" }, templateStep: { runner: null }, runs: [{ runNumber: 1, branch: "feature/x" }],
   };
   let lookup = 0;
@@ -312,6 +356,7 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
       findUnique: async () => executable,
     },
     taskActivity: { create: async () => ({}) },
+    agent: { findUnique: async () => runAgent({ archivedAt: options.agentArchivedAt ?? null }) },
     run: {
       // enqueueTaskRun asks whether the producing run's branch actually reached
       // the remote before reusing it as the redo's base. A gate exists because
@@ -430,6 +475,7 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
   const tx = {
     // The locked re-read is the authority; the relation below only agrees.
     $queryRaw: async () => [{ id: "agent-1", archivedAt: new Date() }],
+    agent: { findUnique: async () => runAgent({ name: "Ada", archivedAt: new Date() }) },
     task: {
       findUniqueOrThrow: async () => ({
         id: "task-archived", projectId: "project-1", name: "Archived work", description: "work",

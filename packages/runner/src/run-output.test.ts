@@ -126,6 +126,8 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     codexServiceTier: "DEFAULT",
     subprocessModel: null,
     subprocessCodexServiceTier: null,
+    elevatedSubprocessModel: null,
+    elevatedSubprocessCodexServiceTier: null,
     targetBranch: "master",
     targetBranchPublished: false,
     pinnedBaseSha: null,

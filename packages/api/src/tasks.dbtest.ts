@@ -976,6 +976,74 @@ const archiveUnderHeldLock = async <T>(agentId: string, operation: () => Promise
   }
 };
 
+const updateAgentUnderHeldLock = async <T>(
+  agentId: string,
+  data: { model: string; runnerPreference: "CODEX" | "PI"; codexServiceTier: "DEFAULT" | "FAST" },
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let acquired!: () => void;
+  const held = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const updating = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
+      await tx.agent.update({ where: { id: agentId }, data });
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }, { timeout: 10_000 });
+    await held;
+    const pending = operation();
+    await updating;
+    return await pending;
+  } finally {
+    await holder.$disconnect();
+  }
+};
+
+test("Agent PATCH validates the locked current row instead of committing a raced runner/model contradiction", { timeout: 30_000 }, async () => {
+  const context = await seedTask("locked-agent-patch", { status: "DONE" });
+  await db.agent.update({ where: { id: context.agent.id }, data: {
+    model: "gpt-5.6-luna:max", runnerPreference: "CODEX", codexServiceTier: "DEFAULT",
+  } });
+  const patched = await updateAgentUnderHeldLock(context.agent.id, {
+    model: "openai-codex/gpt-5.6-sol:high", runnerPreference: "PI", codexServiceTier: "DEFAULT",
+  }, () => call("PATCH", `/agents/${context.agent.id}`, { model: "gpt-5.6-terra:high" }));
+  assert.equal(patched.status, 400, JSON.stringify(patched.body));
+  assert.match(patched.body.error, /requires CODEX, but this Agent stores PI/u);
+  const stored = await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } });
+  assert.equal(stored.runnerPreference, "PI");
+  assert.equal(stored.model, "openai-codex/gpt-5.6-sol:high");
+});
+
+test("task creation snapshots the Agent configuration re-read after its row lock", { timeout: 30_000 }, async () => {
+  const context = await seedTask("locked-agent-run-snapshot", { status: "DONE" });
+  const created = await updateAgentUnderHeldLock(context.agent.id, {
+    model: "gpt-5.6-luna:max", runnerPreference: "CODEX", codexServiceTier: "FAST",
+  }, () => call("POST", `/projects/${context.project.id}/tasks`, {
+    name: "Fresh snapshot", description: "work", assigneeType: "AGENT",
+    assigneeAgentId: context.agent.id, repoId: context.repo.id,
+  }));
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const run = await db.run.findFirstOrThrow({ where: { taskId: created.body.id } });
+  assert.equal(run.runner, "CODEX");
+  assert.equal(run.model, "gpt-5.6-luna:max");
+  assert.equal(run.codexServiceTier, "FAST");
+});
+
+test("Run subprocess snapshots reject either half of an ordinary or elevated profile", async () => {
+  const context = await seedTask("subprocess-pair", { status: "DONE" });
+  const base = {
+    projectId: context.project.id, taskId: context.task.id, agentId: context.agent.id, repoId: context.repo.id,
+    runner: "CODEX" as const, model: "gpt-5.6-sol:medium", promptHash: "hash",
+  };
+  await assert.rejects(() => db.run.create({ data: {
+    ...base, runNumber: 1, dedupeKey: `task:${context.task.id}:run:1`, subprocessModel: "gpt-5.6-luna:max",
+  } }));
+  await assert.rejects(() => db.run.create({ data: {
+    ...base, runNumber: 2, dedupeKey: `task:${context.task.id}:run:2`, elevatedSubprocessCodexServiceTier: "DEFAULT",
+  } }));
+});
+
 test("an archive committing under the lock is seen by task creation and by instantiation", { timeout: 30_000 }, async () => {
   // Both writers passed their unlocked assignee check before the archive
   // committed. Only the re-read under the Agent-row mutex can still refuse

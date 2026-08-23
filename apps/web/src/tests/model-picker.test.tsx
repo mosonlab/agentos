@@ -119,6 +119,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
     model: "gpt-5.6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
+    ordinarySubprocessModel: null, ordinarySubprocessCodexServiceTier: null, elevatedSubprocessModel: null, elevatedSubprocessCodexServiceTier: null,
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };
@@ -145,6 +146,50 @@ test("the real detail Save button blocks a stored contradiction until the picker
     model.value = "gpt-5.6-sol";
     await act(async () => model.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
     assert.equal(save.disabled, false);
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("the executioner Setup page shows and edits independent ordinary and elevated Codex subprocess profiles", async () => {
+  const { dom, container } = installDom();
+  const root = createRoot(container);
+  const agent: Agent = {
+    id: "a", projectId: "p", environmentId: "e", name: "implementation-plan-executioner", title: "Implementation Plan Executioner",
+    model: "gpt-5.6-sol:medium", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
+    ordinarySubprocessModel: "gpt-5.6-luna:max", ordinarySubprocessCodexServiceTier: "DEFAULT",
+    elevatedSubprocessModel: "gpt-5.6-sol:high", elevatedSubprocessCodexServiceTier: "DEFAULT",
+    foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), archivedAt: null,
+  };
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: async (input: string | URL | Request) => {
+    const path = String(input);
+    return new Response(JSON.stringify(path.endsWith("/agents/a") ? agent : [agent]), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    });
+  } });
+  try {
+    await act(async () => {
+      root.render(<AgentDetailPage agentId="a" />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(dom.window.document.body.textContent ?? "", /Ordinary Codex subprocess/u);
+    assert.match(dom.window.document.body.textContent ?? "", /Elevated Codex subprocess/u);
+    assert.match(dom.window.document.body.textContent ?? "", /gpt-5\.6-luna:max/u);
+    assert.match(dom.window.document.body.textContent ?? "", /gpt-5\.6-sol:high/u);
+
+    const edit = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Edit");
+    assert.ok(edit);
+    await act(async () => edit.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    for (const profile of ["ordinary", "elevated"]) {
+      const section = dom.window.document.querySelector(`[data-subprocess-profile="${profile}"]`);
+      assert.ok(section);
+      assert.equal(section.querySelectorAll("select").length, 4);
+      assert.match(section.textContent ?? "", /Codex service tier/u);
+    }
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
     await act(async () => root.unmount());

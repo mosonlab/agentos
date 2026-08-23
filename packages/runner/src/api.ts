@@ -83,6 +83,8 @@ export type ClaimedTask = {
     codexServiceTier: CodexServiceTier;
     subprocessModel: string | null;
     subprocessCodexServiceTier: CodexServiceTier | null;
+    elevatedSubprocessModel: string | null;
+    elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
     targetBranch: string | null;
     /** Whether targetBranch was selected from durable Run.pushedBranch evidence.
      * When true, provisioning must not replace it with an older declared head. */
