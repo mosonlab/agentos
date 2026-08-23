@@ -24,6 +24,17 @@ export type MechanicalClaim = {
   sessionToken: string;
 };
 
+export type MechanicalCancellation = {
+  requestId: string;
+  reason: string;
+  requestedAt: string;
+};
+
+export type MechanicalHeartbeat = {
+  cancellation: MechanicalCancellation | null;
+  mechanicalCancellationPolicy: "refused" | null;
+};
+
 export type AgentOsClient = ReturnType<typeof makeAgentOsClient>;
 
 const jsonHeaders = (token: string): Record<string, string> => ({
@@ -73,8 +84,8 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
     });
   };
 
-  const heartbeat = async (claimed: MechanicalClaim): Promise<void> => {
-    await request(`/runner/runs/${claimed.run.id}/heartbeat`, {
+  const heartbeat = async (claimed: MechanicalClaim): Promise<MechanicalHeartbeat> => {
+    const response = await request(`/runner/runs/${claimed.run.id}/heartbeat`, {
       method: "POST",
       token: config.executorToken,
       body: {
@@ -84,6 +95,30 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
         processAlive: true,
         lastProgressEventAt: null,
         inFlightTool: null,
+      },
+    });
+    if (response.status === 204) return { cancellation: null, mechanicalCancellationPolicy: null };
+    const payload = await response.json() as {
+      cancellation?: MechanicalCancellation | null;
+      mechanicalCancellationPolicy?: string;
+    };
+    return {
+      cancellation: payload.cancellation ?? null,
+      mechanicalCancellationPolicy: payload.mechanicalCancellationPolicy === "refused" ? "refused" : null,
+    };
+  };
+
+  const acknowledgeCancellation = async (
+    claimed: MechanicalClaim,
+    cancellation: MechanicalCancellation,
+  ): Promise<void> => {
+    await request(`/runner/runs/${claimed.run.id}/cancel/acknowledge`, {
+      method: "POST",
+      token: config.executorToken,
+      body: {
+        runnerId: config.runnerId,
+        fencingToken: claimed.fencingToken,
+        requestId: cancellation.requestId,
       },
     });
   };
@@ -159,5 +194,5 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
     });
   };
 
-  return { claim, start, heartbeat, readChain, readOwnIntents, writeActivity, writeOutput, complete };
+  return { claim, start, heartbeat, acknowledgeCancellation, readChain, readOwnIntents, writeActivity, writeOutput, complete };
 };

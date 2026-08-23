@@ -1,4 +1,4 @@
-import { InboxDeliveryStatus, Prisma, type PrismaClient } from "@agentos/db";
+import { InboxDeliveryStatus, InboxStatus, Prisma, type PrismaClient } from "@agentos/db";
 
 import { questionCard, type Choice } from "./cards.js";
 
@@ -21,6 +21,7 @@ export const deliverPending = async (
   const messages = await db.inboxMessage.findMany({
     where: {
       from: "AGENT",
+      status: InboxStatus.OPEN,
       deliveryStatus: { in: [InboxDeliveryStatus.PENDING, InboxDeliveryStatus.FAILED] },
       nextDeliveryAt: { lte: now },
       thread: { isNot: null },
@@ -33,7 +34,7 @@ export const deliverPending = async (
   let failed = 0;
   for (const message of messages) {
     const won = await db.inboxMessage.updateMany({
-      where: { id: message.id, deliveryStatus: message.deliveryStatus },
+      where: { id: message.id, status: InboxStatus.OPEN, deliveryStatus: message.deliveryStatus },
       data: { deliveryStatus: InboxDeliveryStatus.SENDING, deliveryAttempts: { increment: 1 } },
     });
     if (won.count !== 1 || !message.thread) continue;

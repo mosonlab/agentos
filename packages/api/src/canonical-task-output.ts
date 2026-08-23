@@ -224,6 +224,10 @@ export const persistSessionTaskOutput = async (
     metadata?: Prisma.InputJsonValue;
   },
 ): Promise<PersistOutputResult> => {
+  // Run is the cancellation authority. Take its row before Task so every
+  // output writer serializes with cancellation/completion and follows the
+  // same Run -> Task lock order as those terminal paths.
+  await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${input.runId} FOR UPDATE`;
   await lockTaskRow(tx, input.task.id);
   const authorized = await tx.run.findFirst({
     where: {

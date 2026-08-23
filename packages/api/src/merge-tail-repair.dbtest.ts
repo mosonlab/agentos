@@ -350,6 +350,19 @@ test("a semantic FAIL skips the gate path and creates one review-fix task", asyn
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 
+test("invalid Regression output opens a stop notice with no unusable operator choices", async () => {
+  const seeded = await seedRegression();
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.regression,
+    run: { id: seeded.run.id, agentId: seeded.regressionAgent.id, branch: BRANCH, headSha: HEAD, sessionId: seeded.session.id },
+    now: new Date(),
+  })), "handled");
+  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(card.kind, "TEXT");
+  assert.equal(card.choices, null);
+  assert.match(card.dedupeKey ?? "", /^merge-tail-stop:/u);
+});
+
 test("a fresh Regression claim carries the prior verdict and exact published repair without resuming context", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");

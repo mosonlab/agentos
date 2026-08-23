@@ -635,6 +635,90 @@ test("completion makes an admitted replacement output lose atomically before suc
   assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
 });
 
+test("cancellation holding the Run mutex makes an already-authenticated output lose", { timeout: 20_000 }, async () => {
+  const seed = await seedTask({
+    chained: true,
+    outputKind: "implementation",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 1,
+  });
+  const runId = await enqueue(seed.task.id);
+  const claimed = await claimRun(runId, "output-cancellation-race");
+  const cancellationClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  const outputClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  let cancellationLocked!: () => void;
+  let outputWaiting!: () => void;
+  let releaseCancellation!: () => void;
+  const cancellationHasLock = new Promise<void>((resolve) => { cancellationLocked = resolve; });
+  const outputReachedLock = new Promise<void>((resolve) => { outputWaiting = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCancellation = resolve; });
+  const instrumentTransactions = (
+    client: PrismaClient,
+    intercept: (pending: Promise<unknown>) => Promise<unknown>,
+  ): PrismaClient => new Proxy(client, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return (...args: unknown[]) => intercept(Reflect.apply(txTarget.$queryRaw, txTarget, args));
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+  let cancellationIntercepted = false;
+  let outputIntercepted = false;
+  const cancellationDb = instrumentTransactions(cancellationClient, async (pending) => {
+    const result = await pending;
+    if (!cancellationIntercepted) {
+      cancellationIntercepted = true;
+      cancellationLocked();
+      await release;
+    }
+    return result;
+  });
+  const outputDb = instrumentTransactions(outputClient, async (pending) => {
+    if (!outputIntercepted) {
+      outputIntercepted = true;
+      outputWaiting();
+    }
+    return pending;
+  });
+  try {
+    await withTokens(async () => {
+      const cancellation = createApp(cancellationDb).request(`/runs/${runId}/cancel`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: "cancel-output-race", reason: "operator stop" }),
+      });
+      await cancellationHasLock;
+      const output = createApp(outputDb).request(`/session/runs/${runId}/output`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fencingToken: claimed.fencingToken,
+          kind: "implementation",
+          body: implementationOutput("late output must lose"),
+          commitSha: SHA,
+        }),
+      });
+      await outputReachedLock;
+      releaseCancellation();
+      const [cancelled, written] = await Promise.all([cancellation, output]);
+      assert.equal(cancelled.status, 200, await cancelled.text());
+      assert.equal(written.status, 409);
+      assert.match((await written.json() as { error: string }).error, /Stale fencing token/u);
+    });
+  } finally {
+    await Promise.all([cancellationClient.$disconnect(), outputClient.$disconnect()]);
+  }
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: seed.task.id } }), 0);
+  const run = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(run.cancelRequestId, "cancel-output-race");
+});
+
 test("a canonical retry receives only the immediate prior Run output and retry reason", async () => {
   const { task } = await seedTask({
     chained: true,

@@ -31,6 +31,7 @@ test("active Runs expose cancellation and an outstanding intent renders Cancelli
   assert.match(source, /newest\.cancelAcknowledgedAt === null/u);
   assert.match(source, /taskDetail\.cancel\.cancelling/u);
   assert.match(source, /\/runs\/\$\{newest\.id\}\/cancel/u);
+  assert.match(source, /task\.executionOwner === "agent"/u);
 });
 
 const output = (body: string): TaskStepOutput => ({

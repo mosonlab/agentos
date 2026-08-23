@@ -14,7 +14,7 @@ import "dotenv/config";
 
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@agentos/db/merge-integrator";
 
-import { makeAgentOsClient, type MechanicalClaim } from "./agentos.js";
+import { makeAgentOsClient, type MechanicalCancellation, type MechanicalClaim } from "./agentos.js";
 import { loadExecutorConfig, type ExecutorConfig } from "./config.js";
 import { execute, type Deps } from "./decision-table.js";
 import { mintInstallationToken } from "./github-app-auth.js";
@@ -23,6 +23,18 @@ import { evaluatePreconditions, liveDeps } from "./preconditions.js";
 import { makeLog, makeRedactor, type ExecutorLog } from "./redaction.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+class MechanicalCancellationObserved extends Error {
+  constructor(readonly cancellation: MechanicalCancellation) {
+    super("persisted mechanical cancellation observed");
+  }
+}
+
+class MechanicalApiIncompatible extends Error {
+  constructor() {
+    super("control plane does not refuse mechanical cancellation");
+  }
+}
 
 export const runClaim = async (
   config: ExecutorConfig,
@@ -47,12 +59,31 @@ export const runClaim = async (
 
   const startedAt = new Date();
   let runLog = log;
+  let pendingCancellation: MechanicalCancellation | null = null;
+  const checkCancellation = async (): Promise<void> => {
+    if (pendingCancellation) throw new MechanicalCancellationObserved(pendingCancellation);
+    const heartbeat = await agentos.heartbeat(claimed);
+    if (heartbeat.cancellation) {
+      pendingCancellation = heartbeat.cancellation;
+      throw new MechanicalCancellationObserved(heartbeat.cancellation);
+    }
+    // A new executor must never run against an old API that can still accept a
+    // cancellation in the check-to-merge gap. The capability marker turns an
+    // unsafe inverse rollout into a fail-closed retry instead of a merge.
+    if (heartbeat.mechanicalCancellationPolicy !== "refused") throw new MechanicalApiIncompatible();
+  };
   const heartbeat = setInterval(() => {
-    void agentos.heartbeat(claimed).catch((error: unknown) => { runLog.warn("heartbeat failed", { error }); });
+    void agentos.heartbeat(claimed)
+      .then((observed) => { if (observed.cancellation) pendingCancellation = observed.cancellation; })
+      .catch((error: unknown) => { runLog.warn("heartbeat failed", { error }); });
   }, Math.max(5_000, config.leaseSeconds * 500));
 
   try {
     await agentos.start(claimed);
+    // Old control planes could persist a cancellation for an already-started
+    // mechanical Run. A rolling upgrade must consume that state before this
+    // process mints GitHub authority or reaches an irreversible merge.
+    await checkCancellation();
     const minted = await (overrides.mintToken ?? mintInstallationToken)({
       appId: config.githubAppId,
       installationId: config.githubAppInstallationId,
@@ -100,7 +131,13 @@ export const runClaim = async (
       readChain: () => agentos.readChain(claimed, chainIndex - 1),
       readOwnIntents: () => agentos.readOwnIntents(claimed, chainIndex),
       readPullRequest: (reference) => github.readPullRequest(reference),
-      merge: (reference, expectedHeadSha, expectedBase) => github.mergePullRequest(reference, expectedHeadSha, expectedBase),
+      merge: async (reference, expectedHeadSha, expectedBase) => {
+        // The current API refuses new mechanical cancellation, so this is an
+        // upgrade fence for persisted legacy intent. Keep it immediately in
+        // front of the only irreversible operation as defense in depth.
+        await checkCancellation();
+        return github.mergePullRequest(reference, expectedHeadSha, expectedBase);
+      },
       disableAutoMerge: (pullRequestId) => github.disableAutoMerge(pullRequestId),
       dequeuePullRequest: (entryId) => github.dequeuePullRequest(entryId),
       writeIntent: async (intent) => {
@@ -120,6 +157,7 @@ export const runClaim = async (
     };
 
     const outcome = await (overrides.executeDecision ?? execute)(deps);
+    await checkCancellation();
     // The output is the latest view and is replaceable; the activity is the
     // append-only history the stop guard keys on (Y1). Both are written, always.
     await agentos.writeOutput(claimed, INTEGRATOR_OUTPUT_KIND, serializeMergeResult(outcome));
@@ -135,6 +173,20 @@ export const runClaim = async (
     await agentos.complete(claimed, { succeeded: true, outcome });
     runLog.info("mechanical run completed", { runId: claimed.run.id, outcome: outcome.outcome });
   } catch (error: unknown) {
+    if (error instanceof MechanicalCancellationObserved) {
+      await agentos.acknowledgeCancellation(claimed, error.cancellation);
+      runLog.info("persisted mechanical cancellation acknowledged", { runId: claimed.run.id });
+      return;
+    }
+    if (error instanceof MechanicalApiIncompatible) {
+      runLog.error("mechanical run refused incompatible control plane", { runId: claimed.run.id });
+      await agentos.complete(claimed, {
+        succeeded: false,
+        outcome: null,
+        failureReason: "control plane does not enforce mechanical cancellation refusal",
+      });
+      return;
+    }
     runLog.error("mechanical run crashed", { runId: claimed.run.id, error });
     // Deep transport errors can contain request headers. The run record names
     // the failed phase without serialising the thrown value into control-plane

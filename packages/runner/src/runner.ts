@@ -168,6 +168,7 @@ const preflightEvidence = (message: string): ExitEvidence => ({
 export type ExecuteClaimDependencies = {
   provisionSessionConfig?: typeof provisionSessionConfig;
   cleanupAgentScratch?: typeof cleanupAgentScratch;
+  writeSessionCredentials?: typeof writeSessionCredentials;
 };
 
 export const executeClaim = async (
@@ -186,6 +187,15 @@ export const executeClaim = async (
   let waitingInbox = false;
   let cancellation: CancellationRequest | null = null;
   let cancellationPromise: Promise<void> | null = null;
+  let closeProviderLaunch!: () => void;
+  const providerLaunchSettled = new Promise<void>((resolve) => {
+    let closed = false;
+    closeProviderLaunch = () => {
+      if (closed) return;
+      closed = true;
+      resolve();
+    };
+  });
   let budgetReason: string | null = null;
   // A session CLI's root is retained until the run is known to have succeeded, so a
   // provisioning or execution failure can be inspected and resumed without
@@ -252,8 +262,12 @@ export const executeClaim = async (
     cancellation = request;
     fencingRejected = true;
     cancellationPromise ??= (async () => {
+      // ACK is proof that no provider group can still appear. Cancellation
+      // during credential preparation or adapter startup waits until launch is
+      // either abandoned or has produced the handle that must be killed.
+      await providerLaunchSettled;
       if (handle) await adapter.kill(handle, request.reason);
-      await acknowledgeCancellation(config, claim, request);
+      await acknowledgeCancellation(config, claim, request, workspace);
     })();
     await cancellationPromise;
   };
@@ -360,6 +374,7 @@ export const executeClaim = async (
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (fencingRejected) {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      closeProviderLaunch();
       if (cancellation) {
         await cancellationPromise;
         return;
@@ -397,11 +412,26 @@ export const executeClaim = async (
       return;
     }
 
-    const credentialsPath = await writeSessionCredentials(config, claim, workspace);
+    const credentialsPath = await (dependencies.writeSessionCredentials ?? writeSessionCredentials)(config, claim, workspace);
+    if (fencingRejected) {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      closeProviderLaunch();
+      if (cancellation) await cancellationPromise;
+      return;
+    }
     const spec = { config, claim, workingDirectory: workspace.path, env, prompt, credentialsPath };
-    handle = claim.resume
-      ? await adapter.resume({ ...spec, ...claim.resume }, sink)
-      : await adapter.start(spec, sink);
+    try {
+      handle = claim.resume
+        ? await adapter.resume({ ...spec, ...claim.resume }, sink)
+        : await adapter.start(spec, sink);
+    } finally {
+      closeProviderLaunch();
+    }
+    if (fencingRejected) {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (cancellation) await cancellationPromise;
+      return;
+    }
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     phase = "EXECUTE";
     await startRun(config, claim, {
@@ -625,6 +655,7 @@ export const executeClaim = async (
     });
     scratch = null;
   } catch (error: unknown) {
+    closeProviderLaunch();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if ((error as { status?: number; code?: string }).status === 409 && (error as { code?: string }).code === "WAITING_INBOX") {
       waitingInbox = true;
@@ -705,6 +736,7 @@ export const executeClaim = async (
       } : {}),
     });
   } finally {
+    closeProviderLaunch();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     lease?.close();
     // Throwaway by construction, so losing it costs nothing and leaving it

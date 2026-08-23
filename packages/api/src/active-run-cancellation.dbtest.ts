@@ -99,6 +99,18 @@ test("every live provider status exposes one idempotent cancellation through hea
     assert.equal(duplicate.body.requestId, requestId);
     assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, { requestId: `${requestId}-other`, reason: "other" })).status, 409);
 
+    const lateEvents = await call("POST", `/runner/runs/${seeded.run.id}/events`, RUNNER, {
+      runnerId: RUNNER_ID,
+      fencingToken: seeded.run.fencingToken,
+      events: [{ seq: 0, source: "CLAUDE", type: "LATE", payload: { text: "must lose" } }],
+    });
+    assert.equal(lateEvents.status, 409);
+    const lateActivity = await call("POST", `/runner/runs/${seeded.run.id}/activity`, RUNNER, {
+      fencingToken: seeded.run.fencingToken,
+      body: "late activity must lose",
+    });
+    assert.equal(lateActivity.status, 409);
+
     const observed = await heartbeat(seeded.run.id, seeded.run.fencingToken!);
     assert.equal(observed.status, 200);
     assert.equal(observed.body.cancellation.requestId, requestId);
@@ -136,6 +148,159 @@ test("every live provider status exposes one idempotent cancellation through hea
   }
 });
 
+test("mechanical merge Runs refuse cancellation before recording an intent", async () => {
+  const seeded = await seed(RunStatus.RUNNING);
+  const template = await db.taskTemplate.create({ data: {
+    projectId: seeded.project.id,
+    name: "direct-engineer-workflow",
+    description: "mechanical tail",
+    variables: [],
+  } });
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    stepIndex: 7,
+    name: "Merge execution",
+    prompt: "merge",
+    outputKind: "merge-result",
+    assigneeType: "AGENT",
+  } });
+  await db.task.update({ where: { id: seeded.task.id }, data: { templateId: template.id, templateStepId: step.id } });
+
+  const response = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId: "cancel-mechanical",
+    reason: "must be refused",
+  });
+  assert.equal(response.status, 409);
+  assert.match(response.body.error, /Mechanical merge Runs cannot be cancelled/u);
+  const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+  assert.equal(run.cancelRequestId, null);
+  assert.equal(run.cancelRequestedAt, null);
+
+  await db.run.update({ where: { id: seeded.run.id }, data: {
+    cancelRequestId: "legacy-mechanical-cancel",
+    cancelReason: "persisted before upgrade",
+    cancelRequestedAt: new Date(),
+  } });
+  const replay = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId: "legacy-mechanical-cancel",
+    reason: "same request replay",
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.cancellationState, "requested");
+  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId: "different-mechanical-cancel",
+    reason: "must conflict",
+  })).status, 409);
+});
+
+test("cancellation acknowledgement persists a provisioning workspace before terminalizing", async () => {
+  const seeded = await seed(RunStatus.PROVISIONING);
+  await db.run.update({ where: { id: seeded.run.id }, data: { workspacePath: null, branch: null, baseSha: null } });
+  const requestId = "cancel-with-workspace";
+  assert.equal((await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId,
+    reason: "retain provisioning evidence",
+  })).status, 200);
+  assert.equal((await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+    runnerId: RUNNER_ID,
+    fencingToken: seeded.run.fencingToken,
+    requestId,
+    workspacePath: "/scratch/provisioning-evidence",
+    branch: "codex/provisioning-evidence",
+    baseSha: "a".repeat(40),
+  })).status, 200);
+  const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+  assert.equal(run.status, RunStatus.CANCELLED);
+  assert.equal(run.workspacePath, "/scratch/provisioning-evidence");
+  assert.equal(run.branch, "codex/provisioning-evidence");
+  assert.equal(run.baseSha, "a".repeat(40));
+});
+
+test("start and cancellation acknowledgement serialize to one Run and Session outcome", { timeout: 20_000 }, async () => {
+  const seeded = await seed(RunStatus.PROVISIONING);
+  const startClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  let sessionWriteReached!: () => void;
+  let releaseSessionWrite!: () => void;
+  const reached = new Promise<void>((resolve) => { sessionWriteReached = resolve; });
+  const release = new Promise<void>((resolve) => { releaseSessionWrite = resolve; });
+  let intercepted = false;
+  const startDb = new Proxy(startClient, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "session") return Reflect.get(txTarget, txProperty, txReceiver);
+        return new Proxy(txTarget.session, { get(sessionTarget, sessionProperty, sessionReceiver) {
+          if (sessionProperty !== "updateMany") return Reflect.get(sessionTarget, sessionProperty, sessionReceiver);
+          return async (...args: unknown[]) => {
+            if (!intercepted) {
+              intercepted = true;
+              sessionWriteReached();
+              await release;
+            }
+            return Reflect.apply(sessionTarget.updateMany, sessionTarget, args);
+          };
+        } });
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  const priorRunner = process.env.RUNNER_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  process.env.RUNNER_TOKEN = RUNNER;
+  try {
+    const start = createApp(startDb).request(`/runner/runs/${seeded.run.id}/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: RUNNER_ID,
+        fencingToken: seeded.run.fencingToken,
+        adapterVersion: "test",
+        cliVersion: "test",
+        manifest: {},
+        workspacePath: "/scratch/start-cancel-race",
+        runtimeHandle: "test:123",
+      }),
+    });
+    await reached;
+    let cancellationSettled = false;
+    const cancellation = (async () => {
+      const requested = await createApp(db).request(`/runs/${seeded.run.id}/cancel`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: "cancel-start-race", reason: "operator stop" }),
+      });
+      assert.equal(requested.status, 200, await requested.text());
+      const acknowledged = await createApp(db).request(`/runner/runs/${seeded.run.id}/cancel/acknowledge`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${RUNNER}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, requestId: "cancel-start-race" }),
+      });
+      assert.equal(acknowledged.status, 200, await acknowledged.text());
+      cancellationSettled = true;
+    })();
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(cancellationSettled, false, "cancellation must wait for the atomic start transaction");
+    releaseSessionWrite();
+    const started = await start;
+    assert.equal(started.status, 200, await started.text());
+    await cancellation;
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorOperator;
+    if (priorRunner === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = priorRunner;
+    await startClient.$disconnect();
+  }
+  const [run, session] = await Promise.all([
+    db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
+    db.session.findUniqueOrThrow({ where: { runId: seeded.run.id } }),
+  ]);
+  assert.equal(run.status, RunStatus.CANCELLED);
+  assert.equal(session.executionStatus, SessionExecutionStatus.CANCELLED);
+});
+
 test("QUEUED and WAITING_INBOX cancellation settle immediately without a provider acknowledgement", async () => {
   for (const status of [RunStatus.QUEUED, RunStatus.WAITING_INBOX]) {
     const seeded = await seed(status);
@@ -170,6 +335,103 @@ test("lease reconciliation settles an unacknowledged cancellation without retryi
   assert.equal(run.cancelAcknowledgedAt?.toISOString(), now.toISOString());
   assert.equal(count, 1);
   assert.equal(successor.status, TaskStatus.TODO);
+});
+
+test("a late runner acknowledgement backfills workspace evidence after reconciliation", async () => {
+  const now = new Date();
+  const seeded = await seed(RunStatus.PROVISIONING, new Date(now.getTime() - 1_000));
+  await db.run.update({ where: { id: seeded.run.id }, data: {
+    cancelRequestId: "cancel-reconciled-first",
+    cancelReason: "stop during provisioning",
+    cancelRequestedAt: new Date(now.getTime() - 2_000),
+    workspacePath: null,
+    branch: null,
+    baseSha: null,
+  } });
+  assert.equal(await reconcileDatabaseRuns(db, now), 1);
+  const response = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+    runnerId: RUNNER_ID,
+    fencingToken: seeded.run.fencingToken,
+    requestId: "cancel-reconciled-first",
+    workspacePath: "/scratch/reconciled-first",
+    branch: "codex/reconciled-first",
+    baseSha: "b".repeat(40),
+  });
+  assert.equal(response.status, 200);
+  const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+  assert.equal(run.status, RunStatus.CANCELLED);
+  assert.equal(run.workspacePath, "/scratch/reconciled-first");
+  assert.equal(run.branch, "codex/reconciled-first");
+  assert.equal(run.baseSha, "b".repeat(40));
+
+  const conflicting = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+    runnerId: RUNNER_ID,
+    fencingToken: seeded.run.fencingToken,
+    requestId: "cancel-reconciled-first",
+    workspacePath: "/scratch/must-not-overwrite",
+    branch: "codex/must-not-overwrite",
+    baseSha: "c".repeat(40),
+  });
+  assert.equal(conflicting.status, 200);
+  const preserved = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
+  assert.equal(preserved.workspacePath, "/scratch/reconciled-first");
+  assert.equal(preserved.branch, "codex/reconciled-first");
+  assert.equal(preserved.baseSha, "b".repeat(40));
+});
+
+test("reconciliation re-reads cancellation after its stale candidate snapshot", { timeout: 20_000 }, async () => {
+  const now = new Date();
+  const seeded = await seed(RunStatus.RUNNING, new Date(now.getTime() - 1_000));
+  await db.run.update({ where: { id: seeded.run.id }, data: {
+    heartbeatAt: new Date(now.getTime() - 20 * 60_000),
+    stallTimeoutMin: 1,
+  } });
+  const reconcileClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  let snapshotRead!: () => void;
+  let releaseSnapshot!: () => void;
+  const reached = new Promise<void>((resolve) => { snapshotRead = resolve; });
+  const release = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+  let intercepted = false;
+  const reconcileDb = new Proxy(reconcileClient, { get(target, property, receiver) {
+    if (property !== "run") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return new Proxy(target.run, { get(runTarget, runProperty, runReceiver) {
+      if (runProperty !== "findMany") return Reflect.get(runTarget, runProperty, runReceiver);
+      return async (...args: unknown[]) => {
+        const rows = await Reflect.apply(runTarget.findMany, runTarget, args);
+        const query = args[0] as { where?: { status?: unknown } } | undefined;
+        if (!intercepted && typeof query?.where?.status === "object") {
+          intercepted = true;
+          snapshotRead();
+          await release;
+        }
+        return rows;
+      };
+    } });
+  } }) as PrismaClient;
+  try {
+    const reconciliation = reconcileDatabaseRuns(reconcileDb, now);
+    await reached;
+    const cancellation = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+      requestId: "cancel-after-snapshot",
+      reason: "operator stop",
+    });
+    assert.equal(cancellation.status, 200);
+    assert.equal(cancellation.body.cancellationState, "requested");
+    releaseSnapshot();
+    assert.equal(await reconciliation, 1);
+  } finally {
+    await reconcileClient.$disconnect();
+  }
+  const [run, runCount] = await Promise.all([
+    db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
+    db.run.count({ where: { taskId: seeded.task.id } }),
+  ]);
+  assert.equal(run.status, RunStatus.CANCELLED);
+  assert.equal(run.cancelRequestId, "cancel-after-snapshot");
+  assert.equal(runCount, 1);
 });
 
 test("a cancellation intent fences out a late Inbox suspension", async () => {
