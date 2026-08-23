@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -37,6 +38,9 @@ const claim: ClaimedTask = {
     stallTimeoutMin: 10,
     maxRunsPerTask: 3,
     model: "codex",
+    codexServiceTier: "DEFAULT",
+    subprocessModel: null,
+    subprocessCodexServiceTier: null,
     targetBranch: "main",
     targetBranchPublished: false,
     pinnedBaseSha: null,
@@ -290,6 +294,7 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
   ]);
   assert.deepEqual(stableArgv(argsForRunner("CODEX", spec)), [
     "exec", "--json", "-m", "codex",
+    "-c", "service_tier=\"default\"",
     "-c", "mcp_servers.agentos.command=\"<NODE>\"",
     "-c", "mcp_servers.agentos.args=[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]",
     "-c", "mcp_servers.agentos.startup_timeout_sec=30",
@@ -300,6 +305,76 @@ test("an empty denied set keeps every runner argv byte-identical", () => {
     "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
     "--extension", "<PI_EXTENSION>",
   ]);
+});
+
+test("Codex fresh and resume launches pin the Run service tier explicitly", () => {
+  const fast = runSpec();
+  fast.claim = {
+    ...fast.claim,
+    run: { ...fast.claim.run, model: "gpt-5.6-luna:max", codexServiceTier: "FAST" },
+  };
+  const resume = { ...fast, providerConversationId: "thread-fast", input: "continue" };
+  for (const args of [argsForRunner("CODEX", fast), argsForRunner("CODEX", fast, resume)]) {
+    assert.ok(args.includes('service_tier="fast"'));
+    assert.ok(args.includes('model_reasoning_effort="max"'));
+    assert.ok(args.includes("gpt-5.6-luna"));
+  }
+});
+
+test("executioner child environment exposes the snapshotted ordinary subprocess profile", () => {
+  const executioner = {
+    ...claim,
+    run: {
+      ...claim.run,
+      subprocessModel: "gpt-5.6-luna:max",
+      subprocessCodexServiceTier: "FAST" as const,
+    },
+    secrets: {
+      ...claim.secrets,
+      AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER: "default",
+    },
+  };
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
+    executioner,
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_SUBORDINATE_CODEX_MODEL, "gpt-5.6-luna");
+  assert.equal(env.AGENTOS_SUBORDINATE_CODEX_REASONING_EFFORT, "max");
+  assert.equal(env.AGENTOS_SUBORDINATE_CODEX_SERVICE_TIER, "fast");
+  assert.match(buildPrompt(executioner), /service tier: fast/u);
+});
+
+test("the PI extension injects the explicit tier only into openai-codex requests", async () => {
+  const loaded = await import(pathToFileURL(piExtensionPath()).href) as {
+    default: (pi: {
+      registerTool(tool: Record<string, unknown>): void;
+      on(event: "before_provider_request", handler: (event: { type: "before_provider_request"; payload: unknown }, context: { model?: { provider?: string } }) => unknown): void;
+    }) => void;
+  };
+  let handler: ((event: { type: "before_provider_request"; payload: unknown }, context: { model?: { provider?: string } }) => unknown) | undefined;
+  loaded.default({
+    registerTool: () => undefined,
+    on: (_event, next) => { handler = next; },
+  });
+  assert.ok(handler);
+  const previous = process.env.AGENTOS_CODEX_SERVICE_TIER;
+  try {
+    process.env.AGENTOS_CODEX_SERVICE_TIER = "fast";
+    assert.deepEqual(handler({ type: "before_provider_request", payload: { model: "gpt-5.6-luna" } }, { model: { provider: "openai-codex" } }), {
+      model: "gpt-5.6-luna",
+      service_tier: "priority",
+    });
+    assert.equal(handler({ type: "before_provider_request", payload: {} }, { model: { provider: "anthropic" } }), undefined);
+    process.env.AGENTOS_CODEX_SERVICE_TIER = "default";
+    assert.deepEqual(handler({ type: "before_provider_request", payload: {} }, { model: { provider: "openai-codex" } }), {
+      service_tier: "default",
+    });
+  } finally {
+    if (previous === undefined) delete process.env.AGENTOS_CODEX_SERVICE_TIER;
+    else process.env.AGENTOS_CODEX_SERVICE_TIER = previous;
+  }
 });
 
 test("Pi relies on its isolated config root while retaining the explicit AgentOS extension", () => {

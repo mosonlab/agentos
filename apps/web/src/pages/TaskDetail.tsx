@@ -8,6 +8,7 @@ import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Chain, ChainStep, Run, Task, TaskActivity, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
+import { supportsCodexServiceTier } from "../lib/models";
 import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList } from "../components/chain-list";
@@ -83,11 +84,12 @@ export const StartabilityChecklist = ({ verdict }: { verdict: TaskStartability }
 
 const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
   const t = useT();
+  const tierApplies = supportsCodexServiceTier(run.runner, run.model);
   return (
     <>
       <TableRow className="cursor-pointer" onClick={onToggle}>
         <TableCell className={TABLE_TIGHT}><span className="text-muted-foreground"><IconChevron open={expanded} /></span></TableCell>
-        <TableCell className={TABLE_NAME}>#{run.runNumber}<span className={TABLE_SUB}>{run.runner.toLowerCase()} · {run.model}</span></TableCell>
+        <TableCell className={TABLE_NAME}>#{run.runNumber}<span className={TABLE_SUB}>{run.runner.toLowerCase()} · {run.model}{tierApplies ? ` · ${t(`serviceTier.${run.codexServiceTier}`)}` : ""}</span></TableCell>
         <TableCell><RunPill status={run.status} mergeOutcome={run.mergeOutcome} /></TableCell>
         <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
         <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
@@ -108,6 +110,12 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
               <KeyValue columns={3} items={[
                 { k: t("taskDetail.run.id"), v: <span className="text-[11.5px]">{run.id}</span> },
                 { k: t("taskDetail.run.runnerInstance"), v: run.runnerId ?? "—" },
+                { k: t("taskDetail.run.serviceTier"), v: tierApplies
+                  ? <Pill tone={run.codexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.codexServiceTier}`)}</Pill>
+                  : "—" },
+                { k: t("taskDetail.run.subprocessProfile"), v: run.subprocessModel && run.subprocessCodexServiceTier
+                  ? <span>{run.subprocessModel} · <Pill tone={run.subprocessCodexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.subprocessCodexServiceTier}`)}</Pill></span>
+                  : "—" },
                 { k: t("taskDetail.run.leaseGeneration"), v: `${run.leaseGeneration}` },
                 { k: t("taskDetail.run.workspace"), v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? ` ${t("taskDetail.run.retained")}` : ""}</span> },
                 { k: t("taskDetail.run.budget"), v: t("taskDetail.run.budgetValue", { wall: run.maxDurationMin, stall: run.stallTimeoutMin, runs: run.maxRunsPerTask }) },

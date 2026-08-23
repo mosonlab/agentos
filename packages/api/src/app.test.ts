@@ -918,6 +918,28 @@ test("task create and patch reject an archived assignee with a named 400", async
   });
 });
 
+test("Agent API refuses Fast for a non-Codex model", async () => {
+  await withTokens(async () => {
+    const response = await createApp({} as PrismaClient).request("/projects/project-1/agents", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        environmentId: "environment-1",
+        name: "claude-fast",
+        title: "Claude Fast",
+        model: "claude-opus-5:medium",
+        rolePrompt: "work",
+        runnerPreference: "CLAUDE",
+        codexServiceTier: "FAST",
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "Fast service tier requires a Codex gpt-* model or a PI openai-codex/* model",
+    });
+  });
+});
+
 test("operator retry rejects an archived assignee with a named 409", async () => {
   await withTokens(async () => {
     const { response, created } = await retryRequest({

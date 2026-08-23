@@ -108,6 +108,9 @@ test("the real Create button blocks a contradictory model and runner pair", () =
     <NewAgent {...common} initial={{ name: "senior-dev", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CODEX" }} />,
   );
   assert.doesNotMatch(valid, /<button[^>]*disabled=""[^>]*>[^<]*Create/);
+  assert.match(valid, /Codex service tier/u);
+  assert.match(valid, /<option value="DEFAULT" selected="">Default<\/option>/u);
+  assert.match(valid, /<option value="FAST">Fast<\/option>/u);
 });
 
 test("the real detail Save button blocks a stored contradiction until the picker repairs it", async () => {
@@ -115,7 +118,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
   const root = createRoot(container);
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
-    model: "gpt-5.6-luna:high", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
+    model: "gpt-5.6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };

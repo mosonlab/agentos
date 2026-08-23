@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   AssigneeType,
+  CodexServiceTier,
   InboxDeliveryStatus,
   InboxKind,
   InboxSender,
@@ -58,14 +59,16 @@ export const deriveRunConfig = (
   agent: {
     runnerPreference: RunnerPreference;
     model: string;
+    codexServiceTier: CodexServiceTier;
     foundationalPrompt: string;
     rolePrompt: string;
   },
   templateStep: { runner: RunnerKind | null } | null,
   task: { name: string; description: string },
-): { runner: RunnerKind; model: string; promptHash: string } => ({
+): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier; promptHash: string } => ({
   runner: templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model),
   model: agent.model,
+  codexServiceTier: agent.codexServiceTier,
   promptHash: promptHash([
     agent.foundationalPrompt,
     agent.rolePrompt,
@@ -73,6 +76,20 @@ export const deriveRunConfig = (
     task.description,
   ]),
 });
+
+export const subprocessRunConfig = async (
+  tx: Tx,
+  projectId: string,
+  agentName: string,
+): Promise<{ subprocessModel: string; subprocessCodexServiceTier: CodexServiceTier } | null> => {
+  if (agentName !== "implementation-plan-executioner") return null;
+  const luna = await tx.agent.findFirst({
+    where: { projectId, name: "senior-dev-luna", archivedAt: null },
+    select: { model: true, codexServiceTier: true },
+  });
+  if (!luna) throw new Error("Implementation Plan Executioner requires an active senior-dev-luna Agent");
+  return { subprocessModel: luna.model, subprocessCodexServiceTier: luna.codexServiceTier };
+};
 
 export class ArchivedAssigneeError extends Error {
   constructor(readonly taskId: string, readonly taskName: string, readonly agentName: string) {
@@ -545,6 +562,7 @@ const enqueueTaskRunInternal = async (
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
+  const subprocess = await subprocessRunConfig(tx, task.projectId, task.assigneeAgent.name);
   const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
   return tx.run.create({ data: {
     projectId: task.projectId,
@@ -555,6 +573,8 @@ const enqueueTaskRunInternal = async (
     dedupeKey: `task:${task.id}:run:${runNumber}`,
     runner: derived.runner,
     model: derived.model,
+    codexServiceTier: derived.codexServiceTier,
+    ...subprocess,
     targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: task.opensPullRequest,

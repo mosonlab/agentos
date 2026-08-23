@@ -52,6 +52,13 @@ export const resolveRunner = (preference: RunnerPreference, model: string): Runn
   return "CLAUDE";
 };
 
+export const supportsCodexServiceTier = (preference: RunnerPreference, model: string): boolean => {
+  const runner = resolveRunner(preference, model);
+  const id = splitModel(model).model;
+  return (runner === "CODEX" && id.startsWith("gpt-"))
+    || (runner === "PI" && id.startsWith("openai-codex/"));
+};
+
 export type ModelPairIssue =
   | { kind: "mismatch"; model: string; expected: RunnerKind; actual: RunnerPreference }
   | { kind: "empty-model" }

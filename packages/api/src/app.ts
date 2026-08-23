@@ -8,6 +8,7 @@ import {
   agentArchiveBlocker,
   applyInboxDecision,
   CleanupStatus,
+  CodexServiceTier,
   deriveRunConfig,
   deployBarrierAllowsClaim,
   FAILURE_ENVELOPE_VERSION,
@@ -39,6 +40,7 @@ import {
   runnerFor,
   sessionUsageCost,
   sumUsageCosts,
+  subprocessRunConfig,
   pinnedImplementationRange,
   SecretPurpose,
   SkillKind,
@@ -487,6 +489,7 @@ const agentFields = {
   name: z.string().trim().min(1).max(80),
   title: z.string().trim().min(1).max(120),
   model: z.string().trim().min(1).max(120),
+  codexServiceTier: z.nativeEnum(CodexServiceTier),
   foundationalPrompt: z.string().min(1),
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
@@ -497,6 +500,7 @@ const agentFields = {
 const agentInput = z.object({
   ...agentFields,
   foundationalPrompt: agentFields.foundationalPrompt.optional(),
+  codexServiceTier: agentFields.codexServiceTier.default(CodexServiceTier.DEFAULT),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
   // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
@@ -505,6 +509,19 @@ const agentInput = z.object({
   disabledTools: agentFields.disabledTools.default([]),
 });
 const agentPatch = z.object(agentFields).partial().refine((value) => Object.keys(value).length > 0);
+
+const codexServiceTierRefusal = (agent: {
+  model: string;
+  runnerPreference: RunnerPreference;
+  codexServiceTier: CodexServiceTier;
+}): string | null => {
+  if (agent.codexServiceTier === CodexServiceTier.DEFAULT) return null;
+  const model = agent.model.slice(0, agent.model.lastIndexOf(":") > 0 ? agent.model.lastIndexOf(":") : agent.model.length);
+  const runner = runnerFor(agent.runnerPreference, agent.model);
+  if (runner === RunnerKind.CODEX && model.startsWith("gpt-")) return null;
+  if (runner === RunnerKind.PI && model.startsWith("openai-codex/")) return null;
+  return "Fast service tier requires a Codex gpt-* model or a PI openai-codex/* model";
+};
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
@@ -1554,6 +1571,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/projects/:projectId/agents", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, agentInput);
+    const tierRefusal = codexServiceTierRefusal(body);
+    if (tierRefusal) return context.json({ error: tierRefusal }, 400);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
     const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
@@ -1585,6 +1604,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const agentId = id.parse(context.req.param("agentId"));
     const before = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     const body = await readJson(context.req.raw, agentPatch);
+    const tierRefusal = codexServiceTierRefusal({
+      model: body.model ?? before.model,
+      runnerPreference: body.runnerPreference ?? before.runnerPreference,
+      codexServiceTier: body.codexServiceTier ?? before.codexServiceTier,
+    });
+    if (tierRefusal) return context.json({ error: tierRefusal }, 400);
     if (body.environmentId) {
       const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
       if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
@@ -2633,6 +2658,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
       if (agent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
         const runner = runnerFor(agent.runnerPreference, agent.model);
+        const subprocess = await subprocessRunConfig(tx, projectId, agent.name);
         // This run is built inline rather than through enqueueTaskRun, so it is
         // one of the paths a chain fix can miss. Missing it puts step ① on a
         // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
@@ -2648,6 +2674,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             dedupeKey: makeDedupeKey(created.id, 1),
             runner,
             model: agent.model,
+            codexServiceTier: agent.codexServiceTier,
+            ...subprocess,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: created.opensPullRequest,
@@ -3185,6 +3213,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
       }
       const derived = deriveRunConfig(task.assigneeAgent, task.templateStep, task);
+      const subprocess = await subprocessRunConfig(tx, task.projectId, task.assigneeAgent.name);
       // A task with no repo cannot be a chain step with a branch, and this route
       // already tolerates a null repoId — so it keeps inheriting run-1's fields.
       const branches = task.repo
@@ -3201,6 +3230,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
           runner: derived.runner,
           model: derived.model,
+          codexServiceTier: derived.codexServiceTier,
+          ...subprocess,
           targetBranch: branches ? branches.targetBranch : last.targetBranch,
           branch: branches ? branches.branch : last.branch,
           opensPullRequest: task.opensPullRequest,
@@ -4930,6 +4961,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             dedupeKey: makeDedupeKey(run.task.id, run.runNumber + 1),
             runner: run.runner,
             model: run.model,
+            codexServiceTier: run.codexServiceTier,
+            subprocessModel: run.subprocessModel,
+            subprocessCodexServiceTier: run.subprocessCodexServiceTier,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: currentTask.opensPullRequest,

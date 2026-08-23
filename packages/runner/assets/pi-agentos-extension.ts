@@ -50,7 +50,31 @@ const said = (text: string): ToolResult => ({ content: [{ type: "text", text }],
 
 export default function (pi: {
   registerTool(tool: Record<string, unknown>): void;
+  on(
+    event: "before_provider_request",
+    handler: (
+      event: { type: "before_provider_request"; payload: unknown },
+      context: { model?: { provider?: string } },
+    ) => unknown,
+  ): void;
 }): void {
+  pi.on("before_provider_request", (event, context) => {
+    if (context.model?.provider !== "openai-codex") return undefined;
+    const configured = process.env.AGENTOS_CODEX_SERVICE_TIER;
+    if (configured !== "default" && configured !== "fast") {
+      throw new Error("AGENTOS_CODEX_SERVICE_TIER must be default or fast");
+    }
+    if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+      throw new Error("PI openai-codex provider request payload is not an object");
+    }
+    return {
+      ...event.payload,
+      // The Responses API reports Fast as `priority`; the AgentOS setting stays
+      // `fast` because that is the operator-facing Codex config vocabulary.
+      service_tier: configured === "fast" ? "priority" : "default",
+    };
+  });
+
   pi.registerTool({
     name: "task_activity_log",
     label: "AgentOS activity",

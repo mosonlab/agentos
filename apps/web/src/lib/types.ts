@@ -8,6 +8,7 @@ export type TaskSource = "MANUAL" | "CRON" | "WEBHOOK";
 export type AssigneeType = "AGENT" | "HUMAN";
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 export type RunnerPreference = RunnerKind | "AUTO" | "INHERIT";
+export type CodexServiceTier = "DEFAULT" | "FAST";
 export type RunStatus =
   | "QUEUED" | "CLAIMED" | "PROVISIONING" | "RUNNING" | "WAITING_INBOX"
   | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "LOST";
@@ -52,6 +53,7 @@ export type Agent = {
   name: string;
   title: string;
   model: string;
+  codexServiceTier: CodexServiceTier;
   foundationalPrompt: string;
   rolePrompt: string;
   runnerPreference: RunnerPreference;
@@ -227,6 +229,9 @@ export type Run = {
   runner: RunnerKind;
   runnerId: string | null;
   model: string;
+  codexServiceTier: CodexServiceTier;
+  subprocessModel: string | null;
+  subprocessCodexServiceTier: CodexServiceTier | null;
   leaseGeneration: number;
   workspacePath: string | null;
   workspaceRetained: boolean;
