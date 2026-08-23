@@ -39,7 +39,7 @@ export type CommandOptions = {
  *
  * It is a *type*, not a message token, because classification must be able to
  * tell it apart from every other "timed out" string in the runner — the CLI
- * preflight in adapters.ts already emits "preflight timed out after 15
+ * preflight in adapters.ts already emits "preflight timed out after 30
  * seconds", and matching that as a network blip would make a missing binary
  * look retryable. network-retry.ts is the only place that reads this.
  */

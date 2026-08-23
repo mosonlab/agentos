@@ -29,7 +29,7 @@ const messageOf = (error: unknown): string => error instanceof Error ? error.mes
 export const isTransientNetworkError = (error: unknown): boolean => {
   // Our own per-command timeout is recognised by type, never by its wording.
   // adapters.ts hands this predicate raw CLI stderr, which already contains an
-  // unrelated "preflight timed out after 15 seconds" for a missing/broken
+  // unrelated "preflight timed out after 30 seconds" for a missing/broken
   // binary; a text token would silently reclassify that as a network blip and
   // make a deterministic failure retryable.
   if (isCommandTimeout(error)) return true;

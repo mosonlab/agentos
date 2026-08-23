@@ -112,8 +112,8 @@ test("the runner's own CLI preflight timeout is not mistaken for a network timeo
   // answers `--version`. It predates this module and means "the CLI is broken",
   // not "the network blinked"; a text-matching classifier would make a missing
   // binary look retryable.
-  assert.equal(isTransientNetworkError("preflight timed out after 15 seconds"), false);
-  assert.equal(isTransientNetworkError(new Error("claude failed (1): \npreflight timed out after 15 seconds")), false);
+  assert.equal(isTransientNetworkError("preflight timed out after 30 seconds"), false);
+  assert.equal(isTransientNetworkError(new Error("claude failed (1): \npreflight timed out after 30 seconds")), false);
   // Ours is recognised by type, not by wording.
   assert.equal(isTransientNetworkError(new CommandTimeoutError("git", ["push"], 20_000)), true);
 });

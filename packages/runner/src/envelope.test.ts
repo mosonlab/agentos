@@ -66,7 +66,7 @@ test("a typed CommandTimeoutError marks the envelope timed out and transient", (
 test("the CLI's own 'timed out' wording is not this runner's command timeout", () => {
   // adapters.ts emits exactly this for a missing or broken binary. It is a
   // deterministic failure; reading it as a timeout would make it retryable.
-  const preflight = "preflight timed out after 15 seconds";
+  const preflight = "preflight timed out after 30 seconds";
   const envelope = buildFailureEnvelope({
     phase: "PROVISION",
     agentExited: false,
