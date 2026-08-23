@@ -797,8 +797,12 @@ parallel_two_steps() {
 
 parallel_lint() {
   local biome="${GATE_TMP}/lint-biome.log" types="${GATE_TMP}/lint-types.log" biome_pid types_pid failed=0
+  local eslint_node_options="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=2560"
   (cd "${REPO_ROOT}" && npm run lint:biome) >"${biome}" 2>&1 & biome_pid=$!
-  (cd "${REPO_ROOT}" && npm run lint:types) >"${types}" 2>&1 & types_pid=$!
+  # Node 26 caps its heap near 1.8 GiB on the 4 GiB worker; the type-aware
+  # project service now crosses that boundary before completing. Raise only
+  # this process's ceiling. The option is a limit, not a reservation.
+  (cd "${REPO_ROOT}" && NODE_OPTIONS="${eslint_node_options}" npm run lint:types) >"${types}" 2>&1 & types_pid=$!
   wait "${biome_pid}" || failed=1
   wait "${types_pid}" || failed=1
   printf '\n--- biome ---\n'; cat "${biome}"
