@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmod, chown, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile,
+  chmod, chown, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
@@ -102,6 +102,14 @@ const fakeInstallExecutor = (
         await onInstall(cwd);
         return "";
       }
+      // The fake proves restore behavior without making unit coverage depend on
+      // whether the host's temporary filesystem supports copy-on-write clones.
+      if (executable === "/bin/cp") {
+        const [source, destination] = args.slice(-2);
+        if (!source || !destination) throw new Error("copy fixture requires source and destination");
+        await cp(source, destination, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+        return "";
+      }
       // Tests use a synthetic prefix to prove routing; executing it would test
       // the host launcher rather than this boundary.
       return runCommand([], executable, args, cwd, env, options);
@@ -121,6 +129,24 @@ const makeWritable = async (path: string): Promise<void> => {
 const cleanupRoot = async (root: string): Promise<void> => {
   await makeWritable(root).catch(() => undefined);
   await rm(root, { recursive: true, force: true });
+};
+
+const supportsCopyOnWriteRestore = async (root: string): Promise<boolean> => {
+  const source = join(root, "copy-on-write-source");
+  const destination = join(root, "copy-on-write-destination");
+  await writeFile(source, "probe\n");
+  try {
+    const args = platform() === "darwin"
+      ? ["-c", source, destination]
+      : ["--reflink=always", source, destination];
+    await runCommand([], "/bin/cp", args, root, process.env);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(source, { force: true });
+    await rm(destination, { force: true });
+  }
 };
 
 const chownTree = async (path: string, uid: number, gid: number): Promise<void> => {
@@ -558,12 +584,16 @@ test("a distinct run-as uid restores readable cache entries and owns the workspa
   skip: typeof process.getuid !== "function" || process.getuid() !== 0
     ? "requires root to exercise a genuinely distinct uid"
     : false,
-}, async () => {
+}, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-distinct-uid-"));
   const targetUser = "daemon";
   const targetUid = Number(execFileSync("id", ["-u", targetUser], { encoding: "utf8" }).trim());
   const targetGid = Number(execFileSync("id", ["-g", targetUser], { encoding: "utf8" }).trim());
   try {
+    if (!await supportsCopyOnWriteRestore(root)) {
+      context.skip("the temporary filesystem does not support copy-on-write restoration");
+      return;
+    }
     const workspace = join(root, "workspace");
     await createFixture(workspace);
     await chownTree(workspace, targetUid, targetGid);
@@ -636,9 +666,13 @@ const git = async (cwd: string, ...args: string[]): Promise<string> =>
 
 const digest = (content: string): string => createHash("sha256").update(content).digest("hex");
 
-test("branch and pinned-detached provisioning materialize a usable scratch repository from one cache entry", async () => {
+test("branch and pinned-detached provisioning materialize a usable scratch repository from one cache entry", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-provision-"));
   try {
+    if (!await supportsCopyOnWriteRestore(root)) {
+      context.skip("the temporary filesystem does not support copy-on-write restoration");
+      return;
+    }
     const remote = join(root, "origin.git");
     const seed = join(root, "seed");
     await mkdir(seed);
