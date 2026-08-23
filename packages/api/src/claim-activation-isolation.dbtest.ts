@@ -169,7 +169,7 @@ const assertPoisonIsolated = async (
   ]);
   const reason = failureType === "PinnedBaseCommitError"
     ? `PinnedBaseCommitError: Pinned task ${seeded.poisonTask.id} cannot activate from step 0: referenced step has no recorded commitSha`
-    : `PinnedRunTargetError: Pinned run ${seeded.poisonRun.id} target is inconsistent with its source step implementation head`;
+    : `PinnedRunTargetError: Pinned run ${seeded.poisonRun.id} targets ${seeded.poisonRun.targetBranch ?? "no commit"}, but its source step now records ${"c".repeat(40)}`;
   assert.equal(run.status, RunStatus.FAILED);
   assert.equal(run.failureClass, FailureClass.TASK_FAILED);
   assert.equal(run.failureReason, reason);

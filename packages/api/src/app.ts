@@ -21,6 +21,7 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   isIntegratorStoppedError,
+  isPinnedBaseCommitError,
   LIVE_TASK_STATUSES,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
@@ -166,8 +167,8 @@ export interface LiveAppOptions {
 type DbTx = Prisma.TransactionClient;
 
 class PinnedRunTargetError extends Error {
-  constructor(readonly runId: string) {
-    super(`Pinned run ${runId} target is inconsistent with its source step implementation head`);
+  constructor(readonly runId: string, targetBranch: string | null, implementationHeadSha: string) {
+    super(`Pinned run ${runId} targets ${targetBranch ?? "no commit"}, but its source step now records ${implementationHeadSha}`);
     this.name = "PinnedRunTargetError";
   }
 }
@@ -175,7 +176,7 @@ class PinnedRunTargetError extends Error {
 type CandidateActivationFailure = PinnedBaseCommitError | PinnedRunTargetError;
 
 const isCandidateActivationFailure = (error: unknown): error is CandidateActivationFailure =>
-  error instanceof PinnedBaseCommitError || error instanceof PinnedRunTargetError;
+  isPinnedBaseCommitError(error) || error instanceof PinnedRunTargetError;
 
 const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
 
@@ -4505,7 +4506,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         try {
           implementationRange = await pinnedImplementationRange(tx, candidate.task);
           if (implementationRange && implementationRange.implementationHeadSha !== candidate.targetBranch) {
-            throw new PinnedRunTargetError(candidate.id);
+            throw new PinnedRunTargetError(
+              candidate.id,
+              candidate.targetBranch,
+              implementationRange.implementationHeadSha,
+            );
           }
         } catch (error: unknown) {
           if (!isCandidateActivationFailure(error)) throw error;

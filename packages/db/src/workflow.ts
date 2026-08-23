@@ -186,6 +186,9 @@ export class PinnedBaseCommitError extends Error {
   }
 }
 
+export const isPinnedBaseCommitError = (error: unknown): error is PinnedBaseCommitError =>
+  error instanceof Error && error.name === "PinnedBaseCommitError";
+
 export const pinnedImplementationRange = async (
   tx: Tx,
   task: {
