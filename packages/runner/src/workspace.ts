@@ -5,6 +5,7 @@ import { dirname, join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
 import { defaultSessionConfigBaselineRoot, runnerProxyEnvironment, type RunnerConfig, type RunnerKind } from "./config.js";
+import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import { runCommand, type CommandOptions } from "./exec.js";
 import {
   CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
@@ -306,6 +307,7 @@ export const provisionWorkspace = async (
   claim: ClaimedTask,
   execute: WorkspaceCommandExecutor = command,
   retryOptions: RetryOptions = {},
+  dependencyCacheOptions: DependencyCacheOptions = {},
 ): Promise<Workspace> => {
   const root = resolve(config.workspaceRoot);
   const workspace = resolve(root, claim.run.id);
@@ -365,6 +367,7 @@ export const provisionWorkspace = async (
       if (baseSha !== pinnedBaseSha) {
         throw new Error(`Pinned workspace resolved ${baseSha}, expected ${pinnedBaseSha}`);
       }
+      await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
       return { path: workspace, branch, baseSha, pinnedBaseSha };
     }
     // The publication ACK is fenced and immediate, but no database protocol can
@@ -393,6 +396,7 @@ export const provisionWorkspace = async (
     );
     const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
     if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
+    await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
     return { path: workspace, branch, baseSha };
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);
