@@ -61,6 +61,14 @@
 #
 # Anything the gate cannot establish is a FAIL, never a skip.
 #
+# The gate chooses its own proof profile from the exact baseline-to-candidate
+# diff. A content-only modification to an explicit allowlist of prose files uses
+# the docs-only profile: frozen-record enforcement, classifier fixtures, diff
+# hygiene, the closed public-snapshot scan, and final HEAD/worktree drift. Adds,
+# deletes, renames, mode changes, runtime-coupled documentation, code,
+# configuration, and every unknown path use the full profile below. There is no
+# flag that lets a caller request the cheaper profile.
+#
 # Two content-addressed caches change latency, never the question the gate asks.
 # The dependency snapshot key covers every package manifest, package-lock.json,
 # npm configuration, the Prisma schema consumed by postinstall, and the exact
@@ -140,6 +148,7 @@ LOCK_HELD=0
 GATE_TMP=""
 POSTGRES_STARTED=0
 GATED_HEAD=""
+GATE_PROFILE="full"
 FAILED_STEP=""
 STEP_REPORT=()
 
@@ -783,6 +792,28 @@ overlaps() {
 git_head() { git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null; }
 git_dirt() { git -C "${REPO_ROOT}" status --porcelain 2>/dev/null; }
 
+verify_candidate_diff() {
+  git -C "${REPO_ROOT}" diff --check "${MASTER_OID}" "${GATED_HEAD}" --
+}
+
+# The verdict is about the commit the preflight pinned, so the last step proves
+# nothing moved underneath it: no rebase, no stray edit, no build artefact that
+# is not ignored. Otherwise a PASS could describe a tree that no longer exists.
+verify_tree_did_not_drift() {
+  local now dirt
+  now="$(git_head)" || { printf 'could not re-read HEAD\n' >&2; return 1; }
+  if [ "${now}" != "${GATED_HEAD}" ]; then
+    printf 'HEAD moved from %s to %s while the gate was running\n' "${GATED_HEAD}" "${now}" >&2
+    return 1
+  fi
+  dirt="$(git_dirt)"
+  if [ -n "${dirt}" ]; then
+    printf 'the working tree was modified while the gate was running:\n%s\n' "${dirt}" >&2
+    return 1
+  fi
+  printf 'still at %s, working tree still clean\n' "${GATED_HEAD}"
+}
+
 # --- preflight --------------------------------------------------------------
 
 say "Preflight"
@@ -918,6 +949,28 @@ note "baseline:   ${MASTER_OID} (${MASTER_SOURCE})"
 # append-only rule fails here in a second, and says so even on a machine where
 # Docker is not running.
 step "frozen records append-only" bash scripts/check-frozen-docs.sh --master "${MASTER_OID}"
+# The profile classifier can omit every expensive suite, so its fixtures run
+# before the result is trusted on every profile.
+step "merge-gate profile fixtures" node --test scripts/merge-gate-profile.test.mjs
+
+profile_output=""
+if profile_output="$(node scripts/merge-gate-profile.mjs "${MASTER_OID}" "${GATED_HEAD}")"; then
+  case "${profile_output}" in
+    docs-only|full) GATE_PROFILE="${profile_output}" ;;
+    *) note "profile classifier returned '${profile_output}'; using full" ;;
+  esac
+else
+  note "profile classifier could not decide; using full"
+fi
+note "profile:    ${GATE_PROFILE} (selected from the exact baseline-to-candidate diff)"
+
+if [ "${GATE_PROFILE}" = "docs-only" ]; then
+  step "candidate diff whitespace" verify_candidate_diff
+  step "public snapshot closed-scope scan" node scripts/public-snapshot-scan.mjs
+  step "verify the gated commit did not drift" verify_tree_did_not_drift
+  exit 0
+fi
+
 # The checker is a gate rule, so it is gated too: PR #156 shipped one whose
 # date-prefix rule was unreachable by construction, and nothing ran to say so.
 step "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs
@@ -1046,25 +1099,7 @@ export DATABASE_URL="${TEST_DATABASE_URL}"
 # incident, so a gate that silently skips it is worth very little.
 export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 
-# --- the gate ---------------------------------------------------------------
-
-# The verdict is about the commit the preflight pinned, so the last step proves
-# nothing moved underneath it: no rebase, no stray edit, no build artefact that
-# is not ignored. Otherwise a PASS could describe a tree that no longer exists.
-verify_tree_did_not_drift() {
-  local now dirt
-  now="$(git_head)" || { printf 'could not re-read HEAD\n' >&2; return 1; }
-  if [ "${now}" != "${GATED_HEAD}" ]; then
-    printf 'HEAD moved from %s to %s while the gate was running\n' "${GATED_HEAD}" "${now}" >&2
-    return 1
-  fi
-  dirt="$(git_dirt)"
-  if [ -n "${dirt}" ]; then
-    printf 'the working tree was modified while the gate was running:\n%s\n' "${dirt}" >&2
-    return 1
-  fi
-  printf 'still at %s, working tree still clean\n' "${GATED_HEAD}"
-}
+# --- the full gate ----------------------------------------------------------
 
 # `--prefer-offline` reuses the worker's own `~/.npm` content-addressed cache
 # instead of re-asking the registry for metadata it already has; a tarball
