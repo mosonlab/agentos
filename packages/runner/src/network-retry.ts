@@ -138,6 +138,13 @@ export const NETWORK_OPERATION_BUDGET_MS = 45_000;
 export const CLONE_COMMAND_TIMEOUT_MS = 120_000;
 export const CLONE_OPERATION_BUDGET_MS = 300_000;
 
+/** Dependency installation is substantially heavier than cloning this
+ * repository, but it still needs a finite process-group ceiling. The runner
+ * heartbeat remains active throughout provisioning, so this bound protects
+ * against a wedged registry or install hook rather than the delivery lease. */
+export const NPM_INSTALL_COMMAND_TIMEOUT_MS = 600_000;
+export const NPM_INSTALL_OPERATION_BUDGET_MS = 1_800_000;
+
 /**
  * Reserved out of the lease for everything in the delivery phase that is not a
  * network command, worst case, with a 60s lease and a 10s API ceiling:
@@ -285,7 +292,9 @@ const RETRIED_GIT_OPERATIONS = new Set(["clone", "fetch", "push", "ls-remote"]);
  *
  * Everything on this list is either a read or a write whose repetition is a
  * no-op: a second `git push` of the same ref pushes nothing, a second
- * `gh pr list` lists the same rows. No *creating* GitHub write is on it, and
+ * `gh pr list` lists the same rows, and dependency-cache.ts clears every
+ * declared target before each `npm ci` attempt. No *creating* GitHub write is
+ * on it, and
  * `gh pr create` was taken off it by #139. A loop that resends on an error
  * alone cannot tell a lost response from a failed one, and for a creating write
  * that difference is a duplicate object — those go through
@@ -299,7 +308,8 @@ export const runWithNetworkRetry = async <T>(
   options: RetryOptions = {},
 ): Promise<T> => {
   const retryableCommand = (executable === "git" && RETRIED_GIT_OPERATIONS.has(args[0] ?? ""))
-    || (executable === "gh" && args[0] === "pr" && args[1] === "list");
+    || (executable === "gh" && args[0] === "pr" && args[1] === "list")
+    || (executable === "npm" && args[0] === "ci");
   // The allowlist decides the timeout as well as the retry: a local `git
   // commit` or `git checkout` of a huge tree is slow, not hung, and killing it
   // at 20s would turn a working run into a failed one. Only a command that

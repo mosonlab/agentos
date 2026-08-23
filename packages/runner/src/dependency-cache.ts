@@ -3,16 +3,20 @@ import { constants } from "node:fs";
 import {
   chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile,
 } from "node:fs/promises";
-import { arch, platform } from "node:os";
+import { platform } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
+import {
+  NPM_INSTALL_COMMAND_TIMEOUT_MS, NPM_INSTALL_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
+} from "./network-retry.js";
 
-const CACHE_FORMAT = "agentos-runner-dependency-cache-v1";
+const CACHE_FORMAT = "agentos-runner-dependency-cache-v2";
 const METADATA_FILE = "metadata.json";
 const TREE_DIRECTORY = "trees";
-const MAX_METADATA_BYTES = 1024 * 1024;
+const MAX_METADATA_BYTES = 128 * 1024 * 1024;
+const NPM_PROBE_TIMEOUT_MS = 10_000;
 
 export type DependencyCommandExecutor = (
   config: RunnerConfig,
@@ -31,7 +35,11 @@ export type DependencyCacheToolchain = {
 };
 
 type CacheInput = { path: string; sha256: string } | { path: string; absent: true };
-type TargetManifestEntry = { path: string; present: boolean };
+type TreeManifestEntry =
+  | { path: string; kind: "directory"; mode: number }
+  | { path: string; kind: "file"; mode: number; sha256: string }
+  | { path: string; kind: "symlink"; target: string };
+type TargetManifestEntry = { path: string; present: boolean; tree: TreeManifestEntry[] };
 
 type CacheMetadata = {
   format: typeof CACHE_FORMAT;
@@ -44,6 +52,7 @@ type CacheMetadata = {
 type DependencyProject = {
   inputs: CacheInput[];
   targets: string[];
+  inputMissCondition?: string;
 };
 
 export type DependencyCacheProgress = {
@@ -56,6 +65,7 @@ export type DependencyCacheProgress = {
 export type DependencyCacheOptions = {
   cacheRoot?: string;
   toolchain?: DependencyCacheToolchain;
+  installRetryOptions?: RetryOptions;
   report?: (progress: DependencyCacheProgress) => void;
 };
 
@@ -204,6 +214,100 @@ const declaredWorkspaceDirectories = async (
   return [...directories].sort();
 };
 
+type PackageDefinition = {
+  directory: string;
+  manifestPath: string;
+  manifest: Record<string, unknown>;
+  name?: string;
+};
+
+const INSTALL_LIFECYCLE_SCRIPTS = [
+  "preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare",
+] as const;
+
+const packageScripts = (pkg: PackageDefinition): Record<string, string> => {
+  const scripts = pkg.manifest.scripts;
+  if (scripts === undefined) return {};
+  if (scripts === null || typeof scripts !== "object" || Array.isArray(scripts)) {
+    throw new Error(`Ambiguous dependency input: ${pkg.manifestPath} scripts`);
+  }
+  const result: Record<string, string> = {};
+  for (const [name, command] of Object.entries(scripts)) {
+    if (typeof command !== "string") throw new Error(`Ambiguous dependency input: ${pkg.manifestPath} script ${name}`);
+    result[name] = command;
+  }
+  return result;
+};
+
+const repositoryPath = (workspace: string, directory: string, referenced: string): string => {
+  const unquoted = referenced.replace(/^["']|["']$/gu, "");
+  if (unquoted === "" || unquoted.includes("\\") || unquoted.includes("$") || isAbsolute(unquoted)) {
+    throw new Error(`Ambiguous Prisma schema input: ${referenced}`);
+  }
+  const absolute = resolve(workspace, directory, unquoted);
+  if (!insideOrEqual(workspace, absolute)) throw new Error(`Prisma schema input escaped the run workspace: ${referenced}`);
+  return relative(workspace, absolute).split(sep).join("/");
+};
+
+const lifecycleSchemaInputs = async (
+  workspace: string,
+  packages: PackageDefinition[],
+): Promise<Array<{ path: string; required: boolean }>> => {
+  const byName = new Map(packages.flatMap((pkg) => pkg.name ? [[pkg.name, pkg] as const] : []));
+  const queue: Array<{ pkg: PackageDefinition; name: string }> = packages.flatMap((pkg) => {
+    const scripts = packageScripts(pkg);
+    return INSTALL_LIFECYCLE_SCRIPTS.filter((name) => scripts[name] !== undefined).map((name) => ({ pkg, name }));
+  });
+  const visited = new Set<string>();
+  const schemas = new Map<string, boolean>();
+  const addSchema = (path: string, required: boolean): void => {
+    schemas.set(path, required || schemas.get(path) === true);
+  };
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const visitKey = `${current.pkg.manifestPath}:${current.name}`;
+    if (visited.has(visitKey)) continue;
+    visited.add(visitKey);
+    const command = packageScripts(current.pkg)[current.name];
+    if (command === undefined) throw new Error(`Ambiguous lifecycle script reference: ${visitKey}`);
+
+    const explicit = [...command.matchAll(/--schema(?:=|\s+)([^\s;&|]+)/gu)];
+    for (const match of explicit) addSchema(repositoryPath(workspace, current.pkg.directory, match[1]!), true);
+
+    if (/\bprisma\s+(?:generate|migrate|db|validate|format)\b/u.test(command) && explicit.length === 0) {
+      const prisma = current.pkg.manifest.prisma;
+      const configuredSchema = prisma !== null && typeof prisma === "object" && !Array.isArray(prisma)
+        ? (prisma as { schema?: unknown }).schema
+        : undefined;
+      if (configuredSchema !== undefined && typeof configuredSchema !== "string") {
+        throw new Error(`Ambiguous dependency input: ${current.pkg.manifestPath} prisma.schema`);
+      }
+      if (typeof configuredSchema === "string") {
+        addSchema(repositoryPath(workspace, current.pkg.directory, configuredSchema), true);
+      } else {
+        const defaults = ["prisma/schema.prisma", "schema.prisma"]
+          .map((path) => repositoryPath(workspace, current.pkg.directory, path));
+        const present: string[] = [];
+        for (const path of defaults) if (await pathKind(resolve(workspace, path)) !== "missing") present.push(path);
+        if (present.length > 1) throw new Error(`Ambiguous Prisma schema input for ${current.pkg.manifestPath}`);
+        if (present.length === 1) addSchema(present[0]!, true);
+        else addSchema(defaults[0]!, true);
+      }
+    }
+
+    for (const match of command.matchAll(/\bnpm\s+run(?:-script)?\s+([^\s;&|]+)([^;&|]*)/gu)) {
+      const referencedName = match[1]!;
+      const workspaceMatch = /(?:^|\s)(?:-w|--workspace)(?:=|\s+)([^\s;&|]+)/u.exec(match[2] ?? "");
+      const referencedPackage = workspaceMatch ? byName.get(workspaceMatch[1]!) : current.pkg;
+      if (!referencedPackage) throw new Error(`Ambiguous lifecycle workspace reference: ${workspaceMatch?.[1]}`);
+      queue.push({ pkg: referencedPackage, name: referencedName });
+    }
+  }
+  if (schemas.size === 0) return [{ path: "<lifecycle-prisma-schema>", required: false }];
+  return [...schemas].map(([path, required]) => ({ path, required })).sort((left, right) => left.path.localeCompare(right.path, "en"));
+};
+
 const inspectDependencyProject = async (workspacePath: string): Promise<DependencyProject | null> => {
   const requestedWorkspace = resolve(workspacePath);
   if (await pathKind(requestedWorkspace) !== "directory") throw new Error("Run workspace is not a real directory");
@@ -214,23 +318,45 @@ const inspectDependencyProject = async (workspacePath: string): Promise<Dependen
   if (rootManifestKind !== "file") throw new Error(`Ambiguous dependency input: package.json is ${rootManifestKind}`);
 
   const rootPackage = await readJsonObject(workspace, "package.json");
-  await readJsonObject(workspace, "package-lock.json");
   const packageDirectories = await declaredWorkspaceDirectories(workspace, rootPackage);
-  const requiredPaths = [
-    "package.json",
-    "package-lock.json",
-    ...packageDirectories.map((path) => `${path}/package.json`),
-    "packages/db/prisma/schema.prisma",
-  ];
+  const packages: PackageDefinition[] = [{
+    directory: "", manifestPath: "package.json", manifest: rootPackage,
+    ...(typeof rootPackage.name === "string" ? { name: rootPackage.name } : {}),
+  }];
+  for (const directory of packageDirectories) {
+    const manifestPath = `${directory}/package.json`;
+    const manifest = await readJsonObject(workspace, manifestPath);
+    packages.push({
+      directory, manifestPath, manifest,
+      ...(typeof manifest.name === "string" ? { name: manifest.name } : {}),
+    });
+  }
+  const requiredPaths = ["package.json", "package-lock.json", ...packageDirectories.map((path) => `${path}/package.json`)];
   const optionalPaths = [".npmrc", ...packageDirectories.map((path) => `${path}/.npmrc`)];
-  const inputs = await Promise.all([
-    ...requiredPaths.map((path) => readInput(workspace, path, true)),
-    ...optionalPaths.map((path) => readInput(workspace, path, false)),
-  ]);
+  const schemaInputs = await lifecycleSchemaInputs(workspace, packages);
+  const inputs: CacheInput[] = [];
+  let inputMissCondition: string | undefined;
+  for (const { path, required } of [
+    ...requiredPaths.map((path) => ({ path, required: true })),
+    ...optionalPaths.map((path) => ({ path, required: false })),
+    ...schemaInputs,
+  ]) {
+    try {
+      inputs.push(await readInput(workspace, path, required));
+    } catch (error: unknown) {
+      if (!(error instanceof DependencyCacheInputMissError)) throw error;
+      inputMissCondition ??= error.condition;
+    }
+  }
+  const lockInput = inputs.find(({ path }) => path === "package-lock.json");
+  if (lockInput && "sha256" in lockInput) {
+    parseJsonObject(await readFile(join(workspace, "package-lock.json"), "utf8"), "package-lock.json");
+  }
   inputs.sort((left, right) => left.path.localeCompare(right.path, "en"));
   return {
     inputs,
     targets: ["node_modules", ...packageDirectories.map((path) => `${path}/node_modules`)],
+    ...(inputMissCondition ? { inputMissCondition } : {}),
   };
 };
 
@@ -248,12 +374,62 @@ const currentToolchain = async (
   workspace: string,
   env: NodeJS.ProcessEnv,
   execute: DependencyCommandExecutor,
-): Promise<DependencyCacheToolchain> => validatedToolchain({
-  node: process.version,
-  npm: (await execute(config, "npm", ["--version"], workspace, env)).trim(),
-  operatingSystem: platform(),
-  architecture: arch(),
-});
+): Promise<DependencyCacheToolchain> => {
+  const childCoordinates = parseJsonObject(await execute(
+    config,
+    "node",
+    ["--input-type=commonjs", "-e", "process.stdout.write(JSON.stringify({node:process.version,operatingSystem:process.platform,architecture:process.arch}))"],
+    workspace,
+    env,
+    { timeoutMs: NPM_PROBE_TIMEOUT_MS },
+  ), "child Node toolchain");
+  const coordinate = (name: "node" | "operatingSystem" | "architecture"): string => {
+    const value = childCoordinates[name];
+    if (typeof value !== "string") throw new Error(`Ambiguous dependency toolchain value: ${name}`);
+    return value;
+  };
+  return validatedToolchain({
+    node: coordinate("node"),
+    npm: (await execute(config, "npm", ["--version"], workspace, env, { timeoutMs: NPM_PROBE_TIMEOUT_MS })).trim(),
+    operatingSystem: coordinate("operatingSystem"),
+    architecture: coordinate("architecture"),
+  });
+};
+
+const NPM_SECRET_CONFIG_KEY = /(?:^|[:/_-])(?:_?auth(?:token)?|token|password|username|email|proxy|cert|key)(?:$|[:/_-])/iu;
+
+const canonicalValue = (value: unknown, key = ""): unknown => {
+  if (typeof value === "string" && /registry$/iu.test(key)) {
+    try {
+      const registry = new URL(value);
+      registry.username = "";
+      registry.password = "";
+      return registry.toString();
+    } catch {
+      return value;
+    }
+  }
+  if (Array.isArray(value)) return value.map((entry) => canonicalValue(entry, key));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !NPM_SECRET_CONFIG_KEY.test(key))
+      .sort(([left], [right]) => left.localeCompare(right, "en"))
+      .map(([nestedKey, nested]) => [nestedKey, canonicalValue(nested, nestedKey)]));
+  }
+  return value;
+};
+
+const effectiveNpmConfigInput = async (
+  config: RunnerConfig,
+  workspace: string,
+  env: NodeJS.ProcessEnv,
+  execute: DependencyCommandExecutor,
+): Promise<CacheInput> => {
+  const raw = await execute(config, "npm", ["config", "ls", "--json"], workspace, env, { timeoutMs: NPM_PROBE_TIMEOUT_MS });
+  const parsed = parseJsonObject(raw, "effective npm configuration");
+  const filtered = canonicalValue(parsed);
+  return { path: "<effective-npm-config>", sha256: sha256(`${JSON.stringify(filtered)}\n`) };
+};
 
 export const deriveDependencyCacheKey = async (
   workspace: string,
@@ -261,6 +437,7 @@ export const deriveDependencyCacheKey = async (
 ): Promise<{ key: string; inputs: CacheInput[]; targets: string[] } | null> => {
   const project = await inspectDependencyProject(workspace);
   if (project === null) return null;
+  if (project.inputMissCondition) throw new DependencyCacheInputMissError(project.inputMissCondition);
   const key = sha256(`${JSON.stringify({ format: CACHE_FORMAT, toolchain: validatedToolchain(toolchain), inputs: project.inputs })}\n`);
   return { key, ...project };
 };
@@ -296,63 +473,58 @@ const clearTargets = async (
   }
 };
 
-const validateTree = async (
+const treeManifest = async (
   treeRoot: string,
   workspace: string,
   workspaceTarget: string,
   requireImmutable: boolean,
-): Promise<void> => {
+): Promise<TreeManifestEntry[]> => {
+  const manifest: TreeManifestEntry[] = [];
   const visit = async (path: string): Promise<void> => {
     const info = await lstat(path);
     const mapped = resolve(workspaceTarget, relative(treeRoot, path));
     if (!insideOrEqual(workspace, mapped)) throw new DependencyCacheIntegrityError("tree-path-escape");
+    const manifestPath = relative(treeRoot, path).split(sep).join("/") || ".";
     if (info.isSymbolicLink()) {
       const link = await readlink(path);
       if (isAbsolute(link) || !insideOrEqual(workspace, resolve(dirname(mapped), link))) {
         throw new DependencyCacheIntegrityError("symlink-escape");
       }
+      manifest.push({ path: manifestPath, kind: "symlink", target: link });
       return;
     }
     if (requireImmutable && (info.mode & 0o222) !== 0) {
       throw new DependencyCacheIntegrityError("writable-entry");
     }
     if (info.isDirectory()) {
-      for (const child of await readdir(path)) await visit(join(path, child));
+      if (requireImmutable && (info.mode & 0o005) !== 0o005) {
+        throw new DependencyCacheIntegrityError("entry-not-readable");
+      }
+      manifest.push({ path: manifestPath, kind: "directory", mode: info.mode & 0o111 });
+      for (const child of (await readdir(path)).sort()) await visit(join(path, child));
       return;
     }
     if (!info.isFile()) throw new DependencyCacheIntegrityError("special-file");
+    if (requireImmutable && (info.mode & 0o004) === 0) throw new DependencyCacheIntegrityError("entry-not-readable");
+    manifest.push({ path: manifestPath, kind: "file", mode: info.mode & 0o111, sha256: sha256(await readFile(path)) });
   };
   await visit(treeRoot);
+  return manifest;
 };
 
 const findTargetManifest = async (workspace: string, targets: string[]): Promise<TargetManifestEntry[]> => {
-  const allowed = new Set(targets);
   const manifest: TargetManifestEntry[] = [];
   for (const target of targets) {
     const absolute = assertTarget(workspace, target);
     const kind = await pathKind(absolute);
     if (kind === "symlink") throw new Error(`Dependency target is a symlink: ${target}`);
     if (kind !== "missing" && kind !== "directory") throw new Error(`Dependency target is not a directory: ${target}`);
-    if (kind === "directory") await validateTree(absolute, workspace, absolute, false);
-    manifest.push({ path: target, present: kind === "directory" });
+    const tree = kind === "directory" ? await treeManifest(absolute, workspace, absolute, false) : [];
+    manifest.push({ path: target, present: kind === "directory", tree });
   }
   if (!manifest[0]?.present || manifest[0].path !== "node_modules") {
     throw new Error("npm ci did not produce the root node_modules target");
   }
-
-  const walk = async (directory: string): Promise<void> => {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.name === ".git") continue;
-      const absolute = join(directory, entry.name);
-      const relativePath = relative(workspace, absolute).split(sep).join("/");
-      if (entry.name === "node_modules" && entry.isDirectory()) {
-        if (!allowed.has(relativePath)) throw new Error(`npm ci produced an unexpected dependency target: ${relativePath}`);
-        continue;
-      }
-      if (entry.isDirectory() && !entry.isSymbolicLink()) await walk(absolute);
-    }
-  };
-  await walk(workspace);
   return manifest;
 };
 
@@ -371,7 +543,22 @@ const metadataShape = (value: unknown): value is CacheMetadata => {
     && metadata.targets.every((target) => target !== null && typeof target === "object"
       && typeof (target as TargetManifestEntry).path === "string"
       && typeof (target as TargetManifestEntry).present === "boolean"
-      && sameJson(Object.keys(target).sort(), ["path", "present"]));
+      && Array.isArray((target as TargetManifestEntry).tree)
+      && sameJson(Object.keys(target).sort(), ["path", "present", "tree"])
+      && (target as TargetManifestEntry).tree.every((entry) => {
+        if (entry === null || typeof entry !== "object" || typeof entry.path !== "string" || typeof entry.kind !== "string") return false;
+        if (entry.kind === "directory") {
+          return Number.isInteger(entry.mode) && entry.mode >= 0 && entry.mode <= 0o111
+            && sameJson(Object.keys(entry).sort(), ["kind", "mode", "path"]);
+        }
+        if (entry.kind === "file") {
+          return Number.isInteger(entry.mode) && entry.mode >= 0 && entry.mode <= 0o111
+            && /^[a-f0-9]{64}$/u.test(entry.sha256)
+            && sameJson(Object.keys(entry).sort(), ["kind", "mode", "path", "sha256"]);
+        }
+        return entry.kind === "symlink" && typeof entry.target === "string"
+          && sameJson(Object.keys(entry).sort(), ["kind", "path", "target"]);
+      }));
 };
 
 const readMetadata = async (entry: string): Promise<CacheMetadata> => {
@@ -445,9 +632,14 @@ const validateEntry = async (
     const kind = await pathKind(cached);
     if (target.present && kind !== "directory") throw new DependencyCacheIntegrityError("target-tree-missing");
     if (!target.present && kind !== "missing") throw new DependencyCacheIntegrityError("unexpected-target-tree");
-    if (target.present) await validateTree(cached, workspace, assertTarget(workspace, target.path), true);
+    if (target.present) {
+      const actualTree = await treeManifest(cached, workspace, assertTarget(workspace, target.path), true);
+      if (!sameJson(actualTree, target.tree)) throw new DependencyCacheIntegrityError("tree-manifest-mismatch");
+    } else if (target.tree.length !== 0) {
+      throw new DependencyCacheIntegrityError("target-manifest-mismatch");
+    }
   }
-  await validateTree(join(entry, METADATA_FILE), workspace, workspace, true);
+  await treeManifest(join(entry, METADATA_FILE), workspace, workspace, true);
   const entryInfo = await lstat(entry);
   const treesInfo = await lstat(trees);
   if ((entryInfo.mode & 0o222) !== 0 || (treesInfo.mode & 0o222) !== 0) {
@@ -460,7 +652,7 @@ const makeImmutable = async (path: string): Promise<void> => {
   const info = await lstat(path);
   if (info.isSymbolicLink()) return;
   if (info.isDirectory()) for (const child of await readdir(path)) await makeImmutable(join(path, child));
-  await chmod(path, info.mode & ~0o222);
+  await chmod(path, info.isDirectory() ? 0o555 : 0o444 | (info.mode & 0o111));
 };
 
 const makeWritable = async (path: string): Promise<void> => {
@@ -576,6 +768,31 @@ const publishEntry = async (
   }
 };
 
+const installDependencies = async (
+  config: RunnerConfig,
+  workspace: string,
+  targets: string[],
+  env: NodeJS.ProcessEnv,
+  execute: DependencyCommandExecutor,
+  retryOptions: RetryOptions = {},
+): Promise<TargetManifestEntry[]> => {
+  const args = ["ci", "--prefer-offline", "--no-audit", "--no-fund"];
+  try {
+    await runWithNetworkRetry("npm", args, async ({ timeoutMs }) => {
+      await clearTargets(config, workspace, targets, env, execute);
+      return execute(config, "npm", args, workspace, env, { timeoutMs });
+    }, {
+      commandTimeoutMs: NPM_INSTALL_COMMAND_TIMEOUT_MS,
+      budgetMs: NPM_INSTALL_OPERATION_BUDGET_MS,
+      ...retryOptions,
+    });
+    return await findTargetManifest(workspace, targets);
+  } catch (error: unknown) {
+    await clearTargets(config, workspace, targets, env, execute).catch(() => undefined);
+    throw error;
+  }
+};
+
 export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
@@ -596,6 +813,13 @@ export const materializeWorkspaceDependencies = async (
       report({ event: "miss", condition: "root-package-manifest-missing" });
       return { status: "not-applicable", condition: "root-package-manifest-missing" };
     }
+    if (project.inputMissCondition) {
+      report({ event: "miss", condition: project.inputMissCondition });
+      await installDependencies(config, workspace, project.targets, env, execute, options.installRetryOptions);
+      return { status: "installed", condition: project.inputMissCondition };
+    }
+    project.inputs.push(await effectiveNpmConfigInput(config, workspace, env, execute));
+    project.inputs.sort((left, right) => left.path.localeCompare(right.path, "en"));
     const toolchain = options.toolchain ?? await currentToolchain(config, workspace, env, execute);
     const key = sha256(`${JSON.stringify({ format: CACHE_FORMAT, toolchain: validatedToolchain(toolchain), inputs: project.inputs })}\n`);
     const cacheRoot = await ensureCacheRoot(
@@ -621,9 +845,7 @@ export const materializeWorkspaceDependencies = async (
       report({ event: "miss", key: key.slice(0, 16), condition: "entry-missing" });
     }
 
-    await clearTargets(config, workspace, project.targets, env, execute);
-    await execute(config, "npm", ["ci", "--prefer-offline", "--no-audit", "--no-fund"], workspace, env);
-    const targets = await findTargetManifest(workspace, project.targets);
+    const targets = await installDependencies(config, workspace, project.targets, env, execute, options.installRetryOptions);
     const metadata: CacheMetadata = { format: CACHE_FORMAT, key, toolchain, inputs: project.inputs, targets };
     if (integrityCondition === undefined) {
       const publication = await publishEntry(cacheRoot, entry, metadata, workspace, expected);
@@ -635,11 +857,6 @@ export const materializeWorkspaceDependencies = async (
       }
     }
     return { status: "installed", key, ...(integrityCondition ? { condition: integrityCondition } : {}) };
-  } catch (error: unknown) {
-    if (error instanceof DependencyCacheInputMissError) {
-      report({ event: "miss", condition: error.condition });
-    }
-    throw error;
   } finally {
     report({ event: "elapsed", elapsedMs: Date.now() - started });
   }
