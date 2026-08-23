@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "6839f93cb5bf233cfd669043a6e1f2ef551e029e",
-  "tree": "9e4bf5c1aff1f414f0a4a976a21a33e6f290e73d",
+  "commit": "41f755abb627e58ae95ec14a4e685c1fbfcc7e1a",
+  "tree": "397965581cb8ed93ba14452b660aab619e3f28a9",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -123,8 +123,8 @@
     },
     {
       "path": "packages/db/prisma/migrations/20260823010000_codex_service_tier/migration.sql",
-      "sha256": "9586fe464011aef5281cbcd905c1d46f8ae708547724e50e059e5e1d17e1c427",
-      "blob": "ffc7de94df349cd4281c315374e10ace320dd282"
+      "sha256": "97fd3274861be2b6ebb193ee4b5a48031d7b835020853ae2a0e9325573cb8487",
+      "blob": "bb8b30e44563c2c30fdfdfae6d12c1dceaed07ba"
     },
     {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
@@ -170,11 +170,11 @@
   "migrations": {
     "count": 23,
     "terminal": "20260823010000_codex_service_tier",
-    "sha256": "9b2af74a65d26d539e3149d8153b9803959f487441f70b8598d997fe5ce0b63b"
+    "sha256": "92d7fbc70846cabbdb490c35c5b61a21c9ad8e155709d361338c6e90560ec5bd"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "l8c3l/9SGYHrbgK423J0ezyidr1Dqla5mFwvuQf423hyhXvi97M/nd0V2jWqHmAtYan7eJ5tXYRaiFKP0HqcBg=="
+    "value": "7qD1IHMKP5uT2xOeY6weCPrPhOmvHCKTjn5VL0JT56epxMq4DUcJWM1fY18woc/x90699R3naSFErM/QUyQIBA=="
   }
 }
