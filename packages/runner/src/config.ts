@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { hostname, homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { requireLocalApiDestination } from "./local-origin.js";
@@ -30,6 +30,8 @@ export type RunnerConfig = {
   /** Repository-owned baseline used to provision Codex session config roots. */
   sessionConfigBaselineRoot?: string;
   workspaceRoot: string;
+  /** Runner-owned, write-once dependency snapshots. Defaults beside workspaceRoot. */
+  dependencyCacheRoot?: string;
   failedWorkspaceRetention: number;
   workspaceReclaimIntervalMs: number;
   toolDeadlineMs: number;
@@ -70,6 +72,7 @@ const positiveInteger = (name: string, value: string): number => {
 export const loadRunnerConfig = (): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
   const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
+  const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
   // First, and before this function returns anything a caller could dial: the
   // runner's own index.ts builds the client, the preflight and the poll loop out
   // of this object, so a destination refused here is refused before any DNS
@@ -87,7 +90,8 @@ export const loadRunnerConfig = (): RunnerConfig => {
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
-    workspaceRoot: process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs"),
+    workspaceRoot,
+    dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     // How often this runner asks the control plane which of its directories may
     // be reclaimed (issue #115). Workspace disposal is not urgent — the runner

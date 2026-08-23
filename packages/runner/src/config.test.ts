@@ -34,6 +34,23 @@ test("the default workspace root matches the API's definition of it", () => {
   );
 });
 
+test("the dependency cache defaults beside the workspace root and accepts an explicit runner-owned root", () => {
+  const previousWorkspace = process.env.RUNNER_WORKSPACE_ROOT;
+  const previousCache = process.env.RUNNER_DEPENDENCY_CACHE_ROOT;
+  try {
+    process.env.RUNNER_WORKSPACE_ROOT = "/var/agentos/workspaces";
+    delete process.env.RUNNER_DEPENDENCY_CACHE_ROOT;
+    assert.equal(loadRunnerConfig().dependencyCacheRoot, "/var/agentos/dependency-cache");
+    process.env.RUNNER_DEPENDENCY_CACHE_ROOT = "/srv/agentos/dependencies";
+    assert.equal(loadRunnerConfig().dependencyCacheRoot, "/srv/agentos/dependencies");
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
+    else process.env.RUNNER_WORKSPACE_ROOT = previousWorkspace;
+    if (previousCache === undefined) delete process.env.RUNNER_DEPENDENCY_CACHE_ROOT;
+    else process.env.RUNNER_DEPENDENCY_CACHE_ROOT = previousCache;
+  }
+});
+
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
