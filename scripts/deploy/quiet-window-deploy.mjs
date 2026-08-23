@@ -415,13 +415,15 @@ const serviceState = async () => {
 
 const repositoryState = async (target) => {
   const source = gitText("rev-parse", "HEAD");
+  let branch = null;
+  try { branch = gitText("symbolic-ref", "--short", "HEAD"); } catch { /* detached HEAD is reported by the dry-run */ }
   const dirty = gitText("status", "--porcelain").length > 0;
   let fastForward = "verify-after-fetch";
   try {
     execFileSync(loadBinaries().git, ["-C", REPOSITORY_ROOT, "cat-file", "-e", `${target}^{commit}`], { stdio: "ignore" });
     fastForward = commandSyncOk(loadBinaries().git, ["-C", REPOSITORY_ROOT, "merge-base", "--is-ancestor", source, target]) ? "yes" : "no";
   } catch { /* ls-remote can name an object this checkout has not fetched */ }
-  return { source, dirty, fastForward };
+  return { branch, source, dirty, fastForward };
 };
 
 const commandSyncOk = (program, args) => {
@@ -457,7 +459,7 @@ const dryRun = async () => {
     },
   });
   for (const line of result.lines) log(line);
-  return result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.authority.ok || !result.backup.ok ? 1 : 0;
+  return result.repository.branch !== "main" || result.repository.dirty || result.repository.fastForward !== "yes" || !result.services.ok || !result.authority.ok || !result.backup.ok ? 1 : 0;
 };
 
 const main = async () => {
@@ -518,10 +520,12 @@ const main = async () => {
     }
     const host = createProductionHost({
       fastForward: async () => {
+        let branch = null;
+        try { branch = gitText("symbolic-ref", "--short", "HEAD"); } catch { /* detached HEAD is refused below */ }
         const dirty = gitText("status", "--porcelain").length > 0;
         const headBeforeFetch = gitText("rev-parse", "HEAD");
-        const preflight = gitPreflightFailure({ dirty, head: headBeforeFetch, target: headBeforeFetch, fastForward: true });
-        if (preflight) fail(preflight, "checkout-has-uncommitted-content");
+        const preflight = gitPreflightFailure({ branch, dirty, head: headBeforeFetch, target: headBeforeFetch, fastForward: true });
+        if (preflight) fail(preflight, preflight === "production-checkout-not-main" ? `branch-${branch ?? "detached"}` : "checkout-has-uncommitted-content");
         await checked("fetch-main-failed", loadBinaries().git, ["fetch", "origin", "main"]);
         to = gitText("rev-parse", "origin/main");
         const state = inspectGitPreflight({ git: loadBinaries().git, root: REPOSITORY_ROOT, target: to });

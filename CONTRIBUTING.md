@@ -66,11 +66,12 @@ something outside the checkout.
   and give each worktree its own `?schema=` so parallel runs stay apart. Never
   point them at a database whose contents you would miss: `npm run test:db` drops
   and recreates what it is given.
-- A running installation's API, its configuration directory, its service
-  definitions and its built output belong to whoever is running it. Work in a
-  separate worktree, not in a checkout something is serving from. A fresh worktree
-  needs `npm install && npm run db:generate && npm run build -w @agentos/db`
-  before anything else works.
+- A checkout named by a loaded AgentOS service is an appliance checkout. Follow
+  its ownership and isolation contract in
+  [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
+  use a separate worktree for development. A fresh worktree needs
+  `npm install && npm run db:generate && npm run build -w @agentos/db` before
+  anything else works.
 
 ### Development database bootstrap
 
