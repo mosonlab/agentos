@@ -814,8 +814,8 @@ const capture = async (config: RunnerConfig, runner: RunnerKind, args: string[],
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      finish(1, "\npreflight timed out after 15 seconds");
-    }, 15_000);
+      finish(1, "\npreflight timed out after 30 seconds");
+    }, 30_000);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });

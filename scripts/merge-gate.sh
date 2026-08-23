@@ -685,59 +685,6 @@ run_api_database_tests() {
     node --import tsx packages/api/scripts/dbtest.mjs
 }
 
-# Runs two verdict steps whose mutable state is disjoint, while retaining each
-# step's own stable log, duration and failure. Both complete even when one fails,
-# but the gate fails under the first label that did; parallelism can never turn a
-# red step green. Callers below pair only read-only validation, or unit fixtures
-# under mktemp with a DBTEST runner that owns private databases and host roots.
-parallel_two_steps() {
-  local first_label="$1" first_command="$2" second_label="$3" second_command="$4"
-  local started first_pid second_pid first_rc second_rc first_end second_end
-  local first_safe second_safe first_log second_log first_done second_done
-  first_safe="$(printf '%s' "${first_label}" | tr ' /' '__')"
-  second_safe="$(printf '%s' "${second_label}" | tr ' /' '__')"
-  first_log="${GATE_TMP}/${first_safe}.log"
-  second_log="${GATE_TMP}/${second_safe}.log"
-  first_done="${GATE_TMP}/${first_safe}.done"
-  second_done="${GATE_TMP}/${second_safe}.done"
-  started="$(date +%s)"
-  say "${first_label} (parallel)"
-  say "${second_label} (parallel)"
-  FAILED_STEP="${first_label} / ${second_label}"
-
-  (
-    if cd "${REPO_ROOT}" && "${first_command}"; then rc=0; else rc=$?; fi
-    date +%s > "${first_done}"
-    exit "${rc}"
-  ) >"${first_log}" 2>&1 & first_pid=$!
-  (
-    if cd "${REPO_ROOT}" && "${second_command}"; then rc=0; else rc=$?; fi
-    date +%s > "${second_done}"
-    exit "${rc}"
-  ) >"${second_log}" 2>&1 & second_pid=$!
-
-  if wait "${first_pid}"; then first_rc=0; else first_rc=$?; fi
-  if wait "${second_pid}"; then second_rc=0; else second_rc=$?; fi
-  first_end="$(cat "${first_done}" 2>/dev/null || date +%s)"
-  second_end="$(cat "${second_done}" 2>/dev/null || date +%s)"
-  printf '\n--- %s ---\n' "${first_label}"; cat "${first_log}" || first_rc=1
-  printf '\n--- %s ---\n' "${second_label}"; cat "${second_log}" || second_rc=1
-
-  if [ "${first_rc}" -eq 0 ]; then
-    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${first_label}" "$((first_end - started))")")
-  else
-    STEP_REPORT+=("FAIL  ${first_label}")
-  fi
-  if [ "${second_rc}" -eq 0 ]; then
-    STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${second_label}" "$((second_end - started))")")
-  else
-    STEP_REPORT+=("FAIL  ${second_label}")
-  fi
-  if [ "${first_rc}" -ne 0 ]; then FAILED_STEP="${first_label}"; return 1; fi
-  if [ "${second_rc}" -ne 0 ]; then FAILED_STEP="${second_label}"; return 1; fi
-  FAILED_STEP=""
-}
-
 parallel_lint() {
   local biome="${GATE_TMP}/lint-biome.log" types="${GATE_TMP}/lint-types.log" biome_pid types_pid failed=0
   local eslint_node_options="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=2560"
@@ -1022,7 +969,7 @@ fi
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
-DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 4))))')"
+DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 3))))')"
 export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
@@ -1050,7 +997,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, measured safe ceiling 4), via the per-file DBTEST plan)"
+note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, stable ceiling 3), via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -1107,12 +1054,12 @@ step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deplo
 # only evidence that an empty target passes and a non-empty one still refuses.
 # Both packages' pretest:db hooks only rebuild subsets of the full build that
 # just passed. Invoke the shared DBTEST runner directly so each file receives a
-# cloned database and private host roots. Keep preflight beside unit tests, then
-# run the API suite as its own wave: consolidating both suites measured below the
-# required 15% improvement and delayed every test behind all database clones.
-parallel_two_steps \
-  "unit tests (all workspaces)" parallel_unit_tests \
-  "database preflight tests" run_database_preflight_tests
+# cloned database and private host roots. Each wave already spends its own
+# bounded process budget. Running them together exceeded the machine budget and
+# turned passing standalone suites into transaction and unit-test timeouts, so
+# keep the proof waves serial and preserve their internal parallelism.
+step "unit tests (all workspaces)" parallel_unit_tests
+step "database preflight tests" run_database_preflight_tests
 step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift
 publish_deferred_build_snapshot

@@ -70,7 +70,7 @@ export const buildFailureEnvelope = (input: {
   terminationReason?: string | null;
   /** The error that ended the phase, when there is one. Read by *type* only —
    *  `CommandTimeoutError` and the transient-network predicate — so the CLI's
-   *  unrelated "preflight timed out after 15 seconds" text can never be
+   *  unrelated "preflight timed out after 30 seconds" text can never be
    *  mistaken for this runner's own command timeout. */
   error?: unknown;
 }): FailureEnvelope => {

@@ -1082,7 +1082,7 @@ test("a local CLI preflight timeout stays a deterministic failure, not a provide
     terminationReason: null,
     finalOutput: null,
     providerError: null,
-    stderr: "\npreflight timed out after 15 seconds",
+    stderr: "\npreflight timed out after 30 seconds",
     stdout: "",
   };
   const classified = adapters.CLAUDE.classifyError(evidence);
