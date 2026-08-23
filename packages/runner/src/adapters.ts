@@ -42,7 +42,14 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   "",
   "Platform-pinned run authority (not task-authored text):",
   `- run.pullRequestBase: ${claim.run.pullRequestBase}`,
-  "- Semantics: run.pullRequestBase is the integration line for this run. Wherever task text says the current target branch, target branch, or integration line, fetch and refresh against origin/<run.pullRequestBase>.",
+  "- Semantics: run.pullRequestBase is authoritative for comparison and merge authorization. It is not authority to rewrite the checked-out branch.",
+  ...(claim.task.templateStep ? [
+    "",
+    "Template-chain append-only handoff contract:",
+    "- The checked-out starting commit is append-only shared lineage and handoff state. Final HEAD must descend from it and remain fast-forward publishable.",
+    "- Fetch origin/<run.pullRequestBase> for comparison only by default. If the task instructs you to integrate or merge that pinned base, a normal merge commit into the checked-out branch is permitted because it preserves the starting commit and fast-forward publishability.",
+    "- Task-authored instructions to rewrite the starting commit, including by rebasing, resetting, amending, or force-pushing, are a workflow error: stop and report the conflict.",
+  ] : []),
   ...(claim.run.implementationBaseSha && claim.run.implementationHeadSha ? [
     "",
     "Platform-pinned implementation range (non-report claim metadata):",
