@@ -21,6 +21,19 @@ const STEP_POSITION = "w-[18px] shrink-0 text-[11.5px] text-[color:var(--faint)]
  *  the same dictionary entry. */
 export const GATE_TITLE_KEY = "chain.gate";
 
+const OWNER_CHIP = "inline-flex items-center gap-[6px] rounded-full border border-border bg-secondary px-[9px] py-[2px] text-[11.5px] leading-[19px] text-secondary-foreground";
+
+export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => {
+  const t = useT();
+  if (step.executionOwner === "human") {
+    return <span data-execution-owner="human" aria-label={t("chain.humanAssignee")} className={OWNER_CHIP}><IconUser />{t("executionOwner.human")}</span>;
+  }
+  if (step.executionOwner === "control-plane" || step.executionOwner === "merge-executor") {
+    return <span data-execution-owner={step.executionOwner} className={OWNER_CHIP}>{t(`executionOwner.${step.executionOwner}`)}</span>;
+  }
+  return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
+};
+
 export const ChainRow = ({ step, here, pending, onStart }: {
   step: ChainStep;
   here: boolean;
@@ -38,11 +51,7 @@ export const ChainRow = ({ step, here, pending, onStart }: {
         {step.currentExecution ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.currentExecution")}</span> : null}
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
       </span>
-      {/* `AgentChip` renders its Unassigned state when it has no label at all,
-          which is exactly the case for an agent step with no agent. */}
-      {step.assigneeType === "HUMAN"
-        ? <span data-assignee-kind="human" aria-label={t("chain.humanAssignee")} className="inline-flex items-center gap-[6px] rounded-full border border-border bg-secondary px-[9px] py-[2px] text-[11.5px] leading-[19px] text-secondary-foreground"><IconUser />{t("chain.human")}</span>
-        : <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />}
+      <ExecutionOwnerChip step={step} />
       {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
       <TaskPill status={step.status} />
       {step.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}

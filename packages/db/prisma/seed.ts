@@ -175,7 +175,7 @@ const main = async (): Promise<void> => {
     "Apply review fixes",
     "Regression verification",
     "Librarian",
-    "Merge readiness",
+    "Merge authorization",
     "Merge execution",
   ] as const;
   for (const step of templateSteps) {
@@ -223,7 +223,7 @@ const main = async (): Promise<void> => {
     "Code review and adjudication (Opus)",
     "Apply review fixes",
     "Regression verification",
-    "Merge readiness",
+    "Merge authorization",
     "Merge execution",
   ] as const;
   for (const step of directTemplateSteps) {

@@ -287,6 +287,7 @@ export type Task = {
   failureReason: string | null;
   status: TaskStatus;
   assigneeType: AssigneeType;
+  executionOwner: ExecutionOwner;
   approvalGate: boolean;
   scheduleKind: "NOW" | "AT" | "CRON";
   // The scheduler's own columns. `runAt === null` on a live CRON definition is
@@ -309,7 +310,12 @@ export type Task = {
   archivedAt: string | null;
   schedulePausedAt: string | null;
   recurringSourceTaskId: string | null;
-  templateStep: { name: string } | null;
+  templateStep: {
+    name: string;
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate: { name: string };
+  } | null;
   /** §SF-1, the task's own latest merge outcome; the run rows carry the same
    *  projection bound to the run that recorded it. */
   mergeOutcome?: MergeOutcome | null;
@@ -405,6 +411,8 @@ export type ChainProgress = {
   position: number | null;
 };
 
+export type ExecutionOwner = "agent" | "human" | "control-plane" | "merge-executor";
+
 export type ChainStep = {
   taskId: string;
   position: number;
@@ -414,6 +422,7 @@ export type ChainStep = {
   status: TaskStatus;
   approvalGate: boolean;
   assigneeType: AssigneeType;
+  executionOwner: ExecutionOwner;
   agent: { id: string; title: string } | null;
   archivedAt: string | null;
   failureReason: string | null;

@@ -40,6 +40,12 @@ test("merge recovery state transitions and operator phases are explicit", () => 
 test("regression verdicts are exact-head, versioned, and fail closed", () => {
   const pass = parseRegressionVerdict(JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "PASS" }));
   assert.equal(pass.status, "ok");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "review-fail", headSha: A, baseHeadSha: B, summary: "MF-2 remains open",
+  })).status, "ok");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "review-fail", headSha: A, baseHeadSha: B, summary: "  ",
+  })).status, "invalid");
   assert.equal(parseRegressionVerdict(JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "FAIL" })).status, "invalid");
   assert.equal(parseRegressionVerdict("MERGE GATE: PASS").status, "invalid");
 });

@@ -513,14 +513,16 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
   } }), 0);
 });
 
-test("a recovery regression conflict or gate failure stops without an auxiliary repair task", async () => {
-  for (const outcome of ["refresh-conflict", "gate-fail"] as const) {
+test("a recovery regression conflict, semantic failure, or gate failure stops without an auxiliary repair task", async () => {
+  for (const outcome of ["refresh-conflict", "review-fail", "gate-fail"] as const) {
     const seeded = await seedStopped("twelve-step-readiness", `tail-stop-${outcome}`);
     await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
     const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
     const body = outcome === "refresh-conflict"
       ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE_2, summary: "conflict" }
-      : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE_2, gateVerdict: "FAIL", summary: "gate failed" };
+      : outcome === "review-fail"
+        ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE_2, summary: "MF-2 remains open" }
+        : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE_2, gateVerdict: "FAIL", summary: "gate failed" };
     await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
       taskId: seeded.gateTask.id, runId: run.id, kind: "regression-verification", body: JSON.stringify(body), commitSha: HEAD,
     }, update: { runId: run.id, body: JSON.stringify(body), commitSha: HEAD } });

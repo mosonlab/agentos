@@ -83,13 +83,19 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
       runner: RunnerPreference.PI,
     });
   }
+  assert.deepEqual(canonical.get("regression-verifier"), {
+    name: "regression-verifier",
+    model: "openai-codex/gpt-5.6-sol:medium",
+    runner: RunnerPreference.PI,
+  });
 });
 
 test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
-  const [planReview, firstReview, finalReview] = await Promise.all([
+  const [planReview, firstReview, finalReview, regressionVerification] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
     roleSource("review-coordinator-opus"),
+    roleSource("regression-verifier"),
   ]);
 
   assert.match(planReview, /never review implementation\s+diffs/u);
@@ -122,6 +128,15 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(finalReview, /entire fix diff as one\s+unit/u);
   assert.match(finalReview, /exact fixed head/u);
   assert.match(finalReview, /provider id in the platform output/u);
+
+  assert.equal(frontmatterValue(regressionVerification, "model"), "openai-codex/gpt-5.6-sol:medium");
+  assert.equal(frontmatterValue(regressionVerification, "runner"), "pi");
+  assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
+  assert.match(regressionVerification, /complete persisted review package/u);
+  assert.match(regressionVerification, /entire fix diff as one unit/u);
+  assert.match(regressionVerification, /do not run the full\s+gate/u);
+  assert.match(regressionVerification, /one exact-head\s+mechanical gate/u);
+  assert.doesNotMatch(regressionVerification, /blind reports mechanically/u);
 });
 
 test("the executioner launches ordinary and risk subprocesses with explicit service tiers", async () => {
@@ -147,7 +162,7 @@ test("the canonical twelve-step template sources split code review and preserve 
       { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 9, agentName: "review-coordinator-sol", outputKind: "regression-verification" },
+      { stepIndex: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
       { stepIndex: 10, agentName: "librarian", outputKind: "documentation" },
       { stepIndex: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
@@ -158,6 +173,7 @@ test("the canonical twelve-step template sources split code review and preserve 
   assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 9)!.prompt;
   assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
+  assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
@@ -192,7 +208,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
       { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 5, agentName: "review-coordinator-sol", outputKind: "regression-verification" },
+      { stepIndex: 5, agentName: "regression-verifier", outputKind: "regression-verification" },
       { stepIndex: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -204,6 +220,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
   assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
+  assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
   assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
   assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);

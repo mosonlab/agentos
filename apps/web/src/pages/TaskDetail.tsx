@@ -306,6 +306,9 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
   const pullRequestUrl = newest?.pullRequestUrl ?? null;
+  const executionOwner = task.executionOwner === "agent"
+    ? task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("executionOwner.unassigned")
+    : t(`executionOwner.${task.executionOwner}`);
 
   return (
     <Page className="text-foreground">
@@ -357,8 +360,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         <Card title={t("taskDetail.details.title")}>
           <KeyValue items={[
-            { k: t("taskDetail.details.agent"), v: task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("taskDetail.details.noAgent") },
-            { k: t("taskDetail.details.assignee"), v: t(task.assigneeType === "AGENT" ? "newTask.option.agent" : "newTask.option.human") },
+            { k: t("taskDetail.details.executionOwner"), v: executionOwner },
             { k: t("taskDetail.details.repo"), v: task.repo ? `${task.repo.name} · ${task.repo.remoteUrl}` : "—" },
             { k: t("taskDetail.details.targetBranch"), v: task.targetBranch ?? task.repo?.defaultBranch ?? "—" },
             {

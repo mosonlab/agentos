@@ -23,7 +23,7 @@ const head = (active: TasksTab): string => renderToStaticMarkup(
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "t1", projectId: "p1", assigneeAgentId: null, repoId: null, templateId: null, templateStepId: null,
   followUpTaskId: null, name: "Ship the thing", description: "d", workingDirectory: null, targetBranch: null,
-  failureReason: null, status: "DONE", assigneeType: "AGENT", approvalGate: false, scheduleKind: "NOW",
+  failureReason: null, status: "DONE", assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW",
   runAt: null, cron: null, timezone: null,
   maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",

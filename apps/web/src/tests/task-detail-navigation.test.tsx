@@ -14,7 +14,7 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   templateId: null, templateStepId: null, followUpTaskId: null, name,
   description: prompts[promptIndex]!.prompt,
   workingDirectory: null, targetBranch: "main", failureReason: null, status: "TODO",
-  assigneeType: "AGENT", approvalGate: false, scheduleKind: "NOW", runAt: null,
+  assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW", runAt: null,
   cron: null, timezone: null, maxDurationMin: 120, stallTimeoutMin: 10,
   maxSessionsPerTask: 3, createdAt: now, updatedAt: now, assigneeAgent: null,
   repo: null, runs: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
@@ -42,7 +42,7 @@ const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, steps: [] }
 const chainFor = (taskId: string): Chain => ({
   chainId: "chain-c", total: 1, done: 0, steps: [{
     taskId, position: 1, chainIndex: 0, name: "Chain C", stepName: "Chain C",
-    status: "TODO", approvalGate: false, assigneeType: "AGENT",
+    status: "TODO", approvalGate: false, assigneeType: "AGENT", executionOwner: "agent",
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
     failureReason: null, latestRun: null, startable: true, startAction: "start",
     currentExecution: false,

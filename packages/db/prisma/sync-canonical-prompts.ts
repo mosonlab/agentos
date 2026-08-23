@@ -1,11 +1,19 @@
-import { PrismaClient, RunnerPreference } from "@prisma/client";
+import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
 
-const ASSIGNEE_TRANSITIONS = new Map([
-  ["compound-engineer-workflow:9", { from: "review-coordinator-opus", to: "review-coordinator-sol" }],
-  ["direct-engineer-workflow:5", { from: "review-coordinator-opus", to: "review-coordinator-sol" }],
+const REGRESSION_AGENT_NAME = "regression-verifier";
+const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
+type AssigneeTransition = { from: readonly string[]; to: string };
+const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
+  ["compound-engineer-workflow:9", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["direct-engineer-workflow:5", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+]);
+
+const STEP_NAME_TRANSITIONS = new Map([
+  ["compound-engineer-workflow:11", { from: "Merge readiness", to: "Merge authorization" }],
+  ["direct-engineer-workflow:6", { from: "Merge readiness", to: "Merge authorization" }],
 ]);
 
 const AGENT_TRANSITIONS = new Map([
@@ -35,9 +43,55 @@ const main = async (): Promise<void> => {
         select: { id: true },
       });
       if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
+      let createdAgents = 0;
+      let createdAgentRepoGrants = 0;
+      const regressionRole = rolesByName.get(REGRESSION_AGENT_NAME);
+      if (!regressionRole) throw new Error(`Canonical role ${REGRESSION_AGENT_NAME} was not found`);
+      const existingRegressionAgent = await tx.agent.findUnique({
+        where: { projectId_name: { projectId: canonicalProject.id, name: REGRESSION_AGENT_NAME } },
+        select: { id: true, archivedAt: true },
+      });
+      if (existingRegressionAgent?.archivedAt) {
+        throw new Error(`Canonical Agent ${REGRESSION_AGENT_NAME} is archived; sync will not resurrect it`);
+      }
+      if (!existingRegressionAgent) {
+        const source = await tx.agent.findUnique({
+          where: { projectId_name: { projectId: canonicalProject.id, name: REGRESSION_AGENT_SOURCE } },
+          select: {
+            environmentId: true,
+            disabledTools: true,
+            archivedAt: true,
+            repoAccess: { select: { projectId: true, repoId: true, mountPath: true, permissions: true } },
+          },
+        });
+        if (!source || source.archivedAt) {
+          throw new Error(`Cannot create ${REGRESSION_AGENT_NAME}: active source Agent ${REGRESSION_AGENT_SOURCE} was not found`);
+        }
+        const created = await tx.agent.create({ data: {
+          projectId: canonicalProject.id,
+          environmentId: source.environmentId,
+          name: regressionRole.name,
+          title: regressionRole.title,
+          model: regressionRole.model,
+          runnerPreference: regressionRole.runnerPreference,
+          inboxAccess: regressionRole.inboxAccess,
+          disabledTools: source.disabledTools,
+          foundationalPrompt: sources.foundationalPrompt,
+          rolePrompt: regressionRole.rolePrompt,
+        } });
+        if (source.repoAccess.length > 0) {
+          createdAgentRepoGrants = (await tx.agentRepoAccess.createMany({ data: source.repoAccess.map((grant) => ({
+            ...grant,
+            agentId: created.id,
+          })) })).count;
+        }
+        createdAgents = 1;
+      }
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
+      let renamedSteps = 0;
       let templateCount = 0;
+      const regressionSteps: Array<{ id: string; projectId: string }> = [];
       for (const [templateName, steps] of templateSources) {
         const templates = await tx.taskTemplate.findMany({
           where: { name: templateName },
@@ -58,6 +112,7 @@ const main = async (): Promise<void> => {
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex },
             select: {
               id: true,
+              name: true,
               taskTemplateId: true,
               assigneeAgent: { select: { name: true } },
               assigneeType: true,
@@ -77,7 +132,7 @@ const main = async (): Promise<void> => {
             const transition = ASSIGNEE_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             const adoptsCanonicalAssignee = differences.length === 1
               && differences[0] === "agent"
-              && transition?.from === (persisted.assigneeAgent?.name ?? null)
+              && transition?.from.includes(persisted.assigneeAgent?.name ?? "") === true
               && transition.to === step.agentName;
             if (differences.length > 0 && !adoptsCanonicalAssignee) {
               throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
@@ -99,6 +154,19 @@ const main = async (): Promise<void> => {
               });
               adoptedAssignees += 1;
             }
+            const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
+            if (nameTransition?.from === persisted.name) {
+              await tx.taskTemplateStep.update({
+                where: { id: persisted.id },
+                data: { name: nameTransition.to },
+              });
+              renamedSteps += 1;
+            }
+            if (step.agentName === REGRESSION_AGENT_NAME) {
+              const projectId = templates.find(({ id }) => id === persisted.taskTemplateId)?.projectId;
+              if (!projectId) throw new Error(`Template project was not found for regression step ${persisted.id}`);
+              regressionSteps.push({ id: persisted.id, projectId });
+            }
           }
           updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex, prompt: { not: step.prompt } },
@@ -106,6 +174,73 @@ const main = async (): Promise<void> => {
           })).count;
         }
         updatedSteps[templateName] = updated;
+      }
+
+      let migratedTasks = 0;
+      const preservedTaskAssignments = { archived: 0, nonTodo: 0, started: 0, output: 0 };
+      for (const step of regressionSteps) {
+        const target = await tx.agent.findFirst({
+          where: { projectId: step.projectId, name: REGRESSION_AGENT_NAME, archivedAt: null },
+          select: { id: true },
+        });
+        if (!target) throw new Error(`Regression step ${step.id} has no active ${REGRESSION_AGENT_NAME} in its project`);
+        const tasks = await tx.task.findMany({
+          where: {
+            templateStepId: step.id,
+            assigneeAgent: { name: { in: ["review-coordinator-opus", "review-coordinator-sol"] } },
+          },
+          select: {
+            id: true,
+            assigneeAgentId: true,
+            status: true,
+            archivedAt: true,
+            _count: { select: { runs: true, sessions: true } },
+            stepOutput: { select: { id: true } },
+          },
+        });
+        for (const task of tasks) {
+          if (task.archivedAt) {
+            preservedTaskAssignments.archived += 1;
+            continue;
+          }
+          if (task.status !== TaskStatus.TODO) {
+            preservedTaskAssignments.nonTodo += 1;
+            continue;
+          }
+          if (task._count.runs > 0 || task._count.sessions > 0) {
+            preservedTaskAssignments.started += 1;
+            continue;
+          }
+          if (task.stepOutput) {
+            preservedTaskAssignments.output += 1;
+            continue;
+          }
+          const adopted = await tx.task.updateMany({
+            where: {
+              id: task.id,
+              assigneeAgentId: task.assigneeAgentId,
+              status: TaskStatus.TODO,
+              archivedAt: null,
+              runs: { none: {} },
+              sessions: { none: {} },
+              stepOutput: { is: null },
+            },
+            data: { assigneeAgentId: target.id },
+          });
+          if (adopted.count !== 1) throw new Error(`Regression task ${task.id} changed while canonical routing was being adopted`);
+          await tx.taskActivity.create({ data: {
+            taskId: task.id,
+            actorType: "control-plane",
+            body: `Canonical routing reassigned this unstarted regression step to ${REGRESSION_AGENT_NAME}`,
+            metadata: {
+              kind: "canonicalRouting.regressionVerifier",
+              schemaVersion: 1,
+              fromAgentId: task.assigneeAgentId,
+              toAgentId: target.id,
+            },
+          } });
+          migratedTasks += 1;
+        }
       }
 
       const presentAgents = await tx.agent.findMany({
@@ -167,9 +302,21 @@ const main = async (): Promise<void> => {
           data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
         })).count;
       }
-      return { templates: templateCount, adoptedAssignees, adoptedAgentDefaults, updatedSteps, updatedRoles };
+      return {
+        templates: templateCount,
+        createdAgents,
+        createdAgentRepoGrants,
+        adoptedAssignees,
+        renamedSteps,
+        migratedTasks,
+        preservedTaskAssignments,
+        adoptedAgentDefaults,
+        updatedSteps,
+        updatedRoles,
+      };
     });
-    const updated = result.adoptedAssignees + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
+    const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees
+      + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
       + Object.values(result.updatedRoles).reduce((sum, count) => sum + count, 0);
