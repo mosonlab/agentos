@@ -134,7 +134,7 @@ test("executioner snapshots both configured Codex subprocess profiles while othe
       outputKind: "implementation",
       taskTemplate: { name: "compound-engineer-workflow" },
     }),
-    /must remain assigned to implementation-plan-executioner/u,
+    /must remain assigned to the active in-project Agent implementation-plan-executioner/u,
   );
 });
 
