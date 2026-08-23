@@ -407,7 +407,7 @@ const main = async (): Promise<void> => {
         updatedSteps,
         updatedRoles,
       };
-    });
+    }, { timeout: 30_000 });
     const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
       + result.renamedSteps + result.migratedTasks + result.migratedTaskPrompts + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
