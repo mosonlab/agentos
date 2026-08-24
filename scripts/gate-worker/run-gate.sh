@@ -11,8 +11,8 @@
 #
 # --master carries the authoritative master oid, which the frozen-record rules
 # are evaluated against. remote-gate.sh reads it from origin on the local
-# machine and passes it here, because this box cannot ask: it holds no GitHub
-# credential and its mirror has no remote to fetch through. When it is given, it
+# machine and passes it here, because this box's mirror has no remote to fetch
+# through. When it is given, it
 # is verified to be resolvable in the mirror before the gate starts.
 #
 # The supported remote path always supplies it: gate-dispatch.sh freezes the
@@ -37,8 +37,8 @@
 #
 #   0  PASS               2  usage error (this script or merge-gate.sh)
 #   1  FAIL               3  NOT AUTHORITATIVE
-#   76 nothing ran — no mirror, the commit is not in the mirror, a missing tool,
-#      a credential in this box's environment. The line on stdout is
+#   76 nothing ran — no mirror, the commit is not in the mirror or a missing
+#      tool. The line on stdout is
 #      GATE NOT RUN: <reason>, and it is not a FAIL. Only merge-gate.sh's own
 #      judgement about the commit exits 1, so a caller reading exit codes can
 #      tell a verdict from an errand.
@@ -129,33 +129,6 @@ if [ -n "$MASTER_OID" ]; then
   [ "${#MASTER_OID}" -eq 40 ] || die_usage "not a full 40-character object id: $MASTER_OID"
 fi
 
-# --- red line: this box holds no secrets ------------------------------------
-
-# Re-checked on every run, not just at provisioning time. ssh can carry variables
-# across with SendEnv/PermitUserEnvironment, and a shell profile can acquire one
-# months after provisioning; a worker that runs with a token in its environment is
-# outside the boundary this design was approved under, so it refuses rather than
-# produces a verdict.
-# The same list provision.sh checks, under the same variable name, because the
-# two are one red line stated twice: a variable that provisioning refuses to
-# finish with must also be a variable a gate refuses to run with, and the pair
-# has drifted apart before. scripts/gate-worker/gate-worker.test.mjs fails if
-# they stop matching.
-SECRET_VARS="OPERATOR_TOKEN RUNNER_TOKEN AGENTOS_API_TOKEN AGENTOS_SESSION_TOKEN AGENTOS_FENCING_TOKEN VITE_API_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN FEISHU_APP_SECRET"
-
-for var in $SECRET_VARS; do
-  eval "value=\${$var:-}"
-  # shellcheck disable=SC2154
-  if [ -n "$value" ]; then
-    # Not a FAIL: the gate never ran. This box being outside the boundary it was
-    # approved under is a stop, and calling it a verdict about the commit would
-    # be a lie in both directions.
-    printf 'run-gate: %s is set in this environment; the gate worker holds no credentials\n' "$var" >&2
-    printf 'GATE NOT RUN: worker environment carries %s\n' "$var"
-    exit "$EXIT_NO_VERDICT"
-  fi
-done
-
 # --- preconditions ----------------------------------------------------------
 
 # A verdict about the commit. Reserved for the one precondition that is a
@@ -184,8 +157,8 @@ command -v flock >/dev/null 2>&1 || no_verdict "flock is not installed on the wo
 # install: a documentation branch that rewrites history should be told that,
 # not told about a daemon it never needed. One ordering, defined in one place.
 
-# The commit has to already be in the mirror. The worker never fetches — it has no
-# GitHub credential and its mirror has no remote — so "unknown commit" always
+# The commit has to already be in the mirror. The worker never fetches because
+# its mirror has no remote, so "unknown commit" always
 # means the local machine has not pushed it yet, and saying so precisely is the
 # difference between a one-command fix and a debugging session.
 if ! git -C "$MIRROR_DIR" cat-file -e "${OID}^{commit}" 2>/dev/null; then

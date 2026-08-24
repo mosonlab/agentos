@@ -17,9 +17,9 @@
 # lives under its own directory, so a second project can be gated on the same
 # worker without either seeing the other.
 #
-# This is the only path by which code reaches the worker. The worker holds no
-# GitHub credential and its mirror has no remote configured, so no repository
-# content arrives there except by this push, and the mirror cannot fetch. That
+# This is the only path by which code reaches the worker's gate mirror. The
+# mirror has no remote configured, so no repository content arrives there
+# except by this push, and the mirror cannot fetch. That
 # is a statement about how code gets in, not about what the worker's network can
 # reach: the gate executes the candidate commit's own code, and nothing here
 # constrains what that code connects to. docs/runbooks/gate-worker.md states the
@@ -41,8 +41,8 @@
 # is therefore a complete transport source as long as it contains the requested
 # candidate and the caller refreshed the requested baseline object.
 #
-# Sends no credential of any kind. The push is git-over-ssh; the ssh key stays on
-# this machine and is used for authentication, never copied.
+# The transport copies no credential. The push is git-over-ssh; the ssh key stays
+# on this machine and is used for authentication, never copied.
 #
 # <server>, --gate-home and the repository name all become part of a command
 # string a remote login shell parses. Each is validated against an allowlist in
@@ -139,16 +139,19 @@ REPO_HOME="${GATE_HOME}/${REPO_NAME}"
 # Expanded as ${arr[@]+"${arr[@]}"} at every use site: bash 3.2, which is what
 # /bin/bash still is on macOS, treats an empty array as unset under `set -u`
 # and aborts. The + form expands to nothing when the array is empty.
-SSH_OPTS=()
-SCP_OPTS=()
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+SCP_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 if [ -n "$SSH_PORT" ]; then
   SSH_OPTS+=(-p "$SSH_PORT")
   SCP_OPTS+=(-P "$SSH_PORT")
-  # git has no --port: the scp-style address form used below cannot carry one, and
-  # the ssh:// form that can does not expand ~ in the path. Passing the port
-  # through GIT_SSH_COMMAND keeps the address form that works and adds the port.
-  export GIT_SSH_COMMAND="ssh -p ${SSH_PORT}"
 fi
+# git has no --port: the scp-style address form used below cannot carry one, and
+# the ssh:// form that can does not expand ~ in the path. Passing the port and
+# fixed liveness options through GIT_SSH_COMMAND keeps the address form that
+# works.
+GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+[ -n "$SSH_PORT" ] && GIT_SSH_COMMAND="${GIT_SSH_COMMAND} -p ${SSH_PORT}"
+export GIT_SSH_COMMAND
 
 # A path relative to the remote $HOME, expanded by the remote login shell rather
 # than written as ~ inside a URL: git's ssh:// URLs do not expand a tilde, and
@@ -171,7 +174,9 @@ printf '   baseline:   %s\n' "$BASELINE_OID"
 # path is refused rather than pushed into. `git init` on an existing bare
 # repository is a no-op, so this is convergent, but a non-bare directory there
 # is somebody's working state and not this script's to overwrite.
+MIRROR_EXISTS=0
 if ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" "test -e ${REPO_HOME}/mirror.git" 2>/dev/null; then
+  MIRROR_EXISTS=1
   ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
       "test \"\$(git -C ${REPO_HOME}/mirror.git rev-parse --is-bare-repository 2>/dev/null)\" = true" 2>/dev/null \
     || die "${REPO_HOME}/mirror.git on ${SERVER} exists but is not a bare repository; refusing to push into it"
@@ -206,9 +211,14 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '\n== Dry run: exact cache refs that would be pushed\n'
-  git -C "$REPO_ROOT" push --atomic --dry-run "$REMOTE_MIRROR" \
-    "${CANDIDATE_OID}:${CANDIDATE_REF}" \
-    "${BASELINE_OID}:${BASELINE_REF}" || die "dry-run push failed"
+  if [ "$MIRROR_EXISTS" -eq 1 ]; then
+    git -C "$REPO_ROOT" push --atomic --dry-run "$REMOTE_MIRROR" \
+      "${CANDIDATE_OID}:${CANDIDATE_REF}" \
+      "${BASELINE_OID}:${BASELINE_REF}" || die "dry-run push failed"
+  else
+    printf '   would push %s to %s\n' "$CANDIDATE_REF" "$REMOTE_MIRROR"
+    printf '   would push %s to %s\n' "$BASELINE_REF" "$REMOTE_MIRROR"
+  fi
   printf '\n   would also install scripts/gate-worker/run-gate.sh at %s (copy to a\n   temporary name in the same directory, then rename into place)\n' "$REMOTE_HARNESS"
   printf '\nMIRROR PUSH: DRY RUN OK\n'
   exit 0

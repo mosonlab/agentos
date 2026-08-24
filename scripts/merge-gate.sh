@@ -992,7 +992,7 @@ fi
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
-DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 3))))')"
+DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 4))))')"
 export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
@@ -1020,7 +1020,7 @@ for _ in $(seq 1 90); do
 done
 [ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, stable ceiling 3), via the per-file DBTEST plan)"
+note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, stable ceiling 4), via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever

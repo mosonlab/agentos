@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Gate a commit on the offshore worker and bring the verdict home. Runs ON THE
+# Gate a commit on one remote worker and bring the verdict home. Runs ON THE
 # LOCAL MACHINE (issue #132):
 #
 #   scripts/gate-worker/remote-gate.sh <server>                  # gate local HEAD
@@ -14,9 +14,9 @@
 # default branch, so a verdict has to name the baseline it was formed against.
 # That oid is resolved here, on the machine that can actually ask — `git
 # ls-remote --symref origin HEAD`, which names origin's default branch and its
-# head in one answer, or --master to state it — and passed to the worker, which
-# holds no credential and could otherwise only offer a mirror ref of unknown
-# age. If this repository cannot resolve the oid origin just named, neither can
+# head in one answer, or --master to state it — and passed to the worker, whose
+# mirror does not fetch and could otherwise only offer a ref of unknown age. If
+# this repository cannot resolve the oid origin just named, neither can
 # the mirror, and the fix is an exact candidate/baseline mirror-push.
 #
 # The worker hosts one directory per repository under ~/gate/<repo>, keyed by
@@ -49,17 +49,12 @@
 #
 #   It is evidence, not authority. The merge still happens on the local machine
 #   and still binds an exact head. A worker that has been tampered with can forge
-#   a PASS; it cannot forge a merge, and it holds no GitHub credential to steal
-#   or to push with. What it does have is a working network: the worker runs the
-#   gate the candidate commit ships, so the candidate's own code executes there,
-#   and nothing in this repository makes that box network-isolated. The gate's
-#   own flow needs no GitHub access — the mirror arrives by ssh and never fetches
-#   — but the repository does not guarantee the route is unreachable, and does
-#   not ask an operator to block it (Leo's ruling, 2026-08-20): denying GitHub
-#   alone would leave every other host open, so the containment that carries the
-#   weight is no credential, no remote, no merge authority. Release-grade merges
-#   are spot-checked by re-running the gate locally, which is the hedge against a
-#   forged PASS. docs/runbooks/gate-worker.md states the boundary.
+#   a PASS but cannot perform the caller's merge. The worker is trusted compute:
+#   candidate code can reach its network and anything available to its account,
+#   including credentials if the operator placed them there. The gate mirror has
+#   no remote and receives exact objects from the caller; this repository claims
+#   neither credential nor network isolation. Release-grade merges are
+#   spot-checked locally. docs/runbooks/gate-worker.md states the boundary.
 #
 # The commit must already be in the worker's mirror. The worker never fetches, so
 # push first: scripts/gate-worker/mirror-push.sh <server> --candidate <oid>
@@ -216,9 +211,9 @@ fi
 # Expanded as ${arr[@]+"${arr[@]}"} at every use site: bash 3.2, which is what
 # /bin/bash still is on macOS, treats an empty array as unset under `set -u`
 # and aborts. The + form expands to nothing when the array is empty.
-SSH_OPTS=()
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 [ -n "$SSH_PORT" ] && SSH_OPTS+=(-p "$SSH_PORT")
-SCP_OPTS=()
+SCP_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 [ -n "$SSH_PORT" ] && SCP_OPTS+=(-P "$SSH_PORT")
 
 printf 'remote-gate: %s on %s%s\n' "$OID" "$SERVER" "${SSH_PORT:+ (port ${SSH_PORT})}" >&2
