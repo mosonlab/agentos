@@ -1180,6 +1180,14 @@ export const activateRecoveryIntegratorSuccessor = async (
     throw new Error("Recovery activation readiness output does not select the fresh authorization");
   }
 
+  // REVIEW normally parks a successor for an operator. This path is the one
+  // validated automatic exit from an integrator stop, so make the task
+  // runnable only after every recovery/authorization fence above succeeds.
+  // The enclosing transaction rolls this change back if enqueueing fails.
+  await tx.task.update({
+    where: { id: input.integratorTaskId },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  });
   const activated = await activateChainSuccessorInternal(
     tx,
     readiness,

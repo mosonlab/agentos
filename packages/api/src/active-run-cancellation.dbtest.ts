@@ -157,8 +157,8 @@ test("mechanical merge Runs refuse cancellation before recording an intent", asy
   } });
   const step = await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id,
-    stepIndex: 7,
-    layer: 7,
+    stepIndex: 8,
+    layer: 8,
     name: "Merge execution",
     prompt: "merge",
     outputKind: "merge-result",
