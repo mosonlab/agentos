@@ -904,6 +904,7 @@ const activateChainSuccessorInternal = async (
   options: ChainSuccessorOptions,
   now: Date,
   stopBypass: IntegratorStopBypass | null,
+  chainRowsLocked = false,
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
   if (!task.chainId || task.chainIndex === null) {
     if (task.chainId) {
@@ -916,7 +917,9 @@ const activateChainSuccessorInternal = async (
     return { nextTaskId: null, gated: false };
   }
 
-  await lockChainRows(tx, { projectId: task.projectId, chainId: task.chainId });
+  if (!chainRowsLocked) {
+    await lockChainRows(tx, { projectId: task.projectId, chainId: task.chainId });
+  }
   const chainRows: ChainSuccessor[] = await tx.task.findMany({
     where: { projectId: task.projectId, chainId: task.chainId },
     include: {
@@ -960,7 +963,8 @@ const activateChainSuccessorInternal = async (
   if (nextRows.some((row) => row.approvalGate) && nextRows.length > 1) {
     throw new Error(`Approval gate is not allowed in multi-node chain layer ${nextLayer}`);
   }
-  if (nextRows.some((row) => row.approvalGate)
+  if (nextRows.some((row) => row.approvalGate
+      && (row.assigneeType !== AssigneeType.AGENT || !row.assigneeAgentId || !row.repoId))
     && (currentRows.length !== 1
       || currentRows[0]!.assigneeType !== AssigneeType.AGENT
       || !currentRows[0]!.assigneeAgentId
@@ -1109,6 +1113,17 @@ export const activateRecoveryIntegratorSuccessor = async (
   },
   now = new Date(),
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+  const identity = await tx.task.findUnique({
+    where: { id: input.readinessTaskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!identity?.chainId) {
+    throw new Error("Recovery activation requires a chained merge-readiness step");
+  }
+  // Recovery follows the same mutation protocol as every other chain writer:
+  // resolve identity without a row lock, acquire the full chain mutex, then
+  // re-read every authority fact before changing the integrator task.
+  await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
   const [readiness, stopped, recovery, authorization, output] = await Promise.all([
     tx.task.findUnique({
       where: { id: input.readinessTaskId },
@@ -1194,6 +1209,7 @@ export const activateRecoveryIntegratorSuccessor = async (
     {},
     now,
     { integratorTaskId: input.integratorTaskId, sourceStopId: input.sourceStopId },
+    true,
   );
   if (activated.nextTaskId !== input.integratorTaskId) {
     throw new Error("Recovery activation did not resolve the expected merge-integrator successor");

@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -24,6 +24,15 @@ const UNIQUE_PREDECESSOR_FINDING = {
   title: "Unique predecessor defect",
   evidence: "Only the predecessor review observed this defect.",
   requiredFix: "Close the unique defect.",
+} as const;
+const UNIQUE_BLIND_FINDING = {
+  id: "BLIND-UNIQUE-1",
+  severity: "P2",
+  file: "src/blind.ts",
+  line: 23,
+  title: "Unique blind observation",
+  evidence: "Only the blind reviewer observed this non-blocking issue.",
+  requiredFix: "Record the observation for later cleanup.",
 } as const;
 
 let db: PrismaClient;
@@ -44,7 +53,7 @@ after(async () => {
   else process.env.OPERATOR_TOKEN = priorOperatorToken;
 });
 
-const seedCanonicalTemplate = async () => {
+const seedCanonicalTemplate = async (templateName: typeof DIRECT_TEMPLATE_NAME | typeof INTEGRATOR_TEMPLATE_NAME = INTEGRATOR_TEMPLATE_NAME) => {
   const { stdout, stderr } = await execFileAsync(
     process.execPath,
     ["--import", "tsx", "prisma/seed.ts"],
@@ -54,7 +63,7 @@ const seedCanonicalTemplate = async () => {
   assert.match(stdout, /Seeded .* agents\//u);
 
   const template = await db.taskTemplate.findFirstOrThrow({
-    where: { name: INTEGRATOR_TEMPLATE_NAME },
+    where: { name: templateName },
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
   });
   const repo = await db.repo.create({ data: {
@@ -143,7 +152,7 @@ const reviewReport = (kind: "sol-findings" | "blind-findings", headSha: string, 
   headSha,
   reviewedBase: baseSha,
   reviewedHead: headSha,
-  findings: kind === "sol-findings" ? [UNIQUE_PREDECESSOR_FINDING] : [],
+  findings: kind === "sol-findings" ? [UNIQUE_PREDECESSOR_FINDING] : [UNIQUE_BLIND_FINDING],
   ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
 });
 
@@ -217,6 +226,18 @@ test("blind session cannot read Sol evidence before or after its immutable repor
   });
   assert.equal(rewrite.status, 409);
   assert.match(await rewrite.text(), /immutable/u);
+
+  const operatorRewrite = await createApp(db).request(`/tasks/${blind.chain.tasks.find((task) => task.chainIndex === 7)!.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: "blind-findings",
+      body: reviewReport("blind-findings", claimed.run.targetBranch, "c".repeat(40)),
+      commitSha: claimed.run.targetBranch,
+    }),
+  });
+  assert.equal(operatorRewrite.status, 409);
+  assert.match(await operatorRewrite.text(), /immutable/u);
 
   const after = await createApp(db).request(activityPath, {
     headers: { Authorization: `Bearer ${claimed.sessionToken}` },
@@ -293,4 +314,84 @@ test("adjudication claim succeeds only after both immutable reports match the pi
   assert.equal(claimBody.run.implementationHeadSha, headSha);
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "sol-findings"));
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "blind-findings"));
+
+  const solTask = adjudication.chain.tasks.find((task) => task.chainIndex === 6)!;
+  const originalSol = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } });
+  const operatorRewrite = await createApp(db).request(`/tasks/${solTask.id}/output`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "sol-findings", body: reviewReport("sol-findings", "d".repeat(40)), commitSha: "d".repeat(40) }),
+  });
+  assert.equal(operatorRewrite.status, 409);
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } })).body, originalSol.body);
+});
+
+test("Direct and Full adjudication persistence requires exact union dispositions and must-fix ids", async () => {
+  for (const shape of [
+    { name: DIRECT_TEMPLATE_NAME, adjudication: 4, sol: 2, blind: 3 },
+    { name: INTEGRATOR_TEMPLATE_NAME, adjudication: 8, sol: 6, blind: 7 },
+  ] as const) {
+    await resetTestDb(db);
+    const { template, repo } = await seedCanonicalTemplate(shape.name);
+    const adjudication = await queueCanonicalStep(template, repo.id, shape.adjudication);
+    const headSha = adjudication.run.targetBranch!;
+    await prepareReviewReport(adjudication.chain, shape.sol, "sol-findings", headSha);
+    await prepareReviewReport(adjudication.chain, shape.blind, "blind-findings", headSha);
+    const claimed = await claim();
+    assert.equal(claimed.run.id, adjudication.run.id);
+
+    const write = (artifact: Record<string, unknown>) => createApp(db).request(`/session/runs/${adjudication.run.id}/output`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fencingToken: claimed.fencingToken,
+        kind: "must-fix",
+        body: JSON.stringify(artifact),
+        commitSha: headSha,
+      }),
+    });
+    const base = {
+      schemaVersion: 1,
+      headSha,
+      reviewedBase: "b".repeat(40),
+      reviewedHead: headSha,
+      mustFixIds: [UNIQUE_PREDECESSOR_FINDING.id],
+    };
+    let response = await write({ ...base, dispositions: [] });
+    assert.equal(response.status, 409, `${shape.name}: omitted`);
+    assert.match(await response.text(), /missing:/u);
+
+    response = await write({ ...base, dispositions: [
+      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "MERGED", reason: "duplicate" },
+      { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
+    ] });
+    assert.equal(response.status, 409, `${shape.name}: duplicate`);
+    assert.match(await response.text(), /duplicate ids/u);
+
+    response = await write({ ...base, dispositions: [
+      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+      { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
+      { id: "UNKNOWN-1", disposition: "REJECTED", reason: "not sourced" },
+    ] });
+    assert.equal(response.status, 409, `${shape.name}: unknown`);
+    assert.match(await response.text(), /unknown: UNKNOWN-1/u);
+
+    response = await write({
+      ...base,
+      reviewedBase: "c".repeat(40),
+      dispositions: [
+        { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+        { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
+      ],
+    });
+    assert.equal(response.status, 409, `${shape.name}: stale range`);
+    assert.match(await response.text(), /range does not match/u);
+
+    response = await write({ ...base, dispositions: [
+      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+      { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
+    ] });
+    assert.equal(response.status, 200, `${shape.name}: exact coverage ${await response.text()}`);
+  }
 });

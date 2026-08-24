@@ -103,6 +103,17 @@ test("parallel nodes share one non-null base and never open a pull request", asy
     (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace("opensPullRequest: false\n", "opensPullRequest: true\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /cannot contain a step with opensPullRequest/u),
   );
+
+  for (const [templateName, filename] of [
+    [DIRECT_TEMPLATE_NAME, "02-code-review-sol.md"],
+    [INTEGRATOR_TEMPLATE_NAME, "06-code-review-sol.md"],
+  ] as const) {
+    await withTemplateCopy(
+      templateName,
+      (root) => updateFrontmatter(root, templateName, filename, (source) => source.replace("approvalGate: false\n", "approvalGate: true\n")),
+      (root) => assert.rejects(loadTemplateStepSources(templateName, root), /multi-node layer .* cannot contain an approval gate/u),
+    );
+  }
 });
 
 test("layer is a structural field in canonical prompt drift comparison", async () => {

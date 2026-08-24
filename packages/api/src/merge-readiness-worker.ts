@@ -22,6 +22,8 @@ import {
   defenseTriggers,
   enqueueTaskRun,
   isMergeReadinessStep,
+  lockChainRows,
+  lockTaskRow,
   parseRegressionVerdict,
   resolveChainTarget,
   resolutionTestTriggers,
@@ -58,6 +60,22 @@ type RecoveryContext = {
   regressionTaskId: string;
   integratorTaskId: string;
   recoveryRunId: string;
+};
+
+const lockTaskMutationRows = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+): Promise<void> => {
+  const identity = await tx.task.findUnique({
+    where: { id: taskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!identity) throw new Error(`Task ${taskId} no longer exists`);
+  if (identity.chainId) {
+    await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+  } else {
+    await lockTaskRow(tx, taskId);
+  }
 };
 
 const recoveryContext = (row: MergeRecoveryAttempt | null): RecoveryContext | null => {
@@ -127,6 +145,7 @@ const stopReadiness = async (
     ? `merge-base-drift-recovery-tail-stop:${input.recovery.sourceStopId}:readiness`
     : `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
   await db.$transaction(async (tx) => {
+    await lockTaskMutationRows(tx, input.readinessTaskId);
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
     if (input.recovery) {
@@ -199,6 +218,7 @@ const createReviewObligation = async (
     recovery: RecoveryContext | null;
   },
 ): Promise<{ ok: true } | { ok: false; reason: string }> => db.$transaction(async (tx) => {
+  await lockTaskMutationRows(tx, input.readinessTask.id);
   if (!input.readinessTask.repoId) return { ok: false as const, reason: "readiness task has no repository" };
   const agent = await tx.agent.findFirst({ where: { projectId: input.readinessTask.projectId, name: "review-coordinator", archivedAt: null } });
   if (!agent) return { ok: false as const, reason: "review-coordinator is absent or archived" };
@@ -282,6 +302,7 @@ const requeueRegression = async (
   },
 ): Promise<void> => {
   await db.$transaction(async (tx) => {
+    await lockTaskMutationRows(tx, input.readinessTaskId);
     await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
     const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
@@ -374,7 +395,10 @@ export const readinessTick = async (
         ? { id: readiness.id, status: TaskStatus.DOING, failureReason: readiness.failureReason }
         : null;
     if (!claimWhere) continue;
-    const claimed = await db.task.updateMany({ where: claimWhere, data: { status: TaskStatus.DOING, failureReason: claimReason } });
+    const claimed = await db.$transaction(async (tx) => {
+      await lockTaskMutationRows(tx, readiness.id);
+      return tx.task.updateMany({ where: claimWhere, data: { status: TaskStatus.DOING, failureReason: claimReason } });
+    });
     if (claimed.count !== 1) continue;
     result.claimed += 1;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -491,7 +515,10 @@ export const readinessTick = async (
       );
       if (triggers.length > 0 && review?.state !== "approved") {
         if (review?.state === "open") {
-          await db.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW, failureReason: `independent-review-open:${String(review.reviewTaskId)}` } });
+          await db.$transaction(async (tx) => {
+            await lockTaskMutationRows(tx, readiness.id);
+            await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW, failureReason: `independent-review-open:${String(review.reviewTaskId)}` } });
+          });
           result.reviewing += 1;
           continue;
         }
@@ -529,6 +556,7 @@ export const readinessTick = async (
         continue;
       }
       await db.$transaction(async (tx) => {
+        await lockTaskMutationRows(tx, readiness.id);
         // Every exact-head/current-base cycle gets a distinct binding. The
         // obsolete authorization remains append-only evidence and cannot make a
         // refreshed authorization ambiguous or be reused by the executor.

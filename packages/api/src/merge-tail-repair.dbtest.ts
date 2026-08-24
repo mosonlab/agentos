@@ -177,6 +177,34 @@ const claimNext = async () => {
   }
 };
 
+test("successful auxiliary repair completion preserves success when its chain target or target assignee is archived", async () => {
+  for (const mode of ["task", "assignee"] as const) {
+    await resetTestDb(db);
+    const seeded = await exercise("gate-fail");
+    const repair = await repairFor(seeded, "gate-fix");
+    if (mode === "task") {
+      await db.task.update({ where: { id: seeded.regression.id }, data: { archivedAt: new Date() } });
+    } else {
+      await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.BACKLOG } });
+      await db.agent.update({ where: { id: seeded.regressionAgent.id }, data: { archivedAt: new Date() } });
+      await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.TODO } });
+    }
+
+    await completeRepair(seeded, repair.id, "repair completed", HEAD);
+    const completedRun = await db.run.findFirstOrThrow({ where: { taskId: repair.id }, orderBy: { runNumber: "desc" } });
+    assert.equal(completedRun.status, "SUCCEEDED", mode);
+    assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, status: "QUEUED" } }), 0, mode);
+    const target = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    if (mode === "assignee") {
+      assert.equal(target.status, TaskStatus.REVIEW);
+      assert.match(target.failureReason ?? "", /archived/u);
+    }
+    assert.equal(await db.taskActivity.count({
+      where: { taskId: seeded.regression.id, body: { contains: mode === "task" ? "target is archived" : "assignee" } },
+    }), 1, mode);
+  }
+});
+
 const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeof seedRegression>>) => {
   const pass = JSON.stringify({
     schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "PASS",

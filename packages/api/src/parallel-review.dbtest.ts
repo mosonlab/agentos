@@ -395,8 +395,8 @@ test("simultaneous review completions serialize the join to exactly one adjudica
   assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId } }), 1);
 });
 
-test("failed, parked, and archived review siblings fail-stop the join until repaired", async () => {
-  for (const mode of ["failed", "parked", "archived"] as const) {
+test("failed, parked, and archived-Agent review siblings fail-stop the join until repaired", async () => {
+  for (const mode of ["failed", "parked", "archived-agent"] as const) {
     await resetTestDb(db);
     await runDbScript("seed.ts");
     await runDbScript("sync-canonical-prompts.ts");
@@ -406,9 +406,20 @@ test("failed, parked, and archived review siblings fail-stop the join until repa
     if (mode === "parked") {
       const parked = await operatorRequest(`/tasks/${blindBeforeImplementation}`, "PATCH", { status: TaskStatus.BACKLOG });
       assert.equal(parked.status, 200, JSON.stringify(parked.body));
-    } else if (mode === "archived") {
-      const archived = await operatorRequest(`/tasks/${blindBeforeImplementation}/archive`, "POST");
+    } else if (mode === "archived-agent") {
+      const parked = await operatorRequest(`/tasks/${blindBeforeImplementation}`, "PATCH", { status: TaskStatus.BACKLOG });
+      assert.equal(parked.status, 200, JSON.stringify(parked.body));
+      const blindTask = await db.task.findUniqueOrThrow({
+        where: { id: blindBeforeImplementation },
+        select: { assigneeAgentId: true },
+      });
+      assert.ok(blindTask.assigneeAgentId);
+      const archived = await operatorRequest(`/agents/${blindTask.assigneeAgentId}/archive`, "POST");
       assert.equal(archived.status, 200, JSON.stringify(archived.body));
+      // This models an archived assignee already stored on a runnable chain
+      // node, which is reachable from pre-protocol data and concurrent control
+      // plane repair. Activation must park it rather than enqueueing work.
+      await db.task.update({ where: { id: blindBeforeImplementation }, data: { status: TaskStatus.TODO } });
     }
 
     await completeImplementation(fixture, `${mode}-implementation`);
@@ -432,13 +443,20 @@ test("failed, parked, and archived review siblings fail-stop the join until repa
       assert.equal(started.status, 201, JSON.stringify(started.body));
       repairedClaim = await claim("parked-blind-repair");
     } else {
-      const unarchived = await operatorRequest(`/tasks/${fixture.blindTaskId}/unarchive`, "POST");
+      const blindTask = await db.task.findUniqueOrThrow({
+        where: { id: fixture.blindTaskId },
+        select: { assigneeAgentId: true, status: true, failureReason: true },
+      });
+      assert.equal(blindTask.status, TaskStatus.REVIEW);
+      assert.match(blindTask.failureReason ?? "", /Assignee .* is archived/u);
+      assert.ok(blindTask.assigneeAgentId);
+      const unarchived = await operatorRequest(`/agents/${blindTask.assigneeAgentId}/unarchive`, "POST");
       assert.equal(unarchived.status, 200, JSON.stringify(unarchived.body));
       const parked = await operatorRequest(`/tasks/${fixture.blindTaskId}`, "PATCH", { status: TaskStatus.BACKLOG });
       assert.equal(parked.status, 200, JSON.stringify(parked.body));
       const started = await operatorRequest(`/tasks/${fixture.blindTaskId}/start`, "POST");
       assert.equal(started.status, 201, JSON.stringify(started.body));
-      repairedClaim = await claim("archived-blind-repair");
+      repairedClaim = await claim("archived-agent-blind-repair");
     }
 
     assert.equal(repairedClaim.run.taskId, fixture.blindTaskId);

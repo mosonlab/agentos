@@ -220,6 +220,63 @@ test("fresh server-owned readiness authorization alone activates the recovery me
   assert.equal(aggregate.endedAt !== null, true);
 });
 
+test("recovery holds the full chain mutex before mutation and a concurrent chain writer completes without deadlock or lost recovery", { timeout: 20_000 }, async () => {
+  const seeded = await seedStopped("thirteen-step-readiness", "recovery-lock-order");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await recordRecoveryPass(seeded, BASE_2);
+
+  let lockObserved!: () => void;
+  let releaseRecovery!: () => void;
+  const recoveryHasChain = new Promise<void>((resolve) => { lockObserved = resolve; });
+  const release = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+  let paused = false;
+  const recoveryDb = new Proxy(db, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: unknown) => target.$transaction(async (tx) => {
+      const instrumented = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          const result = await (tx.$queryRaw as (...args: unknown[]) => Promise<unknown>)(strings, ...values);
+          if (!paused && strings.join("?").includes('ORDER BY "chainLayer"')) {
+            paused = true;
+            lockObserved();
+            await release;
+          }
+          return result;
+        };
+      } });
+      return operation(instrumented);
+    }, options as never);
+  } }) as PrismaClient;
+  const writerDb = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  const priorToken = process.env.OPERATOR_TOKEN;
+  try {
+    const recovery = readinessTick(recoveryDb, reader(snapshot(BASE_2)));
+    await recoveryHasChain;
+    process.env.OPERATOR_TOKEN = OPERATOR;
+    const writer = createApp(writerDb).request(`/tasks/${seeded.integratorTask!.id}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ description: "concurrent writer completed after recovery" }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseRecovery();
+    const [tick, response] = await Promise.all([recovery, writer]);
+    assert.equal(tick.authorized, 1);
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorToken;
+    await writerDb.$disconnect();
+  }
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } })).status, "SUCCEEDED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.integratorTask!.id } })).description, "concurrent writer completed after recovery");
+});
+
 test("recovery freshness requeue preserves the run binding through fresh authorization and executor activation", async () => {
   const seeded = await seedStopped("thirteen-step-readiness", "readiness-recovery-second-freshness");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);

@@ -522,7 +522,11 @@ test("an archived assignee's automatic retry is queued, audited, and does not sp
         create: async ({ data }: { data: Record<string, unknown> }) => { retry = data; return { id: "run-4", ...data }; },
       },
       session: { update: async () => ({}) },
-      task: { updateMany: async () => ({ count: 1 }), findUniqueOrThrow: async () => run.task },
+      task: {
+        updateMany: async () => ({ count: 1 }),
+        findUnique: async () => run.task,
+        findUniqueOrThrow: async () => run.task,
+      },
       taskActivity: { create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
@@ -1199,7 +1203,13 @@ test("claim query filters archived agents before take so active work cannot star
       runnerBackendState: { findUnique: async () => null },
       session: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "session-1", ...data }) },
       sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
-      task: { update: async () => ({}) },
+      task: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          const found = seeded.find((entry) => entry.task.id === where.id)?.task;
+          return found ? { ...found, projectId: "project-1", archivedAt: null, assigneeAgentId: null } : null;
+        },
+        update: async () => ({}),
+      },
       taskActivity: { create: async () => ({}) },
       taskStepOutput: { findMany: async () => [{
         kind: "spec", body: completePriorOutput,

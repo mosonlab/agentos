@@ -26,7 +26,6 @@ import { after, before, beforeEach, test } from "node:test";
 import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@agentos/db";
 
 import { hashToken } from "./auth.js";
-import { previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -70,7 +69,7 @@ const call = async (
 });
 
 let sequence = 0;
-const seedTask = async (options: { chained: boolean; outputKind?: string; templateName?: string; stepIndex?: number }) => {
+const seedTask = async (options: { chained: boolean; outputKind?: string; templateName?: string; stepIndex?: number; approvalGate?: boolean }) => {
   sequence += 1;
   const suffix = `${process.pid}-${sequence}`;
   const project = await db.project.create({ data: { name: "Run output", slug: `run-output-${suffix}` } });
@@ -100,12 +99,12 @@ const seedTask = async (options: { chained: boolean; outputKind?: string; templa
     assigneeType: "AGENT",
     assigneeAgentId: agent.id,
     prompt: "verify",
-    approvalGate: false,
+    approvalGate: options.approvalGate ?? false,
     outputKind: options.outputKind!,
   } }) : null;
   const task = await db.task.create({ data: {
     projectId: project.id, name: "Find the inbox deadlock", description: "work", assigneeAgentId: agent.id,
-    repoId: repo.id, status: TaskStatus.TODO, targetBranch: "master",
+    repoId: repo.id, status: TaskStatus.TODO, targetBranch: "master", approvalGate: options.approvalGate ?? false,
     ...(template && templateStep ? { templateId: template.id, templateStepId: templateStep.id } : {}),
     ...(options.chained ? { chainId: `chain-${suffix}`, chainIndex: 0, chainLayer: 0 } : {}),
   } });
@@ -179,6 +178,7 @@ const implementationOutput = (summary: string, headSha = SHA) => JSON.stringify(
   summary,
   testsRun: ["npm test -- focused"],
 });
+const specOutput = (spec: string, headSha = SHA) => JSON.stringify({ schemaVersion: 1, headSha, spec });
 
 const failedCompletion = (runnerId: string, fencingToken: string, branch: string) => ({
   runnerId,
@@ -721,48 +721,79 @@ test("cancellation holding the Run mutex makes an already-authenticated output l
   assert.equal(run.cancelRequestId, "cancel-output-race");
 });
 
-test("a canonical retry receives only the immediate prior Run output and retry reason", async () => {
-  const { task } = await seedTask({
+test("canonical approval revision requeues the same Spec, hands off its output, and activates Plan once after replacement approval", async () => {
+  const seed = await seedTask({
     chained: true,
-    outputKind: "implementation",
-    templateName: DIRECT_TEMPLATE_NAME,
+    outputKind: "spec",
+    templateName: "compound-engineer-workflow",
     stepIndex: 1,
+    approvalGate: true,
   });
-  const firstRunId = await enqueue(task.id);
-  const first = await claimRun(firstRunId, "handoff-runner-1");
+  const plan = await addSuccessor(seed);
+  const firstRunId = await enqueue(seed.task.id);
+  const first = await claimRun(firstRunId, "revision-runner-1");
   assert.equal((await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
     fencingToken: first.fencingToken,
-    kind: "implementation",
-    body: implementationOutput("implementation rejected at approval"),
+    kind: "spec",
+    body: specOutput("first specification rejected at approval"),
     commitSha: SHA,
   })).status, 200);
   assert.equal((await call(
     "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
-    failedCompletion("handoff-runner-1", first.fencingToken, first.run.branch ?? "master"),
+    succeededCompletion("revision-runner-1", first.fencingToken, first.run.branch ?? "master"),
   )).status, 200);
-  await db.taskActivity.create({ data: {
-    taskId: task.id,
-    actorType: "operator",
-    body: "Approval gate rejected; step queued again",
-  } });
-  await db.task.update({ where: { id: task.id }, data: { status: TaskStatus.TODO } });
-  const second = await db.$transaction((tx) => enqueueTaskRun(tx as never, task.id));
-  const loaded = await db.task.findUniqueOrThrow({
-    where: { id: task.id },
-    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+
+  const firstGate = await db.inboxMessage.findFirstOrThrow({ where: { gateTaskId: seed.task.id, status: "OPEN" } });
+  const rejected = await call("POST", `/inbox/messages/${firstGate.id}/decision`, OPERATOR, {
+    requestId: "revision-reject",
+    decision: "reject",
   });
-  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
-    taskId: task.id,
-    runId: second.id,
-    runNumber: second.runNumber,
-    templateStep: loaded.templateStep,
-  }));
-  assert.deepEqual(handoff, {
+  assert.equal(rejected.status, 201, JSON.stringify(rejected.body));
+  assert.equal(rejected.body.gateAction, "rejected");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.task.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: plan.id } }), 0);
+
+  const claimed = await call("POST", "/runner/tasks/claim", RUNNER, {
+    runnerId: "revision-runner-2",
+    leaseSeconds: 60,
+  });
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.task.id, seed.task.id);
+  assert.deepEqual(claimed.body.previousRunHandoff, {
     schemaVersion: 1,
     previousRunId: firstRunId,
-    status: "FAILED",
-    failureReason: "Error: session ended without a result",
+    status: "SUCCEEDED",
+    failureReason: null,
     retryReason: "approval-rejected-without-feedback",
-    output: { kind: "implementation", body: implementationOutput("implementation rejected at approval"), commitSha: SHA },
+    output: { kind: "spec", body: specOutput("first specification rejected at approval"), commitSha: SHA },
   });
+  // A fresh branch/head alone is not approval evidence: Plan remains closed
+  // until this Run publishes and completes a replacement persisted artifact.
+  await db.run.update({ where: { id: claimed.body.run.id }, data: { headSha: "d".repeat(40) } });
+  assert.equal(await db.run.count({ where: { taskId: plan.id } }), 0);
+
+  const secondRunId = claimed.body.run.id as string;
+  const replacementBody = specOutput("replacement specification accepted at approval");
+  const replacement = await call("PUT", `/session/runs/${secondRunId}/output`, claimed.body.sessionToken, {
+    fencingToken: claimed.body.fencingToken,
+    kind: "spec",
+    body: replacementBody,
+    commitSha: SHA,
+  });
+  assert.equal(replacement.status, 200, JSON.stringify(replacement.body));
+  const completed = await call(
+    "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,
+    succeededCompletion("revision-runner-2", claimed.body.fencingToken, claimed.body.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const secondGate = await db.inboxMessage.findFirstOrThrow({ where: { gateTaskId: seed.task.id, status: "OPEN" } });
+  const approved = await call("POST", `/inbox/messages/${secondGate.id}/decision`, OPERATOR, {
+    requestId: "revision-approve",
+    decision: "approve",
+  });
+  assert.equal(approved.status, 201, JSON.stringify(approved.body));
+  assert.equal(approved.body.gateAction, "approved");
+  assert.equal(await db.run.count({ where: { taskId: plan.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: plan.id, status: "QUEUED" } }), 1);
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seed.task.id } })).body, replacementBody);
 });

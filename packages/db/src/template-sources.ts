@@ -208,6 +208,9 @@ export const loadTemplateStepSources = async (
   }
   for (const [layer, group] of layerGroups) {
     if (group.length < 2) continue;
+    if (group.some((step) => step.approvalGate)) {
+      throw new Error(`${templateRoot} multi-node layer ${layer} cannot contain an approval gate`);
+    }
     if (group.some((step) => step.baseFromStepIndex === null)) {
       throw new Error(`${templateRoot} multi-node layer ${layer} requires a non-null baseFromStepIndex on every node`);
     }

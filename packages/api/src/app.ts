@@ -106,6 +106,7 @@ import {
   isCanonicalAdjudicationStep,
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
+  isCanonicalSolFindingsStep,
   persistSessionTaskOutput,
   previousRunHandoffForClaim,
   reviewAdjudicationClaimRefusal,
@@ -1371,6 +1372,7 @@ const settleCancellation = async (
     });
     return { runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged", requestId: input.requestId };
   }
+  if (run.taskId) await lockTaskMutationRows(tx, run.taskId);
   const settled = await tx.run.updateMany({
     where: {
       id: run.id,
@@ -1435,6 +1437,7 @@ type LockedTask = {
   status: TaskStatus;
   archivedAt: Date | null;
   projectId: string;
+  chainId: string | null;
   assigneeAgentId: string | null;
 };
 
@@ -1450,6 +1453,7 @@ const lockedTaskSelect = {
   status: true,
   archivedAt: true,
   projectId: true,
+  chainId: true,
   assigneeAgentId: true,
 } satisfies Prisma.TaskSelect;
 
@@ -1483,6 +1487,26 @@ const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<L
 };
 
 /**
+ * The mutation entry point for a task whose chain identity is not already
+ * known under a lock. Chain identity itself is immutable after dispatch, so an
+ * unlocked identity read can safely choose the mutex without first taking one
+ * Task row and later expanding to its siblings.
+ */
+const lockTaskMutationRows = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+): Promise<LockedTask | null> => {
+  const identity = await tx.task.findUnique({
+    where: { id: taskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!identity) return null;
+  if (!identity.chainId) return lockTask(tx, taskId);
+  await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+  return tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect });
+};
+
+/**
  * Merge-tail repair markers point at an existing canonical task rather than a
  * linked-list successor. Queue that explicit target under the same layer mutex
  * as ordinary chain activation; readiness remains server-owned and is only
@@ -1501,10 +1525,19 @@ const activateMergeTailTarget = async (
     where: { id: taskId },
     include: {
       runs: { where: { status: { in: ACTIVE_RUN_STATUSES } }, take: 1 },
+      assigneeAgent: { select: { name: true, archivedAt: true } },
       templateStep: { include: { taskTemplate: { select: { name: true } } } },
     },
   });
   if (!target || target.status === TaskStatus.DONE || target.runs.length > 0) return;
+  if (target.archivedAt) {
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: "Merge-tail target is archived and was not queued",
+    } });
+    return;
+  }
   if (isMergeReadinessStep(target.templateStep)) {
     await tx.taskActivity.create({ data: {
       taskId,
@@ -1514,12 +1547,55 @@ const activateMergeTailTarget = async (
     } });
     return;
   }
+  if (target.assigneeAgent?.archivedAt) {
+    const reason = `Assignee ${target.assigneeAgent.name} is archived; unarchive the agent and retry to queue this merge-tail target`;
+    await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Merge-tail target not queued because assignee ${target.assigneeAgent.name} is archived`,
+    } });
+    return;
+  }
   const claimed = await tx.task.updateMany({
     where: { id: taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] } },
     data: { status: TaskStatus.TODO, failureReason: null },
   });
   if (claimed.count !== 1) return;
-  await enqueueTaskRun(tx, taskId, now);
+  const rawTx = tx as Prisma.TransactionClient & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const savepoint = "merge_tail_enqueue";
+  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
+  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
+  try {
+    await enqueueTaskRun(tx, taskId, now);
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+  } catch (error: unknown) {
+    if (hasSavepoint) {
+      await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    }
+    const duplicateRun = error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+    if (!isArchivedAssigneeError(error) && !isArchivedTaskError(error)
+      && !isIntegratorStoppedError(error) && !duplicateRun) throw error;
+    if (duplicateRun) {
+      await tx.taskActivity.create({ data: {
+        taskId,
+        actorType: "control-plane",
+        body: "Merge-tail target already has the run created by a concurrent activation",
+      } });
+      return;
+    }
+    await tx.task.update({
+      where: { id: taskId },
+      data: { status: TaskStatus.REVIEW, failureReason: error instanceof Error ? error.message : "Merge-tail target could not be queued" },
+    });
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Merge-tail target was not queued: ${error instanceof Error ? error.message : "enqueue refused"}`,
+    } });
+    return;
+  }
   await tx.taskActivity.create({ data: {
     taskId,
     actorType: "control-plane",
@@ -3443,16 +3519,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // transaction it wrote that TODO back with no lock and no guard at all.
     if (body.status !== undefined) {
       const written = await db.$transaction(async (tx) => {
-        let locked: LockedTask | null;
-        if (body.status === TaskStatus.DONE && before.chainId) {
-          await lockChainRows(tx, {
-            projectId: before.projectId,
-            chainId: before.chainId,
-          });
-          locked = await tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect });
-        } else {
-          locked = await lockTask(tx, taskId);
-        }
+        const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
@@ -3498,19 +3565,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           if (await hasActiveRun(tx, taskId)) {
             return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
           }
-          if (before.chainId) {
-            const prefix = await tx.task.findMany({
+          if (locked.chainId) {
+            const chainRows = await tx.task.findMany({
               where: {
-                projectId: before.projectId,
-                chainId: before.chainId,
+                projectId: locked.projectId,
+                chainId: locked.chainId,
               },
               orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
               select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
             });
-            const blocker = blockingPredecessor(prefix.map((row) => ({
+            const blocker = blockingPredecessor(chainRows.map((row) => ({
               ...row,
-              projectId: before.projectId,
-              chainId: before.chainId,
+              projectId: locked.projectId,
+              chainId: locked.chainId,
               archivedAt: null,
               templateStep: null,
             })), taskId);
@@ -3607,7 +3674,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // requeues; otherwise a request that commits first can still be missed by
       // a creator holding a stale task relation.
       const updated = await db.$transaction(async (tx) => {
-        const locked = await lockTask(tx, taskId);
+        const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
@@ -3620,7 +3687,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // writer, so it joins the same protocol: Task row first, Agent row second.
     if (assignee) {
       const written = await db.$transaction(async (tx) => {
-        const locked = await lockTask(tx, taskId);
+        const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
@@ -3629,10 +3696,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if ("error" in written) return context.json({ error: written.error }, written.code);
       return context.json(written.task);
     }
-    return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
+    const written = await db.$transaction(async (tx) => {
+      const locked = await lockTaskMutationRows(tx, taskId);
+      if (!locked) return null;
+      return tx.task.update({ where: { id: taskId }, data: updateData });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    return written ? context.json(written) : context.json({ error: "Task not found" }, 404);
   });
   app.delete("/tasks/:taskId", async (context) => {
-    await db.task.delete({ where: { id: id.parse(context.req.param("taskId")) } });
+    const taskId = id.parse(context.req.param("taskId"));
+    const deleted = await db.$transaction(async (tx) => {
+      const locked = await lockTaskMutationRows(tx, taskId);
+      if (!locked) return false;
+      await tx.task.delete({ where: { id: taskId } });
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if (!deleted) return context.json({ error: "Task not found" }, 404);
     return context.body(null, 204);
   });
   app.post("/tasks/:taskId/retry", async (context) => {
@@ -3894,7 +3973,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/archive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (await hasActiveRun(tx, taskId)) {
         return { error: "Cannot archive a task with an active run", code: 409 as const };
@@ -3926,7 +4005,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // strand them — and refusing them would make an agent's archival delete the
     // operator's ability to read their own history back onto the board.
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (locked.archivedAt === null) {
         return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
@@ -3947,13 +4026,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const result = await db.$transaction(async (tx) => {
       const candidates = await tx.task.findMany({
         where: { projectId, status: TaskStatus.DONE, archivedAt: null },
-        select: { id: true },
+        select: { id: true, chainId: true },
       });
       // Lock before reading runs, so a retry cannot slip a run in between the
       // selection and the write. Ids that vanished, moved out of `Done` or were
       // archived in between simply do not come back from the lock and count as
       // neither archived nor skipped.
-      const lockedIds = await lockDoneTasks(tx, projectId, candidates.map((task) => task.id));
+      const chainIds = [...new Set(candidates.flatMap((task) => task.chainId ? [task.chainId] : []))].sort();
+      for (const chainId of chainIds) await lockChainRows(tx, { projectId, chainId });
+      const standaloneIds = candidates.filter((task) => !task.chainId).map((task) => task.id);
+      const lockedStandaloneIds = await lockDoneTasks(tx, projectId, standaloneIds);
+      const chainedIds = candidates.filter((task) => task.chainId).map((task) => task.id);
+      const stillDoneChained = chainedIds.length === 0 ? [] : await tx.task.findMany({
+        where: { id: { in: chainedIds }, projectId, status: TaskStatus.DONE, archivedAt: null },
+        select: { id: true },
+      });
+      const lockedIds = [...lockedStandaloneIds, ...stillDoneChained.map(({ id: chainedTaskId }) => chainedTaskId)];
       const busy = lockedIds.length === 0 ? [] : await tx.run.findMany({
         where: { taskId: { in: lockedIds }, status: { in: ACTIVE_RUN_STATUSES } },
         select: { taskId: true },
@@ -3975,34 +4063,42 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/schedule/pause", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const task = await db.task.findUnique({ where: { id: taskId }, select: { scheduleKind: true } });
-    if (!task) return context.json({ error: "Task not found" }, 404);
-    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be paused" }, 400);
-    // In-flight copies are left alone: pausing stops future occurrences, it does
-    // not reach into work that already started.
-    const paused = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
-    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
-    return context.json(paused);
+    const result = await db.$transaction(async (tx) => {
+      if (!await lockTaskMutationRows(tx, taskId)) return { error: "Task not found", code: 404 as const };
+      const task = await tx.task.findUniqueOrThrow({ where: { id: taskId }, select: { scheduleKind: true } });
+      if (task.scheduleKind !== ScheduleKind.CRON) return { error: "Only CRON tasks can be paused", code: 400 as const };
+      // In-flight copies are left alone: pausing stops future occurrences, it does
+      // not reach into work that already started.
+      const paused = await tx.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
+      return { task: paused };
+    });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
   });
   app.post("/tasks/:taskId/schedule/resume", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const task = await db.task.findUnique({
-      where: { id: taskId },
-      select: { scheduleKind: true, cron: true, timezone: true },
+    const result = await db.$transaction(async (tx) => {
+      if (!await lockTaskMutationRows(tx, taskId)) return { error: "Task not found", code: 404 as const };
+      const task = await tx.task.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { scheduleKind: true, cron: true, timezone: true },
+      });
+      if (task.scheduleKind !== ScheduleKind.CRON) return { error: "Only CRON tasks can be resumed", code: 400 as const };
+      let runAt: Date;
+      try {
+        if (!task.cron) throw new Error("CRON tasks require cron");
+        // Recomputed from *now*, so a long pause produces no catch-up burst.
+        runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
+      } catch (error: unknown) {
+        return { error: error instanceof Error ? error.message : "Invalid schedule", code: 400 as const };
+      }
+      const resumed = await tx.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
+      return { task: resumed };
     });
-    if (!task) return context.json({ error: "Task not found" }, 404);
-    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be resumed" }, 400);
-    let runAt: Date;
-    try {
-      if (!task.cron) throw new Error("CRON tasks require cron");
-      // Recomputed from *now*, so a long pause produces no catch-up burst.
-      runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
-    } catch (error: unknown) {
-      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
-    }
-    const resumed = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
-    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
-    return context.json(resumed);
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
   });
   app.get("/tasks/:taskId/recurring-fires", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
@@ -4044,11 +4140,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.put("/tasks/:taskId/output", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskOutputInput);
-    return context.json(await db.taskStepOutput.upsert({
-      where: { taskId },
-      create: { taskId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-      update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-    }));
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockTaskMutationRows(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      const task = await tx.task.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { templateStep: { select: {
+          stepIndex: true,
+          outputKind: true,
+          taskTemplate: { select: { name: true } },
+        } } },
+      });
+      const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
+      const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
+        || isCanonicalBlindFindingsStep(task.templateStep)
+        || isCanonicalAdjudicationStep(task.templateStep);
+      if (immutableReview && existing) {
+        return { error: `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`, code: 409 as const };
+      }
+      const output = await tx.taskStepOutput.upsert({
+        where: { taskId },
+        create: { taskId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+        update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      });
+      return { output };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.output);
   });
   /**
    * §D-P8 — the only mutation that can change a `target-unresolvable` outcome.
@@ -4064,7 +4182,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, mergeTargetInput);
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       const task = await loadIntegratorTask(tx, taskId);
       if (!task || !taskIsIntegratorStep(task)) {
@@ -4509,6 +4627,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stranded.count === 1) {
+            await lockTaskMutationRows(tx, candidate.task.id);
             await tx.task.update({
               where: { id: candidate.task.id },
               data: { status: TaskStatus.BACKLOG, failureReason: reason },
@@ -4592,6 +4711,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stopped.count === 1) {
+            await lockTaskMutationRows(tx, candidate.task.id);
             await tx.task.update({
               where: { id: candidate.task.id },
               data: { status: TaskStatus.REVIEW, failureReason: regressionRepairHandoff.reason },
@@ -4658,6 +4778,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stopped.count === 1) {
+            await lockTaskMutationRows(tx, candidate.task.id);
             await tx.task.update({
               where: { id: candidate.task.id },
               data: { status: TaskStatus.BACKLOG, failureReason: reason },
@@ -4721,6 +4842,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
         if (won.count !== 1) continue;
+        await lockTaskMutationRows(tx, candidate.task.id);
         const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
         const priorResume = !adjudicationTask && candidate.session?.resumeInput && candidate.session.providerConversationId ? {
           providerConversationId: candidate.session.providerConversationId,
@@ -5589,23 +5711,29 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // row: a task's budget being edited mid-run must not retroactively refuse
       // an attempt already authorized.
       const budgetGrants = run.budgetGrants + refunded;
-      if (succeeded && run.task && (run.task.templateId || run.task.chainId || mergeTailAuxiliary)) {
+      // Completion always mutates its Task, including terminal non-retryable
+      // failures. Run is already locked above; acquire the Task/chain mutex now
+      // for every outcome rather than only the branches that may retry or
+      // advance.
+      if (run.task) {
         if (run.task.chainId) {
           await lockChainRows(tx, { projectId: run.task.projectId, chainId: run.task.chainId });
         } else {
           await lockTask(tx, run.task.id);
         }
       }
-      // Join the Task-row exclusion protocol only when this completion can
-      // create a retry. PATCH then retry creation are ordered by this lock, and
-      // the fresh read below snapshots exactly the value current at creation.
-      if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
-        if (run.task.chainId) {
-          await lockChainRows(tx, { projectId: run.task.projectId, chainId: run.task.chainId });
-        } else {
-          await lockTask(tx, run.task.id);
-        }
+      if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
+        await lockTaskMutationRows(tx, auxiliaryTargetTaskId);
       }
+      if (run.task && typeof (tx.task as { findUnique?: unknown }).findUnique === "function") {
+        await tx.task.findUnique({ where: { id: run.task.id }, select: { status: true } });
+      }
+      // Keep the status observed with the fenced Run as the compare-and-set
+      // expectation. The locked re-read above supplies current chain state,
+      // but adopting its newer status as the expectation would let completion
+      // overwrite an operator decision that won while completion waited for
+      // the mutex (for example DONE -> REVIEW on a successful standalone run).
+      const completionTaskStatus = run.task?.status;
       const terminalStatus = succeeded
         ? RunStatus.SUCCEEDED
         : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
@@ -5792,7 +5920,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           });
           const outcome = parseMergeResult(persisted);
           if (outcome.outcome === "merged") {
-            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
           } else {
             await recordIntegratorStop(tx, {
               integratorTaskId: run.taskId,
@@ -5883,10 +6011,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               now,
             });
             if (result === "advance") {
-              await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+              await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
             }
           } else {
-            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
           }
         } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
           let repairUnable = false;
@@ -6035,13 +6163,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             // The failed repair owns the stop; never activate its follow-up.
           } else if (run.task.approvalGate) {
             const claimed = await tx.task.updateMany({
-              where: { id: run.taskId, status: run.task.status },
+              where: { id: run.taskId, status: completionTaskStatus! },
               data: { status: TaskStatus.REVIEW, failureReason: null },
             });
             if (claimed.count === 1) await gateQuestion(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null);
           } else {
             const completed = await tx.task.updateMany({
-              where: { id: run.taskId, status: run.task.status }, data: { status: TaskStatus.DONE, failureReason: null },
+              where: { id: run.taskId, status: completionTaskStatus! }, data: { status: TaskStatus.DONE, failureReason: null },
             });
             if (completed.count === 1) {
               if (run.task.chainId) {
@@ -6055,7 +6183,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
         } else {
           await tx.task.updateMany({
-            where: { id: run.taskId, ...(run.task ? { status: run.task.status } : {}) },
+            where: { id: run.taskId, ...(completionTaskStatus ? { status: completionTaskStatus } : {}) },
             data: {
               status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
               failureReason: succeeded ? null : budgetExhausted

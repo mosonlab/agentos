@@ -172,6 +172,7 @@ const adjudicationArtifact = canonicalEnvelope.extend({
 
 type ReviewArtifact = z.infer<typeof reviewArtifact>;
 type ClosedReviewArtifact = z.infer<typeof closedReviewArtifact>;
+type AdjudicationArtifact = z.infer<typeof adjudicationArtifact>;
 
 const duplicateValues = (values: string[]): string[] => {
   const seen = new Set<string>();
@@ -224,6 +225,103 @@ const closedReviewRunRefusal = (
     .sort();
   if (missing.length > 0) {
     return `closed-must-fix dispositions must cover every independent finding from this Run; missing: ${missing.join(", ")}`;
+  }
+  return null;
+};
+
+const adjudicationPersistenceRefusal = async (
+  tx: DbTx,
+  task: AdjudicationClaimTask,
+  body: string,
+): Promise<string | null> => {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return "must-fix body is not valid JSON";
+  }
+  const parsed = adjudicationArtifact.safeParse(value);
+  if (!parsed.success) return "must-fix body does not satisfy its canonical schema";
+  const adjudication: AdjudicationArtifact = parsed.data;
+  if (!task.chainId || task.chainLayer === null) {
+    return "must-fix adjudication task has no chainId/chainLayer review boundary";
+  }
+  const predecessor = await tx.task.findFirst({
+    where: { projectId: task.projectId, chainId: task.chainId, chainLayer: { lt: task.chainLayer } },
+    select: { chainLayer: true },
+    orderBy: { chainLayer: "desc" },
+  });
+  if (predecessor?.chainLayer === null || !predecessor) {
+    return "must-fix adjudication task has no predecessor review layer";
+  }
+  const reviewTasks = await tx.task.findMany({
+    where: { projectId: task.projectId, chainId: task.chainId, chainLayer: predecessor.chainLayer },
+    select: {
+      id: true,
+      templateStep: { select: {
+        stepIndex: true,
+        outputKind: true,
+        taskTemplate: { select: { name: true } },
+      } },
+      stepOutput: { select: { kind: true, body: true, commitSha: true } },
+    },
+  });
+  const expectedKinds = ["sol-findings", "blind-findings"] as const;
+  const reports: ReviewArtifact[] = [];
+  for (const kind of expectedKinds) {
+    const matches = reviewTasks.filter((candidate) => (
+      kind === "sol-findings"
+        ? isCanonicalSolFindingsStep(candidate.templateStep)
+        : isCanonicalBlindFindingsStep(candidate.templateStep)
+    ));
+    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
+      return `must-fix adjudication requires exactly one immutable ${kind} sibling output`;
+    }
+    const output = matches[0]!.stepOutput!;
+    let reportValue: unknown;
+    try {
+      reportValue = JSON.parse(output.body);
+    } catch {
+      return `must-fix adjudication ${kind} sibling body is not valid JSON`;
+    }
+    const report = reviewArtifact.safeParse(reportValue);
+    if (!report.success) return `must-fix adjudication ${kind} sibling violates its review contract`;
+    if (output.commitSha !== adjudication.headSha
+      || report.data.headSha !== adjudication.headSha
+      || report.data.reviewedBase !== adjudication.reviewedBase
+      || report.data.reviewedHead !== adjudication.reviewedHead) {
+      return `must-fix adjudication range does not match immutable ${kind} sibling`;
+    }
+    reports.push(report.data);
+  }
+
+  const sourceSeverities = new Map<string, "P0" | "P1" | "P2">();
+  const rank = { P0: 0, P1: 1, P2: 2 } as const;
+  for (const finding of reports.flatMap((report) => report.findings)) {
+    const prior = sourceSeverities.get(finding.id);
+    if (!prior || rank[finding.severity] < rank[prior]) sourceSeverities.set(finding.id, finding.severity);
+  }
+  const duplicateDispositions = duplicateValues(adjudication.dispositions.map(({ id }) => id));
+  if (duplicateDispositions.length > 0) {
+    return `must-fix dispositions contain duplicate ids: ${duplicateDispositions.join(", ")}`;
+  }
+  const dispositionIds = new Set(adjudication.dispositions.map(({ id }) => id));
+  const missing = [...sourceSeverities.keys()].filter((id) => !dispositionIds.has(id)).sort();
+  const unknown = [...dispositionIds].filter((id) => !sourceSeverities.has(id)).sort();
+  if (missing.length > 0 || unknown.length > 0) {
+    return `must-fix dispositions must exactly cover sibling findings; missing: ${missing.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}`;
+  }
+  const duplicateMustFixIds = duplicateValues(adjudication.mustFixIds);
+  if (duplicateMustFixIds.length > 0) {
+    return `must-fix mustFixIds contain duplicates: ${duplicateMustFixIds.join(", ")}`;
+  }
+  const expectedMustFixIds = adjudication.dispositions
+    .filter(({ id, disposition }) => disposition !== "REJECTED" && sourceSeverities.get(id) !== "P2")
+    .map(({ id }) => id)
+    .sort();
+  const actualMustFixIds = [...adjudication.mustFixIds].sort();
+  if (JSON.stringify(actualMustFixIds) !== JSON.stringify(expectedMustFixIds)) {
+    return `must-fix mustFixIds must exactly equal accepted P0/P1 disposition ids; expected: ${expectedMustFixIds.join(", ") || "none"}; actual: ${actualMustFixIds.join(", ") || "none"}`;
   }
   return null;
 };
@@ -568,6 +666,10 @@ export const persistSessionTaskOutput = async (
   if (isCanonicalAgentStep(step)) {
     const bodyRefusal = canonicalBodyRefusal(input.kind, input.body, input.commitSha, phase);
     if (bodyRefusal) return { ok: false, reason: bodyRefusal };
+  }
+  if (isCanonicalAdjudicationStep(step)) {
+    const refusal = await adjudicationPersistenceRefusal(tx, task, input.body);
+    if (refusal) return { ok: false, reason: refusal };
   }
   // The old combined node is retained only for already-instantiated
   // -legacy-v1 chains. New canonical blind nodes never enter this phased

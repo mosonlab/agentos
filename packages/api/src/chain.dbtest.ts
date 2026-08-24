@@ -86,6 +86,17 @@ test("concurrent chain advance creates exactly one successor run with no client-
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
 });
 
+test("an ordinary executable Agent approval gate may follow a HUMAN predecessor", async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  const human = await db.task.update({
+    where: { id: predecessor.id },
+    data: { assigneeType: "HUMAN", assigneeAgentId: null, repoId: null },
+  });
+  await db.task.update({ where: { id: successor.id }, data: { approvalGate: true } });
+  await assert.doesNotReject(db.$transaction((tx) => activateChainSuccessor(tx, human)));
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
+});
+
 test("a review layer fans out and joins only after both siblings are done", async () => {
   const seeded = await seedExecutableChain();
   // Move the seeded linear pair to node ordinals 1 and 2 before adding the
