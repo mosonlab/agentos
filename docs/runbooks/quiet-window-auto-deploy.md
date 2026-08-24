@@ -179,9 +179,11 @@ The job then performs exactly this sequence and stops at the first failure:
    and `direct-engineer-workflow:2` from `null` to step 1. Agent-default transitions
    are frozen to `review-coordinator` and `review-coordinator-sol`, from model
    `gpt-5.6-sol:high` with `runnerPreference` `CODEX` to model
-   `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`; the sync adopts
-   one only when both persisted fields exactly match that `from` state and the
-   canonical source exactly matches the `to` state. The dedicated
+   `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`, plus
+   `implementation-plan-executioner` from `gpt-5.6-sol:medium` / `CODEX` to
+   `gpt-5.6-sol:high` / `CODEX`; the sync adopts one only when both persisted
+   fields exactly match that `from` state and the canonical source exactly
+   matches the `to` state. The dedicated
    `regression-verifier` is the one source-declared role creation: when absent,
    sync creates it from canonical role text in the active
    `review-coordinator-sol` environment, copies that source Agent's repository
