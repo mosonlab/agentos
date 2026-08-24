@@ -103,9 +103,12 @@ import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import {
   canonicalOutputRefusal,
+  isCanonicalAdjudicationStep,
   isCanonicalAgentStep,
+  isCanonicalBlindFindingsStep,
   persistSessionTaskOutput,
   previousRunHandoffForClaim,
+  reviewAdjudicationClaimRefusal,
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
@@ -4402,6 +4405,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         take: 20,
       });
       const executorRunnerIds = mergeExecutorRunnerIds();
+      let adjudicationRefusal: string | null = null;
       for (const candidate of candidates) {
         if (!candidate.task || !candidate.repo) continue;
         if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
@@ -4599,6 +4603,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           continue;
         }
+        const reviewClaimRefusal = await reviewAdjudicationClaimRefusal(tx, {
+          task: candidate.task,
+          implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
+          implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
+        });
+        if (reviewClaimRefusal) {
+          adjudicationRefusal = reviewClaimRefusal;
+          continue;
+        }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
         const sessionCredential = issueSessionToken();
@@ -4620,7 +4633,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
         if (won.count !== 1) continue;
-        const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
+        const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
+        const priorResume = !adjudicationTask && candidate.session?.resumeInput && candidate.session.providerConversationId ? {
           providerConversationId: candidate.session.providerConversationId,
           input: candidate.session.resumeInput,
         } : null;
@@ -4632,6 +4646,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             requestedAt: now,
             endedAt: null,
             failureReason: null,
+            ...(adjudicationTask ? {
+              providerConversationId: null,
+              resumeInput: null,
+              resumableUntil: null,
+              waitingOnMessageId: null,
+              resumeAttempt: 0,
+            } : {}),
           },
         }) : await tx.session.create({ data: {
             runId: candidate.id,
@@ -4679,10 +4700,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
           })
           : null;
-        const priorOutputsRaw = candidate.task.chainId && candidate.task.chainIndex !== null
+        const blindReviewTask = isCanonicalBlindFindingsStep(candidate.task.templateStep);
+        const priorOutputsRaw = !blindReviewTask
+          && candidate.task.chainId && candidate.task.chainIndex !== null
           && (candidate.task.templateStepId === null || candidate.task.templateStep?.attachmentsFromPrevious !== false)
           ? await tx.taskStepOutput.findMany({
-            where: { task: { chainId: candidate.task.chainId, chainIndex: { lt: candidate.task.chainIndex } } },
+            where: { task: {
+              projectId: candidate.task.projectId,
+              chainId: candidate.task.chainId,
+              chainIndex: { lt: candidate.task.chainIndex },
+            } },
             select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
             orderBy: { task: { chainIndex: "asc" } },
           })
@@ -4740,7 +4767,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };
       }
-      return null;
+      return adjudicationRefusal ? { error: adjudicationRefusal } : null;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -4753,6 +4780,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           || attempt === 3) throw error;
       }
     }
+    if (claimed && "error" in claimed) return context.json({ error: claimed.error }, 409);
     return claimed ? context.json(claimed) : context.body(null, 204);
   });
 
@@ -5102,6 +5130,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (!run?.taskId) return context.json({ error: "Run not found" }, 404);
     const caller = await loadIntegratorTask(db, run.taskId);
     if (!caller) return context.json({ error: "Run not found" }, 404);
+    if (isCanonicalBlindFindingsStep(caller.templateStep)) {
+      return context.json({ error: "Forbidden: blind review sessions cannot read predecessor or sibling review activity" }, 403);
+    }
     // Eligibility: only the mechanical step may read across the chain at all.
     if (!taskIsIntegratorStep(caller)) return context.json({ error: "Forbidden for this step" }, 403);
     if (caller.chainId === null || caller.chainIndex === null) return context.json({ error: "Run is not part of a chain" }, 404);
