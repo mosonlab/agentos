@@ -1,8 +1,8 @@
 # Canonical agent review package
 
-Status: current as of 2026-08-22.
+Status: current as of 2026-08-23.
 
-The canonical roster contains fourteen LLM roles and one mechanical sentinel:
+The canonical roster contains fifteen LLM roles and one mechanical sentinel:
 
 - `default`
 - `spec`
@@ -11,6 +11,7 @@ The canonical roster contains fourteen LLM roles and one mechanical sentinel:
 - `frontend-dev`
 - `implementation-plan-executioner`
 - `senior-dev`
+- `senior-dev-high`
 - `senior-dev-luna`
 - `review-coordinator`
 - `review-coordinator-sol`
@@ -70,7 +71,7 @@ chain.
 
 ## Acceptance
 
-- Exactly fifteen role files pass the canonical source contract, including the
+- Exactly sixteen role files pass the canonical source contract, including the
   mechanical merge sentinel.
 - Full Assurance step 3 binds `review-coordinator`, step 6 binds
   `review-coordinator-sol`, step 7 binds `review-coordinator-opus`, and step 9

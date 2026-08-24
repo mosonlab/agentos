@@ -106,6 +106,11 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
     model: "openai-codex/gpt-5.6-sol:medium",
     runner: RunnerPreference.PI,
   });
+  assert.deepEqual(canonical.get("senior-dev-high"), {
+    name: "senior-dev-high",
+    model: "gpt-5.6-sol:high",
+    runner: RunnerPreference.CODEX,
+  });
 });
 
 test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
