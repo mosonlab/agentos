@@ -911,7 +911,7 @@ export const taskInput = z.object({
   timezone: taskFields.timezone.default(null),
   chainId: z.string().trim().min(1).max(100).optional(),
   chainIndex: z.number().int().min(0).optional(),
-}).superRefine((value, context) => {
+}).strict().superRefine((value, context) => {
   if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
     context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
   }
@@ -1184,7 +1184,7 @@ const templateStepInput = z.object({
   outputKind: z.string().trim().min(1).max(80).default("result"),
   opensPullRequest: z.boolean().default(true),
   baseFromStepIndex: z.number().int().min(0).nullable().default(null),
-});
+}).strict();
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -1217,6 +1217,7 @@ type ChainSubject = {
   projectId: string;
   chainId: string | null;
   chainIndex: number | null;
+  chainLayer: number | null;
   status: TaskStatus;
   name: string;
   templateStep: { name: string } | null;
@@ -2598,6 +2599,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         outputKind: body.outputKind,
         opensPullRequest: body.opensPullRequest,
         baseFromStepIndex: body.baseFromStepIndex,
+        layer: body.stepIndex,
       } }) };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if ("error" in result) return context.json({ error: result.error }, result.code);
@@ -2796,7 +2798,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // another project supplies this trigger's `firstTask` and progress.
     const rows = chainIds.length === 0 ? [] : await db.task.findMany({
       where: { chainId: { in: chainIds }, projectId: template.projectId },
-      select: { id: true, projectId: true, chainId: true, chainIndex: true, name: true, status: true, archivedAt: true, templateStep: { select: { name: true } } },
+      select: { id: true, projectId: true, chainId: true, chainIndex: true, chainLayer: true, name: true, status: true, archivedAt: true, templateStep: { select: { name: true } } },
     });
     const progress = chainProgressByChain(rows);
     // Keyed by `chainKey`, not `chainId`, for the same reason — the query above
@@ -2949,7 +2951,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
         select: {
           id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-          name: true, archivedAt: true, templateStep: { select: { name: true } },
+          chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
         },
         orderBy: { chainIndex: "asc" },
       });
@@ -2974,6 +2976,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             total: 1,
             activeStepName: task.templateStep?.name ?? task.name,
             activeStatus: task.status.toLowerCase(),
+            currentLayer: 1,
+            layerCount: 1,
             position: 1,
           };
         }
@@ -2993,7 +2997,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         select: {
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
-          templateId: true, source: true, chainId: true, chainIndex: true, updatedAt: true,
+          templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
           assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
@@ -3099,7 +3103,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (bindingRefusal) return { error: bindingRefusal, code: 400 as const };
       const created = await tx.task.create({
-        data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
+        data: {
+          ...withoutUndefined(body),
+          ...schedule,
+          projectId,
+          chainLayer: body.chainId === undefined ? null : body.chainIndex,
+        } as Prisma.TaskUncheckedCreateInput,
       });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
       // API-created chains arrive one task at a time. Only index 0 may receive
@@ -3323,6 +3332,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,
         chainIndex: row.chainIndex,
+        layer: row.chainLayer,
         name: row.name,
         stepName: stepName(row),
         status: row.status,

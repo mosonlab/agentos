@@ -76,6 +76,7 @@ export type BoardRow = {
   source: TaskSource;
   chainId: string | null;
   chainIndex: number | null;
+  chainLayer: number | null;
   updatedAt: Date;
   assigneeAgent: { id: string; title: string; model: string } | null;
   templateStep: { name: string } | null;

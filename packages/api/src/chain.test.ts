@@ -19,6 +19,7 @@ const row = (overrides: Partial<ChainRow> & Pick<ChainRow, "id">): ChainRow => (
   projectId: "project-1",
   chainId: "chain-1",
   chainIndex: 0,
+  chainLayer: null,
   name: `Task ${overrides.id}`,
   status: "TODO",
   archivedAt: null,
@@ -35,16 +36,16 @@ const nineSteps = (doneCount: number): ChainRow[] => Array.from({ length: 9 }, (
 
 test("chainProgress counts done rows and names the first unfinished step", () => {
   assert.deepEqual(chainProgress(nineSteps(0)), {
-    done: 0, total: 9, activeStepName: "Step 1", activeStatus: "todo",
+    done: 0, total: 9, activeStepName: "Step 1", activeStatus: "todo", currentLayer: 1, layerCount: 9,
   });
   assert.deepEqual(chainProgress(nineSteps(3)), {
-    done: 3, total: 9, activeStepName: "Step 4", activeStatus: "todo",
+    done: 3, total: 9, activeStepName: "Step 4", activeStatus: "todo", currentLayer: 4, layerCount: 9,
   });
 });
 
 test("chainProgress on a finished chain reports the last row as active", () => {
   assert.deepEqual(chainProgress(nineSteps(9)), {
-    done: 9, total: 9, activeStepName: "Step 9", activeStatus: "done",
+    done: 9, total: 9, activeStepName: "Step 9", activeStatus: "done", currentLayer: 9, layerCount: 9,
   });
 });
 
@@ -55,13 +56,13 @@ test("chainProgress counts rows, not chainIndex, so a sparse template reads n/3"
     row({ id: "c", chainIndex: 9 }),
   ];
   assert.deepEqual(chainProgress(sparse), {
-    done: 1, total: 3, activeStepName: "Task b", activeStatus: "doing",
+    done: 1, total: 3, activeStepName: "Task b", activeStatus: "doing", currentLayer: 2, layerCount: 3,
   });
 });
 
 test("chainProgress handles a single row and an empty chain", () => {
   assert.deepEqual(chainProgress([row({ id: "only", status: "DONE" })]), {
-    done: 1, total: 1, activeStepName: "Task only", activeStatus: "done",
+    done: 1, total: 1, activeStepName: "Task only", activeStatus: "done", currentLayer: 1, layerCount: 1,
   });
   assert.equal(chainProgress([]), null);
 });
@@ -72,7 +73,24 @@ test("an archived-but-DONE row counts toward both numbers", () => {
     row({ id: "b", chainIndex: 2, status: "TODO" }),
   ];
   assert.deepEqual(chainProgress(rows), {
-    done: 1, total: 2, activeStepName: "Task b", activeStatus: "todo",
+    done: 1, total: 2, activeStepName: "Task b", activeStatus: "todo", currentLayer: 2, layerCount: 2,
+  });
+});
+
+test("parallel siblings share one dense current layer while node progress stays row-based", () => {
+  const rows = [
+    row({ id: "implementation", chainIndex: 1, chainLayer: 10, status: "DONE" }),
+    row({ id: "sol", chainIndex: 2, chainLayer: 40, status: "DONE" }),
+    row({ id: "blind", chainIndex: 3, chainLayer: 40, status: "TODO" }),
+    row({ id: "adjudication", chainIndex: 4, chainLayer: 90, status: "TODO" }),
+  ];
+  assert.deepEqual(chainProgress(rows), {
+    done: 2,
+    total: 4,
+    activeStepName: "Task blind",
+    activeStatus: "todo",
+    currentLayer: 2,
+    layerCount: 3,
   });
 });
 
