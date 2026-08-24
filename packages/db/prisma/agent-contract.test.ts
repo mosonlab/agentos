@@ -257,7 +257,11 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
-  assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
+  const directImplementation = directTemplateSteps[0]!.prompt;
+  assert.match(directImplementation, /brief is the specification of record/u);
+  assert.match(directImplementation, /at least two child-writer branches need integration/u);
+  assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
+  assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
   assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
   // mechanical executor, with no human approval gate on either.
