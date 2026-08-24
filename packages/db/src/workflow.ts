@@ -293,20 +293,25 @@ export const lockAgentRows = async (
   return new Map(rows.map((row) => [row.id, row.archivedAt]));
 };
 
-/** Locks an indexed chain prefix in the one global order used by manual start,
- * manual completion, and automatic advancement. Raw SQL returns ids only;
- * callers perform typed Prisma reads after this serialization point. */
-export const lockChainPrefixRows = async (
+/**
+ * Locks every existing row in one chain in the single order shared by every
+ * chained-task mutation. A prefix lock is insufficient for a layered join:
+ * two siblings can complete concurrently while each only locks its own
+ * prefix, then both observe a stale incomplete layer and race the join.
+ *
+ * The nullable columns are deliberate while the expand migration is live. The
+ * query still locks malformed rows, so a later contract migration cannot race
+ * a writer that is already holding one of them.
+ */
+export const lockChainRows = async (
   tx: Tx,
-  input: { projectId: string; chainId: string; targetChainIndex: number },
+  input: { projectId: string; chainId: string },
 ): Promise<string[]> => {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id" FROM "Task"
     WHERE "projectId" = ${input.projectId}
       AND "chainId" = ${input.chainId}
-      AND "chainIndex" IS NOT NULL
-      AND "chainIndex" <= ${input.targetChainIndex}
-    ORDER BY "chainIndex", "id" FOR UPDATE
+    ORDER BY "chainLayer" NULLS LAST, "chainIndex" NULLS LAST, "id" FOR UPDATE
   `;
   return rows.map((row) => row.id);
 };
@@ -739,7 +744,7 @@ type ChainTask = {
   name: string;
   chainId: string | null;
   chainIndex: number | null;
-  followUpTaskId: string | null;
+  chainLayer?: number | null;
 };
 
 type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true; assigneeAgent: true } }>;
@@ -836,6 +841,7 @@ const isUniqueConflict = (error: unknown): boolean => (
 const parkedReason = (successor: { status: TaskStatus; archivedAt?: Date | null }): string | null => {
   if (successor.archivedAt) return "successor is archived and was not queued";
   if (successor.status === TaskStatus.BACKLOG) return "successor is parked in Backlog — use Start now";
+  if (successor.status === TaskStatus.REVIEW) return "successor is awaiting operator retry or approval";
   return null;
 };
 
@@ -874,7 +880,24 @@ const parkStoppedIntegratorSuccessor = async (
   return { nextTaskId: successor.id, gated: false };
 };
 
-/** Activates at most one chain/follow-up successor using the observed updatedAt as a CAS token. */
+const layerOf = (task: { chainLayer?: number | null; chainIndex: number | null }): number | null => (
+  task.chainLayer ?? task.chainIndex
+);
+
+const layerOrder = (
+  left: { chainLayer?: number | null; chainIndex: number | null; id: string },
+  right: { chainLayer?: number | null; chainIndex: number | null; id: string },
+): number => (
+  (layerOf(left) ?? 0) - (layerOf(right) ?? 0)
+    || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
+    || left.id.localeCompare(right.id)
+);
+
+/**
+ * Activates the next execution layer under a full-chain mutex. The rows are
+ * re-read after the lock so a completion in one review sibling cannot observe
+ * a stale incomplete layer or enqueue the join twice.
+ */
 const activateChainSuccessorInternal = async (
   tx: Tx,
   task: ChainTask,
@@ -882,238 +905,182 @@ const activateChainSuccessorInternal = async (
   now: Date,
   stopBypass: IntegratorStopBypass | null,
 ): Promise<{ nextTaskId: string | null; gated: boolean }> => {
-  let successor: ChainSuccessor | null = null;
-  if (task.chainId && task.chainIndex !== null) {
-    // Resolve, lock, and re-read until the first surviving non-DONE row is
-    // stable. A concurrent DELETE can win before the lock, and historical
-    // out-of-order execution can leave DONE gaps; neither may stall the chain.
-    for (;;) {
-      const candidate = await tx.task.findFirst({
-        where: {
-          projectId: task.projectId,
-          chainId: task.chainId,
-          chainIndex: { gt: task.chainIndex },
-          status: { not: TaskStatus.DONE },
-        },
-        orderBy: [{ chainIndex: "asc" }, { id: "asc" }],
-        select: { id: true },
-      });
-      if (!candidate) break;
-      if (!await lockTaskRow(tx, candidate.id)) continue;
-      const current: ChainSuccessor | null = await tx.task.findUnique({
-        where: { id: candidate.id },
-        include: { runs: { where: { status: { in: ACTIVE_RUN_STATUSES } }, orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
-      });
-      if (!current || current.status === TaskStatus.DONE) continue;
-      successor = current;
-      break;
-    }
-  } else {
+  if (!task.chainId || task.chainIndex === null) {
     if (task.chainId) {
       await tx.taskActivity.create({ data: {
         taskId: task.id,
         actorType: "control-plane",
-        body: "Chain row missing chainIndex; auto-advance skipped",
-      } });
-    }
-    if (task.followUpTaskId) {
-      if (await lockTaskRow(tx, task.followUpTaskId)) {
-        successor = await tx.task.findUnique({
-          where: { id: task.followUpTaskId },
-          include: { runs: { where: { status: { in: ACTIVE_RUN_STATUSES } }, orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
-        });
-      }
-    }
-  }
-
-  if (!successor) {
-    if (task.chainId && task.chainIndex !== null) {
-      await tx.taskActivity.create({ data: {
-        taskId: task.id,
-        actorType: "control-plane",
-        body: "Chain complete",
+        body: "Chain row missing chain identity; auto-advance skipped",
       } });
     }
     return { nextTaskId: null, gated: false };
   }
 
-  if (successor.runs.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {
+  await lockChainRows(tx, { projectId: task.projectId, chainId: task.chainId });
+  const chainRows: ChainSuccessor[] = await tx.task.findMany({
+    where: { projectId: task.projectId, chainId: task.chainId },
+    include: {
+      runs: { where: { status: { in: ACTIVE_RUN_STATUSES } }, orderBy: { runNumber: "desc" }, take: 1 },
+      assigneeAgent: true,
+    },
+  });
+  chainRows.sort(layerOrder);
+  const current = chainRows.find((row) => row.id === task.id);
+  const currentLayer = current ? layerOf(current) : layerOf(task);
+  if (!current || currentLayer === null) {
     await tx.taskActivity.create({ data: {
-      taskId: successor.id,
+      taskId: task.id,
       actorType: "control-plane",
-      body: "Predecessor completed; successor already active",
+      body: "Chain row missing execution layer; auto-advance skipped",
     } });
-    return { nextTaskId: successor.id, gated: false };
+    return { nextTaskId: null, gated: false };
   }
 
-  const parked = parkedReason(successor);
-  if (parked) {
-    await tx.taskActivity.create({ data: {
-      taskId: successor.id,
-      actorType: "control-plane",
-      body: `Predecessor ${task.name} completed; ${parked}`,
-    } });
-    return { nextTaskId: successor.id, gated: false };
+  const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  if (!currentRows.every((row) => row.status === TaskStatus.DONE)) {
+    // The first review completion exits here while its blind sibling is still
+    // unfinished; the second completion owns the join.
+    return { nextTaskId: null, gated: false };
+  }
+  // A legacy chain can contain a historical DONE gap (for example an operator
+  // completed a step before deleting its run). Treat fully completed layers as
+  // history and select the first higher layer that still has work. This keeps
+  // the one-node-per-layer migration linear without recursively re-entering the
+  // activation routine.
+  const nextLayer = [...new Set(chainRows.map(layerOf).filter((value): value is number => value !== null))]
+    .filter((value) => value > currentLayer)
+    .sort((left, right) => left - right)
+    .find((value) => chainRows.some((row) => layerOf(row) === value && row.status !== TaskStatus.DONE));
+  if (nextLayer === undefined) {
+    await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
+    return { nextTaskId: null, gated: false };
   }
 
-  // A lost updatedAt CAS can mean either another advancer won or an unrelated
-  // operator edit landed between the read and claim. Re-read and retry the
-  // latter instead of silently stalling the chain. The status predicate is a
-  // second idempotency boundary: a completed successor is never resurrected.
-  for (;;) {
-    const claimed = await tx.task.updateMany({
-      where: {
-        id: successor.id,
-        updatedAt: successor.updatedAt,
-        status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
-      },
-      data: { status: TaskStatus.TODO },
-    });
-    if (claimed.count === 1) break;
-    const current: ChainSuccessor | null = await tx.task.findUnique({
-      where: { id: successor.id },
-      include: { runs: { where: { status: { in: ACTIVE_RUN_STATUSES } }, orderBy: { runNumber: "desc" }, take: 1 }, assigneeAgent: true },
-    });
-    if (!current || current.status === TaskStatus.DONE) {
-      // A chain row that disappeared or became DONE is no longer the candidate.
-      // Re-entering the function resolves the next surviving non-DONE row.
-      if (task.chainId && task.chainIndex !== null) {
-        return activateChainSuccessorInternal(tx, task, options, now, stopBypass);
-      }
-      return { nextTaskId: current?.id ?? null, gated: false };
-    }
-    if (current.runs.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {
+  const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
+  if (nextRows.some((row) => row.approvalGate) && nextRows.length > 1) {
+    throw new Error(`Approval gate is not allowed in multi-node chain layer ${nextLayer}`);
+  }
+  if (nextRows.some((row) => row.approvalGate)
+    && (currentRows.length !== 1
+      || currentRows[0]!.assigneeType !== AssigneeType.AGENT
+      || !currentRows[0]!.assigneeAgentId
+      || !currentRows[0]!.repoId)) {
+    throw new Error("Server-owned approval gate must follow one executable predecessor");
+  }
+
+  let firstNextTaskId: string | null = null;
+  let gated = false;
+  for (const successor of nextRows) {
+    firstNextTaskId ??= successor.id;
+    if (successor.status === TaskStatus.DONE) continue;
+    if (successor.runs.some((run) => ACTIVE_RUN_STATUSES.includes(run.status))) {
       await tx.taskActivity.create({ data: {
-        taskId: current.id,
-        actorType: "control-plane",
-        body: "Predecessor completed; successor already active",
-      } });
-      return { nextTaskId: current.id, gated: false };
-    }
-    // The same guard as above, because the operator can park the successor
-    // *between* the read and the claim. Without this branch the loop re-enters
-    // with a parked row, the CAS keeps matching zero rows, and it spins forever
-    // inside the caller's transaction.
-    const parkedNow = parkedReason(current);
-    if (parkedNow) {
-      await tx.taskActivity.create({ data: {
-        taskId: current.id,
-        actorType: "control-plane",
-        body: `Predecessor ${task.name} completed; ${parkedNow}`,
-      } });
-      return { nextTaskId: current.id, gated: false };
-    }
-    successor = current;
-  }
-
-  const successorStep = successor.templateStepId
-    ? await tx.taskTemplateStep.findUnique({
-      where: { id: successor.templateStepId },
-      select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
-    })
-    : null;
-  if (isMergeReadinessStep(successorStep)) {
-    await tx.taskActivity.create({ data: {
-      taskId: successor.id,
-      actorType: "control-plane",
-      body: `Predecessor ${task.name} completed; server-side merge readiness queued`,
-      metadata: {
-        kind: MERGE_TAIL_KIND.readiness,
-        schemaVersion: 1,
-        state: "queued",
-        sourceRunId: options.sourceRunId ?? null,
-      },
-    } });
-    return { nextTaskId: successor.id, gated: false };
-  }
-
-  if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {
-    if (options.sourceRunId) {
-      await tx.task.update({ where: { id: successor.id }, data: { status: TaskStatus.REVIEW } });
-      await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
-      return { nextTaskId: successor.id, gated: true };
-    }
-    await tx.taskActivity.create({ data: {
-      taskId: successor.id,
-      actorType: "control-plane",
-      body: "Predecessor completed; successor awaits operator",
-    } });
-    return { nextTaskId: successor.id, gated: false };
-  }
-
-  // Completion-triggered activation treats an unresolved downstream merge
-  // stop as a parked successor, not as a failure of the predecessor that just
-  // completed. Generic enqueue still throws IntegratorStoppedError, which is
-  // why interactive callers continue to receive their named 409 refusal.
-  const stopped = await stopStateFor(tx, successor.id);
-  if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
-    return parkStoppedIntegratorSuccessor(tx, task, successor, stopped, options.sourceRunId ?? null);
-  }
-
-  // An archived assignee parks the successor instead of throwing. enqueueTaskRun
-  // raises ArchivedAssigneeError, which is not a P2002 and would escape the
-  // savepoint catch below and roll back the caller's whole transaction — for
-  // completeRun that means discarding a run that actually succeeded.
-  //
-  // Interactive callers pass archivedAssignee: "throw" instead: a human is
-  // waiting on the response, so they get a named 409 rather than a silent park
-  // they would have to go hunting for.
-  if (successor.assigneeAgent?.archivedAt) {
-    if (options.archivedAssignee === "throw") {
-      throw new ArchivedAssigneeError(successor.id, successor.name, successor.assigneeAgent.name);
-    }
-    await tx.task.update({
-      where: { id: successor.id },
-      data: {
-        status: TaskStatus.REVIEW,
-        failureReason: `Assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
-      },
-    });
-    await tx.taskActivity.create({
-      data: {
         taskId: successor.id,
         actorType: "control-plane",
-        body: `Predecessor ${task.name} completed but assignee ${successor.assigneeAgent.name} is archived; step not queued`,
-      },
-    });
-    return { nextTaskId: successor.id, gated: false };
-  }
+        body: "Predecessor layer completed; successor already active",
+      } });
+      continue;
+    }
+    const parked = parkedReason(successor);
+    if (parked) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: `Predecessor layer completed; ${parked}`,
+      } });
+      continue;
+    }
 
-  const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
-  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
-  if (hasSavepoint) await rawTx.$executeRawUnsafe!("SAVEPOINT chain_successor_enqueue");
-  try {
-    await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
-    if (hasSavepoint) await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
-  } catch (error: unknown) {
-    // The preflight above is the normal path. The named-error branch is
-    // defense in depth for a stop recorded between that read and enqueue: both
-    // outcomes stay inside the savepoint so predecessor completion cannot be
-    // rolled back by downstream activation.
-    if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
-    if (hasSavepoint) {
-      await rawTx.$executeRawUnsafe!("ROLLBACK TO SAVEPOINT chain_successor_enqueue");
-      await rawTx.$executeRawUnsafe!("RELEASE SAVEPOINT chain_successor_enqueue");
+    const successorStep = successor.templateStepId
+      ? await tx.taskTemplateStep.findUnique({
+        where: { id: successor.templateStepId },
+        select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+      })
+      : null;
+    if (isMergeReadinessStep(successorStep)) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: "Predecessor layer completed; server-side merge readiness queued",
+        metadata: {
+          kind: MERGE_TAIL_KIND.readiness,
+          schemaVersion: 1,
+          state: "queued",
+          sourceRunId: options.sourceRunId ?? null,
+        },
+      } });
+      continue;
     }
-    if (isIntegratorStoppedError(error)) {
-      const stoppedAfterRollback = await stopStateFor(tx, successor.id);
-      if (!stoppedAfterRollback) throw error;
-      return parkStoppedIntegratorSuccessor(
-        tx,
-        task,
-        successor,
-        stoppedAfterRollback,
-        options.sourceRunId ?? null,
-      );
+
+    if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.repoId) {
+      if (options.sourceRunId) {
+        await tx.task.update({ where: { id: successor.id }, data: { status: TaskStatus.REVIEW } });
+        await gateQuestion(tx, successor.id, options.sourceRunId, options.chatId ?? null);
+        gated = true;
+      } else {
+        await tx.taskActivity.create({ data: {
+          taskId: successor.id,
+          actorType: "control-plane",
+          body: "Predecessor layer completed; successor awaits operator",
+        } });
+      }
+      continue;
     }
-    return { nextTaskId: successor.id, gated: false };
+
+    const stopped = await stopStateFor(tx, successor.id);
+    if (stopped && (stopBypass?.integratorTaskId !== successor.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
+      await parkStoppedIntegratorSuccessor(tx, current, successor, stopped, options.sourceRunId ?? null);
+      continue;
+    }
+    if (successor.assigneeAgent?.archivedAt) {
+      if (options.archivedAssignee === "throw") {
+        throw new ArchivedAssigneeError(successor.id, successor.name, successor.assigneeAgent.name);
+      }
+      await tx.task.update({
+        where: { id: successor.id },
+        data: {
+          status: TaskStatus.REVIEW,
+          failureReason: `Assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry to queue this step`,
+        },
+      });
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: `Predecessor layer completed but assignee ${successor.assigneeAgent.name} is archived; step not queued`,
+      } });
+      continue;
+    }
+
+    const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
+    const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
+    // Each successor is handled serially and the savepoint is released before
+    // the next one, so one bounded identifier avoids interpolating an external
+    // task id into SQL (and stays below PostgreSQL's identifier limit).
+    const savepoint = "chain_layer_enqueue";
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
+    try {
+      await enqueueTaskRunInternal(tx, successor.id, now, stopBypass);
+      if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    } catch (error: unknown) {
+      if (!isUniqueConflict(error) && !isIntegratorStoppedError(error)) throw error;
+      if (hasSavepoint) {
+        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      if (isIntegratorStoppedError(error)) {
+        const stoppedAfterRollback = await stopStateFor(tx, successor.id);
+        if (!stoppedAfterRollback) throw error;
+        await parkStoppedIntegratorSuccessor(tx, current, successor, stoppedAfterRollback, options.sourceRunId ?? null);
+      }
+      continue;
+    }
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: "Predecessor layer completed; step queued",
+    } });
   }
-  await tx.taskActivity.create({ data: {
-    taskId: successor.id,
-    actorType: "control-plane",
-    body: `Predecessor ${task.name} completed; step queued`,
-  } });
-  return { nextTaskId: successor.id, gated: false };
+  return { nextTaskId: firstNextTaskId, gated };
 };
 
 export const activateChainSuccessor = async (
@@ -1245,7 +1212,27 @@ export const advanceTemplateTask = async (
     where: { id: taskId },
   });
   if (!task.templateId) return { gated: false, nextTaskId: null };
+  // The completion transaction may arrive here after locking the Run, but it
+  // must acquire the complete chain before changing even the producing Task.
+  // Otherwise this update would hold one Task row and activateChainSuccessor
+  // would later expand the lock to siblings, inverting the full-chain mutex.
+  if (task.chainId) {
+    await lockChainRows(tx, { projectId: task.projectId, chainId: task.chainId });
+  }
   if (task.approvalGate) {
+    if (task.chainId) {
+      const layer = layerOf(task);
+      const siblingCount = layer === null ? 0 : await tx.task.count({
+        where: {
+          projectId: task.projectId,
+          chainId: task.chainId,
+          ...(task.chainLayer !== null && task.chainLayer !== undefined
+            ? { chainLayer: task.chainLayer }
+            : { chainIndex: task.chainIndex }),
+        },
+      });
+      if (siblingCount > 1) throw new Error("Approval gate is not allowed in a multi-node chain layer");
+    }
     if (expectedStatus) {
       const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.REVIEW } });
       if (claimed.count !== 1) return { gated: false, nextTaskId: null };
@@ -1253,7 +1240,7 @@ export const advanceTemplateTask = async (
       await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.REVIEW } });
     }
     await gateQuestion(tx, task.id, sourceRunId, chatId);
-    return { gated: true, nextTaskId: task.followUpTaskId };
+    return { gated: true, nextTaskId: null };
   }
   if (expectedStatus) {
     const claimed = await tx.task.updateMany({ where: { id: task.id, status: expectedStatus }, data: { status: TaskStatus.DONE, failureReason: null } });
@@ -1391,7 +1378,6 @@ export const applyInboxDecisionTx = async (
       session: { include: { run: true } },
       gateTask: {
         include: {
-          previousTask: true,
           templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
         },
       },
@@ -1467,17 +1453,33 @@ export const applyInboxDecisionTx = async (
     return { duplicate: false, resumed: false, messageId: question.id };
   }
   // A HUMAN gate or server-owned readiness rejection can queue the executable
-  // predecessor. Ordinary AGENT gates remain executable themselves. Resolve
-  // that target before taking either mutex, then lock predecessor -> gate:
-  // PATCH on the predecessor takes that same order when it activates the
-  // successor. Taking gate -> predecessor here would make the two legitimate
-  // operations deadlock.
+  // predecessor. Ordinary AGENT gates remain executable themselves. A chained
+  // decision takes the complete chain mutex before any Task-row mutation; this
+  // is the same order used by completion and manual start/retry.
   let rejectionTarget: { id: string; name: string } | null = null;
+  if (gateDecision && question.gateTask?.chainId) {
+    await lockChainRows(tx, {
+      projectId: question.gateTask.projectId,
+      chainId: question.gateTask.chainId,
+    });
+  }
   if (gateDecision && question.gateTask && input.decision === "reject") {
     const readiness = isMergeReadinessStep(question.gateTask.templateStep);
     rejectionTarget = question.gateTask.assigneeType === AssigneeType.AGENT && !readiness
       ? question.gateTask
-      : question.gateTask.previousTask;
+      : question.gateTask.chainId && question.gateTask.chainLayer !== null
+        ? await tx.task.findFirst({
+          where: {
+            projectId: question.gateTask.projectId,
+            chainId: question.gateTask.chainId,
+            chainLayer: { lt: question.gateTask.chainLayer },
+            assigneeType: AssigneeType.AGENT,
+            assigneeAgentId: { not: null },
+            repoId: { not: null },
+          },
+          orderBy: [{ chainLayer: "desc" }, { chainIndex: "desc" }, { id: "desc" }],
+        })
+        : null;
     if (!rejectionTarget && question.gateTask.chainId && question.gateTask.chainIndex !== null) {
       rejectionTarget = await tx.task.findFirst({
         where: {
