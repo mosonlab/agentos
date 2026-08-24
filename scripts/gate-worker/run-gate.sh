@@ -43,12 +43,11 @@
 #      judgement about the commit exits 1, so a caller reading exit codes can
 #      tell a verdict from an errand.
 #
-# The worktree is per-run and unique, but the worker is a whole-machine slot:
-# one worker-wide flock is held by the real process for its entire run. A second
-# invocation waits before creating a worktree. That lock is worker-wide rather
-# than repository-wide so two repositories cannot silently oversubscribe the
-# same four vCPUs, and it survives a dropped ssh connection for as long as the
-# remote gate process survives.
+# The worktree is per-run and unique. The worker contributes one execution slot
+# by default, or two when its worker-capacity file contains 2. Each slot is a
+# worker-wide flock held by the real process for its entire run, so repositories
+# share the same fixed capacity and a dropped ssh connection cannot release a
+# slot while its remote gate process survives.
 #
 # Stateless: nothing is remembered between runs except the mirror and the logs.
 # Re-running the same oid after a dropped connection is the supported recovery,
@@ -175,15 +174,47 @@ fi
 mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || no_verdict "could not create the gate directories under ${GATE_HOME}"
 
 # The repository directory is one level below the worker root installed by
-# mirror-push.sh. Keep the lock there so every repository on this machine
-# contends for the same physical capacity. flock owns the lifecycle correctly:
-# the kernel releases it only when the run and any surviving child holding the
-# descriptor are gone, not when the caller's ssh connection disappears.
-WORKER_LOCK="$(dirname "$GATE_HOME")/.full-gate.lock"
-exec 9>"$WORKER_LOCK" || no_verdict "could not open the worker lock at ${WORKER_LOCK}"
-printf 'run-gate: waiting for the worker slot\n' >&2
-flock 9 || no_verdict "could not acquire the worker lock at ${WORKER_LOCK}"
-printf 'run-gate: acquired the worker slot\n' >&2
+# mirror-push.sh. Capacity is host state, not repository state: an absent file
+# means one slot, while the only larger supported value is the measured desktop
+# capacity of two. There is no load-sensitive resizing and no third slot.
+WORKER_ROOT="$(dirname "$GATE_HOME")"
+WORKER_CAPACITY_FILE="${WORKER_ROOT}/worker-capacity"
+WORKER_CAPACITY=1
+if [ -e "$WORKER_CAPACITY_FILE" ] || [ -L "$WORKER_CAPACITY_FILE" ]; then
+  [ -f "$WORKER_CAPACITY_FILE" ] && [ ! -L "$WORKER_CAPACITY_FILE" ] \
+    || no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} is not a regular file"
+  WORKER_CAPACITY="$(cat "$WORKER_CAPACITY_FILE" 2>/dev/null)" \
+    || no_verdict "could not read worker capacity at ${WORKER_CAPACITY_FILE}"
+  case "$WORKER_CAPACITY" in
+    1|2) ;;
+    *) no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} must be exactly 1 or 2" ;;
+  esac
+fi
+
+# Slot one retains the original lock path, so a rollout beside an older
+# run-gate.sh still counts the old process. Slot two has one additional lock
+# file. Polling both non-blockingly is what lets whichever slot frees first run
+# the waiter without a queue daemon or mutable scheduler state.
+WORKER_SLOT=""
+printf 'run-gate: waiting for one of %s worker slot(s)\n' "$WORKER_CAPACITY" >&2
+while [ -z "$WORKER_SLOT" ]; do
+  for slot in $(seq 1 "$WORKER_CAPACITY"); do
+    if [ "$slot" -eq 1 ]; then
+      candidate_lock="${WORKER_ROOT}/.full-gate.lock"
+    else
+      candidate_lock="${WORKER_ROOT}/.full-gate-${slot}.lock"
+    fi
+    exec 9>"$candidate_lock" \
+      || no_verdict "could not open worker slot ${slot} at ${candidate_lock}"
+    if flock -n 9; then
+      WORKER_SLOT="$slot"
+      break
+    fi
+    exec 9>&-
+  done
+  [ -n "$WORKER_SLOT" ] || sleep 1
+done
+printf 'run-gate: acquired worker slot %s/%s\n' "$WORKER_SLOT" "$WORKER_CAPACITY" >&2
 
 # --- reclaim what earlier runs abandoned ------------------------------------
 
@@ -228,7 +259,7 @@ sweep_stale_worktrees
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 WORKTREE="${WORKTREES_DIR}/gate-${OID}-${STAMP}-$$"
-LOG="${LOGS_DIR}/${STAMP}-${OID}.log"
+LOG="${LOGS_DIR}/${STAMP}-${OID}-$$.log"
 WORKTREE_CREATED=0
 
 # Only ever removes the directory this run created, matched against the name it

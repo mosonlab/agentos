@@ -132,6 +132,11 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+# Build-cache publication is shared by distinct worktrees on one host. Reuse
+# the tested atomic pid-lock primitive instead of a mkdir-then-pid lock whose
+# empty-owner window lets two concurrent gates both become the writer.
+# shellcheck source=scripts/gate-worker/lib.sh
+. "${SCRIPT_DIR}/gate-worker/lib.sh"
 CONTAINER="agentos-merge-gate-$$"
 # The lock lives in the worktree because the worktree is what is being contended:
 # two checkouts of the same repository may gate at the same time, two gates in one
@@ -331,17 +336,26 @@ dependency_state_key() {
   } | sha256
 }
 
+CACHE_WRITER_ROOT=""
+CACHE_WRITER_SLOT=""
+
 take_cache_writer_lock() {
-  local lock="$1" holder=""
-  if mkdir "${lock}" 2>/dev/null; then
-    printf '%s\n' "$$" > "${lock}/pid"
+  local entry="$1"
+  CACHE_WRITER_ROOT="$(dirname "${entry}")"
+  CACHE_WRITER_SLOT="$(basename "${entry}").writer"
+  if gate_slot_try "${CACHE_WRITER_ROOT}" "${CACHE_WRITER_SLOT}"; then
     return 0
   fi
-  holder="$(cat "${lock}/pid" 2>/dev/null || true)"
-  if [ -n "${holder}" ] && kill -0 "${holder}" 2>/dev/null; then return 1; fi
-  rm -rf -- "${lock}"
-  mkdir "${lock}" 2>/dev/null || return 1
-  printf '%s\n' "$$" > "${lock}/pid"
+  CACHE_WRITER_ROOT=""
+  CACHE_WRITER_SLOT=""
+  return 1
+}
+
+release_cache_writer_lock() {
+  [ -n "${CACHE_WRITER_ROOT}" ] && [ -n "${CACHE_WRITER_SLOT}" ] || return 0
+  gate_slot_release "${CACHE_WRITER_ROOT}" "${CACHE_WRITER_SLOT}" || true
+  CACHE_WRITER_ROOT=""
+  CACHE_WRITER_SLOT=""
 }
 
 install_dependencies() {
@@ -480,10 +494,10 @@ clear_build_outputs() {
 }
 
 publish_build_snapshot() {
-  local entry="$1" key="$2" source_tree="$3" lock="${entry}.writer" staging="" output=""
-  take_cache_writer_lock "${lock}" || return 0
+  local entry="$1" key="$2" source_tree="$3" staging="" output=""
+  take_cache_writer_lock "${entry}" || return 0
   if build_cache_entry_valid "${entry}" "${key}" || [ -e "${entry}" ]; then
-    rm -rf -- "${lock}"
+    release_cache_writer_lock
     return 0
   fi
   staging="$(mktemp -d "${CACHE_ROOT}/.build.${key}.XXXXXXXX")"
@@ -491,7 +505,8 @@ publish_build_snapshot() {
   for output in "${BUILD_OUTPUTS[@]}"; do
     mkdir -p "${staging}/tree/$(dirname "${output}")"
     copy_cache_tree "${source_tree}/${output}" "${staging}/tree/${output}" || {
-      rm -rf -- "${staging}" "${lock}"
+      rm -rf -- "${staging}"
+      release_cache_writer_lock
       note "build snapshot could not be cloned; this run keeps fresh build output"
       return 0
     }
@@ -502,11 +517,12 @@ publish_build_snapshot() {
     || ! chmod a-w "${entry}"; then
     chmod -R u+w "${staging}" 2>/dev/null || true
     chmod -R u+w "${entry}" 2>/dev/null || true
-    rm -rf -- "${staging}" "${entry}" "${lock}"
+    rm -rf -- "${staging}" "${entry}"
+    release_cache_writer_lock
     note "build snapshot could not be published; this run keeps fresh build output"
     return 0
   fi
-  rm -rf -- "${lock}"
+  release_cache_writer_lock
   note "build cache stored: ${key}"
 }
 

@@ -3,9 +3,10 @@
 //
 // Two things are under test and both are mechanisms, not text.
 //
-// The first is the capacity invariant: two slots, and never a third. That is
-// a concurrency property, so the cases here run real concurrent processes
-// against a real lock root. The bug they exist for is specific — a slot lock
+// The first is the per-slot capacity invariant: one holder for each named slot,
+// never two holders in one slot. That is a concurrency property, so the cases
+// here run real concurrent processes against a real lock root. The bug they
+// exist for is specific — a slot lock
 // that is created before it names its owner has a window in which a second
 // dispatcher reads "no owner", calls the lock abandoned and takes the slot its
 // owner is gating in — and `refuses a lock that names no pid` reproduces
@@ -458,7 +459,7 @@ test("every slot busy times out at 75 with no verdict", (t) => {
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
-  for (const slot of ["remote-1", "remote-2"]) {
+  for (const slot of ["remote-1", "remote-1-2", "remote-2"]) {
     writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
   }
   const result = spawnSync(
@@ -516,12 +517,35 @@ test("locks that cannot be operated are 76 at once, not 75 after the timeout", (
   assert.ok(Date.now() - started < 20_000, "it polled instead of answering at once");
 });
 
-test("a busy primary spills onto the fallback without using the Mac", (t) => {
+test("one busy desktop slot uses the second desktop slot before fallback", (t) => {
   const repo = fixtureRepo(t, {});
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
   writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
+  const result = spawnSync(
+    "bash",
+    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
+    {
+      cwd: repo.root,
+      encoding: "utf8",
+      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS/);
+  assert.match(result.stderr, /running on primary/);
+  assert.doesNotMatch(result.stderr, /running on fallback/);
+});
+
+test("two busy desktop slots spill onto the fallback without using the Mac", (t) => {
+  const repo = fixtureRepo(t, {});
+  const cache = join(scratch(t), "cache");
+  const slots = join(cache, "gate-dispatch");
+  mkdirSync(slots, { recursive: true });
+  for (const slot of ["remote-1", "remote-1-2"]) {
+    writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
+  }
   const result = spawnSync(
     "bash",
     [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
@@ -540,7 +564,7 @@ test("a busy primary spills onto the fallback without using the Mac", (t) => {
 test("busy plus broken waits out the timeout and then reports 76, not 75", (t) => {
   // The mixed case. One slot is genuinely busy, so waiting is justified and the
   // dispatch must not give up early — but when the wait ends empty, the answer
-  // is not "the queue was full": one of the two slots was never available to
+  // is not "the queue was full": one of the three slots was never available to
   // anybody, and 75 would send the operator to re-dispatch into the same broken
   // locks. Nothing may be taken here either, so the capacity limit holds.
   const repo = fixtureRepo(t, {});
@@ -548,6 +572,7 @@ test("busy plus broken waits out the timeout and then reports 76, not 75", (t) =
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
   writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
+  writeFileSync(join(slots, "remote-1-2.slot"), `${process.pid}\n`);
   mkdirSync(join(slots, "remote-2.lock"));
   const result = spawnSync(
     "bash",
