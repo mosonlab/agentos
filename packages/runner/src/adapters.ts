@@ -1008,7 +1008,10 @@ const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
 };
 
 const ownedRunProcesses = async (runId: string): Promise<number[]> => new Promise((resolvePromise, rejectPromise) => {
-  execFile("ps", ["eww", "-axo", "pid=,ppid=,pgid=,command="], { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+  const args = process.platform === "darwin"
+    ? ["-Eww", "-axo", "pid=,ppid=,pgid=,command="]
+    : ["-axeww", "-o", "pid=,ppid=,pgid=,command="];
+  execFile("ps", args, { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
     if (error) {
       rejectPromise(new Error(`Unable to inspect Run-owned processes: ${error.message}`));
       return;
