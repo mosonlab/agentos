@@ -364,11 +364,28 @@ export const reviewAdjudicationClaimRefusal = async (
     return `${refusalPrefix}: adjudication task has no chainId/chainLayer review boundary`;
   }
 
+  // The adjudication node is in the join layer after the two review siblings,
+  // not in the review layer itself. Layer values may be sparse, so derive the
+  // immediate predecessor by ordering the existing chain layers rather than
+  // subtracting one or searching arbitrary earlier nodes.
+  const predecessorLayer = await tx.task.findFirst({
+    where: {
+      projectId: input.task.projectId,
+      chainId: input.task.chainId,
+      chainLayer: { lt: input.task.chainLayer },
+    },
+    select: { chainLayer: true },
+    orderBy: { chainLayer: "desc" },
+  });
+  if (predecessorLayer?.chainLayer === null || predecessorLayer === null) {
+    return `${refusalPrefix}: adjudication task has no predecessor review layer before layer ${input.task.chainLayer}`;
+  }
+  const reviewLayer = predecessorLayer.chainLayer;
   const reviewTasks = await tx.task.findMany({
     where: {
       projectId: input.task.projectId,
       chainId: input.task.chainId,
-      chainLayer: input.task.chainLayer,
+      chainLayer: reviewLayer,
       id: { not: input.task.id },
     },
     select: {
@@ -384,10 +401,10 @@ export const reviewAdjudicationClaimRefusal = async (
   const solTasks = reviewTasks.filter((task) => isCanonicalSolFindingsStep(task.templateStep));
   const blindTasks = reviewTasks.filter((task) => isCanonicalBlindFindingsStep(task.templateStep));
   if (solTasks.length !== 1) {
-    return `${refusalPrefix}: expected exactly one sol-findings sibling in layer ${input.task.chainLayer}, found ${solTasks.length}`;
+    return `${refusalPrefix}: expected exactly one sol-findings sibling in layer ${reviewLayer}, found ${solTasks.length}`;
   }
   if (blindTasks.length !== 1) {
-    return `${refusalPrefix}: expected exactly one blind-findings sibling in layer ${input.task.chainLayer}, found ${blindTasks.length}`;
+    return `${refusalPrefix}: expected exactly one blind-findings sibling in layer ${reviewLayer}, found ${blindTasks.length}`;
   }
 
   const siblings: Array<{ kind: ReviewReportKind; task: typeof solTasks[number] }> = [
