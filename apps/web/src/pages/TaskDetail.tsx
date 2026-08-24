@@ -289,12 +289,16 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const retry = (): void => {
     void run(async () => { await api.post(`/tasks/${taskId}/retry`, {}); reload(); });
   };
-  const cancelCurrentRun = (): void => {
+  const cancelCurrentRun = (parkTask: boolean): void => {
     if (!newest) return;
-    const reason = window.prompt(t("taskDetail.cancel.prompt"));
+    const reason = window.prompt(t(parkTask ? "taskDetail.stop.prompt" : "taskDetail.cancel.prompt"));
     if (!reason?.trim()) return;
     void run(async () => {
-      await api.post(`/runs/${newest.id}/cancel`, { requestId: crypto.randomUUID(), reason: reason.trim() });
+      await api.post(`/runs/${newest.id}/cancel`, {
+        requestId: crypto.randomUUID(),
+        reason: reason.trim(),
+        parkTask,
+      });
       reload();
     });
   };
@@ -354,8 +358,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
         ) : null}
         {newestIsActive ? (
-          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={cancelCurrentRun}>
+          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={() => cancelCurrentRun(false)}>
             {t(newestIsCancelling ? "taskDetail.cancel.cancelling" : "taskDetail.cancel.action")}
+          </Button>
+        ) : null}
+        {newestIsActive ? (
+          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={() => cancelCurrentRun(true)}>
+            {t("taskDetail.stop.action")}
           </Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>

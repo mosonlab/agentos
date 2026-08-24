@@ -173,7 +173,6 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
             endedAt: now,
             leaseExpiresAt: null,
             sessionTokenRevokedAt: now,
-            cancelAcknowledgedAt: now,
             failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
             failureReason: reason,
             retryable: false,
@@ -202,8 +201,13 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           await tx.taskActivity.create({ data: {
             taskId: run.taskId,
             actorType: "control-plane",
-            body: `Run ${run.runNumber} cancellation settled after its lease expired; evidence retained`,
-            metadata: { runId: run.id, requestId: current.cancelRequestId, status: RunStatus.CANCELLED },
+            body: `Run ${run.runNumber} cancellation terminalized after runner loss; process cleanup unconfirmed`,
+            metadata: {
+              runId: run.id,
+              requestId: current.cancelRequestId,
+              status: RunStatus.CANCELLED,
+              cleanupConfirmed: false,
+            },
           } });
         }
         continue;

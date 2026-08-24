@@ -978,6 +978,7 @@ const heartbeatInput = z.object({
 const cancelRunInput = z.object({
   requestId: z.string().trim().min(1).max(160),
   reason: z.string().trim().min(1).max(2000),
+  parkTask: z.boolean().default(false),
 });
 const cancelAcknowledgeInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -1351,7 +1352,7 @@ const settleCancellation = async (
   if (input.runnerId !== undefined && (run.runnerId !== input.runnerId || run.fencingToken !== input.fencingToken)) {
     return { error: "Cancellation acknowledgement is not owned by this runner", code: 409 };
   }
-  if (run.status === RunStatus.CANCELLED && run.cancelAcknowledgedAt) {
+  if (run.status === RunStatus.CANCELLED) {
     // Reconciliation can settle an expired cancellation before the runner's
     // final ACK arrives. That ACK is still the only durable account of a
     // workspace provisioned before /start, so idempotence must backfill its
@@ -1365,6 +1366,21 @@ const settleCancellation = async (
     if (input.baseSha !== undefined) await tx.run.updateMany({
       where: { id: run.id, baseSha: null }, data: { baseSha: input.baseSha },
     });
+    if (!run.cancelAcknowledgedAt && input.runnerId !== undefined) {
+      await tx.run.update({
+        where: { id: run.id },
+        data: { cancelAcknowledgedAt: input.now },
+      });
+      if (run.taskId) await tx.taskActivity.create({ data: {
+        taskId: run.taskId,
+        actorType: "runner",
+        actorId: input.actorId ?? null,
+        body: `Run ${run.runNumber} cancellation cleanup confirmed after terminalization`,
+        metadata: { runId: run.id, requestId: input.requestId, status: RunStatus.CANCELLED },
+      } });
+    } else if (!run.cancelAcknowledgedAt) {
+      return { error: "Cancellation cleanup has not been acknowledged by the runner", code: 409 };
+    }
     return { runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged", requestId: input.requestId };
   }
   const settled = await tx.run.updateMany({
@@ -6183,15 +6199,41 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       if (!run) return { error: "Run not found", code: 404 as const };
+      if (body.parkTask && !run.taskId) return { error: "Run has no Task to park", code: 409 as const };
+      const parkTarget = body.parkTask && run.taskId ? await lockTask(tx, run.taskId) : null;
+      if (body.parkTask && run.taskId && !parkTarget) return { error: "Task not found", code: 404 as const };
+      if (parkTarget && parkTarget.archivedAt !== null) {
+        return { error: "Cannot park an archived task", code: 409 as const };
+      }
+      if (parkTarget?.status === TaskStatus.DONE) return { error: "Cannot park a completed task", code: 409 as const };
+      const parkTask = async () => {
+        const task = parkTarget;
+        if (!task) return;
+        if (task.status === TaskStatus.BACKLOG) return null;
+        const reason = run.cancelRequestId ? run.cancelReason ?? body.reason : body.reason;
+        await tx.task.update({
+          where: { id: task.id },
+          data: { status: TaskStatus.BACKLOG, failureReason: reason },
+        });
+        await tx.taskActivity.create({ data: {
+          taskId: task.id,
+          actorType: "operator",
+          body: `Status changed: ${task.status} → ${TaskStatus.BACKLOG}`,
+          metadata: { runId: run.id, requestId: body.requestId, reason: "stop-and-park" },
+        } });
+      };
       if (run.cancelRequestId) {
         if (run.cancelRequestId !== body.requestId) {
           return { error: `Run already has cancellation request ${run.cancelRequestId}`, code: 409 as const };
         }
+        await parkTask();
         return {
           runId: run.id,
           taskId: run.taskId,
           status: run.status,
-          cancellationState: run.cancelAcknowledgedAt ? "acknowledged" as const : "requested" as const,
+          cancellationState: run.cancelAcknowledgedAt
+            ? "acknowledged" as const
+            : run.status === RunStatus.CANCELLED ? "unconfirmed" as const : "requested" as const,
           requestId: run.cancelRequestId,
           reason: run.cancelReason,
         };
@@ -6220,16 +6262,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       if (requested.count !== 1) return { error: "Run changed while cancellation was being requested", code: 409 as const };
+      await parkTask();
       if (run.taskId) await tx.taskActivity.create({ data: {
         taskId: run.taskId,
         actorType: "operator",
         body: `Cancellation requested for Run ${run.runNumber}: ${body.reason}`,
         metadata: { runId: run.id, requestId: body.requestId, priorStatus: run.status, state: "requested" },
       } });
-      // No provider process exists before claim or while suspended for Inbox,
-      // so the control plane can acknowledge these states immediately. Claimed,
-      // provisioning, and running owners must first kill their process group.
-      if (run.status === RunStatus.QUEUED || run.status === RunStatus.WAITING_INBOX) {
+      // An unclaimed Run has never had a provider process. Every claimed state,
+      // including WAITING_INBOX, requires runner-owned process cleanup or an
+      // explicitly unconfirmed terminalization after runner loss.
+      if (run.status === RunStatus.QUEUED) {
         return settleCancellation(tx, { runId: run.id, requestId: body.requestId, now });
       }
       return {
