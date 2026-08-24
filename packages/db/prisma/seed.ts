@@ -91,12 +91,6 @@ const main = async (): Promise<void> => {
         model: role.model,
         runtimeConfigCustomized: false,
         codexServiceTier: CodexServiceTier.DEFAULT,
-        ...(role.name === "implementation-plan-executioner" ? {
-          ordinarySubprocessModel: "gpt-5.6-luna:max",
-          ordinarySubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
-          elevatedSubprocessModel: "gpt-5.6-sol:high",
-          elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
-        } : {}),
         runnerPreference: role.runnerPreference,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,

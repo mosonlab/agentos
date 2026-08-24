@@ -19,6 +19,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
+import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
@@ -76,7 +77,7 @@ export const deriveRunConfig = (
   const compoundExecutioner = isCompoundImplementationStep(templateStep);
   return {
     runner: compoundExecutioner ? RunnerKind.CODEX : (templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model)),
-    model: compoundExecutioner ? "gpt-5.6-sol:medium" : agent.model,
+    model: compoundExecutioner ? "gpt-5.6-sol:high" : agent.model,
     codexServiceTier: compoundExecutioner ? CodexServiceTier.DEFAULT : agent.codexServiceTier,
     promptHash: promptHash([
     agent.foundationalPrompt,
@@ -132,53 +133,23 @@ export const isCompoundImplementationAssigneeError = (
 ): error is CompoundImplementationAssigneeError =>
   error instanceof Error && error.name === "CompoundImplementationAssigneeError";
 
-const CODEX_SUBPROCESS_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-5.6-luna:max";
+export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
 
-const validatedCodexSubprocessModel = (label: string, raw: string | null): string => {
-  if (!raw) throw new Error(`Implementation Plan Executioner requires a configured ${label} Codex subprocess`);
-  const separator = raw.lastIndexOf(":");
-  const model = separator > 0 ? raw.slice(0, separator) : raw;
-  const effort = separator > 0 ? raw.slice(separator + 1) : "";
-  if (!model.startsWith("gpt-") || !CODEX_SUBPROCESS_EFFORTS.has(effort)) {
-    throw new Error(`${label} subprocess must use a Codex gpt-* model with an explicit reasoning effort`);
-  }
-  return raw;
-};
+export const isDirectImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
+  templateStep?.taskTemplate?.name === DIRECT_TEMPLATE_NAME
+  && templateStep.stepIndex === 1
+  && templateStep.outputKind === "implementation";
 
-export const subprocessRunConfig = async (
-  agent: Pick<Agent,
-    "name"
-    | "ordinarySubprocessModel"
-    | "ordinarySubprocessCodexServiceTier"
-    | "elevatedSubprocessModel"
-    | "elevatedSubprocessCodexServiceTier"
-  >,
-  templateStep: {
-    stepIndex?: number;
-    outputKind?: string;
-    taskTemplate?: { name: string } | null;
-  } | null = null,
-): Promise<{
-  subprocessModel: string;
-  subprocessCodexServiceTier: CodexServiceTier;
-  elevatedSubprocessModel: string;
-  elevatedSubprocessCodexServiceTier: CodexServiceTier;
-} | null> => {
-  const compoundExecutioner = isCompoundImplementationStep(templateStep);
-  if (!compoundExecutioner && agent.name !== COMPOUND_IMPLEMENTATION_AGENT_NAME) return null;
-  if (compoundExecutioner && agent.name !== COMPOUND_IMPLEMENTATION_AGENT_NAME) {
-    throw new CompoundImplementationAssigneeError();
-  }
-  const ordinaryModel = validatedCodexSubprocessModel("ordinary", agent.ordinarySubprocessModel);
-  const elevatedModel = validatedCodexSubprocessModel("elevated", agent.elevatedSubprocessModel);
-  if (!agent.ordinarySubprocessCodexServiceTier || !agent.elevatedSubprocessCodexServiceTier) {
-    throw new Error("Implementation Plan Executioner requires service tiers for both Codex subprocess profiles");
-  }
+export const nativeImplementationSubagentRunConfig = (
+  runner: RunnerKind,
+  templateStep: CompoundImplementationStepShape,
+): { subagentModel: string; subagentMaxConcurrent: number } | null => {
+  if (runner !== RunnerKind.CODEX) return null;
+  if (!isCompoundImplementationStep(templateStep) && !isDirectImplementationStep(templateStep)) return null;
   return {
-    subprocessModel: ordinaryModel,
-    subprocessCodexServiceTier: agent.ordinarySubprocessCodexServiceTier,
-    elevatedSubprocessModel: elevatedModel,
-    elevatedSubprocessCodexServiceTier: agent.elevatedSubprocessCodexServiceTier,
+    subagentModel: NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
+    subagentMaxConcurrent: NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
   };
 };
 
@@ -666,7 +637,7 @@ const enqueueTaskRunInternal = async (
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-  const subprocess = await subprocessRunConfig(lockedAgent, task.templateStep);
+  const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
   const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
   return tx.run.create({ data: {
     projectId: task.projectId,
@@ -678,7 +649,7 @@ const enqueueTaskRunInternal = async (
     runner: derived.runner,
     model: derived.model,
     codexServiceTier: derived.codexServiceTier,
-    ...subprocess,
+    ...subagent,
     targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: task.opensPullRequest,

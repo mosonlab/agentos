@@ -41,10 +41,6 @@ const lockedAgent = <T extends Record<string, unknown>>(agent: T | null): (T & R
   name: "Agent",
   archivedAt: null,
   codexServiceTier: "DEFAULT",
-  ordinarySubprocessModel: null,
-  ordinarySubprocessCodexServiceTier: null,
-  elevatedSubprocessModel: null,
-  elevatedSubprocessCodexServiceTier: null,
   ...agent,
 }) : null;
 
@@ -1016,7 +1012,7 @@ test("Agent API refuses Fast for a non-Codex model", async () => {
   });
 });
 
-test("Agent API refuses an atomic executioner rename and subprocess-profile clear", async () => {
+test("Agent API refuses an executioner rename", async () => {
   await withTokens(async () => {
     let updated = false;
     const executioner = lockedAgent({
@@ -1025,14 +1021,10 @@ test("Agent API refuses an atomic executioner rename and subprocess-profile clea
       environmentId: "environment-1",
       name: "implementation-plan-executioner",
       title: "Implementation Plan Executioner",
-      model: "gpt-5.6-sol:medium",
+      model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
-      ordinarySubprocessModel: "gpt-5.6-luna:max",
-      ordinarySubprocessCodexServiceTier: "DEFAULT",
-      elevatedSubprocessModel: "gpt-5.6-sol:high",
-      elevatedSubprocessCodexServiceTier: "DEFAULT",
     });
     const tx = {
       $queryRaw: async () => [{ id: executioner!.id }],
@@ -1048,13 +1040,7 @@ test("Agent API refuses an atomic executioner rename and subprocess-profile clea
     const response = await createApp(database).request(`/agents/${executioner!.id}`, {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: "renamed-executioner",
-        ordinarySubprocessModel: null,
-        ordinarySubprocessCodexServiceTier: null,
-        elevatedSubprocessModel: null,
-        elevatedSubprocessCodexServiceTier: null,
-      }),
+      body: JSON.stringify({ name: "renamed-executioner" }),
     });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), {

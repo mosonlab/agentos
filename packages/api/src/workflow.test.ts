@@ -17,11 +17,11 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   LIVE_TASK_STATUSES,
+  nativeImplementationSubagentRunConfig,
   resolveRequeueBase,
   resolveRunBranches,
   RunStatus,
   runnerFor,
-  subprocessRunConfig,
   RunnerKind,
   RunnerPreference,
   TaskStatus,
@@ -39,10 +39,6 @@ const runAgent = (overrides: Record<string, unknown> = {}) => ({
   title: "Senior Developer",
   model: "claude",
   codexServiceTier: CodexServiceTier.DEFAULT,
-  ordinarySubprocessModel: null,
-  ordinarySubprocessCodexServiceTier: null,
-  elevatedSubprocessModel: null,
-  elevatedSubprocessCodexServiceTier: null,
   runnerPreference: RunnerPreference.CLAUDE,
   foundationalPrompt: "f",
   rolePrompt: "r",
@@ -96,46 +92,28 @@ test("deriveRunConfig preserves ordinary config and fixes the compound execution
     taskTemplate: { name: "compound-engineer-workflow" },
   }, task), {
     runner: RunnerKind.CODEX,
-    model: "gpt-5.6-sol:medium",
+    model: "gpt-5.6-sol:high",
     codexServiceTier: CodexServiceTier.DEFAULT,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
 });
 
-test("executioner snapshots both configured Codex subprocess profiles while other agents do not", async () => {
-  const ordinary = {
-    name: "senior-dev",
-    ordinarySubprocessModel: null,
-    ordinarySubprocessCodexServiceTier: null,
-    elevatedSubprocessModel: null,
-    elevatedSubprocessCodexServiceTier: null,
+test("Codex implementation steps receive the fixed native Luna child capability", () => {
+  const compound = {
+    stepIndex: 5,
+    outputKind: "implementation",
+    taskTemplate: { name: "compound-engineer-workflow" },
   };
-  const executioner = {
-    name: "implementation-plan-executioner",
-    ordinarySubprocessModel: "gpt-5.6-luna:max",
-    ordinarySubprocessCodexServiceTier: CodexServiceTier.FAST,
-    elevatedSubprocessModel: "gpt-5.6-sol:high",
-    elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
+  const direct = {
+    stepIndex: 1,
+    outputKind: "implementation",
+    taskTemplate: { name: "direct-engineer-workflow" },
   };
-  assert.equal(await subprocessRunConfig(ordinary as never), null);
-  assert.deepEqual(await subprocessRunConfig(executioner as never), {
-    subprocessModel: "gpt-5.6-luna:max",
-    subprocessCodexServiceTier: CodexServiceTier.FAST,
-    elevatedSubprocessModel: "gpt-5.6-sol:high",
-    elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
-  });
-  await assert.rejects(
-    () => subprocessRunConfig({ ...executioner, elevatedSubprocessModel: "openai-codex/gpt-5.6-sol:high" } as never),
-    /must use a Codex gpt-\* model/u,
-  );
-  await assert.rejects(
-    () => subprocessRunConfig(ordinary as never, {
-      stepIndex: 5,
-      outputKind: "implementation",
-      taskTemplate: { name: "compound-engineer-workflow" },
-    }),
-    /must remain assigned to the active in-project Agent implementation-plan-executioner/u,
-  );
+  const expected = { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 };
+  assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, compound), expected);
+  assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, direct), expected);
+  assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CLAUDE, direct), null);
+  assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, null), null);
 });
 
 test("task creation keeps its runner, model, and promptHash output while derivation is shared", async () => {

@@ -105,13 +105,9 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     environmentId: environment.id,
     name: "implementation-plan-executioner",
     title: "Implementation Plan Executioner",
-    model: "gpt-5.6-sol:medium",
+    model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
-    ordinarySubprocessModel: "gpt-5.6-sol:medium",
-    ordinarySubprocessCodexServiceTier: "DEFAULT",
-    elevatedSubprocessModel: "gpt-5.6-sol:high",
-    elevatedSubprocessCodexServiceTier: "DEFAULT",
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id,

@@ -8,7 +8,6 @@ import type { Agent } from "../lib/types";
 const agent = (id: string, archivedAt: string | null): Agent => ({
   id, projectId: "p", environmentId: "e", name: id, title: id,
   model: "claude-opus-5:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
-  ordinarySubprocessModel: null, ordinarySubprocessCodexServiceTier: null, elevatedSubprocessModel: null, elevatedSubprocessCodexServiceTier: null,
   foundationalPrompt: "foundation", rolePrompt: "role", createdAt: "2026-08-16T00:00:00.000Z",
   updatedAt: "2026-08-16T00:00:00.000Z", archivedAt,
 });

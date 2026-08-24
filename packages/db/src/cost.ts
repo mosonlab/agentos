@@ -50,7 +50,11 @@ const hasTokens = (session: CostableSession): boolean =>
 
 /** Provider cost is authoritative. Estimation is a read-time projection so it
  * applies to historical rows without ever overwriting their reported amount. */
-export const sessionUsageCost = (model: string, session: CostableSession): UsageCost => {
+export const sessionUsageCost = (
+  model: string,
+  session: CostableSession,
+  options: { mixedModels?: boolean } = {},
+): UsageCost => {
   const tokens = {
     inputTokens: session.inputTokens,
     cachedInputTokens: session.cachedInputTokens,
@@ -60,6 +64,11 @@ export const sessionUsageCost = (model: string, session: CostableSession): Usage
     return { costUsd: new Prisma.Decimal(session.costUsd), estimated: false, ...tokens };
   }
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
+  // Codex reports aggregate session tokens without a per-model breakdown for
+  // native children. Pricing that total at the root model would overstate a
+  // Luna-heavy implementation Run, so retain tokens but leave cost unpriced
+  // unless the provider supplies an authoritative amount.
+  if (options.mixedModels) return { costUsd: null, estimated: false, ...tokens };
 
   const prices = MODEL_TOKEN_PRICES[modelNameForPricing(model)];
   // Every component is required for a complete estimate. Persisted null means

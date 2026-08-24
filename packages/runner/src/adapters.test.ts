@@ -39,10 +39,8 @@ const claim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "codex",
     codexServiceTier: "DEFAULT",
-    subprocessModel: null,
-    subprocessCodexServiceTier: null,
-    elevatedSubprocessModel: null,
-    elevatedSubprocessCodexServiceTier: null,
+    subagentModel: null,
+    subagentMaxConcurrent: null,
     targetBranch: "main",
     targetBranchPublished: false,
     pinnedBaseSha: null,
@@ -433,49 +431,42 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
   }
 });
 
-test("executioner child environment exposes both snapshotted subprocess profiles", () => {
+test("native implementation subagents are pinned on fresh and resumed Codex launches", () => {
   const executioner = {
     ...claim,
     agent: { ...claim.agent, name: "implementation-plan-executioner" },
     run: {
       ...claim.run,
-      subprocessModel: "gpt-5.6-luna:max",
-      subprocessCodexServiceTier: "FAST" as const,
-      elevatedSubprocessModel: "gpt-5.6-sol:high",
-      elevatedSubprocessCodexServiceTier: "DEFAULT" as const,
-    },
-    secrets: {
-      ...claim.secrets,
-      AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: "default",
+      subagentModel: "gpt-5.6-luna:max",
+      subagentMaxConcurrent: 8,
     },
   };
-  const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
-    executioner,
-    scratch,
-    "/work",
-  );
-  assert.equal(env.AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL, "gpt-5.6-luna");
-  assert.equal(env.AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT, "max");
-  assert.equal(env.AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER, "fast");
-  assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL, "gpt-5.6-sol");
-  assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT, "high");
-  assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER, "default");
-  assert.match(buildPrompt(executioner), /service tier: fast/u);
-  assert.throws(
-    () => buildPrompt({ ...executioner, run: { ...claim.run } }),
-    /missing its Codex subprocess snapshot/u,
-  );
+  const resume = { ...runSpec(), claim: executioner, providerConversationId: "thread-child", input: "continue" };
+  for (const args of [argsForRunner("CODEX", { ...runSpec(), claim: executioner }), argsForRunner("CODEX", resume, resume)]) {
+    assert.ok(args.includes("multi_agent_v2"));
+    assert.ok(args.includes('agents.default_subagent_model="gpt-5.6-luna"'));
+    assert.ok(args.includes('agents.default_subagent_reasoning_effort="max"'));
+    assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
+  }
+  assert.match(buildPrompt(executioner), /maximum concurrent child threads: 8 \(root excluded\)/u);
+  assert.match(buildPrompt(executioner), /do not launch nested Codex CLI processes/u);
   assert.throws(
     () => buildPrompt({
       ...executioner,
       run: {
         ...executioner.run,
-        elevatedSubprocessModel: null,
-        elevatedSubprocessCodexServiceTier: null,
+        subagentMaxConcurrent: null,
       },
     }),
-    /incomplete Codex subprocess snapshot/u,
+    /incomplete native subagent snapshot/u,
+  );
+  assert.throws(() => buildPrompt({
+    ...executioner,
+    run: { ...executioner.run, subagentModel: "gpt-5.6-sol:high" },
+  }), /must use gpt-5\.6-luna:max with concurrency 8/u);
+  assert.throws(
+    () => buildPrompt({ ...executioner, runner: "PI" }),
+    /require a Codex root Run/u,
   );
 });
 

@@ -63,21 +63,25 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
 });
 
-test("canonical profiles start at Default and the published migration is repaired only forward", async () => {
-  const [seed, publishedMigration, forwardMigration] = await Promise.all([
+test("canonical profiles start at Default and native child capability replaces Agent subprocess profiles", async () => {
+  const [seed, publishedMigration, historicalRepair, nativeMigration] = await Promise.all([
     readFile(`${prismaRoot}seed.ts`, "utf8"),
     readFile(`${prismaRoot}migrations/20260823010000_codex_service_tier/migration.sql`, "utf8"),
     readFile(`${prismaRoot}migrations/20260823033000_executioner_subprocess_profiles/migration.sql`, "utf8"),
+    readFile(`${prismaRoot}migrations/20260824010000_native_implementation_subagents/migration.sql`, "utf8"),
   ]);
 
   assert.match(seed, /create:\s*\{[\s\S]*codexServiceTier: CodexServiceTier\.DEFAULT,/u);
   assert.doesNotMatch(seed, /CodexServiceTier\.FAST/u);
   assert.match(publishedMigration, /UPDATE\s+"Agent"[\s\S]*"codexServiceTier"\s*=\s*'fast'/u);
   assert.match(publishedMigration, /ADD COLUMN "codexServiceTier" "CodexServiceTier" NOT NULL DEFAULT 'default'/u);
-  assert.match(forwardMigration, /migration\."finished_at" IS NOT NULL/u);
-  assert.match(forwardMigration, /agent\."updatedAt" < migration\."finished_at"/u);
-  assert.match(forwardMigration, /"ordinarySubprocessModel" = 'gpt-5\.6-luna:max'/u);
-  assert.match(forwardMigration, /"elevatedSubprocessModel" = 'gpt-5\.6-sol:high'/u);
+  assert.match(historicalRepair, /migration\."finished_at" IS NOT NULL/u);
+  assert.match(historicalRepair, /agent\."updatedAt" < migration\."finished_at"/u);
+  assert.match(nativeMigration, /ADD COLUMN "subagentModel" TEXT/u);
+  assert.match(nativeMigration, /"subagentModel" = 'gpt-5\.6-luna:max'/u);
+  assert.match(nativeMigration, /"subagentMaxConcurrent" = 8/u);
+  assert.match(nativeMigration, /DROP COLUMN "ordinarySubprocessModel"/u);
+  assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
 test("signed AgentOS model routing stays pinned in the canonical contract", () => {
@@ -108,6 +112,11 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
   assert.deepEqual(canonical.get("senior-dev-high"), {
     name: "senior-dev-high",
+    model: "gpt-5.6-sol:high",
+    runner: RunnerPreference.CODEX,
+  });
+  assert.deepEqual(canonical.get("implementation-plan-executioner"), {
+    name: "implementation-plan-executioner",
     model: "gpt-5.6-sol:high",
     runner: RunnerPreference.CODEX,
   });
@@ -162,13 +171,14 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.doesNotMatch(regressionVerification, /blind reports mechanically/u);
 });
 
-test("the executioner launches ordinary and risk subprocesses with explicit service tiers", async () => {
+test("the executioner delegates only through platform-pinned native Luna children", async () => {
   const executioner = await roleSource("implementation-plan-executioner");
-  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL/u);
-  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT/u);
-  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER/u);
-  assert.match(executioner, /AGENTOS_ELEVATED_CODEX_SUBPROCESS_\*/u);
-  assert.doesNotMatch(executioner, /gpt-5\.6-sol.*model_reasoning_effort=high/u);
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-5.6-sol:high");
+  assert.match(executioner, /pins every native child to Luna max/u);
+  assert.match(executioner, /eight concurrent child threads/u);
+  assert.match(executioner, /Delegation is not one slice per child/u);
+  assert.match(executioner, /one long-lived Luna max merger child/u);
+  assert.doesNotMatch(executioner, /codex exec/u);
 });
 
 test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {

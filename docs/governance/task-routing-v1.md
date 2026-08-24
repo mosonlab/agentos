@@ -48,7 +48,7 @@ Direct is a formal chain route, not an exemption from review or exact-head human
 
 Critical means only that the work touches persisted data or performs an irreversible external action. No other condition makes a task Critical by itself.
 
-Critical is a risk label, not an implementation-role route. It tightens effort under the active tier: a ⑤ slice that touches persisted data or performs an irreversible external action uses sol:high, and a ⑦ repair diff that touches structural risk uses sol:high. Here, `persisted data` means runtime-created user or system data, including its schema, that must survive a version change. Structural risk means a change to a public interface, persisted data, a component boundary, or a foundational dependency.
+Critical is a risk label, not a child-model route. Step ⑤ keeps every native child on Luna max; the Sol-high root must inspect a risk slice's boundary, rollback behavior, and acceptance evidence before integration, and a child cannot perform an irreversible external action. A ⑦ repair diff that touches structural risk uses sol:high. Here, `persisted data` means runtime-created user or system data, including its schema, that must survive a version change. Structural risk means a change to a public interface, persisted data, a component boundary, or a foundational dependency.
 
 ## Full Assurance eleven-step final table
 
@@ -60,7 +60,7 @@ This is the target shape of the seeded `compound-engineer-workflow` template and
 | ② plan | plan | CLAUDE, fable-5, medium | 产物=垂直切片集，一片一文件：{id, title, delivers, blocked_by[], acceptance[], files_hint[]}；切片判据：纵穿全层、独立可演示、单上下文窗装得下；宽重构走 expand→migrate（分批）→contract；plan 会话 session-id 落链分支文件 |
 | ③ 计划评审 | review-coordinator | PI, openai-codex/gpt-5.6-sol, high | 作者为 Fable，评审异厂；检查：粒度/依赖边真伪/该合该拆三问、每片「能演示什么」、每条验收判据在基点 commit 为红 |
 | ④ 计划修订 | plan-reviser | CLAUDE, fable-5, medium | resume ②会话（同模型同档；显式 session-id，禁 `--last`）；跨链步 resume 实测不通过则新窗读②③产出；不服 findings 须列明理由不得静默略过；实施授权闸在本步后 |
-| ⑤ 实现 | executioner | CODEX 父会话 sol, medium + 子代理 luna, max | 切片逐片按正典入口 (a)/(b) 路由（链即入口 (b) 结构），触及 persisted data 或不可回滚外部动作的切片改 sol:high；父会话按 blocked_by 拓扑分层 wave 调度，同 wave 并行，每子代理一 worktree，屏障处串行合入并跑测试，整案单次 push；子代理经 multi_agent_v2 spawn 且档位写死。fan-out 启用 hard gate（先实测：spawn schema、子代理 model/effort 生效证据、worktree 创建/回收、并发上限、失败清理），任一项不可证明则过渡态=逐片 luna:max 串行（一片一新进程） |
+| ⑤ 实现 | executioner | CODEX 父会话 sol, high + 子代理 luna, max | 保留 approved slice DAG，父会话按实时 dependency frontier 调度，但按上下文与写入所有权组合 assignment，不做一切片一进程；子代理经 multi_agent_v2 spawn，模型固定 luna:max，最多八个 child threads（root 不计），在受控资源上限内尽量填满所有可安全并行的 slots；并发写入者各用独立 worktree，首个结果后保留一个长驻 Luna merger，通常七个 implementers 加一个 merger；结果就绪即依赖安全地合入，无全 wave 屏障；child 只跑窄验收，整案集成后跑一次 implementation suite，不为每个 child/worktree/merge 跑 Gate；失败在原 child 做一次有界纠正，再由 root 接管；risk slice 仍可由 Luna 实现，但 Sol-high root 合入前核查 risk boundary、rollback 与 acceptance，child 禁止不可逆外部动作；整案单次 push，PR 仍由 platform 创建 |
 | ⑥a 代码评审（Sol 路） | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | base=⑤启动前冻结 commit，head=⑤记录的结束 commit，审完整 integrated diff；同一会话先完成 Standards pass 并闭合 findings，再单独执行逐项引用治理文本的 Spec pass，合并为一份报告；findings 仅持久化为 TaskStepOutput，不写入或推送链分支 |
 | ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, medium | workspace 以⑤记录的结束 commit 做 fetch-level isolated detached checkout；claim 以 non-report metadata 提供 immutable base/head；先将独立 Standards/Spec 评审持久化为 intermediate TaskStepOutput，成功写入后才解锁并读取⑥a，再按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；最终报告与 provider session id 仅落 platform output |
 | ⑦ 修复 | senior-dev | CODEX, sol, medium | 按封闭 must-fix 清单修；修复 diff 触及任一结构风险升 sol:high（本合同的 product-owner 裁定） |
@@ -68,13 +68,13 @@ This is the target shape of the seeded `compound-engineer-workflow` template and
 | ⑧ wiki | librarian | CODEX, terra, medium | 自 luna:high 改此（luna:high 违「Luna 一律 max」硬禁令；Terra $2/$12） |
 | ⑨ 人工 PR 审查 | 人工闸 | — | 不变 |
 
-In summary, Full Assurance runs specification and planning through implementation, two-route review, must-fix closure, regression verification, optional documentation, and exact-head human PR review. Step ⑤ uses `executioner` because a persisted Plan exists. Direct skips ①–④ and uses `senior-dev` at ⑤.
+In summary, Full Assurance runs specification and planning through implementation, two-route review, must-fix closure, regression verification, optional documentation, and exact-head human PR review. Step ⑤ uses `executioner` because a persisted Plan exists. Direct skips ①–④ and uses `senior-dev-luna` by default at ⑤, while `senior-dev-high` remains an allowed dispatch-time root under the repository routing rules. Either Direct Codex root receives the same platform-pinned Luna max native-child capability; non-implementation steps do not.
 
 ## Review structure
 
 Steps ⑥a, ⑥b, and ⑥c form the two-route blind-review flow. Review reports and session records live only in TaskStepOutput/platform output and never on the chain branch. ⑥a independently reviews the integrated diff and persists its findings there. ⑥b receives the immutable implementation base/head as non-report claim metadata and runs from a fetch-level isolated detached checkout pinned to ⑤'s recorded end commit; it completes and persists its own Standards/Spec review before the successful write unlocks ⑥a, then performs final adjudication. After ⑦ closes the must-fix list from predecessor outputs, ⑥c uses the dedicated Sol-medium regression verifier to read the complete persisted review package, verify the complete repair diff, and run the one exact-head mechanical gate that binds acceptance to the verified head.
 
-Luna may write only when the dispatch route's safeguards and rollback conditions have been verified. Blind review requires the adjudicator to persist an independent review before reading the other route. Findings carry a stable ID, location, evidence, and severity; P0/P1 findings are must-fix. After repair, the dedicated Sol-medium regression verifier accounts for the adjudicated must-fix list over the complete fix diff, and that verified exact head becomes the acceptance target.
+Luna may write only when the implementation root enforces independent worktrees, bounded authority, narrow acceptance tests, and root review of risk boundaries. Blind review requires the adjudicator to persist an independent review before reading the other route. Findings carry a stable ID, location, evidence, and severity; P0/P1 findings are must-fix. After repair, the dedicated Sol-medium regression verifier accounts for the adjudicated must-fix list over the complete fix diff, and that verified exact head becomes the acceptance target.
 
 ## Human approval placement
 
