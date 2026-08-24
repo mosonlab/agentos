@@ -1205,7 +1205,7 @@ const seedTemplateChain = async (label: string, stepCount = 3) => {
   return { project, agent, repo, template, chain };
 };
 
-test("a pinned successor fails explicitly without its source commit and advances linearly once recorded", async () => {
+test("a pinned successor fails explicitly without canonical source output and advances once recorded", async () => {
   const { template, chain } = await seedTemplateChain("pinned-base", 3);
   const pinnedStep = await db.taskTemplateStep.findFirstOrThrow({
     where: { taskTemplateId: template.id, stepIndex: 2 },
@@ -1225,7 +1225,7 @@ test("a pinned successor fails explicitly without its source commit and advances
 
   await assert.rejects(
     () => db.$transaction((tx) => activateChainSuccessor(tx, predecessor)),
-    /Pinned task .* cannot activate from step 1: referenced step has no recorded commitSha/u,
+    /Pinned task .* cannot activate from step 1: referenced step has no canonical implementation output/u,
   );
   assert.equal(await db.run.count({ where: { taskId: chain.tasks[1]!.id } }), 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.tasks[1]!.id } })).status, "TODO");
@@ -1235,19 +1235,15 @@ test("a pinned successor fails explicitly without its source commit and advances
     taskId: predecessor.id,
     runId: predecessorRun.id,
     kind: "implementation",
-    body: "implemented",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      baseSha: implementationBaseSha,
+      headSha: commitSha,
+      summary: "implemented",
+      testsRun: ["focused"],
+    }),
     commitSha,
   } });
-  await assert.rejects(
-    () => db.$transaction((tx) => activateChainSuccessor(tx, predecessor)),
-    /Pinned task .* cannot activate from step 1: referenced step has no recorded implementation baseSha/u,
-  );
-  assert.equal(await db.run.count({ where: { taskId: chain.tasks[1]!.id } }), 0);
-
-  await db.run.update({
-    where: { id: predecessorRun.id },
-    data: { baseSha: implementationBaseSha },
-  });
   const advanced = await db.$transaction((tx) => activateChainSuccessor(tx, predecessor));
   assert.equal(advanced.nextTaskId, chain.tasks[1]!.id);
   const pinnedRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[1]!.id } });
