@@ -1,5 +1,6 @@
 import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
 
+import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
 
@@ -24,16 +25,12 @@ const STEP_BASE_TRANSITIONS = new Map([
   ["direct-engineer-workflow:2", { from: null, to: 1 }],
 ]);
 
-const AGENT_TRANSITIONS = new Map([
-  ["review-coordinator", {
-    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
-    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
-  }],
-  ["review-coordinator-sol", {
-    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
-    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
-  }],
-]);
+const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
+  const expected = catalogRunnerForModel(agent.model);
+  if (!expected || agent.runnerPreference === RunnerPreference.AUTO || agent.runnerPreference === RunnerPreference.INHERIT
+    || expected === agent.runnerPreference) return null;
+  return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
+};
 
 // Every canonical template, every step of each, and every role under agents/
 // is synced. Omitting any source here would let a prompt edit silently miss
@@ -340,6 +337,7 @@ const main = async (): Promise<void> => {
           name: true,
           title: true,
           model: true,
+          runtimeConfigCustomized: true,
           runnerPreference: true,
           inboxAccess: true,
           collaborators: { select: { allowedAgent: { select: { name: true } } } },
@@ -356,20 +354,27 @@ const main = async (): Promise<void> => {
       }
       const updatedRoles: Record<string, number> = {};
       let adoptedAgentDefaults = 0;
+      let preservedAgentOverrides = 0;
       for (const name of roleNames) {
         const role = rolesByName.get(name)!;
         for (const agent of agentsByName.get(name)!) {
           const differences = roleSourceStructureDifferences(agent, role);
-          const transition = AGENT_TRANSITIONS.get(name);
+          const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
+          const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
+          const transition = CANONICAL_AGENT_RUNTIME_TRANSITIONS.get(name);
           const adoptsCanonicalDefaults = differences.length === 2
             && differences.includes("model")
             && differences.includes("runnerPreference")
+            && !agent.runtimeConfigCustomized
             && transition?.from.model === agent.model
             && transition.from.runnerPreference === agent.runnerPreference
             && transition.to.model === role.model
             && transition.to.runnerPreference === role.runnerPreference;
-          if (differences.length > 0 && !adoptsCanonicalDefaults) {
-            throw new Error(`Agent ${name} (${agent.id}) differs from canonical Markdown structure: ${differences.join(", ")}`);
+          if (structuralDifferences.length > 0) {
+            throw new Error(`Agent ${name} (${agent.id}) differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`);
+          }
+          if (runtimeDifferences.length > 0 && runtimeConfigRefusal(agent)) {
+            throw new Error(`Agent ${name} (${agent.id}) has an invalid runtime configuration: ${runtimeConfigRefusal(agent)}`);
           }
           if (adoptsCanonicalDefaults) {
             await tx.agent.update({
@@ -377,6 +382,12 @@ const main = async (): Promise<void> => {
               data: transition.to,
             });
             adoptedAgentDefaults += 1;
+          } else if (runtimeDifferences.length > 0 && !agent.runtimeConfigCustomized) {
+            await tx.agent.update({
+              where: { id: agent.id },
+              data: { runtimeConfigCustomized: true },
+            });
+            preservedAgentOverrides += 1;
           }
         }
         updatedRoles[name] = (await tx.agent.updateMany({
@@ -404,6 +415,7 @@ const main = async (): Promise<void> => {
         preservedTaskAssignments,
         preservedBlindReviewPrompts,
         adoptedAgentDefaults,
+        preservedAgentOverrides,
         updatedSteps,
         updatedRoles,
       };

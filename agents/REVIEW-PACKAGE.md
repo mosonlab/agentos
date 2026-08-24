@@ -62,7 +62,8 @@ their final assigned chain reaches its human-review gate.
 Role frontmatter and `packages/db/src/agent-contract.ts` jointly define the
 canonical model and runner defaults. `packages/db/prisma/seed.ts` imports the
 role sources and binds the review and regression phases to their distinct
-canonical roles in the Full Assurance template.
+canonical roles in the Full Assurance template. An operator's model or runner
+selection is an explicit runtime override and survives seed and canonical sync.
 
 Existing task rows keep the assignee captured when their chain was created.
 Canonical sync migrates only unarchived TODO regression tasks with no Run,

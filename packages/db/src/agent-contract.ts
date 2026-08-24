@@ -25,6 +25,25 @@ export const CANONICAL_AGENT_DEFAULTS = [
 ] as const;
 
 /**
+ * Runtime migrations that predate operator-owned model selections. These are
+ * the only persisted model/runner changes canonical sync may adopt without an
+ * explicit operator override.
+ */
+export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
+  from: { model: string; runnerPreference: RunnerPreference };
+  to: { model: string; runnerPreference: RunnerPreference };
+}>([
+  ["review-coordinator", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
+  ["review-coordinator-sol", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
+]);
+
+/**
  * The Direct tier has no spec or plan phase and ends in the same mechanical
  * readiness and merge contract as the full-assurance template. Implementation
  * is senior-dev-luna, not the executioner, whose

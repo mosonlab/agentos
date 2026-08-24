@@ -1,6 +1,6 @@
 /**
- * The release-owned loader for `agents/`, the single source of every seeded
- * agent prompt, model and runner.
+ * The release-owned loader for `agents/`, the source of every seeded agent
+ * prompt and initial model/runner default.
  *
  * It used to live inside `prisma/seed.ts`, reachable only by running that seed —
  * which creates the internal multi-role installation, every collaboration edge

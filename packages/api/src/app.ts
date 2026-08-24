@@ -1988,7 +1988,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const result = await db.$transaction(async (tx) => {
       const before = await lockAgentRow(tx, agentId);
       if (!before) return { error: "Agent not found", code: 404 as const };
-      const merged = { ...before, ...withoutUndefined(body) };
+      const patch = withoutUndefined(body);
+      const merged = { ...before, ...patch };
       if (before.name === "implementation-plan-executioner" && merged.name !== before.name) {
         return { error: "implementation-plan-executioner is a canonical Agent name and cannot be changed", code: 400 as const };
       }
@@ -2004,7 +2005,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       return { agent: await tx.agent.update({
         where: { id: agentId },
-        data: withoutUndefined(body) as Prisma.AgentUncheckedUpdateInput,
+        data: {
+          ...patch,
+          ...(body.model !== undefined || body.runnerPreference !== undefined
+            ? { runtimeConfigCustomized: true }
+            : {}),
+        } as Prisma.AgentUncheckedUpdateInput,
       }) };
     });
     if ("error" in result) return context.json({ error: result.error }, result.code);

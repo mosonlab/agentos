@@ -529,7 +529,7 @@ export const zh = {
   "settings.runner.reason": "熔断原因",
   "settings.runner.required": "必需",
   "settings.runner.restartWarning": "Daemon 重启后会作为新条目显示最多 15 分钟；设置 RUNNER_ID 可让重启前后保持同一身份。",
-  "settings.runner.seedWarning": "npm run db:seed 会从 agents/roles/*.md 重写每个 agent 的模型与 runner。",
+  "settings.runner.seedWarning": "页面保存的模型与 runner 是 operator override；seed 和 canonical sync 会保留它们。",
   "settings.runner.starterIsCodex": "本预览只装一个启动代理,它跑在 Codex 上。Codex 是它唯一需要的后端。",
   "settings.runner.state": "状态",
   "settings.runner.title": "Runner",

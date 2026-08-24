@@ -36,8 +36,13 @@ const main = async (): Promise<void> => {
   for (const agent of activeAgents) {
     const expected = expectedByName.get(agent.name)!;
     const differences = roleSourceStructureDifferences(agent, expected);
-    if (differences.length > 0) {
-      throw new Error(`${agent.name} differs from canonical Markdown structure: ${differences.join(", ")}`);
+    const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
+    const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
+    if (structuralDifferences.length > 0) {
+      throw new Error(`${agent.name} differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`);
+    }
+    if (runtimeDifferences.length > 0 && !agent.runtimeConfigCustomized) {
+      throw new Error(`${agent.name} runtime model/runner differs from canonical defaults without an operator override`);
     }
     if (agent.foundationalPrompt !== agentSources.foundationalPrompt) {
       throw new Error(`${agent.name} foundational prompt differs from its canonical Markdown source`);

@@ -532,7 +532,7 @@ export const en = {
   "settings.runner.reason": "Circuit reason",
   "settings.runner.required": "Required",
   "settings.runner.restartWarning": "A restarted daemon appears as a new entry for up to 15 minutes; set RUNNER_ID to keep one identity across restarts.",
-  "settings.runner.seedWarning": "npm run db:seed rewrites every agent's model and runner from agents/roles/*.md.",
+  "settings.runner.seedWarning": "Models and runners saved in the console are operator overrides; seed and canonical sync preserve them.",
   "settings.runner.starterIsCodex": "This preview installs one starter agent and it runs on Codex. Codex is the only backend it requires.",
   "settings.runner.state": "State",
   "settings.runner.title": "Runner",

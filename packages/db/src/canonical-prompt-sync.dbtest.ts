@@ -78,7 +78,7 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
 
   const rejected = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(rejected.status, 0, rejected.output);
-  assert.match(rejected.output, /Agent review-coordinator .* differs from canonical Markdown structure: title, model, runnerPreference/u);
+  assert.match(rejected.output, /Agent review-coordinator .* differs from canonical Markdown structure: title/u);
   const rolledBack = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
     select: { model: true, runnerPreference: true },
@@ -102,6 +102,28 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   assert.equal(upgraded.length, 2);
   assert.ok(upgraded.every((agent) => agent.model === "openai-codex/gpt-5.6-sol:high"
     && agent.runnerPreference === RunnerPreference.PI));
+});
+
+test("sync preserves an operator-selected model and runner", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  await prisma.agent.update({
+    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    data: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE, runtimeConfigCustomized: true },
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"preservedAgentOverrides":0/u);
+
+  const spec = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  });
+  assert.deepEqual(spec, {
+    model: "claude-opus-5:medium",
+    runnerPreference: RunnerPreference.CLAUDE,
+    runtimeConfigCustomized: true,
+  });
 });
 
 test("sync creates the narrow verifier and migrates only never-run TODO regression tasks", async () => {
