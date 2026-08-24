@@ -125,7 +125,7 @@ test("instantiating the canonical feature template copies every layer and writes
   assert.equal(result.tasks.length, 13);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
   assert.deepEqual(created.map((task) => task.chainLayer), canonicalTemplateSteps.map((step) => step.layer));
-  assert.equal(created.some((task) => Object.hasOwn(task, "followUpTaskId")), false);
+  assert.ok(created.every((task) => typeof task.chainLayer === "number"));
   assert.equal(created[11]!.assigneeType, AssigneeType.AGENT);
   assert.equal(created[11]!.approvalGate, false);
   assert.equal(created[11]!.templateStep.outputKind, "merge-authorization");

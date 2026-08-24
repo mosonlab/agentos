@@ -36,7 +36,7 @@ const seedWebhook = async () => {
     webhookRepoId: repo.id, webhookPayloadMapping: { map: { ticket: "issue.title" } },
   } });
   await db.taskTemplateStep.create({ data: {
-    taskTemplateId: template.id, assigneeAgentId: agent.id, stepIndex: 0, name: "Implement", assigneeType: "AGENT", prompt: "Handle {{ticket}}",
+    taskTemplateId: template.id, assigneeAgentId: agent.id, stepIndex: 0, layer: 0, name: "Implement", assigneeType: "AGENT", prompt: "Handle {{ticket}}",
   } });
   return { project, template };
 };

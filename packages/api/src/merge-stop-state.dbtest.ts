@@ -430,7 +430,7 @@ test("legacy seven-step re-authorize fails loudly rather than crossing chains fo
   await db.session.delete({ where: { id: chain.gateSession.id } });
   const foreignTask = await db.task.create({ data: {
     projectId: chain.project.id, repoId: chain.repo.id, name: "Foreign evidence", description: "unrelated chain",
-    assigneeType: "AGENT", assigneeAgentId: chain.agent.id, chainId: "foreign-chain", chainIndex: 5,
+    assigneeType: "AGENT", assigneeAgentId: chain.agent.id, chainId: "foreign-chain", chainIndex: 5, chainLayer: 5,
     status: "DONE", targetBranch: "master",
   } });
   const foreignRun = await db.run.create({ data: {

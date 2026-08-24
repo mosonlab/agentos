@@ -412,6 +412,7 @@ test("older irrelevant REVIEW integrators cannot starve a later eligible stop", 
     opensPullRequest: false,
     chainId: `old-irrelevant-${index}`,
     chainIndex: 12,
+    chainLayer: 12,
     status: TaskStatus.REVIEW,
     targetBranch: "master",
   })) });

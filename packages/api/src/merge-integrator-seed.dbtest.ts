@@ -184,6 +184,7 @@ test("canonical sync adopts the dedicated regression verifier and migrates untou
     status: "TODO",
     chainId: `legacy-chain-${index + 1}`,
     chainIndex: step.stepIndex,
+    chainLayer: step.layer,
   } })));
 
   const synced = await sync();
@@ -310,7 +311,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
     break: async () => {
       const step = await integratorStep();
       await db.taskTemplateStep.create({ data: {
-        taskTemplateId: step.taskTemplateId, stepIndex: INTEGRATOR_STEP_INDEX + 1, name: "Extra",
+        taskTemplateId: step.taskTemplateId, stepIndex: INTEGRATOR_STEP_INDEX + 1, layer: INTEGRATOR_STEP_INDEX + 1, name: "Extra",
         assigneeType: step.assigneeType, assigneeAgentId: step.assigneeAgentId, prompt: "extra",
         approvalGate: false, outputKind: "notes", opensPullRequest: true,
       } });
@@ -418,6 +419,7 @@ test("re-seeding a historical ten-step template preserves and queues its in-flig
       assigneeType: templateStep.assigneeType, assigneeAgentId: templateStep.assigneeAgentId,
       approvalGate: templateStep.approvalGate, opensPullRequest: templateStep.opensPullRequest,
       chainId, chainIndex: templateStep.stepIndex,
+      chainLayer: templateStep.layer,
       status: templateStep.stepIndex < 10 ? TaskStatus.DONE : TaskStatus.TODO,
       targetBranch: "agentos/chain/legacy-upgrade",
     } }));
@@ -513,6 +515,7 @@ test("re-seeding a historical nine-step template preserves its in-flight task se
     assigneeType: reviewStep.assigneeType, assigneeAgentId: reviewStep.assigneeAgentId,
     approvalGate: reviewStep.approvalGate, opensPullRequest: reviewStep.opensPullRequest,
     chainId: `in-flight-nine-${process.pid}`, chainIndex: reviewStep.stepIndex,
+    chainLayer: reviewStep.layer,
     status: TaskStatus.DOING, targetBranch: "agentos/chain/legacy-nine-upgrade",
   } });
   await db.taskStepOutput.create({ data: {

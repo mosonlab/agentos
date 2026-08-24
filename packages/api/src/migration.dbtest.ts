@@ -17,6 +17,9 @@ import { fireCronTask } from "./scheduler.js";
 import { resetTestDb, setupTestDb, testDatabaseSchema, testDatabaseUrl } from "./testdb.js";
 
 const chainLayerExpandMigration = "20260823100000_chain_layer_expand";
+const chainLayerContractMigration = "20260824100000_chain_layer_contract";
+const retiredFollowUpColumn = ["follow", "UpTaskId"].join("");
+const retiredFollowUpIndex = `Task_${retiredFollowUpColumn}_key`;
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
 
 interface ChainLayerMigrationFixture {
@@ -25,6 +28,7 @@ interface ChainLayerMigrationFixture {
   quotedSchema: string;
   execute(sql: string): void;
   applyExpandMigration(): void;
+  applyContractMigration(): void;
   cleanup(): void;
 }
 
@@ -78,6 +82,14 @@ const stageBeforeChainLayerExpand = (): ChainLayerMigrationFixture => {
       cpSync(
         join(dbDirectory, "prisma", "migrations", chainLayerExpandMigration),
         join(staging, "prisma", "migrations", chainLayerExpandMigration),
+        { recursive: true },
+      );
+      deploy();
+    },
+    applyContractMigration: () => {
+      cpSync(
+        join(dbDirectory, "prisma", "migrations", chainLayerContractMigration),
+        join(staging, "prisma", "migrations", chainLayerContractMigration),
         { recursive: true },
       );
       deploy();
@@ -311,7 +323,7 @@ test("the backfill marks webhook tasks and rebuilds one ledger row per fire, ide
   const chainId = "chain-webhook-backfill";
   const firedAt = "2026-08-15T09:00:00.000Z";
   const steps = await Promise.all([0, 1, 2].map((index) => db.task.create({ data: {
-    projectId: project.id, name: `Step ${index}`, description: "s", chainId, chainIndex: index,
+    projectId: project.id, name: `Step ${index}`, description: "s", chainId, chainIndex: index, chainLayer: index,
   } })));
   await db.taskActivity.createMany({ data: steps.map((task) => ({
     taskId: task.id,
@@ -364,7 +376,7 @@ test("two backfills running at once produce one ledger row, not two (SOL-REVIEW 
   });
   const firedAt = "2026-08-15T11:00:00.000Z";
   const task = await db.task.create({ data: {
-    projectId: project.id, name: "Step", description: "s", chainId: "chain-concurrent-backfill", chainIndex: 0,
+    projectId: project.id, name: "Step", description: "s", chainId: "chain-concurrent-backfill", chainIndex: 0, chainLayer: 0,
   } });
   await db.taskActivity.create({ data: {
     taskId: task.id,
@@ -435,7 +447,7 @@ test("the blind-review migration installs nullable base and commit columns", asy
   ]);
 });
 
-test("the chain-layer expand migration installs both columns as nullable", async () => {
+test("the chain-layer contract migration installs the final columns and checks", async () => {
   const columns = await db.$queryRaw<Array<{
     table_name: string;
     column_name: string;
@@ -453,24 +465,39 @@ test("the chain-layer expand migration installs both columns as nullable", async
   `;
   assert.deepEqual(columns, [
     { table_name: "Task", column_name: "chainLayer", is_nullable: "YES", data_type: "integer" },
-    { table_name: "TaskTemplateStep", column_name: "layer", is_nullable: "YES", data_type: "integer" },
+    { table_name: "TaskTemplateStep", column_name: "layer", is_nullable: "NO", data_type: "integer" },
   ]);
 
-  // The all-or-none CHECK belongs to the contract migration. If it appears in
-  // the expand migration, current base-shaped writers cannot remain usable.
-  const prematureChecks = await db.$queryRaw<Array<{ definition: string }>>`
+  const checks = await db.$queryRaw<Array<{ constraint_name: string; definition: string; validated: boolean }>>`
     SELECT pg_get_constraintdef(constraint_obj.oid) AS definition
+         , constraint_obj.conname AS constraint_name
+         , constraint_obj.convalidated AS validated
     FROM pg_constraint AS constraint_obj
     JOIN pg_class AS relation ON relation.oid = constraint_obj.conrelid
     JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname = ${testDatabaseSchema}
       AND relation.relname = 'Task'
-      AND pg_get_constraintdef(constraint_obj.oid) LIKE '%chainLayer%'
+      AND constraint_obj.conname = 'Task_chain_identity_all_or_none_check'
   `;
-  assert.deepEqual(prematureChecks, []);
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]!.constraint_name, "Task_chain_identity_all_or_none_check");
+  assert.equal(checks[0]!.validated, true);
+  assert.match(checks[0]!.definition, /chainLayer/u);
+
+  const followUp = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema}
+      AND table_name = 'Task' AND column_name = '${retiredFollowUpColumn}'
+  `;
+  assert.deepEqual(followUp, []);
+  const followUpIndex = await db.$queryRaw<Array<{ indexname: string }>>`
+    SELECT indexname FROM pg_indexes
+    WHERE schemaname = ${testDatabaseSchema} AND indexname = ${retiredFollowUpIndex}
+  `;
+  assert.deepEqual(followUpIndex, []);
 });
 
-test("base-shaped template and chained-task writers remain valid after expand", async () => {
+test("final contract accepts standalone tasks and requires complete chain identity", async () => {
   const suffix = `${Date.now()}-${process.pid}`;
   const project = await db.project.create({ data: {
     name: `Chain layer expand ${suffix}`,
@@ -488,17 +515,111 @@ test("base-shaped template and chained-task writers remain valid after expand", 
     name: "legacy step",
     assigneeType: "AGENT",
     prompt: "legacy prompt",
+    layer: 1,
   } });
-  assert.equal(step.layer, null);
+  assert.equal(step.layer, 1);
 
-  const task = await db.task.create({ data: {
+  const standalone = await db.task.create({ data: {
     projectId: project.id,
-    name: "legacy chain task",
-    description: "legacy chain fixture",
-    chainId: `legacy-chain-${suffix}`,
-    chainIndex: 17,
+    name: "standalone task",
+    description: "standalone fixture",
   } });
-  assert.equal(task.chainLayer, null);
+  assert.equal(standalone.chainLayer, null);
+  await assert.rejects(
+    () => db.$executeRawUnsafe(`
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "updatedAt")
+      VALUES ('contract-partial-${suffix}', '${project.id}', 'partial', 'partial', 'partial-chain', 17, NOW())
+    `),
+    /violates check constraint|Task_chain_identity_all_or_none_check/u,
+  );
+});
+
+test("contract migration preserves a consistent legacy chain and removes follow-ups", {
+  skip: !migrationHarnessEnabled,
+}, async () => {
+  const fixture = stageBeforeChainLayerExpand();
+  try {
+    fixture.execute(`
+      INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
+      VALUES ('contract-project', 'contract-project', 'contract-project', NOW());
+      INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")
+      VALUES ('contract-template', 'contract-project', 'legacy-template', 'legacy', ARRAY[]::text[], NOW());
+      INSERT INTO "TaskTemplateStep" ("id", "taskTemplateId", "stepIndex", "name", "assigneeType", "prompt")
+      VALUES ('contract-step-1', 'contract-template', 1, 'step 1', 'agent', 'prompt 1'),
+             ('contract-step-2', 'contract-template', 2, 'step 2', 'agent', 'prompt 2');
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "updatedAt")
+      VALUES ('contract-task-1', 'contract-project', 'task 1', 'task 1', 'contract-chain', 1, NOW()),
+             ('contract-task-2', 'contract-project', 'task 2', 'task 2', 'contract-chain', 2, NOW());
+      UPDATE "Task" SET "${retiredFollowUpColumn}" = 'contract-task-2' WHERE "id" = 'contract-task-1';
+    `);
+    fixture.applyExpandMigration();
+    fixture.applyContractMigration();
+
+    assert.deepEqual(
+      await migrationQuery<{ stepIndex: number; layer: number }>(fixture,
+        'SELECT "stepIndex", "layer" FROM "TaskTemplateStep" ORDER BY "stepIndex"'),
+      [{ stepIndex: 1, layer: 1 }, { stepIndex: 2, layer: 2 }],
+    );
+    assert.deepEqual(
+      await migrationQuery<{ chainIndex: number; chainLayer: number }>(fixture,
+        'SELECT "chainIndex", "chainLayer" FROM "Task" WHERE "chainId" = \'contract-chain\' ORDER BY "chainIndex"'),
+      [{ chainIndex: 1, chainLayer: 1 }, { chainIndex: 2, chainLayer: 2 }],
+    );
+    assert.deepEqual(await migrationColumns(fixture), ["chainLayer", "layer"]);
+    assert.deepEqual(
+      await migrationQuery<{ indexname: string }>(fixture,
+        `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = '${retiredFollowUpIndex}'`),
+      [],
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("contract migration refuses an inconsistent follow-up before tightening or dropping", {
+  skip: !migrationHarnessEnabled,
+}, async () => {
+  const fixture = stageBeforeChainLayerExpand();
+  try {
+    fixture.execute(`
+      INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
+      VALUES ('contract-fence-project', 'contract-fence-project', 'contract-fence-project', NOW());
+      INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")
+      VALUES ('contract-fence-template', 'contract-fence-project', 'legacy-template', 'legacy', ARRAY[]::text[], NOW());
+      INSERT INTO "TaskTemplateStep" ("id", "taskTemplateId", "stepIndex", "name", "assigneeType", "prompt")
+      VALUES ('contract-fence-step', 'contract-fence-template', 1, 'step', 'agent', 'prompt');
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "updatedAt")
+      VALUES ('contract-fence-source', 'contract-fence-project', 'source', 'source', 'contract-fence-chain', 1, NOW()),
+             ('contract-fence-target', 'contract-fence-project', 'target', 'target', 'contract-fence-chain', 2, NOW());
+    `);
+    fixture.applyExpandMigration();
+    // The expand fence has already run. Introduce a legacy inconsistency after
+    // it so this test exercises the contract migration's second fence.
+    fixture.execute(`UPDATE "Task" SET "${retiredFollowUpColumn}" = 'contract-fence-source' WHERE "id" = 'contract-fence-target';`);
+    const before = await migrationSnapshot(fixture);
+    let error: unknown;
+    try {
+      fixture.applyContractMigration();
+    } catch (caught) {
+      error = caught;
+    }
+    assert.ok(error, "the contract follow-up consistency fence must fail");
+    assert.match(migrationFailureOutput(error), /chain-layer-contract: inconsistent-follow-up-relationship/u);
+    assert.deepEqual(await migrationSnapshot(fixture), before);
+    assert.deepEqual(await migrationColumns(fixture), ["chainLayer", "layer"]);
+    assert.deepEqual(
+      await migrationQuery<{ is_nullable: string }>(fixture,
+        `SELECT is_nullable FROM information_schema.columns WHERE table_schema = '${fixture.schema.replaceAll("'", "''")}' AND table_name = 'TaskTemplateStep' AND column_name = 'layer'`),
+      [{ is_nullable: "YES" }],
+    );
+    assert.deepEqual(
+      await migrationQuery<{ column_name: string }>(fixture,
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'Task' AND column_name = '${retiredFollowUpColumn}'`),
+      [{ column_name: retiredFollowUpColumn }],
+    );
+  } finally {
+    fixture.cleanup();
+  }
 });
 
 test("chain-layer expand migration dense-ranks legacy template steps and chain nodes", {
@@ -585,7 +706,7 @@ test("inconsistent follow-up relationship aborts expand before changing rows", {
       VALUES ('follow-up-project', 'follow-up-project', 'follow-up-project', NOW());
       INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "updatedAt")
       VALUES ('follow-up-target', 'follow-up-project', 'target', 'target', 'chain-b', 2, NOW());
-      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "followUpTaskId", "updatedAt")
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "${retiredFollowUpColumn}", "updatedAt")
       VALUES ('follow-up-source', 'follow-up-project', 'source', 'source', 'chain-a', 1, 'follow-up-target', NOW());
     `);
     const before = await migrationSnapshot(fixture);

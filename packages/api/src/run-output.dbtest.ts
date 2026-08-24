@@ -95,6 +95,7 @@ const seedTask = async (options: { chained: boolean; outputKind?: string; templa
   const templateStep = template ? await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id,
     stepIndex: options.stepIndex ?? 0,
+    layer: options.stepIndex ?? 0,
     name: "Regression verification",
     assigneeType: "AGENT",
     assigneeAgentId: agent.id,
@@ -106,7 +107,7 @@ const seedTask = async (options: { chained: boolean; outputKind?: string; templa
     projectId: project.id, name: "Find the inbox deadlock", description: "work", assigneeAgentId: agent.id,
     repoId: repo.id, status: TaskStatus.TODO, targetBranch: "master",
     ...(template && templateStep ? { templateId: template.id, templateStepId: templateStep.id } : {}),
-    ...(options.chained ? { chainId: `chain-${suffix}`, chainIndex: 0 } : {}),
+    ...(options.chained ? { chainId: `chain-${suffix}`, chainIndex: 0, chainLayer: 0 } : {}),
   } });
   return { project, agent, repo, task };
 };
@@ -155,6 +156,7 @@ const addSuccessor = async (seed: Awaited<ReturnType<typeof seedTask>>) => {
     targetBranch: "master",
     chainId: seed.task.chainId,
     chainIndex: 1,
+    chainLayer: 1,
   } });
 };
 

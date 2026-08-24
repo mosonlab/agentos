@@ -58,7 +58,11 @@ const seedTask = async (label: string, overrides: Record<string, unknown> = {}) 
   const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo" } });
   await db.agentRepoAccess.create({ data: { projectId: project.id, agentId: agent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
   const task = await db.task.create({ data: {
-    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Step", description: "work", ...overrides,
+    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Step", description: "work",
+    ...overrides,
+    ...(("chainId" in overrides || "chainIndex" in overrides) && !("chainLayer" in overrides)
+      ? { chainLayer: typeof overrides.chainIndex === "number" ? overrides.chainIndex : null }
+      : {}),
   } });
   return { project, agent, repo, task };
 };
@@ -201,8 +205,9 @@ test("startability endpoint exposes the shared checklist and dependency verdict"
     status: "TODO",
     chainId,
     chainIndex: 0,
+    chainLayer: 0,
   } });
-  await db.task.update({ where: { id: context.task.id }, data: { chainId, chainIndex: 1 } });
+  await db.task.update({ where: { id: context.task.id }, data: { chainId, chainIndex: 1, chainLayer: 1 } });
   const blocked = await call("GET", `/tasks/${context.task.id}/startability`);
   assert.equal(blocked.body.startable, false);
   assert.equal(blocked.body.checklist.predecessorsDone, false);
@@ -217,6 +222,7 @@ test("unfinished chain predecessor blocks every future start with zero side effe
     repoId: context.repo.id,
     chainId,
     chainIndex,
+    chainLayer: chainIndex,
     name,
     description: "work",
     status,
@@ -248,6 +254,7 @@ test("the dependency-safe next chain step starts or recovers exactly once", asyn
       repoId: context.repo.id,
       chainId,
       chainIndex: 1,
+      chainLayer: 1,
       name: `${status} target`,
       description: "work",
       status,
@@ -272,6 +279,7 @@ test("ordinary PATCH cannot rewrite chain gates, skip predecessors, or complete 
     repoId: context.repo.id,
     chainId,
     chainIndex: 1,
+    chainLayer: 1,
     name: "Future step",
     description: "work",
     status: "TODO",
@@ -828,22 +836,18 @@ test("archive-done never reaches across projects, even for ids handed to it", as
 
 // --- review fixes: E1 consistency between list and detail (SOL SS3) ---------
 
-test("E1: a null-chainIndex row reads as its own one-row chain on the board too", async () => {
+test("E1: a partial chain identity is rejected before it can reach the board", async () => {
   const context = await seedTask("e1-list", { chainId: "chain-e1", chainIndex: 0 });
-  const broken = await db.task.create({ data: {
-    projectId: context.project.id, name: "Broken row", description: "d",
-    chainId: "chain-e1", chainIndex: null,
-  } });
+  await assert.rejects(
+    () => db.task.create({ data: {
+      projectId: context.project.id, name: "Broken row", description: "d",
+      chainId: "chain-e1", chainIndex: null,
+    } }),
+    /Task_chain_identity_all_or_none_check/u,
+  );
   const { body } = await call("GET", `/tasks?projectId=${context.project.id}`);
   const real = body.find((task: any) => task.id === context.task.id);
-  const orphan = body.find((task: any) => task.id === broken.id);
-  // The broken row must not inflate its siblings' totals...
   assert.equal(real.chainProgress.total, 1);
-  // ...and must report the same 1/1 the detail route reports for it.
-  assert.equal(orphan.chainProgress.total, 1);
-  assert.equal(orphan.chainProgress.done, 0);
-  const detail = await call("GET", `/tasks/${broken.id}/chain`);
-  assert.equal(detail.body.total, orphan.chainProgress.total);
 });
 
 test("enrich=false drops the extra fields and keeps the rows", async () => {
@@ -872,6 +876,7 @@ const seedTemplate = async (context: Awaited<ReturnType<typeof seedTask>>) => {
   await db.taskTemplateStep.createMany({ data: [0, 1].map((stepIndex) => ({
     taskTemplateId: template.id,
     stepIndex,
+    layer: stepIndex,
     name: `Step ${stepIndex}`,
     assigneeType: "AGENT" as const,
     assigneeAgentId: context.agent.id,

@@ -253,6 +253,7 @@ const queuePeerIntegratorRun = async (chain: IntegratorChain, targetBranch: stri
     opensPullRequest: false,
     chainId: `peer-${targetBranch}-${Date.now()}-${Math.random()}`,
     chainIndex: chain.integratorStep!.stepIndex,
+    chainLayer: chain.integratorStep!.layer,
     status: TaskStatus.TODO,
     targetBranch,
   } });
