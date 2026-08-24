@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "2086f1dc0d23eeb823b1abd4dabc8913e37870b3",
-  "tree": "b22130c380b5192e1fd6c99d340ddb5c9a424c8d",
+  "commit": "d899705a66693d5898c53aa1ca4d84059f940906",
+  "tree": "31ae3740d0fdb0d45d02e4c9b99f7bdd59f4b09a",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -137,6 +137,16 @@
       "blob": "f32655e398eccf9ce5b5cbd363b446499686df91"
     },
     {
+      "path": "packages/db/prisma/migrations/20260823100000_chain_layer_expand/migration.sql",
+      "sha256": "d01ca9d20af1439417b6894c64d05fb5e03d057f387d7a792a5ccac19994858a",
+      "blob": "236d80dd7a7e8bc9476b26a6c28c03799e4dce8a"
+    },
+    {
+      "path": "packages/db/prisma/migrations/20260824100000_chain_layer_contract/migration.sql",
+      "sha256": "12a2cf0515e04d9f751ff6091ad0719dfedeaabc5aa256f2db5cd5893a3c7be2",
+      "blob": "655d8fd302e5ce27f71cbad25d22e1d4616879ea"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -153,8 +163,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "435287657eee2cdc02253276e272c6c6a7e414edd0d418631c5980f289487b1f",
-      "blob": "74b670f8073df01277db0ce4b638e8cbd335e6c6"
+      "sha256": "3147ebb3e1896dfe10b838db9684639690b16d6bb58557a7e5dff41762f13595",
+      "blob": "de1de303b035eb5cb67034fc473650dfe7ba7b5b"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -163,13 +173,13 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "29250a4852898d7e0c007e9eaeb4befe890a8aec79a3de0dffe335ba92def9ac",
-      "blob": "ce1619bc069435158fa2e27ae0363283f76441ec"
+      "sha256": "7c6b1faacb05695b85fe79b5755d79e883365805d1d6fe353ef0b1c1366599e2",
+      "blob": "f7ee35ef774401fd9682c83acba6f8f11ad16615"
     },
     {
       "path": "packages/db/src/schema-census.ts",
-      "sha256": "decd228f6d8da2a5317bde9b046d54c75f0c5ce9690abd1c026fcf14e6abc5cb",
-      "blob": "bdaa84023f8aa805646ebedf33851a90d228c189"
+      "sha256": "adb4b2163ebdfa798bba712fcafca38ed85dced543b5ad0c6550ecd88c207bd0",
+      "blob": "337b50e57de818565fc0f19e24324247b10066df"
     },
     {
       "path": "release-authority.pub",
@@ -178,13 +188,13 @@
     }
   ],
   "migrations": {
-    "count": 25,
-    "terminal": "20260823070000_active_run_cancellation",
-    "sha256": "81114c3938c8d7a5e0dc839bdbdb141a7ff2586201a37e00bad5e8a2d08e97b9"
+    "count": 27,
+    "terminal": "20260824100000_chain_layer_contract",
+    "sha256": "aaa3891f4427720ce82e25ec2c3840f7ff97228f26053b4b8b754d07d6a5aabb"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "OIaE6q03jw+DA5KFIi9tPaotXtlBQKsRHsSF7EIAcSz5x10Jlq2H1joxYxkkUayrOp7q467vuhtWhuf+nQ6LBA=="
+    "value": "EUs7DTz19TiQs/NKqVY7UQ1YTY54jQZtSoWQRo4WWA3sb1cNqlAHSTcPP3qW447Y+12y84lqiDHjTtXm7nEAAA=="
   }
 }
