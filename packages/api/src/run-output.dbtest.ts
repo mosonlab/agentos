@@ -458,6 +458,25 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   const stopped = await db.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(stopped.status, TaskStatus.REVIEW);
   assert.match(stopped.failureReason ?? "", /belongs to prior Run/u);
+
+  const queuedThird = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(queuedThird.status, 201, JSON.stringify(queuedThird.body));
+  const loaded = await db.task.findUniqueOrThrow({
+    where: { id: task.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
+    taskId: task.id,
+    runId: queuedThird.body.id as string,
+    runNumber: 3,
+    templateStep: loaded.templateStep,
+  }));
+  assert.deepEqual(handoff?.output, {
+    runId: firstRunId,
+    kind: "implementation",
+    body: implementationOutput("Run 1 implementation"),
+    commitSha: SHA,
+  });
 });
 
 test("canonical JSON contracts reject malformed bodies and never activate a successor", async () => {
@@ -761,6 +780,6 @@ test("a canonical retry receives only the immediate prior Run output and retry r
     status: "FAILED",
     failureReason: "Error: session ended without a result",
     retryReason: "approval-rejected-without-feedback",
-    output: { kind: "implementation", body: implementationOutput("implementation rejected at approval"), commitSha: SHA },
+    output: { runId: firstRunId, kind: "implementation", body: implementationOutput("implementation rejected at approval"), commitSha: SHA },
   });
 });

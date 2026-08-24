@@ -22,7 +22,7 @@ export const zh = {
   "agents.confirm.delete": "删除 agent {name}？",
   "agents.create": "创建 Agent",
   "agents.empty": "本项目还没有 agent。",
-  "agents.executioner.outerHint": "Full Assurance 第 5 步以 GPT-5.6 Sol high 与 Default 启动 root；原生 Luna max 子代理由平台固化，不属于 Agent 设置。",
+  "agents.executioner.outerHint": "Full Assurance 实现步骤使用此 Agent 的 Codex model、reasoning effort 与 service tier 启动 root；原生 Luna max 子代理仍由平台固化。",
   "agents.field.codexServiceTier": "Codex 服务层级",
   "agents.field.environment": "环境",
   "agents.field.environment.hint": "该 agent 的沙箱与环境变量作用域。",

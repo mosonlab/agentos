@@ -800,7 +800,7 @@ test("a failed first completion request restores and retains CODEX_HOME", async 
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-completion-failure" },
+      session: testSession(root),
     });
 
     const completions = posts.filter((post) => post.path.endsWith("/complete"));

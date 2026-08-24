@@ -117,7 +117,7 @@ export type ClaimedTask = {
     status: string;
     failureReason: string | null;
     retryReason: "approval-rejected-without-feedback" | "automatic-retry" | "operator-retry" | "retry";
-    output: { kind: string; body: string; commitSha: string | null } | null;
+    output: { runId: string; kind: string; body: string; commitSha: string | null } | null;
   } | null;
   /** A control-plane selected, exact-head handoff for a fresh Regression Run.
    * It carries only durable verdict/repair evidence, never provider history. */

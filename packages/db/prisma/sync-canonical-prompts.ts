@@ -362,9 +362,8 @@ const main = async (): Promise<void> => {
           const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
           const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
           const transition = CANONICAL_AGENT_RUNTIME_TRANSITIONS.get(name);
-          const adoptsCanonicalDefaults = differences.length === 2
-            && differences.includes("model")
-            && differences.includes("runnerPreference")
+          const adoptsCanonicalDefaults = structuralDifferences.length === 0
+            && runtimeDifferences.length > 0
             && !agent.runtimeConfigCustomized
             && transition?.from.model === agent.model
             && transition.from.runnerPreference === agent.runnerPreference

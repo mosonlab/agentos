@@ -243,12 +243,14 @@ test("buildPrompt gives a retry the immediate prior output without reusing provi
       status: "SUCCEEDED",
       failureReason: null,
       retryReason: "approval-rejected-without-feedback",
-      output: { kind: "plan", body: "Prior plan body", commitSha: "a".repeat(40) },
+      output: { runId: "run-1", kind: "plan", body: "Prior plan body", commitSha: "a".repeat(40) },
     },
   });
   assert.match(prompt, /Platform-pinned previous-run handoff:[\s\S]*Prior plan body/u);
   assert.match(prompt, /fresh provider Session/u);
   assert.match(prompt, /approval-rejected-without-feedback/u);
+  assert.match(prompt, /output remains bound to Run run-1/u);
+  assert.match(prompt, /publish the current Run's canonical task_output/u);
   assert.match(prompt, /Use inbox_ask to obtain the required change/u);
 });
 
@@ -450,6 +452,8 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
   }
   assert.match(buildPrompt(executioner), /maximum concurrent child threads: 8 \(root excluded\)/u);
   assert.match(buildPrompt(executioner), /do not launch nested Codex CLI processes/u);
+  assert.match(buildPrompt(executioner), /one affected-workspace compile or typecheck after integration/u);
+  assert.match(buildPrompt(executioner), /Do not run repository-wide suites or the repository Merge Gate in Implementation/u);
   assert.throws(
     () => buildPrompt({
       ...executioner,

@@ -23,7 +23,7 @@ export const en = {
   "agents.confirm.delete": "Delete agent {name}?",
   "agents.create": "Create Agent",
   "agents.empty": "No agents in this project yet.",
-  "agents.executioner.outerHint": "Full Assurance step 5 launches this root as GPT-5.6 Sol high with Default. Native Luna max children are pinned by the platform and are not Agent settings.",
+  "agents.executioner.outerHint": "Full Assurance implementation uses this Agent's Codex model, reasoning effort, and service tier for the root. Native Luna max children remain pinned by the platform.",
   "agents.field.codexServiceTier": "Codex service tier",
   "agents.field.environment": "Environment",
   "agents.field.environment.hint": "Sandbox and env-var scope for this agent.",

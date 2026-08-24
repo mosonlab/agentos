@@ -83,6 +83,8 @@ export const buildPrompt = (claim: ClaimedTask): string => {
     `- maximum concurrent child threads: ${subagents.maxConcurrent} (root excluded)`,
     "- multi_agent_v2 is enabled by the runner. Spawn, message, wait for, and close native children through the session collaboration tools; do not launch nested Codex CLI processes.",
     "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
+    "- Implementation proof is limited to each assignment's focused tests, one affected-workspace compile or typecheck after integration, and tests for seams crossed by multiple assignments.",
+    "- Do not run repository-wide suites or the repository Merge Gate in Implementation; the later Regression step owns the formal Gate.",
   ] : []),
   "",
   `Task: ${claim.task.name}`,
@@ -98,7 +100,8 @@ export const buildPrompt = (claim: ClaimedTask): string => {
       retryReason: claim.previousRunHandoff.retryReason,
     })}`,
     ...(claim.previousRunHandoff.output ? [
-      `- Previous task output (${claim.previousRunHandoff.output.kind}, commit ${claim.previousRunHandoff.output.commitSha ?? "unbound"}):\n${claim.previousRunHandoff.output.body}`,
+      `- Persisted task output from Run ${claim.previousRunHandoff.output.runId} (${claim.previousRunHandoff.output.kind}, commit ${claim.previousRunHandoff.output.commitSha ?? "unbound"}):\n${claim.previousRunHandoff.output.body}`,
+      `- This output remains bound to Run ${claim.previousRunHandoff.output.runId}. Before successful completion, publish the current Run's canonical task_output; reuse the body only if it still matches the current exact head.`,
     ] : ["- The previous Run did not publish a current task output."]),
     ...(claim.previousRunHandoff.retryReason === "approval-rejected-without-feedback" ? [
       "- The human rejected the approval gate without a reason. Use inbox_ask to obtain the required change before revising the output.",

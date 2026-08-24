@@ -726,6 +726,17 @@ const runnerModelRefusal = (agent: { model: string; runnerPreference: RunnerPref
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
 
+const executionerRuntimeRefusal = (agent: {
+  name: string;
+  model: string;
+  runnerPreference: RunnerPreference;
+}): string | null => {
+  if (agent.name !== "implementation-plan-executioner") return null;
+  if (runnerFor(agent.runnerPreference, agent.model) === RunnerKind.CODEX
+    && catalogRunnerForModel(agent.model) === RunnerPreference.CODEX) return null;
+  return "implementation-plan-executioner requires a Codex gpt-* model";
+};
+
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
@@ -1953,6 +1964,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, agentInput);
     const modelRefusal = runnerModelRefusal(body);
     if (modelRefusal) return context.json({ error: modelRefusal }, 400);
+    const executionerRefusal = executionerRuntimeRefusal(body);
+    if (executionerRefusal) return context.json({ error: executionerRefusal }, 400);
     const tierRefusal = codexServiceTierRefusal(body);
     if (tierRefusal) return context.json({ error: tierRefusal }, 400);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
@@ -1995,6 +2008,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       const modelRefusal = runnerModelRefusal(merged);
       if (modelRefusal) return { error: modelRefusal, code: 400 as const };
+      const executionerRefusal = executionerRuntimeRefusal(merged);
+      if (executionerRefusal) return { error: executionerRefusal, code: 400 as const };
       const tierRefusal = codexServiceTierRefusal(merged);
       if (tierRefusal) return { error: tierRefusal, code: 400 as const };
       if (body.environmentId) {
@@ -2005,7 +2020,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         where: { id: agentId },
         data: {
           ...patch,
-          ...(body.model !== undefined || body.runnerPreference !== undefined
+          ...((body.model !== undefined && body.model !== before.model)
+            || (body.runnerPreference !== undefined && body.runnerPreference !== before.runnerPreference)
             ? { runtimeConfigCustomized: true }
             : {}),
         } as Prisma.AgentUncheckedUpdateInput,

@@ -47,6 +47,8 @@ Require wide refactors to use explicit expand, migrate, and contract slices.
 Reject missing requirements, circular or false dependencies, mislabelled risk
 flags, acceptance that is already green at base, non-executable verification,
 and slices that cannot say what they demonstrate.
+The repository Merge Gate is later chain-level Regression evidence, not a
+missing implementation requirement or slice acceptance criterion.
 
 Persist one consolidated report with stable finding IDs, exact plan locations,
 repository evidence, severity, and a concrete required correction. Separate

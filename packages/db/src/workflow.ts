@@ -19,7 +19,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
-import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
+import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
@@ -75,10 +75,15 @@ export const deriveRunConfig = (
   task: { name: string; description: string },
 ): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier; promptHash: string } => {
   const compoundExecutioner = isCompoundImplementationStep(templateStep);
+  const runner = templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model);
+  if (compoundExecutioner
+    && (runner !== RunnerKind.CODEX || catalogRunnerForModel(agent.model) !== RunnerPreference.CODEX)) {
+    throw new Error("Compound implementation root requires a Codex gpt-* model");
+  }
   return {
-    runner: compoundExecutioner ? RunnerKind.CODEX : (templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model)),
-    model: compoundExecutioner ? "gpt-5.6-sol:high" : agent.model,
-    codexServiceTier: compoundExecutioner ? CodexServiceTier.DEFAULT : agent.codexServiceTier,
+    runner,
+    model: agent.model,
+    codexServiceTier: agent.codexServiceTier,
     promptHash: promptHash([
     agent.foundationalPrompt,
     agent.rolePrompt,

@@ -1050,6 +1050,91 @@ test("Agent API refuses an executioner rename", async () => {
   });
 });
 
+test("Agent API refuses a non-Codex executioner runtime", async () => {
+  await withTokens(async () => {
+    let updated = false;
+    const executioner = lockedAgent({
+      id: "agent-executioner",
+      projectId: "project-1",
+      environmentId: "environment-1",
+      name: "implementation-plan-executioner",
+      title: "Implementation Plan Executioner",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    });
+    const tx = {
+      $queryRaw: async () => [{ id: executioner!.id }],
+      agent: {
+        findUnique: async () => executioner,
+        update: async () => { updated = true; return executioner; },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "implementation-plan-executioner requires a Codex gpt-* model",
+    });
+    assert.equal(updated, false);
+  });
+});
+
+test("Agent API does not mark unchanged runtime fields as an operator override", async () => {
+  await withTokens(async () => {
+    let updateData: Record<string, unknown> | null = null;
+    const executioner = lockedAgent({
+      id: "agent-executioner",
+      projectId: "project-1",
+      environmentId: "environment-1",
+      name: "implementation-plan-executioner",
+      title: "Implementation Plan Executioner",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      runtimeConfigCustomized: false,
+    });
+    const tx = {
+      $queryRaw: async () => [{ id: executioner!.id }],
+      agent: {
+        findUnique: async () => executioner,
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          updateData = data;
+          return { ...executioner, ...data };
+        },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Renamed title",
+        model: executioner!.model,
+        runnerPreference: executioner!.runnerPreference,
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(updateData, {
+      title: "Renamed title",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+    });
+  });
+});
+
 test("operator retry rejects an archived assignee with a named 409", async () => {
   await withTokens(async () => {
     const { response, created } = await retryRequest({

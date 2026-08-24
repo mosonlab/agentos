@@ -378,7 +378,17 @@ test("session-less gate PATCH refuses before writing any approval state", async 
 
 test("repaired compound approval is atomic and exactly once across PATCH, Inbox, replay, and concurrency", async () => {
   const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
-  await db.task.update({ where: { id: successor.id }, data: { assigneeAgentId: executioner.id } });
+  await db.$transaction([
+    db.agent.update({
+      where: { id: executioner.id },
+      data: {
+        model: "gpt-5.6-luna:max",
+        runnerPreference: "CODEX",
+        codexServiceTier: "FAST",
+      },
+    }),
+    db.task.update({ where: { id: successor.id }, data: { assigneeAgentId: executioner.id } }),
+  ]);
 
   const [patch, inbox] = await withOperatorToken(() => Promise.all([
     createApp(db).request(`/tasks/${predecessor.id}`, {
@@ -398,6 +408,22 @@ test("repaired compound approval is atomic and exactly once across PATCH, Inbox,
   assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
   assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+  assert.deepEqual(await db.run.findFirstOrThrow({
+    where: { taskId: successor.id },
+    select: {
+      runner: true,
+      model: true,
+      codexServiceTier: true,
+      subagentModel: true,
+      subagentMaxConcurrent: true,
+    },
+  }), {
+    runner: "CODEX",
+    model: "gpt-5.6-luna:max",
+    codexServiceTier: "FAST",
+    subagentModel: "gpt-5.6-luna:max",
+    subagentMaxConcurrent: 8,
+  });
 
   const [patchReplay, inboxReplay] = await withOperatorToken(() => Promise.all([
     createApp(db).request(`/tasks/${predecessor.id}`, {

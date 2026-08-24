@@ -104,6 +104,32 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
     && agent.runnerPreference === RunnerPreference.PI));
 });
 
+test("sync adopts the exact model-only executioner transition", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  await prisma.agent.update({
+    where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
+    data: {
+      model: "gpt-5.6-sol:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      runtimeConfigCustomized: false,
+    },
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"adoptedAgentDefaults":1/u);
+
+  const executioner = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  });
+  assert.deepEqual(executioner, {
+    model: "gpt-5.6-sol:high",
+    runnerPreference: RunnerPreference.CODEX,
+    runtimeConfigCustomized: false,
+  });
+});
+
 test("sync preserves an operator-selected model and runner", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   await prisma.agent.update({

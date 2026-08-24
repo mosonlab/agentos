@@ -178,6 +178,7 @@ test("the executioner delegates only through platform-pinned native Luna childre
   assert.match(executioner, /eight concurrent child threads/u);
   assert.match(executioner, /Delegation is not one slice per child/u);
   assert.match(executioner, /one long-lived Luna max merger child/u);
+  assert.match(executioner, /Do not run a Merge Gate or repository-wide suite during Implementation/u);
   assert.doesNotMatch(executioner, /codex exec/u);
 });
 
@@ -212,8 +213,10 @@ test("the canonical twelve-step template sources split code review and preserve 
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
   assert.match(templateSteps[1]!.prompt, /this run's id/u);
+  assert.match(templateSteps[1]!.prompt, /chain-level evidence, including the repository Merge Gate, remains outside the slice set/u);
   assert.match(templateSteps[2]!.prompt, /merge or split decisions priced against frontier width/u);
   assert.match(templateSteps[3]!.prompt, /run id labelled `plan_authoring`/u);
+  assert.match(templateSteps[4]!.prompt, /platform-pinned Implementation proof boundary/u);
 });
 
 test("only implementation opens a pull request, and the integrator is not a model row", async () => {
@@ -262,6 +265,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.match(directImplementation, /at least two child-writer branches need integration/u);
   assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
   assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
+  assert.match(directImplementation, /platform-pinned Implementation proof boundary/u);
   assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
   // mechanical executor, with no human approval gate on either.

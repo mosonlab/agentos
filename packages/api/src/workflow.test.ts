@@ -70,8 +70,8 @@ test("runnerFor preserves explicit preferences and every inherited model heurist
   }
 });
 
-test("deriveRunConfig preserves ordinary config and fixes the compound executioner outer profile", () => {
-  const agent = {
+test("deriveRunConfig preserves the selected Agent runtime profile for ordinary and compound runs", () => {
+  const ordinaryAgent = {
     runnerPreference: RunnerPreference.PI,
     model: "current-model",
     codexServiceTier: CodexServiceTier.DEFAULT,
@@ -79,23 +79,35 @@ test("deriveRunConfig preserves ordinary config and fixes the compound execution
     rolePrompt: "role",
   };
   const task = { name: "Task name", description: "Task description" };
-  assert.deepEqual(deriveRunConfig(agent, { runner: RunnerKind.CODEX }, task), {
+  assert.deepEqual(deriveRunConfig(ordinaryAgent, { runner: RunnerKind.CODEX }, task), {
     runner: RunnerKind.CODEX,
     model: "current-model",
     codexServiceTier: CodexServiceTier.DEFAULT,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
-  assert.deepEqual(deriveRunConfig(agent, {
+  const executionerAgent = {
+    ...ordinaryAgent,
+    runnerPreference: RunnerPreference.CODEX,
+    model: "gpt-5.6-luna:max",
+    codexServiceTier: CodexServiceTier.FAST,
+  };
+  assert.deepEqual(deriveRunConfig(executionerAgent, {
     runner: null,
     stepIndex: 5,
     outputKind: "implementation",
     taskTemplate: { name: "compound-engineer-workflow" },
   }, task), {
     runner: RunnerKind.CODEX,
-    model: "gpt-5.6-sol:high",
-    codexServiceTier: CodexServiceTier.DEFAULT,
+    model: "gpt-5.6-luna:max",
+    codexServiceTier: CodexServiceTier.FAST,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
+  assert.throws(() => deriveRunConfig(ordinaryAgent, {
+    runner: null,
+    stepIndex: 5,
+    outputKind: "implementation",
+    taskTemplate: { name: "compound-engineer-workflow" },
+  }, task), /requires a Codex gpt-\* model/u);
 });
 
 test("Codex implementation steps receive the fixed native Luna child capability", () => {
