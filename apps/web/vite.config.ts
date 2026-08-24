@@ -26,24 +26,25 @@ const sourceRoot = fileURLToPath(new URL("./src", import.meta.url));
  *  below decides, per request, that the caller is this server's own loopback
  *  origin. Both live in `src/lib/local-origin.ts`, which is unit-tested; the
  *  policy is not restated here. */
-export default defineConfig(({ mode }) => {
-  const environment = loadEnv(mode, repositoryRoot, "");
-  // First, and before anything is built: a refused destination throws here, so
-  // no proxy, no bearer header, no DNS lookup and no socket ever exists.
-  const target = resolveProxyTarget(environment);
-  const token = environment["OPERATOR_TOKEN"] ?? "";
-  if (token === "") {
-    console.warn("[agentos/web] OPERATOR_TOKEN is not set in the repository root .env; the control plane will answer 401.");
-  }
-
-  const proxy: Record<string, ProxyOptions> = {
-    "/api": {
+export default defineConfig(({ command, mode }) => {
+  const proxy: Record<string, ProxyOptions> = {};
+  if (command === "serve") {
+    const environment = loadEnv(mode, repositoryRoot, "");
+    // Refuse an unsafe destination before a proxy, bearer header, DNS lookup,
+    // or socket exists. Production builds contain no proxy and read no local
+    // credential-bearing environment, which makes their dist tree portable.
+    const target = resolveProxyTarget(environment);
+    const token = environment["OPERATOR_TOKEN"] ?? "";
+    if (token === "") {
+      console.warn("[agentos/web] OPERATOR_TOKEN is not set in the repository root .env; the control plane will answer 401.");
+    }
+    proxy["/api"] = {
       target,
       changeOrigin: false,
       headers: { Authorization: `Bearer ${token}` },
       rewrite: (path) => path.replace(/^\/api/, ""),
-    },
-  };
+    };
+  }
 
   /** Installed inside `configureServer`, which Vite calls *before* it adds its
    *  own middlewares — so `server.middlewares.use` here runs ahead of the proxy

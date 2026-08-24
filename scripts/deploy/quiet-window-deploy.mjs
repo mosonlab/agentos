@@ -38,6 +38,8 @@ import {
   workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
+import { materializeReleaseSnapshot } from "./release-snapshot.mjs";
+import { runCommandWithRetry } from "./quiet-window-retry.mjs";
 import { verifyBackupConfiguration } from "./install-launchd.mjs";
 import { backupConfigurationFromEnvironment, writePgDumpBackup } from "./quiet-window-backup.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
@@ -54,6 +56,10 @@ const POLL_MS = POLL_SECONDS * 1_000;
 const SHA = /^[0-9a-f]{40}$/u;
 const DEPLOY_BARRIER_CLASS = 0x41_47_44_50; // Must match @agentos/db deploy-barrier.ts ("AGDP").
 const DEPLOY_BARRIER_KEY = 1;
+
+const generatedPrismaClientIsComplete = (root) =>
+  existsSync(join(root, "node_modules/.prisma/client/index.js"))
+  && existsSync(join(root, "node_modules/.prisma/client/schema.prisma"));
 
 const log = (line) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
@@ -117,9 +123,9 @@ const command = (program, args, {
   });
 };
 
-const checked = async (reason, program, args, options) => {
+const checkedResult = async (reason, run) => {
   log(`START ${reason}`);
-  const result = await command(program, args, options).catch((error) => {
+  const result = await run().catch((error) => {
     if (error instanceof DeployFailure) throw error;
     return { code: 1, stderr: String(error), stdout: "" };
   });
@@ -130,6 +136,28 @@ const checked = async (reason, program, args, options) => {
   log(`PASS ${reason}`);
   return result;
 };
+
+const checked = (reason, program, args, options) => checkedResult(
+  reason,
+  () => command(program, args, options),
+);
+
+const retryingGitCommand = (operation, args, options) => runCommandWithRetry(
+  () => command(loadBinaries().git, args, options).catch((error) => {
+    if (error instanceof DeployFailure) throw error;
+    return { code: 1, stderr: String(error), stdout: "" };
+  }),
+  {
+    onRetry: ({ attempt, nextAttempt, waitMs }) => log(
+      `RETRY git-network operation=${operation} attempt=${attempt} next-attempt=${nextAttempt} wait-ms=${waitMs}`,
+    ),
+  },
+);
+
+const checkedGitNetwork = (reason, operation, args, options) => checkedResult(
+  reason,
+  () => retryingGitCommand(operation, args, options),
+);
 
 const gitText = (...args) => execFileSync(loadBinaries().git, ["-C", REPOSITORY_ROOT, ...args], {
   encoding: "utf8",
@@ -155,7 +183,11 @@ const readDeployedRevision = () => {
 };
 
 const remoteMainRevision = async () => {
-  const result = await command(loadBinaries().git, ["ls-remote", "--exit-code", "origin", "refs/heads/main"], { capture: true });
+  const result = await retryingGitCommand(
+    "ls-remote-main",
+    ["ls-remote", "--exit-code", "origin", "refs/heads/main"],
+    { capture: true },
+  );
   const revision = result.stdout.trim().split(/\s+/u)[0] ?? "";
   if (result.code !== 0 || !SHA.test(revision)) fail("remote-main-unreadable", `exit-${result.code}`);
   return revision;
@@ -535,7 +567,7 @@ const main = async () => {
     const host = createProductionHost({
       fastForward: async () => {
         assertProductionCheckout();
-        await checked("fetch-main-failed", loadBinaries().git, ["fetch", "origin", "main"]);
+        await checkedGitNetwork("fetch-main-failed", "fetch-main", ["fetch", "origin", "main"]);
         to = gitText("rev-parse", "origin/main");
         const state = inspectGitPreflight({ git: loadBinaries().git, root: REPOSITORY_ROOT, target: to });
         const { head } = state;
@@ -547,10 +579,19 @@ const main = async () => {
         stage = join(STATE_DIR, `stage-${transactionId}`);
         await checked("staging-worktree-failed", loadBinaries().git, ["worktree", "add", "--detach", stage, "HEAD"]);
       },
-      installDependencies: () => checked("staging-dependencies-failed", loadBinaries().node, [loadBinaries().npm, "ci"], { cwd: stage }),
-      prismaGenerate: () => checked("prisma-generate-failed", loadBinaries().node, [loadBinaries().npm, "run", "db:generate"], { cwd: stage }),
+      installDependencies: async () => {
+        await checked("staging-dependencies-failed", loadBinaries().node, [loadBinaries().npm, "ci"], { cwd: stage });
+        if (!generatedPrismaClientIsComplete(stage)) {
+          fail("staging-dependencies-failed", "npm-ci-did-not-produce-generated-prisma-client");
+        }
+      },
       build: async () => {
-        await checked("build-failed", loadBinaries().node, [loadBinaries().npm, "run", "build"], { cwd: stage });
+        const snapshot = materializeReleaseSnapshot({ stageRoot: stage, revision: to });
+        if (snapshot.hit) log(`PASS release-snapshot-hit build-key=${snapshot.buildKey}`);
+        else {
+          log(`MISS release-snapshot reason=${snapshot.reason}; building-from-source`);
+          await checked("build-failed", loadBinaries().node, [loadBinaries().npm, "run", "build"], { cwd: stage });
+        }
         const stamp = readJson(join(stage, "packages/api/dist/build-info.json"), "build-stamp-invalid");
         if (stamp.commit !== to || stamp.dirty !== false) fail("build-stamp-invalid", "staged-api-dist-does-not-match-target");
         optionalArtifacts = [...DEPLOY_OPTIONAL_ARTIFACT_PATHS, ...workspaceDependencyPaths(stage)];
@@ -587,7 +628,7 @@ const main = async () => {
       },
       syncCanonicalPrompts: () => checked("canonical-prompt-sync-refused", loadBinaries().node, [loadBinaries().npm, "run", "db:sync-canonical-prompts"], { cwd: stage }),
       verifyRuntimePrismaClient: async () => {
-        if (!existsSync(join(stage, "node_modules/.prisma/client/index.js"))) {
+        if (!generatedPrismaClientIsComplete(stage)) {
           fail("runtime-prisma-client-missing", "staged-generated-client-is-absent");
         }
       },
