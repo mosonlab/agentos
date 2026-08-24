@@ -1,7 +1,18 @@
 import { MergeRecoveryStatus, type Prisma } from "@prisma/client";
 
+import {
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_INTEGRATOR_TEMPLATE_NAME,
+} from "./merge-integrator.js";
+
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
+export const DIRECT_MERGE_READINESS_STEP_INDEX = 7;
+export const MERGE_READINESS_STEP_INDEX = 12;
+export const LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX = 6;
+export const LEGACY_MERGE_READINESS_STEP_INDEX = 11;
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
   regression: "mergeTail.regression",
@@ -165,8 +176,10 @@ export type MergeReadinessStepShape = {
 export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean => {
   if (!step || step.outputKind !== MERGE_READINESS_OUTPUT_KIND) return false;
   const name = step.taskTemplate?.name ?? step.taskTemplateName ?? null;
-  return (name === "direct-engineer-workflow" && step.stepIndex === 6)
-    || (name === "compound-engineer-workflow" && step.stepIndex === 11);
+  return (name === DIRECT_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === DIRECT_MERGE_READINESS_STEP_INDEX)
+    || (name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === MERGE_READINESS_STEP_INDEX)
+    || (name === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX)
+    || (name === LEGACY_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_MERGE_READINESS_STEP_INDEX);
 };
 
 const DEFENSE_EXACT = new Set([
