@@ -125,16 +125,31 @@ const queueCanonicalStep = async (
   if (sourceRun) {
     await db.run.update({
       where: { id: sourceRun.id },
-      data: { status: "SUCCEEDED", baseSha: "b".repeat(40) },
+      // Model the exact-head recovery publisher: its workspace starts at the
+      // already-implemented head, while the canonical output retains the
+      // original implementation base.
+      data: { status: "SUCCEEDED", baseSha: "5".padStart(40, "0") },
     });
   }
-  await db.taskStepOutput.createMany({ data: priorTasks.map((task) => ({
-    taskId: task.id,
-    ...(task.id === sourceTask?.id && sourceRun ? { runId: sourceRun.id } : {}),
-    kind: `step-${task.chainIndex}`,
-    body: `persisted output from step ${task.chainIndex}`,
-    commitSha: String(task.chainIndex).padStart(40, "0"),
-  })) });
+  await db.taskStepOutput.createMany({ data: priorTasks.map((task) => {
+    const headSha = String(task.chainIndex).padStart(40, "0");
+    const implementationSource = task.id === sourceTask?.id && sourceRun;
+    return {
+      taskId: task.id,
+      ...(implementationSource ? { runId: sourceRun.id } : {}),
+      kind: implementationSource ? "implementation" : `step-${task.chainIndex}`,
+      body: implementationSource
+        ? JSON.stringify({
+          schemaVersion: 1,
+          baseSha: "b".repeat(40),
+          headSha,
+          summary: "implemented before exact-head recovery",
+          testsRun: ["focused"],
+        })
+        : `persisted output from step ${task.chainIndex}`,
+      commitSha: headSha,
+    };
+  }) });
   const run = await db.$transaction((tx) => enqueueTaskRun(tx as never, target.id));
   return { run, expectedPriorOutputs: priorTasks.length };
 };
@@ -167,7 +182,7 @@ test("canonical blind-review claims omit prior outputs while attached steps reta
   const attachedClaim = await claim();
   assert.equal(attachedClaim.run.id, attached.run.id);
   assert.equal(attachedClaim.priorOutputs.length, attached.expectedPriorOutputs);
-  assert.ok(attachedClaim.priorOutputs.some((output) => output.body === "persisted output from step 5"));
+  assert.ok(attachedClaim.priorOutputs.some((output) => output.body.includes("implemented before exact-head recovery")));
 
   const blind = await queueCanonicalStep(template, repo.id, 7);
   const blindClaim = await claim();

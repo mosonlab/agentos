@@ -202,6 +202,47 @@ export class PinnedBaseCommitError extends Error {
 export const isPinnedBaseCommitError = (error: unknown): error is PinnedBaseCommitError =>
   error instanceof Error && error.name === "PinnedBaseCommitError";
 
+const IMPLEMENTATION_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+const implementationRangeFromOutput = (
+  taskId: string,
+  baseFromStepIndex: number,
+  source: { kind: string; body: string; commitSha: string | null },
+): { implementationBaseSha: string; implementationHeadSha: string } => {
+  if (!source.commitSha) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has no recorded commitSha");
+  }
+  if (!IMPLEMENTATION_SHA.test(source.commitSha)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has invalid commitSha");
+  }
+  if (source.kind !== "implementation") {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has no canonical implementation output");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(source.body);
+  } catch {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output is not valid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output is not a JSON object");
+  }
+  const output = value as Record<string, unknown>;
+  if (output.schemaVersion !== 1) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has unsupported schemaVersion");
+  }
+  if (typeof output.baseSha !== "string" || !IMPLEMENTATION_SHA.test(output.baseSha)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has invalid baseSha");
+  }
+  if (typeof output.headSha !== "string" || !IMPLEMENTATION_SHA.test(output.headSha)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has invalid headSha");
+  }
+  if (output.headSha !== source.commitSha) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output headSha does not match commitSha");
+  }
+  return { implementationBaseSha: output.baseSha, implementationHeadSha: output.headSha };
+};
+
 export const pinnedImplementationRange = async (
   tx: Tx,
   task: {
@@ -226,21 +267,16 @@ export const pinnedImplementationRange = async (
         chainIndex: baseFromStepIndex,
       },
     },
-    select: { commitSha: true, run: { select: { baseSha: true } } },
+    select: { kind: true, body: true, commitSha: true },
   });
-  if (!source?.commitSha) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded commitSha");
+  if (!source) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no canonical implementation output");
   }
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.commitSha)) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has invalid commitSha");
-  }
-  if (!source.run?.baseSha) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded implementation baseSha");
-  }
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.run.baseSha)) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has invalid implementation baseSha");
-  }
-  return { implementationBaseSha: source.run.baseSha, implementationHeadSha: source.commitSha };
+  // A recovery Run republishes an already-complete head, so its workspace
+  // base legitimately equals that head. The canonical implementation output
+  // preserves the original reviewed range and is the authority for every
+  // later blind-review claim.
+  return implementationRangeFromOutput(task.id, baseFromStepIndex, source);
 };
 
 /**
