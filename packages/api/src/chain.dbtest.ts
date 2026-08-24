@@ -245,7 +245,7 @@ test("automatic advancement skips a legacy DONE gap and queues the later TODO", 
 
 // The full-chain mutex makes the old delete-between-observation-and-lock race
 // unexecutable: activation takes every chain row before reading any successor.
-test.skip("automatic advancement reselects after the observed successor is deleted", async () => {
+void test.skip("automatic advancement reselects after the observed successor is deleted", async () => {
   const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
   const later = await db.task.create({ data: {
     projectId: project.id,
@@ -286,7 +286,7 @@ test.skip("automatic advancement reselects after the observed successor is delet
 });
 
 // Likewise, activation has no unlocked observation/CAS phase to re-read.
-test.skip("an unrelated successor patch between observation and lock is re-read and still queues", async () => {
+void test.skip("an unrelated successor patch between observation and lock is re-read and still queues", async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const patchDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   let patched = false;
@@ -659,7 +659,7 @@ test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () =>
 // Both writers now take the same complete chain mutex, so the old two-row
 // barrier cannot be constructed and is superseded by the concurrent winner
 // test above.
-test.skip("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock order", { timeout: 20_000 }, async () => {
+void test.skip("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock order", { timeout: 20_000 }, async () => {
   const { predecessor, successor, gate } = await completeIntoHumanGate();
   // Recreate the legitimate P -> G activation edge while preserving the OPEN
   // HUMAN gate on G. Before the fix, reject locked G -> P and this interleaving
@@ -796,7 +796,7 @@ test("an archived successor is parked, not spun on", { timeout: 20_000 }, async 
 });
 
 // There is no observation gap after the full-chain lock is acquired.
-test.skip("a successor parked between observation and lock is caught by the locked re-read", { timeout: 20_000 }, async () => {
+void test.skip("a successor parked between observation and lock is caught by the locked re-read", { timeout: 20_000 }, async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const parkDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   const hangDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
