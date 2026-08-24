@@ -254,7 +254,14 @@ export const executeClaim = async (
     if (!isFencingError(error)) return;
     waitingInbox = (error as { code?: string }).code === "WAITING_INBOX";
     fencingRejected = true;
-    if (handle) await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected").catch(() => undefined);
+    if (handle) {
+      try {
+        const killed = await adapter.kill(handle, waitingInbox ? "waiting for Inbox reply" : "fencing token rejected");
+        if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+      } catch (killError: unknown) {
+        console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(killError)}`);
+      }
+    }
   };
 
   const acceptCancellation = async (request: CancellationRequest | null): Promise<void> => {
@@ -266,7 +273,10 @@ export const executeClaim = async (
       // during credential preparation or adapter startup waits until launch is
       // either abandoned or has produced the handle that must be killed.
       await providerLaunchSettled;
-      if (handle) await adapter.kill(handle, request.reason);
+      if (handle) {
+        const killed = await adapter.kill(handle, request.reason);
+        if (killed.processAlive) throw new Error(`Run ${claim.run.id} still owns a live provider process`);
+      }
       await acknowledgeCancellation(config, claim, request, workspace);
     })();
     await cancellationPromise;

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -364,6 +364,7 @@ export type HeartbeatSnapshot = {
 };
 
 export type RuntimeHandle = {
+  runId: string;
   runner: RunnerKind;
   child: ChildProcess;
   pid: number | null;
@@ -722,6 +723,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const handle: RuntimeHandle = {
+    runId: spec.claim.run.id,
     runner,
     child,
     pid: child.pid ?? null,
@@ -1020,17 +1022,60 @@ const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
   return { failureClass: "TASK_FAILED", retryable: false };
 };
 
+const ownedRunProcesses = async (runId: string): Promise<number[]> => new Promise((resolvePromise, rejectPromise) => {
+  execFile("ps", ["eww", "-axo", "pid=,ppid=,pgid=,command="], { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+    if (error) {
+      rejectPromise(new Error(`Unable to inspect Run-owned processes: ${error.message}`));
+      return;
+    }
+    const marker = ` AGENTOS_RUN_ID=${runId}`;
+    const pids = stdout.split("\n").flatMap((line) => {
+      if (!line.includes(marker)) return [];
+      const match = /^\s*(\d+)\s+/u.exec(line);
+      return match ? [Number.parseInt(match[1]!, 10)] : [];
+    });
+    resolvePromise(pids.filter((pid) => pid !== process.pid));
+  });
+});
+
+const signalProcesses = (pids: number[], signal: NodeJS.Signals): void => {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, signal);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+};
+
+const waitForRunDrain = async (runId: string, timeoutMs: number): Promise<number[]> => {
+  const deadline = Date.now() + timeoutMs;
+  let remaining = await ownedRunProcesses(runId);
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 50));
+    remaining = await ownedRunProcesses(runId);
+  }
+  return remaining;
+};
+
 const kill = async (handle: RuntimeHandle, reason: string): Promise<KillResult> => {
   handle.terminationReason = reason;
   const pid = handle.pid;
-  if (!pid || handle.child.exitCode !== null || handle.child.signalCode !== null) return { signal: null, processAlive: false };
-  try { process.kill(-pid, "SIGTERM"); } catch { return { signal: null, processAlive: false }; }
-  const closed = await Promise.race([
-    handle.exit.then(() => true),
-    new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 5_000)),
-  ]);
-  if (closed) return { signal: "SIGTERM", processAlive: false };
-  try { process.kill(-pid, "SIGKILL"); } catch { return { signal: "SIGTERM", processAlive: false }; }
+  if (pid && handle.child.exitCode === null && handle.child.signalCode === null) {
+    try { process.kill(-pid, "SIGTERM"); } catch { /* the ownership scan below is authoritative */ }
+  }
+  let remaining = await ownedRunProcesses(handle.runId);
+  signalProcesses(remaining, "SIGTERM");
+  remaining = await waitForRunDrain(handle.runId, 5_000);
+  if (remaining.length === 0) {
+    await handle.exit;
+    return { signal: pid ? "SIGTERM" : null, processAlive: false };
+  }
+  signalProcesses(remaining, "SIGKILL");
+  remaining = await waitForRunDrain(handle.runId, 5_000);
+  if (remaining.length > 0) {
+    throw new Error(`Unable to terminate ${remaining.length} process(es) owned by Run ${handle.runId}`);
+  }
   await handle.exit;
   return { signal: "SIGKILL", processAlive: false };
 };

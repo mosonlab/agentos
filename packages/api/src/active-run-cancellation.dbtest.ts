@@ -301,22 +301,49 @@ test("start and cancellation acknowledgement serialize to one Run and Session ou
   assert.equal(session.executionStatus, SessionExecutionStatus.CANCELLED);
 });
 
-test("QUEUED and WAITING_INBOX cancellation settle immediately without a provider acknowledgement", async () => {
-  for (const status of [RunStatus.QUEUED, RunStatus.WAITING_INBOX]) {
-    const seeded = await seed(status);
-    const response = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
-      requestId: `cancel-immediate-${status.toLowerCase()}`, reason: "operator stop",
-    });
-    assert.equal(response.status, 200);
-    assert.equal(response.body.cancellationState, "acknowledged");
-    const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
-    assert.equal(run.status, RunStatus.CANCELLED);
-    assert.ok(run.cancelAcknowledgedAt);
-    if (seeded.session) {
-      const session = await db.session.findUniqueOrThrow({ where: { id: seeded.session.id } });
-      assert.equal(session.executionStatus, SessionExecutionStatus.CANCELLED);
-    }
-  }
+test("only an unclaimed QUEUED cancellation settles without runner acknowledgement", async () => {
+  const queued = await seed(RunStatus.QUEUED);
+  const queuedResponse = await call("POST", `/runs/${queued.run.id}/cancel`, OPERATOR, {
+    requestId: "cancel-immediate-queued", reason: "operator stop",
+  });
+  assert.equal(queuedResponse.status, 200);
+  assert.equal(queuedResponse.body.cancellationState, "acknowledged");
+  assert.ok((await db.run.findUniqueOrThrow({ where: { id: queued.run.id } })).cancelAcknowledgedAt);
+
+  const waiting = await seed(RunStatus.WAITING_INBOX);
+  const requestId = "cancel-waiting-provider-cleanup";
+  const waitingResponse = await call("POST", `/runs/${waiting.run.id}/cancel`, OPERATOR, {
+    requestId, reason: "operator stop",
+  });
+  assert.equal(waitingResponse.status, 200);
+  assert.equal(waitingResponse.body.cancellationState, "requested");
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: waiting.run.id } })).status, RunStatus.WAITING_INBOX);
+  const acknowledged = await call("POST", `/runner/runs/${waiting.run.id}/cancel/acknowledge`, RUNNER, {
+    runnerId: RUNNER_ID, fencingToken: waiting.run.fencingToken, requestId,
+  });
+  assert.equal(acknowledged.status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: waiting.run.id } })).status, RunStatus.CANCELLED);
+});
+
+test("stop-and-park records cancellation intent and keeps the Task in Backlog after acknowledgement", async () => {
+  const seeded = await seed(RunStatus.RUNNING);
+  const requestId = "cancel-and-park";
+  const requested = await call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+    requestId, reason: "pause implementation", parkTask: true,
+  });
+  assert.equal(requested.status, 200);
+  assert.equal(requested.body.cancellationState, "requested");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.BACKLOG);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.successor.id } })).status, TaskStatus.TODO);
+
+  const acknowledged = await call("POST", `/runner/runs/${seeded.run.id}/cancel/acknowledge`, RUNNER, {
+    runnerId: RUNNER_ID, fencingToken: seeded.run.fencingToken, requestId,
+  });
+  assert.equal(acknowledged.status, 200);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.BACKLOG);
+  assert.equal(await db.run.count({ where: { taskId: seeded.task.id, status: { in: [
+    RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX,
+  ] } } }), 0);
 });
 
 test("lease reconciliation settles an unacknowledged cancellation without retrying", async () => {
@@ -332,7 +359,7 @@ test("lease reconciliation settles an unacknowledged cancellation without retryi
     db.task.findUniqueOrThrow({ where: { id: seeded.successor.id } }),
   ]);
   assert.equal(run.status, RunStatus.CANCELLED);
-  assert.equal(run.cancelAcknowledgedAt?.toISOString(), now.toISOString());
+  assert.equal(run.cancelAcknowledgedAt, null);
   assert.equal(count, 1);
   assert.equal(successor.status, TaskStatus.TODO);
 });
@@ -360,6 +387,7 @@ test("a late runner acknowledgement backfills workspace evidence after reconcili
   assert.equal(response.status, 200);
   const run = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(run.status, RunStatus.CANCELLED);
+  assert.ok(run.cancelAcknowledgedAt);
   assert.equal(run.workspacePath, "/scratch/reconciled-first");
   assert.equal(run.branch, "codex/reconciled-first");
   assert.equal(run.baseSha, "b".repeat(40));

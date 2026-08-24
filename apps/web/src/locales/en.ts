@@ -786,6 +786,8 @@ export const en = {
   "taskDetail.stats.stall": "{n}m stall",
   "taskDetail.stats.tokens": "{n} tokens",
   "taskDetail.stats.wallClock": "{n}m wall-clock",
+  "taskDetail.stop.action": "Stop and park Task",
+  "taskDetail.stop.prompt": "Why should this Task be stopped and parked in Backlog?",
 
   "tasks.announcement.moved": "Moved {name} to {status}",
   "tasks.archiveAll": "Archive All",

@@ -779,6 +779,8 @@ export const zh = {
   "taskDetail.stats.stall": "{n} 分钟停滞",
   "taskDetail.stats.tokens": "{n} token",
   "taskDetail.stats.wallClock": "{n} 分钟总时长",
+  "taskDetail.stop.action": "停止并暂停 Task",
+  "taskDetail.stop.prompt": "请输入停止此 Task 并将其暂停在 Backlog 的原因",
 
   "tasks.announcement.moved": "已将 {name} 移至{status}",
   "tasks.archiveAll": "全部归档",
