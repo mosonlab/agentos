@@ -4,8 +4,13 @@
 
 AgentOS chains are currently linear. The Sol review and the independent Opus
 review run one after the other even though neither consumes the other's output.
-This adds latency and makes the combined Opus review/adjudication step carry two
-different authorities.
+This costs the operator wall-clock time on every chain, and it makes the
+combined Opus review/adjudication step carry two different authorities.
+
+This is for the operator who runs canonical Direct and Full Assurance chains
+with several runner daemons online, and for whoever audits a merge: the split
+keeps blind review and adjudication as separate, separately evidenced
+authorities.
 
 Implement the smallest extension that solves this specific problem: an ordered
 chain may contain multiple tasks in one explicit layer. Every task in the
@@ -351,3 +356,45 @@ latency, not correctness.
 - Reopening a completed review or rewriting an accepted immutable report.
 - Changes to runner fairness, capacity, budget policy, merge authority, or the
   merge gate.
+
+## 10. Assumptions and recorded contract amendments
+
+The following readings are fixed here so the plan agent does not have to ask.
+The first two amend the recorded Product Contract and were approved by the
+human at this step's approval gate; the rest are simplest-reading assumptions.
+
+1. **Adjudication runs a fresh Opus Session (amendment).** The Product
+   Contract required adjudication to continue the exact blind-review provider
+   conversation through a chain-scoped continuation contract. That requirement
+   is withdrawn. `review-adjudicator-opus` always starts a fresh Session, needs
+   no `providerConversationId`, and no continuation lineage is persisted.
+   Cross-vendor authority is preserved by the role/model, not by conversation
+   identity; blindness is preserved because the fresh session reads both
+   immutable outputs only after the join. No `ChainContinuation` table exists.
+2. **No live multi-daemon demonstration (amendment).** The Product Contract
+   asked for timestamped evidence of two runner daemons overlapping in
+   wall-clock time. That requirement is withdrawn. Acceptance item 3 instead
+   proves both review Runs become claimable and are claimed by two distinct
+   runner identities with the same pinned base/head. Capacity affects latency,
+   not correctness, and correctness must hold with one daemon.
+3. **Layer identity, not duplicate ordinals.** `chainIndex` stays unique and
+   remains the node identity used by ordering, `baseFromStepIndex` pinning,
+   chain activity reads, and merge execution. `chainLayer` is the added
+   execution key. This is the alternative the Product Contract explicitly
+   permits.
+4. **Coarse full-chain lock.** Activation takes one `(chainLayer, chainIndex,
+   id)`-ordered lock over every task of the chain rather than a prefix lock
+   plus per-successor compare-and-swap. Chains are small and completions are
+   infrequent, so one provable protocol beats two partial ones.
+5. **Legacy templates are renamed, not edited.** Canonical sync renames the
+   persisted 7-step and 12-step templates to `-legacy-v1` identities and
+   creates the new 8-step and 13-step canonical templates. Instantiated tasks
+   keep pointing at their original step rows, so running chains — including
+   the Event ingestion NUL safety and heartbeat isolation chain — are byte
+   unchanged.
+6. **Adjudication is a new role.** `review-adjudicator-opus` is added rather
+   than reusing `review-coordinator-opus` for both nodes, so the blind role's
+   prompt states exactly one job and blindness cannot read as optional.
+7. **Post-fix regression.** Regression stays its existing dedicated role and
+   Session, freshly started on the exact post-fix head; it never resumes a
+   review Session.
