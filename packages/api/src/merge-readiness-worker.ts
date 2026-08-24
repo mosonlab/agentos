@@ -3,6 +3,14 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   AssigneeType,
   AUTHORIZED_MERGE_METHOD,
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  DIRECT_MERGE_READINESS_STEP_INDEX,
+  INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX,
+  LEGACY_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_MERGE_READINESS_STEP_INDEX,
+  MERGE_READINESS_STEP_INDEX,
   MERGE_TAIL_KIND,
   MergeRecoveryStatus,
   Prisma,
@@ -333,8 +341,10 @@ export const readinessTick = async (
     where: {
       status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
       OR: [
-        { templateStep: { stepIndex: 6, outputKind: "merge-authorization", taskTemplate: { name: "direct-engineer-workflow" } } },
-        { templateStep: { stepIndex: 11, outputKind: "merge-authorization", taskTemplate: { name: "compound-engineer-workflow" } } },
+        { templateStep: { stepIndex: DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
+        { templateStep: { stepIndex: MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } } },
+        { templateStep: { stepIndex: LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
+        { templateStep: { stepIndex: LEGACY_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: LEGACY_INTEGRATOR_TEMPLATE_NAME } } },
       ],
     },
     include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true },

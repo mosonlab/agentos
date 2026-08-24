@@ -2,6 +2,8 @@ import {
   ACTIVE_RUN_STATUSES,
   DIRECT_TEMPLATE_NAME,
   INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_INTEGRATOR_TEMPLATE_NAME,
   lockTaskRow,
   Prisma,
   type RunStatus,
@@ -45,17 +47,68 @@ export type PreviousRunHandoff = {
   } | null;
 };
 
+/**
+ * Agent-authored node ranges are intentionally bounded before the
+ * server-owned readiness and mechanical merge nodes. Legacy-v1 template
+ * names retain the old ranges so output authority for already-instantiated
+ * chains does not move when canonical sync installs the new graph.
+ */
+export const DIRECT_CANONICAL_AGENT_STEP_LAST = 6;
+export const FULL_CANONICAL_AGENT_STEP_LAST = 11;
+export const DIRECT_LEGACY_AGENT_STEP_LAST = 5;
+export const FULL_LEGACY_AGENT_STEP_LAST = 10;
+
+export const DIRECT_BLIND_REVIEW_STEP_INDEX = 3;
+export const FULL_BLIND_REVIEW_STEP_INDEX = 7;
+export const DIRECT_ADJUDICATION_STEP_INDEX = 4;
+export const FULL_ADJUDICATION_STEP_INDEX = 8;
+
+const isNamedStep = (
+  step: TemplateStepIdentity | null | undefined,
+  templateName: string,
+  stepIndex: number,
+  outputKind: string,
+): boolean => step?.taskTemplate?.name === templateName
+  && step.stepIndex === stepIndex
+  && step.outputKind === outputKind;
+
 export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): step is CanonicalTemplateStepIdentity => {
   if (!step?.taskTemplate || step.stepIndex === undefined) return false;
-  if (step.taskTemplate.name === DIRECT_TEMPLATE_NAME) return step.stepIndex >= 1 && step.stepIndex <= 5;
-  if (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME) return step.stepIndex >= 1 && step.stepIndex <= 10;
+  if (step.taskTemplate.name === DIRECT_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_CANONICAL_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_LEGACY_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name === LEGACY_INTEGRATOR_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_LEGACY_AGENT_STEP_LAST;
+  }
   return false;
 };
 
+/** The old combined review node, recognized only on a renamed legacy graph. */
+export const isLegacyCombinedBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "must-fix")
+  || isNamedStep(step, LEGACY_INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "must-fix")
+);
+
 export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  step?.outputKind === "must-fix"
-  && ((step.taskTemplate?.name === DIRECT_TEMPLATE_NAME && step.stepIndex === 3)
-    || (step.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === 7))
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  || isLegacyCombinedBlindReviewStep(step)
+);
+
+export const isCanonicalAdjudicationStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_ADJUDICATION_STEP_INDEX, "must-fix")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_ADJUDICATION_STEP_INDEX, "must-fix")
+);
+
+export const isCanonicalBlindFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
 );
 
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
