@@ -1,4 +1,13 @@
-# Merge Integrator v1.1 — evidence procedure
+# Merge Integrator v1.1 — legacy evidence procedure
+
+> This procedure and its companion system-test script are retained for the
+> former twelve-node Full Assurance workflow. They are not current canonical
+> workflow evidence: the current Full Assurance template has thirteen nodes
+> across twelve layers, with parallel Sol and blind Opus reviews followed by a
+> fresh Opus adjudication node. Its readiness and mechanical integrator are
+> nodes 12 and 13. Do not record a pass from this procedure for the current
+> template until the script is migrated. See [`agents/README.md`](../agents/README.md)
+> for the current canonical graph.
 
 How to produce the Merge Integrator v1.1 acceptance evidence, and what each
 artifact is and is not allowed to claim.
