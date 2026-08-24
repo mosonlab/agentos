@@ -3494,6 +3494,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: stopStateRefusal(stopped), code: 409 as const };
         }
         let winningGateCard: { id: string; body: string; gateTaskId: string | null; sessionId: string | null } | null = null;
+        let winningGateRunId: string | null = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
             return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
@@ -3532,6 +3533,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             select: { id: true, body: true, gateTaskId: true, sessionId: true },
           });
           if (winningGateCard) {
+            const session = winningGateCard.sessionId
+              ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
+              : null;
+            if (!session?.runId) {
+              return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
+            }
+            winningGateRunId = session.runId;
             await tx.inboxMessage.update({
               where: { id: winningGateCard.id },
               data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
@@ -3567,15 +3575,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
         let authorization: Awaited<ReturnType<typeof produceMergeAuthorization>> = null;
         if (winningGateCard) {
-          const session = winningGateCard.sessionId
-            ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
-            : null;
-          if (!session?.runId) {
-            return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
-          }
           const decisionRow = await tx.inboxDecision.create({ data: {
             inboxMessageId: winningGateCard.id,
-            runId: session.runId,
+            runId: winningGateRunId!,
             externalEventId: `patch:${taskId}:${statusActivityId ?? winningGateCard.id}`,
             decision: "approve",
             actorOpenId: "patch-operator",
@@ -6255,6 +6257,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (isCompoundImplementationAssigneeError(error)) {
       return context.json({ error: error.message, code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE }, 409);
     }
+    if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === "P2025") return context.json({ error: "Resource not found" }, 404);
       if (error.code === "P2002") return context.json({ error: "Unique constraint violated" }, 409);

@@ -645,16 +645,16 @@ const enqueueTaskRunInternal = async (
   // refused for the run this call is about to create. A row that vanished
   // falls back to the relation; the foreign key decides that case.
   const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
-  if (lockedAgent && !compoundImplementationAssigneeValid(
+  if (!lockedAgent || lockedAgent.archivedAt) {
+    throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
+  }
+  if (!compoundImplementationAssigneeValid(
     task.projectId,
     task.assigneeType,
     lockedAgent,
     task.templateStep,
   )) {
     throw new CompoundImplementationAssigneeError();
-  }
-  if (!lockedAgent || lockedAgent.archivedAt) {
-    throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
   }
   // §D-P4, the last line of the binding invariant, for the same reason: this is
   // the shared enqueue path, so a route added later inherits the refusal. The
@@ -1057,6 +1057,25 @@ const activateChainSuccessorInternal = async (
       select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
     })
     : null;
+  if (isCompoundImplementationStep(successorStep)) {
+    const lockedAgent = successor.assigneeAgentId
+      ? await lockAgentRow(tx, successor.assigneeAgentId)
+      : null;
+    // An archived assignee is the more precise repair instruction. It must be
+    // checked before the compound binding, whose active-agent predicate would
+    // otherwise hide this state behind a less useful error.
+    if (lockedAgent?.archivedAt) {
+      throw new ArchivedAssigneeError(successor.id, successor.name, lockedAgent.name);
+    }
+    if (!compoundImplementationAssigneeValid(
+      successor.projectId,
+      successor.assigneeType,
+      lockedAgent,
+      successorStep,
+    )) {
+      throw new CompoundImplementationAssigneeError();
+    }
+  }
   if (isMergeReadinessStep(successorStep)) {
     await tx.taskActivity.create({ data: {
       taskId: successor.id,

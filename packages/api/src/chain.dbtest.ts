@@ -211,21 +211,32 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
 };
 
 const compoundApprovalState = async (predecessorId: string, successorId: string, gateId: string) => ({
-  predecessor: await db.task.findUniqueOrThrow({ where: { id: predecessorId }, select: { status: true, updatedAt: true } }),
-  successor: await db.task.findUniqueOrThrow({
-    where: { id: successorId },
-    select: { status: true, assigneeType: true, assigneeAgentId: true, updatedAt: true },
-  }),
-  gate: await db.inboxMessage.findUniqueOrThrow({
-    where: { id: gateId },
-    select: { status: true, selectedChoiceId: true, answeredAt: true },
-  }),
-  decisions: await db.inboxDecision.count({ where: { inboxMessageId: gateId } }),
-  replies: await db.inboxMessage.count({ where: { replyToMessageId: gateId } }),
-  successorRuns: await db.run.count({ where: { taskId: successorId } }),
-  predecessorActivities: await db.taskActivity.count({ where: { taskId: predecessorId } }),
-  successorActivities: await db.taskActivity.count({ where: { taskId: successorId } }),
+  predecessor: await db.task.findUniqueOrThrow({ where: { id: predecessorId } }),
+  successor: await db.task.findUniqueOrThrow({ where: { id: successorId } }),
+  gate: await db.inboxMessage.findUniqueOrThrow({ where: { id: gateId } }),
+  decisions: await db.inboxDecision.findMany({ where: { inboxMessageId: gateId }, orderBy: { id: "asc" } }),
+  replies: await db.inboxMessage.findMany({ where: { replyToMessageId: gateId }, orderBy: { id: "asc" } }),
+  successorRuns: await db.run.findMany({ where: { taskId: successorId }, orderBy: { id: "asc" } }),
+  predecessorActivities: await db.taskActivity.findMany({ where: { taskId: predecessorId }, orderBy: { id: "asc" } }),
+  successorActivities: await db.taskActivity.findMany({ where: { taskId: successorId }, orderBy: { id: "asc" } }),
 });
+
+const requestCompoundApproval = (
+  route: "patch" | "inbox",
+  predecessorId: string,
+  gateId: string,
+  requestId: string,
+) => withOperatorToken(() => route === "patch"
+  ? createApp(db).request(`/tasks/${predecessorId}`, {
+    method: "PATCH",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "DONE" }),
+  })
+  : createApp(db).request(`/inbox/messages/${gateId}/decision`, {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ decision: "approve", requestId }),
+  }));
 
 test("compound Implementation PATCH rejects every non-executioner assignee without changing the task", async () => {
   const { senior, successor } = await seedCompoundImplementationApproval(true);
@@ -300,17 +311,12 @@ for (const route of ["patch", "inbox"] as const) {
   test(`legacy-invalid compound successor makes ${route} approval return the named 409 with a full rollback`, async () => {
     const { predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
     const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
-    const response = await withOperatorToken(() => route === "patch"
-      ? createApp(db).request(`/tasks/${predecessor.id}`, {
-        method: "PATCH",
-        headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "DONE" }),
-      })
-      : createApp(db).request(`/inbox/messages/${gate.id}/decision`, {
-        method: "POST",
-        headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ decision: "approve", requestId: `legacy-invalid-${route}` }),
-      }));
+    const response = await requestCompoundApproval(
+      route,
+      predecessor.id,
+      gate.id,
+      `legacy-invalid-${route}`,
+    );
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
       error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
@@ -319,6 +325,60 @@ for (const route of ["patch", "inbox"] as const) {
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
   });
 }
+
+for (const route of ["patch", "inbox"] as const) {
+  test(`HUMAN/null compound successor makes ${route} approval return the named 409 with a full rollback`, async () => {
+    const { predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
+    await db.task.update({
+      where: { id: successor.id },
+      data: { assigneeType: "HUMAN", assigneeAgentId: null },
+    });
+    const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+    const response = await requestCompoundApproval(
+      route,
+      predecessor.id,
+      gate.id,
+      `human-null-${route}`,
+    );
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+    });
+    assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+  });
+}
+
+for (const route of ["patch", "inbox"] as const) {
+  test(`archived compound executioner makes ${route} approval return the same named 409 with a full rollback`, async () => {
+    const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
+    await db.agent.update({ where: { id: executioner.id }, data: { archivedAt: new Date() } });
+    const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+    const response = await requestCompoundApproval(
+      route,
+      predecessor.id,
+      gate.id,
+      `archived-executioner-${route}`,
+    );
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step",
+    });
+    assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+  });
+}
+
+test("session-less gate PATCH refuses before writing any approval state", async () => {
+  const { predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
+  await db.inboxMessage.update({ where: { id: gate.id }, data: { sessionId: null } });
+  const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+  const response = await requestCompoundApproval("patch", predecessor.id, gate.id, "session-less");
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "Gate card has no session run to bind a decision to",
+  });
+  assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+});
 
 test("repaired compound approval is atomic and exactly once across PATCH, Inbox, replay, and concurrency", async () => {
   const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
