@@ -22,7 +22,7 @@ const head = (active: TasksTab): string => renderToStaticMarkup(
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "t1", projectId: "p1", assigneeAgentId: null, repoId: null, templateId: null, templateStepId: null,
-  followUpTaskId: null, name: "Ship the thing", description: "d", workingDirectory: null, targetBranch: null,
+  name: "Ship the thing", description: "d", workingDirectory: null, targetBranch: null,
   failureReason: null, status: "DONE", assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW",
   runAt: null, cron: null, timezone: null,
   maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 5,
@@ -35,7 +35,7 @@ const task = (overrides: Partial<Task> = {}): Task => ({
 });
 
 const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
-  chainId: "c1", done: 4, total: 9, activeStepName: "Implementation", activeStatus: "doing", position: 5,
+  chainId: "c1", done: 4, total: 9, activeStepName: "Implementation", activeStatus: "doing", currentLayer: 2, layerCount: 7, position: 5,
   ...overrides,
 });
 
