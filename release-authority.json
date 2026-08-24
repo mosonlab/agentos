@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "d899705a66693d5898c53aa1ca4d84059f940906",
-  "tree": "31ae3740d0fdb0d45d02e4c9b99f7bdd59f4b09a",
+  "commit": "d95d6405d7e8eab06589fcf0ced0d44df864fd2d",
+  "tree": "e91101e388010765c4132d007a9bcd52153d2a46",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -137,9 +137,19 @@
       "blob": "f32655e398eccf9ce5b5cbd363b446499686df91"
     },
     {
+      "path": "packages/db/prisma/migrations/20260823100000_agent_runtime_overrides/migration.sql",
+      "sha256": "84ab4a7501bf7bcced5a0abbd545af8ae30b1555a312dd96b404825326baa3b6",
+      "blob": "d335afb524337f9cb479de1ce0eb3d836b3c9362"
+    },
+    {
       "path": "packages/db/prisma/migrations/20260823100000_chain_layer_expand/migration.sql",
       "sha256": "d01ca9d20af1439417b6894c64d05fb5e03d057f387d7a792a5ccac19994858a",
       "blob": "236d80dd7a7e8bc9476b26a6c28c03799e4dce8a"
+    },
+    {
+      "path": "packages/db/prisma/migrations/20260824010000_native_implementation_subagents/migration.sql",
+      "sha256": "bbfe0fbbaab1199640f7eab93523e38b2c524ea8c191c15167e853115b0dcd20",
+      "blob": "4b6020ae0250622023dffbf8bd8f4ebe022a179f"
     },
     {
       "path": "packages/db/prisma/migrations/20260824100000_chain_layer_contract/migration.sql",
@@ -163,8 +173,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "3147ebb3e1896dfe10b838db9684639690b16d6bb58557a7e5dff41762f13595",
-      "blob": "de1de303b035eb5cb67034fc473650dfe7ba7b5b"
+      "sha256": "82e2bc17d3207cb3c08a8693deb9976c52eafbe484f2ccf2d41e4a8df871fdfa",
+      "blob": "0df94658db400a239ba000e7d2076e5817e07add"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -173,8 +183,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "7c6b1faacb05695b85fe79b5755d79e883365805d1d6fe353ef0b1c1366599e2",
-      "blob": "f7ee35ef774401fd9682c83acba6f8f11ad16615"
+      "sha256": "a3a76a606ce2058b4c0c22f5a1f1da003b4f517cefdb99d46299c08f2d4195a8",
+      "blob": "860becdd0da50d90e1c3b12fbb4de002b0b27dad"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -188,13 +198,13 @@
     }
   ],
   "migrations": {
-    "count": 27,
+    "count": 29,
     "terminal": "20260824100000_chain_layer_contract",
-    "sha256": "aaa3891f4427720ce82e25ec2c3840f7ff97228f26053b4b8b754d07d6a5aabb"
+    "sha256": "bc703b99df3509d909d9cf57df20d5e5ac332b087e78846769e167dfc778624e"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "EUs7DTz19TiQs/NKqVY7UQ1YTY54jQZtSoWQRo4WWA3sb1cNqlAHSTcPP3qW447Y+12y84lqiDHjTtXm7nEAAA=="
+    "value": "eq/qhkpq4lo3a6Xs+a//FXo4Rfhree4p8zg7HYSX6cQVA+lntG1rBqOy162wFXppyGGIzCRIjc7+77LUm4/sAg=="
   }
 }
