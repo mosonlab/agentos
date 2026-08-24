@@ -24,6 +24,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   source: "MANUAL" as BoardRow["source"],
   chainId: null,
   chainIndex: null,
+  chainLayer: null,
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
   templateStep: null,
   assigneeAgent: null,
@@ -145,7 +146,7 @@ test("chainProgress is passed through, not recomputed", () => {
   // could disagree with the numbers the detail page renders.
   const progress = {
     chainId: "c1", done: 3, total: 9, activeStepName: "Implementation",
-    activeStatus: "doing", position: 4,
+    activeStatus: "doing", currentLayer: 2, layerCount: 7, position: 4,
   };
   assert.equal(boardCard(row({ chainId: "c1", chainIndex: 4 }), progress).chainProgress, progress);
 });

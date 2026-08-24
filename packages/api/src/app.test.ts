@@ -210,6 +210,73 @@ test("task create requires chainId and chainIndex together", async () => {
   });
 });
 
+test("public task creation assigns a linear layer and rejects layer/dependency inputs", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, unknown> | undefined;
+    const database = {
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        task: {
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            stored = data;
+            return { id: "task-1", ...data };
+          },
+        },
+        taskActivity: { create: async () => ({}) },
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Layered API task", assigneeType: "HUMAN", chainId: "chain-1", chainIndex: 4,
+      }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(stored?.chainLayer, 4);
+
+    for (const field of ["layer", "chainLayer", "dependencies", "blockedBy"]) {
+      const response = await createApp({} as PrismaClient).request("/projects/project-1/tasks", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Rejected", assigneeType: "HUMAN", [field]: field === "layer" ? 2 : [] }),
+      });
+      assert.equal(response.status, 400, field);
+    }
+  });
+});
+
+test("public template-step creation assigns its step layer and rejects dependency input", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, unknown> | undefined;
+    const database = {
+      taskTemplate: { findUnique: async () => ({ id: "template-1", projectId: "project-1", webhookRepoId: null }) },
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        taskTemplateStep: {
+          findFirst: async () => null,
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            stored = data;
+            return { id: "step-1", ...data };
+          },
+        },
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/task-templates/template-1/steps", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ stepIndex: 3, name: "Human gate", assigneeType: "HUMAN", prompt: "wait", dependencies: [] }),
+    });
+    assert.equal(created.status, 400);
+
+    const accepted = await createApp(database).request("/task-templates/template-1/steps", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ stepIndex: 3, name: "Human gate", assigneeType: "HUMAN", prompt: "wait" }),
+    });
+    assert.equal(accepted.status, 201);
+    assert.equal(stored?.layer, 3);
+  });
+});
+
 test("operator DONE on a chain task closes its open gate and queues the CAS-claimed successor", async () => {
   await withTokens(async () => {
     let closed = false;

@@ -15,6 +15,9 @@ export type ChainRow = {
   projectId: string;
   chainId: string | null;
   chainIndex: number | null;
+  /** Stored execution layer. During the expand phase this may still be null
+   *  on legacy fixtures; progress falls back to chainIndex for those rows. */
+  chainLayer: number | null;
   name: string;
   status: TaskStatus;
   archivedAt: Date | null;
@@ -27,6 +30,10 @@ export type ChainProgress = {
   total: number;
   activeStepName: string;
   activeStatus: string;
+  /** Dense one-based ordinal of the active stored layer. */
+  currentLayer: number;
+  /** Number of distinct execution layers in the chain. */
+  layerCount: number;
 };
 
 /** The step's own name when it came from a template, else the task's. */
@@ -49,11 +56,21 @@ export const chainProgress = (rows: ChainRow[]): Omit<ChainProgress, "chainId"> 
   const ordered = [...rows].sort(byChainIndex);
   const done = ordered.filter((row) => row.status === TaskStatus.DONE).length;
   const active = ordered.find((row) => row.status !== TaskStatus.DONE) ?? ordered[ordered.length - 1]!;
+  // The expand migration backfills every legacy row, but keeping the
+  // chainIndex fallback makes progress safe for rows read while that migration
+  // is staged and for malformed one-row fixtures. Stored layers may be sparse,
+  // zero-based, or one-based; the board presents their dense rank instead.
+  const effectiveLayer = (row: ChainRow, index: number): number => row.chainLayer ?? row.chainIndex ?? index;
+  const layerValues = ordered.map(effectiveLayer);
+  const distinctLayers = [...new Set(layerValues)].sort((left, right) => left - right);
+  const denseLayer = new Map(distinctLayers.map((layer, index) => [layer, index + 1]));
   return {
     done,
     total: ordered.length,
     activeStepName: stepName(active),
     activeStatus: active.status.toLowerCase(),
+    currentLayer: denseLayer.get(effectiveLayer(active, ordered.indexOf(active))) ?? 1,
+    layerCount: distinctLayers.length,
   };
 };
 
