@@ -502,9 +502,11 @@ test("the default worker capacity serializes gates from different repositories",
 test("worker capacity two admits exactly two gates and keeps concurrent logs distinct", (t) => {
   const workerRoot = scratch(t);
   const starts = join(workerRoot, "starts");
+  const dbtestConcurrency = join(workerRoot, "dbtest-concurrency");
   const release = join(workerRoot, "release");
   const verdict = `
     printf '%s\n' "$$" >> "$WORKER_LOCK_STARTS"
+    printf '%s\n' "\${AGENTOS_DBTEST_CONCURRENCY:-unset}" >> "$WORKER_DBTEST_CONCURRENCY"
     while [ ! -f "$WORKER_LOCK_RELEASE" ]; do sleep 0.05; done
     printf 'MERGE GATE: PASS fixture\n'
   `;
@@ -546,12 +548,14 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
         GATE_OID: fixture.oid,
         WORKER_ROOT: workerRoot,
         WORKER_LOCK_STARTS: starts,
+        WORKER_DBTEST_CONCURRENCY: dbtestConcurrency,
         WORKER_LOCK_RELEASE: release,
       },
     },
   );
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 3);
+  assert.deepEqual(readFileSync(dbtestConcurrency, "utf8").trim().split("\n"), ["2", "2", "2"]);
   assert.equal((result.stdout.match(/MERGE GATE: PASS/g) ?? []).length, 3);
   const logs = readdirSync(join(fixture.home, "logs")).filter((name) => name.endsWith(".log"));
   assert.equal(logs.length, 3, `concurrent runs shared a log: ${logs.join(", ")}`);
