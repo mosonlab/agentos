@@ -217,6 +217,51 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
   }
 });
 
+test("a cache hit rebuilds binding.gyp workspaces whose install artifacts live outside node_modules", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-native-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    await writeFile(join(workspace, "apps/web/binding.gyp"), '{"targets":[]}\n');
+    const nativeOutput = join(workspace, "apps/web/build/Release/control_plane_directory.node");
+    const fake = fakeInstallExecutor(async (cwd) => {
+      await mkdir(join(cwd, "node_modules/fake-package"), { recursive: true });
+      await writeFile(join(cwd, "node_modules/fake-package/index.js"), "cached root\n");
+      await mkdir(dirname(nativeOutput), { recursive: true });
+      await writeFile(nativeOutput, "installed native addon\n");
+    });
+    const rebuilds: string[][] = [];
+    const execute: DependencyCommandExecutor = async (runnerConfig, executable, args, cwd, env, options) => {
+      if (executable === "npm" && args[0] === "rebuild") {
+        rebuilds.push([...args]);
+        await mkdir(dirname(nativeOutput), { recursive: true });
+        await writeFile(nativeOutput, "rebuilt native addon\n");
+        return "";
+      }
+      return fake.execute(runnerConfig, executable, args, cwd, env, options);
+    };
+    const configured = config(root);
+
+    const first = await materializeWorkspaceDependencies(
+      configured, workspace, workspaceEnvironment(configured), execute,
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    assert.equal(first.status, "installed");
+    assert.deepEqual(rebuilds, []);
+    await rm(join(workspace, "apps/web/build"), { recursive: true });
+
+    const second = await materializeWorkspaceDependencies(
+      configured, workspace, workspaceEnvironment(configured), execute,
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    assert.equal(second.status, "restored");
+    assert.deepEqual(rebuilds, [["rebuild", "-w", "fixture-web", "--no-audit", "--no-fund"]]);
+    assert.equal(await readFile(nativeOutput, "utf8"), "rebuilt native addon\n");
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
 test("every dependency input and toolchain coordinate changes the cache key", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-key-"));
   try {

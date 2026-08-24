@@ -164,6 +164,7 @@ const PROVIDER_OUTAGE_PATTERN = /provider outage|\b5\d\d\b/iu;
  * retry loop has every one of these tokens in its stdout.
  */
 const TRANSIENT_NETWORK_PATTERNS = [
+  /fetch failed/i,
   /SSL_ERROR_SYSCALL/i,
   /unexpected EOF/i,
   /connection (?:reset|closed|timed out|lost)/i,

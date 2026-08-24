@@ -1,6 +1,7 @@
 import { isCommandTimeout, KILL_OVERHEAD_MS } from "./exec.js";
 
 const TRANSIENT_NETWORK_PATTERNS = [
+  /fetch failed/i,
   /SSL_ERROR_SYSCALL/i,
   /unexpected EOF/i,
   /connection (?:reset|closed|timed out|lost)/i,

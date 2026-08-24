@@ -117,3 +117,7 @@ test("the runner's own CLI preflight timeout is not mistaken for a network timeo
   // Ours is recognised by type, not by wording.
   assert.equal(isTransientNetworkError(new CommandTimeoutError("git", ["push"], 20_000)), true);
 });
+
+test("fetch transport failures are classified as transient", () => {
+  assert.equal(isTransientNetworkError(new TypeError("fetch failed")), true);
+});

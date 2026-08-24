@@ -106,6 +106,13 @@ export type GitHubReader = {
   }>;
 };
 
+type GitHubReadRetryOptions = {
+  wait?: (delayMs: number) => Promise<void>;
+};
+
+const GITHUB_READ_RETRY_DELAYS_MS = [250, 1_000] as const;
+const waitForRetry = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs));
+
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asObject = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -234,54 +241,56 @@ export const checkConclusionFor = (snapshot: PullRequestSnapshot, name: string):
 export const createGitHubReader = (
   token: string | undefined = process.env.GITHUB_READ_TOKEN,
   fetchImpl: typeof fetch = fetch,
+  retryOptions: GitHubReadRetryOptions = {},
 ): GitHubReader | null => {
   if (!token) return null;
+  const wait = retryOptions.wait ?? waitForRetry;
   const request = async (url: string, init: RequestInit): Promise<Response> => {
-    let response: Response;
-    try {
-      response = await fetchImpl(url, init);
-    } catch (error: unknown) {
-      if (error instanceof Error && error.name === "AbortError") throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
-      const message = error instanceof Error ? error.message : "unknown";
-      throw new GitHubReadError(`GitHub read failed: ${message}`, isDeterministicRefusal(error) ? "permission" : "transport");
-    }
-    if (response.status === 401 || response.status === 403) throw new GitHubReadError(`GitHub read refused with ${response.status}`, "permission");
-    if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
-    return response;
-  };
-  return {
-    readPullRequest: async (repository, prNumber, baseRef, signal) => {
-      const [owner, name] = repository.split("/");
-      if (!owner || !name) throw new GitHubReadError(`malformed repository ${repository}`, "response");
+    for (let attempt = 0; ; attempt += 1) {
       let response: Response;
       try {
-        response = await fetchImpl(GITHUB_GRAPHQL_URL, {
-          method: "POST",
-          signal,
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-            Accept: "application/vnd.github+json",
-          },
-          body: JSON.stringify({ query: PULL_REQUEST_QUERY, variables: { owner, name, number: prNumber, base: baseRef } }),
-        });
+        response = await fetchImpl(url, init);
       } catch (error: unknown) {
         if (error instanceof Error && error.name === "AbortError") {
           throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
         }
         const message = error instanceof Error ? error.message : "unknown";
-        // A credential failure raised at the transport layer rather than as a
-        // status is still a credential failure. Calling it `transport` invites
-        // the reader to treat a permanently broken token as a network blip.
-        throw new GitHubReadError(
-          `GitHub read failed: ${message}`,
-          isDeterministicRefusal(error) ? "permission" : "transport",
-        );
+        if (isDeterministicRefusal(error)) throw new GitHubReadError(`GitHub read failed: ${message}`, "permission");
+        const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined) throw new GitHubReadError(`GitHub read failed: ${message}`, "transport");
+        await wait(delay);
+        continue;
       }
       if (response.status === 401 || response.status === 403) {
         throw new GitHubReadError(`GitHub read refused with ${response.status}`, "permission");
       }
-      if (!response.ok) throw new GitHubReadError(`GitHub read returned ${response.status}`, "transport");
+      if (response.ok) return response;
+      const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
+      const transientStatus = response.status === 429 || response.status >= 500;
+      if (transientStatus && delay !== undefined) {
+        await wait(delay);
+        continue;
+      }
+      throw new GitHubReadError(
+        `GitHub read returned ${response.status}`,
+        transientStatus ? "transport" : "response",
+      );
+    }
+  };
+  return {
+    readPullRequest: async (repository, prNumber, baseRef, signal) => {
+      const [owner, name] = repository.split("/");
+      if (!owner || !name) throw new GitHubReadError(`malformed repository ${repository}`, "response");
+      const response = await request(GITHUB_GRAPHQL_URL, {
+        method: "POST",
+        signal,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/vnd.github+json",
+        },
+        body: JSON.stringify({ query: PULL_REQUEST_QUERY, variables: { owner, name, number: prNumber, base: baseRef } }),
+      });
       return parsePullRequestResponse(repository, baseRef, await response.json(), new Date().toISOString());
     },
     compareCommits: async (repository, baseSha, headSha, signal) => {

@@ -245,6 +245,7 @@ test("the envelope a real hung push produces is classified as retryable transien
  * vocabulary would have quietly made these failures final.
  */
 const TRANSIENT_PHRASES = [
+  "fetch failed",
   "SSL_ERROR_SYSCALL: connection failed",
   "fatal: the remote end hung up unexpectedly: unexpected EOF",
   "connection reset by peer",
