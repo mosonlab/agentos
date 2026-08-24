@@ -96,17 +96,17 @@ const seedReadiness = async () => {
   } });
   const [regressionStep, readinessStep, integratorStep] = await Promise.all([
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 5, layer: 5, name: "Regression", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 6, layer: 6, name: "Regression", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: regressionAgent.id, prompt: "verify", approvalGate: false,
       outputKind: "regression-verification", opensPullRequest: false,
     } }),
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 6, layer: 6, name: "Readiness", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 7, layer: 7, name: "Readiness", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: reviewAgent.id, prompt: "mechanical", approvalGate: false,
       outputKind: "merge-authorization", opensPullRequest: false,
     } }),
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 7, layer: 7, name: "Merge", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 8, layer: 8, name: "Merge", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: integratorAgent.id, prompt: "merge", approvalGate: false,
       outputKind: "merge-result", opensPullRequest: false,
     } }),
@@ -115,17 +115,17 @@ const seedReadiness = async () => {
   const regression = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: regressionStep.id,
     name: "Regression", description: "verify", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: regressionAgent.id, status: TaskStatus.DONE, chainId, chainIndex: 5, chainLayer: 5, targetBranch: "main",
+    assigneeAgentId: regressionAgent.id, status: TaskStatus.DONE, chainId, chainIndex: 6, chainLayer: 6, targetBranch: "main",
   } });
   const readiness = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: readinessStep.id,
     name: "Readiness", description: "authorize", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: reviewAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 6, chainLayer: 6, targetBranch: "main",
+    assigneeAgentId: reviewAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 7, chainLayer: 7, targetBranch: "main",
   } });
   const integrator = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: integratorStep.id,
     name: "Merge", description: "merge", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: integratorAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 7, chainLayer: 7,
+    assigneeAgentId: integratorAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 8, chainLayer: 8,
     targetBranch: "main", opensPullRequest: false,
   } });
   const run = await db.run.create({ data: {
@@ -250,7 +250,7 @@ test("future and wrong-index readiness steps are never claimed", async () => {
   assert.equal(await db.inboxMessage.count(), 0);
 
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.DONE } });
-  await db.taskTemplateStep.update({ where: { id: future.readiness.templateStepId! }, data: { stepIndex: 8 } });
+  await db.taskTemplateStep.update({ where: { id: future.readiness.templateStepId! }, data: { stepIndex: 9 } });
   assert.deepEqual(await readinessTick(db, reader()), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
 });
 
