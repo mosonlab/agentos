@@ -8,7 +8,12 @@ import { afterEach, test } from "node:test";
 import { adapters } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { executeClaim, reportCliAvailabilityHeartbeat, runStartupPreflight } from "./runner.js";
+import {
+  cliAvailabilityHeartbeatSchedule,
+  executeClaim,
+  reportCliAvailabilityHeartbeat,
+  runStartupPreflight,
+} from "./runner.js";
 import {
   cleanupAgentScratch, provisionSessionConfig, writeSessionCredentials, type AgentScratch,
 } from "./workspace.js";
@@ -1488,6 +1493,16 @@ test("an availability heartbeat reports a CLI recovery without restarting the ru
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("CLI availability uses an independent one-minute cadence with stable runner jitter", () => {
+  const first = cliAvailabilityHeartbeatSchedule("runner-1");
+  const same = cliAvailabilityHeartbeatSchedule("runner-1");
+  const other = cliAvailabilityHeartbeatSchedule("runner-2");
+  assert.deepEqual(first, same);
+  assert.equal(first.intervalMs, 60_000);
+  assert.ok(first.initialDelayMs >= 60_000 && first.initialDelayMs < 75_000);
+  assert.notEqual(first.initialDelayMs, other.initialDelayMs);
 });
 
 test("an availability heartbeat runs one requested preflight and reports its recovery", async () => {
