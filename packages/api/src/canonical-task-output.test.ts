@@ -89,16 +89,18 @@ test("adjudication guards select the immediate predecessor review layer for Dire
     { template: "compound-engineer-workflow", adjudicationStep: 8, adjudicationLayer: 7, reviewLayer: 6 },
   ] as const;
   for (const candidate of cases) {
-    let predecessorWhere: Record<string, unknown> | null = null;
-    let siblingWhere: Record<string, unknown> | null = null;
+    const observed = {
+      predecessorWhere: null as Record<string, unknown> | null,
+      siblingWhere: null as Record<string, unknown> | null,
+    };
     const tx = {
       task: {
         findFirst: async (args: { where: Record<string, unknown> }) => {
-          predecessorWhere = args.where;
+          observed.predecessorWhere = args.where;
           return { chainLayer: candidate.reviewLayer };
         },
         findMany: async (args: { where: Record<string, unknown> }) => {
-          siblingWhere = args.where;
+          observed.siblingWhere = args.where;
           return [];
         },
       },
@@ -115,7 +117,11 @@ test("adjudication guards select the immediate predecessor review layer for Dire
       implementationHeadSha: "a".repeat(40),
     });
     assert.match(refusal ?? "", new RegExp(`layer ${candidate.reviewLayer}[^]*found 0`, "u"));
-    assert.deepEqual(predecessorWhere?.chainLayer, { lt: candidate.adjudicationLayer });
-    assert.equal(siblingWhere?.chainLayer, candidate.reviewLayer);
+    const predecessorWhere = observed.predecessorWhere;
+    const siblingWhere = observed.siblingWhere;
+    assert.ok(predecessorWhere);
+    assert.ok(siblingWhere);
+    assert.deepEqual(predecessorWhere.chainLayer, { lt: candidate.adjudicationLayer });
+    assert.equal(siblingWhere.chainLayer, candidate.reviewLayer);
   }
 });

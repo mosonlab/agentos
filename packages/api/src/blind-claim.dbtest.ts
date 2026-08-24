@@ -201,8 +201,9 @@ test("blind session cannot read Sol evidence before or after its immutable repor
       commitSha: claimed.run.targetBranch,
     }),
   });
-  assert.equal(persisted.status, 200, await persisted.text());
-  assert.deepEqual((await persisted.json() as { predecessorOutputs: unknown[] }).predecessorOutputs, []);
+  const persistedText = await persisted.text();
+  assert.equal(persisted.status, 200, persistedText);
+  assert.deepEqual((JSON.parse(persistedText) as { predecessorOutputs: unknown[] }).predecessorOutputs, []);
 
   const rewrite = await createApp(db).request(`/session/runs/${blind.run.id}/output`, {
     method: "PUT",
@@ -281,8 +282,9 @@ test("adjudication claim succeeds only after both immutable reports match the pi
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ runnerId: "adjudication-claim-runner", leaseSeconds: 60 }),
   });
-  assert.equal(response.status, 200, await response.text());
-  const claimBody = await response.json() as {
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  const claimBody = JSON.parse(responseText) as {
     run: { id: string; implementationBaseSha: string | null; implementationHeadSha: string | null };
     priorOutputs: Array<{ kind: string; body: string }>;
   };
