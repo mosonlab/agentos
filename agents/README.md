@@ -1,6 +1,6 @@
 # agents/ — Canonical prompts
 
-Source-of-truth files for canonical agents, the mechanical merge sentinel, and task-template step prompts. The seed script imports these into the `Agent`, join, and `TaskTemplateStep` tables; `packages/db/prisma/seed.ts` is the consumer. Skills remain an API-managed concept (`Skill` / `AgentSkill`), but no canonical skill is seeded from this directory.
+Source-of-truth files for canonical agent prompts and initial runtime defaults, the mechanical merge sentinel, and task-template step prompts. The seed script imports these into the `Agent`, join, and `TaskTemplateStep` tables; `packages/db/prisma/seed.ts` is the consumer. Models and runners changed by the operator in the console are persisted runtime overrides and are not replaced by seed or canonical prompt sync. Skills remain an API-managed concept (`Skill` / `AgentSkill`), but no canonical skill is seeded from this directory.
 
 All prompts here are reconstructed from BLUEPRINT.md (itself reconstructed from Danny Postma's talk); none are his verbatim files.
 
@@ -36,7 +36,7 @@ spawnPolicy: null                      # null or an inline JSON object
 
 The `compound-engineer-workflow` directory contains exactly twelve files and `direct-engineer-workflow` exactly seven, each with contiguous indexes. The filename prefix must match `stepIndex`, and only these structural keys are accepted. Step display names remain seed-owned presentation metadata; all execution structure and prompt text live in the Markdown sources.
 
-Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its default runner, model, and reasoning effort. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `senior-dev-high`, `senior-dev-luna`, `implementation-plan-executioner`, `review-coordinator-opus`, `merge-resolver`).
+Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort. The canonical values are used for new or uncustomized Agents; an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `senior-dev-high`, `senior-dev-luna`, `implementation-plan-executioner`, `review-coordinator-opus`, `merge-resolver`).
 
 Approval is task metadata, not an Agent personality. Roles read the current
 task's `approvalGate`; they do not hard-code a pause or send a second Inbox

@@ -247,6 +247,9 @@ model Agent {
   name               String
   title              String
   model              String
+  /// Set when the operator changes model or runner in the console. Canonical
+  /// seed and prompt sync preserve this runtime choice.
+  runtimeConfigCustomized Boolean          @default(false)
   codexServiceTier   CodexServiceTier     @default(DEFAULT)
   /// Profiles used only by the compound implementation executioner. They are
   /// nullable for every other Agent and snapshotted onto each Run.

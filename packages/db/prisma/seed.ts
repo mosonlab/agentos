@@ -1,6 +1,6 @@
 import { AssigneeType, CodexServiceTier, Prisma, PrismaClient } from "@prisma/client";
 
-import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
+import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
   INTEGRATOR_AGENT_NAME,
@@ -56,13 +56,29 @@ const main = async (): Promise<void> => {
   });
 
   for (const role of sources.roles) {
+    const existing = await prisma.agent.findUnique({
+      where: { projectId_name: { projectId: project.id, name: role.name } },
+      select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    });
+    const transition = CANONICAL_AGENT_RUNTIME_TRANSITIONS.get(role.name);
+    const isCanonicalRuntimeTransition = existing !== null
+      && existing.runtimeConfigCustomized === false
+      && transition?.from.model === existing.model
+      && transition.from.runnerPreference === existing.runnerPreference
+      && transition.to.model === role.model
+      && transition.to.runnerPreference === role.runnerPreference;
+    const runtimeConfigCustomized = existing?.runtimeConfigCustomized === true
+      || (existing !== null
+        && !isCanonicalRuntimeTransition
+        && (existing.model !== role.model || existing.runnerPreference !== role.runnerPreference));
+    const useCanonicalRuntimeConfig = !runtimeConfigCustomized;
     await prisma.agent.upsert({
       where: { projectId_name: { projectId: project.id, name: role.name } },
       update: {
         environmentId: environment.id,
         title: role.title,
-        model: role.model,
-        runnerPreference: role.runnerPreference,
+        ...(useCanonicalRuntimeConfig ? { model: role.model, runnerPreference: role.runnerPreference } : {}),
+        runtimeConfigCustomized,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
         rolePrompt: role.rolePrompt,
@@ -73,6 +89,7 @@ const main = async (): Promise<void> => {
         name: role.name,
         title: role.title,
         model: role.model,
+        runtimeConfigCustomized: false,
         codexServiceTier: CodexServiceTier.DEFAULT,
         ...(role.name === "implementation-plan-executioner" ? {
           ordinarySubprocessModel: "gpt-5.6-luna:max",

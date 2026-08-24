@@ -132,6 +132,23 @@ test("re-seeding is idempotent and does not flip step 12 back", async () => {
   assert.equal(step.taskTemplate.steps.length, 12);
 });
 
+test("re-seeding preserves an operator-selected model and runner", async () => {
+  assert.equal((await seed()).code, 0);
+  const project = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  await db.agent.update({
+    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    data: { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", runtimeConfigCustomized: true },
+  });
+
+  const reseeded = await seed();
+  assert.equal(reseeded.code, 0, reseeded.output);
+  const spec = await db.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  });
+  assert.deepEqual(spec, { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", runtimeConfigCustomized: true });
+});
+
 test("canonical sync restores step, merge-resolver role, and foundational prompts when structure matches", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
