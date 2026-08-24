@@ -1,5 +1,6 @@
 ---
 stepIndex: 1
+layer: 1
 agent: spec
 approvalGate: true
 outputKind: spec

@@ -1,5 +1,6 @@
 ---
 stepIndex: 4
+layer: 4
 agent: plan-reviser
 approvalGate: true
 outputKind: revised-plan
