@@ -342,18 +342,18 @@ const dispatch = (t, repo, args, env = {}, busySlots = []) => {
   });
 };
 
-test("a local PASS comes back as 0 with the gate's own verdict line", (t) => {
+test("an explicitly enabled local PASS comes back as 0 with the gate's own verdict line", (t) => {
   const repo = fixtureRepo(t, {});
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
+  const result = dispatch(t, repo, [repo.head, "--server", "primary", "--allow-local"], {}, ["remote-1"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
 });
 
-test("a local FAIL comes back as 1, unchanged", (t) => {
+test("an explicitly enabled local FAIL comes back as 1, unchanged", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: FAIL (stub)\\n"; exit 1',
   });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
+  const result = dispatch(t, repo, [repo.head, "--server", "primary", "--allow-local"], {}, ["remote-1"]);
   assert.equal(result.status, 1);
   assert.match(result.stdout, /MERGE GATE: FAIL/);
 });
@@ -362,7 +362,7 @@ test("NOT AUTHORITATIVE keeps its own code", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: NOT AUTHORITATIVE\\n"; exit 3',
   });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
+  const result = dispatch(t, repo, [repo.head, "--server", "primary", "--allow-local"], {}, ["remote-1"]);
   assert.equal(result.status, 3);
 });
 
@@ -391,15 +391,15 @@ test("dispatch tries the remote slot before an eligible local slot", (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /remote-first/);
   assert.doesNotMatch(result.stdout, /LOCAL SHOULD NOT RUN/);
-  assert.match(result.stderr, /remote-1/);
+  assert.match(result.stderr, /running on primary/);
 });
 
-test("dispatch uses local only when the remote slot is busy", (t) => {
+test("dispatch uses local only when it is explicit and the selected remote is busy", (t) => {
   const repo = fixtureRepo(t, {
     mergeGate: 'printf "MERGE GATE: PASS local-spillover\\n"; exit 0',
     remoteGate: 'printf "REMOTE SHOULD NOT RUN\\n"; exit 1',
   });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
+  const result = dispatch(t, repo, [repo.head, "--server", "primary", "--allow-local"], {}, ["remote-1"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /local-spillover/);
   assert.doesNotMatch(result.stdout, /REMOTE SHOULD NOT RUN/);
@@ -411,7 +411,7 @@ test("the remote path's exit code is passed through unchanged", (t) => {
     remoteGate: 'printf "GATE NOT RUN: stub precondition\\n"; exit 76',
   });
   writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
-  const result = dispatch(t, repo, [repo.head]);
+  const result = dispatch(t, repo, [repo.head, "--server", "primary"]);
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /GATE NOT RUN/);
 });
@@ -428,11 +428,29 @@ test("the remote path receives the exact candidate and frozen baseline", (t) => 
   assert.match(result.stderr, new RegExp(`remote args: .*${repo.head} --master ${repo.head}`));
 });
 
-test("an ssh transport failure stays 255", (t) => {
-  const repo = fixtureRepo(t, { remoteGate: "exit 255" });
+test("an ssh transport failure retries the exact gate on the fallback", (t) => {
+  const repo = fixtureRepo(t, {
+    remoteGate:
+      'if [ "$1" = ci-desktop-worker ]; then printf "GATE NOT RUN: ssh dropped\\n"; exit 255; fi; printf "MERGE GATE: PASS fallback\\n"',
+  });
   writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
   const result = dispatch(t, repo, [repo.head]);
-  assert.equal(result.status, 255);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^MERGE GATE: PASS fallback$/m);
+  assert.doesNotMatch(result.stdout, /GATE NOT RUN/);
+  assert.match(result.stderr, /trying fallback capacity/);
+  assert.match(result.stderr, /running on fallback/);
+});
+
+test("a primary FAIL is final and never falls back", (t) => {
+  const repo = fixtureRepo(t, {
+    remoteGate:
+      'if [ "$1" = ci-desktop-worker ]; then printf "MERGE GATE: FAIL (candidate)\\n"; exit 1; fi; printf "FALLBACK SHOULD NOT RUN\\n"',
+  });
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: FAIL/);
+  assert.doesNotMatch(result.stdout + result.stderr, /FALLBACK SHOULD NOT RUN/);
 });
 
 test("every slot busy times out at 75 with no verdict", (t) => {
@@ -440,7 +458,7 @@ test("every slot busy times out at 75 with no verdict", (t) => {
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
-  for (const slot of ["local", "remote-1"]) {
+  for (const slot of ["remote-1", "remote-2"]) {
     writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
   }
   const result = spawnSync(
@@ -498,7 +516,7 @@ test("locks that cannot be operated are 76 at once, not 75 after the timeout", (
   assert.ok(Date.now() - started < 20_000, "it polled instead of answering at once");
 });
 
-test("a busy remote slot spills an eligible gate onto the free local slot", (t) => {
+test("a busy primary spills onto the fallback without using the Mac", (t) => {
   const repo = fixtureRepo(t, {});
   const cache = join(scratch(t), "cache");
   const slots = join(cache, "gate-dispatch");
@@ -515,7 +533,8 @@ test("a busy remote slot spills an eligible gate onto the free local slot", (t) 
   );
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
-  assert.match(result.stderr, /local slot/);
+  assert.match(result.stderr, /running on fallback/);
+  assert.doesNotMatch(result.stderr, /local slot/);
 });
 
 test("busy plus broken waits out the timeout and then reports 76, not 75", (t) => {
@@ -529,7 +548,7 @@ test("busy plus broken waits out the timeout and then reports 76, not 75", (t) =
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
   writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
-  mkdirSync(join(slots, "local.lock"));
+  mkdirSync(join(slots, "remote-2.lock"));
   const result = spawnSync(
     "bash",
     [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head, "--timeout-minutes", "0"],
@@ -545,16 +564,12 @@ test("busy plus broken waits out the timeout and then reports 76, not 75", (t) =
   assert.equal(readFileSync(join(slots, "remote-1.slot"), "utf8").trim(), String(process.pid));
 });
 
-test("a gate killed by SIGKILL comes back as 137 with no verdict line", (t) => {
-  // 137 is not in the table's named codes and is not supposed to be: SIGKILL
-  // cannot be trapped, so merge-gate.sh prints nothing and the death shows up
-  // as 128+9. What matters is that it is passed through as itself — a reader
-  // sees no MERGE GATE line and must read the silence as "no verdict", never as
-  // a pass, and never as the FAIL that a rewritten code would have implied.
-  const repo = fixtureRepo(t, { mergeGate: "kill -9 $$" });
-  const result = dispatch(t, repo, [repo.head], {}, ["remote-1"]);
-  assert.equal(result.status, 137);
+test("remote processes that die without a verdict exhaust fallback as 76", (t) => {
+  const repo = fixtureRepo(t, { remoteGate: "exit 137" });
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 76);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
+  assert.match(result.stdout, /^GATE NOT RUN:/m);
 });
 
 test("the dispatcher releases its slot when the gate ends", (t) => {
@@ -575,5 +590,5 @@ test("a destination that is not an ssh destination is refused before anything is
   const repo = fixtureRepo(t, {});
   const result = dispatch(t, repo, [repo.head, "--server", "host; rm -rf /"]);
   assert.equal(result.status, 2);
-  assert.match(result.stderr, /not a usable ssh destination/);
+  assert.match(result.stderr, /not a usable primary ssh destination/);
 });

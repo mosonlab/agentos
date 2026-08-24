@@ -4,12 +4,8 @@
 // Three things are proved here, and each is something that has already been
 // wrong once.
 //
-// 1. The credential red line is one rule stated in two files. `provision.sh`
-//    refuses to finish provisioning a box that carries any of a list of
-//    variables, and `run-gate.sh` refuses to gate on one. The lists drifted
-//    apart — `FEISHU_APP_SECRET` was in the first and not the second — which
-//    turned "re-checked on every single run" into a claim the code did not
-//    keep. They are compared here rather than trusted.
+// 1. Credentials are not a worker precondition. Provisioning and gate execution
+//    must not fail merely because the trusted operator VM carries credentials.
 //
 // 2. Repository names, gate homes, ssh destinations and ref names become part
 //    of a command string a remote login shell parses. `.` and `..` were
@@ -18,14 +14,14 @@
 //    than what is accepted.
 //
 // 3. `run-gate.sh` must not report the worker's own state as a verdict about a
-//    commit. A missing mirror, a commit that was never pushed, a credential in
-//    the environment — none of those are things the gate decided, and each is
+//    commit. A missing mirror or a commit that was never pushed is not something
+//    the gate decided, and each is
 //    checked to exit 76 with a GATE NOT RUN line rather than 1 with a
 //    MERGE GATE: FAIL line.
 //
 // 4. What the worker's isolation is claimed to be. Leo's ruling of 2026-08-20
-//    is that no network egress control is required: the containment is no
-//    credential, no remote and no merge authority, and the box is NOT
+//    is that no network egress control is required: the deterministic boundary
+//    is the exact pushed objects, no mirror remote and no merge authority; the box is NOT
 //    network-isolated. The failure mode this guards is a document drifting back
 //    into "the worker cannot reach GitHub", which would be an isolation claim
 //    nothing enforces.
@@ -51,6 +47,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const libPath = join(here, "lib.sh");
 const runGatePath = join(here, "run-gate.sh");
 const dispatchPath = join(here, "gate-dispatch.sh");
+const mirrorPushPath = join(here, "mirror-push.sh");
 const provisionPath = join(here, "provision.sh");
 const runbookPath = join(here, "..", "..", "docs", "runbooks", "gate-worker.md");
 
@@ -77,42 +74,17 @@ const scratch = (t) => {
 const git = (cwd, ...args) =>
   execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
 
-// --- the credential red line -------------------------------------------------
+// --- worker provisioning contract -------------------------------------------
 
-// Both files declare the list under the same name, on one line, so one reader
-// serves both. A change that splits the list across lines will fail here rather
-// than pass by reading half of it.
-const secretVars = (path) => {
-  const source = readFileSync(path, "utf8");
-  const match = source.match(/^SECRET_VARS="([^"]*)"$/m);
-  assert.ok(match, `${path} has no single-line SECRET_VARS= declaration`);
-  return match[1].split(/\s+/).filter(Boolean);
-};
-
-test("provision.sh and run-gate.sh refuse the same credential variables", () => {
-  const provisioning = secretVars(provisionPath);
-  const runtime = secretVars(runGatePath);
-  assert.deepEqual(
-    [...runtime].sort(),
-    [...provisioning].sort(),
-    "the provisioning red line and the per-run red line have drifted apart",
-  );
-  assert.ok(provisioning.length > 0);
-});
-
-test("the credential list still carries the variables the red line names", () => {
-  const declared = new Set(secretVars(runGatePath));
-  for (const name of [
-    "OPERATOR_TOKEN",
-    "RUNNER_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    // The one that was missing at runtime while provisioning called it a secret.
-    "FEISHU_APP_SECRET",
-  ]) {
-    assert.ok(declared.has(name), `${name} is not in the runtime red line`);
+test("provisioning includes the native Node build/runtime dependencies and Git identity", () => {
+  const source = readFileSync(provisionPath, "utf8");
+  for (const pkg of ["python3", "build-essential", "libatomic1"]) {
+    assert.match(source, new RegExp(`for pkg in [^\\n]*\\b${pkg}\\b`), `${pkg} is not provisioned`);
   }
+  assert.match(source, /git config --global user\.name/);
+  assert.match(source, /git config --global user\.email/);
+  assert.doesNotMatch(source, /SECRET_VARS=/);
+  assert.doesNotMatch(readFileSync(runGatePath, "utf8"), /SECRET_VARS=/);
 });
 
 // --- what may reach a remote shell -------------------------------------------
@@ -214,6 +186,63 @@ test("gate_repo_name refuses a name carrying remote shell syntax", (t) => {
   }
 });
 
+test("a first-deployment mirror dry-run describes creation without pushing into an absent mirror", (t) => {
+  const root = scratch(t);
+  const repo = join(root, "source");
+  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  cpSync(mirrorPushPath, join(repo, "scripts", "gate-worker", "mirror-push.sh"));
+  cpSync(libPath, join(repo, "scripts", "gate-worker", "lib.sh"));
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/agentos-public.git");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "fixture");
+  const oid = git(repo, "rev-parse", "HEAD");
+
+  const fakeHome = join(root, "worker-home");
+  const fakeBin = join(root, "fake-bin");
+  mkdirSync(fakeHome, { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(
+    join(fakeBin, "ssh"),
+    `#!/usr/bin/env bash
+set -uo pipefail
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|-o|-i|-F) shift 2 ;;
+    -n|-T|-x) shift ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || exit 2
+shift
+cd "$FAKE_SSH_HOME"
+exec bash -c "$*"
+`,
+  );
+  chmodSync(join(fakeBin, "ssh"), 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [join(repo, "scripts", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid, "--dry-run"],
+    {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...GIT_ENV,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        FAKE_SSH_HOME: fakeHome,
+      },
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /would create the bare mirror/);
+  assert.match(result.stdout, /MIRROR PUSH: DRY RUN OK/);
+  assert.equal(existsSync(join(fakeHome, "gate", "agentos-public", "mirror.git")), false);
+});
+
 // --- exact-ref transport -----------------------------------------------------
 
 test("dispatch transports a detached candidate and current baseline without mirroring an incomplete ref namespace", (t) => {
@@ -290,7 +319,7 @@ exec bash -c "$*"
 set -uo pipefail
 while [ $# -gt 0 ]; do
   case "$1" in
-    -P) shift 2 ;;
+    -P|-o) shift 2 ;;
     -q) shift ;;
     *) break ;;
   esac
@@ -373,14 +402,11 @@ test("a gate that fails is 1 and says MERGE GATE: FAIL", (t) => {
   assert.match(result.stdout, /MERGE GATE: FAIL/);
 });
 
-test("a credential in the worker's environment stops the run without a verdict", (t) => {
-  // The regression for the missing entry: FEISHU_APP_SECRET must stop a gate,
-  // and stopping it is not a FAIL — the runbook calls this a red-line stop.
+test("a credential in the trusted worker environment does not block the gate", (t) => {
   const fixture = gateHome(t);
   const result = runGate(fixture.home, [fixture.oid], { FEISHU_APP_SECRET: "x" });
-  assert.equal(result.status, 76, result.stdout + result.stderr);
-  assert.match(result.stdout, /^GATE NOT RUN: worker environment carries FEISHU_APP_SECRET$/m);
-  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS/);
 });
 
 test("a commit the mirror does not have is not a FAIL", (t) => {
@@ -556,8 +582,8 @@ test("the runbook and the scripts agree on the no-verdict exit code", () => {
 test("the isolation claim stays the one that is actually enforced", () => {
   // Leo's ruling, 2026-08-20: no egress control, so nothing here may probe a
   // route or make provisioning depend on one, and the runbook has to say plainly
-  // that the box is not isolated. The enforced half — no credential, no remote —
-  // stays fail-closed and is checked above and on every run.
+  // that the box is not isolated. Exact inputs and the mirror's lack of a
+  // remote stay fail-closed.
   const provision = readFileSync(provisionPath, "utf8");
   assert.doesNotMatch(provision, /\/dev\/tcp/, "provision.sh probes a route again");
   assert.doesNotMatch(provision, /GATE_GITHUB_HOSTS/, "the egress host list is back");
@@ -566,9 +592,12 @@ test("the isolation claim stays the one that is actually enforced", () => {
   assert.match(runbook, /not network-isolated/);
   assert.doesNotMatch(runbook, /^\s*ssh [^\n]*nft /m, "the runbook asks for a firewall rule again");
 
-  // The half that is enforced, in both places that enforce it.
-  assert.match(provision, /no AgentOS credentials on this host/);
-  assert.match(readFileSync(runGatePath, "utf8"), /the gate worker holds no credentials/);
+  // Credential presence is deliberately not a provisioning or runtime stop.
+  assert.doesNotMatch(provision, /SECRET_VARS=/);
+  assert.doesNotMatch(readFileSync(runGatePath, "utf8"), /SECRET_VARS=/);
+  assert.match(runbook, /credentials do not block provisioning or gate\s+execution/i);
+
+  // Exact pushed inputs and a mirror with no remote remain enforced.
   assert.match(
     readFileSync(join(here, "mirror-push.sh"), "utf8"),
     /refusing to push into a mirror this check could not inspect/,

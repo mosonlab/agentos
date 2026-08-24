@@ -181,12 +181,13 @@ run_trial() {
   # The container merge-gate.sh starts today, identical for both arms: the
   # server is not what is under test here.
   docker run -d --rm --name "$CONTAINER" \
-    -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=agentos \
+    -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
     -e POSTGRES_DB=agentos_gate \
     -e PGDATA=/var/lib/postgresql/data \
     --tmpfs /var/lib/postgresql/data:rw,size=1024m \
     -p 127.0.0.1::5432 "$POSTGRES_IMAGE" \
-    -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_wal_size=256MB >/dev/null \
+    -c fsync=off -c synchronous_commit=off -c full_page_writes=off \
+    -c max_connections=200 -c max_wal_size=256MB >/dev/null \
     || die "trial ${label}: could not start ${POSTGRES_IMAGE}"
 
   local port
@@ -206,8 +207,8 @@ run_trial() {
   export CONTROL_PLANE_STATE_DIR="${TMP_ROOT}/state"
   export FILES_ROOT="${TMP_ROOT}/files"
   mkdir -p "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$FILES_ROOT"
-  export TEST_DATABASE_URL="postgresql://agentos:agentos@127.0.0.1:${port}/agentos_gate?schema=agentos_gate"
-  export TEST_DATABASE_MAINTENANCE_URL="postgresql://agentos:agentos@127.0.0.1:${port}/postgres"
+  export TEST_DATABASE_URL="postgresql://agentos:gate-scratch-fixture-password-000000@127.0.0.1:${port}/agentos_gate?schema=agentos_gate"
+  export TEST_DATABASE_MAINTENANCE_URL="postgresql://agentos:gate-scratch-fixture-password-000000@127.0.0.1:${port}/postgres"
   export DATABASE_URL="$TEST_DATABASE_URL"
   export AGENTOS_ALLOW_SCRATCH_DATABASES=1
   unset AGENTOS_DBTEST_PROVISION AGENTOS_DBTEST_CONCURRENCY

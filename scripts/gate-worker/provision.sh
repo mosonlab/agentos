@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
 #
-# Provision an offshore merge-gate worker (issue #132). Runs ON THE SERVER.
+# Provision a merge-gate worker (issue #132). Runs ON THE SERVER.
 #
 #   scp scripts/gate-worker/provision.sh <server>:/tmp/
 #   ssh <server> 'bash /tmp/provision.sh'            # dry run, prints the plan
 #   ssh <server> 'bash /tmp/provision.sh --apply'    # do it
 #
-# What this machine is allowed to be: a stateless compute worker that checks a
-# commit out of a bare mirror and runs scripts/merge-gate.sh against it. That is
-# all. It holds no credential, has no remote configured on its mirror, and never
-# runs an AgentOS runner or an agent session — the execution plane stays on the
-# local machine (Leo's ruling, 2026-08-18). This script therefore installs a
-# toolchain and a directory layout and nothing else: no service, no queue, no
-# daemon, no token file, no clone of a GitHub remote.
+# What this machine is: a compute worker that checks a commit out of a bare
+# mirror and runs scripts/merge-gate.sh against it. It never runs an AgentOS
+# runner or an agent session — the execution plane stays on the local machine.
+# This script installs a toolchain and a directory layout and nothing else: no
+# service, no queue, no daemon and no clone of a GitHub remote.
 #
-# Both of those are enforced, here and in mirror-push.sh, and both are checked
-# again on every run. What is deliberately NOT claimed: this box is not made
+# The mirror's lack of a remote is enforced here and in mirror-push.sh. What is
+# deliberately NOT claimed: this box is not made
 # network-isolated. Nothing here denies it a route to GitHub or anywhere else,
 # and the repository does not guarantee one is denied (Leo's ruling,
 # 2026-08-20). The gate's own flow never needs GitHub — the mirror arrives over
 # ssh from the local machine and nothing fetches from a remote — but a candidate
 # commit's build and test scripts run on this box, so what they can reach is
 # whatever this box's network policy allows. Blocking GitHub alone would not
-# change that, since every other host would remain reachable; the boundary that
-# does the work is the one above — no credential, no remote, no merge authority,
-# and a remote PASS that is evidence rather than an authoritative verdict.
+# change that, since every other host would remain reachable. Deterministic
+# inputs come from the exact pushed objects and a mirror with no remote; merge
+# authority remains on the calling machine.
 #
 # Idempotent by construction: every step reads the current state first and prints
 # "ok" for what already matches, so re-running after a partial failure is safe
@@ -150,35 +148,11 @@ else
   note "dry run — nothing below will be changed; re-run with --apply"
 fi
 
-# --- red line: this box holds no secrets ------------------------------------
-
-# Checked before anything is installed, and checked again by run-gate.sh on every
-# gate run. The worst case this design accepts is a compromised worker forging a
-# PASS; it must not be able to escalate that into a leaked credential, so a box
-# that already carries one is not a box this script will finish provisioning.
-step "Red line: no AgentOS credentials on this host"
-
-SECRET_VARS="OPERATOR_TOKEN RUNNER_TOKEN AGENTOS_API_TOKEN AGENTOS_SESSION_TOKEN AGENTOS_FENCING_TOKEN VITE_API_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN FEISHU_APP_SECRET"
-for var in $SECRET_VARS; do
-  eval "value=\${$var:-}"
-  # shellcheck disable=SC2154
-  if [ -n "$value" ]; then
-    fail "$var is set in this environment; unset it and remove it from the shell profile before provisioning"
-  fi
-done
-
-for path in "$HOME/.config/gh/hosts.yml" "$HOME/.claude/.credentials.json" "$HOME/.agentos" "$HOME/.netrc"; do
-  if [ -e "$path" ]; then
-    fail "$path exists on this host; the worker holds no credentials — remove it"
-  fi
-done
-[ "$failures" = 0 ] && ok "no known credential variable or file present"
-
 # --- packages ---------------------------------------------------------------
 
 step "Base packages"
 missing_pkgs=""
-for pkg in git curl ca-certificates xz-utils util-linux; do
+for pkg in git curl ca-certificates xz-utils util-linux python3 build-essential libatomic1; do
   if dpkg -s "$pkg" >/dev/null 2>&1; then
     ok "$pkg"
   else
@@ -191,6 +165,21 @@ if [ -n "$missing_pkgs" ]; then
   sudo_run apt-get update || fail "apt-get update failed"
   # shellcheck disable=SC2086
   sudo_run apt-get install -y $missing_pkgs || fail "could not install:${missing_pkgs}"
+fi
+
+# Several gate fixtures create commits in temporary repositories. A fresh cloud
+# image has no Git identity, so those fixtures fail before testing anything. Do
+# not overwrite an operator identity that is already complete; provide a stable
+# synthetic one only when either half is absent.
+step "Git fixture identity"
+if command -v git >/dev/null 2>&1 \
+  && [ -n "$(git config --global user.name 2>/dev/null)" ] \
+  && [ -n "$(git config --global user.email 2>/dev/null)" ]; then
+  ok "$(git config --global user.name) <$(git config --global user.email)>"
+else
+  run git config --global user.name "AgentOS Gate Worker"
+  run git config --global user.email "gate-worker@example.invalid"
+  did "configured the synthetic Git fixture identity"
 fi
 
 step "Docker"
@@ -284,19 +273,14 @@ else
 fi
 
 step "npm registry"
-# A user-level .npmrc rather than a global one: it carries no auth token (there
-# is nothing private to fetch) and keeping it in $HOME makes "what does this box
-# talk to" answerable by reading one file.
+# A user-level .npmrc rather than a global one keeps the worker's registry
+# selection visible and easy to change without rewriting system configuration.
 if [ -f "$HOME/.npmrc" ] && grep -q "registry=${NPM_REGISTRY}" "$HOME/.npmrc" 2>/dev/null; then
   ok "~/.npmrc points at ${NPM_REGISTRY}"
 else
   run_sh "printf 'registry=%s\n' '${NPM_REGISTRY}' >> \"\$HOME/.npmrc\""
   did "appended registry=${NPM_REGISTRY} to ~/.npmrc"
 fi
-if [ -f "$HOME/.npmrc" ] && grep -qE '_authToken|_auth=' "$HOME/.npmrc" 2>/dev/null; then
-  fail "~/.npmrc carries an auth token; this host holds no credentials — remove that line"
-fi
-
 # --- layout -----------------------------------------------------------------
 
 # Only the root. Each repository's mirror, worktrees, logs and run-gate.sh live

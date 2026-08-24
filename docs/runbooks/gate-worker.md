@@ -1,4 +1,4 @@
-# Runbook — the offshore merge-gate worker and the gate dispatcher
+# Runbook — merge-gate workers and the gate dispatcher
 
 A merge gate selects its own profile from the exact baseline-to-candidate diff.
 Content-only modifications to the gate's explicit prose allowlist use the
@@ -18,7 +18,9 @@ Prisma Client inside `npm ci`; an exact-head build-cache hit also removes the
 roughly 42-second build. Unit and database proof waves run serially because each
 already uses bounded internal concurrency; overlapping them caused passing
 standalone suites to time out under host contention. Database files use at most
-three workers for the same reason. The install-free `docs-only` profile takes
+four workers. A 12-vCPU worker measured 93 seconds at concurrency 3 and 83–85
+seconds across ten consecutive green runs at concurrency 4, with no leaked
+scratch databases. The install-free `docs-only` profile takes
 about 4 seconds. Use
 `scripts/gate-worker/bench-postgres.sh` and
 `scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
@@ -33,7 +35,7 @@ Everything here is `scripts/gate-worker/`:
 | `mirror-push.sh` | the local machine | Pushes one exact candidate and one exact baseline into immutable `refs/gate/.../<oid>` cache refs, creating `~/gate/<repo>/mirror.git` on first push, and installs `run-gate.sh` beside it. |
 | `run-gate.sh` | the server | Holds the worker-wide execution lock, checks one oid out of its repository's mirror and runs `scripts/merge-gate.sh --expect-head <oid> --master <baseline-oid>` against it. |
 | `remote-gate.sh` | the local machine | One synchronous `ssh` call; returns the verdict line and the exit code. |
-| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then tries the worker slot first and the local slot while the worker is busy. |
+| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then tries the primary worker and fallback worker. Local execution is explicit only. |
 | `lib.sh` | the local machine | Shared repository-name derivation for the three local-side scripts. |
 
 The worker hosts one directory per repository, keyed by the origin repository's
@@ -45,12 +47,12 @@ ships.
 
 ## The slot model
 
-A full gate saturates every core of whatever machine runs it. The dispatcher
-cannot know the candidate-selected profile before running it, so it rations
-machines, not processes: the local machine contributes **one** slot —
-it is also where the agent sessions and the local services live — and the
-four-vCPU worker contributes **one**. Two slots, machine-wide, shared by every
-repository that dispatches from this machine.
+A full gate is a whole-machine load. The dispatcher cannot know the
+candidate-selected profile before running it, so it rations machines, not
+processes: the primary worker contributes one slot and the fallback worker
+contributes one. The local machine contributes no automatic capacity; it adds
+one slot only for an invocation that passes `--allow-local` or sets
+`AGENTOS_GATE_ALLOW_LOCAL=1`.
 
 `gate-dispatch.sh` is the way to run a gate when anything else might also be
 running one:
@@ -63,14 +65,21 @@ scripts/gate-worker/gate-dispatch.sh <oid>
   supplied, the dispatcher fetches origin's current default branch without
   creating a local tracking ref, re-reads `origin HEAD`, and freezes that exact
   oid as the baseline before taking a slot.
-- The remote slot is preferred. It runs `mirror-push.sh` before
+- The primary worker is preferred. It runs `mirror-push.sh` before
   `remote-gate.sh`, pushing only the frozen candidate and baseline under
   oid-named cache refs. The local checkout may be detached or single-branch;
   its incomplete ref namespace is never mirrored and cannot delete worker refs.
-- The local slot is spillover only while the remote slot is busy, and only when
-  this worktree is clean at `<oid>`.
-- Both busy: the dispatcher blocks and re-polls (default every 30s, for
-  60 minutes — `GATE_DISPATCH_POLL_SECONDS`, `GATE_DISPATCH_TIMEOUT_MINUTES`).
+- If the primary is offline, its mirror push fails, its SSH connection drops,
+  or its slot is busy, the fallback receives the same frozen candidate and
+  baseline. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final; only
+  absence of a verdict falls through to another machine. SSH connection setup
+  is bounded at 10 seconds, and a dead established connection is detected by
+  keepalives instead of waiting on the operating-system TCP timeout.
+- The local slot is considered only with explicit opt-in and only when this
+  worktree is clean at `<oid>`.
+- All usable slots busy: the dispatcher blocks and re-polls (default every 30s,
+  for 60 minutes — `GATE_DISPATCH_POLL_SECONDS`,
+  `GATE_DISPATCH_TIMEOUT_MINUTES`).
   On timeout it exits **75** with `GATE DISPATCH: NO SLOT`: nothing ran, no
   verdict exists, and re-dispatching is the recovery. A timeout that recurs
   means the queue is systemically full, which is a capacity question, not a
@@ -83,7 +92,7 @@ scripts/gate-worker/gate-dispatch.sh <oid>
   around it exits 76 rather than 75. Waiting for a lock nobody can take is
   waiting for nothing, and reporting it as a full queue hides what to fix.
 
-The dispatcher accounts for `remote-1` and `local` under
+The dispatcher accounts for `remote-1`, `remote-2`, and optional `local` under
 `~/.cache/gate-dispatch/`, outside any repository because the slots belong to
 the machines. A direct `merge-gate.sh` bypasses that accounting. A direct
 `remote-gate.sh` bypasses the local lock too, but it cannot add worker capacity:
@@ -119,10 +128,10 @@ so neither can produce a `1` of its own.
 | `2` | usage error | no gate ran |
 | `3` | `MERGE GATE: NOT AUTHORITATIVE` | yes |
 | `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
-| `76` | `GATE NOT RUN: <reason>` — a precondition failed: the mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is not in this checkout, the commit is not in the mirror, the worker's toolchain is incomplete, a credential is set in the worker's environment, or `merge-gate.sh` died without printing a verdict | no gate ran |
+| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, or `merge-gate.sh` died without printing a verdict | no gate ran |
 | `130` / `143` | interrupted | no gate ran |
 | `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
-| `255` | ssh transport failure | no gate ran |
+| `255` | ssh transport failure from direct `remote-gate.sh`; the dispatcher consumes this and tries its fallback | no gate ran |
 
 **`1` is the only code that means the commit was judged and did not pass.**
 `75`, `76`, `128+N` and `255` are errands, not judgements: re-dispatch after
@@ -147,25 +156,20 @@ cannot be trapped: a gate the OOM killer takes produces `137` and **no stdout
 line at all**. Read a missing verdict line as "no verdict", never as a pass —
 `128+N` with silence is the one case where the code is the only evidence.
 
-## The red lines
-
-These are Leo's ruling of 2026-08-18, not preferences. A change that crosses
-one of them is not a tuning decision.
+## Operating boundaries
 
 - **No execution plane on the server.** No AgentOS runner, no agent session, no
   Anthropic API call. The server builds and tests; it never acts.
-- **No secrets on the server.** No `RUNNER_TOKEN`, no `OPERATOR_TOKEN`, no `gh`
-  credential, no Anthropic key, no SSH private key. `provision.sh` refuses to
-  finish if it finds one, and `run-gate.sh` re-checks the environment on every
-  single run — a profile can acquire a variable months after provisioning.
-- **No GitHub credential and no remote on the worker.** Code reaches the worker
-  only by SSH push from the local machine. The worker holds no GitHub
-  credential, its mirror has no remote configured, and both `provision.sh` and
-  every `mirror-push.sh` refuse to proceed if one appears — including when the
-  check cannot read the mirror's remotes at all, which is treated as "unknown"
-  and therefore refused. `run-gate.sh` re-checks the credential list on every
-  run. All `gh` reads and writes stay local. This is what makes the *mirror*
-  unable to fetch and the worker unable to push anywhere.
+- **Credentials are permitted.** Credentials do not block provisioning or gate
+  execution. The normal gate path does not require GitHub or agent credentials,
+  but a trusted operator VM may carry them. Candidate build and test code runs
+  with the worker account's effective environment and permissions, so only
+  place credentials there when that trust is intended.
+- **The gate mirror has no remote.** Code reaches it by exact SSH push from the
+  calling machine. `provision.sh` and `mirror-push.sh` refuse a mirror with a
+  configured remote, including when the remote list cannot be read. This is an
+  input-determinism rule: a worker cannot silently fetch a different candidate
+  or baseline from the ones the dispatcher froze.
 
   **The worker is not network-isolated, and this repository does not claim it
   is** (Leo's ruling, 2026-08-20). The gate's normal flow never needs GitHub —
@@ -174,12 +178,8 @@ one of them is not a tuning decision.
   before a box may gate. That was weighed and declined: the gate executes the
   candidate commit's own build and test scripts, so blocking GitHub alone would
   leave every other host reachable and buy little, at the cost of maintaining
-  deny rules against addresses that move. What carries the weight instead is the
-  line above plus no merge authority: a remote PASS is evidence, never an
-  authoritative verdict.
-
-  So when a worker's verdicts are quoted, the accurate claim is "holds no
-  credential, has no remote, cannot merge" — **never** "cannot reach GitHub".
+  deny rules against addresses that move. The exact pushed inputs and the
+  caller's merge authority remain the relevant boundaries.
 - **Local production is untouched by any of this.** `localhost:5432`,
   `localhost:3000`, `~/.agentos/` and launchd are not in this picture at all.
 
@@ -188,11 +188,10 @@ one of them is not a tuning decision.
 State this honestly wherever a remote verdict is quoted.
 
 A remote PASS is **evidence, not authority**. The merge still happens on the
-local machine and still binds an exact head, so the worst a compromised worker
-can do is forge a PASS for a commit that would not really pass. It cannot merge
-anything, and it holds no credential worth stealing. What it can do is whatever
-its network allows the candidate commit's own build and test scripts to do —
-the box is not isolated, and this repository does not pretend otherwise.
+local machine and still binds an exact head. A worker can produce false
+evidence if it is compromised, and candidate code can access whatever the
+worker account can access; this design treats the worker as trusted compute and
+does not claim credential or network isolation.
 
 The hedge against a forged PASS is **spot-checking**: for release-grade merges,
 re-run the gate locally and compare. That is a deliberate trade — one gate's
@@ -205,8 +204,8 @@ Three properties keep the evidence honest even when the worker is trusted:
   wrong tree.
 - A verdict also names the baseline it was formed against, and prints it in the
   preflight. The gate's frozen-record rules (`scripts/check-frozen-docs.sh`)
-  ask what is already on the default branch, and the worker cannot find that
-  out — it holds no credential and its mirror is whatever was last pushed. So
+  ask what is already on the default branch, and the worker mirror does not
+  fetch it. So
   `gate-dispatch.sh` asks origin — `git ls-remote --symref origin HEAD`, which
   names the default branch and its head in one answer — fetches that branch,
   re-reads the answer, and passes the resulting oid through both transport hops
@@ -225,13 +224,19 @@ Three properties keep the evidence honest even when the worker is trusted:
 
 ## First deployment
 
-You need: an SSH-reachable Ubuntu server, an account on it that can `sudo`, and
-a `Host` entry in `~/.ssh/config` on the local machine. Use the alias
-everywhere below — it keeps the address, user, port and key in one place that
-is not this repository. `gate-dispatch.sh` and the other local scripts default
-to the alias `agentos-gate` (`AGENTOS_GATE_SERVER` overrides it).
+Each worker needs an SSH-reachable Ubuntu account that can `sudo`, plus a
+`Host` entry in `~/.ssh/config` on the local machine. The dispatcher defaults
+to `ci-desktop-worker` as primary and `agentos-gate` as fallback;
+`AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` override them.
+`--server <alias>` remains the explicit one-worker form.
 
 ```
+Host ci-desktop-worker
+  HostName <ip>
+  User <user>
+  Port <port>
+  IdentityFile ~/.ssh/<key>
+
 Host agentos-gate
   HostName <ip>
   User <user>
@@ -243,34 +248,31 @@ Host agentos-gate
 plan.
 
 ```sh
-scp scripts/gate-worker/provision.sh agentos-gate:/tmp/
-ssh agentos-gate 'bash /tmp/provision.sh'
-ssh agentos-gate 'bash /tmp/provision.sh --apply'
+scp scripts/gate-worker/provision.sh ci-desktop-worker:/tmp/
+ssh ci-desktop-worker 'bash /tmp/provision.sh'
+ssh ci-desktop-worker 'bash /tmp/provision.sh --apply'
 ```
 
 It pins Node to the version in the script (`v26.5.0` — the local machine's
 version on 2026-08-18; `package.json` engines only sets a floor), installs
-Docker with mainland registry mirrors, points npm at `registry.npmmirror.com`,
-pre-pulls `postgres:16-alpine`, and creates `~/gate/`.
+Docker with registry mirrors, the native Node build dependencies, and a Git
+fixture identity when the account has none; it points npm at
+`registry.npmmirror.com`, pre-pulls `postgres:16-alpine`, and creates `~/gate/`.
 
 If it adds the account to the `docker` group, **log out and back in and re-run
 it** — group membership does not apply to the session that granted it, and the
 re-run is what confirms `docker info` works.
 
-It also refuses to finish while a known credential variable or file is present
-on the box. That is the red line above, and it is checked again on every gate
-run.
-
 It does **not** check or install any egress rule: the worker is not
-network-isolated by design (see the red lines), so there is no firewall step
-between provisioning and the first gate.
+network-isolated by design (see the operating boundaries), so there is no
+firewall step between provisioning and the first gate.
 
 **2. Push the exact gate inputs (local).** The first push creates
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
 
 ```sh
-scripts/gate-worker/mirror-push.sh agentos-gate --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
-scripts/gate-worker/mirror-push.sh agentos-gate --candidate <candidate-oid> --baseline <baseline-oid>
+scripts/gate-worker/mirror-push.sh ci-desktop-worker --candidate <candidate-oid> --baseline <baseline-oid> --dry-run
+scripts/gate-worker/mirror-push.sh ci-desktop-worker --candidate <candidate-oid> --baseline <baseline-oid>
 ```
 
 Both oids must resolve in the local object database. Routine use does not ask an
@@ -280,11 +282,12 @@ origin baseline before it calls `mirror-push.sh`.
 **3. Gate a commit (local).**
 
 ```sh
-scripts/gate-worker/gate-dispatch.sh <oid>                           # first free slot
-scripts/gate-worker/remote-gate.sh agentos-gate <oid>                # this worker, explicitly
-scripts/gate-worker/remote-gate.sh agentos-gate <oid> --verbose      # stream it
-scripts/gate-worker/remote-gate.sh agentos-gate <oid> --fetch-log    # copy the log back
-scripts/gate-worker/remote-gate.sh agentos-gate <oid> --master <oid> # state the baseline
+scripts/gate-worker/gate-dispatch.sh <oid>                                # primary, then fallback
+scripts/gate-worker/gate-dispatch.sh <oid> --allow-local                  # opt in to Mac last
+scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid>                # one worker explicitly
+scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> --verbose      # stream it
+scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> --fetch-log    # copy the log back
+scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> --master <oid> # state the baseline
 ```
 
 `--master` is only needed when origin cannot be read (no network, expired
@@ -301,7 +304,7 @@ and compare the two verdict lines.
 ```sh
 git rev-parse HEAD                                       # <oid>
 bash scripts/merge-gate.sh --expect-head <oid>           # local
-scripts/gate-worker/remote-gate.sh agentos-gate <oid>    # remote
+scripts/gate-worker/remote-gate.sh ci-desktop-worker <oid> # remote
 ```
 
 Both must end in `MERGE GATE: PASS <oid>` naming the same oid. Record both
@@ -319,14 +322,15 @@ the terminal for the whole gate.
 There is no queue file and no daemon by design: the state a queue would need is
 exactly the state that makes a worker something to operate rather than
 something to use, and the callers — agent sessions blocking on their own
-merges — are the backpressure. When both slots are occupied, every later caller
-waits and re-polls; requests are not pinned to a machine and strict FIFO order
-is not promised. The first waiter to acquire whichever slot frees runs there.
+merges — are the backpressure. When both remote slots are occupied, every later
+caller waits and re-polls; requests are not pinned to a machine and strict FIFO
+order is not promised. The first waiter to acquire whichever slot frees runs
+there.
 
-The database step runs cores-1 files at once — three on this worker — each with
-a database of its own and its own subdirectory of the roots the gate exports.
-The worker permits one gate at a time, so that is up to three test processes on
-four vCPU; `AGENTOS_DBTEST_CONCURRENCY` lowers it on a busier worker and
+The database step runs cores-1 files at once, capped at four: three on a
+four-vCPU worker and four on larger workers. Each gets a database of its own and
+its own subdirectory of the roots the gate exports. A worker permits one gate
+at a time; `AGENTOS_DBTEST_CONCURRENCY` lowers the file concurrency and
 `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 
 ## Troubleshooting
@@ -338,14 +342,6 @@ not given.
 
 **`no mirror at ...`** — that repository has never been pushed from this
 machine. `mirror-push.sh` creates it.
-
-**`GATE NOT RUN: worker environment carries <VAR>`** (exit 76) — a credential
-appeared in the worker's environment. This is a red-line stop, not a gate
-failure, and the exit code says so: find what set it (`~/.bashrc`, `~/.profile`,
-an ssh `SendEnv`, a systemd drop-in), remove it, and re-run `provision.sh` to
-confirm the box is clean again. `run-gate.sh` checks the same variable list
-`provision.sh` does, `FEISHU_APP_SECRET` included; the two lists are held
-identical by `scripts/gate-worker/gate-worker.test.mjs`.
 
 **`another merge gate is running in ... (pid N)`** — the per-worktree lock.
 Each remote run gets a unique worktree, so this can only mean a previous run in
