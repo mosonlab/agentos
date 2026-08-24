@@ -84,6 +84,8 @@ test("provisioning includes the native Node build/runtime dependencies and Git i
   }
   assert.match(source, /git config --global user\.name/);
   assert.match(source, /git config --global user\.email/);
+  assert.match(source, /vmware-toolbox-cmd timesync disable/);
+  assert.match(source, /timedatectl set-ntp true/);
   assert.doesNotMatch(source, /SECRET_VARS=/);
   assert.doesNotMatch(readFileSync(runGatePath, "utf8"), /SECRET_VARS=/);
 });

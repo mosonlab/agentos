@@ -167,6 +167,30 @@ if [ -n "$missing_pkgs" ]; then
   sudo_run apt-get install -y $missing_pkgs || fail "could not install:${missing_pkgs}"
 fi
 
+# VMware's guest time plugin and Ubuntu's NTP service must not both discipline
+# CLOCK_REALTIME. Under sustained gate load the two sources can step the clock
+# backwards, making freshly-created database rows appear to come from the
+# future. Keep VMware's periodic synchronization off and let Ubuntu own the
+# clock. This is a no-op on physical, cloud and non-VMware workers.
+step "Clock discipline"
+if command -v vmware-toolbox-cmd >/dev/null 2>&1; then
+  vmware_timesync="$(vmware-toolbox-cmd timesync status 2>&1 || true)"
+  if [ "$vmware_timesync" = "Disabled" ]; then
+    ok "VMware time synchronization disabled"
+  else
+    sudo_run vmware-toolbox-cmd timesync disable || fail "could not disable VMware time synchronization"
+    did "disabled VMware time synchronization"
+  fi
+  if [ "$(timedatectl show -p NTP --value 2>/dev/null)" = "yes" ]; then
+    ok "Ubuntu NTP enabled"
+  else
+    sudo_run timedatectl set-ntp true || fail "could not enable Ubuntu NTP"
+    did "enabled Ubuntu NTP"
+  fi
+else
+  ok "not a VMware guest"
+fi
+
 # Several gate fixtures create commits in temporary repositories. A fresh cloud
 # image has no Git identity, so those fixtures fail before testing anything. Do
 # not overwrite an operator identity that is already complete; provide a stable

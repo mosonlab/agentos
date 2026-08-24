@@ -16,9 +16,10 @@ same four vCPUs, which is why a worker exposes one execution slot unless that
 exact host has been accepted for two. The current gate removes the redundant
 whole-workspace typecheck and generates Prisma Client inside `npm ci`; an
 exact-head build-cache hit also removes the roughly 42-second build. Unit and
-database proof waves run serially because each already uses bounded internal
-concurrency; overlapping them caused passing standalone suites to time out
-under host contention. Database files use at most four workers. A 12-vCPU
+database proof waves run serially inside each gate because each already uses
+bounded internal concurrency. Database files use at most four workers in a
+single-slot worker; a capacity-two worker automatically uses two per gate so
+the host-wide database fan-out remains four. A 12-vCPU
 worker measured 93 seconds at concurrency 3 and 83–85 seconds across ten
 consecutive green runs at concurrency 4, with no leaked scratch databases. The
 install-free `docs-only` profile takes about 4 seconds. Use
@@ -261,6 +262,10 @@ version on 2026-08-18; `package.json` engines only sets a floor), installs
 Docker with registry mirrors, the native Node build dependencies, and a Git
 fixture identity when the account has none; it points npm at
 `registry.npmmirror.com`, pre-pulls `postgres:16-alpine`, and creates `~/gate/`.
+On a VMware guest it also disables VMware's time synchronization and enables
+Ubuntu NTP. Two independent time disciplines caused the guest wall clock to
+step backwards under sustained load; database ordering and ready-time tests
+then failed even with only one gate running.
 
 If it adds the account to the `docker` group, **log out and back in and re-run
 it** — group membership does not apply to the session that granted it, and the
@@ -329,6 +334,18 @@ pressure, and the median two-gate batch finishes at least 15 percent sooner
 than running two median single gates serially. Otherwise remove the capacity
 file; one slot remains the supported result rather than a degraded fallback.
 
+The 12-vCPU, 20-GiB desktop VM passed this acceptance on 2026-08-24 at commit
+`7886fad3ee03380672832166337c804726b5aec9`, after VMware time synchronization
+was disabled and Ubuntu NTP was the sole time discipline. Three warm single
+runs took 241, 240 and 240 seconds (median 240). Five two-gate batches took
+270, 270, 270, 271 and 270 seconds (median 270); all ten overlapping gates
+passed. The median batch was 43.8 percent faster than two median single gates
+run serially. Peak CPU reached 100 percent, peak used memory was 5.50 GiB, at
+least 13.37 GiB remained available, and there was no OOM, sustained memory
+pressure, leaked container, database, worktree or held slot. The retained
+desktop setting is therefore `worker-capacity=2`; the four-vCPU fallback stays
+at its default capacity of one.
+
 ## Routine use
 
 ```sh
@@ -346,11 +363,13 @@ occupied, every later caller waits and re-polls; requests are not pinned to a
 machine and strict FIFO order is not promised. The first waiter to acquire
 whichever slot frees runs there.
 
-The database step runs cores-1 files at once, capped at four: three on a
-four-vCPU worker and four on larger workers. Each gets a database of its own and
-its own subdirectory of the roots the gate exports. A worker permits one gate
-by default or two only when `~/gate/worker-capacity` contains `2`;
-`AGENTOS_DBTEST_CONCURRENCY` lowers the file concurrency and
+The database step normally runs cores-1 files at once, capped at four: three on
+a four-vCPU worker and four on larger single-slot workers. Each gets a database
+of its own and its own subdirectory of the roots the gate exports. A worker
+permits one gate by default or two only when `~/gate/worker-capacity` contains
+`2`; in capacity-two mode `run-gate.sh` fixes each gate's database concurrency
+at two, keeping the host-wide maximum at four. `AGENTOS_DBTEST_CONCURRENCY`
+lowers the file concurrency on other paths and
 `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 
 ## Troubleshooting
@@ -434,6 +453,12 @@ local PASS alone. Fetch the remote log (`--fetch-log`) and read the failing
 step first; the interesting cases are real (a platform-dependent test, a Node
 minor difference, a timing-sensitive dbtest), and a divergence here is exactly
 what a second machine is for.
+
+**Timing assertions fail intermittently on a VMware guest** — check both time
+disciplines before changing tests. `vmware-toolbox-cmd timesync status` must say
+`Disabled`, while `timedatectl show -p NTP -p NTPSynchronized` must report both
+as `yes`. Re-run `provision.sh --apply` to converge that state. Do not leave
+VMware periodic synchronization and Ubuntu NTP enabled together.
 
 **Reading logs.** They stay on the worker at
 `~/gate/<repo>/logs/<stamp>-<oid>-<pid>.log`, one per run, and are never pruned
