@@ -39,7 +39,7 @@ Work done directly in the current session is outside these tiers and does not re
 Choose the shortest tier that satisfies the Product Contract. This contract defines three tiers:
 
 - 顺手小活：本窗直接做，不上看板。
-- Direct：模板跳步（跳①②③④），保⑤→⑥a→⑥b→⑦→⑥c→⑨，⑧可选；无 spec/plan；实现步用 senior-dev 角色（executioner 硬前提是既存 plan）。
+- Direct：模板跳步（跳①②③④），保⑤→⑥a→⑥b→⑦→⑥c→⑨，⑧可选；无 spec/plan；实现步默认用 senior-dev-luna，命中 persisted data、defense-list 或无法枚举的 cross-cutting 风险时在派发前改用 senior-dev-high（executioner 硬前提是既存 plan）。
 - Full Assurance：全链。
 
 Direct is a formal chain route, not an exemption from review or exact-head human acceptance. Full Assurance is required when the Product Contract calls for specification, planning, plan review, or revised-plan implementation authorization.
@@ -96,7 +96,7 @@ Record this block when creating or materially rerouting a chain:
 ```text
 Routing Contract: v1.1
 Tier: Direct
-Implementation Agent: senior-dev
+Implementation Agent: senior-dev-luna
 Critical: no
 Reason: Bounded change; Direct review and exact-head acceptance remain intact.
 ```
