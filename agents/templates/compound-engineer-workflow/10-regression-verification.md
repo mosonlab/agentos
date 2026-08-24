@@ -1,5 +1,6 @@
 ---
-stepIndex: 5
+stepIndex: 10
+layer: 9
 agent: regression-verifier
 approvalGate: false
 outputKind: regression-verification
