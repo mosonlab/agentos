@@ -15,6 +15,9 @@ export type ChainRow = {
   projectId: string;
   chainId: string | null;
   chainIndex: number | null;
+  /** Execution layer. It is optional only while the expand migration is live;
+   * callers fall back to the stable node ordinal for pre-contract rows. */
+  chainLayer?: number | null;
   name: string;
   status: TaskStatus;
   archivedAt: Date | null;
@@ -33,8 +36,21 @@ export type ChainProgress = {
 export const stepName = (row: Pick<ChainRow, "name" | "templateStep">): string => row.templateStep?.name ?? row.name;
 
 const byChainIndex = (left: ChainRow, right: ChainRow): number => (left.chainIndex ?? 0) - (right.chainIndex ?? 0);
-const byChainPosition = <T extends { chainIndex: number | null; id: string }>(left: T, right: T): number => (
-  (left.chainIndex ?? 0) - (right.chainIndex ?? 0) || left.id.localeCompare(right.id)
+
+/** A missing layer can only occur during the nullable expand migration (or in
+ * old API fixtures). Treating the node ordinal as its layer preserves the
+ * legacy linear contract without reintroducing a linked-list successor. */
+const executionLayer = (row: { chainLayer?: number | null; chainIndex: number | null }): number | null => (
+  row.chainLayer ?? row.chainIndex
+);
+
+const byExecutionPosition = <T extends { chainLayer?: number | null; chainIndex: number | null; id: string }>(
+  left: T,
+  right: T,
+): number => (
+  (executionLayer(left) ?? 0) - (executionLayer(right) ?? 0)
+    || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
+    || left.id.localeCompare(right.id)
 );
 
 /**
@@ -179,20 +195,26 @@ export type ChainStartDecision = {
 /** The earliest surviving row that still owns chain progress. Deleted rows are
  * absent; archived rows remain dependencies until they are DONE. */
 export const firstUnfinishedStep = <T extends Pick<ChainRow, "chainIndex" | "id" | "status">>(rows: T[]): T | null => (
-  [...rows].sort(byChainPosition)
+  [...rows].sort(byExecutionPosition)
     .find((item) => item.status !== TaskStatus.DONE) ?? null
 );
 
 /** The first unfinished surviving row before target, or null when the ordered
  * prefix is complete. This is the predecessor named by the 409 response. */
-export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id" | "name" | "status">>(
+export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id" | "name" | "status"> & { chainLayer?: number | null }>(
   rows: T[],
   targetId: string,
 ): T | null => {
-  const ordered = [...rows].sort(byChainPosition);
-  const targetIndex = ordered.findIndex((item) => item.id === targetId);
-  if (targetIndex < 0) return null;
-  return ordered.slice(0, targetIndex).find((item) => item.status !== TaskStatus.DONE) ?? null;
+  const ordered = [...rows].sort(byExecutionPosition);
+  const target = ordered.find((item) => item.id === targetId);
+  if (!target) return null;
+  const targetLayer = executionLayer(target);
+  return ordered.find((item) => {
+    const itemLayer = executionLayer(item);
+    return itemLayer !== null && targetLayer !== null
+      ? itemLayer < targetLayer && item.status !== TaskStatus.DONE
+      : item.id !== target.id && item.status !== TaskStatus.DONE;
+  }) ?? null;
 };
 
 /** One dependency decision for the whole chain. Row-local capability remains
@@ -201,11 +223,15 @@ export const chainStartDecisions = (
   rows: ChainDecisionRow[],
   factsByTask: ReadonlyMap<string, RunFacts>,
 ): Map<string, ChainStartDecision> => {
-  const ordered = [...rows].sort((left, right) => byChainIndex(left, right) || left.id.localeCompare(right.id));
+  const ordered = [...rows].sort(byExecutionPosition);
   const first = firstUnfinishedStep(ordered);
+  const firstLayer = first ? executionLayer(first) : null;
   return new Map(ordered.map((row) => {
     const facts = factsByTask.get(row.id) ?? { total: 0, active: false };
-    const isCandidate = first?.id === row.id;
+    // Siblings in one layer are eligible together. A completed sibling remains
+    // historical, while every unfinished sibling in the frontier is a start
+    // candidate; a same-layer sibling is never reported as a predecessor.
+    const isCandidate = firstLayer !== null && executionLayer(row) === firstLayer;
     const allowed = taskStartability(row, facts, row.maxSessionsPerTask, isCandidate).startable;
     const predecessor = blockingPredecessor(ordered, row.id);
     return [row.id, {

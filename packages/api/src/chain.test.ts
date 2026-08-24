@@ -252,6 +252,22 @@ test("chain dependency exposes only the first unfinished TODO or BACKLOG action"
   assert.equal(parked.get("step-4")!.startAction, "recover");
 });
 
+test("layered chain siblings are candidates together and do not block one another", () => {
+  const decisions = chainStartDecisions([
+    decisionRow(1, { chainLayer: 1, status: "DONE" }),
+    decisionRow(2, { chainLayer: 2 }),
+    decisionRow(3, { chainLayer: 2 }),
+    decisionRow(4, { chainLayer: 3 }),
+  ], new Map());
+  assert.equal(decisions.get("step-2")!.startAction, "start");
+  assert.equal(decisions.get("step-3")!.startAction, "start");
+  assert.equal(decisions.get("step-2")!.blockingPredecessor, null);
+  assert.equal(decisions.get("step-3")!.blockingPredecessor, null);
+  assert.deepEqual(decisions.get("step-4")!.blockingPredecessor, {
+    id: "step-2", name: "Task step-2",
+  });
+});
+
 test("REVIEW, HUMAN, archive, grant, budget, and active-run facts fail closed", () => {
   for (const first of [
     decisionRow(1, { status: "REVIEW" }),
