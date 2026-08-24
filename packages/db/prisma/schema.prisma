@@ -492,6 +492,9 @@ model TaskTemplateStep {
   outputKind              String       @default("result")
   opensPullRequest        Boolean      @default(true)
   baseFromStepIndex       Int?
+  /// Nullable during the expand migration; slice 09 makes this required after
+  /// every template-step writer has been migrated to persist it.
+  layer                   Int?
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
   assigneeAgent           Agent?       @relation(fields: [assigneeAgentId], references: [id], onDelete: SetNull)
   tasks                   Task[]
@@ -525,6 +528,9 @@ model Task {
   opensPullRequest        Boolean              @default(true)
   chainId                 String?
   chainIndex              Int?
+  /// Nullable during the expand migration; slice 09 adds the all-or-none
+  /// chain identity check after every chained-task writer supplies it.
+  chainLayer              Int?
   scheduleKind            ScheduleKind         @default(NOW)
   runAt                   DateTime?
   cron                    String?

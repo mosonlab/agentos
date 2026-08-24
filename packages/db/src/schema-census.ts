@@ -41,6 +41,20 @@ export interface SchemaCensus {
   others: number;
 }
 
+/**
+ * Application columns introduced by the chain-layer expand migration.
+ *
+ * This is intentionally metadata rather than an emptiness-census field: a
+ * nullable column cannot make a schema non-empty, and the release preflight
+ * must continue to have one definition of emptiness. Migration code and tests
+ * can use this inventory to keep the staged shape explicit; the contract slice
+ * changes the nullability and removes the follow-up column.
+ */
+export const CHAIN_LAYER_EXPAND_COLUMNS = [
+  { table: "TaskTemplateStep", column: "layer", nullable: true },
+  { table: "Task", column: "chainLayer", nullable: true },
+] as const;
+
 /** Takes the schema name as `$1`. Use with `$queryRawUnsafe(SQL, schema)`. */
 export const SCHEMA_CENSUS_SQL = `
   WITH target AS (SELECT oid FROM pg_namespace WHERE nspname = $1),

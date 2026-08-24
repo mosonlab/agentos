@@ -302,6 +302,72 @@ test("the blind-review migration installs nullable base and commit columns", asy
   ]);
 });
 
+test("the chain-layer expand migration installs both columns as nullable", async () => {
+  const columns = await db.$queryRaw<Array<{
+    table_name: string;
+    column_name: string;
+    is_nullable: string;
+    data_type: string;
+  }>>`
+    SELECT table_name, column_name, is_nullable, data_type
+    FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema}
+      AND (table_name, column_name) IN (
+        ('TaskTemplateStep', 'layer'),
+        ('Task', 'chainLayer')
+      )
+    ORDER BY table_name, column_name
+  `;
+  assert.deepEqual(columns, [
+    { table_name: "Task", column_name: "chainLayer", is_nullable: "YES", data_type: "integer" },
+    { table_name: "TaskTemplateStep", column_name: "layer", is_nullable: "YES", data_type: "integer" },
+  ]);
+
+  // The all-or-none CHECK belongs to the contract migration. If it appears in
+  // the expand migration, current base-shaped writers cannot remain usable.
+  const prematureChecks = await db.$queryRaw<Array<{ definition: string }>>`
+    SELECT pg_get_constraintdef(constraint_obj.oid) AS definition
+    FROM pg_constraint AS constraint_obj
+    JOIN pg_class AS relation ON relation.oid = constraint_obj.conrelid
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = ${testDatabaseSchema}
+      AND relation.relname = 'Task'
+      AND pg_get_constraintdef(constraint_obj.oid) LIKE '%chainLayer%'
+  `;
+  assert.deepEqual(prematureChecks, []);
+});
+
+test("base-shaped template and chained-task writers remain valid after expand", async () => {
+  const suffix = `${Date.now()}-${process.pid}`;
+  const project = await db.project.create({ data: {
+    name: `Chain layer expand ${suffix}`,
+    slug: `chain-layer-expand-${suffix}`,
+  } });
+  const template = await db.taskTemplate.create({ data: {
+    projectId: project.id,
+    name: "pre-migration-shaped-template",
+    description: "linear template fixture",
+    variables: [],
+  } });
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    stepIndex: 17,
+    name: "legacy step",
+    assigneeType: "AGENT",
+    prompt: "legacy prompt",
+  } });
+  assert.equal(step.layer, null);
+
+  const task = await db.task.create({ data: {
+    projectId: project.id,
+    name: "legacy chain task",
+    description: "legacy chain fixture",
+    chainId: `legacy-chain-${suffix}`,
+    chainIndex: 17,
+  } });
+  assert.equal(task.chainLayer, null);
+});
+
 // ---------------------------------------------------------------------------
 // Goal 5a0, plan Step 2.8 — catalog assertions for the idempotent execution
 // kernel migration, plus the raw negative inserts Step 2's verification names.
