@@ -1264,20 +1264,51 @@ test("successful completion commits output and parks an archived chain successor
       let runCreates = 0;
       const successor = {
         id: "task-2",
+        projectId: "project-1",
+        name: "Archived Successor",
+        chainId: "chain-1",
+        chainIndex: 2,
+        chainLayer: 2,
+        status: "TODO",
         assigneeType: "AGENT",
         assigneeAgentId: "agent-2",
         repoId: "repo-1",
+        templateId: "template-1",
+        templateStepId: null,
         approvalGate: false,
+        archivedAt: null,
+        failureReason: null,
         updatedAt: new Date(),
         runs: [],
         assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
+      };
+      const predecessor = {
+        id: "task-1",
+        projectId: "project-1",
+        name: "Predecessor",
+        templateId: "template-1",
+        chainId: "chain-1",
+        chainIndex: 1,
+        chainLayer: 1,
+        status: "DOING",
+        approvalGate: false,
+        archivedAt: null,
+        assigneeType: "AGENT",
+        assigneeAgentId: "agent-1",
+        repoId: "repo-1",
+        templateStepId: null,
+        failureReason: null,
       };
       const run = {
         id: "run-1", projectId: "project-1", taskId: "task-1", goalId: null, agentId: "agent-1",
         repoId: "repo-1", runNumber: 1, maxRunsPerTask: 3, runner: RunnerKind.CLAUDE,
         model: "model", targetBranch: "main", branch: "feature/chain", baseSha: "base",
         promptHash: "hash", maxDurationMin: 120, stallTimeoutMin: 10,
-        task: { id: "task-1", templateId: "template-1", templateStep: { outputKind: "result" } },
+        task: {
+          ...predecessor,
+          templateStep: { outputKind: "result" },
+          repo: { defaultBranch: "main" },
+        },
         session: { id: "session-1" },
       };
       const tx = {
@@ -1293,12 +1324,13 @@ test("successful completion commits output and parks an archived chain successor
           create: async () => { outputCreated = true; return {}; },
         },
         task: {
-          findUniqueOrThrow: async () => ({
-            id: "task-1", name: "Predecessor", templateId: "template-1", approvalGate: false,
-            followUpTaskId: successor.id, followUpTask: successor,
-          }),
+          findUniqueOrThrow: async () => predecessor,
           findUnique: async () => successor,
-          updateMany: async () => ({ count: 1 }),
+          findMany: async () => [predecessor, successor],
+          updateMany: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+            if (where.id === predecessor.id && typeof data.status === "string") predecessor.status = data.status;
+            return { count: 1 };
+          },
           update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
             if (where.id === successor.id) successorUpdate = data;
             return {};
@@ -1354,15 +1386,23 @@ test("archived successor errors from gate approve and reject map to named 409 re
         projectId: "project-1",
         name: decision === "approve" ? "Successor step" : "Redo step",
         description: "work",
+        chainId: "chain-1",
+        chainIndex: decision === "approve" ? 2 : 1,
+        chainLayer: decision === "approve" ? 2 : 1,
+        status: "TODO",
         assigneeType: "AGENT",
         assigneeAgentId: "agent-archived",
         repoId: "repo-1",
         templateId: "template-1",
+        templateStepId: null,
         targetBranch: "main",
         updatedAt: new Date(),
         maxDurationMin: 120,
         stallTimeoutMin: 10,
         maxSessionsPerTask: 3,
+        approvalGate: false,
+        archivedAt: null,
+        failureReason: null,
         runs: [],
         assigneeAgent: {
           id: "agent-archived",
@@ -1378,9 +1418,22 @@ test("archived successor errors from gate approve and reject map to named 409 re
       };
       const gateTask = {
         id: "gate-1",
+        projectId: "project-1",
+        name: "Gate",
+        chainId: "chain-1",
+        chainIndex: 1,
+        chainLayer: 1,
+        status: "REVIEW",
+        archivedAt: null,
+        approvalGate: true,
         assigneeType: "AGENT",
-        followUpTaskId: "successor-1",
-        previousTask: null,
+        assigneeAgentId: "agent-archived",
+        repoId: "repo-1",
+        templateId: "template-1",
+        templateStepId: null,
+        templateStep: null,
+        runs: [],
+        assigneeAgent: executable.assigneeAgent,
       };
       const tx = {
         // The reject path locks the redo row before queueing it. This task is
@@ -1399,11 +1452,16 @@ test("archived successor errors from gate approve and reject map to named 409 re
         },
         inboxDecision: { create: async () => ({}) },
         task: {
-          update: async () => ({}),
+          update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+            if (where.id === gateTask.id && typeof data.status === "string") gateTask.status = data.status;
+            return {};
+          },
           findUniqueOrThrow: async () => executable,
-          // approve now routes through activateChainSuccessor, which reads the
-          // successor itself and CAS-claims it before the archived check
+          // Both approval and rejection resolve the target through the real
+          // layered chain rows; no linked-list relation is available.
           findUnique: async () => executable,
+          findFirst: async () => null,
+          findMany: async () => decision === "approve" ? [gateTask, executable] : [],
           updateMany: async () => ({ count: 1 }),
         },
         taskActivity: { create: async () => ({}) },
