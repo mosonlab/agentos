@@ -59,7 +59,10 @@ before(async () => {
     configFile: fileURLToPath(new URL("../../vite.config.ts", import.meta.url)),
     root: fileURLToPath(new URL("../../", import.meta.url)),
     logLevel: "silent",
-    server: { port: 0, host: "127.0.0.1" },
+    // Vite normalises port 0 back to its development default. Let this test
+    // advance to the next loopback port when another isolated GATE already owns
+    // 5173; the assertions read the address it actually bound below.
+    server: { port: 0, host: "127.0.0.1", strictPort: false },
     // Nothing here asks for a module, so the dependency scanner would only cost
     // seconds and leave work in flight at `close()`. The transport boundary is
     // what is under test; the bundler is not.
