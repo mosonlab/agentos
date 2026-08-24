@@ -378,6 +378,7 @@ export type RuntimeHandle = {
   sawError: boolean;
   providerError: string | null;
   piTurnCompleted: boolean;
+  piFinalAttemptFailed: boolean;
   finalOutput: string | null;
   stdout: string;
   stderr: string;
@@ -564,11 +565,18 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
     }
     emit(handle, sink, "MODEL_COMPLETED", event);
   } else if (type === "agent_end") {
-    if (event.willRetry === true) handle.sawError = true;
+    const messages = Array.isArray(event.messages) ? event.messages : [];
+    const finalMessage = asRecord(messages.at(-1));
+    const stopReason = stringField(finalMessage, "stopReason");
+    const errorMessage = stringField(finalMessage, "errorMessage");
+    handle.piFinalAttemptFailed = event.willRetry === true || stopReason === "error" || errorMessage !== null;
+    handle.providerError = handle.piFinalAttemptFailed
+      ? errorMessage ?? (stopReason ? `PI stopped with ${stopReason}` : "PI provider retry failed")
+      : null;
     emit(handle, sink, "PROVIDER_STATUS", event);
   } else if (type === "agent_settled") {
     handle.terminalEventSeen = true;
-    handle.terminalSuccess = handle.piTurnCompleted && !handle.sawError;
+    handle.terminalSuccess = handle.piTurnCompleted && !handle.piFinalAttemptFailed && !handle.sawError;
     emit(handle, sink, "FINAL_OUTPUT", event);
   } else {
     if (type?.includes("error")) handle.sawError = true;
@@ -728,6 +736,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     sawError: false,
     providerError: null,
     piTurnCompleted: false,
+    piFinalAttemptFailed: false,
     finalOutput: null,
     stdout: "",
     stderr: "",

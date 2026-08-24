@@ -892,6 +892,54 @@ test("Codex structured errors take precedence over stderr warnings", async () =>
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
 });
 
+test("PI terminal success follows the final provider attempt after an internal retry", async () => {
+  const script = [
+    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+    "emit({type:'turn_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'fetch failed'}});",
+    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'fetch failed'}],willRetry:true});",
+    "emit({type:'turn_end',message:{role:'assistant',content:[{type:'text',text:'final PASS'}],stopReason:'stop'}});",
+    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'stop'}],willRetry:false});",
+    "emit({type:'agent_settled'});",
+  ].join("");
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", script],
+  } as unknown as RunnerConfig;
+  const handle = await adapters.PI.start({
+    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
+    credentialsPath: "/tmp/session.json",
+  }, () => undefined);
+
+  const evidence = await handle.exit;
+  assert.equal(evidence.terminalSuccess, true);
+  assert.equal(evidence.providerError, null);
+  assert.equal(evidence.finalOutput, "final PASS");
+  assert.equal(adapterExecutionSucceeded(evidence), true);
+});
+
+test("PI exposes the exhausted provider error instead of a generic protocol failure", async () => {
+  const script = [
+    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+    "emit({type:'turn_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'fetch failed'}});",
+    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'fetch failed'}],willRetry:false});",
+    "emit({type:'agent_settled'});",
+  ].join("");
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", script],
+  } as unknown as RunnerConfig;
+  const handle = await adapters.PI.start({
+    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
+    credentialsPath: "/tmp/session.json",
+  }, () => undefined);
+
+  const evidence = await handle.exit;
+  assert.equal(evidence.terminalEventSeen, true);
+  assert.equal(evidence.terminalSuccess, false);
+  assert.equal(evidence.providerError, "fetch failed");
+  assert.deepEqual(adapters.PI.classifyError(evidence), { failureClass: "TRANSIENT_PROVIDER", retryable: true });
+});
+
 test("Codex agent progress renews an open command deadline while stderr does not", async () => {
   const script = [
     "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",

@@ -52,6 +52,7 @@ type CacheMetadata = {
 type DependencyProject = {
   inputs: CacheInput[];
   targets: string[];
+  nativeWorkspaces: string[];
   inputMissCondition?: string;
 };
 
@@ -334,6 +335,15 @@ const inspectDependencyProject = async (workspacePath: string): Promise<Dependen
   const requiredPaths = ["package.json", "package-lock.json", ...packageDirectories.map((path) => `${path}/package.json`)];
   const optionalPaths = [".npmrc", ...packageDirectories.map((path) => `${path}/.npmrc`)];
   const schemaInputs = await lifecycleSchemaInputs(workspace, packages);
+  const nativeWorkspaces: string[] = [];
+  for (const pkg of packages) {
+    const bindingPath = posix.join(pkg.directory, "binding.gyp");
+    const kind = await pathKind(resolve(workspace, bindingPath));
+    if (kind === "missing") continue;
+    if (kind !== "file") throw new Error(`Ambiguous native workspace input: ${bindingPath} is ${kind}`);
+    if (!pkg.name) throw new Error(`Native workspace ${pkg.manifestPath} has no package name`);
+    nativeWorkspaces.push(pkg.name);
+  }
   const inputs: CacheInput[] = [];
   let inputMissCondition: string | undefined;
   for (const { path, required } of [
@@ -356,6 +366,7 @@ const inspectDependencyProject = async (workspacePath: string): Promise<Dependen
   return {
     inputs,
     targets: ["node_modules", ...packageDirectories.map((path) => `${path}/node_modules`)],
+    nativeWorkspaces,
     ...(inputMissCondition ? { inputMissCondition } : {}),
   };
 };
@@ -793,6 +804,25 @@ const installDependencies = async (
   }
 };
 
+const rebuildNativeWorkspaces = async (
+  config: RunnerConfig,
+  workspace: string,
+  nativeWorkspaces: string[],
+  env: NodeJS.ProcessEnv,
+  execute: DependencyCommandExecutor,
+): Promise<void> => {
+  for (const name of nativeWorkspaces) {
+    await execute(
+      config,
+      "npm",
+      ["rebuild", "-w", name, "--no-audit", "--no-fund"],
+      workspace,
+      env,
+      { timeoutMs: NPM_INSTALL_COMMAND_TIMEOUT_MS },
+    );
+  }
+};
+
 export const materializeWorkspaceDependencies = async (
   config: RunnerConfig,
   workspacePath: string,
@@ -834,6 +864,7 @@ export const materializeWorkspaceDependencies = async (
       try {
         const metadata = await validateEntry(entry, expected, workspace);
         await restoreEntry(config, metadata, entry, workspace, env, execute);
+        await rebuildNativeWorkspaces(config, workspace, project.nativeWorkspaces, env, execute);
         report({ event: "hit", key: key.slice(0, 16) });
         return { status: "restored", key };
       } catch (error: unknown) {

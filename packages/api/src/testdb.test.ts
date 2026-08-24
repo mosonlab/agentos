@@ -1,18 +1,36 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import {
+const unitTestDatabaseUrl = "postgresql://scratch_role:secret@127.0.0.1:55432/agentos_test_control?schema=isolated";
+const previousTestDatabaseUrl = process.env.TEST_DATABASE_URL;
+process.env.TEST_DATABASE_URL = unitTestDatabaseUrl;
+const {
   awaitNoConnections,
   ScratchDatabaseManager,
   scratchNameOwnerPid,
   validateScratchDatabaseEnvironment,
-} from "./testdb.js";
+} = await import("./testdb.js");
+if (previousTestDatabaseUrl === undefined) delete process.env.TEST_DATABASE_URL;
+else process.env.TEST_DATABASE_URL = previousTestDatabaseUrl;
 
 const safeEnvironment = {
   AGENTOS_ALLOW_SCRATCH_DATABASES: "1",
-  TEST_DATABASE_URL: "postgresql://scratch_role:secret@127.0.0.1:55432/agentos_test_control?schema=isolated",
+  TEST_DATABASE_URL: unitTestDatabaseUrl,
   TEST_DATABASE_MAINTENANCE_URL: "postgresql://scratch_role:secret@127.0.0.1:55432/postgres_maintenance?schema=isolated",
 } satisfies NodeJS.ProcessEnv;
+
+test("DB-HARNESS-GUARD refuses to load without an explicit test database URL", () => {
+  const environment = { ...process.env };
+  delete environment.TEST_DATABASE_URL;
+  const imported = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", `await import(${JSON.stringify(new URL("./testdb.ts", import.meta.url).href)})`],
+    { encoding: "utf8", env: environment },
+  );
+  assert.notEqual(imported.status, 0);
+  assert.match(imported.stderr, /scratch-test-database-url-required/u);
+});
 
 test("DB-HARNESS-GUARD requires explicit opt-in and both explicit URLs", () => {
   assert.throws(() => validateScratchDatabaseEnvironment({}), /opt-in-required/u);
