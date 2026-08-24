@@ -119,6 +119,7 @@ import {
   readStoredCliAvailability,
   storeCliAvailability,
 } from "./runner-cli-availability.js";
+import { runRunnerAvailabilityTransaction } from "./runner-availability-transaction.js";
 import {
   chainKey,
   chainProgress,
@@ -4243,7 +4244,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
     const now = new Date();
-    const state = await db.$transaction(async (tx) => {
+    const state = await runRunnerAvailabilityTransaction(db, async (tx) => {
       const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
       const previousAvailability = readStoredCliAvailability(previous?.capabilities);
       const availability = nextStoredCliAvailability(body, previousAvailability, now);
@@ -4306,7 +4307,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
       }
       return available;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
     const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
     const revalidatePreflight = body.available

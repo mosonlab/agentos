@@ -3,7 +3,6 @@ export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "
 export const DEPLOY_STEPS = Object.freeze([
   "fast-forward",
   "install-dependencies",
-  "prisma-generate",
   "build",
   "backup",
   "guarded-migration",
@@ -65,7 +64,6 @@ export const executeUpgrade = async (host, initialRevisions) => {
     revisions = Object.freeze({ from: initialRevisions.from, to });
     await host.createStage();
     await host.installDependencies();
-    await host.prismaGenerate();
     await host.build();
     await host.backup();
     await host.guardedMigration();

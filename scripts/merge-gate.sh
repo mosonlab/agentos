@@ -525,6 +525,10 @@ prepare_deferred_build_snapshot() {
   printf '%s\n' "${key}" > "${GATE_TMP}/deferred-build-key" || return 1
 }
 
+record_release_build_key() {
+  printf '%s\n' "$1" > "${GATE_TMP}/release-build-key"
+}
+
 # This is called only after verify_tree_did_not_drift succeeds. Until then the
 # completed build exists solely under this gate run's private temporary root and
 # no later run can observe it under the pinned-OID cache key.
@@ -540,6 +544,21 @@ publish_deferred_build_snapshot() {
   publish_build_snapshot "${entry}" "${key}" "${snapshot}/tree" \
     || note "build cache publication failed; this run keeps fresh build output"
   prune_build_cache "${key}"
+}
+
+# The revision index is deployment acceleration, never merge authority. It is
+# published only after the final drift proof and points at the bounded immutable
+# build cache above, so it adds no second artifact copy or unbounded cache.
+publish_release_snapshot() {
+  local key=""
+  [ -f "${GATE_TMP}/release-build-key" ] && [ ! -L "${GATE_TMP}/release-build-key" ] || return 0
+  key="$(cat "${GATE_TMP}/release-build-key" 2>/dev/null || true)"
+  [ -n "${key}" ] || return 0
+  if node "${REPO_ROOT}/scripts/deploy/release-snapshot.mjs" publish "${GATED_HEAD}" "${CACHE_ROOT}" "${key}"; then
+    note "release snapshot indexed: ${GATED_HEAD}"
+  else
+    note "release snapshot publication failed; deployment will build from source"
+  fi
 }
 
 build_all() {
@@ -569,14 +588,18 @@ build_all() {
     (cd "${REPO_ROOT}/packages/api" && node ../build-info/stamp.mjs dist) || return 1
     (cd "${REPO_ROOT}/packages/runner" && node ../build-info/stamp.mjs dist) || return 1
     note "build cache hit: ${key} ($(cache_copy_description), provenance restamped)"
+    record_release_build_key "${key}" || return 1
     prune_build_cache "${key}"
     return 0
   fi
   note "build cache miss: ${key}"
   clear_build_outputs || return 1
   npm run build || return 1
-  prepare_deferred_build_snapshot "${key}" \
-    || note "build snapshot could not be staged; this run keeps fresh build output"
+  if prepare_deferred_build_snapshot "${key}"; then
+    record_release_build_key "${key}" || return 1
+  else
+    note "build snapshot could not be staged; this run keeps fresh build output"
+  fi
   return 0
 }
 
@@ -1063,3 +1086,4 @@ step "database preflight tests" run_database_preflight_tests
 step "api database tests" run_api_database_tests
 step "verify the gated commit did not drift" verify_tree_did_not_drift
 publish_deferred_build_snapshot
+publish_release_snapshot

@@ -1,5 +1,5 @@
 const METHODS = Object.freeze([
-  "fastForward", "createStage", "installDependencies", "prismaGenerate", "build", "backup",
+  "fastForward", "createStage", "installDependencies", "build", "backup",
   "guardedMigration", "syncCanonicalPrompts", "verifyRuntimePrismaClient",
   "assertQuietBeforeRestart", "publishBuild", "restartServices", "verifyServices",
   "restorePreviousServices", "escalate", "notify", "cleanupStage",

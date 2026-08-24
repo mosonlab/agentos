@@ -208,7 +208,6 @@ export const publishReclaimIntents = async (
     }
     if (!ownedByCaller(run, inventory.runnerId)) {
       keep.push({ directory, reason: "foreign-runner" });
-      audit("keep-foreign-runner", { root, runId: run.id, owner: run.runnerId, caller: inventory.runnerId });
       continue;
     }
     // Only a terminal run's directory is disposable. The two lists partition

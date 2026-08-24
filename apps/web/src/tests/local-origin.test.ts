@@ -344,3 +344,27 @@ test("the guard is installed inside configureServer, ahead of Vite's own middlew
   assert.equal(recorded.statusCode, 403);
   assert.deepEqual(attempts, []);
 });
+
+test("a production build does not read or embed the development proxy environment", async () => {
+  const priorTarget = process.env.WEB_API_URL;
+  const priorToken = process.env.OPERATOR_TOKEN;
+  process.env.WEB_API_URL = "https://not-loopback.example";
+  process.env.OPERATOR_TOKEN = "must-not-enter-build";
+  try {
+    const { default: configure } = await import("../../vite.config.js");
+    const resolved = typeof configure === "function"
+      ? await configure({ command: "build", mode: "production" })
+      : configure;
+    const config = resolved as {
+      server?: { proxy?: Record<string, unknown> };
+      preview?: { proxy?: Record<string, unknown> };
+    };
+    assert.deepEqual(config.server?.proxy, {});
+    assert.deepEqual(config.preview?.proxy, {});
+  } finally {
+    if (priorTarget === undefined) delete process.env.WEB_API_URL;
+    else process.env.WEB_API_URL = priorTarget;
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorToken;
+  }
+});
