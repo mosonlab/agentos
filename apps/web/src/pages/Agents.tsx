@@ -9,7 +9,7 @@ import { Link, navigate } from "../lib/router";
 import type { Agent, CodexServiceTier, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
-import { findModel, resolveRunner, runnerForModel, splitModel, supportsCodexServiceTier, validateModelPair } from "../lib/models";
+import { resolveRunner, runnerForModel, supportsCodexServiceTier, validateModelPair } from "../lib/models";
 import { isEnforced, TOOL_KEYS, TOOL_LABEL_KEYS, type ToolKey } from "../lib/tools";
 import { cn } from "../lib/utils";
 import {
@@ -24,18 +24,6 @@ import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
-
-const codexSubprocessModelValid = (model: string | null): boolean => {
-  if (!model || runnerForModel(model) !== "CODEX") return false;
-  const separator = model.lastIndexOf(":");
-  return separator > 0 && model.slice(0, separator).startsWith("gpt-") && model.slice(separator + 1).length > 0;
-};
-
-const subprocessModelDetails = (model: string | null | undefined): { model: ReactNode; effort: string } => {
-  if (!model) return { model: "—", effort: "—" };
-  const parsed = splitModel(model);
-  return { model: findModel(parsed.model)?.label ?? parsed.model, effort: parsed.effort ?? "—" };
-};
 
 export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
   projectId: string;
@@ -64,12 +52,6 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
       ...form,
       model: modelForSave(form.model),
       runnerPreference: runnerForModel(form.model) ?? form.runnerPreference,
-      ...(form.name === "implementation-plan-executioner" ? {
-        ordinarySubprocessModel: "gpt-5.6-luna:max",
-        ordinarySubprocessCodexServiceTier: "DEFAULT",
-        elevatedSubprocessModel: "gpt-5.6-sol:high",
-        elevatedSubprocessCodexServiceTier: "DEFAULT",
-      } : {}),
     }));
     if (ok) { onCreated(); onClose(); }
   };
@@ -550,31 +532,10 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
       name: draft.name, title: draft.title, model: modelForSave(draft.model),
       runnerPreference: runnerForModel(draft.model) ?? draft.runnerPreference, inboxAccess: draft.inboxAccess,
       codexServiceTier: draft.codexServiceTier,
-      ...(draft.name === "implementation-plan-executioner" ? {
-        ordinarySubprocessModel: draft.ordinarySubprocessModel ? modelForSave(draft.ordinarySubprocessModel) : null,
-        ordinarySubprocessCodexServiceTier: draft.ordinarySubprocessCodexServiceTier,
-        elevatedSubprocessModel: draft.elevatedSubprocessModel ? modelForSave(draft.elevatedSubprocessModel) : null,
-        elevatedSubprocessCodexServiceTier: draft.elevatedSubprocessCodexServiceTier,
-      } : {}),
       rolePrompt: draft.rolePrompt,
     }));
     if (ok) { setDraft(null); reload(); }
   };
-  const subprocessProfilesValid = view.name !== "implementation-plan-executioner" || (
-    codexSubprocessModelValid(view.ordinarySubprocessModel)
-    && view.ordinarySubprocessCodexServiceTier !== null
-    && codexSubprocessModelValid(view.elevatedSubprocessModel)
-    && view.elevatedSubprocessCodexServiceTier !== null
-  );
-  const subprocessSchemaAvailable = agent.name !== "implementation-plan-executioner" || (
-    agent.ordinarySubprocessModel !== undefined
-    && agent.ordinarySubprocessCodexServiceTier !== undefined
-    && agent.elevatedSubprocessModel !== undefined
-    && agent.elevatedSubprocessCodexServiceTier !== undefined
-  );
-  const ordinarySubprocess = subprocessModelDetails(view.ordinarySubprocessModel);
-  const elevatedSubprocess = subprocessModelDetails(view.elevatedSubprocessModel);
-
   return (
     <Page className="text-foreground">
       <div className={DETAIL_HEAD}>
@@ -592,7 +553,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
           : (
             <>
               <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(null)}>{t("common.cancel")}</Button>
-              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || validateModelPair(view.model, view.runnerPreference) !== null || !subprocessSchemaAvailable || !subprocessProfilesValid} onClick={() => void save()}>{t("common.save")}</Button>
+              <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || validateModelPair(view.model, view.runnerPreference) !== null} onClick={() => void save()}>{t("common.save")}</Button>
             </>
           )}
       </div>
@@ -657,69 +618,6 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
               </div>
             )}
           </Card>
-        ) : null}
-
-        {tab === "setup" && view.name === "implementation-plan-executioner" ? (
-          <>
-            <Card title={t("agents.subprocess.ordinary.title")}>
-              <div data-subprocess-profile="ordinary" className={STACK}>
-                <div>{t("agents.subprocess.ordinary.hint")}</div>
-                {view.ordinarySubprocessModel == null || view.ordinarySubprocessCodexServiceTier == null
-                  ? <div className="text-destructive" role="alert">{t(subprocessSchemaAvailable ? "agents.subprocess.missing" : "agents.subprocess.unavailable")}</div>
-                  : null}
-                {draft === null ? (
-                  <KeyValue items={[
-                    { k: t("agents.field.model"), v: ordinarySubprocess.model },
-                    { k: t("agents.model.effort"), v: ordinarySubprocess.effort },
-                    { k: t("agents.field.runnerPreference"), v: "Codex" },
-                    { k: t("agents.field.codexServiceTier"), v: view.ordinarySubprocessCodexServiceTier ? t(`serviceTier.${view.ordinarySubprocessCodexServiceTier}`) : "—" },
-                  ]} />
-                ) : (
-                  <>
-                    <ModelPicker model={view.ordinarySubprocessModel ?? ""} runnerPreference="CODEX" onChange={(next) => patch({ ordinarySubprocessModel: next.model })} />
-                    <Field label={t("agents.field.codexServiceTier")} hint={t("agents.serviceTier.hint")}>
-                      <Select value={view.ordinarySubprocessCodexServiceTier ?? ""}
-                        onChange={(event) => patch({ ordinarySubprocessCodexServiceTier: event.target.value as CodexServiceTier })}>
-                        <option value="" disabled>—</option>
-                        <option value="DEFAULT">{t("serviceTier.DEFAULT")}</option>
-                        <option value="FAST">{t("serviceTier.FAST")}</option>
-                      </Select>
-                    </Field>
-                    {codexSubprocessModelValid(view.ordinarySubprocessModel) ? null : <div className="text-destructive">{t("agents.subprocess.codexOnly")}</div>}
-                  </>
-                )}
-              </div>
-            </Card>
-            <Card title={t("agents.subprocess.elevated.title")}>
-              <div data-subprocess-profile="elevated" className={STACK}>
-                <div>{t("agents.subprocess.elevated.hint")}</div>
-                {view.elevatedSubprocessModel == null || view.elevatedSubprocessCodexServiceTier == null
-                  ? <div className="text-destructive" role="alert">{t(subprocessSchemaAvailable ? "agents.subprocess.missing" : "agents.subprocess.unavailable")}</div>
-                  : null}
-                {draft === null ? (
-                  <KeyValue items={[
-                    { k: t("agents.field.model"), v: elevatedSubprocess.model },
-                    { k: t("agents.model.effort"), v: elevatedSubprocess.effort },
-                    { k: t("agents.field.runnerPreference"), v: "Codex" },
-                    { k: t("agents.field.codexServiceTier"), v: view.elevatedSubprocessCodexServiceTier ? t(`serviceTier.${view.elevatedSubprocessCodexServiceTier}`) : "—" },
-                  ]} />
-                ) : (
-                  <>
-                    <ModelPicker model={view.elevatedSubprocessModel ?? ""} runnerPreference="CODEX" onChange={(next) => patch({ elevatedSubprocessModel: next.model })} />
-                    <Field label={t("agents.field.codexServiceTier")} hint={t("agents.serviceTier.hint")}>
-                      <Select value={view.elevatedSubprocessCodexServiceTier ?? ""}
-                        onChange={(event) => patch({ elevatedSubprocessCodexServiceTier: event.target.value as CodexServiceTier })}>
-                        <option value="" disabled>—</option>
-                        <option value="DEFAULT">{t("serviceTier.DEFAULT")}</option>
-                        <option value="FAST">{t("serviceTier.FAST")}</option>
-                      </Select>
-                    </Field>
-                    {codexSubprocessModelValid(view.elevatedSubprocessModel) ? null : <div className="text-destructive">{t("agents.subprocess.codexOnly")}</div>}
-                  </>
-                )}
-              </div>
-            </Card>
-          </>
         ) : null}
 
         {tab === "prompt" ? (

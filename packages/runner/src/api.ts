@@ -85,10 +85,8 @@ export type ClaimedTask = {
     maxRunsPerTask: number;
     model: string;
     codexServiceTier: CodexServiceTier;
-    subprocessModel: string | null;
-    subprocessCodexServiceTier: CodexServiceTier | null;
-    elevatedSubprocessModel: string | null;
-    elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
+    subagentModel: string | null;
+    subagentMaxConcurrent: number | null;
     targetBranch: string | null;
     /** Whether targetBranch was selected from durable Run.pushedBranch evidence.
      * When true, provisioning must not replace it with an older declared head. */

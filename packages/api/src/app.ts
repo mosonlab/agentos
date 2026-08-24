@@ -32,6 +32,7 @@ import {
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockChainPrefixRows,
+  nativeImplementationSubagentRunConfig,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -47,7 +48,6 @@ import {
   runnerFor,
   sessionUsageCost,
   sumUsageCosts,
-  subprocessRunConfig,
   pinnedImplementationRange,
   SecretPurpose,
   SkillKind,
@@ -686,10 +686,6 @@ const agentFields = {
   title: z.string().trim().min(1).max(120),
   model: z.string().trim().min(1).max(120),
   codexServiceTier: z.nativeEnum(CodexServiceTier),
-  ordinarySubprocessModel: z.string().trim().min(1).max(120).nullable(),
-  ordinarySubprocessCodexServiceTier: z.nativeEnum(CodexServiceTier).nullable(),
-  elevatedSubprocessModel: z.string().trim().min(1).max(120).nullable(),
-  elevatedSubprocessCodexServiceTier: z.nativeEnum(CodexServiceTier).nullable(),
   foundationalPrompt: z.string().min(1),
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
@@ -701,10 +697,6 @@ const agentInput = z.object({
   ...agentFields,
   foundationalPrompt: agentFields.foundationalPrompt.optional(),
   codexServiceTier: agentFields.codexServiceTier.default(CodexServiceTier.DEFAULT),
-  ordinarySubprocessModel: agentFields.ordinarySubprocessModel.default(null),
-  ordinarySubprocessCodexServiceTier: agentFields.ordinarySubprocessCodexServiceTier.default(null),
-  elevatedSubprocessModel: agentFields.elevatedSubprocessModel.default(null),
-  elevatedSubprocessCodexServiceTier: agentFields.elevatedSubprocessCodexServiceTier.default(null),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
   // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
@@ -734,42 +726,6 @@ const runnerModelRefusal = (agent: { model: string; runnerPreference: RunnerPref
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
 
-const codexSubprocessProfileRefusal = (label: string, model: string | null, tier: CodexServiceTier | null): string | null => {
-  if (model === null && tier === null) return `${label} Codex subprocess profile is required`;
-  if (model === null || tier === null) return `${label} Codex subprocess model and service tier must be configured together`;
-  const separator = model.lastIndexOf(":");
-  const baseModel = separator > 0 ? model.slice(0, separator) : model;
-  const effort = separator > 0 ? model.slice(separator + 1) : "";
-  if (!baseModel.startsWith("gpt-") || !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
-    return `${label} subprocess must use a Codex gpt-* model with an explicit reasoning effort`;
-  }
-  return null;
-};
-
-const executionerSubprocessRefusal = (agent: {
-  name: string;
-  ordinarySubprocessModel: string | null;
-  ordinarySubprocessCodexServiceTier: CodexServiceTier | null;
-  elevatedSubprocessModel: string | null;
-  elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
-}): string | null => {
-  const configured = agent.ordinarySubprocessModel !== null
-    || agent.ordinarySubprocessCodexServiceTier !== null
-    || agent.elevatedSubprocessModel !== null
-    || agent.elevatedSubprocessCodexServiceTier !== null;
-  if (agent.name !== "implementation-plan-executioner") {
-    return configured ? "Codex subprocess profiles belong only to implementation-plan-executioner" : null;
-  }
-  return codexSubprocessProfileRefusal(
-    "Ordinary",
-    agent.ordinarySubprocessModel,
-    agent.ordinarySubprocessCodexServiceTier,
-  ) ?? codexSubprocessProfileRefusal(
-    "Elevated",
-    agent.elevatedSubprocessModel,
-    agent.elevatedSubprocessCodexServiceTier,
-  );
-};
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
@@ -1983,8 +1939,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (modelRefusal) return context.json({ error: modelRefusal }, 400);
     const tierRefusal = codexServiceTierRefusal(body);
     if (tierRefusal) return context.json({ error: tierRefusal }, 400);
-    const subprocessRefusal = executionerSubprocessRefusal(body);
-    if (subprocessRefusal) return context.json({ error: subprocessRefusal }, 400);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
     const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
@@ -2027,8 +1981,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (modelRefusal) return { error: modelRefusal, code: 400 as const };
       const tierRefusal = codexServiceTierRefusal(merged);
       if (tierRefusal) return { error: tierRefusal, code: 400 as const };
-      const subprocessRefusal = executionerSubprocessRefusal(merged);
-      if (subprocessRefusal) return { error: subprocessRefusal, code: 400 as const };
       if (body.environmentId) {
         const environment = await tx.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
         if (!environment) return { error: "Environment does not belong to this project", code: 400 as const };
@@ -2986,7 +2938,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runs: {
             orderBy: { runNumber: "desc" },
             select: {
-              id: true, runNumber: true, status: true, model: true,
+              id: true, runNumber: true, status: true, model: true, subagentModel: true,
               session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true, startedAt: true, endedAt: true } },
             },
           },
@@ -3097,7 +3049,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
       if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
         const derived = deriveRunConfig(currentAgent, null, created);
-        const subprocess = await subprocessRunConfig(currentAgent);
         // This run is built inline rather than through enqueueTaskRun, so it is
         // one of the paths a chain fix can miss. Missing it puts step ① on a
         // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
@@ -3114,7 +3065,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             runner: derived.runner,
             model: derived.model,
             codexServiceTier: derived.codexServiceTier,
-            ...subprocess,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: created.opensPullRequest,
@@ -3166,7 +3116,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const mergeOutcome = projectMergeOutcome(task.stepOutput);
     const usageCosts = task.runs.map((run) => run.session === null
       ? null
-      : sessionUsageCost(run.model, run.session));
+      : sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null }));
     return context.json({
       ...task,
       executionOwner: chainExecutionOwner(task),
@@ -3709,7 +3659,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const currentBinding = integratorBindingRefusal(lockedAgent.name, integratorStepShape);
       if (currentBinding) return { error: currentBinding, code: 400 as const };
       const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-      const subprocess = await subprocessRunConfig(lockedAgent, task.templateStep);
+      const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
       // A task with no repo cannot be a chain step with a branch, and this route
       // already tolerates a null repoId — so it keeps inheriting run-1's fields.
       const branches = task.repo
@@ -3727,7 +3677,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runner: derived.runner,
           model: derived.model,
           codexServiceTier: derived.codexServiceTier,
-          ...subprocess,
+          ...subagent,
           targetBranch: branches ? branches.targetBranch : last.targetBranch,
           branch: branches ? branches.branch : last.branch,
           opensPullRequest: task.opensPullRequest,
@@ -5669,10 +5619,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             runner: run.runner,
             model: run.model,
             codexServiceTier: run.codexServiceTier,
-            subprocessModel: run.subprocessModel,
-            subprocessCodexServiceTier: run.subprocessCodexServiceTier,
-            elevatedSubprocessModel: run.elevatedSubprocessModel,
-            elevatedSubprocessCodexServiceTier: run.elevatedSubprocessCodexServiceTier,
+            subagentModel: run.subagentModel,
+            subagentMaxConcurrent: run.subagentMaxConcurrent,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: currentTask.opensPullRequest,

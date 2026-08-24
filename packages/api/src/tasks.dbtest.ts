@@ -1069,17 +1069,22 @@ test("task creation snapshots the Agent configuration re-read after its row lock
   assert.equal(run.codexServiceTier, "FAST");
 });
 
-test("Run subprocess snapshots reject either half of an ordinary or elevated profile", async () => {
-  const context = await seedTask("subprocess-pair", { status: "DONE" });
+test("Run native subagent snapshots reject incomplete or noncanonical capability", async () => {
+  const context = await seedTask("subagent-snapshot", { status: "DONE" });
   const base = {
     projectId: context.project.id, taskId: context.task.id, agentId: context.agent.id, repoId: context.repo.id,
     runner: "CODEX" as const, model: "gpt-5.6-sol:medium", promptHash: "hash",
   };
   await assert.rejects(() => db.run.create({ data: {
-    ...base, runNumber: 1, dedupeKey: `task:${context.task.id}:run:1`, subprocessModel: "gpt-5.6-luna:max",
+    ...base, runNumber: 1, dedupeKey: `task:${context.task.id}:run:1`, subagentModel: "gpt-5.6-luna:max",
   } }));
   await assert.rejects(() => db.run.create({ data: {
-    ...base, runNumber: 2, dedupeKey: `task:${context.task.id}:run:2`, elevatedSubprocessCodexServiceTier: "DEFAULT",
+    ...base, runNumber: 2, dedupeKey: `task:${context.task.id}:run:2`,
+    subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 7,
+  } }));
+  await assert.rejects(() => db.run.create({ data: {
+    ...base, runNumber: 3, dedupeKey: `task:${context.task.id}:run:3`, runner: "CLAUDE",
+    subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8,
   } }));
 });
 

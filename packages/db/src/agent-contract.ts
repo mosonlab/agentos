@@ -3,7 +3,7 @@ import { RunnerKind, RunnerPreference } from "@prisma/client";
 export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
+  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "librarian", model: "gpt-5.6-terra:high", runner: RunnerPreference.CODEX },
   // Not an LLM role. The sentinel Agent row step 12 binds so a mechanical run
   // can carry a non-null `Run.agentId` without presenting a second human gate.
@@ -40,6 +40,10 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
   ["review-coordinator-sol", {
     from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
     to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
+  ["implementation-plan-executioner", {
+    from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
   }],
 ]);
 
