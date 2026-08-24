@@ -23,6 +23,50 @@ export const GATE_TITLE_KEY = "chain.gate";
 
 const OWNER_CHIP = "inline-flex items-center gap-[6px] rounded-full border border-border bg-secondary px-[9px] py-[2px] text-[11.5px] leading-[19px] text-secondary-foreground";
 
+export type ChainLayerGroup = {
+  storedLayer: number;
+  ordinal: number;
+  steps: ChainStep[];
+  blockers: ChainStep[];
+};
+
+/**
+ * Render order is a node concern (`position`), while execution order is a
+ * layer concern. The API normally supplies a stored layer, but falling back to
+ * the node ordinal keeps a legacy/expand-migration response visibly linear.
+ * The returned ordinal is dense so sparse, zero-based, and one-based storage
+ * all have the same operator-facing numbering.
+ */
+export const chainLayerGroups = (steps: readonly ChainStep[]): ChainLayerGroup[] => {
+  const effectiveLayer = (step: ChainStep): number => step.layer ?? step.chainIndex ?? step.position;
+  const values = [...new Set(steps.map(effectiveLayer))].sort((left, right) => left - right);
+  const ordinals = new Map(values.map((value, index) => [value, index + 1]));
+  const byLayer = new Map<number, ChainStep[]>();
+  for (const step of steps) {
+    const layer = effectiveLayer(step);
+    const group = byLayer.get(layer);
+    if (group) group.push(step); else byLayer.set(layer, [step]);
+  }
+  const groups = values.map((storedLayer) => ({
+    storedLayer,
+    ordinal: ordinals.get(storedLayer) ?? 1,
+    steps: [...(byLayer.get(storedLayer) ?? [])].sort((left, right) => (
+      left.position - right.position || (left.chainIndex ?? 0) - (right.chainIndex ?? 0) || left.taskId.localeCompare(right.taskId)
+    )),
+    blockers: [] as ChainStep[],
+  }));
+  for (const [index, group] of groups.entries()) {
+    const previous = groups[index - 1];
+    // A linear predecessor is already communicated by the existing chain
+    // ordering. The explicit join callout is for the new fan-in boundary, where
+    // naming the unfinished parallel sibling makes the dependency visible.
+    group.blockers = previous !== undefined && previous.steps.length > 1
+      ? previous.steps.filter((step) => step.status !== "DONE")
+      : [];
+  }
+  return groups;
+};
+
 export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => {
   const t = useT();
   if (step.executionOwner === "human") {
@@ -43,7 +87,7 @@ export const ChainRow = ({ step, here, pending, onStart }: {
   const t = useT();
   const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
   return (
-    <div className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
+    <div data-chain-node={step.taskId} className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
       <span className={STEP_POSITION}>{step.position}</span>
       <span className="min-w-0 flex-1">
         <Link to={`/tasks/${step.taskId}`}>{step.stepName}</Link>
@@ -80,10 +124,33 @@ export const ChainList = ({ chain, taskId, pending, onStart }: {
   const [all, setAll] = useState(false);
   const t = useT();
   const shown = all ? chain.steps : chain.steps.slice(0, CHAIN_PAGE);
+  const shownIds = new Set(shown.map((step) => step.taskId));
+  const groups = chainLayerGroups(chain.steps).flatMap((group) => {
+    const visibleSteps = group.steps.filter((step) => shownIds.has(step.taskId));
+    return visibleSteps.length === 0 ? [] : [{ ...group, steps: visibleSteps }];
+  });
   return (
     <Card title={t("chain.title")} extra={<span className={COUNT}>{t("chain.completed", { done: chain.done, total: chain.total })}</span>} flush>
-      {shown.map((step) => (
-        <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} onStart={onStart} />
+      {groups.map((group) => (
+        <section
+          key={group.storedLayer}
+          data-chain-layer={group.storedLayer}
+          data-chain-layer-ordinal={group.ordinal}
+          aria-label={t("chain.layer", { n: group.ordinal })}
+        >
+          <div className="flex flex-wrap items-center gap-[8px] border-t border-[color:var(--border-soft)] bg-secondary/40 px-[20px] py-[7px] text-[11.5px] text-muted-foreground first:border-t-0">
+            <span className="font-medium text-secondary-foreground">{t("chain.layer", { n: group.ordinal })}</span>
+            {group.steps.length > 1 ? <span data-chain-parallel="">{t("chain.parallel", { n: group.steps.length })}</span> : null}
+            {group.blockers.length > 0 && group.steps.some((step) => step.status !== "DONE") ? (
+              <span data-chain-join-blocked="">{t("chain.blockedBy", { names: group.blockers.map((step) => step.stepName).join(", ") })}</span>
+            ) : null}
+          </div>
+          <div className={group.steps.length > 1 ? "grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))]" : undefined}>
+            {group.steps.map((step) => (
+              <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} onStart={onStart} />
+            ))}
+          </div>
+        </section>
       ))}
       {all || chain.steps.length <= CHAIN_PAGE ? null : (
         <div className={cn(ROW, "px-[20px] py-[11px]")}>
