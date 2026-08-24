@@ -224,6 +224,10 @@ test("retry refuses a mis-bound integrator task", async () => {
     where: { id: chain.integratorTask!.id },
     data: { assigneeAgentId: chain.agent.id, status: TaskStatus.TODO },
   });
+  await db.task.update({
+    where: { id: chain.gateTask.id },
+    data: { status: TaskStatus.DONE },
+  });
   const refused = await call("POST", `/tasks/${chain.integratorTask!.id}/retry`);
   assert.equal(refused.status, 400, JSON.stringify(refused.body));
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id, status: "QUEUED" } }), 0);
