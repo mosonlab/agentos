@@ -152,10 +152,18 @@ recovery. The job does not stop runner processes while it waits.
 The job then performs exactly this sequence and stops at the first failure:
 
 1. require branch `main`, refuse a dirty checkout, fetch `origin/main`, prove the
-   current source is its ancestor, and fast-forward with `git merge --ff-only`;
-2. create a detached staging worktree under `.agentos-deploy/`, run `npm ci`
-   against the target lockfile, and run `npm run db:generate`;
-3. run `npm run build` in staging and verify its API build stamp;
+   current source is its ancestor, and fast-forward with `git merge --ff-only`.
+   The remote revision read and fetch each make at most three attempts, waiting
+   two seconds and then five seconds; only the final failure escalates;
+2. create a detached staging worktree under `.agentos-deploy/` and run `npm ci`
+   against the target lockfile. The root `postinstall` generates Prisma Client,
+   so the deploy does not run the same generation a second time; the runtime
+   client is still verified before publication;
+3. materialize the exact target revision's local merge-gate `dist/` snapshot
+   when it is present and valid, otherwise run `npm run build` in staging, then
+   verify the API build stamp. A missing or cache-evicted snapshot is an explicit
+   source-build miss; a present malformed index, symlinked tree, wrong stamp, or
+   partial artifact is a terminal refusal rather than a silent fallback;
 4. run `/usr/local/bin/pg_dump -Fc` through `docker exec` in
    `agentos-postgres-1`; stream its stdout to a mode-0600 temporary file on the
    host under `.agentos-deploy/backups/`, fsync it, and rename it to `.dump`
@@ -185,6 +193,20 @@ The job then performs exactly this sequence and stops at the first failure:
    restart the services;
 8. require every launchd service to be running, `/health` to pass, and
    `/version` to report the exact target commit before reporting success.
+
+The release snapshot is only a local acceleration path. The exact-head merge
+gate publishes its revision index after the final clean-tree drift proof, and
+the index points at the gate's existing bounded, immutable build cache rather
+than creating a second artifact copy. A gate run on another host provides merge
+evidence but no local deployment artifact, so this host performs the normal
+source build. Deployment correctness never depends on cache availability.
+
+Runner lease heartbeats remain on `RUNNER_HEARTBEAT_INTERVAL_MS`. CLI
+availability reports use a separate one-minute interval, with a deterministic
+zero-to-fifteen-second initial offset derived from `runnerId`, so sibling runner
+services do not create a synchronized Serializable write burst. The API retries
+at most two `P2034` conflicts for this one global availability transaction and
+surfaces a third conflict normally.
 
 The old `dist/` trees and `node_modules` stay in a private `previous-*`
 transaction directory. A

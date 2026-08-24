@@ -10,6 +10,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,6 +50,12 @@ import {
 } from "./quiet-window-backup.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
+import {
+  materializeReleaseSnapshot,
+  publishReleaseSnapshot,
+  RELEASE_SNAPSHOT_OUTPUTS,
+} from "./release-snapshot.mjs";
+import { runCommandWithRetry } from "./quiet-window-retry.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 
@@ -86,7 +93,6 @@ const fixture = (failure = null) => {
     fastForward: step("fast-forward", async () => revisions.to),
     createStage: step("create-stage"),
     installDependencies: step("install-dependencies"),
-    prismaGenerate: step("prisma-generate"),
     build: step("build"),
     backup: step("backup"),
     guardedMigration: step("guarded-migration"),
@@ -194,7 +200,7 @@ test("successful upgrade runs the safety sequence in order", async () => {
   const { host, calls, state } = fixture();
   assert.deepEqual(await executeUpgrade(host, revisions), { ok: true });
   assert.deepEqual(calls, [
-    "fast-forward", "create-stage", "install-dependencies", "prisma-generate", "build", "backup",
+    "fast-forward", "create-stage", "install-dependencies", "build", "backup",
     "guarded-migration", "canonical-prompt-sync", "verify-runtime-prisma-client", "quiet-recheck",
     "publish-build", "restart-services", "verify-services", "notify-success", "commit-build", "cleanup-stage",
   ]);
@@ -209,7 +215,7 @@ test("the first failing step stops the pipeline and keeps the previous build ser
   assert.equal(result.ok, false);
   assert.equal(result.failure.reason, "build-failed");
   assert.deepEqual(calls, [
-    "fast-forward", "create-stage", "install-dependencies", "prisma-generate", "build",
+    "fast-forward", "create-stage", "install-dependencies", "build",
     "escalate", "notify-failure", "cleanup-stage",
   ]);
   assert.equal(state.serving, "previous");
@@ -465,7 +471,112 @@ test("dry-run reads every decision surface and invokes no mutation", async () =>
   assert.equal(result.quiet, true);
   assert.deepEqual(new Set(calls), new Set(["revisions", "runs", "repository", "services", "authority", "backup"]));
   assert.ok(result.lines.includes("DRY-RUN backup=ready mode=container"));
-  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 11);
+  assert.equal(result.lines.filter((line) => line.includes("mutation=skipped")).length, 10);
+});
+
+const buildCacheFixture = (root, revision, buildKey) => {
+  const tree = join(root, "builds", buildKey, "tree");
+  for (const output of RELEASE_SNAPSHOT_OUTPUTS) {
+    mkdirSync(join(tree, output), { recursive: true });
+    writeFileSync(join(tree, output, "artifact.txt"), output);
+  }
+  writeFileSync(join(root, "builds", buildKey, "READY"), `${buildKey}\n`);
+  writeFileSync(join(tree, "packages/api/dist/build-info.json"), JSON.stringify({
+    packageName: "@agentos/api", commit: revision, dirty: false,
+  }));
+  writeFileSync(join(tree, "packages/runner/dist/build-info.json"), JSON.stringify({
+    packageName: "@agentos/runner", commit: revision, dirty: false,
+  }));
+};
+
+test("an exact merge-gate snapshot materializes every deploy output without a source build", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-release-snapshot-"));
+  const cacheRoot = join(root, "cache");
+  const stageRoot = join(root, "stage");
+  const revision = "c".repeat(40);
+  const buildKey = "d".repeat(64);
+  mkdirSync(stageRoot);
+  buildCacheFixture(cacheRoot, revision, buildKey);
+  assert.deepEqual(publishReleaseSnapshot({ revision, buildKey, cacheRoot }), { published: true, buildKey });
+  assert.deepEqual(materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }), { hit: true, buildKey });
+  for (const output of RELEASE_SNAPSHOT_OUTPUTS) {
+    assert.equal(readFileSync(join(stageRoot, output, "artifact.txt"), "utf8"), output);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a missing or evicted release snapshot explicitly falls back to a source build", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-release-miss-"));
+  const cacheRoot = join(root, "cache");
+  const stageRoot = join(root, "stage");
+  const revision = "e".repeat(40);
+  const buildKey = "f".repeat(64);
+  mkdirSync(stageRoot);
+  assert.deepEqual(materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }), { hit: false, reason: "missing" });
+  buildCacheFixture(cacheRoot, revision, buildKey);
+  publishReleaseSnapshot({ revision, buildKey, cacheRoot });
+  rmSync(join(cacheRoot, "builds", buildKey), { recursive: true });
+  assert.deepEqual(materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }), { hit: false, reason: "evicted" });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a present but corrupted or symlinked release snapshot fails loudly", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-release-invalid-"));
+  const cacheRoot = join(root, "cache");
+  const stageRoot = join(root, "stage");
+  const revision = "1".repeat(40);
+  const buildKey = "2".repeat(64);
+  mkdirSync(stageRoot);
+  buildCacheFixture(cacheRoot, revision, buildKey);
+  publishReleaseSnapshot({ revision, buildKey, cacheRoot });
+  rmSync(join(cacheRoot, "builds", buildKey, "tree", "apps/web/dist/artifact.txt"));
+  assert.throws(
+    () => materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }),
+    (error) => error instanceof DeployFailure && error.reason === "release-snapshot-invalid",
+  );
+  writeFileSync(join(cacheRoot, "builds", buildKey, "tree", "apps/web/dist/artifact.txt"), "apps/web/dist");
+  symlinkSync("/tmp", join(cacheRoot, "builds", buildKey, "tree", "apps/web/dist/unsafe"));
+  assert.throws(
+    () => materializeReleaseSnapshot({ revision, stageRoot, cacheRoot }),
+    (error) => error instanceof DeployFailure && error.reason === "release-snapshot-invalid",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("Git network commands retry twice with bounded delays before succeeding or surfacing failure", async () => {
+  const waits = [];
+  let attempts = 0;
+  const recovered = await runCommandWithRetry(async () => ({
+    code: ++attempts === 3 ? 0 : 128, stdout: "", stderr: "transient",
+  }), { wait: async (milliseconds) => { waits.push(milliseconds); } });
+  assert.equal(recovered.code, 0);
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [2_000, 5_000]);
+
+  attempts = 0;
+  const failed = await runCommandWithRetry(async () => {
+    attempts += 1;
+    return { code: 128, stdout: "", stderr: "still unavailable" };
+  }, { wait: async () => undefined });
+  assert.equal(failed.code, 128);
+  assert.equal(attempts, 3);
+});
+
+test("the merge gate publishes deploy acceleration only after its final drift proof", () => {
+  const repositoryRoot = realpathSync(new URL("../../", import.meta.url));
+  const source = readFileSync(join(repositoryRoot, "scripts/merge-gate.sh"), "utf8");
+  const drift = source.lastIndexOf('step "verify the gated commit did not drift"');
+  const buildPublication = source.lastIndexOf("publish_deferred_build_snapshot");
+  const releasePublication = source.lastIndexOf("publish_release_snapshot");
+  assert.ok(drift >= 0 && drift < buildPublication && buildPublication < releasePublication);
+});
+
+test("deployment relies on npm ci postinstall once and verifies the generated Prisma client", () => {
+  const repositoryRoot = realpathSync(new URL("../../", import.meta.url));
+  const source = readFileSync(join(repositoryRoot, "scripts/deploy/quiet-window-deploy.mjs"), "utf8");
+  assert.doesNotMatch(source, /\[loadBinaries\(\)\.npm, "run", "db:generate"\]/u);
+  assert.match(source, /npm-ci-did-not-produce-generated-prisma-client/u);
+  assert.match(source, /node_modules\/\.prisma\/client\/schema\.prisma/u);
 });
 
 test("dry-run reports a refused container backup contract as a named decision", async () => {

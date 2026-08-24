@@ -902,10 +902,37 @@ export const startCliAvailabilityMonitor = (
   options: AvailabilityHeartbeatOptions = {},
 ): { stop: () => void } => {
   let busy = false;
-  const timer = setInterval(() => {
+  let interval: ReturnType<typeof setInterval> | null = null;
+  const tick = (): void => {
     if (busy) return;
     busy = true;
     void reportCliAvailabilityHeartbeat(config, options).finally(() => { busy = false; });
-  }, config.heartbeatIntervalMs);
-  return { stop: () => clearInterval(timer) };
+  };
+  const schedule = cliAvailabilityHeartbeatSchedule(config.runnerId);
+  const initial = setTimeout(() => {
+    tick();
+    interval = setInterval(tick, schedule.intervalMs);
+  }, schedule.initialDelayMs);
+  return { stop: () => {
+    clearTimeout(initial);
+    if (interval !== null) clearInterval(interval);
+  } };
+};
+
+const CLI_AVAILABILITY_INTERVAL_MS = 60_000;
+const CLI_AVAILABILITY_JITTER_MS = 15_000;
+
+export const cliAvailabilityHeartbeatSchedule = (runnerId: string): {
+  initialDelayMs: number;
+  intervalMs: number;
+} => {
+  let hash = 2_166_136_261;
+  for (const character of runnerId) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16_777_619) >>> 0;
+  }
+  return {
+    initialDelayMs: CLI_AVAILABILITY_INTERVAL_MS + (hash % CLI_AVAILABILITY_JITTER_MS),
+    intervalMs: CLI_AVAILABILITY_INTERVAL_MS,
+  };
 };
