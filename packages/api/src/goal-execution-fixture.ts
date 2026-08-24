@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,7 +50,14 @@ export const stageAtPreviousMigration = (label: string): PreKernelDatabase => {
   execute(`DROP SCHEMA IF EXISTS ${quoted} CASCADE; CREATE SCHEMA ${quoted};`);
   const staging = mkdtempSync(join(tmpdir(), "goal5a0-fixture."));
   cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
-  rmSync(join(staging, "prisma", "migrations", kernelMigration), { recursive: true, force: true });
+  // This fixture is staged *before* the kernel. Remove the kernel and every
+  // later migration, not just the named kernel directory: later migrations may
+  // depend on constraints the pre-kernel schema intentionally does not have.
+  for (const entry of readdirSync(join(staging, "prisma", "migrations"), { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name >= kernelMigration) {
+      rmSync(join(staging, "prisma", "migrations", entry.name), { recursive: true, force: true });
+    }
+  }
 
   const deploy = (): void => {
     execFileSync("npx", ["prisma", "migrate", "deploy", "--schema", join(staging, "prisma", "schema.prisma")], {
