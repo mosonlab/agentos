@@ -94,6 +94,11 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
       runner: RunnerPreference.CLAUDE,
     });
   }
+  assert.deepEqual(canonical.get("review-adjudicator-opus"), {
+    name: "review-adjudicator-opus",
+    model: "claude-opus-5:medium",
+    runner: RunnerPreference.CLAUDE,
+  });
   for (const name of ["review-coordinator", "review-coordinator-sol"] as const) {
     assert.deepEqual(canonical.get(name), {
       name,
@@ -113,11 +118,12 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
 });
 
-test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
-  const [planReview, firstReview, finalReview, regressionVerification] = await Promise.all([
+test("the split review prompts enforce persisted-range, blindness, adjudication, and regression contracts", async () => {
+  const [planReview, firstReview, blindReview, adjudicatorReview, regressionVerification] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
     roleSource("review-coordinator-opus"),
+    roleSource("review-adjudicator-opus"),
     roleSource("regression-verifier"),
   ]);
 
@@ -135,22 +141,33 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(firstReview, /only then start a separate Spec pass/u);
   assert.match(firstReview, /merge both passes into one persisted report/u);
   assert.doesNotMatch(firstReview, /codex exec review/u);
+  assert.doesNotMatch(firstReview, /service[-_ ]tier/iu);
   assert.match(firstReview, /post-fix regression verification/u);
   assert.match(firstReview, /entire fix diff as one unit/u);
   assert.match(firstReview, /exact fixed head/u);
 
-  const blindWrite = finalReview.indexOf("intermediate AgentOS task output");
-  const firstReportRead = finalReview.indexOf("predecessor step outputs", blindWrite);
-  assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
-  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/slices\/` where the chain carries one/u);
-  assert.match(finalReview, /reachable in the tree at `head`/u);
-  assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
-  assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
-  assert.match(finalReview, /Use Inbox only when the contradiction can change\s+a P0\/P1 must-fix decision/u);
-  assert.match(finalReview, /P2-only contradiction[\s\S]*continue without interrupting the human/u);
-  assert.match(finalReview, /entire fix diff as one\s+unit/u);
-  assert.match(finalReview, /exact fixed head/u);
-  assert.match(finalReview, /provider id in the platform output/u);
+  assert.match(blindReview, /independent blind Opus review coordinator/u);
+  assert.match(blindReview, /immutable `blind-findings` task output/u);
+  assert.match(blindReview, /Do not read predecessor task outputs, sibling\s+task outputs/u);
+  assert.match(blindReview, /entire task and provider\s+session, both before and after/u);
+  assert.match(blindReview, /implementationBaseSha|implementation base and head/u);
+  assert.doesNotMatch(blindReview, /adjudicat/u);
+  assert.doesNotMatch(blindReview, /merge matrix/u);
+  assert.doesNotMatch(blindReview, /service[-_ ]tier/iu);
+  assert.doesNotMatch(blindReview, /codex exec review/u);
+
+  assert.match(adjudicatorReview, /fresh provider Session/u);
+  assert.match(adjudicatorReview, /Never resume or\s+continue the blind review conversation/u);
+  assert.match(adjudicatorReview, /provider conversation id\s+or continuation proof/u);
+  assert.match(adjudicatorReview, /immutable `implementationBaseSha` and `implementationHeadSha`\s+values/u);
+  assert.match(adjudicatorReview, /one `sol-findings` report and one `blind-findings`/u);
+  assert.match(adjudicatorReview, /canonical merge matrix/u);
+  assert.match(adjudicatorReview, /every finding id from either report/u);
+  assert.match(adjudicatorReview, /ADOPTED.*REJECTED.*MERGED/u);
+  assert.match(adjudicatorReview, /one final immutable `must-fix` task output/u);
+  assert.doesNotMatch(adjudicatorReview, /codex exec review/u);
+  assert.equal(frontmatterValue(adjudicatorReview, "model"), "claude-opus-5:medium");
+  assert.equal(frontmatterValue(adjudicatorReview, "runner"), "claude");
 
   assert.equal(frontmatterValue(regressionVerification, "model"), "openai-codex/gpt-5.6-sol:medium");
   assert.equal(frontmatterValue(regressionVerification, "runner"), "pi");
