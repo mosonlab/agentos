@@ -10,16 +10,18 @@ files_hint:
   - packages/api/src/templates.test.ts
   - packages/api/src/tasks.dbtest.ts
   - packages/api/src/board.test.ts
-risk: false
+risk: true
 ---
 
 # Slice 06: API layer surface
 
 ## Delivers
 
-The HTTP and instantiation surface (spec 6.2 server side). Independent of
-slice 04: it assigns and reports layer data; activation semantics live in the
-scheduler slice. Coordination note: slice 04 also edits
+The HTTP and instantiation surface (spec 6.2 server side). Risk true: it
+changes persisted TaskTemplateStep and Task creation and instantiation
+writes. Independent of slice 04: it assigns and reports layer data;
+activation semantics live in the scheduler slice. Coordination note: slice
+04 also edits
 `packages/api/src/chain.ts` decision logic; this slice keeps to input
 assignment, instantiation, and wire shape, and only adds the derived
 `currentLayer`/`layerCount` fields where chain progress is computed.
@@ -51,10 +53,14 @@ shape, instantiation still links followUpTaskId.
    public route and assert `layer = stepIndex`; assert both routes reject any
    layer or dependency input field. Verification:
    `npm run test:db -w @agentos/api`.
-2. Template tests instantiate the new Direct and Full Assurance templates and
-   assert 8 nodes with layers `1,2,2,3,4,5,6,7` and 13 nodes with layers
-   `1,2,3,4,5,6,6,7,8,9,10,11,12`, with no `followUpTaskId` writes
-   (spec 8.2). Verification: `npm run test:db -w @agentos/api`.
+2. Template tests instantiate hand-built persisted template fixtures — one
+   linear and one with a two-node layer plus the exact Direct-shaped layer
+   vector `1,2,2,3,4,5,6,7` — and assert `TaskTemplateStep.layer` is copied
+   into `Task.chainLayer` node for node, with no `followUpTaskId` writes.
+   Exact canonical 8/13 instantiation from the synced templates is proven by
+   slices 05 and 10, whose dependency closures actually contain the new
+   sources (review finding PLAN-006); this slice needs only schema slice 01.
+   Verification: `npm run test:db -w @agentos/api`.
 3. Chain-read tests assert each node carries `layer` and nothing else new;
    board tests assert `currentLayer`/`layerCount` for a chain with a
    two-node layer and for a sparse-layer legacy chain (spec 8.8 API half).

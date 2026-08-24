@@ -34,6 +34,11 @@ The web half of spec 6.2. Consumes only the `layer` field and derived
   the existing node counts.
 - Wire types in `apps/web/src/lib/types.ts` add `layer` to chain steps and
   the derived progress fields to board tasks.
+- Web-side `followUpTaskId` retirement (review finding PLAN-009): the
+  remaining references in `apps/web/src/lib/types.ts` and
+  `apps/web/src/lib/board.ts` (types, comments, and any derived logic) are
+  removed or replaced with layer-derived equivalents, together with their
+  web tests, so the slice 09 census can reach zero hits.
 
 ## Acceptance
 

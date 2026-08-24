@@ -6,18 +6,32 @@ blocked_by:
 files_hint:
   - packages/db/src/workflow.ts
   - packages/api/src/chain.ts
+  - packages/api/src/app.ts
+  - packages/api/src/scheduler.ts
   - packages/api/src/workflow.test.ts
   - packages/api/src/chain.dbtest.ts
   - packages/api/src/claim-activation-isolation.dbtest.ts
-risk: false
+risk: true
 ---
 
 # Slice 04: Layer scheduler and join
 
 ## Delivers
 
-The runtime core (spec 4.1, 4.2, 4.3, 7). Runtime code stops reading or
-writing `followUpTaskId` here; the column itself is dropped by slice 09.
+The runtime core (spec 4.1, 4.2, 4.3, 7). Risk true: this slice rewrites the
+transactions that lock and mutate persisted Task and Run state and owns
+exactly-once Run enqueueing. Runtime code stops reading or writing
+`followUpTaskId` here; the column itself is dropped by slice 09.
+
+Scheduler-side `followUpTaskId` semantics beyond workflow.ts are owned here
+(review finding PLAN-009): the activation predicates and auxiliary
+merge-tail follow-up activation in `packages/api/src/app.ts`, and the
+standalone-creation path in `packages/api/src/scheduler.ts`, are migrated to
+layer semantics or deleted with their behavior reassigned to the layer
+scheduler — not left for the slice 09 census to discover. Coordination note:
+slices 06 and 07 touch other regions of app.ts (input/read routes and
+claim/session-scope routes respectively); this slice keeps to activation and
+merge-tail follow-up regions.
 
 - One lock protocol in `packages/db/src/workflow.ts`: Run first when the
   mutation belongs to a Run, then every Task row of `(projectId, chainId)` in
@@ -68,7 +82,9 @@ layer semantics exist.
    of the replacement output activates the next layer once (spec 8.7).
 5. A legacy-shape dbtest instantiates a backfilled linear chain and proves
    sequential activation is unchanged with no `followUpTaskId` reads
-   (spec 8.7 first sentence).
+   (spec 8.7 first sentence). A dbtest covers the migrated app.ts auxiliary
+   merge-tail follow-up activation and the scheduler.ts standalone path
+   under layer semantics.
 6. Unit tests in `packages/api/src/workflow.test.ts` and `chain.test.ts`
    cover the pure layer-eligibility decisions. Verification:
    `npm test -w @agentos/api`.

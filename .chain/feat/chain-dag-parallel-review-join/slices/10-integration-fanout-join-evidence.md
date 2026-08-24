@@ -6,6 +6,9 @@ blocked_by:
   - 05-canonical-sync-replacement
   - 06-api-layer-surface
   - 07-review-authority-guards
+  - 08-chain-ui-layers
+  - 09-schema-contract-drop-followup
+  - 11-runtime-graph-identity
 files_hint:
   - packages/api/src/parallel-review.dbtest.ts
   - packages/api/src/template-base-pinning.dbtest.ts
@@ -20,9 +23,14 @@ risk: false
 
 The cross-slice acceptance evidence (spec 8.2 claim path, 8.3, 8.4, 8.5,
 8.10) in a new `packages/api/src/parallel-review.dbtest.ts` suite against a
-scratch database/API environment. Slices 04 through 07 each carry their own
+scratch database/API environment. Each implementation slice carries its own
 unit and dbtest proof; this slice proves the composed path through the real
-HTTP claim route with real synced templates.
+HTTP claim route with real synced templates. It is the terminal join: it
+blocks on every other slice, including 08 and 09, so the exact head it
+verifies is the final candidate head containing the UI and the schema
+contract (review finding PLAN-004). This turns the previous three-way
+terminal frontier into 08/09 followed by this join and lengthens the
+critical path by one layer; exact-head acceptance outweighs that loss.
 
 - Full-path test: sync canonical prompts, instantiate the new Direct
   template, complete implementation, and prove both review Runs become

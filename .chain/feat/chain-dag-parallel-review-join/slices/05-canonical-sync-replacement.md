@@ -5,6 +5,7 @@ blocked_by:
   - 01-schema-expand-chain-layer
   - 02-template-sources-layer-split
   - 03-review-role-prompts
+  - 11-runtime-graph-identity
 files_hint:
   - packages/db/prisma/sync-canonical-prompts.ts
   - packages/db/src/canonical-prompt-sync.dbtest.ts
@@ -35,6 +36,14 @@ rows and creates a live Agent on existing installations.
 - Template-step rows referenced by instantiated tasks are never mutated; the
   live Event ingestion NUL safety and heartbeat isolation chain is byte
   unchanged.
+- Existing-chain preservation is proven behaviorally, not just structurally
+  (review finding PLAN-008): the sync fixtures snapshot legacy Task
+  descriptions, assignees, statuses, Runs, Sessions, and step references
+  before sync and compare byte-for-byte after, and representative old 7/12
+  chains renamed to `-legacy-v1` are executed through their old combined
+  review output, merge readiness, and integrator identities using the
+  `-legacy-v1` runtime compatibility delivered by slice 11 (hence the new
+  dependency on 11-runtime-graph-identity).
 
 ## Acceptance
 
@@ -42,16 +51,22 @@ All red at frozen base 5f5aad1: sync knows nothing of layers, renames, or the
 adjudicator agent.
 
 1. `canonical-prompt-sync.dbtest.ts` seeds the old 7/12-step templates with
-   an instantiated task pointing at a step row, runs sync, and asserts the
-   legacy `-legacy-v1` renames, preserved step rows and task references, and
+   instantiated tasks (descriptions, assignees, statuses, Runs, Sessions,
+   step references), runs sync, and asserts the legacy `-legacy-v1`
+   renames, a byte-identical before/after snapshot of every instantiated
+   Task and its Runs/Sessions, preserved step rows and task references, and
    new canonical templates with the exact layer vectors `1,2,2,3,4,5,6,7`
    and `1,2,3,4,5,6,6,7,8,9,10,11,12`. Verification:
    `npm run test:db -w @agentos/db`.
-2. A dbtest seeds a drifted persisted shape (for example 8 steps under the
+2. A dbtest drives a renamed `-legacy-v1` chain through its old combined
+   review output, readiness, and integrator step identities and asserts
+   canonical output acceptance and merge-tail recognition still hold
+   (spec acceptance 7, behavioral half; runtime predicates from slice 11).
+3. A dbtest seeds a drifted persisted shape (for example 8 steps under the
    canonical name) and asserts sync refuses with a named error and changes
    nothing.
-3. A dbtest proves the one-time agent creation copies environment, grants,
+4. A dbtest proves the one-time agent creation copies environment, grants,
    and disabled tools from `review-coordinator-opus`, and that a missing or
    archived source or archived target refuses by name.
-4. Running sync twice yields identical database state (idempotency assert in
+5. Running sync twice yields identical database state (idempotency assert in
    the same suite).

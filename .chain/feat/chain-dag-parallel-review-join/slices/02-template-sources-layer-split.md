@@ -7,6 +7,7 @@ files_hint:
   - agents/templates/compound-engineer-workflow/
   - packages/db/src/template-sources.ts
   - packages/db/src/template-sources.test.ts
+  - agents/README.md
 risk: false
 ---
 
@@ -38,6 +39,10 @@ database or scheduler code; independently mergeable against the frozen base.
   multi-node layer; every node of a multi-node layer has the same non-null
   `baseFromStepIndex` and `opensPullRequest: false`. Violations refuse
   loading by name; nothing is linearized silently.
+- `agents/README.md` step-count documentation (currently exactly 12/7 files
+  at README.md:37-47) updated to the 13/8 layered graphs so the repository
+  workflow documentation matches the shipped sources (review finding
+  PLAN-010; the role-flow half of that finding lands in slice 03).
 
 ## Acceptance
 
