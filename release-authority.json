@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "2086f1dc0d23eeb823b1abd4dabc8913e37870b3",
-  "tree": "b22130c380b5192e1fd6c99d340ddb5c9a424c8d",
+  "commit": "d460a6430e5f20d0c02ec69edef6c807d31dc630",
+  "tree": "2585e3f43317267b5a372362f16e63cfede91fdb",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -137,6 +137,11 @@
       "blob": "f32655e398eccf9ce5b5cbd363b446499686df91"
     },
     {
+      "path": "packages/db/prisma/migrations/20260823100000_agent_runtime_overrides/migration.sql",
+      "sha256": "84ab4a7501bf7bcced5a0abbd545af8ae30b1555a312dd96b404825326baa3b6",
+      "blob": "d335afb524337f9cb479de1ce0eb3d836b3c9362"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -153,8 +158,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "435287657eee2cdc02253276e272c6c6a7e414edd0d418631c5980f289487b1f",
-      "blob": "74b670f8073df01277db0ce4b638e8cbd335e6c6"
+      "sha256": "ab7bd21af23cd88da6ea6268e833b3220d632688cf0953cebabc2bfacc8b81ef",
+      "blob": "c1e60a8cb3bd7401c65764e99220c69d9efa6857"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -163,8 +168,8 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "29250a4852898d7e0c007e9eaeb4befe890a8aec79a3de0dffe335ba92def9ac",
-      "blob": "ce1619bc069435158fa2e27ae0363283f76441ec"
+      "sha256": "0a2997731c8ceb3866b198e8dccf214a39da4fcfb2b7120f7cf17183a0f828c5",
+      "blob": "667a7c712f013789d027dcf53bd357531c3b8cb6"
     },
     {
       "path": "packages/db/src/schema-census.ts",
@@ -178,13 +183,13 @@
     }
   ],
   "migrations": {
-    "count": 25,
-    "terminal": "20260823070000_active_run_cancellation",
-    "sha256": "81114c3938c8d7a5e0dc839bdbdb141a7ff2586201a37e00bad5e8a2d08e97b9"
+    "count": 26,
+    "terminal": "20260823100000_agent_runtime_overrides",
+    "sha256": "3bf7a3a0e8a702e860de5f24f47ce010b774aa71597b63342176601a53bd1373"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "OIaE6q03jw+DA5KFIi9tPaotXtlBQKsRHsSF7EIAcSz5x10Jlq2H1joxYxkkUayrOp7q467vuhtWhuf+nQ6LBA=="
+    "value": "gLKNDDIhkieUoozLUJkPW7q06omGM34W9sOVdrpRkhkHXOsOiYrUG1P8OVt/9YBSRWBgNnfTiI9cC3EkLV7oBg=="
   }
 }
