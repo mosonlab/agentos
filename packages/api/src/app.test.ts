@@ -287,7 +287,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
       repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
-    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, followUpTaskId: null, assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
     const tx = {
       // The status write takes the Task-row mutex before advancing the chain.
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
@@ -332,7 +332,7 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
     let closedWhere: unknown;
     const before = {
       id: "task-1", projectId: "project-1", name: "Human final", status: "REVIEW", templateId: "template-1",
-      approvalGate: false, chainId: "chain-1", chainIndex: 2, followUpTaskId: null,
+      approvalGate: false, chainId: "chain-1", chainIndex: 2,
       assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
     };
     const tx = {
@@ -426,7 +426,7 @@ test("AT create waits for the scheduler and merged-view patch cannot remove its 
   await withTokens(async () => {
     let runs = 0;
     const runAt = new Date(Date.now() - 60_000);
-    const before = { id: "task-1", projectId: "project-1", status: "TODO", templateId: null, approvalGate: false, chainId: null, followUpTaskId: null, scheduleKind: "AT", runAt, cron: null, timezone: null, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1" };
+    const before = { id: "task-1", projectId: "project-1", status: "TODO", templateId: null, approvalGate: false, chainId: null, scheduleKind: "AT", runAt, cron: null, timezone: null, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1" };
     const database = {
       agent: { findFirst: async () => ({ id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
       repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },

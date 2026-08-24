@@ -476,7 +476,7 @@ test("duplicate OPEN gate cards allow reject then approve to have exactly one wi
 
 test("completion status CAS preserves a concurrent operator DONE decision", async () => {
   const { project, agent, repo, predecessor } = await seedExecutableChain();
-  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING", chainId: null, chainIndex: null } });
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING", chainId: null, chainIndex: null, chainLayer: null } });
   const { run, runnerId, fencingToken } = await seedRunningRun(predecessor.id, project.id, agent.id, repo.id);
   let readObserved!: () => void;
   let resumeCompletion!: () => void;
@@ -863,6 +863,7 @@ const seedTemplateChain = async (label: string, stepCount = 3) => {
     projectId: project.id, name: `${label}-template`, description: "t", variables: [],
     steps: { create: Array.from({ length: stepCount }, (_, index) => ({
       stepIndex: index + 1,
+      layer: index + 1,
       name: `Step ${index + 1}`,
       // The last step mirrors the seeded nine-step template: a HUMAN approval gate.
       assigneeType: index + 1 === stepCount ? "HUMAN" as const : "AGENT" as const,
@@ -970,24 +971,16 @@ test("GET /tasks/:id/chain is 404 for a task that does not exist", async () => {
   assert.equal(status, 404);
 });
 
-test("E1: a chainId with a null chainIndex is its own 1/1 chain and never joins another", async () => {
+test("E1: a partial chain identity is rejected before chain reads", async () => {
   const { project, chain } = await seedTemplateChain("e1", 3);
-  const orphan = await db.task.create({ data: {
-    projectId: project.id, name: "Broken row", description: "d", chainId: chain.chainId, chainIndex: null, status: "DONE",
-  } });
-
-  const alone = await operatorGet(`/tasks/${orphan.id}/chain`);
-  assert.equal(alone.status, 200);
-  assert.equal(alone.body.total, 1);
-  assert.equal(alone.body.done, 1);
-  assert.equal(alone.body.steps.length, 1);
-  assert.equal(alone.body.steps[0].position, 1);
-  assert.equal(alone.body.steps[0].taskId, orphan.id);
-
-  // …and the sibling rows never see it, so nobody's position shifts.
+  await assert.rejects(
+    () => db.task.create({
+      data: { projectId: project.id, name: "Broken row", description: "d", chainId: chain.chainId, chainIndex: null, status: "DONE" },
+    }),
+    /Task_chain_identity_all_or_none_check/u,
+  );
   const sibling = await operatorGet(`/tasks/${chain.tasks[0]!.id}/chain`);
   assert.equal(sibling.body.total, 3);
-  assert.equal(sibling.body.steps.some((step: any) => step.taskId === orphan.id), false);
 });
 
 test("E2: two projects sharing one chainId stay separate in both chain reads", async () => {

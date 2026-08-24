@@ -97,17 +97,18 @@ export const seedIntegratorChain = async (
   } });
   const gateStep = await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id, stepIndex: realReadinessTail ? integratorIndex - 2 : integratorIndex - 1,
+    layer: realReadinessTail ? integratorIndex - 2 : integratorIndex - 1,
     name: realReadinessTail ? "Regression" : "Approval",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "deliver", approvalGate: !realReadinessTail,
     outputKind: realReadinessTail ? "regression-verification" : "delivery", opensPullRequest: !direct,
   } });
   const readinessStep = realReadinessTail ? await db.taskTemplateStep.create({ data: {
-    taskTemplateId: template.id, stepIndex: integratorIndex - 1, name: "Merge readiness",
+    taskTemplateId: template.id, stepIndex: integratorIndex - 1, layer: integratorIndex - 1, name: "Merge readiness",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, prompt: "server-owned", approvalGate: false,
     outputKind: "merge-authorization", opensPullRequest: false,
   } }) : null;
   const integratorStep = options.withIntegrator === false ? null : await db.taskTemplateStep.create({ data: {
-    taskTemplateId: template.id, stepIndex: integratorIndex, name: "Merge",
+    taskTemplateId: template.id, stepIndex: integratorIndex, layer: integratorIndex, name: "Merge",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: integratorAgent.id, prompt: "merge", approvalGate: false,
     outputKind: INTEGRATOR_OUTPUT_KIND, opensPullRequest: false,
   } });
@@ -116,29 +117,21 @@ export const seedIntegratorChain = async (
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: gateStep.id,
     name: realReadinessTail ? "Regression" : "Approval", description: "approve",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id,
-    approvalGate: !realReadinessTail, chainId, chainIndex: gateStep.stepIndex,
+    approvalGate: !realReadinessTail, chainId, chainIndex: gateStep.stepIndex, chainLayer: gateStep.layer,
     status: realReadinessTail ? TaskStatus.DONE : TaskStatus.DOING, targetBranch: "master",
   } });
   const readinessTask = readinessStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: readinessStep.id,
     name: "Merge readiness", description: "server-owned", assigneeType: AssigneeType.AGENT,
     assigneeAgentId: agent.id, approvalGate: false, opensPullRequest: false,
-    chainId, chainIndex: readinessStep.stepIndex, status: TaskStatus.DONE, targetBranch: "master",
+    chainId, chainIndex: readinessStep.stepIndex, chainLayer: readinessStep.layer, status: TaskStatus.DONE, targetBranch: "master",
   } }) : null;
   const integratorTask = integratorStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: integratorStep.id,
     name: "Merge", description: "merge", assigneeType: AssigneeType.AGENT, assigneeAgentId: integratorAgent.id,
-    approvalGate: false, opensPullRequest: false, chainId, chainIndex: integratorStep.stepIndex,
+    approvalGate: false, opensPullRequest: false, chainId, chainIndex: integratorStep.stepIndex, chainLayer: integratorStep.layer,
     status: TaskStatus.TODO, targetBranch: "master",
   } }) : null;
-  if (integratorTask) {
-    if (readinessTask) {
-      await db.task.update({ where: { id: gateTask.id }, data: { followUpTaskId: readinessTask.id } });
-      await db.task.update({ where: { id: readinessTask.id }, data: { followUpTaskId: integratorTask.id } });
-    } else {
-      await db.task.update({ where: { id: gateTask.id }, data: { followUpTaskId: integratorTask.id } });
-    }
-  }
   const delivered = await seedDeliveredRun(db, {
     project: project.id, task: gateTask.id, agent: agent.id, repo: repo.id,
     prNumbers: options.prNumbers ?? [123],

@@ -70,7 +70,7 @@ const seedTrigger = async (label: string, overrides: {
   } });
   for (let index = 0; index < (overrides.steps ?? 1); index += 1) {
     await db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, assigneeAgentId: agent.id, stepIndex: index,
+      taskTemplateId: template.id, assigneeAgentId: agent.id, stepIndex: index, layer: index,
       name: `Step ${index + 1}`, assigneeType: "AGENT", prompt: "Handle {{ticket}}",
     } });
   }
@@ -329,7 +329,7 @@ test("a colliding chainId in another project never supplies this trigger's fire 
   // sort the foreign rows first and pick one as `firstTask`.
   const foreign = await db.task.create({ data: {
     projectId: theirs.project.id, name: "FOREIGN PROJECT TASK", description: "d",
-    chainId, chainIndex: -5, status: "DONE",
+    chainId, chainIndex: -5, chainLayer: -5, status: "DONE",
   } });
 
   const { status, body } = await call("GET", `/triggers/${mine.template.id}/fires?take=20`);

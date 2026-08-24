@@ -75,6 +75,7 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
     steps: { create: [
       {
         stepIndex: 0,
+        layer: 0,
         name: "Implementation",
         assigneeType: "AGENT",
         assigneeAgentId: agent.id,
@@ -82,6 +83,7 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
       },
       {
         stepIndex: 1,
+        layer: 1,
         name: "Review",
         assigneeType: "AGENT",
         assigneeAgentId: agent.id,
@@ -99,6 +101,7 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
     templateStepId: template.steps[0]!.id,
     chainId,
     chainIndex: 0,
+    chainLayer: 0,
     name: "Source implementation",
     description: "source",
   } });
@@ -123,6 +126,7 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
     templateStepId: template.steps[1]!.id,
     chainId,
     chainIndex: 1,
+    chainLayer: 1,
     name: "Poisoned pinned review",
     description: "poison",
   } });

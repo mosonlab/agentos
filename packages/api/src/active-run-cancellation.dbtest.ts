@@ -56,7 +56,6 @@ const seed = async (status: RunStatus, leaseExpiresAt = new Date(Date.now() + 60
   const task = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, name: "Active", description: "cancel me",
     assigneeAgentId: agent.id, status: status === RunStatus.QUEUED ? TaskStatus.TODO : TaskStatus.DOING,
-    followUpTaskId: successor.id,
   } });
   const owned = status === RunStatus.QUEUED ? {} : {
     runnerId: RUNNER_ID,
@@ -159,6 +158,7 @@ test("mechanical merge Runs refuse cancellation before recording an intent", asy
   const step = await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id,
     stepIndex: 7,
+    layer: 7,
     name: "Merge execution",
     prompt: "merge",
     outputKind: "merge-result",
