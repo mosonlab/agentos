@@ -63,21 +63,25 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   assert.equal(roles.length, CANONICAL_AGENT_DEFAULTS.length);
 });
 
-test("canonical profiles start at Default and the published migration is repaired only forward", async () => {
-  const [seed, publishedMigration, forwardMigration] = await Promise.all([
+test("canonical profiles start at Default and native child capability replaces Agent subprocess profiles", async () => {
+  const [seed, publishedMigration, historicalRepair, nativeMigration] = await Promise.all([
     readFile(`${prismaRoot}seed.ts`, "utf8"),
     readFile(`${prismaRoot}migrations/20260823010000_codex_service_tier/migration.sql`, "utf8"),
     readFile(`${prismaRoot}migrations/20260823033000_executioner_subprocess_profiles/migration.sql`, "utf8"),
+    readFile(`${prismaRoot}migrations/20260824010000_native_implementation_subagents/migration.sql`, "utf8"),
   ]);
 
   assert.match(seed, /create:\s*\{[\s\S]*codexServiceTier: CodexServiceTier\.DEFAULT,/u);
   assert.doesNotMatch(seed, /CodexServiceTier\.FAST/u);
   assert.match(publishedMigration, /UPDATE\s+"Agent"[\s\S]*"codexServiceTier"\s*=\s*'fast'/u);
   assert.match(publishedMigration, /ADD COLUMN "codexServiceTier" "CodexServiceTier" NOT NULL DEFAULT 'default'/u);
-  assert.match(forwardMigration, /migration\."finished_at" IS NOT NULL/u);
-  assert.match(forwardMigration, /agent\."updatedAt" < migration\."finished_at"/u);
-  assert.match(forwardMigration, /"ordinarySubprocessModel" = 'gpt-5\.6-luna:max'/u);
-  assert.match(forwardMigration, /"elevatedSubprocessModel" = 'gpt-5\.6-sol:high'/u);
+  assert.match(historicalRepair, /migration\."finished_at" IS NOT NULL/u);
+  assert.match(historicalRepair, /agent\."updatedAt" < migration\."finished_at"/u);
+  assert.match(nativeMigration, /ADD COLUMN "subagentModel" TEXT/u);
+  assert.match(nativeMigration, /"subagentModel" = 'gpt-5\.6-luna:max'/u);
+  assert.match(nativeMigration, /"subagentMaxConcurrent" = 8/u);
+  assert.match(nativeMigration, /DROP COLUMN "ordinarySubprocessModel"/u);
+  assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
 test("signed AgentOS model routing stays pinned in the canonical contract", () => {
@@ -113,6 +117,11 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
   assert.deepEqual(canonical.get("senior-dev-high"), {
     name: "senior-dev-high",
+    model: "gpt-5.6-sol:high",
+    runner: RunnerPreference.CODEX,
+  });
+  assert.deepEqual(canonical.get("implementation-plan-executioner"), {
+    name: "implementation-plan-executioner",
     model: "gpt-5.6-sol:high",
     runner: RunnerPreference.CODEX,
   });
@@ -179,13 +188,15 @@ test("the split review prompts enforce persisted-range, blindness, adjudication,
   assert.doesNotMatch(regressionVerification, /blind reports mechanically/u);
 });
 
-test("the executioner launches ordinary and risk subprocesses with explicit service tiers", async () => {
+test("the executioner delegates only through platform-pinned native Luna children", async () => {
   const executioner = await roleSource("implementation-plan-executioner");
-  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL/u);
-  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT/u);
-  assert.match(executioner, /AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER/u);
-  assert.match(executioner, /AGENTOS_ELEVATED_CODEX_SUBPROCESS_\*/u);
-  assert.doesNotMatch(executioner, /gpt-5\.6-sol.*model_reasoning_effort=high/u);
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-5.6-sol:high");
+  assert.match(executioner, /pins every native child to Luna max/u);
+  assert.match(executioner, /eight concurrent child threads/u);
+  assert.match(executioner, /Delegation is not one slice per child/u);
+  assert.match(executioner, /one long-lived Luna max merger child/u);
+  assert.match(executioner, /Do not run a Merge Gate or repository-wide suite during Implementation/u);
+  assert.doesNotMatch(executioner, /codex exec/u);
 });
 
 test("the canonical thirteen-step layered template sources split review and preserve mechanical merge", async () => {
@@ -221,8 +232,10 @@ test("the canonical thirteen-step layered template sources split review and pres
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
   assert.match(templateSteps[1]!.prompt, /this run's id/u);
+  assert.match(templateSteps[1]!.prompt, /chain-level evidence, including the repository Merge Gate, remains outside the slice set/u);
   assert.match(templateSteps[2]!.prompt, /merge or split decisions priced against frontier width/u);
   assert.match(templateSteps[3]!.prompt, /run id labelled `plan_authoring`/u);
+  assert.match(templateSteps[4]!.prompt, /platform-pinned Implementation proof boundary/u);
 });
 
 test("only implementation opens a pull request, and the integrator is not a model row", async () => {
@@ -268,7 +281,12 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
-  assert.match(directTemplateSteps[0]!.prompt, /brief is the specification of record/u);
+  const directImplementation = directTemplateSteps[0]!.prompt;
+  assert.match(directImplementation, /brief is the specification of record/u);
+  assert.match(directImplementation, /at least two child-writer branches need integration/u);
+  assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
+  assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
+  assert.match(directImplementation, /platform-pinned Implementation proof boundary/u);
   assert.match(directTemplateSteps[6]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
   // mechanical executor, with no human approval gate on either.

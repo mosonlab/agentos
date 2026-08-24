@@ -11,6 +11,8 @@ file says so where it does.
 
 - The help-only repository command-line interface is retired; the next minor
   release will no longer build or ship an `agentos` binary.
+- Model and runner choices saved in the Agents page are now durable operator
+  overrides; canonical seed and prompt sync no longer replace them.
 
 ## v0.2.0 — Developer Preview 2
 

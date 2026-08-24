@@ -85,10 +85,8 @@ export type ClaimedTask = {
     maxRunsPerTask: number;
     model: string;
     codexServiceTier: CodexServiceTier;
-    subprocessModel: string | null;
-    subprocessCodexServiceTier: CodexServiceTier | null;
-    elevatedSubprocessModel: string | null;
-    elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
+    subagentModel: string | null;
+    subagentMaxConcurrent: number | null;
     targetBranch: string | null;
     /** Whether targetBranch was selected from durable Run.pushedBranch evidence.
      * When true, provisioning must not replace it with an older declared head. */
@@ -119,7 +117,7 @@ export type ClaimedTask = {
     status: string;
     failureReason: string | null;
     retryReason: "approval-rejected-without-feedback" | "automatic-retry" | "operator-retry" | "retry";
-    output: { kind: string; body: string; commitSha: string | null } | null;
+    output: { runId: string; kind: string; body: string; commitSha: string | null } | null;
   } | null;
   /** A control-plane selected, exact-head handoff for a fresh Regression Run.
    * It carries only durable verdict/repair evidence, never provider history. */

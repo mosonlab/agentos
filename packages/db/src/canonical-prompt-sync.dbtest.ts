@@ -221,7 +221,7 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
 
   const rejected = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(rejected.status, 0, rejected.output);
-  assert.match(rejected.output, /Agent review-coordinator .* differs from canonical Markdown structure: title, model, runnerPreference/u);
+  assert.match(rejected.output, /Agent review-coordinator .* differs from canonical Markdown structure: title/u);
   const rolledBack = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
     select: { model: true, runnerPreference: true },
@@ -245,6 +245,93 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   assert.equal(upgraded.length, 2);
   assert.ok(upgraded.every((agent) => agent.model === "openai-codex/gpt-5.6-sol:high"
     && agent.runnerPreference === RunnerPreference.PI));
+});
+
+test("sync adopts the exact model-only executioner transition", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  await prisma.agent.update({
+    where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
+    data: {
+      model: "gpt-5.6-sol:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      runtimeConfigCustomized: false,
+    },
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"adoptedAgentDefaults":1/u);
+
+  const executioner = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  });
+  assert.deepEqual(executioner, {
+    model: "gpt-5.6-sol:high",
+    runnerPreference: RunnerPreference.CODEX,
+    runtimeConfigCustomized: false,
+  });
+});
+
+test("sync preserves an operator-selected model and runner", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  await prisma.agent.update({
+    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    data: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE, runtimeConfigCustomized: true },
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"preservedAgentOverrides":0/u);
+
+  const spec = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+  });
+  assert.deepEqual(spec, {
+    model: "claude-opus-5:medium",
+    runnerPreference: RunnerPreference.CLAUDE,
+    runtimeConfigCustomized: true,
+  });
+});
+
+test("sync recreates a missing regression verifier and restores canonical bindings", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const source = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+  });
+  const existingVerifier = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+  });
+  const regressionSteps = await prisma.taskTemplateStep.findMany({
+    where: {
+      outputKind: "regression-verification",
+      taskTemplate: { projectId: project.id },
+    },
+    select: { id: true, taskTemplate: { select: { name: true } } },
+  });
+  await prisma.taskTemplateStep.updateMany({
+    where: { id: { in: regressionSteps.map(({ id }) => id) } },
+    data: { assigneeAgentId: source.id },
+  });
+  await prisma.agent.delete({ where: { id: existingVerifier.id } });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdAgents":1/u);
+  assert.match(synced.output, /"adoptedAssignees":2/u);
+
+  const verifier = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+  });
+  assert.equal(verifier.model, "openai-codex/gpt-5.6-sol:medium");
+  assert.equal(verifier.runnerPreference, RunnerPreference.PI);
+  assert.equal(verifier.inboxAccess, false);
+  const canonicalSteps = regressionSteps.filter(({ taskTemplate }) =>
+    taskTemplate.name === "compound-engineer-workflow" || taskTemplate.name === "direct-engineer-workflow");
+  assert.equal(await prisma.taskTemplateStep.count({
+    where: { id: { in: canonicalSteps.map(({ id }) => id) }, assigneeAgentId: verifier.id },
+  }), 2);
 });
 
 test("sync refuses canonical step drift when instantiated tasks would be mutated", async () => {

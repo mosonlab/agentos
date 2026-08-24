@@ -41,6 +41,7 @@ export type PreviousRunHandoff = {
   failureReason: string | null;
   retryReason: "approval-rejected-without-feedback" | "automatic-retry" | "operator-retry" | "retry";
   output: {
+    runId: string;
     kind: string;
     body: string;
     commitSha: string | null;
@@ -776,12 +777,12 @@ export const previousRunHandoffForClaim = async (
   if (!isCanonicalAgentStep(input.templateStep) || input.runNumber <= 1) return null;
   const previous = await tx.run.findUnique({
     where: { taskId_runNumber: { taskId: input.taskId, runNumber: input.runNumber - 1 } },
-    select: { id: true, status: true, failureReason: true, endedAt: true, updatedAt: true },
+    select: { id: true, status: true, failureReason: true, headSha: true, endedAt: true, updatedAt: true },
   });
   if (!previous || previous.id === input.runId) return null;
   const output = await tx.taskStepOutput.findUnique({
     where: { taskId: input.taskId },
-    select: { runId: true, kind: true, body: true, commitSha: true },
+    select: { runId: true, kind: true, body: true, commitSha: true, metadata: true },
   });
   const activity = await tx.taskActivity.findFirst({
     where: {
@@ -793,6 +794,32 @@ export const previousRunHandoffForClaim = async (
     select: { body: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
+  const refusalActivity = await tx.taskActivity.findFirst({
+    where: {
+      taskId: input.taskId,
+      actorType: "control-plane",
+      body: { startsWith: "Canonical task output refused:" },
+    },
+    select: { metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const refusalMetadata = refusalActivity?.metadata && typeof refusalActivity.metadata === "object"
+    && !Array.isArray(refusalActivity.metadata)
+    ? refusalActivity.metadata as Record<string, unknown>
+    : null;
+  const refusedOutputMatchesPreviousHead = output?.runId !== null
+    && output?.runId !== previous.id
+    && previous.status === "SUCCEEDED"
+    && previous.headSha !== null
+    && output?.commitSha === previous.headSha
+    && refusalMetadata?.kind === "canonicalTaskOutput.refusal"
+    && refusalMetadata.runId === previous.id
+    && refusalMetadata.reason === canonicalOutputRefusal(
+      input.templateStep,
+      output,
+      previous.id,
+      previous.headSha,
+    );
   const retryReason = activity?.body === "Approval gate rejected; step queued again"
     ? "approval-rejected-without-feedback"
     : activity?.body === `Run ${input.runNumber} queued by operator retry`
@@ -804,8 +831,8 @@ export const previousRunHandoffForClaim = async (
     status: previous.status,
     failureReason: previous.failureReason,
     retryReason,
-    output: output?.runId === previous.id
-      ? { kind: output.kind, body: output.body, commitSha: output.commitSha }
+    output: output?.runId && (output.runId === previous.id || refusedOutputMatchesPreviousHead)
+      ? { runId: output.runId, kind: output.kind, body: output.body, commitSha: output.commitSha }
       : null,
   };
 };

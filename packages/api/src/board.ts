@@ -85,6 +85,7 @@ export type BoardRow = {
     runNumber: number;
     status: string;
     model: string;
+    subagentModel?: string | null;
     session: {
       costUsd: Parameters<typeof sessionUsageCost>[1]["costUsd"];
       inputTokens: number | null;
@@ -164,7 +165,7 @@ export const boardCard = (
   const run = row.runs[0];
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
-    : [sessionUsageCost(item.model, item.session)]));
+    : [sessionUsageCost(item.model, item.session, { mixedModels: item.subagentModel != null })]));
   return {
     id: row.id,
     name: row.name,

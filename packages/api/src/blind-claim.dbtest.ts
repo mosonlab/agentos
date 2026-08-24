@@ -112,16 +112,31 @@ const queueCanonicalStep = async (
   if (sourceRun) {
     await db.run.update({
       where: { id: sourceRun.id },
-      data: { status: "SUCCEEDED", baseSha: "b".repeat(40) },
+      // Model the exact-head recovery publisher: its workspace starts at the
+      // already-implemented head, while the canonical output retains the
+      // original implementation base.
+      data: { status: "SUCCEEDED", baseSha: "5".padStart(40, "0") },
     });
   }
-  await db.taskStepOutput.createMany({ data: priorTasks.map((task) => ({
-    taskId: task.id,
-    ...(task.id === sourceTask?.id && sourceRun ? { runId: sourceRun.id } : {}),
-    kind: `step-${task.chainIndex}`,
-    body: `persisted output from step ${task.chainIndex}`,
-    commitSha: String(task.chainIndex).padStart(40, "0"),
-  })) });
+  await db.taskStepOutput.createMany({ data: priorTasks.map((task) => {
+    const headSha = String(task.chainIndex).padStart(40, "0");
+    const implementationSource = task.id === sourceTask?.id && sourceRun;
+    return {
+      taskId: task.id,
+      ...(implementationSource ? { runId: sourceRun.id } : {}),
+      kind: implementationSource ? "implementation" : `step-${task.chainIndex}`,
+      body: implementationSource
+        ? JSON.stringify({
+          schemaVersion: 1,
+          baseSha: "b".repeat(40),
+          headSha,
+          summary: "implemented before exact-head recovery",
+          testsRun: ["focused"],
+        })
+        : `persisted output from step ${task.chainIndex}`,
+      commitSha: headSha,
+    };
+  }) });
   const run = await db.$transaction((tx) => enqueueTaskRun(tx as never, target.id));
   return { run, chain };
 };
@@ -192,6 +207,9 @@ test("blind session cannot read Sol evidence before or after its immutable repor
   const claimed = await claim();
   assert.equal(claimed.run.id, blind.run.id);
   assert.deepEqual(claimed.priorOutputs, []);
+  assert.equal(claimed.run.pinnedBaseSha, claimed.run.targetBranch);
+  assert.equal(claimed.run.implementationBaseSha, "b".repeat(40));
+  assert.equal(claimed.run.implementationHeadSha, claimed.run.targetBranch);
 
   const activityPath = `/session/runs/${blind.run.id}/chain/steps/6/activity`;
   const before = await createApp(db).request(activityPath, {

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import type { InFlightTool } from "./budget.js";
 import { isTransientNetworkError } from "./network-retry.js";
 import { workspaceEnvironment, type AgentScratch } from "./workspace.js";
 
-export const ADAPTER_VERSION = "2.0.0";
+export const ADAPTER_VERSION = "2.1.0";
 
 // The seat manual tells the agent to use the AgentOS tools; the manifest has to
 // name them, or the agent has no way to know what it was actually granted.
@@ -34,35 +34,25 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
 ];
 
-const subprocessProfiles = (run: ClaimedTask["run"], required = false): {
-  ordinary: { model: string; effort: string; tier: string };
-  elevated: { model: string; effort: string; tier: string };
+const nativeSubagentProfile = (run: ClaimedTask["run"], runner: RunnerKind): {
+  model: string;
+  effort: string;
+  maxConcurrent: number;
 } | null => {
-  const values = [
-    run.subprocessModel,
-    run.subprocessCodexServiceTier,
-    run.elevatedSubprocessModel,
-    run.elevatedSubprocessCodexServiceTier,
-  ];
-  if (values.every((value) => value === null)) {
-    if (required) throw new Error("Implementation Plan Executioner Run is missing its Codex subprocess snapshot");
-    return null;
+  if (run.subagentModel === null && run.subagentMaxConcurrent === null) return null;
+  if (run.subagentModel === null || run.subagentMaxConcurrent === null) {
+    throw new Error("Run contains an incomplete native subagent snapshot");
   }
-  if (values.some((value) => value === null)) throw new Error("Run contains an incomplete Codex subprocess snapshot");
-  const ordinary = modelSpec(run.subprocessModel!);
-  const elevated = modelSpec(run.elevatedSubprocessModel!);
-  if (!ordinary.model.startsWith("gpt-") || !ordinary.effort
-    || !elevated.model.startsWith("gpt-") || !elevated.effort) {
-    throw new Error("Run Codex subprocess snapshots require gpt-* models with explicit reasoning effort");
+  if (runner !== "CODEX") throw new Error("Native implementation subagents require a Codex root Run");
+  const { model, effort } = modelSpec(run.subagentModel);
+  if (model !== "gpt-5.6-luna" || effort !== "max" || run.subagentMaxConcurrent !== 8) {
+    throw new Error("Native implementation subagents must use gpt-5.6-luna:max with concurrency 8");
   }
-  return {
-    ordinary: { model: ordinary.model, effort: ordinary.effort, tier: run.subprocessCodexServiceTier!.toLowerCase() },
-    elevated: { model: elevated.model, effort: elevated.effort, tier: run.elevatedSubprocessCodexServiceTier!.toLowerCase() },
-  };
+  return { model, effort, maxConcurrent: run.subagentMaxConcurrent };
 };
 
 export const buildPrompt = (claim: ClaimedTask): string => {
-  const profiles = subprocessProfiles(claim.run, claim.agent.name === "implementation-plan-executioner");
+  const subagents = nativeSubagentProfile(claim.run, claim.runner);
   return [
   claim.agent.foundationalPrompt,
   "",
@@ -85,17 +75,16 @@ export const buildPrompt = (claim: ClaimedTask): string => {
     `- implementationBaseSha: ${claim.run.implementationBaseSha}`,
     `- implementationHeadSha: ${claim.run.implementationHeadSha}`,
   ] : []),
-  ...(profiles ? [
+  ...(subagents ? [
     "",
-    "Platform-pinned ordinary Codex subprocess profile:",
-    `- model: ${profiles.ordinary.model}`,
-    `- reasoning effort: ${profiles.ordinary.effort}`,
-    `- service tier: ${profiles.ordinary.tier}`,
-    "Platform-pinned elevated Codex subprocess profile:",
-    `- model: ${profiles.elevated.model}`,
-    `- reasoning effort: ${profiles.elevated.effort}`,
-    `- service tier: ${profiles.elevated.tier}`,
-    "- The runner exposes both profiles as AGENTOS_ORDINARY_CODEX_SUBPROCESS_* and AGENTOS_ELEVATED_CODEX_SUBPROCESS_*. Use the matching model, reasoning effort, and service tier on every launch and resume.",
+    "Platform-pinned native implementation subagents:",
+    `- model: ${subagents.model}`,
+    `- reasoning effort: ${subagents.effort}`,
+    `- maximum concurrent child threads: ${subagents.maxConcurrent} (root excluded)`,
+    "- multi_agent_v2 is enabled by the runner. Spawn, message, wait for, and close native children through the session collaboration tools; do not launch nested Codex CLI processes.",
+    "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
+    "- Implementation proof is limited to each assignment's focused tests, one affected-workspace compile or typecheck after integration, and tests for seams crossed by multiple assignments.",
+    "- Do not run repository-wide suites or the repository Merge Gate in Implementation; the later Regression step owns the formal Gate.",
   ] : []),
   "",
   `Task: ${claim.task.name}`,
@@ -111,7 +100,8 @@ export const buildPrompt = (claim: ClaimedTask): string => {
       retryReason: claim.previousRunHandoff.retryReason,
     })}`,
     ...(claim.previousRunHandoff.output ? [
-      `- Previous task output (${claim.previousRunHandoff.output.kind}, commit ${claim.previousRunHandoff.output.commitSha ?? "unbound"}):\n${claim.previousRunHandoff.output.body}`,
+      `- Persisted task output from Run ${claim.previousRunHandoff.output.runId} (${claim.previousRunHandoff.output.kind}, commit ${claim.previousRunHandoff.output.commitSha ?? "unbound"}):\n${claim.previousRunHandoff.output.body}`,
+      `- This output remains bound to Run ${claim.previousRunHandoff.output.runId}. Before successful completion, publish the current Run's canonical task_output; reuse the body only if it still matches the current exact head.`,
     ] : ["- The previous Run did not publish a current task output."]),
     ...(claim.previousRunHandoff.retryReason === "approval-rejected-without-feedback" ? [
       "- The human rejected the approval gate without a reason. Use inbox_ask to obtain the required change before revising the output.",
@@ -160,7 +150,6 @@ export const buildChildEnvironment = (
   scratch: AgentScratch,
   workspacePath: string,
 ): NodeJS.ProcessEnv => {
-  const profiles = subprocessProfiles(claim.run, claim.agent.name === "implementation-plan-executioner");
   // These names are runner-owned. In particular, a task secret must never be
   // able to reintroduce the host Codex home or the CLAUDE_CONFIG_DIR path that
   // this chain deliberately does not use.
@@ -171,12 +160,6 @@ export const buildChildEnvironment = (
     PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
     AGENTOS_PI_EXPECTS_OPENAI_CODEX: _piExpectsOpenAICodex,
-    AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL: _ordinarySubprocessModel,
-    AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT: _ordinarySubprocessEffort,
-    AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: _ordinarySubprocessServiceTier,
-    AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL: _elevatedSubprocessModel,
-    AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT: _elevatedSubprocessEffort,
-    AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER: _elevatedSubprocessServiceTier,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -197,14 +180,6 @@ export const buildChildEnvironment = (
     ...(claim.runner === "PI" && claim.run.model.startsWith("openai-codex/")
       ? { AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1" }
       : {}),
-    ...(profiles ? {
-      AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL: profiles.ordinary.model,
-      AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT: profiles.ordinary.effort,
-      AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: profiles.ordinary.tier,
-      AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL: profiles.elevated.model,
-      AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT: profiles.elevated.effort,
-      AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER: profiles.elevated.tier,
-    } : {}),
     // Last on purpose, so no task secret can point a session back at the
     // production roots. See provisionAgentScratch for why this containment has
     // to live in the runner rather than in the run's checkout.
@@ -217,10 +192,7 @@ export const buildChildEnvironment = (
 
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
-  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL",
-  "AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT", "AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER",
-  "AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL", "AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT",
-  "AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER",
+  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
 ] as const;
 
 /**
@@ -364,6 +336,7 @@ export type HeartbeatSnapshot = {
 };
 
 export type RuntimeHandle = {
+  runId: string;
   runner: RunnerKind;
   child: ChildProcess;
   pid: number | null;
@@ -378,6 +351,7 @@ export type RuntimeHandle = {
   sawError: boolean;
   providerError: string | null;
   piTurnCompleted: boolean;
+  piFinalAttemptFailed: boolean;
   finalOutput: string | null;
   stdout: string;
   stderr: string;
@@ -564,11 +538,18 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
     }
     emit(handle, sink, "MODEL_COMPLETED", event);
   } else if (type === "agent_end") {
-    if (event.willRetry === true) handle.sawError = true;
+    const messages = Array.isArray(event.messages) ? event.messages : [];
+    const finalMessage = asRecord(messages.at(-1));
+    const stopReason = stringField(finalMessage, "stopReason");
+    const errorMessage = stringField(finalMessage, "errorMessage");
+    handle.piFinalAttemptFailed = event.willRetry === true || stopReason === "error" || errorMessage !== null;
+    handle.providerError = handle.piFinalAttemptFailed
+      ? errorMessage ?? (stopReason ? `PI stopped with ${stopReason}` : "PI provider retry failed")
+      : null;
     emit(handle, sink, "PROVIDER_STATUS", event);
   } else if (type === "agent_settled") {
     handle.terminalEventSeen = true;
-    handle.terminalSuccess = handle.piTurnCompleted && !handle.sawError;
+    handle.terminalSuccess = handle.piTurnCompleted && !handle.piFinalAttemptFailed && !handle.sawError;
     emit(handle, sink, "FINAL_OUTPUT", event);
   } else {
     if (type?.includes("error")) handle.sawError = true;
@@ -607,6 +588,17 @@ const codexMcpArgs = (credentialsPath: string): string[] => [
   "-c", `mcp_servers.agentos.args=${JSON.stringify(mcpServerArgs(credentialsPath))}`,
   "-c", "mcp_servers.agentos.startup_timeout_sec=30",
 ];
+
+const codexNativeSubagentArgs = (run: ClaimedTask["run"]): string[] => {
+  const profile = nativeSubagentProfile(run, "CODEX");
+  if (!profile) return [];
+  return [
+    "--enable", "multi_agent_v2",
+    "-c", `agents.default_subagent_model=${JSON.stringify(profile.model)}`,
+    "-c", `agents.default_subagent_reasoning_effort=${JSON.stringify(profile.effort)}`,
+    "-c", `agents.max_concurrent_threads_per_session=${profile.maxConcurrent}`,
+  ];
+};
 
 type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
 const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
@@ -674,12 +666,14 @@ export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: Resume
       "exec", "resume", "--json", "-m", model,
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
       "-c", `service_tier="${serviceTier}"`,
+      ...codexNativeSubagentArgs(spec.claim.run),
       ...codexMcpArgs(spec.credentialsPath), resume.providerConversationId, "-",
     ]
     : [
       "exec", "--json", "-m", model,
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
       "-c", `service_tier="${serviceTier}"`,
+      ...codexNativeSubagentArgs(spec.claim.run),
       ...codexMcpArgs(spec.credentialsPath),
       "--dangerously-bypass-approvals-and-sandbox", "-",
     ];
@@ -714,6 +708,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const handle: RuntimeHandle = {
+    runId: spec.claim.run.id,
     runner,
     child,
     pid: child.pid ?? null,
@@ -728,6 +723,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     sawError: false,
     providerError: null,
     piTurnCompleted: false,
+    piFinalAttemptFailed: false,
     finalOutput: null,
     stdout: "",
     stderr: "",
@@ -1011,17 +1007,63 @@ const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
   return { failureClass: "TASK_FAILED", retryable: false };
 };
 
+const ownedRunProcesses = async (runId: string): Promise<number[]> => new Promise((resolvePromise, rejectPromise) => {
+  const args = process.platform === "darwin"
+    ? ["-Eww", "-axo", "pid=,ppid=,pgid=,command="]
+    : ["-axeww", "-o", "pid=,ppid=,pgid=,command="];
+  execFile("ps", args, { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+    if (error) {
+      rejectPromise(new Error(`Unable to inspect Run-owned processes: ${error.message}`));
+      return;
+    }
+    const marker = ` AGENTOS_RUN_ID=${runId}`;
+    const pids = stdout.split("\n").flatMap((line) => {
+      if (!line.includes(marker)) return [];
+      const match = /^\s*(\d+)\s+/u.exec(line);
+      return match ? [Number.parseInt(match[1]!, 10)] : [];
+    });
+    resolvePromise(pids.filter((pid) => pid !== process.pid));
+  });
+});
+
+const signalProcesses = (pids: number[], signal: NodeJS.Signals): void => {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, signal);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+};
+
+const waitForRunDrain = async (runId: string, timeoutMs: number): Promise<number[]> => {
+  const deadline = Date.now() + timeoutMs;
+  let remaining = await ownedRunProcesses(runId);
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 50));
+    remaining = await ownedRunProcesses(runId);
+  }
+  return remaining;
+};
+
 const kill = async (handle: RuntimeHandle, reason: string): Promise<KillResult> => {
   handle.terminationReason = reason;
   const pid = handle.pid;
-  if (!pid || handle.child.exitCode !== null || handle.child.signalCode !== null) return { signal: null, processAlive: false };
-  try { process.kill(-pid, "SIGTERM"); } catch { return { signal: null, processAlive: false }; }
-  const closed = await Promise.race([
-    handle.exit.then(() => true),
-    new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 5_000)),
-  ]);
-  if (closed) return { signal: "SIGTERM", processAlive: false };
-  try { process.kill(-pid, "SIGKILL"); } catch { return { signal: "SIGTERM", processAlive: false }; }
+  if (pid && handle.child.exitCode === null && handle.child.signalCode === null) {
+    try { process.kill(-pid, "SIGTERM"); } catch { /* the ownership scan below is authoritative */ }
+  }
+  let remaining = await ownedRunProcesses(handle.runId);
+  signalProcesses(remaining, "SIGTERM");
+  remaining = await waitForRunDrain(handle.runId, 5_000);
+  if (remaining.length === 0) {
+    await handle.exit;
+    return { signal: pid ? "SIGTERM" : null, processAlive: false };
+  }
+  signalProcesses(remaining, "SIGKILL");
+  remaining = await waitForRunDrain(handle.runId, 5_000);
+  if (remaining.length > 0) {
+    throw new Error(`Unable to terminate ${remaining.length} process(es) owned by Run ${handle.runId}`);
+  }
   await handle.exit;
   return { signal: "SIGKILL", processAlive: false };
 };
@@ -1059,10 +1101,8 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   runAsPrefix: spec.config.runAsPrefix,
   model: spec.claim.run.model,
   codexServiceTier: spec.claim.run.codexServiceTier,
-  subprocessModel: spec.claim.run.subprocessModel,
-  subprocessCodexServiceTier: spec.claim.run.subprocessCodexServiceTier,
-  elevatedSubprocessModel: spec.claim.run.elevatedSubprocessModel,
-  elevatedSubprocessCodexServiceTier: spec.claim.run.elevatedSubprocessCodexServiceTier,
+  subagentModel: spec.claim.run.subagentModel,
+  subagentMaxConcurrent: spec.claim.run.subagentMaxConcurrent,
   promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
   promptTransport: "stdin",
   structuredEvents: true,

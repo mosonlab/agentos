@@ -147,8 +147,13 @@ const seedReadiness = async () => {
 
 test("clean exact-head readiness authorizes and queues mechanical merge", async () => {
   const seeded = await seedReadiness();
+  await db.task.update({
+    where: { id: seeded.regression.id },
+    data: { failureReason: "readiness evaluation failed: GitHub read failed: fetch failed" },
+  });
   assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).failureReason, null);
   const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.readiness.id } });
   assert.equal(output.commitSha, HEAD);
   assert.equal((await db.run.count({ where: { taskId: seeded.integrator.id } })), 1);

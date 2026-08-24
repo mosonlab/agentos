@@ -19,6 +19,7 @@ import {
 } from "@prisma/client";
 
 import { sharedChainBranch } from "./chain-branch.js";
+import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
@@ -73,11 +74,16 @@ export const deriveRunConfig = (
   } | null,
   task: { name: string; description: string },
 ): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier; promptHash: string } => {
-  const compoundExecutioner = isCompoundExecutionerStep(templateStep);
+  const compoundExecutioner = isCompoundImplementationStep(templateStep);
+  const runner = templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model);
+  if (compoundExecutioner
+    && (runner !== RunnerKind.CODEX || catalogRunnerForModel(agent.model) !== RunnerPreference.CODEX)) {
+    throw new Error("Compound implementation root requires a Codex gpt-* model");
+  }
   return {
-    runner: compoundExecutioner ? RunnerKind.CODEX : (templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model)),
-    model: compoundExecutioner ? "gpt-5.6-sol:medium" : agent.model,
-    codexServiceTier: compoundExecutioner ? CodexServiceTier.DEFAULT : agent.codexServiceTier,
+    runner,
+    model: agent.model,
+    codexServiceTier: agent.codexServiceTier,
     promptHash: promptHash([
     agent.foundationalPrompt,
     agent.rolePrompt,
@@ -87,61 +93,68 @@ export const deriveRunConfig = (
   };
 };
 
-const isCompoundExecutionerStep = (templateStep: {
+export const COMPOUND_IMPLEMENTATION_AGENT_NAME = "implementation-plan-executioner";
+export const COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE = "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID";
+
+export type CompoundImplementationStepShape = {
   stepIndex?: number;
   outputKind?: string;
   taskTemplate?: { name: string } | null;
-} | null): boolean => templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
+} | null;
+
+export const isCompoundImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
+  templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
   && templateStep.stepIndex === 5
   && templateStep.outputKind === "implementation";
 
-const CODEX_SUBPROCESS_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+type CompoundImplementationAgent = {
+  name: string;
+  projectId: string;
+  archivedAt: Date | null;
+} | null;
 
-const validatedCodexSubprocessModel = (label: string, raw: string | null): string => {
-  if (!raw) throw new Error(`Implementation Plan Executioner requires a configured ${label} Codex subprocess`);
-  const separator = raw.lastIndexOf(":");
-  const model = separator > 0 ? raw.slice(0, separator) : raw;
-  const effort = separator > 0 ? raw.slice(separator + 1) : "";
-  if (!model.startsWith("gpt-") || !CODEX_SUBPROCESS_EFFORTS.has(effort)) {
-    throw new Error(`${label} subprocess must use a Codex gpt-* model with an explicit reasoning effort`);
-  }
-  return raw;
-};
+export const compoundImplementationAssigneeValid = (
+  taskProjectId: string,
+  assigneeType: AssigneeType,
+  agent: CompoundImplementationAgent,
+  templateStep: CompoundImplementationStepShape,
+): boolean => !isCompoundImplementationStep(templateStep)
+  || (assigneeType === AssigneeType.AGENT
+    && agent?.name === COMPOUND_IMPLEMENTATION_AGENT_NAME
+    && agent.projectId === taskProjectId
+    && agent.archivedAt === null);
 
-export const subprocessRunConfig = async (
-  agent: Pick<Agent,
-    "name"
-    | "ordinarySubprocessModel"
-    | "ordinarySubprocessCodexServiceTier"
-    | "elevatedSubprocessModel"
-    | "elevatedSubprocessCodexServiceTier"
-  >,
-  templateStep: {
-    stepIndex?: number;
-    outputKind?: string;
-    taskTemplate?: { name: string } | null;
-  } | null = null,
-): Promise<{
-  subprocessModel: string;
-  subprocessCodexServiceTier: CodexServiceTier;
-  elevatedSubprocessModel: string;
-  elevatedSubprocessCodexServiceTier: CodexServiceTier;
-} | null> => {
-  const compoundExecutioner = isCompoundExecutionerStep(templateStep);
-  if (!compoundExecutioner && agent.name !== "implementation-plan-executioner") return null;
-  if (compoundExecutioner && agent.name !== "implementation-plan-executioner") {
-    throw new Error("Compound implementation step must remain assigned to implementation-plan-executioner");
+export class CompoundImplementationAssigneeError extends Error {
+  readonly code = COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE;
+
+  constructor() {
+    super(`Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`);
+    this.name = "CompoundImplementationAssigneeError";
   }
-  const ordinaryModel = validatedCodexSubprocessModel("ordinary", agent.ordinarySubprocessModel);
-  const elevatedModel = validatedCodexSubprocessModel("elevated", agent.elevatedSubprocessModel);
-  if (!agent.ordinarySubprocessCodexServiceTier || !agent.elevatedSubprocessCodexServiceTier) {
-    throw new Error("Implementation Plan Executioner requires service tiers for both Codex subprocess profiles");
-  }
+}
+
+export const isCompoundImplementationAssigneeError = (
+  error: unknown,
+): error is CompoundImplementationAssigneeError =>
+  error instanceof Error && error.name === "CompoundImplementationAssigneeError";
+
+export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-5.6-luna:max";
+export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
+
+export const isDirectImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
+  templateStep?.taskTemplate?.name === DIRECT_TEMPLATE_NAME
+  && templateStep.stepIndex === 1
+  && templateStep.outputKind === "implementation";
+
+export const nativeImplementationSubagentRunConfig = (
+  runner: RunnerKind,
+  templateStep: CompoundImplementationStepShape,
+): { subagentModel: string; subagentMaxConcurrent: number } | null => {
+  if (runner !== RunnerKind.CODEX) return null;
+  if (!isCompoundImplementationStep(templateStep) && !isDirectImplementationStep(templateStep)) return null;
   return {
-    subprocessModel: ordinaryModel,
-    subprocessCodexServiceTier: agent.ordinarySubprocessCodexServiceTier,
-    elevatedSubprocessModel: elevatedModel,
-    elevatedSubprocessCodexServiceTier: agent.elevatedSubprocessCodexServiceTier,
+    subagentModel: NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
+    subagentMaxConcurrent: NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
   };
 };
 
@@ -189,6 +202,47 @@ export class PinnedBaseCommitError extends Error {
 export const isPinnedBaseCommitError = (error: unknown): error is PinnedBaseCommitError =>
   error instanceof Error && error.name === "PinnedBaseCommitError";
 
+const IMPLEMENTATION_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+
+const implementationRangeFromOutput = (
+  taskId: string,
+  baseFromStepIndex: number,
+  source: { kind: string; body: string; commitSha: string | null },
+): { implementationBaseSha: string; implementationHeadSha: string } => {
+  if (!source.commitSha) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has no recorded commitSha");
+  }
+  if (!IMPLEMENTATION_SHA.test(source.commitSha)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has invalid commitSha");
+  }
+  if (source.kind !== "implementation") {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has no canonical implementation output");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(source.body);
+  } catch {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output is not valid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output is not a JSON object");
+  }
+  const output = value as Record<string, unknown>;
+  if (output.schemaVersion !== 1) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has unsupported schemaVersion");
+  }
+  if (typeof output.baseSha !== "string" || !IMPLEMENTATION_SHA.test(output.baseSha)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has invalid baseSha");
+  }
+  if (typeof output.headSha !== "string" || !IMPLEMENTATION_SHA.test(output.headSha)) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has invalid headSha");
+  }
+  if (output.headSha !== source.commitSha) {
+    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output headSha does not match commitSha");
+  }
+  return { implementationBaseSha: output.baseSha, implementationHeadSha: output.headSha };
+};
+
 export const pinnedImplementationRange = async (
   tx: Tx,
   task: {
@@ -213,21 +267,16 @@ export const pinnedImplementationRange = async (
         chainIndex: baseFromStepIndex,
       },
     },
-    select: { commitSha: true, run: { select: { baseSha: true } } },
+    select: { kind: true, body: true, commitSha: true },
   });
-  if (!source?.commitSha) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded commitSha");
+  if (!source) {
+    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no canonical implementation output");
   }
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.commitSha)) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has invalid commitSha");
-  }
-  if (!source.run?.baseSha) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no recorded implementation baseSha");
-  }
-  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(source.run.baseSha)) {
-    throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has invalid implementation baseSha");
-  }
-  return { implementationBaseSha: source.run.baseSha, implementationHeadSha: source.commitSha };
+  // A recovery Run republishes an already-complete head, so its workspace
+  // base legitimately equals that head. The canonical implementation output
+  // preserves the original reviewed range and is the authority for every
+  // later blind-review claim.
+  return implementationRangeFromOutput(task.id, baseFromStepIndex, source);
 };
 
 /**
@@ -616,6 +665,14 @@ const enqueueTaskRunInternal = async (
   if (!lockedAgent || lockedAgent.archivedAt) {
     throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
   }
+  if (!compoundImplementationAssigneeValid(
+    task.projectId,
+    task.assigneeType,
+    lockedAgent,
+    task.templateStep,
+  )) {
+    throw new CompoundImplementationAssigneeError();
+  }
   // §D-P4, the last line of the binding invariant, for the same reason: this is
   // the shared enqueue path, so a route added later inherits the refusal. The
   // Agent name comes from the locked re-read, never the stale task relation.
@@ -626,7 +683,7 @@ const enqueueTaskRunInternal = async (
   const prior = task.runs[0];
   const runNumber = (prior?.runNumber ?? 0) + 1;
   const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-  const subprocess = await subprocessRunConfig(lockedAgent, task.templateStep);
+  const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
   const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
   return tx.run.create({ data: {
     projectId: task.projectId,
@@ -638,7 +695,7 @@ const enqueueTaskRunInternal = async (
     runner: derived.runner,
     model: derived.model,
     codexServiceTier: derived.codexServiceTier,
-    ...subprocess,
+    ...subagent,
     targetBranch: branches.targetBranch,
     branch: branches.branch,
     opensPullRequest: task.opensPullRequest,
@@ -1001,6 +1058,22 @@ const activateChainSuccessorInternal = async (
         select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
       })
       : null;
+    if (isCompoundImplementationStep(successorStep)) {
+      const lockedAgent = successor.assigneeAgentId
+        ? await lockAgentRow(tx, successor.assigneeAgentId)
+        : null;
+      if (lockedAgent?.archivedAt) {
+        throw new ArchivedAssigneeError(successor.id, successor.name, lockedAgent.name);
+      }
+      if (!compoundImplementationAssigneeValid(
+        successor.projectId,
+        successor.assigneeType,
+        lockedAgent,
+        successorStep,
+      )) {
+        throw new CompoundImplementationAssigneeError();
+      }
+    }
     if (isMergeReadinessStep(successorStep)) {
       await tx.taskActivity.create({ data: {
         taskId: successor.id,

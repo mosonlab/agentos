@@ -200,6 +200,16 @@
       "reason": "internal planning state is not needed to build or run the product"
     },
     {
+      "glob": "pelican-bike.html",
+      "disposition": "later-release-follow-up",
+      "reason": "standalone animation demo is not AgentOS product source and requires a separate publication and license decision"
+    },
+    {
+      "glob": "pelican-bike-2.html",
+      "disposition": "later-release-follow-up",
+      "reason": "standalone animation demo is not AgentOS product source and requires a separate publication and license decision"
+    },
+    {
       "glob": "deploy/**",
       "disposition": "later-release-follow-up",
       "reason": "host-specific deployment material requires environment and path review"

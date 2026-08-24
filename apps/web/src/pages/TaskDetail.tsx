@@ -113,11 +113,8 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
                 { k: t("taskDetail.run.serviceTier"), v: tierApplies
                   ? <Pill tone={run.codexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.codexServiceTier}`)}</Pill>
                   : "—" },
-                { k: t("taskDetail.run.subprocessProfile"), v: run.subprocessModel && run.subprocessCodexServiceTier
-                  ? <span>{run.subprocessModel} · <Pill tone={run.subprocessCodexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.subprocessCodexServiceTier}`)}</Pill></span>
-                  : "—" },
-                { k: t("taskDetail.run.elevatedSubprocessProfile"), v: run.elevatedSubprocessModel && run.elevatedSubprocessCodexServiceTier
-                  ? <span>{run.elevatedSubprocessModel} · <Pill tone={run.elevatedSubprocessCodexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.elevatedSubprocessCodexServiceTier}`)}</Pill></span>
+                { k: t("taskDetail.run.nativeSubagents"), v: run.subagentModel && run.subagentMaxConcurrent
+                  ? `${run.subagentModel} · max ${run.subagentMaxConcurrent}`
                   : "—" },
                 { k: t("taskDetail.run.leaseGeneration"), v: `${run.leaseGeneration}` },
                 { k: t("taskDetail.run.workspace"), v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? ` ${t("taskDetail.run.retained")}` : ""}</span> },
@@ -289,12 +286,16 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const retry = (): void => {
     void run(async () => { await api.post(`/tasks/${taskId}/retry`, {}); reload(); });
   };
-  const cancelCurrentRun = (): void => {
+  const cancelCurrentRun = (parkTask: boolean): void => {
     if (!newest) return;
-    const reason = window.prompt(t("taskDetail.cancel.prompt"));
+    const reason = window.prompt(t(parkTask ? "taskDetail.stop.prompt" : "taskDetail.cancel.prompt"));
     if (!reason?.trim()) return;
     void run(async () => {
-      await api.post(`/runs/${newest.id}/cancel`, { requestId: crypto.randomUUID(), reason: reason.trim() });
+      await api.post(`/runs/${newest.id}/cancel`, {
+        requestId: crypto.randomUUID(),
+        reason: reason.trim(),
+        parkTask,
+      });
       reload();
     });
   };
@@ -354,8 +355,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
         ) : null}
         {newestIsActive ? (
-          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={cancelCurrentRun}>
+          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={() => cancelCurrentRun(false)}>
             {t(newestIsCancelling ? "taskDetail.cancel.cancelling" : "taskDetail.cancel.action")}
+          </Button>
+        ) : null}
+        {newestIsActive ? (
+          <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={() => cancelCurrentRun(true)}>
+            {t("taskDetail.stop.action")}
           </Button>
         ) : null}
         <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={() => setArchived(task.archivedAt === null)}>

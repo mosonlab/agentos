@@ -70,3 +70,20 @@ test("explicit create and patch foundation paths remain available", async () => 
   assert.equal(patched.status, 200);
   assert.equal(patched.body.foundationalPrompt, "patched foundation");
 });
+
+test("patching an Agent model records an operator runtime override", async () => {
+  const { project, environment } = await seedProject("runtime-override");
+  const response = await call("POST", `/projects/${project.id}/agents`, {
+    ...createBody(environment.id, "created"), foundationalPrompt: "foundation",
+  });
+  assert.equal(response.status, 201);
+
+  const patched = await call("PATCH", `/agents/${response.body.id}`, {
+    model: "claude-opus-5:medium", runnerPreference: "CLAUDE",
+  });
+  assert.equal(patched.status, 200);
+  const stored = await db.agent.findUniqueOrThrow({ where: { id: response.body.id } });
+  assert.equal(stored.model, "claude-opus-5:medium");
+  assert.equal(stored.runnerPreference, "CLAUDE");
+  assert.equal(stored.runtimeConfigCustomized, true);
+});

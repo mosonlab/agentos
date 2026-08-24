@@ -10,6 +10,9 @@ import {
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  CompoundImplementationAssigneeError,
+  compoundImplementationAssigneeValid,
   deriveRunConfig,
   deployBarrierAllowsClaim,
   FAILURE_ENVELOPE_VERSION,
@@ -20,6 +23,8 @@ import {
   InboxStatus,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  isCompoundImplementationAssigneeError,
+  isCompoundImplementationStep,
   isIntegratorStoppedError,
   isPinnedBaseCommitError,
   LIVE_TASK_STATUSES,
@@ -27,6 +32,7 @@ import {
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockChainRows,
+  nativeImplementationSubagentRunConfig,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -42,7 +48,6 @@ import {
   runnerFor,
   sessionUsageCost,
   sumUsageCosts,
-  subprocessRunConfig,
   pinnedImplementationRange,
   SecretPurpose,
   SkillKind,
@@ -56,7 +61,6 @@ import {
   isMergeExecutorRunnerId,
   mechanicalPrincipalRefusal,
   executionModeFor,
-  gateFeedsIntegratorStep,
   isMergeConfirmationError,
   integratorBindingRefusal,
   integratorBindingRefusalFor,
@@ -690,10 +694,6 @@ const agentFields = {
   title: z.string().trim().min(1).max(120),
   model: z.string().trim().min(1).max(120),
   codexServiceTier: z.nativeEnum(CodexServiceTier),
-  ordinarySubprocessModel: z.string().trim().min(1).max(120).nullable(),
-  ordinarySubprocessCodexServiceTier: z.nativeEnum(CodexServiceTier).nullable(),
-  elevatedSubprocessModel: z.string().trim().min(1).max(120).nullable(),
-  elevatedSubprocessCodexServiceTier: z.nativeEnum(CodexServiceTier).nullable(),
   foundationalPrompt: z.string().min(1),
   rolePrompt: z.string().min(1),
   runnerPreference: z.nativeEnum(RunnerPreference),
@@ -705,10 +705,6 @@ const agentInput = z.object({
   ...agentFields,
   foundationalPrompt: agentFields.foundationalPrompt.optional(),
   codexServiceTier: agentFields.codexServiceTier.default(CodexServiceTier.DEFAULT),
-  ordinarySubprocessModel: agentFields.ordinarySubprocessModel.default(null),
-  ordinarySubprocessCodexServiceTier: agentFields.ordinarySubprocessCodexServiceTier.default(null),
-  elevatedSubprocessModel: agentFields.elevatedSubprocessModel.default(null),
-  elevatedSubprocessCodexServiceTier: agentFields.elevatedSubprocessCodexServiceTier.default(null),
   runnerPreference: agentFields.runnerPreference.default(RunnerPreference.INHERIT),
   inboxAccess: agentFields.inboxAccess.default(false),
   // `.default([])` rather than `.optional()`: under exactOptionalPropertyTypes an
@@ -738,42 +734,17 @@ const runnerModelRefusal = (agent: { model: string; runnerPreference: RunnerPref
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
 
-const codexSubprocessProfileRefusal = (label: string, model: string | null, tier: CodexServiceTier | null): string | null => {
-  if (model === null && tier === null) return `${label} Codex subprocess profile is required`;
-  if (model === null || tier === null) return `${label} Codex subprocess model and service tier must be configured together`;
-  const separator = model.lastIndexOf(":");
-  const baseModel = separator > 0 ? model.slice(0, separator) : model;
-  const effort = separator > 0 ? model.slice(separator + 1) : "";
-  if (!baseModel.startsWith("gpt-") || !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
-    return `${label} subprocess must use a Codex gpt-* model with an explicit reasoning effort`;
-  }
-  return null;
+const executionerRuntimeRefusal = (agent: {
+  name: string;
+  model: string;
+  runnerPreference: RunnerPreference;
+}): string | null => {
+  if (agent.name !== "implementation-plan-executioner") return null;
+  if (runnerFor(agent.runnerPreference, agent.model) === RunnerKind.CODEX
+    && catalogRunnerForModel(agent.model) === RunnerPreference.CODEX) return null;
+  return "implementation-plan-executioner requires a Codex gpt-* model";
 };
 
-const executionerSubprocessRefusal = (agent: {
-  name: string;
-  ordinarySubprocessModel: string | null;
-  ordinarySubprocessCodexServiceTier: CodexServiceTier | null;
-  elevatedSubprocessModel: string | null;
-  elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
-}): string | null => {
-  const configured = agent.ordinarySubprocessModel !== null
-    || agent.ordinarySubprocessCodexServiceTier !== null
-    || agent.elevatedSubprocessModel !== null
-    || agent.elevatedSubprocessCodexServiceTier !== null;
-  if (agent.name !== "implementation-plan-executioner") {
-    return configured ? "Codex subprocess profiles belong only to implementation-plan-executioner" : null;
-  }
-  return codexSubprocessProfileRefusal(
-    "Ordinary",
-    agent.ordinarySubprocessModel,
-    agent.ordinarySubprocessCodexServiceTier,
-  ) ?? codexSubprocessProfileRefusal(
-    "Elevated",
-    agent.elevatedSubprocessModel,
-    agent.elevatedSubprocessCodexServiceTier,
-  );
-};
 const repoInput = z.object({
   name: z.string().trim().min(1).max(120),
   remoteUrl: z.string().trim().min(1),
@@ -982,6 +953,7 @@ const heartbeatInput = z.object({
 const cancelRunInput = z.object({
   requestId: z.string().trim().min(1).max(160),
   reason: z.string().trim().min(1).max(2000),
+  parkTask: z.boolean().default(false),
 });
 const cancelAcknowledgeInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
@@ -1356,7 +1328,7 @@ const settleCancellation = async (
   if (input.runnerId !== undefined && (run.runnerId !== input.runnerId || run.fencingToken !== input.fencingToken)) {
     return { error: "Cancellation acknowledgement is not owned by this runner", code: 409 };
   }
-  if (run.status === RunStatus.CANCELLED && run.cancelAcknowledgedAt) {
+  if (run.status === RunStatus.CANCELLED) {
     // Reconciliation can settle an expired cancellation before the runner's
     // final ACK arrives. That ACK is still the only durable account of a
     // workspace provisioned before /start, so idempotence must backfill its
@@ -1370,6 +1342,21 @@ const settleCancellation = async (
     if (input.baseSha !== undefined) await tx.run.updateMany({
       where: { id: run.id, baseSha: null }, data: { baseSha: input.baseSha },
     });
+    if (!run.cancelAcknowledgedAt && input.runnerId !== undefined) {
+      await tx.run.update({
+        where: { id: run.id },
+        data: { cancelAcknowledgedAt: input.now },
+      });
+      if (run.taskId) await tx.taskActivity.create({ data: {
+        taskId: run.taskId,
+        actorType: "runner",
+        actorId: input.actorId ?? null,
+        body: `Run ${run.runNumber} cancellation cleanup confirmed after terminalization`,
+        metadata: { runId: run.id, requestId: input.requestId, status: RunStatus.CANCELLED },
+      } });
+    } else if (!run.cancelAcknowledgedAt) {
+      return { error: "Cancellation cleanup has not been acknowledged by the runner", code: 409 };
+    }
     return { runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged", requestId: input.requestId };
   }
   if (run.taskId) await lockTaskMutationRows(tx, run.taskId);
@@ -1438,7 +1425,13 @@ type LockedTask = {
   archivedAt: Date | null;
   projectId: string;
   chainId: string | null;
+  assigneeType: AssigneeType;
   assigneeAgentId: string | null;
+  templateStep: {
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate: { name: string };
+  } | null;
 };
 
 /** Live means exactly what blocks an agent's archival: the same
@@ -1454,7 +1447,11 @@ const lockedTaskSelect = {
   archivedAt: true,
   projectId: true,
   chainId: true,
+  assigneeType: true,
   assigneeAgentId: true,
+  templateStep: {
+    select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+  },
 } satisfies Prisma.TaskSelect;
 
 /**
@@ -1650,6 +1647,22 @@ const assignmentBlocked = async (
   const locked = await lockAgentRow(tx, assignee.id);
   if (!locked) return "Assignee does not belong to this project";
   return locked.archivedAt ? `Assignee ${assignee.name} is archived` : null;
+};
+
+/** Rechecks the compound binding after the Task lock and under the Agent lock.
+ * The unlocked route check gives a fast refusal; this one decides against
+ * concurrent archive or persisted-state corruption before the write commits. */
+const assertCompoundImplementationAssignment = async (
+  tx: Prisma.TransactionClient,
+  task: LockedTask,
+  assigneeType: AssigneeType,
+  assigneeAgentId: string | null,
+): Promise<void> => {
+  if (task.archivedAt !== null || !isCompoundImplementationStep(task.templateStep)) return;
+  const agent = assigneeAgentId ? await lockAgentRow(tx, assigneeAgentId) : null;
+  if (!compoundImplementationAssigneeValid(task.projectId, assigneeType, agent, task.templateStep)) {
+    throw new CompoundImplementationAssigneeError();
+  }
 };
 
 /**
@@ -2080,10 +2093,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, agentInput);
     const modelRefusal = runnerModelRefusal(body);
     if (modelRefusal) return context.json({ error: modelRefusal }, 400);
+    const executionerRefusal = executionerRuntimeRefusal(body);
+    if (executionerRefusal) return context.json({ error: executionerRefusal }, 400);
     const tierRefusal = codexServiceTierRefusal(body);
     if (tierRefusal) return context.json({ error: tierRefusal }, 400);
-    const subprocessRefusal = executionerSubprocessRefusal(body);
-    if (subprocessRefusal) return context.json({ error: subprocessRefusal }, 400);
     const environment = await db.environment.findFirst({ where: { id: body.environmentId, projectId } });
     if (!environment) return context.json({ error: "Environment does not belong to this project" }, 400);
     const foundationalPrompt = body.foundationalPrompt ?? (await db.agent.findFirst({
@@ -2117,23 +2130,30 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const result = await db.$transaction(async (tx) => {
       const before = await lockAgentRow(tx, agentId);
       if (!before) return { error: "Agent not found", code: 404 as const };
-      const merged = { ...before, ...withoutUndefined(body) };
+      const patch = withoutUndefined(body);
+      const merged = { ...before, ...patch };
       if (before.name === "implementation-plan-executioner" && merged.name !== before.name) {
         return { error: "implementation-plan-executioner is a canonical Agent name and cannot be changed", code: 400 as const };
       }
       const modelRefusal = runnerModelRefusal(merged);
       if (modelRefusal) return { error: modelRefusal, code: 400 as const };
+      const executionerRefusal = executionerRuntimeRefusal(merged);
+      if (executionerRefusal) return { error: executionerRefusal, code: 400 as const };
       const tierRefusal = codexServiceTierRefusal(merged);
       if (tierRefusal) return { error: tierRefusal, code: 400 as const };
-      const subprocessRefusal = executionerSubprocessRefusal(merged);
-      if (subprocessRefusal) return { error: subprocessRefusal, code: 400 as const };
       if (body.environmentId) {
         const environment = await tx.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
         if (!environment) return { error: "Environment does not belong to this project", code: 400 as const };
       }
       return { agent: await tx.agent.update({
         where: { id: agentId },
-        data: withoutUndefined(body) as Prisma.AgentUncheckedUpdateInput,
+        data: {
+          ...patch,
+          ...((body.model !== undefined && body.model !== before.model)
+            || (body.runnerPreference !== undefined && body.runnerPreference !== before.runnerPreference)
+            ? { runtimeConfigCustomized: true }
+            : {}),
+        } as Prisma.AgentUncheckedUpdateInput,
       }) };
     });
     if ("error" in result) return context.json({ error: result.error }, result.code);
@@ -3082,7 +3102,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runs: {
             orderBy: { runNumber: "desc" },
             select: {
-              id: true, runNumber: true, status: true, model: true,
+              id: true, runNumber: true, status: true, model: true, subagentModel: true,
               session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true, startedAt: true, endedAt: true } },
             },
           },
@@ -3198,7 +3218,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
       if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
         const derived = deriveRunConfig(currentAgent, null, created);
-        const subprocess = await subprocessRunConfig(currentAgent);
         // This run is built inline rather than through enqueueTaskRun, so it is
         // one of the paths a chain fix can miss. Missing it puts step ① on a
         // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
@@ -3215,7 +3234,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             runner: derived.runner,
             model: derived.model,
             codexServiceTier: derived.codexServiceTier,
-            ...subprocess,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: created.opensPullRequest,
@@ -3267,7 +3285,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const mergeOutcome = projectMergeOutcome(task.stepOutput);
     const usageCosts = task.runs.map((run) => run.session === null
       ? null
-      : sessionUsageCost(run.model, run.session));
+      : sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null }));
     return context.json({
       ...task,
       executionOwner: chainExecutionOwner(task),
@@ -3443,6 +3461,31 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const assignee = body.assigneeAgentId
       ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } })
       : null;
+    const effectiveAgentId = body.assigneeAgentId === undefined ? before.assigneeAgentId : body.assigneeAgentId;
+    const effectiveAssigneeType = body.assigneeType ?? before.assigneeType;
+    if (before.archivedAt === null
+      && (body.assigneeType !== undefined || body.assigneeAgentId !== undefined)) {
+      const [effectiveAgent, templateStep] = await Promise.all([
+        effectiveAgentId
+          ? db.agent.findFirst({ where: { id: effectiveAgentId, projectId: before.projectId } })
+          : null,
+        before.templateStepId
+          ? db.taskTemplateStep.findUnique({
+            where: { id: before.templateStepId },
+            select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+          })
+          : null,
+      ]);
+      if (!compoundImplementationAssigneeValid(
+        before.projectId,
+        effectiveAssigneeType,
+        effectiveAgent,
+        templateStep,
+      )) {
+        const error = new CompoundImplementationAssigneeError();
+        return context.json({ error: error.message, code: error.code }, 409);
+      }
+    }
     if (body.assigneeAgentId) {
       if (!assignee) return context.json({ error: "Assignee does not belong to this project" }, 400);
       if (assignee.archivedAt) return context.json({ error: `Assignee ${assignee.name} is archived` }, 400);
@@ -3451,7 +3494,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const repo = await db.repo.findFirst({ where: { id: body.repoId, projectId: before.projectId } });
       if (!repo) return context.json({ error: "Repo does not belong to this project" }, 400);
     }
-    const effectiveAgentId = body.assigneeAgentId === undefined ? before.assigneeAgentId : body.assigneeAgentId;
     const effectiveRepoId = body.repoId === undefined ? before.repoId : body.repoId;
     if (effectiveAgentId && effectiveRepoId) {
       const access = await db.agentRepoAccess.findFirst({
@@ -3459,7 +3501,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
-    const effectiveAssigneeType = body.assigneeType ?? before.assigneeType;
     // §D-P4 on reassignment. `templateStepId` is not a patchable field, so the
     // step half of the pair cannot move under this check; the assignee half is
     // exactly what this route can move, in either direction — an ordinary task
@@ -3525,6 +3566,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
         }
         // Task rows first, then the Agent row — the one global lock order.
+        if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
+          await assertCompoundImplementationAssignment(
+            tx,
+            locked,
+            body.assigneeType ?? locked.assigneeType,
+            body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
+          );
+        }
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
         // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
@@ -3561,6 +3610,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: stopStateRefusal(stopped), code: 409 as const };
         }
         let winningGateCard: { id: string; body: string; gateTaskId: string | null; sessionId: string | null } | null = null;
+        let winningGateRunId: string | null = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
             return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
@@ -3588,25 +3638,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               };
             }
           }
-          // §D-P2 rule 2 / Y4. For an integrator gate the closed-card set plus a
-          // status activity is not a durable decision identity, and it is partly
-          // forgeable through POST /tasks/:taskId/activity. This channel
-          // therefore names one winning card and answers it, so the same
-          // server-only anchors the Inbox channel produces exist here too. The
-          // earliest OPEN card is the deterministic winner.
-          const integratorGate = await gateFeedsIntegratorStep(tx, before);
-          if (integratorGate) {
-            winningGateCard = await tx.inboxMessage.findFirst({
-              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
-              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-              select: { id: true, body: true, gateTaskId: true, sessionId: true },
-            });
-            if (winningGateCard) {
-              await tx.inboxMessage.update({
-                where: { id: winningGateCard.id },
-                data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
-              });
+          // A Human approval has one durable decision identity on both API
+          // channels. The earliest OPEN card is the deterministic winner; the
+          // gate Task lock above makes this selection and the Inbox route's OPEN
+          // claim one compare-and-set rather than two competing decisions.
+          winningGateCard = await tx.inboxMessage.findFirst({
+            where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: { id: true, body: true, gateTaskId: true, sessionId: true },
+          });
+          if (winningGateCard) {
+            const session = winningGateCard.sessionId
+              ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
+              : null;
+            if (!session?.runId) {
+              return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
             }
+            winningGateRunId = session.runId;
+            await tx.inboxMessage.update({
+              where: { id: winningGateCard.id },
+              data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
+            });
           }
           // This OPEN row is the gate-decision CAS. It deliberately depends on
           // neither templateId nor approvalGate: gate creation records the
@@ -3638,15 +3690,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
         let authorization: Awaited<ReturnType<typeof produceMergeAuthorization>> = null;
         if (winningGateCard) {
-          const session = winningGateCard.sessionId
-            ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
-            : null;
-          if (!session?.runId) {
-            return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
-          }
           const decisionRow = await tx.inboxDecision.create({ data: {
             inboxMessageId: winningGateCard.id,
-            runId: session.runId,
+            runId: winningGateRunId!,
             externalEventId: `patch:${taskId}:${statusActivityId ?? winningGateCard.id}`,
             decision: "approve",
             actorOpenId: "patch-operator",
@@ -3676,6 +3722,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const updated = await db.$transaction(async (tx) => {
         const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
+        if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
+          await assertCompoundImplementationAssignment(
+            tx,
+            locked,
+            body.assigneeType ?? locked.assigneeType,
+            body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
+          );
+        }
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
         return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
@@ -3689,6 +3743,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const written = await db.$transaction(async (tx) => {
         const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
+        await assertCompoundImplementationAssignment(
+          tx,
+          locked,
+          body.assigneeType ?? locked.assigneeType,
+          body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
+        );
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
         return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
@@ -3797,7 +3857,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const currentBinding = integratorBindingRefusal(lockedAgent.name, integratorStepShape);
       if (currentBinding) return { error: currentBinding, code: 400 as const };
       const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-      const subprocess = await subprocessRunConfig(lockedAgent, task.templateStep);
+      const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
       // A task with no repo cannot be a chain step with a branch, and this route
       // already tolerates a null repoId — so it keeps inheriting run-1's fields.
       const branches = task.repo
@@ -3815,7 +3875,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runner: derived.runner,
           model: derived.model,
           codexServiceTier: derived.codexServiceTier,
-          ...subprocess,
+          ...subagent,
           targetBranch: branches ? branches.targetBranch : last.targetBranch,
           branch: branches ? branches.branch : last.branch,
           opensPullRequest: task.opensPullRequest,
@@ -5846,10 +5906,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             runner: run.runner,
             model: run.model,
             codexServiceTier: run.codexServiceTier,
-            subprocessModel: run.subprocessModel,
-            subprocessCodexServiceTier: run.subprocessCodexServiceTier,
-            elevatedSubprocessModel: run.elevatedSubprocessModel,
-            elevatedSubprocessCodexServiceTier: run.elevatedSubprocessCodexServiceTier,
+            subagentModel: run.subagentModel,
+            subagentMaxConcurrent: run.subagentMaxConcurrent,
             targetBranch: branches.targetBranch,
             branch: branches.branch,
             opensPullRequest: currentTask.opensPullRequest,
@@ -6361,15 +6419,41 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       if (!run) return { error: "Run not found", code: 404 as const };
+      if (body.parkTask && !run.taskId) return { error: "Run has no Task to park", code: 409 as const };
+      const parkTarget = body.parkTask && run.taskId ? await lockTask(tx, run.taskId) : null;
+      if (body.parkTask && run.taskId && !parkTarget) return { error: "Task not found", code: 404 as const };
+      if (parkTarget && parkTarget.archivedAt !== null) {
+        return { error: "Cannot park an archived task", code: 409 as const };
+      }
+      if (parkTarget?.status === TaskStatus.DONE) return { error: "Cannot park a completed task", code: 409 as const };
+      const parkTask = async () => {
+        const task = parkTarget;
+        if (!task) return;
+        if (task.status === TaskStatus.BACKLOG) return null;
+        const reason = run.cancelRequestId ? run.cancelReason ?? body.reason : body.reason;
+        await tx.task.update({
+          where: { id: task.id },
+          data: { status: TaskStatus.BACKLOG, failureReason: reason },
+        });
+        await tx.taskActivity.create({ data: {
+          taskId: task.id,
+          actorType: "operator",
+          body: `Status changed: ${task.status} → ${TaskStatus.BACKLOG}`,
+          metadata: { runId: run.id, requestId: body.requestId, reason: "stop-and-park" },
+        } });
+      };
       if (run.cancelRequestId) {
         if (run.cancelRequestId !== body.requestId) {
           return { error: `Run already has cancellation request ${run.cancelRequestId}`, code: 409 as const };
         }
+        await parkTask();
         return {
           runId: run.id,
           taskId: run.taskId,
           status: run.status,
-          cancellationState: run.cancelAcknowledgedAt ? "acknowledged" as const : "requested" as const,
+          cancellationState: run.cancelAcknowledgedAt
+            ? "acknowledged" as const
+            : run.status === RunStatus.CANCELLED ? "unconfirmed" as const : "requested" as const,
           requestId: run.cancelRequestId,
           reason: run.cancelReason,
         };
@@ -6398,16 +6482,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       if (requested.count !== 1) return { error: "Run changed while cancellation was being requested", code: 409 as const };
+      await parkTask();
       if (run.taskId) await tx.taskActivity.create({ data: {
         taskId: run.taskId,
         actorType: "operator",
         body: `Cancellation requested for Run ${run.runNumber}: ${body.reason}`,
         metadata: { runId: run.id, requestId: body.requestId, priorStatus: run.status, state: "requested" },
       } });
-      // No provider process exists before claim or while suspended for Inbox,
-      // so the control plane can acknowledge these states immediately. Claimed,
-      // provisioning, and running owners must first kill their process group.
-      if (run.status === RunStatus.QUEUED || run.status === RunStatus.WAITING_INBOX) {
+      // An unclaimed Run has never had a provider process. Every claimed state,
+      // including WAITING_INBOX, requires runner-owned process cleanup or an
+      // explicitly unconfirmed terminalization after runner loss.
+      if (run.status === RunStatus.QUEUED) {
         return settleCancellation(tx, { runId: run.id, requestId: body.requestId, now });
       }
       return {
@@ -6439,6 +6524,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.onError((error, context) => {
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
+    if (isCompoundImplementationAssigneeError(error)) {
+      return context.json({ error: error.message, code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE }, 409);
+    }
+    if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === "P2025") return context.json({ error: "Resource not found" }, 404);
       if (error.code === "P2002") return context.json({ error: "Unique constraint violated" }, 409);

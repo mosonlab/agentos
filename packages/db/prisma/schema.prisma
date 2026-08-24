@@ -247,13 +247,10 @@ model Agent {
   name               String
   title              String
   model              String
+  /// Set when the operator changes model or runner in the console. Canonical
+  /// seed and prompt sync preserve this runtime choice.
+  runtimeConfigCustomized Boolean          @default(false)
   codexServiceTier   CodexServiceTier     @default(DEFAULT)
-  /// Profiles used only by the compound implementation executioner. They are
-  /// nullable for every other Agent and snapshotted onto each Run.
-  ordinarySubprocessModel            String?
-  ordinarySubprocessCodexServiceTier CodexServiceTier?
-  elevatedSubprocessModel            String?
-  elevatedSubprocessCodexServiceTier CodexServiceTier?
   foundationalPrompt String
   rolePrompt         String
   runnerPreference   RunnerPreference     @default(INHERIT)
@@ -820,12 +817,10 @@ model Run {
   /// Immutable launch snapshot. DEFAULT is explicit rather than an omitted
   /// provider value, so AgentOS never delegates this choice to `auto`.
   codexServiceTier      CodexServiceTier     @default(DEFAULT)
-  /// The ordinary implementation subprocess profile for an executioner Run.
-  /// Null for every Agent that does not schedule its own Codex subprocesses.
-  subprocessModel       String?
-  subprocessCodexServiceTier CodexServiceTier?
-  elevatedSubprocessModel       String?
-  elevatedSubprocessCodexServiceTier CodexServiceTier?
+  /// Immutable native-child capability snapshot. Null outside Codex
+  /// implementation steps; fixed by the platform rather than Agent setup.
+  subagentModel         String?
+  subagentMaxConcurrent Int?
   authMode              String?
   manifest              Json?
   promptHash            String

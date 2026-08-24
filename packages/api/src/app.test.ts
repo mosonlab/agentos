@@ -5,7 +5,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { Prisma, RunStatus, RunnerKind, RunnerPreference, type PrismaClient } from "@agentos/db";
+import {
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  Prisma,
+  RunStatus,
+  RunnerKind,
+  RunnerPreference,
+  type PrismaClient,
+} from "@agentos/db";
 
 import { createApp, partitionArchivable } from "./test-app.js";
 import { createApp as createLiveApp } from "./app.js";
@@ -34,10 +41,6 @@ const lockedAgent = <T extends Record<string, unknown>>(agent: T | null): (T & R
   name: "Agent",
   archivedAt: null,
   codexServiceTier: "DEFAULT",
-  ordinarySubprocessModel: null,
-  ordinarySubprocessCodexServiceTier: null,
-  elevatedSubprocessModel: null,
-  elevatedSubprocessCodexServiceTier: null,
   ...agent,
 }) : null;
 
@@ -182,7 +185,7 @@ test("task status patch does not apply create defaults to other fields", async (
         update: async ({ data }: { data: unknown }) => { updateData = data; return { id: "task-1", status: "DONE" }; },
       },
       run: { count: async () => 0 },
-      inboxMessage: { updateMany: async () => ({ count: 0 }), count: async () => 0 },
+      inboxMessage: { findFirst: async () => null, updateMany: async () => ({ count: 0 }), count: async () => 0 },
       taskActivity: { create: async () => ({ id: "activity-1" }) },
     };
     const database = {
@@ -196,6 +199,55 @@ test("task status patch does not apply create defaults to other fields", async (
     });
     assert.equal(response.status, 200);
     assert.deepEqual(updateData, { status: "DONE" });
+  });
+});
+
+test("task PATCH names and rejects an invalid compound implementation assignee before writing", async () => {
+  await withTokens(async () => {
+    let updates = 0;
+    const before = {
+      id: "implementation-1",
+      projectId: "project-1",
+      name: "Implementation",
+      description: "execute the plan",
+      status: "TODO",
+      archivedAt: null,
+      assigneeType: "AGENT",
+      assigneeAgentId: "executioner-1",
+      repoId: "repo-1",
+      templateStepId: "step-5",
+      chainId: "chain-1",
+      approvalGate: false,
+    };
+    const senior = {
+      id: "senior-1",
+      projectId: before.projectId,
+      name: "senior-dev-high",
+      archivedAt: null,
+    };
+    const database = {
+      task: {
+        findUniqueOrThrow: async () => before,
+        update: async () => { updates += 1; return before; },
+      },
+      agent: { findFirst: async () => senior },
+      taskTemplateStep: { findUnique: async () => ({
+        stepIndex: 5,
+        outputKind: "implementation",
+        taskTemplate: { name: "compound-engineer-workflow" },
+      }) },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/tasks/${before.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ assigneeAgentId: senior.id }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+    });
+    assert.equal(updates, 0);
   });
 });
 
@@ -300,6 +352,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
         findUniqueOrThrow: async () => successor,
       },
       inboxMessage: {
+        findFirst: async () => null,
         updateMany: async () => { closed = true; return { count: 1 }; },
         count: async () => 1,
       },
@@ -346,6 +399,7 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
       },
       run: { count: async () => 0 },
       inboxMessage: {
+        findFirst: async () => null,
         updateMany: async ({ where }: { where: unknown }) => { closedWhere = where; return { count: 1 }; },
         count: async () => 1,
       },
@@ -1029,7 +1083,7 @@ test("Agent API refuses Fast for a non-Codex model", async () => {
   });
 });
 
-test("Agent API refuses an atomic executioner rename and subprocess-profile clear", async () => {
+test("Agent API refuses an executioner rename", async () => {
   await withTokens(async () => {
     let updated = false;
     const executioner = lockedAgent({
@@ -1038,14 +1092,10 @@ test("Agent API refuses an atomic executioner rename and subprocess-profile clea
       environmentId: "environment-1",
       name: "implementation-plan-executioner",
       title: "Implementation Plan Executioner",
-      model: "gpt-5.6-sol:medium",
+      model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
-      ordinarySubprocessModel: "gpt-5.6-luna:max",
-      ordinarySubprocessCodexServiceTier: "DEFAULT",
-      elevatedSubprocessModel: "gpt-5.6-sol:high",
-      elevatedSubprocessCodexServiceTier: "DEFAULT",
     });
     const tx = {
       $queryRaw: async () => [{ id: executioner!.id }],
@@ -1061,19 +1111,98 @@ test("Agent API refuses an atomic executioner rename and subprocess-profile clea
     const response = await createApp(database).request(`/agents/${executioner!.id}`, {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: "renamed-executioner",
-        ordinarySubprocessModel: null,
-        ordinarySubprocessCodexServiceTier: null,
-        elevatedSubprocessModel: null,
-        elevatedSubprocessCodexServiceTier: null,
-      }),
+      body: JSON.stringify({ name: "renamed-executioner" }),
     });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), {
       error: "implementation-plan-executioner is a canonical Agent name and cannot be changed",
     });
     assert.equal(updated, false);
+  });
+});
+
+test("Agent API refuses a non-Codex executioner runtime", async () => {
+  await withTokens(async () => {
+    let updated = false;
+    const executioner = lockedAgent({
+      id: "agent-executioner",
+      projectId: "project-1",
+      environmentId: "environment-1",
+      name: "implementation-plan-executioner",
+      title: "Implementation Plan Executioner",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    });
+    const tx = {
+      $queryRaw: async () => [{ id: executioner!.id }],
+      agent: {
+        findUnique: async () => executioner,
+        update: async () => { updated = true; return executioner; },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "implementation-plan-executioner requires a Codex gpt-* model",
+    });
+    assert.equal(updated, false);
+  });
+});
+
+test("Agent API does not mark unchanged runtime fields as an operator override", async () => {
+  await withTokens(async () => {
+    let updateData: Record<string, unknown> | null = null;
+    const executioner = lockedAgent({
+      id: "agent-executioner",
+      projectId: "project-1",
+      environmentId: "environment-1",
+      name: "implementation-plan-executioner",
+      title: "Implementation Plan Executioner",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      runtimeConfigCustomized: false,
+    });
+    const tx = {
+      $queryRaw: async () => [{ id: executioner!.id }],
+      agent: {
+        findUnique: async () => executioner,
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          updateData = data;
+          return { ...executioner, ...data };
+        },
+      },
+    };
+    const database = {
+      ...tx,
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Renamed title",
+        model: executioner!.model,
+        runnerPreference: executioner!.runnerPreference,
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(updateData, {
+      title: "Renamed title",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+    });
   });
 });
 

@@ -39,10 +39,8 @@ const claim: ClaimedTask = {
     maxRunsPerTask: 3,
     model: "codex",
     codexServiceTier: "DEFAULT",
-    subprocessModel: null,
-    subprocessCodexServiceTier: null,
-    elevatedSubprocessModel: null,
-    elevatedSubprocessCodexServiceTier: null,
+    subagentModel: null,
+    subagentMaxConcurrent: null,
     targetBranch: "main",
     targetBranchPublished: false,
     pinnedBaseSha: null,
@@ -87,6 +85,60 @@ const stableArgv = (args: string[]): string[] => args.map((arg) => arg
   .replaceAll(mcpServerPath(), "<MCP_SERVER>")
   .replaceAll(piExtensionPath(), "<PI_EXTENSION>")
   .replaceAll(claudePlatformSettingsPath(), "<CLAUDE_SETTINGS>"));
+
+const processAlive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+const waitForProcessExit = async (pid: number): Promise<boolean> => {
+  for (let waited = 0; waited < 3_000; waited += 25) {
+    if (!processAlive(pid)) return true;
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  return false;
+};
+
+test("cancellation drains a Run-owned descendant that starts a separate process group", { timeout: 20_000 }, async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "agentos-run-drain-"));
+  const binary = join(fixture, "provider.mjs");
+  const pidFile = join(fixture, "descendant.pid");
+  await writeFile(binary, [
+    "#!/usr/bin/env node",
+    'import { spawn } from "node:child_process";',
+    'import { writeFileSync } from "node:fs";',
+    `const descendant = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { detached: true, stdio: "ignore", env: process.env });`,
+    "descendant.unref();",
+    `writeFileSync(${JSON.stringify(pidFile)}, String(descendant.pid));`,
+    "setInterval(() => undefined, 1000);",
+    "",
+  ].join("\n"));
+  await chmod(binary, 0o755);
+  let descendantPid: number | null = null;
+  try {
+    const spec = runSpec();
+    spec.config = { ...spec.config, binaries: { CLAUDE: binary, CODEX: binary, PI: binary } };
+    spec.claim = { ...spec.claim, run: { ...spec.claim.run, id: `run-drain-${process.pid}` } };
+    spec.workingDirectory = fixture;
+    spec.env = { PATH: process.env.PATH ?? "/usr/bin:/bin", AGENTOS_RUN_ID: spec.claim.run.id };
+    const handle = await adapters.CODEX.start(spec, () => undefined);
+    for (let waited = 0; waited < 3_000; waited += 25) {
+      try {
+        descendantPid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
+        break;
+      } catch {
+        await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25));
+      }
+    }
+    assert.ok(descendantPid && Number.isInteger(descendantPid));
+    assert.equal(processAlive(descendantPid), true);
+    const result = await adapters.CODEX.kill(handle, "operator stop");
+    assert.equal(result.processAlive, false);
+    assert.equal(await waitForProcessExit(descendantPid), true, "detached Run-owned descendant survived cancellation");
+  } finally {
+    if (descendantPid && processAlive(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
 
 test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
@@ -191,12 +243,14 @@ test("buildPrompt gives a retry the immediate prior output without reusing provi
       status: "SUCCEEDED",
       failureReason: null,
       retryReason: "approval-rejected-without-feedback",
-      output: { kind: "plan", body: "Prior plan body", commitSha: "a".repeat(40) },
+      output: { runId: "run-1", kind: "plan", body: "Prior plan body", commitSha: "a".repeat(40) },
     },
   });
   assert.match(prompt, /Platform-pinned previous-run handoff:[\s\S]*Prior plan body/u);
   assert.match(prompt, /fresh provider Session/u);
   assert.match(prompt, /approval-rejected-without-feedback/u);
+  assert.match(prompt, /output remains bound to Run run-1/u);
+  assert.match(prompt, /publish the current Run's canonical task_output/u);
   assert.match(prompt, /Use inbox_ask to obtain the required change/u);
 });
 
@@ -379,49 +433,44 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
   }
 });
 
-test("executioner child environment exposes both snapshotted subprocess profiles", () => {
+test("native implementation subagents are pinned on fresh and resumed Codex launches", () => {
   const executioner = {
     ...claim,
     agent: { ...claim.agent, name: "implementation-plan-executioner" },
     run: {
       ...claim.run,
-      subprocessModel: "gpt-5.6-luna:max",
-      subprocessCodexServiceTier: "FAST" as const,
-      elevatedSubprocessModel: "gpt-5.6-sol:high",
-      elevatedSubprocessCodexServiceTier: "DEFAULT" as const,
-    },
-    secrets: {
-      ...claim.secrets,
-      AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER: "default",
+      subagentModel: "gpt-5.6-luna:max",
+      subagentMaxConcurrent: 8,
     },
   };
-  const env = buildChildEnvironment(
-    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [] },
-    executioner,
-    scratch,
-    "/work",
-  );
-  assert.equal(env.AGENTOS_ORDINARY_CODEX_SUBPROCESS_MODEL, "gpt-5.6-luna");
-  assert.equal(env.AGENTOS_ORDINARY_CODEX_SUBPROCESS_REASONING_EFFORT, "max");
-  assert.equal(env.AGENTOS_ORDINARY_CODEX_SUBPROCESS_SERVICE_TIER, "fast");
-  assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_MODEL, "gpt-5.6-sol");
-  assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_REASONING_EFFORT, "high");
-  assert.equal(env.AGENTOS_ELEVATED_CODEX_SUBPROCESS_SERVICE_TIER, "default");
-  assert.match(buildPrompt(executioner), /service tier: fast/u);
-  assert.throws(
-    () => buildPrompt({ ...executioner, run: { ...claim.run } }),
-    /missing its Codex subprocess snapshot/u,
-  );
+  const resume = { ...runSpec(), claim: executioner, providerConversationId: "thread-child", input: "continue" };
+  for (const args of [argsForRunner("CODEX", { ...runSpec(), claim: executioner }), argsForRunner("CODEX", resume, resume)]) {
+    assert.ok(args.includes("multi_agent_v2"));
+    assert.ok(args.includes('agents.default_subagent_model="gpt-5.6-luna"'));
+    assert.ok(args.includes('agents.default_subagent_reasoning_effort="max"'));
+    assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
+  }
+  assert.match(buildPrompt(executioner), /maximum concurrent child threads: 8 \(root excluded\)/u);
+  assert.match(buildPrompt(executioner), /do not launch nested Codex CLI processes/u);
+  assert.match(buildPrompt(executioner), /one affected-workspace compile or typecheck after integration/u);
+  assert.match(buildPrompt(executioner), /Do not run repository-wide suites or the repository Merge Gate in Implementation/u);
   assert.throws(
     () => buildPrompt({
       ...executioner,
       run: {
         ...executioner.run,
-        elevatedSubprocessModel: null,
-        elevatedSubprocessCodexServiceTier: null,
+        subagentMaxConcurrent: null,
       },
     }),
-    /incomplete Codex subprocess snapshot/u,
+    /incomplete native subagent snapshot/u,
+  );
+  assert.throws(() => buildPrompt({
+    ...executioner,
+    run: { ...executioner.run, subagentModel: "gpt-5.6-sol:high" },
+  }), /must use gpt-5\.6-luna:max with concurrency 8/u);
+  assert.throws(
+    () => buildPrompt({ ...executioner, runner: "PI" }),
+    /require a Codex root Run/u,
   );
 });
 
@@ -890,6 +939,54 @@ test("Codex structured errors take precedence over stderr warnings", async () =>
 
   assert.equal(evidence.providerError, "policy denied");
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
+});
+
+test("PI terminal success follows the final provider attempt after an internal retry", async () => {
+  const script = [
+    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+    "emit({type:'turn_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'fetch failed'}});",
+    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'fetch failed'}],willRetry:true});",
+    "emit({type:'turn_end',message:{role:'assistant',content:[{type:'text',text:'final PASS'}],stopReason:'stop'}});",
+    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'stop'}],willRetry:false});",
+    "emit({type:'agent_settled'});",
+  ].join("");
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", script],
+  } as unknown as RunnerConfig;
+  const handle = await adapters.PI.start({
+    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
+    credentialsPath: "/tmp/session.json",
+  }, () => undefined);
+
+  const evidence = await handle.exit;
+  assert.equal(evidence.terminalSuccess, true);
+  assert.equal(evidence.providerError, null);
+  assert.equal(evidence.finalOutput, "final PASS");
+  assert.equal(adapterExecutionSucceeded(evidence), true);
+});
+
+test("PI exposes the exhausted provider error instead of a generic protocol failure", async () => {
+  const script = [
+    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+    "emit({type:'turn_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'fetch failed'}});",
+    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'fetch failed'}],willRetry:false});",
+    "emit({type:'agent_settled'});",
+  ].join("");
+  const config = {
+    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+    runAsPrefix: [process.execPath, "-e", script],
+  } as unknown as RunnerConfig;
+  const handle = await adapters.PI.start({
+    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
+    credentialsPath: "/tmp/session.json",
+  }, () => undefined);
+
+  const evidence = await handle.exit;
+  assert.equal(evidence.terminalEventSeen, true);
+  assert.equal(evidence.terminalSuccess, false);
+  assert.equal(evidence.providerError, "fetch failed");
+  assert.deepEqual(adapters.PI.classifyError(evidence), { failureClass: "TRANSIENT_PROVIDER", retryable: true });
 });
 
 test("Codex agent progress renews an open command deadline while stderr does not", async () => {

@@ -74,7 +74,7 @@ export const FILES_PRECHECK_COMMAND = ["npm", "run", "db:files-precheck"] as con
  * match what is on disk.
  */
 export const RELEASE_CANDIDATE_MIGRATIONS = {
-  count: 27,
+  count: 29,
   terminal: "20260824100000_chain_layer_contract",
 } as const;
 

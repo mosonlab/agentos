@@ -3,7 +3,7 @@ import { RunnerKind, RunnerPreference } from "@prisma/client";
 export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
+  { name: "implementation-plan-executioner", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "librarian", model: "gpt-5.6-terra:high", runner: RunnerPreference.CODEX },
   // Not an LLM role. The sentinel Agent row step 12 binds so a mechanical run
   // can carry a non-null `Run.agentId` without presenting a second human gate.
@@ -24,6 +24,29 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
   { name: "spec", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
 ] as const;
+
+/**
+ * Runtime migrations that predate operator-owned model selections. These are
+ * the only persisted model/runner changes canonical sync may adopt without an
+ * explicit operator override.
+ */
+export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
+  from: { model: string; runnerPreference: RunnerPreference };
+  to: { model: string; runnerPreference: RunnerPreference };
+}>([
+  ["review-coordinator", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
+  ["review-coordinator-sol", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+  }],
+  ["implementation-plan-executioner", {
+    from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+  }],
+]);
 
 /**
  * The Direct tier has no spec or plan phase and ends in the same mechanical

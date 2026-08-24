@@ -26,6 +26,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, PrismaClient, TaskStatus } from "@agentos/db";
 
 import { hashToken } from "./auth.js";
+import { previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -460,6 +461,25 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   const stopped = await db.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(stopped.status, TaskStatus.REVIEW);
   assert.match(stopped.failureReason ?? "", /belongs to prior Run/u);
+
+  const queuedThird = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(queuedThird.status, 201, JSON.stringify(queuedThird.body));
+  const loaded = await db.task.findUniqueOrThrow({
+    where: { id: task.id },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
+    taskId: task.id,
+    runId: queuedThird.body.id as string,
+    runNumber: 3,
+    templateStep: loaded.templateStep,
+  }));
+  assert.deepEqual(handoff?.output, {
+    runId: firstRunId,
+    kind: "implementation",
+    body: implementationOutput("Run 1 implementation"),
+    commitSha: SHA,
+  });
 });
 
 test("canonical JSON contracts reject malformed bodies and never activate a successor", async () => {
@@ -765,7 +785,12 @@ test("canonical approval revision requeues the same Spec, hands off its output, 
     status: "SUCCEEDED",
     failureReason: null,
     retryReason: "approval-rejected-without-feedback",
-    output: { kind: "spec", body: specOutput("first specification rejected at approval"), commitSha: SHA },
+    output: {
+      runId: firstRunId,
+      kind: "spec",
+      body: specOutput("first specification rejected at approval"),
+      commitSha: SHA,
+    },
   });
   // A fresh branch/head alone is not approval evidence: Plan remains closed
   // until this Run publishes and completes a replacement persisted artifact.

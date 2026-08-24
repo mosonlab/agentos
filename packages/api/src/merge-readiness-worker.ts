@@ -579,6 +579,7 @@ export const readinessTick = async (
           update: { kind: "merge-authorization", body: JSON.stringify({ authorizationActivityId: activity.id, headSha: evidence.headSha }), commitSha: evidence.headSha },
         });
         await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.DONE, failureReason: null } });
+        await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
         await tx.taskActivity.create({ data: {
           taskId: readiness.id,
           actorType: "control-plane",

@@ -12,7 +12,6 @@ import { AgentDetailPage, NewAgent } from "../pages/Agents";
 const value: Agent = {
   id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
   model: "claude-opus-5:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
-  ordinarySubprocessModel: null, ordinarySubprocessCodexServiceTier: null, elevatedSubprocessModel: null, elevatedSubprocessCodexServiceTier: null,
   foundationalPrompt: "the canonical foundation", rolePrompt: "role", createdAt: "2026-08-16T00:00:00.000Z",
   updatedAt: "2026-08-16T00:00:00.000Z", archivedAt: null,
 };

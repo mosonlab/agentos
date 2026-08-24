@@ -15,6 +15,15 @@ import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const RUNNER_TOKEN = "claim-activation-isolation-runner";
+const IMPLEMENTATION_BASE = "b".repeat(40);
+const IMPLEMENTATION_HEAD = "a".repeat(40);
+const implementationBody = (headSha = IMPLEMENTATION_HEAD) => JSON.stringify({
+  schemaVersion: 1,
+  baseSha: IMPLEMENTATION_BASE,
+  headSha,
+  summary: "preserved implementation evidence",
+  testsRun: ["focused"],
+});
 const priorRunnerToken = process.env.RUNNER_TOKEN;
 let db: PrismaClient;
 
@@ -108,15 +117,16 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
   const sourceRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, sourceTask.id));
   await db.run.update({
     where: { id: sourceRun.id },
-    data: { status: RunStatus.SUCCEEDED, baseSha: "b".repeat(40), endedAt: new Date() },
+    data: { status: RunStatus.SUCCEEDED, baseSha: IMPLEMENTATION_BASE, endedAt: new Date() },
   });
   await db.task.update({ where: { id: sourceTask.id }, data: { status: TaskStatus.DONE } });
+  const originalSourceBody = implementationBody();
   const sourceOutput = await db.taskStepOutput.create({ data: {
     taskId: sourceTask.id,
     runId: sourceRun.id,
     kind: "implementation",
-    body: "preserved implementation evidence",
-    commitSha: "a".repeat(40),
+    body: originalSourceBody,
+    commitSha: IMPLEMENTATION_HEAD,
   } });
   const poisonTask = await db.task.create({ data: {
     projectId: project.id,
@@ -137,7 +147,9 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
   ));
   await db.taskStepOutput.update({
     where: { id: sourceOutput.id },
-    data: { commitSha: options.inconsistent ? "c".repeat(40) : null },
+    data: options.inconsistent
+      ? { commitSha: "c".repeat(40), body: implementationBody("c".repeat(40)) }
+      : { commitSha: null },
   });
 
   let validTask: Awaited<ReturnType<typeof db.task.create>> | null = null;
@@ -156,7 +168,20 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
       new Date("2026-01-01T00:00:01.000Z"),
     ));
   }
-  return { project, environment, agent, repo, sourceTask, sourceRun, sourceOutput, poisonTask, poisonRun, validTask, validRun };
+  return {
+    project,
+    environment,
+    agent,
+    repo,
+    sourceTask,
+    sourceRun,
+    sourceOutput,
+    expectedSourceBody: options.inconsistent ? implementationBody("c".repeat(40)) : originalSourceBody,
+    poisonTask,
+    poisonRun,
+    validTask,
+    validRun,
+  };
 };
 
 const assertPoisonIsolated = async (
@@ -193,7 +218,7 @@ const assertPoisonIsolated = async (
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0]!.dedupeKey, `candidate-activation-failed:${seeded.poisonRun.id}`);
   assert.match(notifications[0]!.body, new RegExp(`${failureType}:`, "u"));
-  assert.equal(output.body, "preserved implementation evidence");
+  assert.equal(output.body, seeded.expectedSourceBody);
 };
 
 test("one claim isolates a poisoned pinned candidate and returns the next valid run", async () => {

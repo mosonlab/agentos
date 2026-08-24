@@ -28,10 +28,6 @@ test("instantiating the canonical feature template copies every layer and writes
     model: string;
     runnerPreference: RunnerPreference;
     codexServiceTier: CodexServiceTier;
-    ordinarySubprocessModel: string | null;
-    ordinarySubprocessCodexServiceTier: CodexServiceTier | null;
-    elevatedSubprocessModel: string | null;
-    elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
     foundationalPrompt: string;
     rolePrompt: string;
   }>(CANONICAL_AGENT_DEFAULTS.map((contract, index) => [contract.name, {
@@ -40,10 +36,6 @@ test("instantiating the canonical feature template copies every layer and writes
     model: contract.model,
     runnerPreference: contract.runner,
     codexServiceTier: CodexServiceTier.DEFAULT,
-    ordinarySubprocessModel: contract.name === "implementation-plan-executioner" ? "gpt-5.6-luna:max" : null,
-    ordinarySubprocessCodexServiceTier: contract.name === "implementation-plan-executioner" ? CodexServiceTier.DEFAULT : null,
-    elevatedSubprocessModel: contract.name === "implementation-plan-executioner" ? "gpt-5.6-sol:high" : null,
-    elevatedSubprocessCodexServiceTier: contract.name === "implementation-plan-executioner" ? CodexServiceTier.DEFAULT : null,
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   }]));

@@ -17,11 +17,11 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   LIVE_TASK_STATUSES,
+  nativeImplementationSubagentRunConfig,
   resolveRequeueBase,
   resolveRunBranches,
   RunStatus,
   runnerFor,
-  subprocessRunConfig,
   RunnerKind,
   RunnerPreference,
   TaskStatus,
@@ -39,10 +39,6 @@ const runAgent = (overrides: Record<string, unknown> = {}) => ({
   title: "Senior Developer",
   model: "claude",
   codexServiceTier: CodexServiceTier.DEFAULT,
-  ordinarySubprocessModel: null,
-  ordinarySubprocessCodexServiceTier: null,
-  elevatedSubprocessModel: null,
-  elevatedSubprocessCodexServiceTier: null,
   runnerPreference: RunnerPreference.CLAUDE,
   foundationalPrompt: "f",
   rolePrompt: "r",
@@ -74,8 +70,8 @@ test("runnerFor preserves explicit preferences and every inherited model heurist
   }
 });
 
-test("deriveRunConfig preserves ordinary config and fixes the compound executioner outer profile", () => {
-  const agent = {
+test("deriveRunConfig preserves the selected Agent runtime profile for ordinary and compound runs", () => {
+  const ordinaryAgent = {
     runnerPreference: RunnerPreference.PI,
     model: "current-model",
     codexServiceTier: CodexServiceTier.DEFAULT,
@@ -83,59 +79,53 @@ test("deriveRunConfig preserves ordinary config and fixes the compound execution
     rolePrompt: "role",
   };
   const task = { name: "Task name", description: "Task description" };
-  assert.deepEqual(deriveRunConfig(agent, { runner: RunnerKind.CODEX }, task), {
+  assert.deepEqual(deriveRunConfig(ordinaryAgent, { runner: RunnerKind.CODEX }, task), {
     runner: RunnerKind.CODEX,
     model: "current-model",
     codexServiceTier: CodexServiceTier.DEFAULT,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
-  assert.deepEqual(deriveRunConfig(agent, {
+  const executionerAgent = {
+    ...ordinaryAgent,
+    runnerPreference: RunnerPreference.CODEX,
+    model: "gpt-5.6-luna:max",
+    codexServiceTier: CodexServiceTier.FAST,
+  };
+  assert.deepEqual(deriveRunConfig(executionerAgent, {
     runner: null,
     stepIndex: 5,
     outputKind: "implementation",
     taskTemplate: { name: "compound-engineer-workflow" },
   }, task), {
     runner: RunnerKind.CODEX,
-    model: "gpt-5.6-sol:medium",
-    codexServiceTier: CodexServiceTier.DEFAULT,
+    model: "gpt-5.6-luna:max",
+    codexServiceTier: CodexServiceTier.FAST,
     promptHash: createHash("sha256").update("foundation\nrole\nTask name\nTask description").digest("hex"),
   });
+  assert.throws(() => deriveRunConfig(ordinaryAgent, {
+    runner: null,
+    stepIndex: 5,
+    outputKind: "implementation",
+    taskTemplate: { name: "compound-engineer-workflow" },
+  }, task), /requires a Codex gpt-\* model/u);
 });
 
-test("executioner snapshots both configured Codex subprocess profiles while other agents do not", async () => {
-  const ordinary = {
-    name: "senior-dev",
-    ordinarySubprocessModel: null,
-    ordinarySubprocessCodexServiceTier: null,
-    elevatedSubprocessModel: null,
-    elevatedSubprocessCodexServiceTier: null,
+test("Codex implementation steps receive the fixed native Luna child capability", () => {
+  const compound = {
+    stepIndex: 5,
+    outputKind: "implementation",
+    taskTemplate: { name: "compound-engineer-workflow" },
   };
-  const executioner = {
-    name: "implementation-plan-executioner",
-    ordinarySubprocessModel: "gpt-5.6-luna:max",
-    ordinarySubprocessCodexServiceTier: CodexServiceTier.FAST,
-    elevatedSubprocessModel: "gpt-5.6-sol:high",
-    elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
+  const direct = {
+    stepIndex: 1,
+    outputKind: "implementation",
+    taskTemplate: { name: "direct-engineer-workflow" },
   };
-  assert.equal(await subprocessRunConfig(ordinary as never), null);
-  assert.deepEqual(await subprocessRunConfig(executioner as never), {
-    subprocessModel: "gpt-5.6-luna:max",
-    subprocessCodexServiceTier: CodexServiceTier.FAST,
-    elevatedSubprocessModel: "gpt-5.6-sol:high",
-    elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
-  });
-  await assert.rejects(
-    () => subprocessRunConfig({ ...executioner, elevatedSubprocessModel: "openai-codex/gpt-5.6-sol:high" } as never),
-    /must use a Codex gpt-\* model/u,
-  );
-  await assert.rejects(
-    () => subprocessRunConfig(ordinary as never, {
-      stepIndex: 5,
-      outputKind: "implementation",
-      taskTemplate: { name: "compound-engineer-workflow" },
-    }),
-    /must remain assigned to implementation-plan-executioner/u,
-  );
+  const expected = { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 };
+  assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, compound), expected);
+  assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, direct), expected);
+  assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CLAUDE, direct), null);
+  assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, null), null);
 });
 
 test("task creation keeps its runner, model, and promptHash output while derivation is shared", async () => {
@@ -456,6 +446,52 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
   assert.ok(error instanceof ArchivedAssigneeError);
   assert.equal(isArchivedAssigneeError(error), true);
   assert.equal(isArchivedAssigneeError({ name: "ArchivedAssigneeError" }), false);
+});
+
+test("enqueueTaskRun preserves the precise archived-assignee refusal for a compound executioner", async () => {
+  const archivedAt = new Date();
+  const executioner = runAgent({
+    name: "implementation-plan-executioner",
+    archivedAt,
+  });
+  const tx = {
+    $queryRaw: async () => [{ id: executioner.id }],
+    agent: { findUnique: async () => executioner },
+    task: {
+      findUniqueOrThrow: async () => ({
+        id: "compound-implementation",
+        projectId: "project-1",
+        name: "Implementation",
+        description: "implement",
+        assigneeType: AssigneeType.AGENT,
+        templateId: "compound-template",
+        templateStepId: "implementation-step",
+        targetBranch: "main",
+        maxDurationMin: 120,
+        stallTimeoutMin: 10,
+        maxSessionsPerTask: 3,
+        runs: [],
+        assigneeAgent: executioner,
+        repo: { id: "repo-1", defaultBranch: "main" },
+        templateStep: {
+          stepIndex: 5,
+          outputKind: "implementation",
+          taskTemplate: { name: "compound-engineer-workflow" },
+        },
+      }),
+      findUnique: async () => ({ id: "compound-implementation", templateStep: null }),
+    },
+    run: { create: async () => { throw new Error("must not create run"); } },
+  } as any;
+  const error = await enqueueTaskRun(tx, "compound-implementation").then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+  assert.ok(error instanceof ArchivedAssigneeError);
+  assert.equal(
+    error.message,
+    "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step",
+  );
 });
 
 test("chain advancement parks an archived successor without throwing or enqueueing", async () => {

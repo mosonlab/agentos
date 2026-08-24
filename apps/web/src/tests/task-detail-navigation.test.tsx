@@ -30,8 +30,7 @@ const output = (taskId: string, body: string): TaskStepOutput => ({
 const sourceRun = (taskId: string): Run => ({
   id: `run-${taskId}`, projectId: "project-1", taskId, goalId: null, agentId: "agent-1", repoId: "repo-1",
   runNumber: 1, status: "SUCCEEDED", runner: "CLAUDE", runnerId: "runner-source", model: "claude",
-  codexServiceTier: "DEFAULT", subprocessModel: null, subprocessCodexServiceTier: null,
-  elevatedSubprocessModel: null, elevatedSubprocessCodexServiceTier: null,
+  codexServiceTier: "DEFAULT", subagentModel: null, subagentMaxConcurrent: null,
   leaseGeneration: 1, cancelRequestId: null, cancelReason: null, cancelRequestedAt: null, cancelAcknowledgedAt: null,
   workspacePath: "/source-only-workspace", workspaceRetained: true,
   targetBranch: "main", branch: "source-branch", baseSha: "1111111111111111", headSha: "2222222222222222",

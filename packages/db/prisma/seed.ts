@@ -1,6 +1,6 @@
 import { AssigneeType, CodexServiceTier, Prisma, PrismaClient } from "@prisma/client";
 
-import { DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
+import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import { legacyTemplateShapeRefusal, type PersistedTransitionStep } from "../src/canonical-template-transition.js";
 import {
@@ -65,13 +65,29 @@ const main = async (): Promise<void> => {
 
   const ordinaryRoles = sources.roles.filter((role) => role.name !== ADJUDICATOR_AGENT_NAME);
   for (const role of ordinaryRoles) {
+    const existing = await prisma.agent.findUnique({
+      where: { projectId_name: { projectId: project.id, name: role.name } },
+      select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    });
+    const transition = CANONICAL_AGENT_RUNTIME_TRANSITIONS.get(role.name);
+    const isCanonicalRuntimeTransition = existing !== null
+      && existing.runtimeConfigCustomized === false
+      && transition?.from.model === existing.model
+      && transition.from.runnerPreference === existing.runnerPreference
+      && transition.to.model === role.model
+      && transition.to.runnerPreference === role.runnerPreference;
+    const runtimeConfigCustomized = existing?.runtimeConfigCustomized === true
+      || (existing !== null
+        && !isCanonicalRuntimeTransition
+        && (existing.model !== role.model || existing.runnerPreference !== role.runnerPreference));
+    const useCanonicalRuntimeConfig = !runtimeConfigCustomized;
     await prisma.agent.upsert({
       where: { projectId_name: { projectId: project.id, name: role.name } },
       update: {
         environmentId: environment.id,
         title: role.title,
-        model: role.model,
-        runnerPreference: role.runnerPreference,
+        ...(useCanonicalRuntimeConfig ? { model: role.model, runnerPreference: role.runnerPreference } : {}),
+        runtimeConfigCustomized,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
         rolePrompt: role.rolePrompt,
@@ -82,13 +98,8 @@ const main = async (): Promise<void> => {
         name: role.name,
         title: role.title,
         model: role.model,
+        runtimeConfigCustomized: false,
         codexServiceTier: CodexServiceTier.DEFAULT,
-        ...(role.name === "implementation-plan-executioner" ? {
-          ordinarySubprocessModel: "gpt-5.6-luna:max",
-          ordinarySubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
-          elevatedSubprocessModel: "gpt-5.6-sol:high",
-          elevatedSubprocessCodexServiceTier: CodexServiceTier.DEFAULT,
-        } : {}),
         runnerPreference: role.runnerPreference,
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
@@ -101,18 +112,29 @@ const main = async (): Promise<void> => {
   if (!adjudicatorRole) throw new Error(`Canonical role ${ADJUDICATOR_AGENT_NAME} was not found`);
   const existingAdjudicator = await prisma.agent.findUnique({
     where: { projectId_name: { projectId: project.id, name: ADJUDICATOR_AGENT_NAME } },
-    select: { id: true, archivedAt: true },
+    select: {
+      id: true,
+      archivedAt: true,
+      model: true,
+      runnerPreference: true,
+      runtimeConfigCustomized: true,
+    },
   });
   if (existingAdjudicator?.archivedAt) {
     throw new Error(`Canonical Agent ${ADJUDICATOR_AGENT_NAME} is archived; seed will not resurrect it`);
   }
   if (existingAdjudicator) {
+    const runtimeConfigCustomized = existingAdjudicator.runtimeConfigCustomized
+      || existingAdjudicator.model !== adjudicatorRole.model
+      || existingAdjudicator.runnerPreference !== adjudicatorRole.runnerPreference;
     await prisma.agent.update({
       where: { id: existingAdjudicator.id },
       data: {
         title: adjudicatorRole.title,
-        model: adjudicatorRole.model,
-        runnerPreference: adjudicatorRole.runnerPreference,
+        ...(runtimeConfigCustomized
+          ? {}
+          : { model: adjudicatorRole.model, runnerPreference: adjudicatorRole.runnerPreference }),
+        runtimeConfigCustomized,
         inboxAccess: adjudicatorRole.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
         rolePrompt: adjudicatorRole.rolePrompt,
@@ -138,6 +160,7 @@ const main = async (): Promise<void> => {
         name: adjudicatorRole.name,
         title: adjudicatorRole.title,
         model: adjudicatorRole.model,
+        runtimeConfigCustomized: false,
         codexServiceTier: CodexServiceTier.DEFAULT,
         runnerPreference: adjudicatorRole.runnerPreference,
         inboxAccess: adjudicatorRole.inboxAccess,

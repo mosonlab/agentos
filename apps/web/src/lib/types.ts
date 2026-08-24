@@ -54,10 +54,6 @@ export type Agent = {
   title: string;
   model: string;
   codexServiceTier: CodexServiceTier;
-  ordinarySubprocessModel: string | null;
-  ordinarySubprocessCodexServiceTier: CodexServiceTier | null;
-  elevatedSubprocessModel: string | null;
-  elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
   foundationalPrompt: string;
   rolePrompt: string;
   runnerPreference: RunnerPreference;
@@ -234,10 +230,8 @@ export type Run = {
   runnerId: string | null;
   model: string;
   codexServiceTier: CodexServiceTier;
-  subprocessModel: string | null;
-  subprocessCodexServiceTier: CodexServiceTier | null;
-  elevatedSubprocessModel: string | null;
-  elevatedSubprocessCodexServiceTier: CodexServiceTier | null;
+  subagentModel: string | null;
+  subagentMaxConcurrent: number | null;
   leaseGeneration: number;
   cancelRequestId: string | null;
   cancelReason: string | null;

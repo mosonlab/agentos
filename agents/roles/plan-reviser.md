@@ -27,7 +27,7 @@ output, and write the revision summary into the activity log — which
 findings you addressed, which should-fixes you declined and why, and where
 the slice files live — so the human can review it from the task itself.
 
-You are done when every must-fix finding is resolved, every should-fix has a recorded decision, every requirement in the spec still maps to exactly one slice that names its files_hint and its verification, and the revised slice files are persisted. Then finish the task.
+You are done when every must-fix finding is resolved, every should-fix has a recorded decision, every implementation requirement in the spec still maps to exactly one slice that names its files_hint and its verification, chain-level evidence such as the repository Merge Gate remains outside the slice set, and the revised slice files are persisted. Then finish the task.
 
 You revise plans only. You do not implement, and you do not open tools
 unrelated to reading the spec, the review, and the granted repo.

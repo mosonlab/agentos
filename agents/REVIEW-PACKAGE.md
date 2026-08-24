@@ -76,7 +76,8 @@ their final assigned chain reaches its human-review gate.
 Role frontmatter and `packages/db/src/agent-contract.ts` jointly define the
 canonical model and runner defaults. `packages/db/prisma/seed.ts` imports the
 role sources and binds the review and regression phases to their distinct
-canonical roles in the Full Assurance template.
+canonical roles in the Full Assurance template. An operator's model or runner
+selection is an explicit runtime override and survives seed and canonical sync.
 
 The Sol and blind Opus review tasks occupy one parallel execution layer and
 are independently claimable after implementation. The adjudicator is the

@@ -171,15 +171,19 @@ The job then performs exactly this sequence and stops at the first failure:
 5. run `npm run db:migrate-goal-execution` from staging with the two authority
    SHAs read from that revision's `release-authority.json`;
 6. run `npm run db:sync-canonical-prompts`; structural drift outside an
-   explicitly source-declared assignee, review-base, or Agent-default transition
-   is a terminal refusal and is never changed with SQL. The review-base
+   explicitly source-declared assignee or review-base transition is a terminal
+   refusal and is never changed with SQL. Operator model and runner overrides
+   are preserved after validation; only uncustomized Agent-default transitions
+   declared by the source may be adopted. The review-base
    transitions adopt only `compound-engineer-workflow:6` from `null` to step 5
    and `direct-engineer-workflow:2` from `null` to step 1. Agent-default transitions
    are frozen to `review-coordinator` and `review-coordinator-sol`, from model
    `gpt-5.6-sol:high` with `runnerPreference` `CODEX` to model
-   `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`; the sync adopts
-   one only when both persisted fields exactly match that `from` state and the
-   canonical source exactly matches the `to` state. The dedicated
+   `openai-codex/gpt-5.6-sol:high` with `runnerPreference` `PI`, plus
+   `implementation-plan-executioner` from `gpt-5.6-sol:medium` / `CODEX` to
+   `gpt-5.6-sol:high` / `CODEX`; the sync adopts one only when both persisted
+   fields exactly match that `from` state and the canonical source exactly
+   matches the `to` state. The dedicated
    `regression-verifier` is the one source-declared role creation: when absent,
    sync creates it from canonical role text in the active
    `review-coordinator-sol` environment, copies that source Agent's repository
