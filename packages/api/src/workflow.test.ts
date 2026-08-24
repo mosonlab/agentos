@@ -134,7 +134,7 @@ test("executioner snapshots both configured Codex subprocess profiles while othe
       outputKind: "implementation",
       taskTemplate: { name: "compound-engineer-workflow" },
     }),
-    /must remain assigned to implementation-plan-executioner/u,
+    /must remain assigned to the active in-project Agent implementation-plan-executioner/u,
   );
 });
 
@@ -507,6 +507,52 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
   assert.ok(error instanceof ArchivedAssigneeError);
   assert.equal(isArchivedAssigneeError(error), true);
   assert.equal(isArchivedAssigneeError({ name: "ArchivedAssigneeError" }), false);
+});
+
+test("enqueueTaskRun preserves the precise archived-assignee refusal for a compound executioner", async () => {
+  const archivedAt = new Date();
+  const executioner = runAgent({
+    name: "implementation-plan-executioner",
+    archivedAt,
+  });
+  const tx = {
+    $queryRaw: async () => [{ id: executioner.id }],
+    agent: { findUnique: async () => executioner },
+    task: {
+      findUniqueOrThrow: async () => ({
+        id: "compound-implementation",
+        projectId: "project-1",
+        name: "Implementation",
+        description: "implement",
+        assigneeType: AssigneeType.AGENT,
+        templateId: "compound-template",
+        templateStepId: "implementation-step",
+        targetBranch: "main",
+        maxDurationMin: 120,
+        stallTimeoutMin: 10,
+        maxSessionsPerTask: 3,
+        runs: [],
+        assigneeAgent: executioner,
+        repo: { id: "repo-1", defaultBranch: "main" },
+        templateStep: {
+          stepIndex: 5,
+          outputKind: "implementation",
+          taskTemplate: { name: "compound-engineer-workflow" },
+        },
+      }),
+      findUnique: async () => ({ id: "compound-implementation", templateStep: null }),
+    },
+    run: { create: async () => { throw new Error("must not create run"); } },
+  } as any;
+  const error = await enqueueTaskRun(tx, "compound-implementation").then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+  assert.ok(error instanceof ArchivedAssigneeError);
+  assert.equal(
+    error.message,
+    "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step",
+  );
 });
 
 test("chain advancement parks an archived successor without throwing or enqueueing", async () => {

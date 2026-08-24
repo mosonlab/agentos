@@ -73,7 +73,7 @@ export const deriveRunConfig = (
   } | null,
   task: { name: string; description: string },
 ): { runner: RunnerKind; model: string; codexServiceTier: CodexServiceTier; promptHash: string } => {
-  const compoundExecutioner = isCompoundExecutionerStep(templateStep);
+  const compoundExecutioner = isCompoundImplementationStep(templateStep);
   return {
     runner: compoundExecutioner ? RunnerKind.CODEX : (templateStep?.runner ?? runnerFor(agent.runnerPreference, agent.model)),
     model: compoundExecutioner ? "gpt-5.6-sol:medium" : agent.model,
@@ -87,13 +87,50 @@ export const deriveRunConfig = (
   };
 };
 
-const isCompoundExecutionerStep = (templateStep: {
+export const COMPOUND_IMPLEMENTATION_AGENT_NAME = "implementation-plan-executioner";
+export const COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE = "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID";
+
+export type CompoundImplementationStepShape = {
   stepIndex?: number;
   outputKind?: string;
   taskTemplate?: { name: string } | null;
-} | null): boolean => templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
+} | null;
+
+export const isCompoundImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
+  templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
   && templateStep.stepIndex === 5
   && templateStep.outputKind === "implementation";
+
+type CompoundImplementationAgent = {
+  name: string;
+  projectId: string;
+  archivedAt: Date | null;
+} | null;
+
+export const compoundImplementationAssigneeValid = (
+  taskProjectId: string,
+  assigneeType: AssigneeType,
+  agent: CompoundImplementationAgent,
+  templateStep: CompoundImplementationStepShape,
+): boolean => !isCompoundImplementationStep(templateStep)
+  || (assigneeType === AssigneeType.AGENT
+    && agent?.name === COMPOUND_IMPLEMENTATION_AGENT_NAME
+    && agent.projectId === taskProjectId
+    && agent.archivedAt === null);
+
+export class CompoundImplementationAssigneeError extends Error {
+  readonly code = COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE;
+
+  constructor() {
+    super(`Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`);
+    this.name = "CompoundImplementationAssigneeError";
+  }
+}
+
+export const isCompoundImplementationAssigneeError = (
+  error: unknown,
+): error is CompoundImplementationAssigneeError =>
+  error instanceof Error && error.name === "CompoundImplementationAssigneeError";
 
 const CODEX_SUBPROCESS_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -127,10 +164,10 @@ export const subprocessRunConfig = async (
   elevatedSubprocessModel: string;
   elevatedSubprocessCodexServiceTier: CodexServiceTier;
 } | null> => {
-  const compoundExecutioner = isCompoundExecutionerStep(templateStep);
-  if (!compoundExecutioner && agent.name !== "implementation-plan-executioner") return null;
-  if (compoundExecutioner && agent.name !== "implementation-plan-executioner") {
-    throw new Error("Compound implementation step must remain assigned to implementation-plan-executioner");
+  const compoundExecutioner = isCompoundImplementationStep(templateStep);
+  if (!compoundExecutioner && agent.name !== COMPOUND_IMPLEMENTATION_AGENT_NAME) return null;
+  if (compoundExecutioner && agent.name !== COMPOUND_IMPLEMENTATION_AGENT_NAME) {
+    throw new CompoundImplementationAssigneeError();
   }
   const ordinaryModel = validatedCodexSubprocessModel("ordinary", agent.ordinarySubprocessModel);
   const elevatedModel = validatedCodexSubprocessModel("elevated", agent.elevatedSubprocessModel);
@@ -611,6 +648,14 @@ const enqueueTaskRunInternal = async (
   if (!lockedAgent || lockedAgent.archivedAt) {
     throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
   }
+  if (!compoundImplementationAssigneeValid(
+    task.projectId,
+    task.assigneeType,
+    lockedAgent,
+    task.templateStep,
+  )) {
+    throw new CompoundImplementationAssigneeError();
+  }
   // §D-P4, the last line of the binding invariant, for the same reason: this is
   // the shared enqueue path, so a route added later inherits the refusal. The
   // Agent name comes from the locked re-read, never the stale task relation.
@@ -1012,6 +1057,25 @@ const activateChainSuccessorInternal = async (
       select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
     })
     : null;
+  if (isCompoundImplementationStep(successorStep)) {
+    const lockedAgent = successor.assigneeAgentId
+      ? await lockAgentRow(tx, successor.assigneeAgentId)
+      : null;
+    // An archived assignee is the more precise repair instruction. It must be
+    // checked before the compound binding, whose active-agent predicate would
+    // otherwise hide this state behind a less useful error.
+    if (lockedAgent?.archivedAt) {
+      throw new ArchivedAssigneeError(successor.id, successor.name, lockedAgent.name);
+    }
+    if (!compoundImplementationAssigneeValid(
+      successor.projectId,
+      successor.assigneeType,
+      lockedAgent,
+      successorStep,
+    )) {
+      throw new CompoundImplementationAssigneeError();
+    }
+  }
   if (isMergeReadinessStep(successorStep)) {
     await tx.taskActivity.create({ data: {
       taskId: successor.id,

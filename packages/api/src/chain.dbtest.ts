@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
 
-import { activateChainSuccessor, applyInboxDecisionTx, Prisma, PrismaClient } from "@agentos/db";
+import {
+  activateChainSuccessor,
+  applyInboxDecisionTx,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  Prisma,
+  PrismaClient,
+} from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 import { instantiateTemplate } from "./templates.js";
@@ -70,6 +76,350 @@ const withRunnerToken = async <T>(operation: () => T | Promise<T>): Promise<T> =
     if (priorRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT; else process.env.RUNNER_WORKSPACE_ROOT = priorRoot;
   }
 };
+
+const withOperatorToken = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+  const priorToken = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "operator-db-token";
+  try {
+    return await operation();
+  } finally {
+    if (priorToken === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorToken;
+  }
+};
+
+const seedCompoundImplementationApproval = async (validSuccessor = false) => {
+  const project = await db.project.create({ data: { name: "Compound", slug: `compound-${Date.now()}` } });
+  const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
+  const senior = await db.agent.create({ data: {
+    projectId: project.id,
+    environmentId: environment.id,
+    name: "senior-dev-high",
+    title: "Senior developer",
+    model: "gpt-5.6-sol:high",
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  } });
+  const executioner = await db.agent.create({ data: {
+    projectId: project.id,
+    environmentId: environment.id,
+    name: "implementation-plan-executioner",
+    title: "Implementation Plan Executioner",
+    model: "gpt-5.6-sol:medium",
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+    ordinarySubprocessModel: "gpt-5.6-sol:medium",
+    ordinarySubprocessCodexServiceTier: "DEFAULT",
+    elevatedSubprocessModel: "gpt-5.6-sol:high",
+    elevatedSubprocessCodexServiceTier: "DEFAULT",
+  } });
+  const repo = await db.repo.create({ data: {
+    projectId: project.id,
+    name: "repo",
+    remoteUrl: "https://example.test/repo.git",
+    mountPath: "/repo",
+  } });
+  await db.agentRepoAccess.createMany({ data: [senior, executioner].map((agent) => ({
+    projectId: project.id,
+    agentId: agent.id,
+    repoId: repo.id,
+    mountPath: "/repo",
+    permissions: "GIT_WRITE" as const,
+  })) });
+  const template = await db.taskTemplate.create({ data: {
+    projectId: project.id,
+    name: "compound-engineer-workflow",
+    description: "compound",
+    variables: ["branchName"],
+  } });
+  const reviseStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: senior.id,
+    stepIndex: 4,
+    name: "Revise plan",
+    assigneeType: "AGENT",
+    prompt: "revise",
+    approvalGate: true,
+    outputKind: "revised-plan",
+    opensPullRequest: false,
+  } });
+  const implementationStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: executioner.id,
+    stepIndex: 5,
+    name: "Implementation",
+    assigneeType: "AGENT",
+    prompt: "implement",
+    outputKind: "implementation",
+  } });
+  const chainId = `compound-chain-${Date.now()}`;
+  const predecessor = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Revise plan",
+    description: "revise",
+    assigneeAgentId: senior.id,
+    repoId: repo.id,
+    templateId: template.id,
+    templateStepId: reviseStep.id,
+    status: "REVIEW",
+    approvalGate: true,
+    chainId,
+    chainIndex: 4,
+  } });
+  const successor = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Implementation",
+    description: "implement",
+    assigneeAgentId: validSuccessor ? executioner.id : senior.id,
+    repoId: repo.id,
+    templateId: template.id,
+    templateStepId: implementationStep.id,
+    chainId,
+    chainIndex: 5,
+  } });
+  const run = await db.run.create({ data: {
+    projectId: project.id,
+    taskId: predecessor.id,
+    agentId: senior.id,
+    repoId: repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${predecessor.id}:compound-gate`,
+    runner: "CODEX",
+    model: senior.model,
+    promptHash: "hash",
+    status: "SUCCEEDED",
+  } });
+  const session = await db.session.create({ data: {
+    runId: run.id,
+    projectId: project.id,
+    agentId: senior.id,
+    taskId: predecessor.id,
+    runner: "CODEX",
+  } });
+  const gate = await db.inboxMessage.create({ data: {
+    from: "AGENT",
+    agentId: senior.id,
+    sessionId: session.id,
+    taskId: predecessor.id,
+    gateTaskId: predecessor.id,
+    kind: "MULTIPLE_CHOICE",
+    body: "Approve revised plan",
+    choices: [{ id: "approve", label: "Approve" }, { id: "reject", label: "Reject" }],
+    dedupeKey: `gate:compound:${predecessor.id}`,
+  } });
+  return { project, senior, executioner, repo, template, implementationStep, predecessor, successor, gate };
+};
+
+const compoundApprovalState = async (predecessorId: string, successorId: string, gateId: string) => ({
+  predecessor: await db.task.findUniqueOrThrow({ where: { id: predecessorId } }),
+  successor: await db.task.findUniqueOrThrow({ where: { id: successorId } }),
+  gate: await db.inboxMessage.findUniqueOrThrow({ where: { id: gateId } }),
+  decisions: await db.inboxDecision.findMany({ where: { inboxMessageId: gateId }, orderBy: { id: "asc" } }),
+  replies: await db.inboxMessage.findMany({ where: { replyToMessageId: gateId }, orderBy: { id: "asc" } }),
+  successorRuns: await db.run.findMany({ where: { taskId: successorId }, orderBy: { id: "asc" } }),
+  predecessorActivities: await db.taskActivity.findMany({ where: { taskId: predecessorId }, orderBy: { id: "asc" } }),
+  successorActivities: await db.taskActivity.findMany({ where: { taskId: successorId }, orderBy: { id: "asc" } }),
+});
+
+const requestCompoundApproval = (
+  route: "patch" | "inbox",
+  predecessorId: string,
+  gateId: string,
+  requestId: string,
+) => withOperatorToken(() => route === "patch"
+  ? createApp(db).request(`/tasks/${predecessorId}`, {
+    method: "PATCH",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "DONE" }),
+  })
+  : createApp(db).request(`/inbox/messages/${gateId}/decision`, {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ decision: "approve", requestId }),
+  }));
+
+test("compound Implementation PATCH rejects every non-executioner assignee without changing the task", async () => {
+  const { senior, successor } = await seedCompoundImplementationApproval(true);
+  const before = await db.task.findUniqueOrThrow({
+    where: { id: successor.id },
+    select: {
+      assigneeType: true,
+      assigneeAgentId: true,
+      status: true,
+      archivedAt: true,
+      updatedAt: true,
+    },
+  });
+  const response = await withOperatorToken(() => createApp(db).request(`/tasks/${successor.id}`, {
+    method: "PATCH",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ assigneeAgentId: senior.id }),
+  }));
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  });
+  assert.deepEqual(await db.task.findUniqueOrThrow({
+    where: { id: successor.id },
+    select: {
+      assigneeType: true,
+      assigneeAgentId: true,
+      status: true,
+      archivedAt: true,
+      updatedAt: true,
+    },
+  }), before);
+});
+
+test("direct-engineer-workflow Implementation PATCH still accepts senior-dev-high", async () => {
+  const { project, senior, executioner, repo } = await seedCompoundImplementationApproval(true);
+  const template = await db.taskTemplate.create({ data: {
+    projectId: project.id,
+    name: "direct-engineer-workflow",
+    description: "direct",
+    variables: [],
+  } });
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    assigneeAgentId: senior.id,
+    stepIndex: 2,
+    name: "Implementation",
+    assigneeType: "AGENT",
+    prompt: "implement",
+    outputKind: "implementation",
+  } });
+  const task = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Direct implementation",
+    description: "implement directly",
+    assigneeAgentId: executioner.id,
+    repoId: repo.id,
+    templateId: template.id,
+    templateStepId: step.id,
+  } });
+  const response = await withOperatorToken(() => createApp(db).request(`/tasks/${task.id}`, {
+    method: "PATCH",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ assigneeAgentId: senior.id }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).assigneeAgentId, senior.id);
+});
+
+for (const route of ["patch", "inbox"] as const) {
+  test(`legacy-invalid compound successor makes ${route} approval return the named 409 with a full rollback`, async () => {
+    const { predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
+    const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+    const response = await requestCompoundApproval(
+      route,
+      predecessor.id,
+      gate.id,
+      `legacy-invalid-${route}`,
+    );
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+    });
+    assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+  });
+}
+
+for (const route of ["patch", "inbox"] as const) {
+  test(`HUMAN/null compound successor makes ${route} approval return the named 409 with a full rollback`, async () => {
+    const { predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
+    await db.task.update({
+      where: { id: successor.id },
+      data: { assigneeType: "HUMAN", assigneeAgentId: null },
+    });
+    const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+    const response = await requestCompoundApproval(
+      route,
+      predecessor.id,
+      gate.id,
+      `human-null-${route}`,
+    );
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+    });
+    assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+  });
+}
+
+for (const route of ["patch", "inbox"] as const) {
+  test(`archived compound executioner makes ${route} approval return the same named 409 with a full rollback`, async () => {
+    const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
+    await db.agent.update({ where: { id: executioner.id }, data: { archivedAt: new Date() } });
+    const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+    const response = await requestCompoundApproval(
+      route,
+      predecessor.id,
+      gate.id,
+      `archived-executioner-${route}`,
+    );
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step",
+    });
+    assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+  });
+}
+
+test("session-less gate PATCH refuses before writing any approval state", async () => {
+  const { predecessor, successor, gate } = await seedCompoundImplementationApproval(true);
+  await db.inboxMessage.update({ where: { id: gate.id }, data: { sessionId: null } });
+  const before = await compoundApprovalState(predecessor.id, successor.id, gate.id);
+  const response = await requestCompoundApproval("patch", predecessor.id, gate.id, "session-less");
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: "Gate card has no session run to bind a decision to",
+  });
+  assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
+});
+
+test("repaired compound approval is atomic and exactly once across PATCH, Inbox, replay, and concurrency", async () => {
+  const { executioner, predecessor, successor, gate } = await seedCompoundImplementationApproval(false);
+  await db.task.update({ where: { id: successor.id }, data: { assigneeAgentId: executioner.id } });
+
+  const [patch, inbox] = await withOperatorToken(() => Promise.all([
+    createApp(db).request(`/tasks/${predecessor.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    }),
+    createApp(db).request(`/inbox/messages/${gate.id}/decision`, {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "approve", requestId: "compound-race" }),
+    }),
+  ]));
+  assert.equal(patch.status, 200);
+  assert.ok([200, 201].includes(inbox.status));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "ANSWERED");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+
+  const [patchReplay, inboxReplay] = await withOperatorToken(() => Promise.all([
+    createApp(db).request(`/tasks/${predecessor.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "DONE" }),
+    }),
+    createApp(db).request(`/inbox/messages/${gate.id}/decision`, {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "approve", requestId: "compound-race-replay" }),
+    }),
+  ]));
+  assert.equal(patchReplay.status, 200);
+  assert.equal(inboxReplay.status, 200);
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+});
 
 test("concurrent chain advance creates exactly one successor run with no client-visible conflict", async () => {
   const { predecessor, successor } = await seedExecutableChain();
@@ -473,7 +823,7 @@ test("completion status CAS preserves a concurrent operator DONE decision", asyn
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: predecessor.id } })).status, "DONE");
 });
 
-test("operator DONE closes the gate card and a later approval is a duplicate no-op", async () => {
+test("operator DONE answers the gate with one decision and a later approval is a duplicate no-op", async () => {
   const { project, agent, repo, predecessor } = await seedExecutableChain();
   await db.task.update({ where: { id: predecessor.id }, data: { status: "REVIEW", approvalGate: true } });
   const run = await db.run.create({ data: {
@@ -495,7 +845,10 @@ test("operator DONE closes the gate card and a later approval is a duplicate no-
   } finally {
     if (priorToken === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = priorToken;
   }
-  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } })).status, "CLOSED");
+  const answeredGate = await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } });
+  assert.equal(answeredGate.status, "ANSWERED");
+  assert.equal(answeredGate.selectedChoiceId, "approve");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
   const result = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
     inboxMessageId: gate.id, externalEventId: `late-${Date.now()}`, decision: "approve",
   }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
@@ -590,7 +943,8 @@ test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () =>
   const settledGate = await db.inboxMessage.findUniqueOrThrow({ where: { id: gate.id } });
   const settledPredecessor = await db.task.findUniqueOrThrow({ where: { id: predecessor.id } });
   const settledSuccessor = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
-  if (settledGate.status === "CLOSED") {
+  assert.equal(settledGate.status, "ANSWERED");
+  if (settledGate.selectedChoiceId === "approve") {
     assert.equal(patchStatus!, 200);
     assert.equal(decision!.duplicate, true);
     assert.equal(settledPredecessor.status, "DONE");
@@ -598,12 +952,13 @@ test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () =>
     assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 1);
   } else {
     assert.equal(patchStatus!, 409);
-    assert.equal(settledGate.status, "ANSWERED");
+    assert.equal(settledGate.selectedChoiceId, "reject");
     assert.equal(decision!.gateAction, "rejected");
     assert.equal(settledPredecessor.status, "TODO");
     assert.equal(settledSuccessor.status, "TODO");
     assert.equal(await db.run.count({ where: { taskId: predecessor.id } }), 2);
   }
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: gate.id } }), 1);
   const winnerActivities = await db.taskActivity.count({ where: {
     OR: [
       { taskId: successor.id, body: "Status changed: REVIEW → DONE" },

@@ -10,6 +10,9 @@ import {
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  CompoundImplementationAssigneeError,
+  compoundImplementationAssigneeValid,
   deriveRunConfig,
   deployBarrierAllowsClaim,
   FAILURE_ENVELOPE_VERSION,
@@ -20,6 +23,8 @@ import {
   InboxStatus,
   isArchivedAssigneeError,
   isArchivedTaskError,
+  isCompoundImplementationAssigneeError,
+  isCompoundImplementationStep,
   isIntegratorStoppedError,
   isPinnedBaseCommitError,
   LIVE_TASK_STATUSES,
@@ -56,7 +61,6 @@ import {
   isMergeExecutorRunnerId,
   mechanicalPrincipalRefusal,
   executionModeFor,
-  gateFeedsIntegratorStep,
   isMergeConfirmationError,
   integratorBindingRefusal,
   integratorBindingRefusalFor,
@@ -1427,7 +1431,13 @@ type LockedTask = {
   status: TaskStatus;
   archivedAt: Date | null;
   projectId: string;
+  assigneeType: AssigneeType;
   assigneeAgentId: string | null;
+  templateStep: {
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate: { name: string };
+  } | null;
 };
 
 /** Live means exactly what blocks an agent's archival: the same
@@ -1442,7 +1452,11 @@ const lockedTaskSelect = {
   status: true,
   archivedAt: true,
   projectId: true,
+  assigneeType: true,
   assigneeAgentId: true,
+  templateStep: {
+    select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+  },
 } satisfies Prisma.TaskSelect;
 
 /**
@@ -1521,6 +1535,22 @@ const assignmentBlocked = async (
   const locked = await lockAgentRow(tx, assignee.id);
   if (!locked) return "Assignee does not belong to this project";
   return locked.archivedAt ? `Assignee ${assignee.name} is archived` : null;
+};
+
+/** Rechecks the compound binding after the Task lock and under the Agent lock.
+ * The unlocked route check gives a fast refusal; this one decides against
+ * concurrent archive or persisted-state corruption before the write commits. */
+const assertCompoundImplementationAssignment = async (
+  tx: Prisma.TransactionClient,
+  task: LockedTask,
+  assigneeType: AssigneeType,
+  assigneeAgentId: string | null,
+): Promise<void> => {
+  if (task.archivedAt !== null || !isCompoundImplementationStep(task.templateStep)) return;
+  const agent = assigneeAgentId ? await lockAgentRow(tx, assigneeAgentId) : null;
+  if (!compoundImplementationAssigneeValid(task.projectId, assigneeType, agent, task.templateStep)) {
+    throw new CompoundImplementationAssigneeError();
+  }
 };
 
 /**
@@ -3312,6 +3342,31 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const assignee = body.assigneeAgentId
       ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: before.projectId } })
       : null;
+    const effectiveAgentId = body.assigneeAgentId === undefined ? before.assigneeAgentId : body.assigneeAgentId;
+    const effectiveAssigneeType = body.assigneeType ?? before.assigneeType;
+    if (before.archivedAt === null
+      && (body.assigneeType !== undefined || body.assigneeAgentId !== undefined)) {
+      const [effectiveAgent, templateStep] = await Promise.all([
+        effectiveAgentId
+          ? db.agent.findFirst({ where: { id: effectiveAgentId, projectId: before.projectId } })
+          : null,
+        before.templateStepId
+          ? db.taskTemplateStep.findUnique({
+            where: { id: before.templateStepId },
+            select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+          })
+          : null,
+      ]);
+      if (!compoundImplementationAssigneeValid(
+        before.projectId,
+        effectiveAssigneeType,
+        effectiveAgent,
+        templateStep,
+      )) {
+        const error = new CompoundImplementationAssigneeError();
+        return context.json({ error: error.message, code: error.code }, 409);
+      }
+    }
     if (body.assigneeAgentId) {
       if (!assignee) return context.json({ error: "Assignee does not belong to this project" }, 400);
       if (assignee.archivedAt) return context.json({ error: `Assignee ${assignee.name} is archived` }, 400);
@@ -3320,7 +3375,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const repo = await db.repo.findFirst({ where: { id: body.repoId, projectId: before.projectId } });
       if (!repo) return context.json({ error: "Repo does not belong to this project" }, 400);
     }
-    const effectiveAgentId = body.assigneeAgentId === undefined ? before.assigneeAgentId : body.assigneeAgentId;
     const effectiveRepoId = body.repoId === undefined ? before.repoId : body.repoId;
     if (effectiveAgentId && effectiveRepoId) {
       const access = await db.agentRepoAccess.findFirst({
@@ -3328,7 +3382,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (!access) return context.json({ error: "Assignee has no grant for this Repo" }, 400);
     }
-    const effectiveAssigneeType = body.assigneeType ?? before.assigneeType;
     // §D-P4 on reassignment. `templateStepId` is not a patchable field, so the
     // step half of the pair cannot move under this check; the assignee half is
     // exactly what this route can move, in either direction — an ordinary task
@@ -3404,6 +3457,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
         }
         // Task rows first, then the Agent row — the one global lock order.
+        if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
+          await assertCompoundImplementationAssignment(
+            tx,
+            locked,
+            body.assigneeType ?? locked.assigneeType,
+            body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
+          );
+        }
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
         // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
@@ -3440,6 +3501,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return { error: stopStateRefusal(stopped), code: 409 as const };
         }
         let winningGateCard: { id: string; body: string; gateTaskId: string | null; sessionId: string | null } | null = null;
+        let winningGateRunId: string | null = null;
         if (body.status === TaskStatus.DONE) {
           if (await hasActiveRun(tx, taskId)) {
             return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
@@ -3468,25 +3530,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               };
             }
           }
-          // §D-P2 rule 2 / Y4. For an integrator gate the closed-card set plus a
-          // status activity is not a durable decision identity, and it is partly
-          // forgeable through POST /tasks/:taskId/activity. This channel
-          // therefore names one winning card and answers it, so the same
-          // server-only anchors the Inbox channel produces exist here too. The
-          // earliest OPEN card is the deterministic winner.
-          const integratorGate = await gateFeedsIntegratorStep(tx, before);
-          if (integratorGate) {
-            winningGateCard = await tx.inboxMessage.findFirst({
-              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
-              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-              select: { id: true, body: true, gateTaskId: true, sessionId: true },
-            });
-            if (winningGateCard) {
-              await tx.inboxMessage.update({
-                where: { id: winningGateCard.id },
-                data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
-              });
+          // A Human approval has one durable decision identity on both API
+          // channels. The earliest OPEN card is the deterministic winner; the
+          // gate Task lock above makes this selection and the Inbox route's OPEN
+          // claim one compare-and-set rather than two competing decisions.
+          winningGateCard = await tx.inboxMessage.findFirst({
+            where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: { id: true, body: true, gateTaskId: true, sessionId: true },
+          });
+          if (winningGateCard) {
+            const session = winningGateCard.sessionId
+              ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
+              : null;
+            if (!session?.runId) {
+              return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
             }
+            winningGateRunId = session.runId;
+            await tx.inboxMessage.update({
+              where: { id: winningGateCard.id },
+              data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
+            });
           }
           // This OPEN row is the gate-decision CAS. It deliberately depends on
           // neither templateId nor approvalGate: gate creation records the
@@ -3518,15 +3582,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
         let authorization: Awaited<ReturnType<typeof produceMergeAuthorization>> = null;
         if (winningGateCard) {
-          const session = winningGateCard.sessionId
-            ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
-            : null;
-          if (!session?.runId) {
-            return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
-          }
           const decisionRow = await tx.inboxDecision.create({ data: {
             inboxMessageId: winningGateCard.id,
-            runId: session.runId,
+            runId: winningGateRunId!,
             externalEventId: `patch:${taskId}:${statusActivityId ?? winningGateCard.id}`,
             decision: "approve",
             actorOpenId: "patch-operator",
@@ -3556,6 +3614,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const updated = await db.$transaction(async (tx) => {
         const locked = await lockTask(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
+        if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
+          await assertCompoundImplementationAssignment(
+            tx,
+            locked,
+            body.assigneeType ?? locked.assigneeType,
+            body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
+          );
+        }
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
         return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
@@ -3569,6 +3635,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const written = await db.$transaction(async (tx) => {
         const locked = await lockTask(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
+        await assertCompoundImplementationAssignment(
+          tx,
+          locked,
+          body.assigneeType ?? locked.assigneeType,
+          body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
+        );
         const blockedAssignment = await assignmentBlocked(tx, assignee);
         if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
         return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
@@ -6189,6 +6261,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.onError((error, context) => {
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
+    if (isCompoundImplementationAssigneeError(error)) {
+      return context.json({ error: error.message, code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE }, 409);
+    }
+    if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === "P2025") return context.json({ error: "Resource not found" }, 404);
       if (error.code === "P2002") return context.json({ error: "Unique constraint violated" }, 409);

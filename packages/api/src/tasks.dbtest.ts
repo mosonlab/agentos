@@ -456,15 +456,24 @@ test("archive refuses a REVIEW task with an open approval gate", async () => {
   assert.equal(body.error, "Decide the approval gate in the Inbox first");
 });
 
-test("HUMAN final DONE closes only exact OPEN gate messages even when approvalGate is false", async () => {
+test("HUMAN final DONE answers only the exact OPEN gate even when approvalGate is false", async () => {
   const chainId = `human-final-${Date.now()}`;
   const target = await seedTask("human-final", {
     status: "REVIEW", assigneeType: "HUMAN", assigneeAgentId: null, repoId: null,
     approvalGate: false, chainId, chainIndex: 0,
   });
   const unrelated = await seedTask("human-final-unrelated", { status: "REVIEW" });
+  const run = await seedRun(target, 1, "SUCCEEDED");
+  const session = await db.session.create({ data: {
+    runId: run.id,
+    projectId: target.project.id,
+    agentId: target.agent.id,
+    taskId: target.task.id,
+    runner: "CLAUDE",
+  } });
   const exactOpen = await db.inboxMessage.create({ data: {
-    from: "AGENT", taskId: target.task.id, gateTaskId: target.task.id,
+    from: "AGENT", agentId: target.agent.id, sessionId: session.id,
+    taskId: target.task.id, gateTaskId: target.task.id,
     kind: "MULTIPLE_CHOICE", body: "exact open", status: "OPEN",
     choices: [{ id: "approve", label: "Approve" }], dedupeKey: `gate:exact:${target.task.id}`,
   } });
@@ -485,7 +494,8 @@ test("HUMAN final DONE closes only exact OPEN gate messages even when approvalGa
 
   assert.equal((await call("PATCH", `/tasks/${target.task.id}`, { status: "DONE" })).status, 200);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: target.task.id } })).status, "DONE");
-  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: exactOpen.id } })).status, "CLOSED");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: exactOpen.id } })).status, "ANSWERED");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: exactOpen.id } }), 1);
   assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: exactClosed.id } })).status, "CLOSED");
   assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: ordinaryOpen.id } })).status, "OPEN");
   assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: unrelatedOpen.id } })).status, "OPEN");
