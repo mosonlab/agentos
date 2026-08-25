@@ -429,6 +429,18 @@ test("the remote path receives the exact candidate and frozen baseline", (t) => 
   assert.match(result.stderr, new RegExp(`remote args: .*${repo.head} --master ${repo.head}`));
 });
 
+test("a configured single server is consumed by the dispatcher before child tools", (t) => {
+  const repo = fixtureRepo(t, {
+    mirrorPush: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = agentos-gate; printf "MIRROR PUSH: OK\\n"',
+    remoteGate: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = agentos-gate; printf "MERGE GATE: PASS single-server\\n"',
+  });
+  const result = dispatch(t, repo, [repo.head], { AGENTOS_GATE_SERVER: "agentos-gate" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS single-server/u);
+  assert.match(result.stderr, /primary agentos-gate\(1\)/u);
+  assert.doesNotMatch(result.stderr, /fallback/u);
+});
+
 test("an ssh transport failure retries the exact gate on the fallback", (t) => {
   const repo = fixtureRepo(t, {
     remoteGate:

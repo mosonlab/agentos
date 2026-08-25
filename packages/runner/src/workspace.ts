@@ -63,12 +63,14 @@ const command: WorkspaceCommandExecutor = (
 
 export const workspaceEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "runAsPrefix">
+    & Partial<Pick<RunnerConfig, "gateServer">>
     & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
 ): NodeJS.ProcessEnv => ({
   PATH: config.path,
   HOME: config.home,
   LANG: "C.UTF-8",
   GIT_TERMINAL_PROMPT: "0",
+  ...(config.gateServer ? { AGENTOS_GATE_SERVER: config.gateServer } : {}),
   ...(config.proxyEnvironment ?? runnerProxyEnvironment()),
   // macOS Keychain lookups (claude CLI auth) fail without the login identity.
   // Only the daemon's own identity is meant here: under a run-as prefix the

@@ -267,6 +267,13 @@ to `ci-desktop-worker` as primary and `agentos-gate` as fallback;
 `AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` override them.
 `--server <alias>` remains the explicit one-worker form.
 
+Agent sessions receive a single operator-selected worker only when their runner
+daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
+that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
+puts `gate-dispatch.sh` into its existing single-server mode. Task secrets cannot
+override this runner-owned choice. Leave `RUNNER_GATE_SERVER` unset when the
+normal primary/fallback topology is intended.
+
 ```
 Host ci-desktop-worker
   HostName <ip>
