@@ -211,7 +211,7 @@ test("sync rolls the exact old graphs forward without touching instantiated evid
 test("sync upgrades only the exact frozen-base review agent defaults", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const names = ["review-coordinator", "review-coordinator-sol"];
-  const frozenBase = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
+  const frozenBase = { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI };
   const frozenSolBase = { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI };
 
   await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator" }, data: frozenBase });
@@ -247,9 +247,7 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   });
   assert.equal(upgraded.length, 2);
   assert.ok(upgraded.every((agent) => agent.runnerPreference === RunnerPreference.PI
-    && agent.model === (agent.name === "review-coordinator"
-      ? "openai-codex/gpt-5.6-sol:high"
-      : "openai-codex/gpt-5.6-sol:xhigh")));
+    && agent.model === "openai-codex/gpt-5.6-sol:xhigh"));
 });
 
 test("sync adopts the exact model-only executioner transition", async () => {

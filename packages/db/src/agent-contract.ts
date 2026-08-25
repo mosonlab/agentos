@@ -15,7 +15,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "plan-reviser", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "regression-verifier", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:high", runner: RunnerPreference.PI },
+  { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-adjudicator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
@@ -33,9 +33,12 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
   from: { model: string; runnerPreference: RunnerPreference };
   to: { model: string; runnerPreference: RunnerPreference };
 }>([
+  // 2026-08-25 ruling: the plan review is the sole reviewer gating implementation,
+  // so it buys the same depth as the dual-vendor code review. Supersedes the
+  // earlier CODEX-to-PI runner switch, whose target this from-value matches.
   ["review-coordinator", {
-    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
-    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+    from: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+    to: { model: "openai-codex/gpt-5.6-sol:xhigh", runnerPreference: RunnerPreference.PI },
   }],
   ["review-coordinator-sol", {
     from: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },

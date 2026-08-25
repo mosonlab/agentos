@@ -112,7 +112,7 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
   assert.deepEqual(canonical.get("review-coordinator"), {
     name: "review-coordinator",
-    model: "openai-codex/gpt-5.6-sol:high",
+    model: "openai-codex/gpt-5.6-sol:xhigh",
     runner: RunnerPreference.PI,
   });
   assert.deepEqual(canonical.get("review-coordinator-sol"), {
