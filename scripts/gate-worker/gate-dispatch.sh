@@ -110,6 +110,20 @@ read_origin_head() {
   return 1
 }
 
+fetch_origin_ref() {
+  local ref="$1" attempt
+  for attempt in 1 2 3; do
+    if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" fetch --no-tags --no-write-fetch-head origin "$ref" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      printf 'gate-dispatch: origin ref fetch failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
+      sleep 1
+    fi
+  done
+  return 1
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --master)
@@ -200,7 +214,7 @@ if [ -z "$MASTER_OID" ]; then
     || die "origin did not name its default branch; pass --master <oid> to state the baseline" "$EXIT_NO_VERDICT"
   gate_valid_ref "$DEFAULT_REF" >/dev/null \
     || die "origin named a default branch this dispatcher will not fetch: ${DEFAULT_REF}" "$EXIT_NO_VERDICT"
-  GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" fetch --no-tags --no-write-fetch-head origin "$DEFAULT_REF" >/dev/null 2>&1 \
+  fetch_origin_ref "$DEFAULT_REF" \
     || die "could not refresh ${DEFAULT_REF} from origin; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
   refreshed="$(read_origin_head)" \
     || die "could not re-read HEAD from origin after refresh; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
@@ -285,14 +299,14 @@ run_remote() {
   # so there is no verdict to report and 76 says exactly that; returning the
   # gate's FAIL code here would have dressed a transport or mirror problem up as
   # a judgement about the commit.
-  AGENTOS_GATE_SERVER= bash "${SCRIPT_DIR}/mirror-push.sh" "$server" \
+  AGENTOS_GATE_SERVER='' bash "${SCRIPT_DIR}/mirror-push.sh" "$server" \
     --candidate "$OID" --baseline "$MASTER_OID" >&2 || {
     printf 'gate-dispatch: mirror-push failed; no gate was run and no verdict exists\n' >&2
     REMOTE_OUTPUT=""
     REMOTE_STATUS="$EXIT_NO_VERDICT"
     return 0
   }
-  REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER= bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
+  REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER='' bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
   REMOTE_STATUS=$?
 }
 

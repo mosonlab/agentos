@@ -226,9 +226,17 @@ fi
 
 printf '\n== Pushing exact candidate and baseline refs\n'
 push_status=0
-git -C "$REPO_ROOT" push --atomic "$REMOTE_MIRROR" \
-  "${CANDIDATE_OID}:${CANDIDATE_REF}" \
-  "${BASELINE_OID}:${BASELINE_REF}" || push_status=$?
+for push_attempt in 1 2 3; do
+  push_status=0
+  git -C "$REPO_ROOT" push --atomic "$REMOTE_MIRROR" \
+    "${CANDIDATE_OID}:${CANDIDATE_REF}" \
+    "${BASELINE_OID}:${BASELINE_REF}" || push_status=$?
+  [ "$push_status" -ne 0 ] || break
+  if [ "$push_attempt" -lt 3 ]; then
+    printf 'mirror-push: exact-ref push failed; retrying attempt=%s/3\n' "$((push_attempt + 1))" >&2
+    sleep 1
+  fi
+done
 if [ "$push_status" -ne 0 ]; then
   # Two dispatches for the same oids can both advertise an absent immutable ref,
   # then race to create it. The loser may be rejected even though the exact

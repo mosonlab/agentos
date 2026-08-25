@@ -24,8 +24,13 @@
 // whose merge-gate.sh, mirror-push.sh and remote-gate.sh are stubs, because
 // what is being proved is which code comes back from which failure, and a real
 // gate would take minutes to prove one bit of it.
+//
+// The fourth is the origin-backed merge lease: mutual exclusion, release,
+// status, the machine and human steal boundaries, and compare-and-swap under
+// concurrent steal attempts. Those cases use a local bare origin so they test
+// Git's real ref-update behavior without reaching a hosted repository.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -43,6 +48,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const libPath = join(here, "lib.sh");
 const dispatchPath = join(here, "gate-dispatch.sh");
+const mergeLeasePath = join(here, "..", "merge-lease.sh");
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
@@ -457,6 +463,34 @@ exec "$REAL_GIT" "$@"
   assert.match(result.stderr, /origin HEAD read failed; retrying attempt=3\/3/u);
 });
 
+test("origin default-ref fetch retries transient git failures before dispatch", (t) => {
+  const repo = fixtureRepo(t, {});
+  const shim = scratch(t);
+  const counter = join(shim, "fetch-count");
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const gitShim = join(shim, "git");
+  writeFileSync(gitShim, `#!/usr/bin/env bash
+if [ "$1" = "-C" ] && [ "$3" = "fetch" ]; then
+  count=0
+  [ ! -f "$GATE_FETCH_COUNTER" ] || count="$(cat "$GATE_FETCH_COUNTER")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$GATE_FETCH_COUNTER"
+  [ "$count" -gt 2 ] || exit 1
+fi
+exec "$REAL_GIT" "$@"
+`);
+  chmodSync(gitShim, 0o755);
+  const result = dispatch(t, repo, [repo.head], {
+    PATH: `${shim}:${process.env.PATH}`,
+    REAL_GIT: realGit,
+    GATE_FETCH_COUNTER: counter,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(counter, "utf8").trim(), "3");
+  assert.match(result.stderr, /origin ref fetch failed; retrying attempt=2\/3/u);
+  assert.match(result.stderr, /origin ref fetch failed; retrying attempt=3\/3/u);
+});
+
 test("a configured single server is consumed by the dispatcher before child tools", (t) => {
   const repo = fixtureRepo(t, {
     mirrorPush: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = agentos-gate; printf "MIRROR PUSH: OK\\n"',
@@ -656,4 +690,185 @@ test("a destination that is not an ssh destination is refused before anything is
   const result = dispatch(t, repo, [repo.head, "--server", "host; rm -rf /"]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /not a usable primary ssh destination/);
+});
+
+// --- the global merge lease -------------------------------------------------
+
+const leaseFixture = (t) => {
+  const parent = scratch(t);
+  const origin = join(parent, "origin.git");
+  const root = join(parent, "source");
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: GIT_ENV });
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  cpSync(mergeLeasePath, join(root, "scripts", "merge-lease.sh"));
+  chmodSync(join(root, "scripts", "merge-lease.sh"), 0o755);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: GIT_ENV });
+  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: GIT_ENV });
+  return { root, origin };
+};
+
+const runLease = (fixture, args, holder = "machine@fixture") =>
+  spawnSync("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
+    cwd: fixture.root,
+    encoding: "utf8",
+    timeout: 15_000,
+    env: { ...GIT_ENV, MERGE_LEASE_HOLDER: holder },
+  });
+
+const installLease = (fixture, lease) => {
+  const body = `${JSON.stringify(lease)}\n`;
+  const sha = execFileSync("git", ["-C", fixture.root, "hash-object", "-w", "--stdin"], {
+    env: GIT_ENV,
+    encoding: "utf8",
+    input: body,
+  }).trim();
+  execFileSync("git", ["-C", fixture.root, "push", "-q", "origin", `+${sha}:refs/merge-lease/holder`], {
+    env: GIT_ENV,
+  });
+  return { ...lease, sha };
+};
+
+const readLease = (fixture) => {
+  const sha = execFileSync("git", ["--git-dir", fixture.origin, "rev-parse", "refs/merge-lease/holder"], {
+    env: GIT_ENV,
+    encoding: "utf8",
+  }).trim();
+  const body = execFileSync("git", ["--git-dir", fixture.origin, "cat-file", "blob", sha], {
+    env: GIT_ENV,
+    encoding: "utf8",
+  });
+  return { sha, lease: JSON.parse(body) };
+};
+
+const runLeaseAsync = (fixture, args, holder) =>
+  new Promise((resolve) => {
+    const child = spawn("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
+      cwd: fixture.root,
+      env: { ...GIT_ENV, MERGE_LEASE_HOLDER: holder },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+
+test("merge lease acquire is mutually exclusive and release removes the lease", (t) => {
+  const fixture = leaseFixture(t);
+  const first = runLease(fixture, ["acquire", "--reason", "First merge"], "first@fixture");
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+
+  const second = runLease(
+    fixture,
+    ["acquire", "--reason", "Second merge", "--timeout-minutes", "0"],
+    "second@fixture",
+  );
+  assert.equal(second.status, 75, second.stdout + second.stderr);
+  assert.equal(readLease(fixture).lease.holder, "first@fixture");
+
+  const released = runLease(fixture, ["release"], "first@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  const status = runLease(fixture, ["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /no lease held/u);
+});
+
+test("merge lease status prints every field of the current holder", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Inspect status", "--task", "task-42"],
+    "status@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const secondRoot = join(dirname(fixture.root), "second-source");
+  mkdirSync(join(secondRoot, "scripts"), { recursive: true });
+  cpSync(mergeLeasePath, join(secondRoot, "scripts", "merge-lease.sh"));
+  chmodSync(join(secondRoot, "scripts", "merge-lease.sh"), 0o755);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: secondRoot, env: GIT_ENV });
+  execFileSync("git", ["remote", "add", "origin", fixture.origin], { cwd: secondRoot, env: GIT_ENV });
+  const status = runLease({ root: secondRoot, origin: fixture.origin }, ["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  const lease = JSON.parse(status.stdout);
+  assert.equal(lease.holder, "status@fixture");
+  assert.equal(lease.task, "task-42");
+  assert.equal(lease.reason, "Inspect status");
+  assert.match(lease.acquiredAt, /^\d{4}-\d{2}-\d{2}T/u);
+  assert.match(lease.token, /^[0-9a-f-]{36}$/u);
+});
+
+test("machine steal is refused through 45 minutes and allowed only after it", (t) => {
+  const fixture = leaseFixture(t);
+  const recent = {
+    holder: "recent@fixture",
+    acquiredAt: new Date(Date.now() - 44 * 60 * 1000).toISOString(),
+    reason: "Recent merge",
+    token: "recent-token",
+  };
+  installLease(fixture, recent);
+  const refused = runLease(fixture, ["steal", "--reason", "Machine recovery"], "machine@fixture");
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /has not exceeded 2700s/u);
+  assert.equal(readLease(fixture).lease.holder, "recent@fixture");
+
+  const stale = {
+    ...recent,
+    acquiredAt: new Date(Date.now() - 46 * 60 * 1000).toISOString(),
+    token: "stale-token",
+  };
+  installLease(fixture, stale);
+  const stolen = runLease(fixture, ["steal", "--reason", "Machine recovery"], "machine@fixture");
+  assert.equal(stolen.status, 0, stolen.stdout + stolen.stderr);
+  assert.match(stolen.stderr, /stealing lease from/u);
+  const current = readLease(fixture).lease;
+  assert.equal(current.holder, "machine@fixture");
+  assert.deepEqual(current.stolenFrom, stale);
+});
+
+test("an explicit human steal replaces a fresh lease immediately", (t) => {
+  const fixture = leaseFixture(t);
+  const original = {
+    holder: "active@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Active merge",
+    token: "active-token",
+  };
+  installLease(fixture, original);
+  const stolen = runLease(
+    fixture,
+    ["steal", "--human", "--reason", "Human override", "--task", "incident-7"],
+    "leo@fixture",
+  );
+  assert.equal(stolen.status, 0, stolen.stdout + stolen.stderr);
+  const current = readLease(fixture).lease;
+  assert.equal(current.holder, "leo@fixture");
+  assert.equal(current.task, "incident-7");
+  assert.deepEqual(current.stolenFrom, original);
+});
+
+test("two concurrent steals compare-and-swap the observed holder so exactly one wins", async (t) => {
+  const fixture = leaseFixture(t);
+  const original = {
+    holder: "abandoned@fixture",
+    acquiredAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    reason: "Abandoned merge",
+    token: "abandoned-token",
+  };
+  installLease(fixture, original);
+  const hook = join(fixture.origin, "hooks", "pre-receive");
+  writeFileSync(hook, "#!/usr/bin/env bash\nsleep 0.4\n");
+  chmodSync(hook, 0o755);
+
+  const results = await Promise.all([
+    runLeaseAsync(fixture, ["steal", "--reason", "First recovery"], "first@fixture"),
+    runLeaseAsync(fixture, ["steal", "--reason", "Second recovery"], "second@fixture"),
+  ]);
+  assert.equal(results.filter((result) => result.status === 0).length, 1, JSON.stringify(results));
+  assert.equal(results.filter((result) => result.status === 1).length, 1, JSON.stringify(results));
+  assert.match(results.find((result) => result.status === 1).stderr, /compare-and-swap refused/u);
+  const current = readLease(fixture).lease;
+  assert.ok(["first@fixture", "second@fixture"].includes(current.holder));
+  assert.deepEqual(current.stolenFrom, original);
 });

@@ -246,6 +246,99 @@ exec bash -c "$*"
   assert.equal(existsSync(join(fakeHome, "gate", "agentos-public", "mirror.git")), false);
 });
 
+test("mirror push retries two transient push failures before succeeding", (t) => {
+  const root = scratch(t);
+  const repo = join(root, "source");
+  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  writeFileSync(join(repo, "scripts", "merge-gate.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  for (const name of ["mirror-push.sh", "run-gate.sh", "lib.sh"]) {
+    cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
+  }
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "remote", "add", "origin", "https://example.invalid/mosonlab/retry.git");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "fixture");
+  const oid = git(repo, "rev-parse", "HEAD");
+
+  const fakeHome = join(root, "worker-home");
+  const mirror = join(fakeHome, "gate", "retry", "mirror.git");
+  mkdirSync(join(fakeHome, "gate", "retry"), { recursive: true });
+  execFileSync("git", ["init", "-q", "--bare", mirror], { env: GIT_ENV });
+
+  const fakeBin = join(root, "fake-bin");
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(fakeBin, "ssh"), `#!/usr/bin/env bash
+set -uo pipefail
+if [ "\${1:-}" = "-G" ]; then exit 1; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|-o|-i|-F) shift 2 ;;
+    -n|-T|-x) shift ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || exit 2
+shift
+cd "$FAKE_SSH_HOME"
+exec bash -c "$*"
+`);
+  writeFileSync(join(fakeBin, "scp"), `#!/usr/bin/env bash
+set -uo pipefail
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -P|-o) shift 2 ;;
+    -q) shift ;;
+    *) break ;;
+  esac
+done
+[ $# -eq 2 ] || exit 2
+destination="\${2#*:}"
+cp "$1" "$FAKE_SSH_HOME/$destination"
+`);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const pushCounter = join(root, "push-count");
+  writeFileSync(join(fakeBin, "git"), `#!/usr/bin/env bash
+is_push=0
+for argument in "$@"; do
+  [ "$argument" = push ] && is_push=1
+done
+if [ "$is_push" -eq 1 ]; then
+  count=0
+  [ ! -f "$PUSH_COUNTER" ] || count="$(cat "$PUSH_COUNTER")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$PUSH_COUNTER"
+  [ "$count" -gt 2 ] || exit 1
+fi
+exec "$REAL_GIT" "$@"
+`);
+  for (const name of ["ssh", "scp", "git"]) chmodSync(join(fakeBin, name), 0o755);
+
+  const result = spawnSync(
+    "bash",
+    [join(repo, "scripts", "gate-worker", "mirror-push.sh"), "fake", "--candidate", oid, "--baseline", oid],
+    {
+      cwd: repo,
+      encoding: "utf8",
+      timeout: 15_000,
+      env: {
+        ...GIT_ENV,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        FAKE_SSH_HOME: fakeHome,
+        REAL_GIT: realGit,
+        PUSH_COUNTER: pushCounter,
+      },
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(pushCounter, "utf8").trim(), "3");
+  assert.match(result.stderr, /exact-ref push failed; retrying attempt=2\/3/u);
+  assert.match(result.stderr, /exact-ref push failed; retrying attempt=3\/3/u);
+  assert.equal(git(mirror, "rev-parse", `refs/gate/candidates/${oid}^{commit}`), oid);
+  assert.equal(git(mirror, "rev-parse", `refs/gate/baselines/${oid}^{commit}`), oid);
+});
+
 // --- exact-ref transport -----------------------------------------------------
 
 test("dispatch transports a detached candidate and current baseline without mirroring an incomplete ref namespace", (t) => {
