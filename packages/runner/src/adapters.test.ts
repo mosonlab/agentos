@@ -234,6 +234,41 @@ test("buildPrompt gives a fresh Regression session only the head-bound repair ha
   assert.match(prompt, /verify the checked-out starting HEAD equals repair\.resolvedHeadSha/u);
 });
 
+test("buildPrompt pins a repaired Regression retry to the prior same-task pushed head", () => {
+  const prompt = buildPrompt({
+    ...claim,
+    regressionRepairHandoff: {
+      schemaVersion: 1,
+      trigger: {
+        kind: "regression-verdict",
+        verdict: {
+          schemaVersion: 1,
+          outcome: "review-fail",
+          headSha: "a".repeat(40),
+          baseHeadSha: "b".repeat(40),
+          summary: "MF-2 remains open",
+        },
+      },
+      repair: {
+        kind: "review-fix",
+        taskId: "repair-1",
+        startHeadSha: "a".repeat(40),
+        targetHeadSha: "b".repeat(40),
+        resolvedHeadSha: "c".repeat(40),
+        outputKind: "result",
+        outputBody: "Closed MF-2.",
+      },
+      retry: {
+        previousRunId: "regression-run-2",
+        startHeadSha: "d".repeat(40),
+      },
+    },
+  });
+  assert.match(prompt, new RegExp(`previousRunId":"regression-run-2","startHeadSha":"${"d".repeat(40)}`));
+  assert.match(prompt, /verify the checked-out starting HEAD equals retry\.startHeadSha/u);
+  assert.doesNotMatch(prompt, /verify the checked-out starting HEAD equals repair\.resolvedHeadSha/u);
+});
+
 test("buildPrompt gives a retry the immediate prior output without reusing provider context", () => {
   const prompt = buildPrompt({
     ...claim,
