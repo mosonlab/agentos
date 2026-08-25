@@ -135,9 +135,13 @@ export const isPrePlanDecisionsTemplate = (
 export const previousChainLeasePrompt = (prompt: string): string => prompt
   .replace(LEASE_FETCH_PROMPT, PRE_LEASE_FETCH_PROMPT)
   .replace(DISPATCH_RETRY_PROMPT, "")
+  // The canonical prompt ends on this sentence with no trailing newline, so the
+  // search string must not carry one: a trailing "\n" here made the replace a
+  // silent no-op, which kept isPreChainLeaseTemplate from ever matching a
+  // pre-lease row and stranded production one template generation behind.
   .replace(
-    "No other output shape advances the chain. A non-verdict gate exit is neither\nPASS nor FAIL.\n",
-    "No other output shape advances the chain. A non-verdict gate exit is neither\nPASS nor FAIL: report it through the activity log and fail the run loudly.\n",
+    "No other output shape advances the chain. A non-verdict gate exit is neither\nPASS nor FAIL.",
+    "No other output shape advances the chain. A non-verdict gate exit is neither\nPASS nor FAIL: report it through the activity log and fail the run loudly.",
   );
 
 export const legacyChainLeaseTemplateName = (templateName: string, templateId: string): string =>

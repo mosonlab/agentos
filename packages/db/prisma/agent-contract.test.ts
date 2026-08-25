@@ -35,8 +35,10 @@ import {
   templateStepStructureDifferences,
 } from "../src/template-sources.js";
 import {
+  isPreChainLeaseTemplate,
   isPrePlanDecisionsTemplate,
   preDecisionsPlanPrompt,
+  previousChainLeasePrompt,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
 
@@ -297,6 +299,62 @@ test("the pre-decisions compound shape is recognized for rollover and the curren
     prompt: step.prompt,
   }));
   assert.equal(isPrePlanDecisionsTemplate(DIRECT_TEMPLATE_NAME, directPersisted, direct), false);
+});
+
+test("the pre-lease reconstruction rewrites every fragment it names", async () => {
+  for (const templateName of [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]) {
+    const canonical = await loadTemplateStepSources(templateName);
+    const regression = canonical.find((step) => step.outputKind === "regression-verification")!;
+    const old = previousChainLeasePrompt(regression.prompt);
+    // Each of the three replacements is asserted against the literal wording a
+    // real pre-lease row carries, never against this function's own output: a
+    // search string that carries a trailing newline the canonical prompt does
+    // not have makes the replace a silent no-op, and a self-referential
+    // assertion cannot see that. Such a no-op stranded production one template
+    // generation behind, because isPreChainLeaseTemplate then only ever matched
+    // rows this same function had produced.
+    assert.doesNotMatch(old, /merge-lease\.sh acquire/u);
+    assert.match(old, /Refresh `\{\{branchName\}\}` onto it before reviewing: fetch/u);
+    assert.doesNotMatch(old, /If dispatch exits 75 or 76 without a verdict/u);
+    assert.match(old, /PASS nor FAIL: report it through the activity log and fail the run loudly\.$/u);
+    assert.doesNotMatch(old, /PASS nor FAIL\.$/u);
+    assert.doesNotMatch(regression.prompt, /PASS nor FAIL: report it/u);
+  }
+});
+
+test("a compound row two generations behind is recognized as pre-lease", async () => {
+  const canonical = await loadTemplateStepSources();
+  const leaseStepIndex = canonical.find((step) => step.outputKind === "regression-verification")!.stepIndex;
+  const twoBehind: PersistedTransitionStep[] = canonical.map((step) => ({
+    id: `step-${step.stepIndex}`,
+    taskTemplateId: "template-1",
+    stepIndex: step.stepIndex,
+    name: `Step ${step.stepIndex}`,
+    assigneeAgent: step.agentName ? { name: step.agentName } : null,
+    assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
+    layer: step.layer,
+    approvalGate: step.approvalGate,
+    outputKind: step.outputKind,
+    attachmentsFromPrevious: step.attachmentsFromPrevious,
+    opensPullRequest: step.opensPullRequest,
+    baseFromStepIndex: step.baseFromStepIndex,
+    spawnPolicy: step.spawnPolicy,
+    // Pre-merge-lease on the regression step and pre-decisions.md on the plan
+    // steps at the same time: the shape production actually sat in.
+    prompt: step.stepIndex === leaseStepIndex
+      ? previousChainLeasePrompt(step.prompt)
+      : preDecisionsPlanPrompt(step.stepIndex, step.prompt),
+  }));
+  // The reconstructions themselves are pinned to literal pre-lease wording by
+  // "the pre-lease reconstruction rewrites every fragment it names"; this test
+  // owns only the composition, so building the row from them is not circular.
+  assert.notEqual(twoBehind[leaseStepIndex - 1]!.prompt, canonical[leaseStepIndex - 1]!.prompt);
+  assert.notEqual(twoBehind[1]!.prompt, canonical[1]!.prompt);
+  assert.notEqual(twoBehind[3]!.prompt, canonical[3]!.prompt);
+  assert.equal(isPreChainLeaseTemplate(INTEGRATOR_TEMPLATE_NAME, twoBehind, canonical), true);
+  // The lease rollover subsumes it: a two-generations-behind row must not also
+  // present as the single-transition pre-decisions shape.
+  assert.equal(isPrePlanDecisionsTemplate(INTEGRATOR_TEMPLATE_NAME, twoBehind, canonical), false);
 });
 
 test("only implementation opens a pull request, and the integrator is not a model row", async () => {
