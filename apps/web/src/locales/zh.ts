@@ -157,7 +157,6 @@ export const zh = {
   "chain.humanAssignee": "人工职责",
   "chain.layer": "层级 {n}",
   "chain.loading": "正在加载任务链…",
-  "chain.parallel": "并行 · {n} 个步骤",
   "chain.parked": "停在储备池",
   "chain.recoverParked": "恢复停放步骤",
   "chain.showAll": "显示全部 {n} 个步骤",
