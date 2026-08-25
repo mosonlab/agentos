@@ -270,14 +270,14 @@ run_remote() {
   # so there is no verdict to report and 76 says exactly that; returning the
   # gate's FAIL code here would have dressed a transport or mirror problem up as
   # a judgement about the commit.
-  bash "${SCRIPT_DIR}/mirror-push.sh" "$server" \
+  AGENTOS_GATE_SERVER= bash "${SCRIPT_DIR}/mirror-push.sh" "$server" \
     --candidate "$OID" --baseline "$MASTER_OID" >&2 || {
     printf 'gate-dispatch: mirror-push failed; no gate was run and no verdict exists\n' >&2
     REMOTE_OUTPUT=""
     REMOTE_STATUS="$EXIT_NO_VERDICT"
     return 0
   }
-  REMOTE_OUTPUT="$(bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
+  REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER= bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
   REMOTE_STATUS=$?
 }
 
