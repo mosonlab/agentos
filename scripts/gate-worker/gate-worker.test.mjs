@@ -54,8 +54,24 @@ const runbookPath = join(here, "..", "..", "docs", "runbooks", "gate-worker.md")
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
-const GIT_ENV = {
-  ...process.env,
+// The dispatcher and the gate read their topology and their sizing out of the
+// environment: `AGENTOS_GATE_SERVER` alone collapses the dispatcher to a single
+// server with an empty fallback (gate-dispatch.sh), which turns a case that
+// pre-fills the desktop slots into a wait for a slot that cannot open. A
+// session configured to reach a real gate worker exports that variable, so a
+// fixture that inherits the host environment tests the host's topology instead
+// of the one it declares. The host's Git identity was already neutralised here
+// for the same reason; behaviour belongs on the same list. Stripping by prefix
+// rather than by name means a variable added to the dispatcher later cannot
+// reintroduce the leak.
+const hostNeutralEnv = Object.fromEntries(
+  Object.entries(process.env).filter(
+    ([key]) => !key.startsWith("AGENTOS_GATE_") && !key.startsWith("GATE_DISPATCH_"),
+  ),
+);
+
+const FIXTURE_ENV = {
+  ...hostNeutralEnv,
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_AUTHOR_NAME: "gate-worker-fixture",
@@ -73,7 +89,7 @@ const scratch = (t) => {
 };
 
 const git = (cwd, ...args) =>
-  execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
+  execFileSync("git", args, { cwd, encoding: "utf8", env: FIXTURE_ENV }).trim();
 
 // --- worker provisioning contract -------------------------------------------
 
@@ -234,7 +250,7 @@ exec bash -c "$*"
       cwd: repo,
       encoding: "utf8",
       env: {
-        ...GIT_ENV,
+        ...FIXTURE_ENV,
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
         FAKE_SSH_HOME: fakeHome,
       },
@@ -263,7 +279,7 @@ test("mirror push retries two transient push failures before succeeding", (t) =>
   const fakeHome = join(root, "worker-home");
   const mirror = join(fakeHome, "gate", "retry", "mirror.git");
   mkdirSync(join(fakeHome, "gate", "retry"), { recursive: true });
-  execFileSync("git", ["init", "-q", "--bare", mirror], { env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "--bare", mirror], { env: FIXTURE_ENV });
 
   const fakeBin = join(root, "fake-bin");
   mkdirSync(fakeBin, { recursive: true });
@@ -323,7 +339,7 @@ exec "$REAL_GIT" "$@"
       encoding: "utf8",
       timeout: 15_000,
       env: {
-        ...GIT_ENV,
+        ...FIXTURE_ENV,
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
         FAKE_SSH_HOME: fakeHome,
         REAL_GIT: realGit,
@@ -344,8 +360,8 @@ exec "$REAL_GIT" "$@"
 test("dispatch transports a detached candidate and current baseline without mirroring an incomplete ref namespace", (t) => {
   const root = scratch(t);
   const origin = join(root, "origin.git");
-  execFileSync("git", ["init", "-q", "--bare", origin], { env: GIT_ENV });
-  execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: FIXTURE_ENV });
+  execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: FIXTURE_ENV });
 
   const source = join(root, "source");
   mkdirSync(join(source, "scripts", "gate-worker"), { recursive: true });
@@ -379,7 +395,7 @@ test("dispatch transports a detached candidate and current baseline without mirr
   git(source, "push", "-q", "origin", "main");
 
   const checkout = join(root, "checkout");
-  execFileSync("git", ["clone", "-q", "--single-branch", "--branch", "feature", origin, checkout], { env: GIT_ENV });
+  execFileSync("git", ["clone", "-q", "--single-branch", "--branch", "feature", origin, checkout], { env: FIXTURE_ENV });
   git(checkout, "checkout", "-q", "--detach", candidate);
   git(checkout, "branch", "-D", "feature");
   git(checkout, "update-ref", "-d", "refs/remotes/origin/feature");
@@ -388,8 +404,8 @@ test("dispatch transports a detached candidate and current baseline without mirr
   const fakeHome = join(root, "worker-home");
   const mirror = join(fakeHome, "gate", "origin", "mirror.git");
   mkdirSync(join(fakeHome, "gate", "origin"), { recursive: true });
-  execFileSync("git", ["init", "-q", "--bare", mirror], { env: GIT_ENV });
-  execFileSync("git", ["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "--bare", mirror], { env: FIXTURE_ENV });
+  execFileSync("git", ["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/main"], { env: FIXTURE_ENV });
   git(source, "push", "-q", mirror, `${oldMain}:refs/heads/main`);
 
   const fakeBin = join(root, "fake-bin");
@@ -433,7 +449,7 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
     encoding: "utf8",
     timeout: 30_000,
     env: {
-      ...GIT_ENV,
+      ...FIXTURE_ENV,
       PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       FAKE_SSH_HOME: fakeHome,
       XDG_CACHE_HOME: cache,
@@ -472,7 +488,7 @@ const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
   const oid = git(work, "rev-parse", "HEAD");
 
   mkdirSync(home, { recursive: true });
-  execFileSync("git", ["clone", "-q", "--bare", work, join(home, "mirror.git")], { env: GIT_ENV });
+  execFileSync("git", ["clone", "-q", "--bare", work, join(home, "mirror.git")], { env: FIXTURE_ENV });
   writeFileSync(join(home, "run-gate.sh"), readFileSync(runGatePath));
   chmodSync(join(home, "run-gate.sh"), 0o755);
   return { root, home, oid };
@@ -481,7 +497,7 @@ const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
 const runGate = (home, args, env = {}) =>
   spawnSync("bash", [join(home, "run-gate.sh"), ...args], {
     encoding: "utf8",
-    env: { ...GIT_ENV, ...env },
+    env: { ...FIXTURE_ENV, ...env },
   });
 
 test("a gate that passes is reported as the gate's own verdict", (t) => {
@@ -578,7 +594,7 @@ test("the default worker capacity serializes gates from different repositories",
       encoding: "utf8",
       timeout: 10_000,
       env: {
-        ...GIT_ENV,
+        ...FIXTURE_ENV,
         FIRST_HOME: first.home,
         FIRST_OID: first.oid,
         SECOND_HOME: second.home,
@@ -638,7 +654,7 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
       encoding: "utf8",
       timeout: 10_000,
       env: {
-        ...GIT_ENV,
+        ...FIXTURE_ENV,
         GATE_HOME: fixture.home,
         GATE_OID: fixture.oid,
         WORKER_ROOT: workerRoot,
