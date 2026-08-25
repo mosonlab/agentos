@@ -102,6 +102,11 @@ Several agent windows work one checkout at a time. Deliver from a dedicated
 branch, and stage only the exact paths you changed. A branch switch in the
 shared checkout carries away another window's uncommitted work.
 
+Put that worktree under
+`~/Documents/claude_projects/agentos-public-worktrees/<task-name>/`, one folder
+per task, and remove it once the work is merged. Presence in that directory
+therefore means in flight or awaiting review; absence means delivered.
+
 ## Frozen records
 
 `docs/reviews/`, `docs/merge-notes/`, `docs/briefs/`, and
