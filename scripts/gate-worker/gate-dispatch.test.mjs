@@ -757,12 +757,16 @@ const runLeaseAsync = (fixture, args, holder) =>
 
 test("merge lease acquire is mutually exclusive and release removes the lease", (t) => {
   const fixture = leaseFixture(t);
-  const first = runLease(fixture, ["acquire", "--reason", "First merge"], "first@fixture");
+  const first = runLease(
+    fixture,
+    ["acquire", "--reason", "First merge", "--task", "chain-1"],
+    "first@fixture",
+  );
   assert.equal(first.status, 0, first.stdout + first.stderr);
 
   const second = runLease(
     fixture,
-    ["acquire", "--reason", "Second merge", "--timeout-minutes", "0"],
+    ["acquire", "--reason", "Second merge", "--task", "chain-2", "--timeout-minutes", "0"],
     "second@fixture",
   );
   assert.equal(second.status, 75, second.stdout + second.stderr);
@@ -842,6 +846,14 @@ test("merge lease release refuses a caller that does not hold the lease", (t) =>
   assert.equal(released.status, 0, released.stdout + released.stderr);
   const status = runLease(fixture, ["status"]);
   assert.match(status.stdout, /no lease held/u);
+});
+
+test("merge lease acquire without --task is refused so every lease records its task", (t) => {
+  const fixture = leaseFixture(t);
+  const refused = runLease(fixture, ["acquire", "--reason", "Missing task"], "agent@mac");
+  assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /acquire requires --task/u);
+  assert.match(runLease(fixture, ["status"]).stdout, /no lease held/u);
 });
 
 test("merge lease release without --task is refused rather than freeing a sibling window", (t) => {
