@@ -88,6 +88,15 @@ pushing a feature branch, and opening a PR do not require the lease. The lease
 keeps an exact-head gate proof valid from the moment its baseline is fixed until
 that proof is consumed by the merge.
 
+Pass `--task <id>` to both `acquire` and `release`. The default holder is
+`user@host`, which every agent window on one machine shares, so without a task
+id a release cannot tell its own lease from a sibling window's.
+
+Several agent windows work one checkout at a time. Deliver from a dedicated
+`git worktree` on your own branch, never by switching the shared checkout's
+branch, and stage only the exact paths you changed. A branch switch in the
+shared checkout carries away another window's uncommitted work.
+
 ## Frozen records
 
 `docs/reviews/`, `docs/merge-notes/`, `docs/briefs/`, and
