@@ -167,6 +167,11 @@ test("the split review prompts enforce persisted-range, blindness, adjudication,
   assert.match(firstReview, /merge both passes into one persisted report/u);
   assert.doesNotMatch(firstReview, /codex exec review/u);
   assert.doesNotMatch(firstReview, /service[-_ ]tier/iu);
+  // The 2026-08-25 incident: this role ran the full merge gate inside its review
+  // step, deadlocked the host twice, and recorded the interrupted gate's FAIL
+  // line as review evidence. The gate belongs to the later regression step.
+  assert.match(firstReview, /repository merge gate\s+is not yours to run/u);
+  assert.match(firstReview, /a gate\s+that is interrupted reports no verdict at all/u);
   assert.match(firstReview, /post-fix regression verification/u);
   assert.match(firstReview, /entire fix diff as one unit/u);
   assert.match(firstReview, /exact fixed head/u);
@@ -176,11 +181,13 @@ test("the split review prompts enforce persisted-range, blindness, adjudication,
   assert.match(blindReview, /Do not read predecessor task outputs, sibling\s+task outputs/u);
   assert.match(blindReview, /entire task and provider\s+session, both before and after/u);
   assert.match(blindReview, /implementationBaseSha|implementation base and head/u);
+  assert.match(blindReview, /repository merge gate is not yours to run/u);
   assert.doesNotMatch(blindReview, /adjudicat/u);
   assert.doesNotMatch(blindReview, /merge matrix/u);
   assert.doesNotMatch(blindReview, /service[-_ ]tier/iu);
   assert.doesNotMatch(blindReview, /codex exec review/u);
 
+  assert.match(adjudicatorReview, /run no build, test, or merge gate command/u);
   assert.match(adjudicatorReview, /fresh provider Session/u);
   assert.match(adjudicatorReview, /Never resume or\s+continue the blind review conversation/u);
   assert.match(adjudicatorReview, /provider conversation id\s+or continuation proof/u);

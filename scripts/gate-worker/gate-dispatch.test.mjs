@@ -52,8 +52,33 @@ const mergeLeasePath = join(here, "..", "merge-lease.sh");
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
-const GIT_ENV = {
-  ...process.env,
+// The dispatcher and the gate read their topology and their sizing out of the
+// environment: `AGENTOS_GATE_SERVER` alone collapses the dispatcher to a single
+// server with an empty fallback (gate-dispatch.sh), which turns a case that
+// pre-fills the desktop slots into a wait for a slot that cannot open. A
+// session configured to reach a real gate worker exports that variable, so a
+// fixture that inherits the host environment tests the host's topology instead
+// of the one it declares. The host's Git identity was already neutralised here
+// for the same reason; behaviour belongs on the same list. The dispatcher's own
+// namespace is stripped by prefix so a variable added to it later cannot
+// reintroduce the leak.
+const HOST_GATE_PREFIXES = ["AGENTOS_GATE_", "GATE_DISPATCH_"];
+// run-gate.sh's two are not prefixed but are read the same way: GATE_HOME
+// relocates the whole gate directory a fixture built for itself — at the real
+// worker's mirror, worktrees and logs — and STALE_WORKTREE_MINUTES decides what
+// its sweep reclaims. XDG_CACHE_HOME is deliberately NOT on this list: every
+// case that needs it sets it, and removing it would point a dispatcher at the
+// real slot locks under $HOME/.cache instead.
+const HOST_GATE_NAMES = ["GATE_HOME", "STALE_WORKTREE_MINUTES"];
+const isHostGateConfig = (key) =>
+  HOST_GATE_PREFIXES.some((prefix) => key.startsWith(prefix)) || HOST_GATE_NAMES.includes(key);
+
+const hostNeutralEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !isHostGateConfig(key)),
+);
+
+const FIXTURE_ENV = {
+  ...hostNeutralEnv,
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_AUTHOR_NAME: "gate-dispatch-fixture",
@@ -319,35 +344,69 @@ const fixtureRepo = (t, { mergeGate, mirrorPush, remoteGate }) => {
   cpSync(libPath, join(root, "scripts", "gate-worker", "lib.sh"));
   cpSync(dispatchPath, join(root, "scripts", "gate-worker", "gate-dispatch.sh"));
   chmodSync(join(root, "scripts", "gate-worker", "gate-dispatch.sh"), 0o755);
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: GIT_ENV });
-  execFileSync("git", ["add", "-A"], { cwd: root, env: GIT_ENV });
-  execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: root, env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: FIXTURE_ENV });
+  execFileSync("git", ["add", "-A"], { cwd: root, env: FIXTURE_ENV });
+  execFileSync("git", ["commit", "-q", "-m", "fixture"], { cwd: root, env: FIXTURE_ENV });
   const head = execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: root,
-    env: GIT_ENV,
+    env: FIXTURE_ENV,
     encoding: "utf8",
   }).trim();
   const originRoot = scratch(t);
   const origin = join(originRoot, "origin.git");
-  execFileSync("git", ["init", "-q", "--bare", origin], { env: GIT_ENV });
-  execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
-  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: GIT_ENV });
-  execFileSync("git", ["push", "-q", "origin", "main"], { cwd: root, env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: FIXTURE_ENV });
+  execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: FIXTURE_ENV });
+  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: FIXTURE_ENV });
+  execFileSync("git", ["push", "-q", "origin", "main"], { cwd: root, env: FIXTURE_ENV });
   return { root, head };
 };
 
-const dispatch = (t, repo, args, env = {}, busySlots = []) => {
+// No fixture may block. The dispatcher's default patience is an hour, which is
+// right for an operator waiting on a real queue and absurd inside a test, and a
+// spawnSync with no timeout promotes that wait into a suite that never returns
+// — the shape a leaked AGENTOS_GATE_SERVER produced here. Every dispatcher run
+// therefore goes through this helper and carries both bounds: the dispatcher
+// gives up first, so the failure is a readable 75 rather than a kill, and the
+// timeout is the backstop for a dispatcher that never gets that far. Cases that
+// are about the wait itself pass their own --timeout-minutes, which wins.
+const DISPATCH_KILL_MS = 120_000;
+
+const runDispatch = (repo, cache, args, env = {}) =>
+  spawnSync("bash", [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), ...args], {
+    cwd: repo.root,
+    encoding: "utf8",
+    timeout: DISPATCH_KILL_MS,
+    env: {
+      ...FIXTURE_ENV,
+      XDG_CACHE_HOME: cache,
+      GATE_DISPATCH_POLL_SECONDS: "1",
+      GATE_DISPATCH_TIMEOUT_MINUTES: "1",
+      ...env,
+    },
+  });
+
+// A cache root with the named slots already taken, so a case states its queue
+// as a precondition instead of racing one into place.
+const busyCache = (t, busySlots = []) => {
   const cache = join(scratch(t), "cache");
-  mkdirSync(cache, { recursive: true });
   const slots = join(cache, "gate-dispatch");
   mkdirSync(slots, { recursive: true });
   for (const slot of busySlots) writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
-  return spawnSync("bash", [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), ...args], {
-    cwd: repo.root,
-    encoding: "utf8",
-    env: { ...GIT_ENV, XDG_CACHE_HOME: cache, ...env },
-  });
+  return cache;
 };
+
+const dispatch = (t, repo, args, env = {}, busySlots = []) =>
+  runDispatch(repo, busyCache(t, busySlots), args, env);
+
+test("the fixture environment carries no host gate configuration", () => {
+  // The guard for the leak itself. Nothing below states which servers exist or
+  // how long to wait unless it says so, so a host that is configured to reach a
+  // real gate worker cannot silently rewrite the topology these cases assert
+  // on — which is how this suite once blocked for the dispatcher's full hour
+  // instead of failing.
+  const leaked = Object.keys(FIXTURE_ENV).filter(isHostGateConfig);
+  assert.deepEqual(leaked, [], `host gate configuration reached the fixtures: ${leaked.join(", ")}`);
+});
 
 test("an explicitly enabled local PASS comes back as 0 with the gate's own verdict line", (t) => {
   const repo = fixtureRepo(t, {});
@@ -530,21 +589,8 @@ test("a primary FAIL is final and never falls back", (t) => {
 
 test("every slot busy times out at 75 with no verdict", (t) => {
   const repo = fixtureRepo(t, {});
-  const cache = join(scratch(t), "cache");
-  const slots = join(cache, "gate-dispatch");
-  mkdirSync(slots, { recursive: true });
-  for (const slot of ["remote-1", "remote-1-2", "remote-2"]) {
-    writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
-  }
-  const result = spawnSync(
-    "bash",
-    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head, "--timeout-minutes", "0"],
-    {
-      cwd: repo.root,
-      encoding: "utf8",
-      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
-    },
-  );
+  const cache = busyCache(t, ["remote-1", "remote-1-2", "remote-2"]);
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "0"]);
   assert.equal(result.status, 75, result.stderr);
   assert.match(result.stdout, /GATE DISPATCH: NO SLOT/);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
@@ -558,34 +604,20 @@ test("locks that cannot be operated are 76 at once, not 75 after the timeout", (
   // slot that was never going to open. There is nothing to wait for, so this
   // must come back immediately and say what to clear.
   const repo = fixtureRepo(t, {});
-  const cache = join(scratch(t), "cache");
+  const cache = busyCache(t);
   const slots = join(cache, "gate-dispatch");
-  mkdirSync(slots, { recursive: true });
   chmodSync(slots, 0o555);
   const started = Date.now();
-  const result = spawnSync(
-    "bash",
-    [
-      join(repo.root, "scripts/gate-worker/gate-dispatch.sh"),
-      repo.head,
-      // One minute, not the default hour: long enough that polling is
-      // unmistakable in the elapsed time, short enough that a regression here
-      // fails the suite instead of hanging it.
-      "--timeout-minutes",
-      "1",
-    ],
-    {
-      cwd: repo.root,
-      encoding: "utf8",
-      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
-    },
-  );
+  // One minute: long enough that polling would be unmistakable in the elapsed
+  // time, short enough that a regression here fails the suite instead of
+  // hanging it.
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "1"]);
   chmodSync(slots, 0o755);
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /^GATE NOT RUN: /m);
   assert.doesNotMatch(result.stdout, /GATE DISPATCH: NO SLOT/);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
-  // It did not wait: a --timeout-minutes 5 run that returns in seconds is the
+  // It did not wait: a --timeout-minutes 1 run that returns in seconds is the
   // observable difference between "nothing can be locked" and "everything is
   // busy".
   assert.ok(Date.now() - started < 20_000, "it polled instead of answering at once");
@@ -593,19 +625,7 @@ test("locks that cannot be operated are 76 at once, not 75 after the timeout", (
 
 test("one busy desktop slot uses the second desktop slot before fallback", (t) => {
   const repo = fixtureRepo(t, {});
-  const cache = join(scratch(t), "cache");
-  const slots = join(cache, "gate-dispatch");
-  mkdirSync(slots, { recursive: true });
-  writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
-  const result = spawnSync(
-    "bash",
-    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
-    {
-      cwd: repo.root,
-      encoding: "utf8",
-      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
-    },
-  );
+  const result = runDispatch(repo, busyCache(t, ["remote-1"]), [repo.head]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
   assert.match(result.stderr, /running on primary/);
@@ -614,21 +634,7 @@ test("one busy desktop slot uses the second desktop slot before fallback", (t) =
 
 test("two busy desktop slots spill onto the fallback without using the Mac", (t) => {
   const repo = fixtureRepo(t, {});
-  const cache = join(scratch(t), "cache");
-  const slots = join(cache, "gate-dispatch");
-  mkdirSync(slots, { recursive: true });
-  for (const slot of ["remote-1", "remote-1-2"]) {
-    writeFileSync(join(slots, `${slot}.slot`), `${process.pid}\n`);
-  }
-  const result = spawnSync(
-    "bash",
-    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
-    {
-      cwd: repo.root,
-      encoding: "utf8",
-      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
-    },
-  );
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]), [repo.head]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
   assert.match(result.stderr, /running on fallback/);
@@ -642,21 +648,10 @@ test("busy plus broken waits out the timeout and then reports 76, not 75", (t) =
   // anybody, and 75 would send the operator to re-dispatch into the same broken
   // locks. Nothing may be taken here either, so the capacity limit holds.
   const repo = fixtureRepo(t, {});
-  const cache = join(scratch(t), "cache");
+  const cache = busyCache(t, ["remote-1", "remote-1-2"]);
   const slots = join(cache, "gate-dispatch");
-  mkdirSync(slots, { recursive: true });
-  writeFileSync(join(slots, "remote-1.slot"), `${process.pid}\n`);
-  writeFileSync(join(slots, "remote-1-2.slot"), `${process.pid}\n`);
   mkdirSync(join(slots, "remote-2.lock"));
-  const result = spawnSync(
-    "bash",
-    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head, "--timeout-minutes", "0"],
-    {
-      cwd: repo.root,
-      encoding: "utf8",
-      env: { ...GIT_ENV, XDG_CACHE_HOME: cache, GATE_DISPATCH_POLL_SECONDS: "1" },
-    },
-  );
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "0"]);
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /^GATE NOT RUN: /m);
   assert.doesNotMatch(result.stdout, /GATE DISPATCH: NO SLOT/);
@@ -673,13 +668,8 @@ test("remote processes that die without a verdict exhaust fallback as 76", (t) =
 
 test("the dispatcher releases its slot when the gate ends", (t) => {
   const repo = fixtureRepo(t, {});
-  const cache = join(scratch(t), "cache");
-  mkdirSync(cache, { recursive: true });
-  const result = spawnSync(
-    "bash",
-    [join(repo.root, "scripts/gate-worker/gate-dispatch.sh"), repo.head],
-    { cwd: repo.root, encoding: "utf8", env: { ...GIT_ENV, XDG_CACHE_HOME: cache } },
-  );
+  const cache = busyCache(t);
+  const result = runDispatch(repo, cache, [repo.head]);
   assert.equal(result.status, 0, result.stderr);
   const check = spawnSync("test", ["-e", join(cache, "gate-dispatch", "remote-1.slot")]);
   assert.notEqual(check.status, 0, "the remote slot was not released");
@@ -698,12 +688,12 @@ const leaseFixture = (t) => {
   const parent = scratch(t);
   const origin = join(parent, "origin.git");
   const root = join(parent, "source");
-  execFileSync("git", ["init", "-q", "--bare", origin], { env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: FIXTURE_ENV });
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(mergeLeasePath, join(root, "scripts", "merge-lease.sh"));
   chmodSync(join(root, "scripts", "merge-lease.sh"), 0o755);
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: GIT_ENV });
-  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: FIXTURE_ENV });
+  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: FIXTURE_ENV });
   return { root, origin };
 };
 
@@ -712,29 +702,29 @@ const runLease = (fixture, args, holder = "machine@fixture") =>
     cwd: fixture.root,
     encoding: "utf8",
     timeout: 15_000,
-    env: { ...GIT_ENV, MERGE_LEASE_HOLDER: holder },
+    env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
   });
 
 const installLease = (fixture, lease) => {
   const body = `${JSON.stringify(lease)}\n`;
   const sha = execFileSync("git", ["-C", fixture.root, "hash-object", "-w", "--stdin"], {
-    env: GIT_ENV,
+    env: FIXTURE_ENV,
     encoding: "utf8",
     input: body,
   }).trim();
   execFileSync("git", ["-C", fixture.root, "push", "-q", "origin", `+${sha}:refs/merge-lease/holder`], {
-    env: GIT_ENV,
+    env: FIXTURE_ENV,
   });
   return { ...lease, sha };
 };
 
 const readLease = (fixture) => {
   const sha = execFileSync("git", ["--git-dir", fixture.origin, "rev-parse", "refs/merge-lease/holder"], {
-    env: GIT_ENV,
+    env: FIXTURE_ENV,
     encoding: "utf8",
   }).trim();
   const body = execFileSync("git", ["--git-dir", fixture.origin, "cat-file", "blob", sha], {
-    env: GIT_ENV,
+    env: FIXTURE_ENV,
     encoding: "utf8",
   });
   return { sha, lease: JSON.parse(body) };
@@ -744,7 +734,7 @@ const runLeaseAsync = (fixture, args, holder) =>
   new Promise((resolve) => {
     const child = spawn("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
       cwd: fixture.root,
-      env: { ...GIT_ENV, MERGE_LEASE_HOLDER: holder },
+      env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
     });
     let stdout = "";
     let stderr = "";
@@ -894,7 +884,7 @@ test("merge lease acquire restamps acquiredAt on every attempt while it queues",
   await new Promise((resolve) => setTimeout(resolve, 2500));
   const queuedFor = Date.now();
   execFileSync("git", ["--git-dir", fixture.origin, "update-ref", "-d", "refs/merge-lease/holder"], {
-    env: GIT_ENV,
+    env: FIXTURE_ENV,
   });
 
   const result = await waiter;
@@ -918,8 +908,8 @@ test("merge lease status prints every field of the current holder", (t) => {
   mkdirSync(join(secondRoot, "scripts"), { recursive: true });
   cpSync(mergeLeasePath, join(secondRoot, "scripts", "merge-lease.sh"));
   chmodSync(join(secondRoot, "scripts", "merge-lease.sh"), 0o755);
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: secondRoot, env: GIT_ENV });
-  execFileSync("git", ["remote", "add", "origin", fixture.origin], { cwd: secondRoot, env: GIT_ENV });
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: secondRoot, env: FIXTURE_ENV });
+  execFileSync("git", ["remote", "add", "origin", fixture.origin], { cwd: secondRoot, env: FIXTURE_ENV });
   const status = runLease({ root: secondRoot, origin: fixture.origin }, ["status"]);
   assert.equal(status.status, 0, status.stderr);
   const lease = JSON.parse(status.stdout);
