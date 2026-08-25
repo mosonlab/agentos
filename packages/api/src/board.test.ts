@@ -25,6 +25,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainId: null,
   chainIndex: null,
   chainLayer: null,
+  dispatchAfterTaskId: null,
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
   templateStep: null,
   assigneeAgent: null,
@@ -38,10 +39,48 @@ test("the board card carries every field the board renders and nothing else", ()
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
-    "approvalGate", "assigneeAgent", "chainId", "chainIndex", "chainName", "chainProgress", "cron", "displayName",
+    "approvalGate", "assigneeAgent", "blockedOn", "chainId", "chainIndex", "chainName", "chainProgress", "cron", "displayName",
     "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status", "taskCost",
     "templateId", "timezone", "updatedAt",
   ]);
+});
+
+test("blockedOn is projected from the resolved predecessor without storing its status", () => {
+  const predecessor = { id: "after-1", name: "Finish the release", status: "DOING" as BoardRow["status"] };
+  const blocked = boardCard(row({ dispatchAfterTaskId: predecessor.id }), null, undefined, predecessor);
+  assert.deepEqual(blocked.blockedOn, { taskId: predecessor.id, taskName: predecessor.name });
+
+  const resolved = boardCard(row({ dispatchAfterTaskId: predecessor.id }), null, undefined, {
+    ...predecessor, status: "DONE" as BoardRow["status"],
+  });
+  assert.equal(resolved.blockedOn, null);
+
+  const unbound = boardCard(row(), null);
+  assert.equal(unbound.blockedOn, null);
+  const { blockedOn: _blockedOn, ...rest } = unbound;
+  assert.deepEqual(rest, {
+    id: "t1",
+    name: "Ship the thing",
+    displayName: "Ship the thing",
+    status: "TODO",
+    failureReason: null,
+    scheduleKind: "NOW",
+    runAt: null,
+    cron: null,
+    timezone: null,
+    approvalGate: false,
+    templateId: null,
+    source: "MANUAL",
+    chainId: null,
+    chainIndex: null,
+    chainName: null,
+    updatedAt: new Date("2026-08-16T00:00:00.000Z"),
+    assigneeAgent: null,
+    chainProgress: null,
+    latestRun: null,
+    taskCost: null,
+    mergeOutcome: null,
+  });
 });
 
 test("the card's merge outcome is bound to the run it shows, and is null everywhere else", () => {
