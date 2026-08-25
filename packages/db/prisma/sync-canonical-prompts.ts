@@ -1,8 +1,17 @@
-import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
+import { AssigneeType, Prisma, PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
-import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
+import {
+  INTEGRATOR_TEMPLATE_NAME,
+  legacyRegressionFirstTwelveStepTemplateName,
+} from "../src/merge-integrator.js";
+import {
+  canonicalTemplateStepName,
+  loadAllTemplateStepSources,
+  templateStepStructureDifferences,
+  type TemplateStepSource,
+} from "../src/template-sources.js";
 
 const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
@@ -11,7 +20,7 @@ const LEGACY_BLIND_REVIEW_PROMPTS = [
 ] as const;
 type AssigneeTransition = { from: readonly string[]; to: string };
 const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
-  ["compound-engineer-workflow:9", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["compound-engineer-workflow:10", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
   ["direct-engineer-workflow:5", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
 ]);
 
@@ -31,6 +40,12 @@ const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPr
     || expected === agent.runnerPreference) return null;
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
+
+const regressionFirstContract = (canonical: TemplateStepSource[]): TemplateStepSource[] => canonical.map((step) => {
+  if (step.stepIndex === 9) return { ...canonical[9]!, stepIndex: 9 };
+  if (step.stepIndex === 10) return { ...canonical[8]!, stepIndex: 10 };
+  return step;
+});
 
 // Every canonical template, every step of each, and every role under agents/
 // is synced. Omitting any source here would let a prompt edit silently miss
@@ -91,6 +106,70 @@ const main = async (): Promise<void> => {
           })) })).count;
         }
         createdAgents = 1;
+      }
+      let rolledOverTemplates = 0;
+      const compoundSources = templateSources.get(INTEGRATOR_TEMPLATE_NAME);
+      if (!compoundSources) throw new Error(`Canonical template ${INTEGRATOR_TEMPLATE_NAME} was not found`);
+      const priorContract = regressionFirstContract(compoundSources);
+      const rolloverCandidates = await tx.taskTemplate.findMany({
+        where: { name: INTEGRATOR_TEMPLATE_NAME },
+        include: {
+          steps: {
+            include: { assigneeAgent: { select: { name: true } } },
+            orderBy: { stepIndex: "asc" },
+          },
+        },
+      });
+      for (const existing of rolloverCandidates) {
+        const isRegressionFirst = existing.steps.length === priorContract.length
+          && existing.steps.every((step, index) => step.stepIndex === index + 1
+            && templateStepStructureDifferences(step, priorContract[index]!).length === 0);
+        if (!isRegressionFirst) continue;
+        const unfinishedTasks = await tx.task.count({
+          where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+        });
+        if (unfinishedTasks > 0) {
+          throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+        }
+        if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
+          || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
+          || existing.webhookReplayWindowSec !== null) {
+          throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+        }
+        await tx.taskTemplate.update({
+          where: { id: existing.id },
+          data: { name: legacyRegressionFirstTwelveStepTemplateName(existing.id) },
+        });
+        const replacement = await tx.taskTemplate.create({ data: {
+          projectId: existing.projectId,
+          name: INTEGRATOR_TEMPLATE_NAME,
+          description: existing.description,
+          variables: existing.variables,
+        } });
+        for (const step of compoundSources) {
+          const assignee = step.agentName === null ? null : await tx.agent.findFirst({
+            where: { projectId: existing.projectId, name: step.agentName, archivedAt: null },
+            select: { id: true },
+          });
+          if (step.agentName !== null && !assignee) {
+            throw new Error(`${INTEGRATOR_TEMPLATE_NAME} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found in the template project`);
+          }
+          await tx.taskTemplateStep.create({ data: {
+            taskTemplateId: replacement.id,
+            assigneeAgentId: assignee?.id ?? null,
+            stepIndex: step.stepIndex,
+            name: canonicalTemplateStepName(INTEGRATOR_TEMPLATE_NAME, step.stepIndex),
+            assigneeType: step.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT,
+            prompt: step.prompt,
+            approvalGate: step.approvalGate,
+            attachmentsFromPrevious: step.attachmentsFromPrevious,
+            spawnPolicy: step.spawnPolicy ?? Prisma.JsonNull,
+            outputKind: step.outputKind,
+            opensPullRequest: step.opensPullRequest,
+            baseFromStepIndex: step.baseFromStepIndex,
+          } });
+        }
+        rolledOverTemplates += 1;
       }
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
@@ -404,6 +483,7 @@ const main = async (): Promise<void> => {
       }
       return {
         templates: templateCount,
+        rolledOverTemplates,
         createdAgents,
         createdAgentRepoGrants,
         adoptedAssignees,
@@ -419,7 +499,7 @@ const main = async (): Promise<void> => {
         updatedRoles,
       };
     }, { timeout: 30_000 });
-    const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
+    const updated = result.rolledOverTemplates + result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
       + result.renamedSteps + result.migratedTasks + result.migratedTaskPrompts + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)

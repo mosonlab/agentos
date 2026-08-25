@@ -15,6 +15,36 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   { name: DIRECT_TEMPLATE_NAME, stepCount: 7 },
 ] as const;
 export type CanonicalTemplateName = (typeof CANONICAL_TEMPLATE_SOURCE_SPECS)[number]["name"];
+const COMPOUND_TEMPLATE_STEP_NAMES = [
+  "Write a spec",
+  "Plan",
+  "Plan review",
+  "Revise plan",
+  "Implementation",
+  "Code review (Sol)",
+  "Code review and adjudication (Opus)",
+  "Apply review fixes",
+  "Librarian",
+  "Regression verification",
+  "Merge authorization",
+  "Merge execution",
+] as const;
+const DIRECT_TEMPLATE_STEP_NAMES = [
+  "Implementation",
+  "Code review (Sol)",
+  "Code review and adjudication (Opus)",
+  "Apply review fixes",
+  "Regression verification",
+  "Merge authorization",
+  "Merge execution",
+] as const;
+
+export const canonicalTemplateStepName = (templateName: CanonicalTemplateName, stepIndex: number): string => {
+  const names = templateName === INTEGRATOR_TEMPLATE_NAME ? COMPOUND_TEMPLATE_STEP_NAMES : DIRECT_TEMPLATE_STEP_NAMES;
+  const name = names[stepIndex - 1];
+  if (!name) throw new Error(`Missing canonical ${templateName} step name ${stepIndex}`);
+  return name;
+};
 const STRUCTURAL_FIELDS = [
   "stepIndex",
   "agent",

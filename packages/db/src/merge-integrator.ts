@@ -36,6 +36,7 @@ export const DIRECT_INTEGRATOR_TEMPLATE_NAME = "direct-engineer-workflow";
 export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
 export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
 export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-human-12-`;
+export const LEGACY_REGRESSION_FIRST_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-regression-first-12-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 
@@ -52,6 +53,9 @@ export const legacyNineStepTemplateName = (templateId: string): string =>
 
 export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
   `${LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX}${templateId}`;
+
+export const legacyRegressionFirstTwelveStepTemplateName = (templateId: string): string =>
+  `${LEGACY_REGRESSION_FIRST_TWELVE_STEP_TEMPLATE_PREFIX}${templateId}`;
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant
@@ -81,9 +85,9 @@ export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean =>
 };
 
 /**
- * Runtime recognition includes the one historical shape the seed can mark
- * during a 10 -> 12 rollover. It is deliberately narrower than "step 10" or
- * "merge-result": only a seed-minted legacy template identity qualifies.
+ * Runtime recognition includes only the historical shapes seed or canonical
+ * sync can mark during a template rollover. It is deliberately narrower than
+ * a step index or output kind alone: only a minted legacy identity qualifies.
  */
 export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
   if (!step) return false;
@@ -92,6 +96,9 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
     || (step.stepIndex === INTEGRATOR_STEP_INDEX
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX) === true)
+    || (step.stepIndex === INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_REGRESSION_FIRST_TWELVE_STEP_TEMPLATE_PREFIX) === true)
     || (step.stepIndex === 10
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);

@@ -1,5 +1,5 @@
 ---
-stepIndex: 9
+stepIndex: 10
 agent: regression-verifier
 approvalGate: false
 outputKind: regression-verification
@@ -18,12 +18,12 @@ commit. If Git reports a conflict, record both pre-refresh head SHAs,
 abort the merge so the workspace is deliverable, and finish with the
 `refresh-conflict` output below; do not resolve a hunk yourself.
 
-After a successful refresh, read the must-fix list and fixed implementation
-from AgentOS step outputs. Review the full fix diff as one unit, account for
-every must-fix ID, and rerun relevant regressions. If a must-fix remains open
-or the fix introduces a defect, do not run the full gate; emit the
-`review-fail` output below. Only after semantic verification passes, run
-`scripts/gate-worker/gate-dispatch.sh <head-sha> --master <baseHeadSha>`.
+After a successful refresh, read the must-fix list, fixed implementation, and
+documentation result from AgentOS step outputs. Review the full final diff as
+one unit, account for every must-fix ID, and rerun relevant regressions. If a
+must-fix remains open or the fix introduces a defect, do not run the full gate;
+emit the `review-fail` output below. Only after semantic verification passes,
+run `scripts/gate-worker/gate-dispatch.sh <head-sha> --master <baseHeadSha>`.
 Persist exactly one JSON object as the AgentOS task output and do not write a
 report file:
 

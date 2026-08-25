@@ -1,4 +1,4 @@
-import { AssigneeType, CodexServiceTier, Prisma, PrismaClient } from "@prisma/client";
+import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, TaskStatus } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
@@ -6,11 +6,12 @@ import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_TEMPLATE_NAME,
-  legacyNineStepTemplateName,
-  legacyTenStepTemplateName,
   legacyHumanTwelveStepTemplateName,
+  legacyNineStepTemplateName,
+  legacyRegressionFirstTwelveStepTemplateName,
+  legacyTenStepTemplateName,
 } from "../src/merge-integrator.js";
-import { loadAllTemplateStepSources } from "../src/template-sources.js";
+import { canonicalTemplateStepName, loadAllTemplateStepSources } from "../src/template-sources.js";
 
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
 // so that OSS-B0's first-run onboarding can read the same `agents/` contract
@@ -145,16 +146,38 @@ const main = async (): Promise<void> => {
       && existing.steps[10]?.outputKind === "approval"
       && existing.steps[11]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
       && existing.steps[11]?.outputKind === INTEGRATOR_OUTPUT_KIND;
+    const isRegressionFirstTwelveStepTemplate = existing?.steps.length === 12
+      && existing.steps.every((step, index) => step.stepIndex === index + 1)
+      && existing.steps[8]?.assigneeAgent?.name === "regression-verifier"
+      && existing.steps[8]?.outputKind === "regression-verification"
+      && existing.steps[9]?.assigneeAgent?.name === "librarian"
+      && existing.steps[9]?.outputKind === "documentation"
+      && existing.steps[10]?.outputKind === "merge-authorization"
+      && existing.steps[11]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
+      && existing.steps[11]?.outputKind === INTEGRATOR_OUTPUT_KIND;
+    if (existing && isRegressionFirstTwelveStepTemplate) {
+      const unfinishedTasks = await tx.task.count({
+        where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+      });
+      if (unfinishedTasks > 0) {
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      }
+      if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
+        || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
+        || existing.webhookReplayWindowSec !== null) {
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+      }
+    }
 
-    // A historical 9- or 10-row template cannot be rewritten in place: its
-    // in-flight tasks keep foreign keys to rows 6-10, whose meanings changed in
-    // the 12-row routing contract. Preserve the entire template under a
-    // seed-minted legacy identity; then the canonical upsert below creates a
-    // new template for new Runs. Runtime mechanical recognition remains
-    // limited to the marked 10-row shape, because the 9-row shape had no
-    // integrator.
+    // A template whose step meanings changed cannot be rewritten in place:
+    // materialized tasks keep foreign keys to those rows. Preserve the entire
+    // template under a seed-minted legacy identity; then the canonical upsert
+    // below creates a new template for new Runs. Runtime mechanical recognition
+    // remains limited to legacy shapes that actually carried an integrator.
     const legacyName = existing && isHistoricalHumanTwelveStepTemplate
       ? legacyHumanTwelveStepTemplateName(existing.id)
+      : existing && isRegressionFirstTwelveStepTemplate
+      ? legacyRegressionFirstTwelveStepTemplateName(existing.id)
       : existing && isHistoricalNineStepTemplate
       ? legacyNineStepTemplateName(existing.id)
       : existing && isHistoricalTenStepTemplate
@@ -181,24 +204,9 @@ const main = async (): Promise<void> => {
       },
     });
   });
-  const stepNames = [
-    "Write a spec",
-    "Plan",
-    "Plan review",
-    "Revise plan",
-    "Implementation",
-    "Code review (Sol)",
-    "Code review and adjudication (Opus)",
-    "Apply review fixes",
-    "Regression verification",
-    "Librarian",
-    "Merge authorization",
-    "Merge execution",
-  ] as const;
   for (const step of templateSteps) {
     const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
-    const name = stepNames[stepIndex - 1];
-    if (!name) throw new Error(`Missing canonical template step name ${stepIndex}`);
+    const name = canonicalTemplateStepName(INTEGRATOR_TEMPLATE_NAME, stepIndex);
     const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
     const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
     if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
@@ -234,19 +242,9 @@ const main = async (): Promise<void> => {
       variables: ["branchName"],
     },
   });
-  const directStepNames = [
-    "Implementation",
-    "Code review (Sol)",
-    "Code review and adjudication (Opus)",
-    "Apply review fixes",
-    "Regression verification",
-    "Merge authorization",
-    "Merge execution",
-  ] as const;
   for (const step of directTemplateSteps) {
     const { stepIndex, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
-    const name = directStepNames[stepIndex - 1];
-    if (!name) throw new Error(`Missing direct template step name ${stepIndex}`);
+    const name = canonicalTemplateStepName(DIRECT_TEMPLATE_NAME, stepIndex);
     const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
     const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
     if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);

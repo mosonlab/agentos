@@ -27,6 +27,7 @@ import {
   isIncidentCondition,
   isIntegratorStep,
   legacyNineStepTemplateName,
+  legacyRegressionFirstTwelveStepTemplateName,
   legacyTenStepTemplateName,
   isTerminalDisposition,
   parseEvidence,
@@ -308,6 +309,17 @@ test("seed-marked legacy step 10 stays mechanical without widening new-template 
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: legacyNineStepTemplateName("template-old") },
   }), false);
+});
+
+test("a regression-first twelve-step rollover keeps its merge execution mechanical", () => {
+  const legacy = {
+    stepIndex: INTEGRATOR_STEP_INDEX,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: legacyRegressionFirstTwelveStepTemplateName("template-old") },
+  };
+  assert.equal(isIntegratorStep(legacy), true);
+  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
+  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
 });
 
 test("a lookalike step in another template or with another output kind is not the integrator step", () => {

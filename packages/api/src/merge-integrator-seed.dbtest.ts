@@ -30,6 +30,7 @@ import {
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
   legacyNineStepTemplateName,
+  legacyRegressionFirstTwelveStepTemplateName,
   legacyTenStepTemplateName,
   loadAgentSources,
   loadTemplateStepSources,
@@ -92,7 +93,9 @@ test("a fresh seed writes the twelve-step and seven-step autonomous merge templa
   assert.equal(step.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
   assert.equal(step.spawnPolicy, null);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 7)?.attachmentsFromPrevious, false);
-  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.attachmentsFromPrevious, true);
+  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.assigneeAgentId,
+    (await db.agent.findFirstOrThrow({ where: { name: "librarian" } })).id);
+  assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.attachmentsFromPrevious, true);
   assert.match(
     step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
     /vertical slice[\s\S]*blocked_by[\s\S]*expand-migrate-contract[\s\S]*fail at base/iu,
@@ -173,6 +176,68 @@ test("canonical sync restores step, merge-resolver role, and foundational prompt
   assert.equal(persistedAgent.rolePrompt, expectedRole.rolePrompt);
 });
 
+test("canonical sync rolls the regression-first template without rewriting existing task semantics", async () => {
+  assert.equal((await seed()).code, 0);
+  const current = await db.taskTemplate.findFirstOrThrow({
+    where: { name: INTEGRATOR_TEMPLATE_NAME },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  const librarian = current.steps.find((step) => step.stepIndex === 9)!;
+  const regression = current.steps.find((step) => step.stepIndex === 10)!;
+  await db.taskTemplateStep.update({ where: { id: librarian.id }, data: { stepIndex: 99 } });
+  await db.taskTemplateStep.update({ where: { id: regression.id }, data: { stepIndex: 9 } });
+  await db.taskTemplateStep.update({ where: { id: librarian.id }, data: { stepIndex: 10 } });
+
+  const oldRegressionTask = await db.task.create({ data: {
+    projectId: current.projectId,
+    templateId: current.id,
+    templateStepId: regression.id,
+    name: "Existing regression-first task",
+    description: regression.prompt,
+    assigneeType: regression.assigneeType,
+    assigneeAgentId: regression.assigneeAgentId,
+    status: TaskStatus.TODO,
+    chainId: `regression-first-rollover-${process.pid}`,
+    chainIndex: 9,
+  } });
+
+  const refused = await sync();
+  assert.notEqual(refused.code, 0, refused.output);
+  assert.match(refused.output, /still has 1 unfinished tasks/u);
+  assert.equal((await db.taskTemplate.findUniqueOrThrow({ where: { id: current.id } })).name, INTEGRATOR_TEMPLATE_NAME);
+
+  await db.task.update({ where: { id: oldRegressionTask.id }, data: { status: TaskStatus.DONE } });
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  assert.match(synced.output, /"rolledOverTemplates":1/u);
+
+  const legacy = await db.taskTemplate.findUniqueOrThrow({
+    where: { id: current.id },
+    include: { steps: { include: { taskTemplate: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(legacy.name, legacyRegressionFirstTwelveStepTemplateName(current.id));
+  assert.equal(legacy.steps[8]?.id, regression.id);
+  assert.equal(legacy.steps[8]?.outputKind, "regression-verification");
+  assert.equal(legacy.steps[9]?.id, librarian.id);
+  assert.equal(legacy.steps[9]?.outputKind, "documentation");
+  assert.equal(executionModeFor(legacy.steps[11]), "mechanical");
+
+  const replacement = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: current.projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.notEqual(replacement.id, current.id);
+  assert.equal(replacement.steps[8]?.outputKind, "documentation");
+  assert.equal(replacement.steps[9]?.outputKind, "regression-verification");
+  const preserved = await db.task.findUniqueOrThrow({
+    where: { id: oldRegressionTask.id },
+    include: { templateStep: { include: { taskTemplate: true } } },
+  });
+  assert.equal(preserved.templateStepId, regression.id);
+  assert.equal(preserved.templateStep?.outputKind, "regression-verification");
+  assert.equal(preserved.templateStep?.taskTemplate.name, legacy.name);
+});
+
 test("canonical sync adopts the dedicated regression verifier and migrates untouched TODO tasks", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
@@ -182,7 +247,7 @@ test("canonical sync adopts the dedicated regression verifier and migrates untou
   });
   const regressionSteps = [
     direct.steps.find(({ stepIndex }) => stepIndex === 5)!,
-    compound.steps.find(({ stepIndex }) => stepIndex === 9)!,
+    compound.steps.find(({ stepIndex }) => stepIndex === 10)!,
   ];
   const opus = await db.agent.findFirstOrThrow({
     where: { projectId: direct.projectId, name: "review-coordinator-opus" },

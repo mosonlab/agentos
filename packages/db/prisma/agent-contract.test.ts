@@ -196,8 +196,8 @@ test("the canonical twelve-step template sources split code review and preserve 
       { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix" },
       { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
-      { stepIndex: 10, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 9, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 10, agentName: "regression-verifier", outputKind: "regression-verification" },
       { stepIndex: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -205,11 +205,12 @@ test("the canonical twelve-step template sources split code review and preserve 
   assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 6)?.baseFromStepIndex, 5);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
-  assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
-  const compoundRegression = templateSteps.find((step) => step.stepIndex === 9)!.prompt;
+  assert.equal(templateSteps.find((step) => step.stepIndex === 10)?.attachmentsFromPrevious, true);
+  const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
   assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
+  assert.match(compoundRegression, /documentation result/u);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
   assert.match(templateSteps[1]!.prompt, /this run's id/u);
