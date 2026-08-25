@@ -30,6 +30,10 @@ When the user requests a chain:
 - Archive a backlog card in the same action that dispatches its work or records
   the decisions that settle it. Leave only genuinely open questions on the
   board.
+- Dispatching, gating, or rerouting a chain follows
+  [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md):
+  it owns the Product Contract, tier definitions, Critical classification,
+  approval-gate placement, and the routing snapshot recorded at dispatch.
 
 Before changing canonical Agents, roles, or task templates, read
 [`agents/README.md`](agents/README.md). Its source map and the contract files it

@@ -11,11 +11,11 @@
 # while integrating the latest main, proving the exact candidate, and advancing
 # main. There is deliberately no heartbeat: a machine may steal a lease only
 # after 45 minutes, while a human may steal it immediately. Release removes only
-# a lease you hold; breaking somebody else's lease requires steal. Release needs
-# --task because the default holder is user@host, which every agent window on
-# one machine shares: without a task only the machine is identified, so one
-# window would release another window's lease. Use --force to fall back to the
-# holder check when the acquiring task id is genuinely unknown.
+# a lease you hold; breaking somebody else's lease requires steal. Acquire and
+# release need --task because the default holder is user@host, which every agent
+# window on one machine shares: without a task only the machine is identified,
+# so one window would release another window's lease. Use --force to fall back
+# to the holder check when the acquiring task id is genuinely unknown.
 set -uo pipefail
 
 LEASE_REF="refs/merge-lease/holder"
@@ -89,6 +89,9 @@ case "$HUMAN" in 0|1) ;; *) die "--human is invalid" 2 ;; esac
 case "$FORCE" in 0|1) ;; *) die "--force is invalid" 2 ;; esac
 if [ "$COMMAND" = "acquire" ] || [ "$COMMAND" = "steal" ]; then
   [ -n "$REASON" ] || die "$COMMAND requires --reason" 2
+fi
+if [ "$COMMAND" = "acquire" ] && [ -z "$TASK" ]; then
+  die "acquire requires --task" 2
 fi
 if [ "$COMMAND" != "steal" ] && [ "$HUMAN" -eq 1 ]; then
   die "--human is valid only with steal" 2

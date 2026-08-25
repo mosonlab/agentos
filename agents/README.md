@@ -67,9 +67,9 @@ defense-list, and cross-cutting work: a direct chain reassigns its
 implementation step to it before dispatch.
 
 `review-coordinator` reviews plans only. `review-coordinator-sol` performs the
-first integrated-diff review at Sol xhigh. `regression-verifier` performs the
-bounded post-fix semantic verification and the one exact-head gate at Sol
-medium. `review-coordinator-opus` performs the blind final review, while
+first integrated-diff review. `regression-verifier` performs the bounded
+post-fix semantic verification and the one exact-head gate.
+`review-coordinator-opus` performs the blind final review, while
 `review-adjudicator-opus` performs the fresh must-fix adjudication. Existing
 task rows keep the assignee captured when their chain was created, so the Sol
 and Opus roles retain regression instructions for legacy chains that were
