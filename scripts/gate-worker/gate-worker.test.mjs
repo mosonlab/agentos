@@ -494,11 +494,24 @@ const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
   return { root, home, oid };
 };
 
+// Bounded like every other fixture that runs a real script: a harness that
+// waits on something is a failing test, never a suite that stops returning.
 const runGate = (home, args, env = {}) =>
   spawnSync("bash", [join(home, "run-gate.sh"), ...args], {
     encoding: "utf8",
+    timeout: 120_000,
     env: { ...FIXTURE_ENV, ...env },
   });
+
+test("the fixture environment carries no host gate configuration", () => {
+  // The guard for the leak: a host configured to reach a real gate worker must
+  // not be able to rewrite what these cases run against. Stated in both
+  // gate-worker fixture files because each builds its own environment.
+  const leaked = Object.keys(FIXTURE_ENV).filter(
+    (key) => key.startsWith("AGENTOS_GATE_") || key.startsWith("GATE_DISPATCH_"),
+  );
+  assert.deepEqual(leaked, [], `host gate configuration reached the fixtures: ${leaked.join(", ")}`);
+});
 
 test("a gate that passes is reported as the gate's own verdict", (t) => {
   const fixture = gateHome(t);
