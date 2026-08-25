@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import { CommandTimeoutError, KILL_GRACE_MS, runCommand } from "./exec.js";
@@ -49,10 +50,13 @@ test("a command that ignores SIGTERM is escalated to SIGKILL", async () => {
   try {
     // `exec` keeps the ignored SIGTERM disposition across the exec, so the
     // entire group survives the polite signal and only SIGKILL ends it.
-    const started = Date.now();
+    // The timeout implementation uses Node's monotonic timers. Measure it with
+    // the same kind of clock: VM wall-clock synchronisation may move Date.now()
+    // backwards while the SIGTERM grace is elapsing.
+    const started = performance.now();
     const error = await runCommand([], "/bin/sh", ["-c", "trap '' TERM; exec sleep 30"], directory, env, { timeoutMs: 300 })
       .then(() => null, (reason: unknown) => reason);
-    const elapsed = Date.now() - started;
+    const elapsed = performance.now() - started;
     assert.ok(error instanceof Error);
     assert.match(error.message, /timed out after 300ms/);
     assert.ok(elapsed >= 300 + KILL_GRACE_MS, `expected the SIGTERM grace to elapse, took ${elapsed}ms`);

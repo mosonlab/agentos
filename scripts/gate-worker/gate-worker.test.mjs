@@ -33,6 +33,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -83,6 +84,8 @@ test("provisioning includes the native Node build/runtime dependencies and Git i
   }
   assert.match(source, /git config --global user\.name/);
   assert.match(source, /git config --global user\.email/);
+  assert.match(source, /vmware-toolbox-cmd timesync disable/);
+  assert.match(source, /timedatectl set-ntp true/);
   assert.doesNotMatch(source, /SECRET_VARS=/);
   assert.doesNotMatch(readFileSync(runGatePath, "utf8"), /SECRET_VARS=/);
 });
@@ -442,7 +445,7 @@ test("a malformed STALE_WORKTREE_MINUTES is refused rather than passed to find",
   assert.match(result.stderr, /STALE_WORKTREE_MINUTES/);
 });
 
-test("the worker lock serializes gates from different repositories", (t) => {
+test("the default worker capacity serializes gates from different repositories", (t) => {
   const workerRoot = scratch(t);
   const starts = join(workerRoot, "starts");
   const release = join(workerRoot, "release");
@@ -496,6 +499,77 @@ test("the worker lock serializes gates from different repositories", (t) => {
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 2);
   assert.equal((result.stdout.match(/MERGE GATE: PASS/g) ?? []).length, 2);
+});
+
+test("worker capacity two admits exactly two gates and keeps concurrent logs distinct", (t) => {
+  const workerRoot = scratch(t);
+  const starts = join(workerRoot, "starts");
+  const dbtestConcurrency = join(workerRoot, "dbtest-concurrency");
+  const release = join(workerRoot, "release");
+  const verdict = `
+    printf '%s\n' "$$" >> "$WORKER_LOCK_STARTS"
+    printf '%s\n' "\${AGENTOS_DBTEST_CONCURRENCY:-unset}" >> "$WORKER_DBTEST_CONCURRENCY"
+    while [ ! -f "$WORKER_LOCK_RELEASE" ]; do sleep 0.05; done
+    printf 'MERGE GATE: PASS fixture\n'
+  `;
+  const fixture = gateHome(t, { verdict, workerRoot });
+  writeFileSync(join(workerRoot, "worker-capacity"), "2\n");
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      `
+        set -uo pipefail
+        for run in 1 2 3; do
+          "$GATE_HOME/run-gate.sh" "$GATE_OID" > "$WORKER_ROOT/$run.out" 2>&1 &
+          eval "pid_$run=$!"
+        done
+        for _ in $(seq 1 100); do
+          [ -s "$WORKER_LOCK_STARTS" ] \
+            && [ "$(wc -l < "$WORKER_LOCK_STARTS" | tr -d ' ')" -ge 2 ] \
+            && break
+          sleep 0.05
+        done
+        [ "$(wc -l < "$WORKER_LOCK_STARTS" | tr -d ' ')" = 2 ] || exit 90
+        sleep 0.3
+        [ "$(wc -l < "$WORKER_LOCK_STARTS" | tr -d ' ')" = 2 ] || exit 91
+
+        : > "$WORKER_LOCK_RELEASE"
+        wait "$pid_1"
+        wait "$pid_2"
+        wait "$pid_3"
+        cat "$WORKER_ROOT/1.out" "$WORKER_ROOT/2.out" "$WORKER_ROOT/3.out"
+      `,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: {
+        ...GIT_ENV,
+        GATE_HOME: fixture.home,
+        GATE_OID: fixture.oid,
+        WORKER_ROOT: workerRoot,
+        WORKER_LOCK_STARTS: starts,
+        WORKER_DBTEST_CONCURRENCY: dbtestConcurrency,
+        WORKER_LOCK_RELEASE: release,
+      },
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 3);
+  assert.deepEqual(readFileSync(dbtestConcurrency, "utf8").trim().split("\n"), ["2", "2", "2"]);
+  assert.equal((result.stdout.match(/MERGE GATE: PASS/g) ?? []).length, 3);
+  const logs = readdirSync(join(fixture.home, "logs")).filter((name) => name.endsWith(".log"));
+  assert.equal(logs.length, 3, `concurrent runs shared a log: ${logs.join(", ")}`);
+});
+
+test("a worker capacity other than one or two is refused without a verdict", (t) => {
+  const fixture = gateHome(t);
+  writeFileSync(join(fixture.root, "worker-capacity"), "3\n");
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: worker capacity .* must be exactly 1 or 2/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
 });
 
 // --- the stale-worktree sweep ------------------------------------------------

@@ -9,8 +9,9 @@
 #   scripts/gate-worker/gate-dispatch.sh <oid> --allow-local
 #   scripts/gate-worker/gate-dispatch.sh <oid> --server <one-server>
 #
-# The slot model: gates are whole-machine loads, so what is being rationed is
-# machines, not processes. Each remote worker contributes one slot. The local
+# The slot model rations measured host capacity, not arbitrary processes. The
+# default desktop worker contributes two fixed slots and the fallback worker
+# contributes one. The explicit --server form remains one slot. The local
 # machine contributes one only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1)
 # says this invocation may spend its resources.
 #
@@ -20,9 +21,9 @@
 # itself and says why it is shaped the way it is. Every dispatch on this machine
 # contends for the same slots. A direct merge-gate.sh is invisible to this
 # accounting. A direct
-# remote-gate.sh bypasses the local accounting too, but run-gate.sh holds the
-# worker-wide execution lock for the real process lifetime, so it can wait but
-# cannot turn one worker slot into concurrent full gates.
+# remote-gate.sh bypasses the local accounting too, but run-gate.sh enforces the
+# worker's configured capacity with worker-wide execution locks held for the
+# real process lifetime.
 #
 # The optional local slot is only eligible when this worktree is already the
 # thing a local gate would test: HEAD at the requested commit and the tree clean.
@@ -72,9 +73,11 @@ EXIT_NO_VERDICT=76
 
 PRIMARY_SERVER="${AGENTOS_GATE_PRIMARY_SERVER:-ci-desktop-worker}"
 FALLBACK_SERVER="${AGENTOS_GATE_FALLBACK_SERVER:-agentos-gate}"
+SINGLE_SERVER=0
 if [ -n "${AGENTOS_GATE_SERVER:-}" ]; then
   PRIMARY_SERVER="$AGENTOS_GATE_SERVER"
   FALLBACK_SERVER=""
+  SINGLE_SERVER=1
 fi
 ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
@@ -100,8 +103,8 @@ while [ $# -gt 0 ]; do
     --master=*) MASTER_OID="$(printf '%s' "${1#--master=}" | tr '[:upper:]' '[:lower:]')" ;;
     --server)
       [ $# -ge 2 ] || die "--server needs a value"
-      PRIMARY_SERVER="$2"; FALLBACK_SERVER=""; shift ;;
-    --server=*) PRIMARY_SERVER="${1#--server=}"; FALLBACK_SERVER="" ;;
+      PRIMARY_SERVER="$2"; FALLBACK_SERVER=""; SINGLE_SERVER=1; shift ;;
+    --server=*) PRIMARY_SERVER="${1#--server=}"; FALLBACK_SERVER=""; SINGLE_SERVER=1 ;;
     --primary-server)
       [ $# -ge 2 ] || die "--primary-server needs a value"
       PRIMARY_SERVER="$2"; shift ;;
@@ -123,6 +126,12 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$SINGLE_SERVER" -eq 1 ]; then
+  PRIMARY_SLOTS=(remote-1)
+else
+  PRIMARY_SLOTS=(remote-1 remote-1-2)
+fi
 
 case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) die "--timeout-minutes needs a number, got: $TIMEOUT_MINUTES" ;; esac
 case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a positive number, got: $POLL_SECONDS" ;; esac
@@ -234,7 +243,7 @@ local_eligible() {
 
 mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$EXIT_NO_VERDICT"
 
-printf 'gate-dispatch: %s, primary %s(1)' "$OID" "$PRIMARY_SERVER" >&2
+printf 'gate-dispatch: %s, primary %s(%s)' "$OID" "$PRIMARY_SERVER" "${#PRIMARY_SLOTS[@]}" >&2
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
 [ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(1, explicit)' >&2
 printf ', poll %ss, timeout %smin\n' "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
@@ -293,27 +302,29 @@ while :; do
   # a busy slot frees when its gate ends, a broken one does not free at all.
   round_busy=0
   round_broken=""
-  outcome=0
-
   if [ "$PRIMARY_DISABLED" -eq 0 ]; then
-    try_slot remote-1 || outcome=$?
-    case "$outcome" in
-      0)
-        run_remote primary "$PRIMARY_SERVER"
-        case "$REMOTE_STATUS" in
-          0|1|3) [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"; exit "$REMOTE_STATUS" ;;
-          *)
-            printf 'gate-dispatch: primary produced no verdict (exit %s); trying fallback capacity\n' "$REMOTE_STATUS" >&2
-            [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: primary said: %s\n' "$REMOTE_OUTPUT" >&2
-            release_slot
-            PRIMARY_DISABLED=1
-            UNAVAILABLE_EVER="${UNAVAILABLE_EVER} remote-1"
-            ;;
-        esac
-        ;;
-      1) round_busy=$(( round_busy + 1 )) ;;
-      *) round_broken="${round_broken} remote-1" ;;
-    esac
+    for primary_slot in "${PRIMARY_SLOTS[@]}"; do
+      outcome=0
+      try_slot "$primary_slot" || outcome=$?
+      case "$outcome" in
+        0)
+          run_remote primary "$PRIMARY_SERVER"
+          case "$REMOTE_STATUS" in
+            0|1|3) [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"; exit "$REMOTE_STATUS" ;;
+            *)
+              printf 'gate-dispatch: primary produced no verdict (exit %s); trying fallback capacity\n' "$REMOTE_STATUS" >&2
+              [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: primary said: %s\n' "$REMOTE_OUTPUT" >&2
+              release_slot
+              PRIMARY_DISABLED=1
+              UNAVAILABLE_EVER="${UNAVAILABLE_EVER} primary"
+              break
+              ;;
+          esac
+          ;;
+        1) round_busy=$(( round_busy + 1 )) ;;
+        *) round_broken="${round_broken} ${primary_slot}" ;;
+      esac
+    done
   fi
 
   outcome=0

@@ -41,7 +41,8 @@ export const readinessPollIntervalMs = (): number => {
 };
 
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
-const READINESS_LEASE_MS = 30_000;
+export const READINESS_READ_BUDGET_MS = 20_000;
+export const READINESS_CLAIM_LEASE_MS = 30_000;
 
 type RecoveryContext = {
   aggregateId: string;
@@ -120,7 +121,7 @@ const recoveryContextFor = async (
 };
 
 const readinessClaim = (now: Date): string => (
-  `${READINESS_CLAIM_PREFIX}${randomUUID()}|${new Date(now.getTime() + READINESS_LEASE_MS).toISOString()}`
+  `${READINESS_CLAIM_PREFIX}${randomUUID()}|${new Date(now.getTime() + READINESS_CLAIM_LEASE_MS).toISOString()}`
 );
 
 const expiredReadinessClaim = (reason: string | null, now: Date): boolean => {
@@ -434,7 +435,7 @@ export const readinessTick = async (
       continue;
     }
       const controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), 8_000);
+      timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
       const snapshot = await reader.readPullRequest(target.repository, target.prNumber, readiness.repo?.defaultBranch ?? "main", controller.signal);
       if (snapshot.headRefOid !== verdict.verdict.headSha) {
         await requeueRegression(db, {

@@ -1,5 +1,6 @@
 # Shared by the local-side gate-worker scripts (mirror-push.sh, remote-gate.sh,
-# gate-dispatch.sh). Not executable on its own; source it.
+# gate-dispatch.sh) and merge-gate.sh's build-cache publisher. Not executable
+# on its own; source it.
 #
 # Two things live here: the values that travel into a remote shell command
 # string, and the slot locks that ration how many gates run at once. Both are
