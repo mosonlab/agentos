@@ -775,6 +775,27 @@ test("merge lease acquire is mutually exclusive and release removes the lease", 
   assert.match(status.stdout, /no lease held/u);
 });
 
+test("merge lease release refuses a caller that does not hold the lease", (t) => {
+  const fixture = leaseFixture(t);
+  const held = {
+    holder: "holder@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Active merge",
+    token: "holder-token",
+  };
+  installLease(fixture, held);
+
+  const refused = runLease(fixture, ["release"], "stranger@fixture");
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /held by holder@fixture, not stranger@fixture/u);
+  assert.deepEqual(readLease(fixture).lease, held);
+
+  const released = runLease(fixture, ["release"], "holder@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  const status = runLease(fixture, ["status"]);
+  assert.match(status.stdout, /no lease held/u);
+});
+
 test("merge lease status prints every field of the current holder", (t) => {
   const fixture = leaseFixture(t);
   const acquired = runLease(

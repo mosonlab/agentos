@@ -10,7 +10,8 @@
 # Writing code and pushing a feature branch do not need this lease. Hold it only
 # while integrating the latest main, proving the exact candidate, and advancing
 # main. There is deliberately no heartbeat: a machine may steal a lease only
-# after 45 minutes, while a human may steal it immediately.
+# after 45 minutes, while a human may steal it immediately. Release removes only
+# a lease you hold; breaking somebody else's lease requires steal.
 set -uo pipefail
 
 LEASE_REF="refs/merge-lease/holder"
@@ -289,6 +290,15 @@ case "$COMMAND" in
       exit 0
     fi
     released_sha="$REMOTE_SHA"
+    current_holder="$(printf '%s' "$LEASE_JSON" | node -e '
+      let body = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { body += chunk; });
+      process.stdin.on("end", () => process.stdout.write(JSON.parse(body).holder));
+    ')" || die "could not read the current lease holder"
+    if [ "$current_holder" != "$HOLDER" ]; then
+      die "release refused: ${LEASE_REF} is held by ${current_holder}, not ${HOLDER}; use steal to break it"
+    fi
     delete_lease "$released_sha"
     printf 'merge-lease: released %s (%s)\n' "$LEASE_REF" "$released_sha"
     ;;
