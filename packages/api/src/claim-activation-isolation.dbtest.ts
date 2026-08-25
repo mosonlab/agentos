@@ -44,7 +44,11 @@ const claim = (runnerId = "claim-activation-runner") => createApp(db).request("/
   body: JSON.stringify({ runnerId, leaseSeconds: 60 }),
 });
 
-const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean } = {}) => {
+const seedCandidates = async (options: {
+  valid?: boolean;
+  inconsistent?: boolean;
+  validInChain?: boolean;
+} = {}) => {
   const project = await db.project.create({ data: {
     name: `claim-activation-${Date.now()}`,
     slug: `claim-activation-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
@@ -159,6 +163,7 @@ const seedCandidates = async (options: { valid?: boolean; inconsistent?: boolean
       projectId: project.id,
       repoId: repo.id,
       assigneeAgentId: agent.id,
+      ...(options.validInChain ? { chainId, chainIndex: 2, chainLayer: 2 } : {}),
       name: "Valid queued task",
       description: "valid",
     } });
@@ -221,13 +226,44 @@ const assertPoisonIsolated = async (
   assert.equal(output.body, seeded.expectedSourceBody);
 };
 
-test("one claim isolates a poisoned pinned candidate and returns the next valid run", async () => {
-  const seeded = await seedCandidates();
-  const response = await claim();
+test("a chained poison commits without waiting on a later sibling Run", { timeout: 20_000 }, async () => {
+  const seeded = await seedCandidates({ validInChain: true });
+  let siblingLocked!: () => void;
+  let releaseSibling!: () => void;
+  const siblingLockHeld = new Promise<void>((resolve) => { siblingLocked = resolve; });
+  const releaseSiblingLock = new Promise<void>((resolve) => { releaseSibling = resolve; });
+  const blocker = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${seeded.validRun!.id} FOR UPDATE`;
+    siblingLocked();
+    await releaseSiblingLock;
+  });
+  await siblingLockHeld;
+
+  const claimRequest = claim();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let parked: Response | null = null;
+  try {
+    parked = await Promise.race([
+      claimRequest,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 5_000); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    releaseSibling();
+    await blocker;
+  }
+  if (!parked) {
+    await claimRequest;
+    assert.fail("claim waited on a sibling Run after acquiring the full-chain mutex");
+  }
+  assert.equal(parked.status, 204);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.validRun!.id } })).status, RunStatus.QUEUED);
+  await assertPoisonIsolated(seeded);
+
+  const response = await claim("sibling-runner");
   assert.equal(response.status, 200);
   const claimed = await response.json() as { run: { id: string } };
   assert.equal(claimed.run.id, seeded.validRun!.id);
-  await assertPoisonIsolated(seeded);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: seeded.validRun!.id } })).status, RunStatus.CLAIMED);
 });
 
@@ -278,7 +314,7 @@ test("poisoned authority is isolated before its secret grants are decrypted", as
   await assertPoisonIsolated(seeded);
 });
 
-test("an unexpected activation-path error fails loudly and rolls back earlier isolation writes", async () => {
+test("a later unexpected activation error cannot roll back the committed chained park", async () => {
   const seeded = await seedCandidates();
   const secret = await db.secret.create({ data: {
     name: `unexpected-secret-error-${Date.now()}`,
@@ -291,22 +327,18 @@ test("an unexpected activation-path error fails loudly and rolls back earlier is
     envVar: "BROKEN_SECRET",
   } });
 
-  const response = await claim();
+  assert.equal((await claim("park-before-unexpected-error")).status, 204);
+  await assertPoisonIsolated(seeded);
+
+  const response = await claim("unexpected-error-runner");
   assert.equal(response.status, 500);
-  const [poison, valid, poisonTask, activities, notifications, sessions] = await Promise.all([
-    db.run.findUniqueOrThrow({ where: { id: seeded.poisonRun.id } }),
+  const [valid, sessions] = await Promise.all([
     db.run.findUniqueOrThrow({ where: { id: seeded.validRun!.id } }),
-    db.task.findUniqueOrThrow({ where: { id: seeded.poisonTask.id } }),
-    db.taskActivity.count({ where: { taskId: seeded.poisonTask.id } }),
-    db.inboxMessage.count({ where: { taskId: seeded.poisonTask.id } }),
     db.session.count({ where: { runId: { in: [seeded.poisonRun.id, seeded.validRun!.id] } } }),
   ]);
-  assert.equal(poison.status, RunStatus.QUEUED);
   assert.equal(valid.status, RunStatus.QUEUED);
-  assert.equal(poisonTask.status, TaskStatus.TODO);
-  assert.equal(activities, 0);
-  assert.equal(notifications, 0);
   assert.equal(sessions, 0);
+  await assertPoisonIsolated(seeded);
 });
 
 test("a database read failure is not classified as a candidate activation failure", async () => {

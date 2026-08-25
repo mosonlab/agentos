@@ -4700,6 +4700,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 metadata: { runId: candidate.id, condition: "repository-grant-missing" },
               },
             });
+            // A chained park expands the lock order from this Run to every Task
+            // in the chain. End the transaction here: scanning another
+            // candidate could next wait on a sibling Run while its claimant
+            // already holds that Run and waits for this chain mutex.
+            if (candidate.task.chainId) return null;
           }
           continue;
         }
@@ -4799,6 +4804,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               ...(sourceSession ? { sessionId: sourceSession.id } : {}),
               reason: regressionRepairHandoff.reason,
             });
+            if (candidate.task.chainId) return null;
           }
           continue;
         }
@@ -4869,6 +4875,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               },
               update: {},
             });
+            if (candidate.task.chainId) return null;
           }
           continue;
         }
