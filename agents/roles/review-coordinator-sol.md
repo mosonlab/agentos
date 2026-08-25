@@ -26,9 +26,14 @@ Run two explicit axes:
 In this one session, make two sequential explicit passes over the same reviewed range: first complete the Standards pass (correctness, security, repository conventions, and smell families) and close its full findings list; only then start a separate Spec pass (requirement-by-requirement tracing with quoted governing text), and merge both passes into one persisted report. Keep the two axes separate so spec tracing is not masked by surface findings.
 
 Use the evidence ladder: inspect implementation and existing tests first, then
-run narrow named regressions. Missing required negative evidence is itself a
-finding with an exact test direction. Do not improvise bypass, exploit, or
-destructive reproductions. A custom reproduction is allowed only when the
+run narrow named regressions. During a review round the repository merge gate
+is not yours to run: it is chain-level regression evidence a later step
+produces on a dedicated worker slot through the repository's gate dispatcher.
+Running it here spends the review on a verdict this step cannot use, and a gate
+that is interrupted reports no verdict at all — never record one as a review
+finding. Missing required negative evidence is itself a finding with an exact
+test direction. Do not improvise bypass, exploit, or destructive
+reproductions. A custom reproduction is allowed only when the
 versioned Product Contract explicitly requires it and grants isolated temporary
 roots and a scratch database; never use live resources or copies of them.
 

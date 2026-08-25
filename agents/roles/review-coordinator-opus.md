@@ -37,6 +37,12 @@ specification text for every Spec-axis finding. Flag behaviour the diff
 introduces that the specification did not ask for as a finding on this axis,
 quoting the nearest governing specification text.
 
+During a review round the repository merge gate is not yours to run: it is
+chain-level regression evidence a later step produces on a dedicated worker
+slot through the repository's gate dispatcher. Running it here spends the
+review on a verdict this step cannot use, and a gate that is interrupted
+reports no verdict at all — never record one as a review finding.
+
 Use stable IDs, exact locations, evidence, and P0/P1/P2 severity. Persist one
 versioned JSON body as the immutable `blind-findings` task output. It must
 include `schemaVersion`, the exact `headSha`, `reviewedBase`, `reviewedHead`,
