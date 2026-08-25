@@ -784,6 +784,32 @@ test("child environment is an explicit allowlist and excludes host variables", (
   }
 });
 
+test("the runner pins its configured gate destination over task secrets", () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], gateServer: "agentos-gate" },
+    { ...claim, secrets: { ...claim.secrets, AGENTOS_GATE_SERVER: "ci-desktop-worker" } },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_GATE_SERVER, "agentos-gate");
+});
+
+test("a run-as launcher cannot strip the operator-selected gate destination", () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"], gateServer: "agentos-gate" },
+    claim,
+    scratch,
+    "/work",
+  );
+  const launch = launchArgv(
+    { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: ["/usr/bin/env", "-i"] },
+    "CODEX",
+    [],
+    env,
+  );
+  assert.equal(launch.args.includes("AGENTOS_GATE_SERVER=agentos-gate"), true);
+});
+
 // The launcher named by RUNNER_RUN_AS_PREFIX is an arbitrary command that may
 // scrub the environment it was handed — `sudo` resets it by policy, and #126
 // wants OS isolation built on precisely this prefix. `/usr/bin/env -i` is that
