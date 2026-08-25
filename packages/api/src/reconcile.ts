@@ -12,6 +12,7 @@ import {
 } from "@agentos/db";
 
 import { makeDedupeKey } from "./execution.js";
+import { mergeTailLeaseChainId, releaseMergeLease, releaseMergeLeaseSafely, type MergeLeaseReleaser } from "./merge-lease.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
@@ -76,7 +77,11 @@ export const createArchivedRunNoticeScheduler = (
   };
 };
 
-export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()): Promise<number> => {
+export const reconcileDatabaseRuns = async (
+  db: PrismaClient,
+  now = new Date(),
+  releaseChainLease: MergeLeaseReleaser = releaseMergeLease,
+): Promise<number> => {
   const [candidates, expiredInboxRuns] = await Promise.all([
     db.run.findMany({
       where: {
@@ -129,7 +134,11 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
     run.heartbeatAt && now.getTime() - run.heartbeatAt.getTime() < run.stallTimeoutMin * 60_000
   ));
   if (orphans.length === 0 && expiredInboxRuns.length === 0) return 0;
-  await db.$transaction(async (tx) => {
+  const strandedChainLeases = await db.$transaction(async (tx) => {
+    // Chains whose tail run this sweep terminalizes without a successor. Held
+    // until the sweep commits, because a lease released against a transaction
+    // that then rolls back would free a window the chain still owns.
+    const stranded = new Set<string>();
     for (const run of orphans) {
       const leaseLossReason = !run.leaseExpiresAt
         ? "Platform lease missing during startup reconciliation; runner heartbeat authority was lost"
@@ -208,6 +217,8 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
             },
           } });
         }
+        const cancelledChainId = await mergeTailLeaseChainId(tx, run.taskId);
+        if (cancelledChainId) stranded.add(cancelledChainId);
         continue;
       }
       // Losing a lease is an external failure: it buys an attempt, never spends one.
@@ -305,6 +316,10 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
           data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${run.runNumber + 1} queued` },
         });
       } else {
+        // Budget exhausted: no retry follows, so this lost run is the chain's
+        // last word and its lease has no successor to hand itself to.
+        const lostChainId = await mergeTailLeaseChainId(tx, run.taskId);
+        if (lostChainId) stranded.add(lostChainId);
         await tx.task.update({
           where: { id: run.taskId },
           data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
@@ -359,7 +374,9 @@ export const reconcileDatabaseRuns = async (db: PrismaClient, now = new Date()):
         });
       }
     }
+    return [...stranded];
   });
+  for (const chainId of strandedChainLeases) await releaseMergeLeaseSafely(releaseChainLease, chainId);
   return orphans.length + expiredInboxRuns.length;
 };
 

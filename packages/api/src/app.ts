@@ -118,6 +118,7 @@ import {
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import {
+  mergeTailLeaseChainId,
   releaseMergeLease,
   releaseMergeLeaseSafely,
   type MergeLeaseReleaser,
@@ -1301,7 +1302,10 @@ const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.
 
 type CancellationSettlement =
   | { error: string; code: 404 | 409 }
-  | { runId: string; taskId: string | null; status: RunStatus; cancellationState: "acknowledged"; requestId: string };
+  | {
+      runId: string; taskId: string | null; status: RunStatus; cancellationState: "acknowledged";
+      requestId: string; releaseMergeLeaseTask: string | null;
+    };
 
 /** Terminalize one already-recorded cancellation intent. The Run row is the
  * race authority: completion and settlement both update it with mutually
@@ -1364,7 +1368,12 @@ const settleCancellation = async (
     } else if (!run.cancelAcknowledgedAt) {
       return { error: "Cancellation cleanup has not been acknowledged by the runner", code: 409 };
     }
-    return { runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged", requestId: input.requestId };
+    // The terminal writer that got here first already released the lease; a
+    // later acknowledgement of the same cancellation has nothing left to free.
+    return {
+      runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged",
+      requestId: input.requestId, releaseMergeLeaseTask: null,
+    };
   }
   if (run.taskId) await lockTaskMutationRows(tx, run.taskId);
   const settled = await tx.run.updateMany({
@@ -1423,7 +1432,13 @@ const settleCancellation = async (
       metadata: { runId: run.id, requestId: input.requestId, status: RunStatus.CANCELLED },
     } });
   }
-  return { runId: run.id, taskId: run.taskId, status: RunStatus.CANCELLED, cancellationState: "acknowledged", requestId: input.requestId };
+  // Cancellation never creates a retry or a successor, so a cancelled chain-tail
+  // run is the chain's last word: whatever lease it was holding is now stranded
+  // until a machine steals it 45 minutes later. Release it instead.
+  return {
+    runId: run.id, taskId: run.taskId, status: RunStatus.CANCELLED, cancellationState: "acknowledged",
+    requestId: input.requestId, releaseMergeLeaseTask: await mergeTailLeaseChainId(tx, run.taskId),
+  };
 };
 
 type LockedTask = {
@@ -4633,7 +4648,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const now = new Date();
     runners.note(body.runnerId, body, now);
     await options.ownership.assertHeld();
-    await reconcileDatabaseRuns(db, now);
+    await reconcileDatabaseRuns(db, now, releaseChainLease);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimOnce = () => db.$transaction(async (tx) => {
       // This is the shared half of the production deploy barrier. It is the
@@ -5200,7 +5215,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ...(body.branch === undefined ? {} : { branch: body.branch }),
       ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
     }));
-    return "error" in result ? context.json({ error: result.error }, result.code) : context.json(result);
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    const { releaseMergeLeaseTask, ...settlement } = result;
+    await releaseMergeLeaseSafely(releaseChainLease, releaseMergeLeaseTask);
+    return context.json(settlement);
   });
 
   // Publication is a separate durable fact from terminal completion. Persist
@@ -6547,6 +6565,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             : run.status === RunStatus.CANCELLED ? "unconfirmed" as const : "requested" as const,
           requestId: run.cancelRequestId,
           reason: run.cancelReason,
+          releaseMergeLeaseTask: null,
         };
       }
       if (executionModeFor(run.task?.templateStep ?? null) === "mechanical") {
@@ -6560,6 +6579,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           cancellationState: "terminal" as const,
           requestId: body.requestId,
           reason: null,
+          releaseMergeLeaseTask: null,
         };
       }
       const now = new Date();
@@ -6593,9 +6613,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         cancellationState: "requested" as const,
         requestId: body.requestId,
         reason: body.reason,
+        // Terminalization is still owed by the runner acknowledgement or by
+        // reconciliation, and only a terminal writer may free the lease.
+        releaseMergeLeaseTask: null,
       };
     });
-    return "error" in result ? context.json({ error: result.error }, result.code) : context.json(result);
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    const { releaseMergeLeaseTask, ...cancellation } = result;
+    await releaseMergeLeaseSafely(releaseChainLease, releaseMergeLeaseTask);
+    return context.json(cancellation);
   });
 
   app.get("/runs/:runId/events", async (context) => {
