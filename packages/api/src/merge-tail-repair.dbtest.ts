@@ -392,6 +392,62 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
   });
 });
 
+test("a repaired Regression retry pins the prior same-task published head without rewriting repair evidence", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  const firstClaim = await claimNext();
+  assert.equal(firstClaim.status, 200);
+  const firstBody = firstClaim.body as {
+    run: { id: string };
+    regressionRepairHandoff: { retry?: unknown };
+  };
+  assert.equal(firstBody.regressionRepairHandoff.retry, undefined);
+
+  const continuationHead = "d".repeat(40);
+  await db.run.update({
+    where: { id: firstBody.run.id },
+    data: {
+      status: "SUCCEEDED",
+      headSha: continuationHead,
+      pushedBranch: BRANCH,
+      pushStatus: "SUCCEEDED",
+      endedAt: new Date(),
+    },
+  });
+  await db.task.update({
+    where: { id: seeded.regression.id },
+    data: { status: TaskStatus.REVIEW, failureReason: "gate formed no verdict" },
+  });
+
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
+  try {
+    const retried = await createApp(db).request(`/tasks/${seeded.regression.id}/retry`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-operator-token" },
+    });
+    assert.equal(retried.status, 201, await retried.text());
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorOperator;
+  }
+
+  const retryClaim = await claimNext();
+  assert.equal(retryClaim.status, 200);
+  const retryBody = retryClaim.body as {
+    regressionRepairHandoff: {
+      repair: { resolvedHeadSha: string };
+      retry: { previousRunId: string; startHeadSha: string };
+    };
+  };
+  assert.equal(retryBody.regressionRepairHandoff.repair.resolvedHeadSha, RESOLVED);
+  assert.deepEqual(retryBody.regressionRepairHandoff.retry, {
+    previousRunId: firstBody.run.id,
+    startHeadSha: continuationHead,
+  });
+});
+
 test("independent-review rejection stops for an explicit repair decision before a fresh Regression claim", async () => {
   const seeded = await seedRegression();
   const rejected = await rejectIndependentReviewAfterPass(seeded);

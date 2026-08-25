@@ -32,6 +32,7 @@ export const regressionRepairHandoffForClaim = async (
     projectId: string;
     repoId: string;
     runId: string;
+    runNumber: number;
     branch: string | null;
     outputKind: string | null;
   },
@@ -209,6 +210,7 @@ export const regressionRepairHandoffForClaim = async (
           kind: true,
           body: true,
           commitSha: true,
+          updatedAt: true,
           run: { select: { status: true, headSha: true, pushedBranch: true, pushStatus: true } },
         },
       },
@@ -224,6 +226,19 @@ export const regressionRepairHandoffForClaim = async (
     || output.run.pushedBranch !== input.branch) {
     return invalid(`repair task ${repairTaskId} did not publish ${resolvedHeadSha} to ${input.branch}`);
   }
+  const retryRun = await tx.run.findFirst({
+    where: {
+      taskId: input.taskId,
+      runNumber: { gt: 1, lt: input.runNumber },
+      status: RunStatus.SUCCEEDED,
+      pushStatus: PushStatus.SUCCEEDED,
+      pushedBranch: input.branch,
+      headSha: { not: null },
+      createdAt: { gte: output.updatedAt },
+    },
+    select: { id: true, headSha: true },
+    orderBy: { runNumber: "desc" },
+  });
   return {
     status: "ok",
     handoff: {
@@ -238,6 +253,9 @@ export const regressionRepairHandoffForClaim = async (
         outputKind: output.kind,
         outputBody: output.body,
       },
+      ...(retryRun?.headSha ? {
+        retry: { previousRunId: retryRun.id, startHeadSha: retryRun.headSha },
+      } : {}),
     },
   };
 };

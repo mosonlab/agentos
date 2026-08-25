@@ -247,7 +247,9 @@ Three properties keep the evidence honest even when the worker is trusted:
   ask what is already on the default branch, and the worker mirror does not
   fetch it. So
   `gate-dispatch.sh` asks origin — `git ls-remote --symref origin HEAD`, which
-  names the default branch and its head in one answer — fetches that branch,
+  names the default branch and its head in one answer. It makes at most three
+  short attempts for a transient read failure, then still stops with no verdict
+  if origin remains unreadable. After a successful read it fetches that branch,
   re-reads the answer, and passes the resulting oid through both transport hops
   as `--master`. `mirror-push.sh` pushes the candidate and baseline atomically
   into separate oid-named cache refs and reads both refs back exactly before the

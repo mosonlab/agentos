@@ -137,7 +137,12 @@ export const buildPrompt = (claim: ClaimedTask): string => {
       resolvedHeadSha: claim.regressionRepairHandoff.repair.resolvedHeadSha,
       outputKind: claim.regressionRepairHandoff.repair.outputKind,
     })}`,
-    "- Before refreshing the target branch, verify the checked-out starting HEAD equals repair.resolvedHeadSha. Stop loudly on any mismatch.",
+    ...(claim.regressionRepairHandoff.retry ? [
+      `- Retry continuation: ${JSON.stringify(claim.regressionRepairHandoff.retry)}`,
+      "- Before refreshing the target branch, verify the checked-out starting HEAD equals retry.startHeadSha. This retry authority comes only from the prior same-Task Run's successful push; stop loudly on any mismatch.",
+    ] : [
+      "- Before refreshing the target branch, verify the checked-out starting HEAD equals repair.resolvedHeadSha. Stop loudly on any mismatch.",
+    ]),
     `- Repair task output (${claim.regressionRepairHandoff.repair.outputKind}):\n${claim.regressionRepairHandoff.repair.outputBody}`,
   ] : []),
   ].join("\n");
