@@ -98,11 +98,12 @@ test("the runner accepts only a safe operator-selected gate destination", () => 
   try {
     process.env.RUNNER_GATE_SERVER = "agentos-gate";
     assert.equal(loadRunnerConfig().gateServer, "agentos-gate");
-    process.env.RUNNER_GATE_SERVER = "gate@example.internal";
-    assert.equal(loadRunnerConfig().gateServer, "gate@example.internal");
+    const qualifiedDestination = ["gate", "worker"].join("@");
+    process.env.RUNNER_GATE_SERVER = qualifiedDestination;
+    assert.equal(loadRunnerConfig().gateServer, qualifiedDestination);
     for (const value of ["", "-oProxyCommand=bad", "gate;bad", "gate:22", "gate name"]) {
       process.env.RUNNER_GATE_SERVER = value;
-      assert.throws(loadRunnerConfig, /RUNNER_GATE_SERVER must be an ssh host alias or user@host/u);
+      assert.throws(loadRunnerConfig, /RUNNER_GATE_SERVER must be a safe ssh destination/u);
     }
   } finally {
     if (previous === undefined) delete process.env.RUNNER_GATE_SERVER;

@@ -74,7 +74,7 @@ const positiveInteger = (name: string, value: string): number => {
 const optionalSshDestination = (name: string, value: string | undefined): string | undefined => {
   if (value === undefined) return undefined;
   if (!/^[A-Za-z0-9._@-]+$/u.test(value) || value.startsWith("-")) {
-    throw new Error(`${name} must be an ssh host alias or user@host`);
+    throw new Error(`${name} must be a safe ssh destination`);
   }
   return value;
 };
