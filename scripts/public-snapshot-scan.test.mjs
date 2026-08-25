@@ -197,8 +197,16 @@ test("the checked-out tree is fully classified", () => {
 
 test("the merge gate executes snapshot and auto-deploy contracts", () => {
   const gate = readFileSync("scripts/merge-gate.sh", "utf8");
+  // A gate step is a label followed by the command it runs, either as a serial
+  // `step "label" <command>` or as one member of a concurrent group, which is
+  // the same pair indented under parallel_steps. Anchoring at the start of a
+  // line is what stops a mention in a comment from satisfying this.
   for (const script of ["test:snapshot-scan", "snapshot:scan", "test:auto-deploy"]) {
-    assert.match(gate, new RegExp(`step [^\\n]+ npm run ${script.replace(":", "\\:")}`), `${script} is absent from the merge gate`);
+    assert.match(
+      gate,
+      new RegExp(`^(?:step |\\s+)"[^"\\n]+" npm run ${script}`, "m"),
+      `${script} is absent from the merge gate`,
+    );
   }
 });
 
