@@ -504,11 +504,11 @@ test("the default worker capacity serializes gates from different repositories",
 test("worker capacity two admits exactly two gates and keeps concurrent logs distinct", (t) => {
   const workerRoot = scratch(t);
   const starts = join(workerRoot, "starts");
-  const dbtestConcurrency = join(workerRoot, "dbtest-concurrency");
+  const hostShare = join(workerRoot, "host-share");
   const release = join(workerRoot, "release");
   const verdict = `
     printf '%s\n' "$$" >> "$WORKER_LOCK_STARTS"
-    printf '%s\n' "\${AGENTOS_DBTEST_CONCURRENCY:-unset}" >> "$WORKER_DBTEST_CONCURRENCY"
+    printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" >> "$WORKER_HOST_SHARE"
     while [ ! -f "$WORKER_LOCK_RELEASE" ]; do sleep 0.05; done
     printf 'MERGE GATE: PASS fixture\n'
   `;
@@ -550,17 +550,56 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
         GATE_OID: fixture.oid,
         WORKER_ROOT: workerRoot,
         WORKER_LOCK_STARTS: starts,
-        WORKER_DBTEST_CONCURRENCY: dbtestConcurrency,
+        WORKER_HOST_SHARE: hostShare,
         WORKER_LOCK_RELEASE: release,
       },
     },
   );
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(readFileSync(starts, "utf8").trim().split("\n").length, 3);
-  assert.deepEqual(readFileSync(dbtestConcurrency, "utf8").trim().split("\n"), ["2", "2", "2"]);
+  // Every gate on a two-slot worker is told it has half the host. What it does
+  // with that is merge-gate.sh's business; that this reaches it is this one's.
+  assert.deepEqual(readFileSync(hostShare, "utf8").trim().split("\n"), ["2", "2", "2"]);
   assert.equal((result.stdout.match(/MERGE GATE: PASS/g) ?? []).length, 3);
   const logs = readdirSync(join(fixture.home, "logs")).filter((name) => name.endsWith(".log"));
   assert.equal(logs.length, 3, `concurrent runs shared a log: ${logs.join(", ")}`);
+});
+
+test("the share run-gate states is the one merge-gate sizes from, and nothing recomputes it", () => {
+  // 7886fad exported AGENTOS_DBTEST_CONCURRENCY=2 here for a two-slot worker,
+  // and merge-gate.sh recomputed that exact variable a few lines into its own
+  // run. The bound never took effect: the worker ran eight database files at
+  // once while run-gate.sh's log line still said two. Nothing failed, because
+  // the fixture above only proved what run-gate.sh exported, never what
+  // survived to the gate.
+  //
+  // The shape of that bug is two files computing one number. So: run-gate.sh
+  // states the share and names no fan-out, and merge-gate.sh reads the share
+  // and is the only place that turns it into lanes.
+  const runGate = readFileSync(runGatePath, "utf8");
+  const mergeGate = readFileSync(join(here, "..", "merge-gate.sh"), "utf8");
+
+  assert.match(runGate, /export AGENTOS_GATE_HOST_SHARE="\$WORKER_CAPACITY"/);
+  assert.doesNotMatch(
+    runGate,
+    /AGENTOS_DBTEST_CONCURRENCY|AGENTOS_GATE_UNIT_LANES|AGENTOS_GATE_DB_LANES/,
+    "run-gate.sh names a fan-out of its own; it may only state the share",
+  );
+
+  assert.match(mergeGate, /GATE_HOST_SHARE="\$\{AGENTOS_GATE_HOST_SHARE:-1\}"/);
+  assert.doesNotMatch(
+    mergeGate,
+    /^\s*export\s+AGENTOS_GATE_HOST_SHARE/m,
+    "merge-gate.sh overwrites the share it was given instead of sizing from it",
+  );
+  // The database wave states its lane count at the point of use. An ambient
+  // export is what let run-gate.sh's value silently become something else.
+  assert.match(mergeGate, /AGENTOS_DBTEST_CONCURRENCY="\$\{GATE_DB_LANES\}"/);
+  assert.doesNotMatch(
+    mergeGate,
+    /^\s*export\s+AGENTOS_DBTEST_CONCURRENCY/m,
+    "merge-gate.sh exports an ambient database fan-out instead of stating it where it is used",
+  );
 });
 
 test("a worker capacity other than one or two is refused without a verdict", (t) => {
