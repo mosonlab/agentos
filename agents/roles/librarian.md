@@ -1,8 +1,8 @@
 ---
 name: librarian
 title: Librarian
-model: gpt-5.6-luna:xhigh
-runner: codex
+model: openai-codex/gpt-5.6-luna:xhigh
+runner: pi
 inboxAccess: false
 collaborators: []
 ---

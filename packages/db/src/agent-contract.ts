@@ -4,7 +4,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "implementation-plan-executioner", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "librarian", model: "gpt-5.6-luna:xhigh", runner: RunnerPreference.CODEX },
+  { name: "librarian", model: "openai-codex/gpt-5.6-luna:xhigh", runner: RunnerPreference.PI },
   // Not an LLM role. The sentinel Agent row step 12 binds so a mechanical run
   // can carry a non-null `Run.agentId` without presenting a second human gate.
   // `catalogRunnerForModel` returns null for this model, so the runner/model
@@ -48,7 +48,7 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
   // 2026-08-24 tier rulings: reviewed model/effort re-pins for uncustomized rows.
   ["librarian", {
     from: { model: "gpt-5.6-terra:high", runnerPreference: RunnerPreference.CODEX },
-    to: { model: "gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "openai-codex/gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.PI },
   }],
   ["regression-verifier", {
     from: { model: "openai-codex/gpt-5.6-sol:medium", runnerPreference: RunnerPreference.PI },
