@@ -59,13 +59,22 @@ const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 // session configured to reach a real gate worker exports that variable, so a
 // fixture that inherits the host environment tests the host's topology instead
 // of the one it declares. The host's Git identity was already neutralised here
-// for the same reason; behaviour belongs on the same list. Stripping by prefix
-// rather than by name means a variable added to the dispatcher later cannot
+// for the same reason; behaviour belongs on the same list. The dispatcher's own
+// namespace is stripped by prefix so a variable added to it later cannot
 // reintroduce the leak.
+const HOST_GATE_PREFIXES = ["AGENTOS_GATE_", "GATE_DISPATCH_"];
+// run-gate.sh's two are not prefixed but are read the same way: GATE_HOME
+// relocates the whole gate directory a fixture built for itself — at the real
+// worker's mirror, worktrees and logs — and STALE_WORKTREE_MINUTES decides what
+// its sweep reclaims. XDG_CACHE_HOME is deliberately NOT on this list: every
+// case that needs it sets it, and removing it would point a dispatcher at the
+// real slot locks under $HOME/.cache instead.
+const HOST_GATE_NAMES = ["GATE_HOME", "STALE_WORKTREE_MINUTES"];
+const isHostGateConfig = (key) =>
+  HOST_GATE_PREFIXES.some((prefix) => key.startsWith(prefix)) || HOST_GATE_NAMES.includes(key);
+
 const hostNeutralEnv = Object.fromEntries(
-  Object.entries(process.env).filter(
-    ([key]) => !key.startsWith("AGENTOS_GATE_") && !key.startsWith("GATE_DISPATCH_"),
-  ),
+  Object.entries(process.env).filter(([key]) => !isHostGateConfig(key)),
 );
 
 const FIXTURE_ENV = {
@@ -395,9 +404,7 @@ test("the fixture environment carries no host gate configuration", () => {
   // real gate worker cannot silently rewrite the topology these cases assert
   // on — which is how this suite once blocked for the dispatcher's full hour
   // instead of failing.
-  const leaked = Object.keys(FIXTURE_ENV).filter(
-    (key) => key.startsWith("AGENTOS_GATE_") || key.startsWith("GATE_DISPATCH_"),
-  );
+  const leaked = Object.keys(FIXTURE_ENV).filter(isHostGateConfig);
   assert.deepEqual(leaked, [], `host gate configuration reached the fixtures: ${leaked.join(", ")}`);
 });
 
