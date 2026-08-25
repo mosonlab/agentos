@@ -1,23 +1,53 @@
-import { PrismaClient, RunnerPreference, TaskStatus } from "@prisma/client";
+import { PrismaClient, Prisma, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
-import { loadAllTemplateStepSources, templateStepStructureDifferences } from "../src/template-sources.js";
+import {
+  legacyTemplateShapeRefusal,
+  type PersistedTransitionStep,
+} from "../src/canonical-template-transition.js";
+import {
+  loadAllTemplateStepSources,
+  templateStepStructureDifferences,
+  type CanonicalTemplateName,
+  type TemplateStepSource,
+} from "../src/template-sources.js";
 
 const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
+const ADJUDICATOR_AGENT_NAME = "review-adjudicator-opus";
+const ADJUDICATOR_AGENT_SOURCE = "review-coordinator-opus";
+const CANONICAL_TEMPLATE_DESCRIPTIONS = new Map([
+  ["compound-engineer-workflow", "Thirteen-step Full Assurance workflow with parallel independent code review, fresh Opus adjudication, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution."],
+  ["direct-engineer-workflow", "Direct-tier workflow: implementation from the task brief, parallel independent code review with fresh Opus adjudication, fix application, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution."],
+]);
+const CANONICAL_STEP_NAMES = new Map([
+  ["compound-engineer-workflow", [
+    "Write a spec", "Plan", "Plan review", "Revise plan", "Implementation", "Code review (Sol)",
+    "Code review (Opus blind)", "Opus adjudication", "Apply review fixes", "Regression verification",
+    "Librarian", "Merge authorization", "Merge execution",
+  ]],
+  ["direct-engineer-workflow", [
+    "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Opus adjudication",
+    "Apply review fixes", "Regression verification", "Merge authorization", "Merge execution",
+  ]],
+]);
+const LEGACY_TEMPLATE_NAMES = new Map([
+  ["compound-engineer-workflow", "compound-engineer-workflow-legacy-v1"],
+  ["direct-engineer-workflow", "direct-engineer-workflow-legacy-v1"],
+]);
 const LEGACY_BLIND_REVIEW_PROMPTS = [
   "Blind-review the complete integrated implementation diff using the immutable implementationBaseSha and implementationHeadSha in the platform-pinned claim metadata; verify both endpoints resolve in this detached checkout. Persist your independent findings as an intermediate AgentOS task output before reading the first review. The successful task_output response unlocks predecessor step outputs; only then read them, apply the canonical merge matrix, and replace the intermediate output with the closed must-fix list. Do not write or commit any review report file.",
 ] as const;
 type AssigneeTransition = { from: readonly string[]; to: string };
 const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
-  ["compound-engineer-workflow:9", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
-  ["direct-engineer-workflow:5", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["compound-engineer-workflow:10", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["direct-engineer-workflow:6", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
 ]);
 
 const STEP_NAME_TRANSITIONS = new Map([
-  ["compound-engineer-workflow:11", { from: "Merge readiness", to: "Merge authorization" }],
-  ["direct-engineer-workflow:6", { from: "Merge readiness", to: "Merge authorization" }],
+  ["compound-engineer-workflow:12", { from: "Merge readiness", to: "Merge authorization" }],
+  ["direct-engineer-workflow:7", { from: "Merge readiness", to: "Merge authorization" }],
 ]);
 
 const STEP_BASE_TRANSITIONS = new Map([
@@ -30,6 +60,131 @@ const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPr
   if (!expected || agent.runnerPreference === RunnerPreference.AUTO || agent.runnerPreference === RunnerPreference.INHERIT
     || expected === agent.runnerPreference) return null;
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
+};
+
+type CanonicalTransaction = Prisma.TransactionClient;
+type CanonicalSources = Map<CanonicalTemplateName, TemplateStepSource[]>;
+
+const transitionStepInclude = {
+  assigneeAgent: { select: { name: true } },
+  _count: { select: { tasks: true } },
+} as const;
+
+const readCanonicalTemplateRows = async (tx: CanonicalTransaction, name: string) => tx.taskTemplate.findMany({
+  where: { name },
+  include: { steps: { orderBy: { stepIndex: "asc" }, include: transitionStepInclude } },
+});
+
+/**
+ * Validate every named row before the transition begins. A row with the old
+ * exact shape is the only row eligible for a fixed legacy-v1 rename. A row
+ * with the current count is checked in the normal canonical sync loop below,
+ * which retains its narrow, named adoption rules for already-reviewed source
+ * edits. Any other count or an unrecognized old shape is a structural refusal.
+ */
+const preflightCanonicalTemplateRows = async (
+  tx: CanonicalTransaction,
+  templateSources: CanonicalSources,
+): Promise<void> => {
+  for (const [templateName, steps] of templateSources) {
+    const rows = await readCanonicalTemplateRows(tx, templateName);
+    if (rows.length === 0) throw new Error(`Template ${templateName} was not found`);
+    const legacyName = LEGACY_TEMPLATE_NAMES.get(templateName);
+    if (!legacyName) throw new Error(`No legacy identity is defined for canonical template ${templateName}`);
+    for (const row of rows) {
+      const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
+      const legacy = legacyTemplateShapeRefusal(templateName, persistedSteps);
+      if (legacy === "legacy") {
+        const existingLegacy = await tx.taskTemplate.findUnique({
+          where: { projectId_name: { projectId: row.projectId, name: legacyName } },
+          select: { id: true },
+        });
+        if (existingLegacy) {
+          throw new Error(`Canonical template ${templateName} on project ${row.projectId} cannot rename to ${legacyName}: target already exists`);
+        }
+        continue;
+      }
+      if (persistedSteps.length !== steps.length) {
+        throw new Error(`Canonical template ${templateName} on project ${row.projectId} has structural drift: expected ${steps.length} steps, found ${persistedSteps.length}`);
+      }
+      const duplicateIndexes = new Set<number>();
+      for (const step of persistedSteps) {
+        if (duplicateIndexes.has(step.stepIndex)) {
+          throw new Error(`Canonical template ${templateName} on project ${row.projectId} has structural drift: duplicate stepIndex ${step.stepIndex}`);
+        }
+        duplicateIndexes.add(step.stepIndex);
+      }
+    }
+  }
+};
+
+const createCanonicalTemplate = async (
+  tx: CanonicalTransaction,
+  projectId: string,
+  templateName: string,
+  steps: readonly TemplateStepSource[],
+): Promise<void> => {
+  const description = CANONICAL_TEMPLATE_DESCRIPTIONS.get(templateName);
+  const stepNames = CANONICAL_STEP_NAMES.get(templateName);
+  if (!description || !stepNames) throw new Error(`No canonical template metadata is defined for ${templateName}`);
+  const template = await tx.taskTemplate.create({
+    data: {
+      projectId,
+      name: templateName,
+      description,
+      variables: ["branchName"],
+    },
+  });
+  for (const step of steps) {
+    const name = stepNames[step.stepIndex - 1];
+    if (!name) throw new Error(`Missing canonical template step name ${templateName}:${step.stepIndex}`);
+    const assigneeAgentId = step.agentName
+      ? (await tx.agent.findFirst({
+        where: { projectId, name: step.agentName, archivedAt: null },
+        select: { id: true },
+      }))?.id ?? null
+      : null;
+    if (step.agentName && !assigneeAgentId) {
+      throw new Error(`Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found in project ${projectId}`);
+    }
+    await tx.taskTemplateStep.create({
+      data: {
+        taskTemplateId: template.id,
+        stepIndex: step.stepIndex,
+        layer: step.layer,
+        name,
+        assigneeAgentId,
+        assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
+        runner: null,
+        approvalGate: step.approvalGate,
+        outputKind: step.outputKind,
+        prompt: step.prompt,
+        opensPullRequest: step.opensPullRequest,
+        attachmentsFromPrevious: step.attachmentsFromPrevious,
+        baseFromStepIndex: step.baseFromStepIndex,
+        spawnPolicy: step.spawnPolicy ?? Prisma.JsonNull,
+      },
+    });
+  }
+};
+
+const transitionCanonicalTemplateRows = async (
+  tx: CanonicalTransaction,
+  templateSources: Awaited<ReturnType<typeof loadAllTemplateStepSources>>,
+): Promise<number> => {
+  let created = 0;
+  for (const [templateName, steps] of templateSources) {
+    const rows = await readCanonicalTemplateRows(tx, templateName);
+    const legacyName = LEGACY_TEMPLATE_NAMES.get(templateName)!;
+    for (const row of rows) {
+      const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
+      if (legacyTemplateShapeRefusal(templateName, persistedSteps) !== "legacy") continue;
+      await tx.taskTemplate.update({ where: { id: row.id }, data: { name: legacyName } });
+      await createCanonicalTemplate(tx, row.projectId, templateName, steps);
+      created += 1;
+    }
+  }
+  return created;
 };
 
 // Every canonical template, every step of each, and every role under agents/
@@ -48,6 +203,7 @@ const main = async (): Promise<void> => {
         select: { id: true },
       });
       if (!canonicalProject) throw new Error("Canonical project agentos-example was not found");
+      await preflightCanonicalTemplateRows(tx, templateSources);
       let createdAgents = 0;
       let createdAgentRepoGrants = 0;
       const regressionRole = rolesByName.get(REGRESSION_AGENT_NAME);
@@ -92,6 +248,49 @@ const main = async (): Promise<void> => {
         }
         createdAgents = 1;
       }
+      const adjudicatorRole = rolesByName.get(ADJUDICATOR_AGENT_NAME);
+      if (!adjudicatorRole) throw new Error(`Canonical role ${ADJUDICATOR_AGENT_NAME} was not found`);
+      const existingAdjudicatorAgent = await tx.agent.findUnique({
+        where: { projectId_name: { projectId: canonicalProject.id, name: ADJUDICATOR_AGENT_NAME } },
+        select: { id: true, archivedAt: true },
+      });
+      if (existingAdjudicatorAgent?.archivedAt) {
+        throw new Error(`Canonical Agent ${ADJUDICATOR_AGENT_NAME} is archived; sync will not resurrect it`);
+      }
+      if (!existingAdjudicatorAgent) {
+        const source = await tx.agent.findUnique({
+          where: { projectId_name: { projectId: canonicalProject.id, name: ADJUDICATOR_AGENT_SOURCE } },
+          select: {
+            environmentId: true,
+            disabledTools: true,
+            archivedAt: true,
+            repoAccess: { select: { projectId: true, repoId: true, mountPath: true, permissions: true } },
+          },
+        });
+        if (!source || source.archivedAt) {
+          throw new Error(`Cannot create ${ADJUDICATOR_AGENT_NAME}: active source Agent ${ADJUDICATOR_AGENT_SOURCE} was not found`);
+        }
+        const created = await tx.agent.create({ data: {
+          projectId: canonicalProject.id,
+          environmentId: source.environmentId,
+          name: adjudicatorRole.name,
+          title: adjudicatorRole.title,
+          model: adjudicatorRole.model,
+          runnerPreference: adjudicatorRole.runnerPreference,
+          inboxAccess: adjudicatorRole.inboxAccess,
+          disabledTools: source.disabledTools,
+          foundationalPrompt: sources.foundationalPrompt,
+          rolePrompt: adjudicatorRole.rolePrompt,
+        } });
+        if (source.repoAccess.length > 0) {
+          createdAgentRepoGrants += (await tx.agentRepoAccess.createMany({ data: source.repoAccess.map((grant) => ({
+            ...grant,
+            agentId: created.id,
+          })) })).count;
+        }
+        createdAgents += 1;
+      }
+      const createdCanonicalTemplates = await transitionCanonicalTemplateRows(tx, templateSources);
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;
@@ -121,6 +320,8 @@ const main = async (): Promise<void> => {
               id: true,
               name: true,
               taskTemplateId: true,
+              prompt: true,
+              layer: true,
               assigneeAgent: { select: { name: true } },
               assigneeType: true,
               approvalGate: true,
@@ -129,6 +330,7 @@ const main = async (): Promise<void> => {
               opensPullRequest: true,
               baseFromStepIndex: true,
               spawnPolicy: true,
+              _count: { select: { tasks: true } },
             },
           });
           if (persistedSteps.length !== templates.length) {
@@ -152,6 +354,9 @@ const main = async (): Promise<void> => {
               throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
             }
             if (adoptsCanonicalAssignee) {
+              if (persisted._count.tasks > 0) {
+                throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} is referenced by instantiated tasks; canonical sync will not mutate it`);
+              }
               const projectId = templates.find(({ id }) => id === persisted.taskTemplateId)?.projectId;
               const assignee = projectId
                 ? await tx.agent.findFirst({
@@ -169,6 +374,9 @@ const main = async (): Promise<void> => {
               adoptedAssignees += 1;
             }
             if (adoptsCanonicalBase) {
+              if (persisted._count.tasks > 0) {
+                throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} is referenced by instantiated tasks; canonical sync will not mutate it`);
+              }
               await tx.taskTemplateStep.update({
                 where: { id: persisted.id },
                 data: { baseFromStepIndex: baseTransition.to },
@@ -177,6 +385,9 @@ const main = async (): Promise<void> => {
             }
             const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             if (nameTransition?.from === persisted.name) {
+              if (persisted._count.tasks > 0) {
+                throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} is referenced by instantiated tasks; canonical sync will not mutate it`);
+              }
               await tx.taskTemplateStep.update({
                 where: { id: persisted.id },
                 data: { name: nameTransition.to },
@@ -191,6 +402,9 @@ const main = async (): Promise<void> => {
             if (step.outputKind === "must-fix") {
               blindReviewSteps.push({ id: persisted.id, prompt: step.prompt });
             }
+          }
+          if (persistedSteps.some((persisted) => persisted._count.tasks > 0 && persisted.prompt !== step.prompt)) {
+            throw new Error(`${templateName} step ${step.stepIndex} on template ${templateName} is referenced by instantiated tasks; canonical sync will not mutate its prompt`);
           }
           updated[step.stepIndex] = (await tx.taskTemplateStep.updateMany({
             where: { taskTemplateId: { in: templateIds }, stepIndex: step.stepIndex, prompt: { not: step.prompt } },
@@ -404,6 +618,7 @@ const main = async (): Promise<void> => {
       }
       return {
         templates: templateCount,
+        createdCanonicalTemplates,
         createdAgents,
         createdAgentRepoGrants,
         adoptedAssignees,
@@ -419,7 +634,7 @@ const main = async (): Promise<void> => {
         updatedRoles,
       };
     }, { timeout: 30_000 });
-    const updated = result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
+    const updated = result.createdCanonicalTemplates + result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
       + result.renamedSteps + result.migratedTasks + result.migratedTaskPrompts + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)

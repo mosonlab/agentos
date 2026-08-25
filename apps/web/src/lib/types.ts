@@ -283,7 +283,6 @@ export type Task = {
   repoId: string | null;
   templateId: string | null;
   templateStepId: string | null;
-  followUpTaskId: string | null;
   name: string;
   description: string;
   workingDirectory: string | null;
@@ -411,6 +410,10 @@ export type ChainProgress = {
   total: number;
   activeStepName: string;
   activeStatus: string;
+  /** Dense one-based ordinal of the active stored execution layer. */
+  currentLayer: number;
+  /** Number of distinct execution layers in the chain. */
+  layerCount: number;
   /** This task's 1-based ordinal within its chain. */
   position: number | null;
 };
@@ -421,6 +424,8 @@ export type ChainStep = {
   taskId: string;
   position: number;
   chainIndex: number | null;
+  /** Stored execution layer; null is tolerated while an older control plane is migrating. */
+  layer: number | null;
   name: string;
   stepName: string;
   status: TaskStatus;

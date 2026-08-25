@@ -15,6 +15,9 @@ export type ChainRow = {
   projectId: string;
   chainId: string | null;
   chainIndex: number | null;
+  /** Stored execution layer. During the expand phase this may still be null
+   *  on legacy fixtures; progress falls back to chainIndex for those rows. */
+  chainLayer: number | null;
   name: string;
   status: TaskStatus;
   archivedAt: Date | null;
@@ -27,14 +30,31 @@ export type ChainProgress = {
   total: number;
   activeStepName: string;
   activeStatus: string;
+  /** Dense one-based ordinal of the active stored layer. */
+  currentLayer: number;
+  /** Number of distinct execution layers in the chain. */
+  layerCount: number;
 };
 
 /** The step's own name when it came from a template, else the task's. */
 export const stepName = (row: Pick<ChainRow, "name" | "templateStep">): string => row.templateStep?.name ?? row.name;
 
 const byChainIndex = (left: ChainRow, right: ChainRow): number => (left.chainIndex ?? 0) - (right.chainIndex ?? 0);
-const byChainPosition = <T extends { chainIndex: number | null; id: string }>(left: T, right: T): number => (
-  (left.chainIndex ?? 0) - (right.chainIndex ?? 0) || left.id.localeCompare(right.id)
+
+/** A missing layer can only occur during the nullable expand migration (or in
+ * old API fixtures). Treating the node ordinal as its layer preserves the
+ * legacy linear contract without reintroducing a linked-list successor. */
+const executionLayer = (row: { chainLayer?: number | null; chainIndex: number | null }): number | null => (
+  row.chainLayer ?? row.chainIndex
+);
+
+const byExecutionPosition = <T extends { chainLayer?: number | null; chainIndex: number | null; id: string }>(
+  left: T,
+  right: T,
+): number => (
+  (executionLayer(left) ?? 0) - (executionLayer(right) ?? 0)
+    || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
+    || left.id.localeCompare(right.id)
 );
 
 /**
@@ -49,11 +69,21 @@ export const chainProgress = (rows: ChainRow[]): Omit<ChainProgress, "chainId"> 
   const ordered = [...rows].sort(byChainIndex);
   const done = ordered.filter((row) => row.status === TaskStatus.DONE).length;
   const active = ordered.find((row) => row.status !== TaskStatus.DONE) ?? ordered[ordered.length - 1]!;
+  // The expand migration backfills every legacy row, but keeping the
+  // chainIndex fallback makes progress safe for rows read while that migration
+  // is staged and for malformed one-row fixtures. Stored layers may be sparse,
+  // zero-based, or one-based; the board presents their dense rank instead.
+  const effectiveLayer = (row: ChainRow, index: number): number => row.chainLayer ?? row.chainIndex ?? index;
+  const layerValues = ordered.map(effectiveLayer);
+  const distinctLayers = [...new Set(layerValues)].sort((left, right) => left - right);
+  const denseLayer = new Map(distinctLayers.map((layer, index) => [layer, index + 1]));
   return {
     done,
     total: ordered.length,
     activeStepName: stepName(active),
     activeStatus: active.status.toLowerCase(),
+    currentLayer: denseLayer.get(effectiveLayer(active, ordered.indexOf(active))) ?? 1,
+    layerCount: distinctLayers.length,
   };
 };
 
@@ -179,20 +209,26 @@ export type ChainStartDecision = {
 /** The earliest surviving row that still owns chain progress. Deleted rows are
  * absent; archived rows remain dependencies until they are DONE. */
 export const firstUnfinishedStep = <T extends Pick<ChainRow, "chainIndex" | "id" | "status">>(rows: T[]): T | null => (
-  [...rows].sort(byChainPosition)
+  [...rows].sort(byExecutionPosition)
     .find((item) => item.status !== TaskStatus.DONE) ?? null
 );
 
 /** The first unfinished surviving row before target, or null when the ordered
  * prefix is complete. This is the predecessor named by the 409 response. */
-export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id" | "name" | "status">>(
+export const blockingPredecessor = <T extends Pick<ChainRow, "chainIndex" | "id" | "name" | "status"> & { chainLayer?: number | null }>(
   rows: T[],
   targetId: string,
 ): T | null => {
-  const ordered = [...rows].sort(byChainPosition);
-  const targetIndex = ordered.findIndex((item) => item.id === targetId);
-  if (targetIndex < 0) return null;
-  return ordered.slice(0, targetIndex).find((item) => item.status !== TaskStatus.DONE) ?? null;
+  const ordered = [...rows].sort(byExecutionPosition);
+  const target = ordered.find((item) => item.id === targetId);
+  if (!target) return null;
+  const targetLayer = executionLayer(target);
+  return ordered.find((item) => {
+    const itemLayer = executionLayer(item);
+    return itemLayer !== null && targetLayer !== null
+      ? itemLayer < targetLayer && item.status !== TaskStatus.DONE
+      : item.id !== target.id && item.status !== TaskStatus.DONE;
+  }) ?? null;
 };
 
 /** One dependency decision for the whole chain. Row-local capability remains
@@ -201,11 +237,15 @@ export const chainStartDecisions = (
   rows: ChainDecisionRow[],
   factsByTask: ReadonlyMap<string, RunFacts>,
 ): Map<string, ChainStartDecision> => {
-  const ordered = [...rows].sort((left, right) => byChainIndex(left, right) || left.id.localeCompare(right.id));
+  const ordered = [...rows].sort(byExecutionPosition);
   const first = firstUnfinishedStep(ordered);
+  const firstLayer = first ? executionLayer(first) : null;
   return new Map(ordered.map((row) => {
     const facts = factsByTask.get(row.id) ?? { total: 0, active: false };
-    const isCandidate = first?.id === row.id;
+    // Siblings in one layer are eligible together. A completed sibling remains
+    // historical, while every unfinished sibling in the frontier is a start
+    // candidate; a same-layer sibling is never reported as a predecessor.
+    const isCandidate = firstLayer !== null && executionLayer(row) === firstLayer;
     const allowed = taskStartability(row, facts, row.maxSessionsPerTask, isCandidate).startable;
     const predecessor = blockingPredecessor(ordered, row.id);
     return [row.id, {

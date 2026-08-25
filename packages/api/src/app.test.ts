@@ -262,6 +262,73 @@ test("task create requires chainId and chainIndex together", async () => {
   });
 });
 
+test("public task creation assigns a linear layer and rejects layer/dependency inputs", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, unknown> | undefined;
+    const database = {
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        task: {
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            stored = data;
+            return { id: "task-1", ...data };
+          },
+        },
+        taskActivity: { create: async () => ({}) },
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/projects/project-1/tasks", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Layered API task", assigneeType: "HUMAN", chainId: "chain-1", chainIndex: 4,
+      }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal(stored?.chainLayer, 4);
+
+    for (const field of ["layer", "chainLayer", "dependencies", "blockedBy"]) {
+      const response = await createApp({} as PrismaClient).request("/projects/project-1/tasks", {
+        method: "POST",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Rejected", assigneeType: "HUMAN", [field]: field === "layer" ? 2 : [] }),
+      });
+      assert.equal(response.status, 400, field);
+    }
+  });
+});
+
+test("public template-step creation assigns its step layer and rejects dependency input", async () => {
+  await withTokens(async () => {
+    let stored: Record<string, unknown> | undefined;
+    const database = {
+      taskTemplate: { findUnique: async () => ({ id: "template-1", projectId: "project-1", webhookRepoId: null }) },
+      $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+        taskTemplateStep: {
+          findFirst: async () => null,
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            stored = data;
+            return { id: "step-1", ...data };
+          },
+        },
+      }),
+    } as unknown as PrismaClient;
+    const created = await createApp(database).request("/task-templates/template-1/steps", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ stepIndex: 3, name: "Human gate", assigneeType: "HUMAN", prompt: "wait", dependencies: [] }),
+    });
+    assert.equal(created.status, 400);
+
+    const accepted = await createApp(database).request("/task-templates/template-1/steps", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ stepIndex: 3, name: "Human gate", assigneeType: "HUMAN", prompt: "wait" }),
+    });
+    assert.equal(accepted.status, 201);
+    assert.equal(stored?.layer, 3);
+  });
+});
+
 test("operator DONE on a chain task closes its open gate and queues the CAS-claimed successor", async () => {
   await withTokens(async () => {
     let closed = false;
@@ -272,7 +339,7 @@ test("operator DONE on a chain task closes its open gate and queues the CAS-clai
       assigneeAgent: { id: "agent-1", model: "claude", runnerPreference: "CLAUDE", foundationalPrompt: "f", rolePrompt: "r" },
       repo: { id: "repo-1", defaultBranch: "main" }, templateStep: null, archivedAt: null,
     };
-    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, followUpTaskId: null, assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
+    const before = { id: "task-1", projectId: "project-1", name: "Gate", status: "REVIEW", templateId: null, approvalGate: true, chainId: "chain-1", chainIndex: 0, assigneeAgentId: "agent-1", repoId: "repo-1", archivedAt: null };
     const tx = {
       // The status write takes the Task-row mutex before advancing the chain.
       $queryRaw: async (_strings: unknown, taskId: string) => [{ id: taskId }],
@@ -318,7 +385,7 @@ test("a template HUMAN final step closes its exact OPEN gate even when approvalG
     let closedWhere: unknown;
     const before = {
       id: "task-1", projectId: "project-1", name: "Human final", status: "REVIEW", templateId: "template-1",
-      approvalGate: false, chainId: "chain-1", chainIndex: 2, followUpTaskId: null,
+      approvalGate: false, chainId: "chain-1", chainIndex: 2,
       assigneeType: "HUMAN", assigneeAgentId: null, repoId: null, archivedAt: null,
     };
     const tx = {
@@ -413,7 +480,7 @@ test("AT create waits for the scheduler and merged-view patch cannot remove its 
   await withTokens(async () => {
     let runs = 0;
     const runAt = new Date(Date.now() - 60_000);
-    const before = { id: "task-1", projectId: "project-1", status: "TODO", templateId: null, approvalGate: false, chainId: null, followUpTaskId: null, scheduleKind: "AT", runAt, cron: null, timezone: null, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1" };
+    const before = { id: "task-1", projectId: "project-1", status: "TODO", templateId: null, approvalGate: false, chainId: null, scheduleKind: "AT", runAt, cron: null, timezone: null, assigneeType: "AGENT", assigneeAgentId: "agent-1", repoId: "repo-1" };
     const database = {
       agent: { findFirst: async () => ({ id: "agent-1", runnerPreference: "CLAUDE", model: "claude", foundationalPrompt: "f", rolePrompt: "r" }) },
       repo: { findFirst: async () => ({ id: "repo-1", defaultBranch: "main" }) },
@@ -509,7 +576,11 @@ test("an archived assignee's automatic retry is queued, audited, and does not sp
         create: async ({ data }: { data: Record<string, unknown> }) => { retry = data; return { id: "run-4", ...data }; },
       },
       session: { update: async () => ({}) },
-      task: { updateMany: async () => ({ count: 1 }), findUniqueOrThrow: async () => run.task },
+      task: {
+        updateMany: async () => ({ count: 1 }),
+        findUnique: async () => run.task,
+        findUniqueOrThrow: async () => run.task,
+      },
       taskActivity: { create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
       inboxMessage: { create: async () => ({}) },
@@ -1261,7 +1332,13 @@ test("claim query filters archived agents before take so active work cannot star
       runnerBackendState: { findUnique: async () => null },
       session: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "session-1", ...data }) },
       sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
-      task: { update: async () => ({}) },
+      task: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          const found = seeded.find((entry) => entry.task.id === where.id)?.task;
+          return found ? { ...found, projectId: "project-1", archivedAt: null, assigneeAgentId: null } : null;
+        },
+        update: async () => ({}),
+      },
       taskActivity: { create: async () => ({}) },
       taskStepOutput: { findMany: async () => [{
         kind: "spec", body: completePriorOutput,
@@ -1326,20 +1403,51 @@ test("successful completion commits output and parks an archived chain successor
       let runCreates = 0;
       const successor = {
         id: "task-2",
+        projectId: "project-1",
+        name: "Archived Successor",
+        chainId: "chain-1",
+        chainIndex: 2,
+        chainLayer: 2,
+        status: "TODO",
         assigneeType: "AGENT",
         assigneeAgentId: "agent-2",
         repoId: "repo-1",
+        templateId: "template-1",
+        templateStepId: null,
         approvalGate: false,
+        archivedAt: null,
+        failureReason: null,
         updatedAt: new Date(),
         runs: [],
         assigneeAgent: { id: "agent-2", name: "Archived Successor", archivedAt: new Date() },
+      };
+      const predecessor = {
+        id: "task-1",
+        projectId: "project-1",
+        name: "Predecessor",
+        templateId: "template-1",
+        chainId: "chain-1",
+        chainIndex: 1,
+        chainLayer: 1,
+        status: "DOING",
+        approvalGate: false,
+        archivedAt: null,
+        assigneeType: "AGENT",
+        assigneeAgentId: "agent-1",
+        repoId: "repo-1",
+        templateStepId: null,
+        failureReason: null,
       };
       const run = {
         id: "run-1", projectId: "project-1", taskId: "task-1", goalId: null, agentId: "agent-1",
         repoId: "repo-1", runNumber: 1, maxRunsPerTask: 3, runner: RunnerKind.CLAUDE,
         model: "model", targetBranch: "main", branch: "feature/chain", baseSha: "base",
         promptHash: "hash", maxDurationMin: 120, stallTimeoutMin: 10,
-        task: { id: "task-1", templateId: "template-1", templateStep: { outputKind: "result" } },
+        task: {
+          ...predecessor,
+          templateStep: { outputKind: "result" },
+          repo: { defaultBranch: "main" },
+        },
         session: { id: "session-1" },
       };
       const tx = {
@@ -1355,12 +1463,13 @@ test("successful completion commits output and parks an archived chain successor
           create: async () => { outputCreated = true; return {}; },
         },
         task: {
-          findUniqueOrThrow: async () => ({
-            id: "task-1", name: "Predecessor", templateId: "template-1", approvalGate: false,
-            followUpTaskId: successor.id, followUpTask: successor,
-          }),
+          findUniqueOrThrow: async () => predecessor,
           findUnique: async () => successor,
-          updateMany: async () => ({ count: 1 }),
+          findMany: async () => [predecessor, successor],
+          updateMany: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+            if (where.id === predecessor.id && typeof data.status === "string") predecessor.status = data.status;
+            return { count: 1 };
+          },
           update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
             if (where.id === successor.id) successorUpdate = data;
             return {};
@@ -1416,15 +1525,23 @@ test("archived successor errors from gate approve and reject map to named 409 re
         projectId: "project-1",
         name: decision === "approve" ? "Successor step" : "Redo step",
         description: "work",
+        chainId: "chain-1",
+        chainIndex: decision === "approve" ? 2 : 1,
+        chainLayer: decision === "approve" ? 2 : 1,
+        status: "TODO",
         assigneeType: "AGENT",
         assigneeAgentId: "agent-archived",
         repoId: "repo-1",
         templateId: "template-1",
+        templateStepId: null,
         targetBranch: "main",
         updatedAt: new Date(),
         maxDurationMin: 120,
         stallTimeoutMin: 10,
         maxSessionsPerTask: 3,
+        approvalGate: false,
+        archivedAt: null,
+        failureReason: null,
         runs: [],
         assigneeAgent: {
           id: "agent-archived",
@@ -1440,9 +1557,22 @@ test("archived successor errors from gate approve and reject map to named 409 re
       };
       const gateTask = {
         id: "gate-1",
+        projectId: "project-1",
+        name: "Gate",
+        chainId: "chain-1",
+        chainIndex: 1,
+        chainLayer: 1,
+        status: "REVIEW",
+        archivedAt: null,
+        approvalGate: true,
         assigneeType: "AGENT",
-        followUpTaskId: "successor-1",
-        previousTask: null,
+        assigneeAgentId: "agent-archived",
+        repoId: "repo-1",
+        templateId: "template-1",
+        templateStepId: null,
+        templateStep: null,
+        runs: [],
+        assigneeAgent: executable.assigneeAgent,
       };
       const tx = {
         // The reject path locks the redo row before queueing it. This task is
@@ -1461,11 +1591,16 @@ test("archived successor errors from gate approve and reject map to named 409 re
         },
         inboxDecision: { create: async () => ({}) },
         task: {
-          update: async () => ({}),
+          update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+            if (where.id === gateTask.id && typeof data.status === "string") gateTask.status = data.status;
+            return {};
+          },
           findUniqueOrThrow: async () => executable,
-          // approve now routes through activateChainSuccessor, which reads the
-          // successor itself and CAS-claims it before the archived check
+          // Both approval and rejection resolve the target through the real
+          // layered chain rows; no linked-list relation is available.
           findUnique: async () => executable,
+          findFirst: async () => null,
+          findMany: async () => decision === "approve" ? [gateTask, executable] : [],
           updateMany: async () => ({ count: 1 }),
         },
         taskActivity: { create: async () => ({}) },

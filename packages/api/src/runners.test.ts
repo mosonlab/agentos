@@ -75,7 +75,32 @@ const makeDatabase = (
     runnerBackendState: { findUnique: async () => null },
     session: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "session-1", ...data }) },
     sessionEvent: { aggregate: async () => ({ _max: { seq: null } }) },
-    task: { update: async () => ({}) },
+    task: {
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        const found = candidates.find((candidate) => (candidate.task as { id?: string } | undefined)?.id === where.id);
+        const task = found?.task as { id: string; chainId: string | null; status?: string } | undefined;
+        return task ? {
+          ...task,
+          projectId: "project-1",
+          archivedAt: null,
+          assigneeAgentId: null,
+          status: task.status ?? "TODO",
+        } : null;
+      },
+      findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
+        const found = candidates.find((candidate) => (candidate.task as { id?: string } | undefined)?.id === where.id);
+        const task = found?.task as { id: string; chainId: string | null; status?: string } | undefined;
+        if (!task) throw new Error(`Task ${where.id} not found`);
+        return {
+          ...task,
+          projectId: "project-1",
+          archivedAt: null,
+          assigneeAgentId: null,
+          status: task.status ?? "TODO",
+        };
+      },
+      update: async () => ({}),
+    },
     taskActivity: { create: async () => ({}) },
     taskStepOutput: { findMany: async () => [] },
   };

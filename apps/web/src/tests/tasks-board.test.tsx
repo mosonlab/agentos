@@ -64,7 +64,7 @@ test("token fallback uses a bounded wrapping row at both desktop card widths", (
 
 const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
   chainId: "c1", done: 3, total: 9, activeStepName: "Implementation", activeStatus: "doing",
-  position: 4, ...overrides,
+  currentLayer: 2, layerCount: 7, position: 4, ...overrides,
 });
 
 /** Renders one real column. Everything the board decides per column — the head,
@@ -234,6 +234,7 @@ test("cards in one chain render their own positions and never the active-step na
   const fourth = card({ chainProgress: progress({ position: 4 }), chainId: "c1", chainIndex: 4, chainName: "Release" });
   assert.match(first, /step 1\/9/);
   assert.match(fourth, /step 4\/9/);
+  assert.match(fourth, /layer 2\/7/);
   assert.doesNotMatch(first + fourth, /Implementation · doing/);
   assert.doesNotMatch(card(), /·/);
 });

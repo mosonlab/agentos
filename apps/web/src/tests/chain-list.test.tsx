@@ -15,7 +15,7 @@ const en = (key: string, vars?: Record<string, string | number>): string => tran
 const detailSource = readFileSync(fileURLToPath(new URL("../pages/TaskDetail.tsx", import.meta.url)), "utf8");
 
 const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep => ({
-  taskId: `t${position}`, position, chainIndex: position - 1, name: `Task ${position}`,
+  taskId: `t${position}`, position, chainIndex: position - 1, layer: null, name: `Task ${position}`,
   stepName: `Step ${position}`, status: "TODO", approvalGate: false, assigneeType: "AGENT",
   executionOwner: "agent",
   agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
@@ -84,6 +84,39 @@ test("sparse template indices renumber to 1 2 3 and the header still reads n/m",
   const positions = [...markup.matchAll(/w-\[18px\][^>]*>(\d+)</g)].map((match) => match[1]);
   assert.deepEqual(positions, ["1", "2", "3"]);
   assert.match(markup, new RegExp(en("chain.completed", { done: 1, total: 3 })));
+});
+
+test("parallel nodes share one dense layer group and a blocked join names its outstanding sibling", () => {
+  const steps = [
+    step(1, { layer: 10, status: "DONE", stepName: "Implementation" }),
+    step(2, { layer: 40, status: "DONE", stepName: "Sol review" }),
+    step(3, { layer: 40, status: "TODO", stepName: "Blind review" }),
+    step(4, { layer: 90, status: "TODO", stepName: "Adjudication" }),
+  ];
+  const markup = render(chain(steps), "t4");
+  assert.equal([...markup.matchAll(/data-chain-layer="40"/g)].length, 1);
+  assert.match(markup, /data-chain-layer-ordinal="2"/);
+  assert.match(markup, /Layer 2/);
+  assert.match(markup, /Parallel · 2 tasks/);
+  assert.match(markup, /Blocked by: Blind review/);
+  assert.doesNotMatch(markup, /Blocked by: Sol review/);
+  assert.match(markup, /Sol review[\s\S]*Blind review/);
+});
+
+test("sparse stored layers use dense one-based layer ordinals", () => {
+  const markup = render(chain([
+    step(1, { layer: 0 }),
+    step(2, { layer: 40 }),
+    step(3, { layer: 90 }),
+  ]), "t1");
+  assert.deepEqual(
+    [...markup.matchAll(/data-chain-layer-ordinal="(\d+)"/g)].map((match) => match[1]),
+    ["1", "2", "3"],
+  );
+  assert.deepEqual(
+    [...markup.matchAll(/>Layer (\d+)</g)].map((match) => match[1]),
+    ["1", "2", "3"],
+  );
 });
 
 test("a long chain shows the first fifty rows behind a Show all press", () => {

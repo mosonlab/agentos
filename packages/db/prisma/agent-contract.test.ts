@@ -98,6 +98,11 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
       runner: RunnerPreference.CLAUDE,
     });
   }
+  assert.deepEqual(canonical.get("review-adjudicator-opus"), {
+    name: "review-adjudicator-opus",
+    model: "claude-opus-5:medium",
+    runner: RunnerPreference.CLAUDE,
+  });
   for (const name of ["review-coordinator", "review-coordinator-sol"] as const) {
     assert.deepEqual(canonical.get(name), {
       name,
@@ -122,11 +127,12 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
 });
 
-test("the split review prompts enforce persisted-range, blind-order, adjudication, and regression contracts", async () => {
-  const [planReview, firstReview, finalReview, regressionVerification] = await Promise.all([
+test("the split review prompts enforce persisted-range, blindness, adjudication, and regression contracts", async () => {
+  const [planReview, firstReview, blindReview, adjudicatorReview, regressionVerification] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
     roleSource("review-coordinator-opus"),
+    roleSource("review-adjudicator-opus"),
     roleSource("regression-verifier"),
   ]);
 
@@ -144,22 +150,33 @@ test("the split review prompts enforce persisted-range, blind-order, adjudicatio
   assert.match(firstReview, /only then start a separate Spec pass/u);
   assert.match(firstReview, /merge both passes into one persisted report/u);
   assert.doesNotMatch(firstReview, /codex exec review/u);
+  assert.doesNotMatch(firstReview, /service[-_ ]tier/iu);
   assert.match(firstReview, /post-fix regression verification/u);
   assert.match(firstReview, /entire fix diff as one unit/u);
   assert.match(firstReview, /exact fixed head/u);
 
-  const blindWrite = finalReview.indexOf("intermediate AgentOS task output");
-  const firstReportRead = finalReview.indexOf("predecessor step outputs", blindWrite);
-  assert.ok(blindWrite >= 0 && firstReportRead > blindWrite, "blind findings must be persisted before the first report is read");
-  assert.match(finalReview, /revised slice set from `.chain\/<chain branch>\/slices\/` where the chain carries one/u);
-  assert.match(finalReview, /reachable in the tree at `head`/u);
-  assert.match(finalReview, /same defect reported by both is adopted at the higher severity/u);
-  assert.equal(frontmatterValue(finalReview, "inboxAccess"), "true");
-  assert.match(finalReview, /Use Inbox only when the contradiction can change\s+a P0\/P1 must-fix decision/u);
-  assert.match(finalReview, /P2-only contradiction[\s\S]*continue without interrupting the human/u);
-  assert.match(finalReview, /entire fix diff as one\s+unit/u);
-  assert.match(finalReview, /exact fixed head/u);
-  assert.match(finalReview, /provider id in the platform output/u);
+  assert.match(blindReview, /independent blind Opus review coordinator/u);
+  assert.match(blindReview, /immutable `blind-findings` task output/u);
+  assert.match(blindReview, /Do not read predecessor task outputs, sibling\s+task outputs/u);
+  assert.match(blindReview, /entire task and provider\s+session, both before and after/u);
+  assert.match(blindReview, /implementationBaseSha|implementation base and head/u);
+  assert.doesNotMatch(blindReview, /adjudicat/u);
+  assert.doesNotMatch(blindReview, /merge matrix/u);
+  assert.doesNotMatch(blindReview, /service[-_ ]tier/iu);
+  assert.doesNotMatch(blindReview, /codex exec review/u);
+
+  assert.match(adjudicatorReview, /fresh provider Session/u);
+  assert.match(adjudicatorReview, /Never resume or\s+continue the blind review conversation/u);
+  assert.match(adjudicatorReview, /provider conversation id\s+or continuation proof/u);
+  assert.match(adjudicatorReview, /immutable `implementationBaseSha` and `implementationHeadSha`\s+values/u);
+  assert.match(adjudicatorReview, /one `sol-findings` report and one `blind-findings`/u);
+  assert.match(adjudicatorReview, /canonical merge matrix/u);
+  assert.match(adjudicatorReview, /every finding id from either report/u);
+  assert.match(adjudicatorReview, /ADOPTED.*REJECTED.*MERGED/u);
+  assert.match(adjudicatorReview, /one final immutable `must-fix` task output/u);
+  assert.doesNotMatch(adjudicatorReview, /codex exec review/u);
+  assert.equal(frontmatterValue(adjudicatorReview, "model"), "claude-opus-5:medium");
+  assert.equal(frontmatterValue(adjudicatorReview, "runner"), "claude");
 
   assert.equal(frontmatterValue(regressionVerification, "model"), "openai-codex/gpt-5.6-sol:medium");
   assert.equal(frontmatterValue(regressionVerification, "runner"), "pi");
@@ -182,31 +199,33 @@ test("the executioner delegates only through platform-pinned native Luna childre
   assert.doesNotMatch(executioner, /codex exec/u);
 });
 
-test("the canonical twelve-step template sources split code review and preserve mechanical merge", async () => {
+test("the canonical thirteen-step layered template sources split review and preserve mechanical merge", async () => {
   const templateSteps = await loadTemplateStepSources();
-  assert.equal(templateSteps.length, 12);
+  assert.equal(templateSteps.length, 13);
   assert.deepEqual(
-    templateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    templateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, agentName: "spec", outputKind: "spec" },
-      { stepIndex: 2, agentName: "plan", outputKind: "plan" },
-      { stepIndex: 3, agentName: "review-coordinator", outputKind: "plan-review" },
-      { stepIndex: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
-      { stepIndex: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
-      { stepIndex: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
-      { stepIndex: 7, agentName: "review-coordinator-opus", outputKind: "must-fix" },
-      { stepIndex: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
-      { stepIndex: 10, agentName: "librarian", outputKind: "documentation" },
-      { stepIndex: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
-      { stepIndex: 12, agentName: "merge-integrator", outputKind: "merge-result" },
+      { stepIndex: 1, layer: 1, agentName: "spec", outputKind: "spec" },
+      { stepIndex: 2, layer: 2, agentName: "plan", outputKind: "plan" },
+      { stepIndex: 3, layer: 3, agentName: "review-coordinator", outputKind: "plan-review" },
+      { stepIndex: 4, layer: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
+      { stepIndex: 5, layer: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
+      { stepIndex: 6, layer: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
+      { stepIndex: 7, layer: 6, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
+      { stepIndex: 8, layer: 7, agentName: "review-adjudicator-opus", outputKind: "must-fix" },
+      { stepIndex: 9, layer: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
+      { stepIndex: 11, layer: 10, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 12, layer: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 13, layer: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 6)?.baseFromStepIndex, 5);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
-  assert.equal(templateSteps.find((step) => step.stepIndex === 9)?.attachmentsFromPrevious, true);
-  const compoundRegression = templateSteps.find((step) => step.stepIndex === 9)!.prompt;
+  assert.equal(templateSteps.find((step) => step.stepIndex === 8)?.attachmentsFromPrevious, true);
+  assert.equal(templateSteps.find((step) => step.stepIndex === 10)?.attachmentsFromPrevious, true);
+  const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
   assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
@@ -236,18 +255,19 @@ test("only implementation opens a pull request, and the integrator is not a mode
   assert.equal(catalogRunnerForModel(sentinel.model), null);
 });
 
-test("the direct template sources keep the review spine, drop planning, and end in mechanical readiness and merge", async () => {
+test("the direct template sources expose the layered review spine and mechanical tail", async () => {
   const directTemplateSteps = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   assert.deepEqual(
-    directTemplateSteps.map(({ stepIndex, agentName, outputKind }) => ({ stepIndex, agentName, outputKind })),
+    directTemplateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, agentName: "senior-dev-luna", outputKind: "implementation" },
-      { stepIndex: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
-      { stepIndex: 3, agentName: "review-coordinator-opus", outputKind: "must-fix" },
-      { stepIndex: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 5, agentName: "regression-verifier", outputKind: "regression-verification" },
-      { stepIndex: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
-      { stepIndex: 7, agentName: "merge-integrator", outputKind: "merge-result" },
+      { stepIndex: 1, layer: 1, agentName: "senior-dev-luna", outputKind: "implementation" },
+      { stepIndex: 2, layer: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
+      { stepIndex: 3, layer: 2, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
+      { stepIndex: 4, layer: 3, agentName: "review-adjudicator-opus", outputKind: "must-fix" },
+      { stepIndex: 5, layer: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 6, layer: 5, agentName: "regression-verifier", outputKind: "regression-verification" },
+      { stepIndex: 7, layer: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   // Only implementation opens the chain's pull request; the blind review
@@ -255,8 +275,9 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.deepEqual(directTemplateSteps.filter((step) => step.opensPullRequest).map((step) => step.stepIndex), [1]);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 2)?.baseFromStepIndex, 1);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
-  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
-  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 4)?.attachmentsFromPrevious, true);
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 6)?.attachmentsFromPrevious, true);
+  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;
   assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
@@ -266,7 +287,7 @@ test("the direct template sources keep the review spine, drop planning, and end 
   assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
   assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
   assert.match(directImplementation, /platform-pinned Implementation proof boundary/u);
-  assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
+  assert.match(directTemplateSteps[6]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
   // mechanical executor, with no human approval gate on either.
   const last = directTemplateSteps.at(-1)!;
@@ -280,11 +301,11 @@ test("the direct template sources keep the review spine, drop planning, and end 
   }
 });
 
-test("the complete template source inventory contains only the twelve-step and direct workflows", async () => {
+test("the complete template source inventory contains only the thirteen-step and direct workflows", async () => {
   const templates = await loadAllTemplateStepSources();
   assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
-  assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
-  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 7);
+  assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 13);
+  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 8);
 });
 
 test("the complete template source inventory rejects an unregistered workflow directory", async () => {
@@ -324,6 +345,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
   const persisted: PersistedTemplateStepStructure = {
     assigneeAgent: { name: expected.agentName! },
     assigneeType: "AGENT",
+    layer: expected.layer,
     approvalGate: expected.approvalGate,
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
@@ -335,6 +357,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
   const mutations: Array<[string, PersistedTemplateStepStructure]> = [
     ["agent", { ...persisted, assigneeAgent: { name: "different-agent" } }],
     ["assigneeType", { ...persisted, assigneeType: "HUMAN" }],
+    ["layer", { ...persisted, layer: expected.layer + 1 }],
     ["approvalGate", { ...persisted, approvalGate: !persisted.approvalGate }],
     ["outputKind", { ...persisted, outputKind: "different-output" }],
     ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],

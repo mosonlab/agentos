@@ -216,6 +216,8 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
               {chainName}
             </button>
           )}
+          {/* The marker keeps the card's node ordinal and the API-derived dense
+              execution-layer progress together, without recomputing either. */}
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </div>
       ) : null}

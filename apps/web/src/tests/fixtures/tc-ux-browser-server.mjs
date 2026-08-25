@@ -9,7 +9,7 @@ const prompts = JSON.parse(await readFile(new URL("./tc-ux-v1-prompts.json", imp
 
 const task = (id, name, status = "TODO") => ({
   id, projectId: "fixture-project", assigneeAgentId: "agent-1", repoId: "repo-1",
-  templateId: null, templateStepId: null, followUpTaskId: null, name,
+  templateId: null, templateStepId: null, name,
   description: prompts[Number(id.replace(/\D/g, "")) - 1].prompt, workingDirectory: null, targetBranch: "main",
   failureReason: null, status, assigneeType: id === "t7" ? "HUMAN" : "AGENT",
   approvalGate: id === "t7", scheduleKind: "NOW", runAt: null, cron: null,

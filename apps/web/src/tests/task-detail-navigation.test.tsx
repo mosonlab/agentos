@@ -11,7 +11,7 @@ import prompts from "./fixtures/tc-ux-v1-prompts.json";
 const now = "2026-08-17T00:00:00.000Z";
 const task = (id: string, name: string, promptIndex: number, chainId: string | null = null): Task => ({
   id, projectId: "project-1", assigneeAgentId: "agent-1", repoId: "repo-1",
-  templateId: null, templateStepId: null, followUpTaskId: null, name,
+  templateId: null, templateStepId: null, name,
   description: prompts[promptIndex]!.prompt,
   workingDirectory: null, targetBranch: "main", failureReason: null, status: "TODO",
   assigneeType: "AGENT", executionOwner: "agent", approvalGate: false, scheduleKind: "NOW", runAt: null,
@@ -42,7 +42,7 @@ const sourceRun = (taskId: string): Run => ({
 const emptyChain = (): Chain => ({ chainId: null, total: 0, done: 0, steps: [] });
 const chainFor = (taskId: string): Chain => ({
   chainId: "chain-c", total: 1, done: 0, steps: [{
-    taskId, position: 1, chainIndex: 0, name: "Chain C", stepName: "Chain C",
+    taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
     status: "TODO", approvalGate: false, assigneeType: "AGENT", executionOwner: "agent",
     agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
     failureReason: null, latestRun: null, startable: true, startAction: "start",

@@ -164,7 +164,7 @@ const seedChainStep = async (
   data: Record<string, unknown> = {},
 ) => db.task.create({ data: {
   projectId: seed.project.id, assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
-  name: `Step ${chainIndex}`, description: `step ${chainIndex}`, chainId, chainIndex, ...data,
+  name: `Step ${chainIndex}`, description: `step ${chainIndex}`, chainId, chainIndex, chainLayer: chainIndex, ...data,
 } });
 
 /** `POST /tasks/:id/start` answers `{ runId, runNumber }`, so the row itself has
@@ -174,12 +174,6 @@ const startStep = async (taskId: string) => {
   const started = await operatorRequest(`/tasks/${taskId}/start`, { method: "POST" });
   assert.equal(started.status, 201, JSON.stringify(started.body));
   return db.run.findUniqueOrThrow({ where: { id: started.body.runId } });
-};
-
-const linkFollowUps = async (taskIds: string[]): Promise<void> => {
-  for (let index = 0; index < taskIds.length - 1; index += 1) {
-    await db.task.update({ where: { id: taskIds[index]! }, data: { followUpTaskId: taskIds[index + 1]! } });
-  }
 };
 
 // --- WI-3: one branch per chain ---------------------------------------------
@@ -209,8 +203,6 @@ test("T1: every run of every step of an API-created chain sits on one branch", a
   assert.equal(second.status, 201);
   assert.equal(third.status, 201);
   assert.equal(await db.run.count({ where: { task: { chainId } } }), 1, "only the head step is admitted initially");
-  await linkFollowUps([first.body.id, second.body.id, third.body.id]);
-
   await runStep(first.body.id, { pushedBranch: shared });
   await runStep(second.body.id, { pushedBranch: shared });
   await runStep(third.body.id, { pushedBranch: shared });
@@ -230,8 +222,6 @@ test("T2: the base branch follows the chain, not the task", async () => {
   });
   const second = await seedChainStep(seed, chainId, 1);
   const third = await seedChainStep(seed, chainId, 2);
-  await linkFollowUps([first.body.id, second.id, third.id]);
-
   // Step ① creates the branch, so it must base on something that exists.
   const firstRun = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
   assert.equal(firstRun.targetBranch, seed.repo.defaultBranch);
@@ -261,8 +251,6 @@ test("T3: a failed run's WIP salvage push is the successor's durable clone base"
     name: "Step 0", description: "step 0", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
   });
   const second = await seedChainStep(seed, chainId, 1);
-  await linkFollowUps([first.body.id, second.id]);
-
   const firstRun = await db.run.findFirstOrThrow({ where: { taskId: first.body.id } });
   await runStep(first.body.id, {
     exitCode: 1,
@@ -341,7 +329,7 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
     steps: { create: [0, 1, 2].map((index) => ({
-      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+      stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
   const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
@@ -359,7 +347,7 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
   const overridable = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "tmpl-branch", description: "t", variables: ["branchName"],
     steps: { create: [0, 1].map((index) => ({
-      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+      stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
   const custom = await instantiateTemplate(db, seed.project.id, overridable.id, {
@@ -374,7 +362,7 @@ test("T6b: a deferred template start preserves its custom head and successor bas
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "deferred-template", description: "t", variables: ["branchName"],
     steps: { create: [0, 1].map((index) => ({
-      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
+      stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
       assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
@@ -431,7 +419,6 @@ test("T7b: a later chain claim retains the first run's custom PR base", async ()
     name: "Step 1", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
     chainId, chainIndex: 1,
   });
-  await linkFollowUps([first.body.id, second.body.id]);
   await runStep(first.body.id, { pushedBranch: shared });
   const secondRun = await db.run.findFirstOrThrow({ where: { taskId: second.body.id } });
   const claim = await claimRun(secondRun.id);
@@ -439,7 +426,7 @@ test("T7b: a later chain claim retains the first run's custom PR base", async ()
   assert.equal(claim.run.pullRequestBase, "release/1.x");
 });
 
-test("T8: a null-index row never joins an indexed chain with the same chainId", async () => {
+test("T8: a partial chain identity is rejected before branch resolution", async () => {
   const seed = await seedProject("t8");
   const chainId = `chain-${Date.now()}`;
   const shared = expectedBranch(seed.project.id, chainId);
@@ -448,13 +435,13 @@ test("T8: a null-index row never joins an indexed chain with the same chainId", 
   });
   await runStep(indexed.body.id, { pushedBranch: shared });
 
-  const orphan = await db.task.create({ data: {
-    projectId: seed.project.id, assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
-    name: "No index", description: "d", chainId, chainIndex: null,
-  } });
-  const run = await startStep(orphan.id);
-  assert.equal(run.branch, null, "the malformed 1/1 row keeps its per-run workspace branch");
-  assert.equal(run.targetBranch, seed.repo.defaultBranch, "indexed publication evidence is not consumed");
+  await assert.rejects(
+    () => db.task.create({ data: {
+      projectId: seed.project.id, assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
+      name: "No index", description: "d", chainId, chainIndex: null,
+    } }),
+    /Task_chain_identity_all_or_none_check/u,
+  );
 });
 
 test("T15: two repos in one chain each need their own published branch", async () => {
@@ -554,7 +541,6 @@ test("T10: an operator retry lands on the shared branch", async () => {
     name: "Step 0", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, chainId, chainIndex: 0,
   });
   const second = await seedChainStep(seed, chainId, 1);
-  await linkFollowUps([first.body.id, second.id]);
   await runStep(first.body.id, { pushedBranch: shared });
 
   await runStep(second.id, {
@@ -571,7 +557,7 @@ test("an operator-retried template step publishes its declared head from the lat
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "operator-template", description: "t", variables: [],
     steps: { create: [0, 1].map((stepIndex) => ({
-      stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT" as const,
+      stepIndex, layer: stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT" as const,
       assigneeAgentId: seed.agent.id, prompt: `do ${stepIndex}`,
     })) },
   } });
@@ -599,7 +585,7 @@ test("a successor first run clones the predecessor's salvage publication", async
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "successor-template", description: "t", variables: [],
     steps: { create: [0, 1].map((stepIndex) => ({
-      stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT" as const,
+      stepIndex, layer: stepIndex, name: `Step ${stepIndex}`, assigneeType: "AGENT" as const,
       assigneeAgentId: seed.agent.id, prompt: `do ${stepIndex}`,
     })) },
   } });
@@ -797,7 +783,7 @@ test("T13b: an upgrade-state template retry returns to its chain head", async ()
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "retry-template", description: "t", variables: [],
     steps: { create: [0, 1].map((index) => ({
-      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
+      stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const,
       assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
@@ -938,7 +924,7 @@ test("T18: an instantiated template copies each step's flag onto its task", asyn
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
     steps: { create: [0, 1, 2].map((index) => ({
-      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id,
+      stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id,
       prompt: `do ${index}`, opensPullRequest: index !== 1,
     })) },
   } });
@@ -1060,7 +1046,7 @@ test("T20: a template step's PR flag is settable through the API", async () => {
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
     steps: { create: [0, 1].map((index) => ({
-      stepIndex: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+      stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
   const steps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: template.id }, orderBy: { stepIndex: "asc" } });
@@ -1077,7 +1063,7 @@ test("T20: a template step's PR flag is settable through the API", async () => {
   // A step of another template is not this template's to patch.
   const other = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "other", description: "t", variables: [],
-    steps: { create: [{ stepIndex: 0, name: "Only", assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: "do" }] },
+    steps: { create: [{ stepIndex: 0, layer: 0, name: "Only", assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: "do" }] },
   } });
   const foreign = await db.taskTemplateStep.findFirstOrThrow({ where: { taskTemplateId: other.id } });
   const crossed = await operatorRequest(`/task-templates/${template.id}/steps/${foreign.id}`, {

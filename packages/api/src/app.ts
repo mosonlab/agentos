@@ -31,7 +31,7 @@ import {
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
-  lockChainPrefixRows,
+  lockChainRows,
   nativeImplementationSubagentRunConfig,
   NetworkingMode,
   Prisma,
@@ -107,9 +107,13 @@ import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import {
   canonicalOutputRefusal,
+  isCanonicalAdjudicationStep,
   isCanonicalAgentStep,
+  isCanonicalBlindFindingsStep,
+  isCanonicalSolFindingsStep,
   persistSessionTaskOutput,
   previousRunHandoffForClaim,
+  reviewAdjudicationClaimRefusal,
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import { createRunnerRegistry } from "./runners.js";
@@ -443,7 +447,11 @@ const applyMergeTailOperatorDecision = async (
   if (regression.templateStep?.outputKind !== "regression-verification" || !regression.chainId || !regression.templateId) {
     return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail decision is not bound to a canonical Regression task" };
   }
-  await lockTask(tx, regression.id);
+  if (regression.chainId) {
+    await lockChainRows(tx, { projectId: regression.projectId, chainId: regression.chainId });
+  } else {
+    await lockTask(tx, regression.id);
+  }
   const readiness = await tx.task.findFirst({
     where: {
       projectId: regression.projectId,
@@ -878,7 +886,7 @@ export const taskInput = z.object({
   timezone: taskFields.timezone.default(null),
   chainId: z.string().trim().min(1).max(100).optional(),
   chainIndex: z.number().int().min(0).optional(),
-}).superRefine((value, context) => {
+}).strict().superRefine((value, context) => {
   if ((value.chainId === undefined) !== (value.chainIndex === undefined)) {
     context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
   }
@@ -1152,7 +1160,7 @@ const templateStepInput = z.object({
   outputKind: z.string().trim().min(1).max(80).default("result"),
   opensPullRequest: z.boolean().default(true),
   baseFromStepIndex: z.number().int().min(0).nullable().default(null),
-});
+}).strict();
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -1185,6 +1193,7 @@ type ChainSubject = {
   projectId: string;
   chainId: string | null;
   chainIndex: number | null;
+  chainLayer: number | null;
   status: TaskStatus;
   name: string;
   templateStep: { name: string } | null;
@@ -1350,6 +1359,7 @@ const settleCancellation = async (
     }
     return { runId: run.id, taskId: run.taskId, status: run.status, cancellationState: "acknowledged", requestId: input.requestId };
   }
+  if (run.taskId) await lockTaskMutationRows(tx, run.taskId);
   const settled = await tx.run.updateMany({
     where: {
       id: run.id,
@@ -1414,6 +1424,7 @@ type LockedTask = {
   status: TaskStatus;
   archivedAt: Date | null;
   projectId: string;
+  chainId: string | null;
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   templateStep: {
@@ -1435,6 +1446,7 @@ const lockedTaskSelect = {
   status: true,
   archivedAt: true,
   projectId: true,
+  chainId: true,
   assigneeType: true,
   assigneeAgentId: true,
   templateStep: {
@@ -1469,6 +1481,123 @@ const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<L
     where: { id: taskId },
     select: lockedTaskSelect,
   });
+};
+
+/**
+ * The mutation entry point for a task whose chain identity is not already
+ * known under a lock. Chain identity itself is immutable after dispatch, so an
+ * unlocked identity read can safely choose the mutex without first taking one
+ * Task row and later expanding to its siblings.
+ */
+const lockTaskMutationRows = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+): Promise<LockedTask | null> => {
+  const identity = await tx.task.findUnique({
+    where: { id: taskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!identity) return null;
+  if (!identity.chainId) return lockTask(tx, taskId);
+  await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+  return tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect });
+};
+
+/**
+ * Merge-tail repair markers point at an existing canonical task rather than a
+ * linked-list successor. Queue that explicit target under the same layer mutex
+ * as ordinary chain activation; readiness remains server-owned and is only
+ * marked queued for its worker.
+ */
+const activateMergeTailTarget = async (
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  now: Date,
+): Promise<void> => {
+  const identity = await tx.task.findUnique({ where: { id: taskId }, select: { projectId: true, chainId: true } });
+  if (!identity) return;
+  if (identity.chainId) await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+  else if (!await lockTask(tx, taskId)) return;
+  const target = await tx.task.findUnique({
+    where: { id: taskId },
+    include: {
+      runs: { where: { status: { in: ACTIVE_RUN_STATUSES } }, take: 1 },
+      assigneeAgent: { select: { name: true, archivedAt: true } },
+      templateStep: { include: { taskTemplate: { select: { name: true } } } },
+    },
+  });
+  if (!target || target.status === TaskStatus.DONE || target.runs.length > 0) return;
+  if (target.archivedAt) {
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: "Merge-tail target is archived and was not queued",
+    } });
+    return;
+  }
+  if (isMergeReadinessStep(target.templateStep)) {
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: "Merge-tail readiness target queued for server worker",
+      metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
+    } });
+    return;
+  }
+  if (target.assigneeAgent?.archivedAt) {
+    const reason = `Assignee ${target.assigneeAgent.name} is archived; unarchive the agent and retry to queue this merge-tail target`;
+    await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Merge-tail target not queued because assignee ${target.assigneeAgent.name} is archived`,
+    } });
+    return;
+  }
+  const claimed = await tx.task.updateMany({
+    where: { id: taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] } },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  });
+  if (claimed.count !== 1) return;
+  const rawTx = tx as Prisma.TransactionClient & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const savepoint = "merge_tail_enqueue";
+  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
+  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
+  try {
+    await enqueueTaskRun(tx, taskId, now);
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+  } catch (error: unknown) {
+    if (hasSavepoint) {
+      await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    }
+    const duplicateRun = error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+    if (!isArchivedAssigneeError(error) && !isArchivedTaskError(error)
+      && !isIntegratorStoppedError(error) && !duplicateRun) throw error;
+    if (duplicateRun) {
+      await tx.taskActivity.create({ data: {
+        taskId,
+        actorType: "control-plane",
+        body: "Merge-tail target already has the run created by a concurrent activation",
+      } });
+      return;
+    }
+    await tx.task.update({
+      where: { id: taskId },
+      data: { status: TaskStatus.REVIEW, failureReason: error instanceof Error ? error.message : "Merge-tail target could not be queued" },
+    });
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Merge-tail target was not queued: ${error instanceof Error ? error.message : "enqueue refused"}`,
+    } });
+    return;
+  }
+  await tx.taskActivity.create({ data: {
+    taskId,
+    actorType: "control-plane",
+    body: "Merge-tail target queued",
+  } });
 };
 
 /** Locks a whole candidate set in one statement. `ORDER BY "id"` is not
@@ -2569,6 +2698,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         outputKind: body.outputKind,
         opensPullRequest: body.opensPullRequest,
         baseFromStepIndex: body.baseFromStepIndex,
+        layer: body.stepIndex,
       } }) };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
     if ("error" in result) return context.json({ error: result.error }, result.code);
@@ -2767,7 +2897,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // another project supplies this trigger's `firstTask` and progress.
     const rows = chainIds.length === 0 ? [] : await db.task.findMany({
       where: { chainId: { in: chainIds }, projectId: template.projectId },
-      select: { id: true, projectId: true, chainId: true, chainIndex: true, name: true, status: true, archivedAt: true, templateStep: { select: { name: true } } },
+      select: { id: true, projectId: true, chainId: true, chainIndex: true, chainLayer: true, name: true, status: true, archivedAt: true, templateStep: { select: { name: true } } },
     });
     const progress = chainProgressByChain(rows);
     // Keyed by `chainKey`, not `chainId`, for the same reason — the query above
@@ -2920,7 +3050,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
         select: {
           id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-          name: true, archivedAt: true, templateStep: { select: { name: true } },
+          chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
         },
         orderBy: { chainIndex: "asc" },
       });
@@ -2945,6 +3075,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             total: 1,
             activeStepName: task.templateStep?.name ?? task.name,
             activeStatus: task.status.toLowerCase(),
+            currentLayer: 1,
+            layerCount: 1,
             position: 1,
           };
         }
@@ -2964,7 +3096,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         select: {
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
-          templateId: true, source: true, chainId: true, chainIndex: true, updatedAt: true,
+          templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
           assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
@@ -3070,7 +3202,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (bindingRefusal) return { error: bindingRefusal, code: 400 as const };
       const created = await tx.task.create({
-        data: { ...withoutUndefined(body), ...schedule, projectId } as Prisma.TaskUncheckedCreateInput,
+        data: {
+          ...withoutUndefined(body),
+          ...schedule,
+          projectId,
+          chainLayer: body.chainId === undefined ? null : body.chainIndex,
+        } as Prisma.TaskUncheckedCreateInput,
       });
       await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
       // API-created chains arrive one task at a time. Only index 0 may receive
@@ -3197,9 +3334,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           where: {
             projectId: task.projectId,
             chainId: task.chainId,
-            chainIndex: { not: null, lte: task.chainIndex },
           },
-          select: { id: true, name: true, status: true, chainIndex: true },
+          select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
         })
         : [],
     ]);
@@ -3293,6 +3429,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,
         chainIndex: row.chainIndex,
+        layer: row.chainLayer,
         name: row.name,
         stepName: stepName(row),
         status: row.status,
@@ -3423,17 +3560,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // transaction it wrote that TODO back with no lock and no guard at all.
     if (body.status !== undefined) {
       const written = await db.$transaction(async (tx) => {
-        let locked: LockedTask | null;
-        if (body.status === TaskStatus.DONE && before.chainId && before.chainIndex !== null) {
-          await lockChainPrefixRows(tx, {
-            projectId: before.projectId,
-            chainId: before.chainId,
-            targetChainIndex: before.chainIndex,
-          });
-          locked = await tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect });
-        } else {
-          locked = await lockTask(tx, taskId);
-        }
+        const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
@@ -3488,20 +3615,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           if (await hasActiveRun(tx, taskId)) {
             return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
           }
-          if (before.chainId && before.chainIndex !== null) {
-            const prefix = await tx.task.findMany({
+          if (locked.chainId) {
+            const chainRows = await tx.task.findMany({
               where: {
-                projectId: before.projectId,
-                chainId: before.chainId,
-                chainIndex: { not: null, lte: before.chainIndex },
+                projectId: locked.projectId,
+                chainId: locked.chainId,
               },
-              orderBy: [{ chainIndex: "asc" }, { id: "asc" }],
-              select: { id: true, name: true, status: true, chainIndex: true },
+              orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
+              select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
             });
-            const blocker = blockingPredecessor(prefix.map((row) => ({
+            const blocker = blockingPredecessor(chainRows.map((row) => ({
               ...row,
-              projectId: before.projectId,
-              chainId: before.chainId,
+              projectId: locked.projectId,
+              chainId: locked.chainId,
               archivedAt: null,
               templateStep: null,
             })), taskId);
@@ -3579,7 +3705,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
         if (locked.status !== TaskStatus.DONE
           && body.status === TaskStatus.DONE
-          && Boolean(updated.chainId || updated.followUpTaskId)
+          && Boolean(updated.chainId)
           && authorization?.purpose !== "confirmation") {
           await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
         }
@@ -3594,7 +3720,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // requeues; otherwise a request that commits first can still be missed by
       // a creator holding a stale task relation.
       const updated = await db.$transaction(async (tx) => {
-        const locked = await lockTask(tx, taskId);
+        const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
           await assertCompoundImplementationAssignment(
@@ -3615,7 +3741,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // writer, so it joins the same protocol: Task row first, Agent row second.
     if (assignee) {
       const written = await db.$transaction(async (tx) => {
-        const locked = await lockTask(tx, taskId);
+        const locked = await lockTaskMutationRows(tx, taskId);
         if (!locked) return { error: "Task not found", code: 404 as const };
         await assertCompoundImplementationAssignment(
           tx,
@@ -3630,17 +3756,37 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if ("error" in written) return context.json({ error: written.error }, written.code);
       return context.json(written.task);
     }
-    return context.json(await db.task.update({ where: { id: taskId }, data: updateData }));
+    const written = await db.$transaction(async (tx) => {
+      const locked = await lockTaskMutationRows(tx, taskId);
+      if (!locked) return null;
+      return tx.task.update({ where: { id: taskId }, data: updateData });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    return written ? context.json(written) : context.json({ error: "Task not found" }, 404);
   });
   app.delete("/tasks/:taskId", async (context) => {
-    await db.task.delete({ where: { id: id.parse(context.req.param("taskId")) } });
+    const taskId = id.parse(context.req.param("taskId"));
+    const deleted = await db.$transaction(async (tx) => {
+      const locked = await lockTaskMutationRows(tx, taskId);
+      if (!locked) return false;
+      await tx.task.delete({ where: { id: taskId } });
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if (!deleted) return context.json({ error: "Task not found" }, 404);
     return context.body(null, 204);
   });
   app.post("/tasks/:taskId/retry", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const now = new Date();
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      // Obtain the chain identity before taking any Task lock, then acquire the
+      // complete chain in layer order. Locking one row first and expanding to
+      // siblings would invert the completion transaction's Run -> chain order.
+      const identity = await tx.task.findUnique({ where: { id: taskId }, select: { projectId: true, chainId: true } });
+      if (!identity) return { error: "Task not found", code: 404 as const };
+      if (identity.chainId) await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+      const locked = identity.chainId
+        ? await tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect })
+        : await lockTask(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       // Retry joins the exclusion protocol: a guard set in which one writer
       // ignores archivedAt excludes nothing.
@@ -3658,6 +3804,26 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       if (!task) return { error: "Task not found", code: 404 as const };
+      if (task.chainId && task.chainIndex !== null) {
+        const chainRows = await tx.task.findMany({
+          where: { projectId: task.projectId, chainId: task.chainId },
+          orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
+          select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
+        });
+        const blocker = blockingPredecessor(chainRows.map((row) => ({
+          ...row,
+          projectId: task.projectId,
+          chainId: task.chainId,
+          archivedAt: null,
+          templateStep: null,
+        })), taskId);
+        if (blocker) {
+          return {
+            error: `Cannot retry ${task.name}; predecessor ${blocker.name} is not done`,
+            code: 409 as const,
+          };
+        }
+      }
       const integratorStepShape = task.templateStep;
       const last = task.runs[0];
       if (!last) return { error: "Task has no run to retry", code: 409 as const };
@@ -3731,16 +3897,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/start", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const identity = await db.task.findUnique({
-      where: { id: taskId }, select: { projectId: true, chainId: true, chainIndex: true },
+      where: { id: taskId }, select: { projectId: true, chainId: true },
     });
     if (!identity) return context.json({ error: "Task not found" }, 404);
     try {
       const result = await db.$transaction(async (tx) => {
-        if (identity.chainId && identity.chainIndex !== null) {
-          await lockChainPrefixRows(tx, {
+        if (identity.chainId) {
+          await lockChainRows(tx, {
             projectId: identity.projectId,
             chainId: identity.chainId,
-            targetChainIndex: identity.chainIndex,
           });
         } else if (!await lockTask(tx, taskId)) {
           return { error: "Task not found", code: 404 as const };
@@ -3752,17 +3917,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             templateStep: { include: { taskTemplate: { select: { name: true } } } },
           },
         });
-        if (identity.chainId && identity.chainIndex !== null) {
+        if (identity.chainId) {
           const prefix = await tx.task.findMany({
             where: {
               projectId: identity.projectId,
               chainId: identity.chainId,
-              chainIndex: { not: null, lte: identity.chainIndex },
             },
-            orderBy: [{ chainIndex: "asc" }, { id: "asc" }],
-            select: { id: true, name: true, status: true, chainIndex: true },
+            orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
+            select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
           });
-          const blocker = blockingPredecessor(prefix.map((row) => ({ ...row, projectId: identity.projectId, chainId: identity.chainId, archivedAt: null, templateStep: null })), taskId);
+          const blocker = blockingPredecessor(prefix.map((row) => ({
+            ...row,
+            projectId: identity.projectId,
+            chainId: identity.chainId,
+            archivedAt: null,
+            templateStep: null,
+          })), taskId);
           if (blocker) {
             return {
               error: `Cannot start ${task.name}; predecessor ${blocker.name} is not done`,
@@ -3863,7 +4033,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/archive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (await hasActiveRun(tx, taskId)) {
         return { error: "Cannot archive a task with an active run", code: 409 as const };
@@ -3895,7 +4065,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // strand them — and refusing them would make an agent's archival delete the
     // operator's ability to read their own history back onto the board.
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (locked.archivedAt === null) {
         return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
@@ -3916,13 +4086,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const result = await db.$transaction(async (tx) => {
       const candidates = await tx.task.findMany({
         where: { projectId, status: TaskStatus.DONE, archivedAt: null },
-        select: { id: true },
+        select: { id: true, chainId: true },
       });
       // Lock before reading runs, so a retry cannot slip a run in between the
       // selection and the write. Ids that vanished, moved out of `Done` or were
       // archived in between simply do not come back from the lock and count as
       // neither archived nor skipped.
-      const lockedIds = await lockDoneTasks(tx, projectId, candidates.map((task) => task.id));
+      const chainIds = [...new Set(candidates.flatMap((task) => task.chainId ? [task.chainId] : []))].sort();
+      for (const chainId of chainIds) await lockChainRows(tx, { projectId, chainId });
+      const standaloneIds = candidates.filter((task) => !task.chainId).map((task) => task.id);
+      const lockedStandaloneIds = await lockDoneTasks(tx, projectId, standaloneIds);
+      const chainedIds = candidates.filter((task) => task.chainId).map((task) => task.id);
+      const stillDoneChained = chainedIds.length === 0 ? [] : await tx.task.findMany({
+        where: { id: { in: chainedIds }, projectId, status: TaskStatus.DONE, archivedAt: null },
+        select: { id: true },
+      });
+      const lockedIds = [...lockedStandaloneIds, ...stillDoneChained.map(({ id: chainedTaskId }) => chainedTaskId)];
       const busy = lockedIds.length === 0 ? [] : await tx.run.findMany({
         where: { taskId: { in: lockedIds }, status: { in: ACTIVE_RUN_STATUSES } },
         select: { taskId: true },
@@ -3944,34 +4123,42 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/schedule/pause", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const task = await db.task.findUnique({ where: { id: taskId }, select: { scheduleKind: true } });
-    if (!task) return context.json({ error: "Task not found" }, 404);
-    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be paused" }, 400);
-    // In-flight copies are left alone: pausing stops future occurrences, it does
-    // not reach into work that already started.
-    const paused = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
-    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
-    return context.json(paused);
+    const result = await db.$transaction(async (tx) => {
+      if (!await lockTaskMutationRows(tx, taskId)) return { error: "Task not found", code: 404 as const };
+      const task = await tx.task.findUniqueOrThrow({ where: { id: taskId }, select: { scheduleKind: true } });
+      if (task.scheduleKind !== ScheduleKind.CRON) return { error: "Only CRON tasks can be paused", code: 400 as const };
+      // In-flight copies are left alone: pausing stops future occurrences, it does
+      // not reach into work that already started.
+      const paused = await tx.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
+      return { task: paused };
+    });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
   });
   app.post("/tasks/:taskId/schedule/resume", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const task = await db.task.findUnique({
-      where: { id: taskId },
-      select: { scheduleKind: true, cron: true, timezone: true },
+    const result = await db.$transaction(async (tx) => {
+      if (!await lockTaskMutationRows(tx, taskId)) return { error: "Task not found", code: 404 as const };
+      const task = await tx.task.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { scheduleKind: true, cron: true, timezone: true },
+      });
+      if (task.scheduleKind !== ScheduleKind.CRON) return { error: "Only CRON tasks can be resumed", code: 400 as const };
+      let runAt: Date;
+      try {
+        if (!task.cron) throw new Error("CRON tasks require cron");
+        // Recomputed from *now*, so a long pause produces no catch-up burst.
+        runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
+      } catch (error: unknown) {
+        return { error: error instanceof Error ? error.message : "Invalid schedule", code: 400 as const };
+      }
+      const resumed = await tx.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
+      await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
+      return { task: resumed };
     });
-    if (!task) return context.json({ error: "Task not found" }, 404);
-    if (task.scheduleKind !== ScheduleKind.CRON) return context.json({ error: "Only CRON tasks can be resumed" }, 400);
-    let runAt: Date;
-    try {
-      if (!task.cron) throw new Error("CRON tasks require cron");
-      // Recomputed from *now*, so a long pause produces no catch-up burst.
-      runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
-    } catch (error: unknown) {
-      return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
-    }
-    const resumed = await db.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
-    await db.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
-    return context.json(resumed);
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.task);
   });
   app.get("/tasks/:taskId/recurring-fires", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
@@ -4013,11 +4200,33 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.put("/tasks/:taskId/output", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskOutputInput);
-    return context.json(await db.taskStepOutput.upsert({
-      where: { taskId },
-      create: { taskId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-      update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
-    }));
+    const result = await db.$transaction(async (tx) => {
+      const locked = await lockTaskMutationRows(tx, taskId);
+      if (!locked) return { error: "Task not found", code: 404 as const };
+      const task = await tx.task.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { templateStep: { select: {
+          stepIndex: true,
+          outputKind: true,
+          taskTemplate: { select: { name: true } },
+        } } },
+      });
+      const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
+      const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
+        || isCanonicalBlindFindingsStep(task.templateStep)
+        || isCanonicalAdjudicationStep(task.templateStep);
+      if (immutableReview && existing) {
+        return { error: `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`, code: 409 as const };
+      }
+      const output = await tx.taskStepOutput.upsert({
+        where: { taskId },
+        create: { taskId, kind: body.kind, body: body.body, commitSha: body.commitSha ?? null, ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+        update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
+      });
+      return { output };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result.output);
   });
   /**
    * §D-P8 — the only mutation that can change a `target-unresolvable` outcome.
@@ -4033,7 +4242,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, mergeTargetInput);
     const result = await db.$transaction(async (tx) => {
-      const locked = await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       const task = await loadIntegratorTask(tx, taskId);
       if (!task || !taskIsIntegratorStep(task)) {
@@ -4462,6 +4671,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         take: 20,
       });
       const executorRunnerIds = mergeExecutorRunnerIds();
+      let adjudicationRefusal: string | null = null;
       for (const candidate of candidates) {
         if (!candidate.task || !candidate.repo) continue;
         if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
@@ -4477,6 +4687,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stranded.count === 1) {
+            await lockTaskMutationRows(tx, candidate.task.id);
             await tx.task.update({
               where: { id: candidate.task.id },
               data: { status: TaskStatus.BACKLOG, failureReason: reason },
@@ -4489,6 +4700,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 metadata: { runId: candidate.id, condition: "repository-grant-missing" },
               },
             });
+            // A chained park expands the lock order from this Run to every Task
+            // in the chain. End the transaction here: scanning another
+            // candidate could next wait on a sibling Run while its claimant
+            // already holds that Run and waits for this chain mutex.
+            if (candidate.task.chainId) return null;
           }
           continue;
         }
@@ -4561,6 +4777,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stopped.count === 1) {
+            await lockTaskMutationRows(tx, candidate.task.id);
             await tx.task.update({
               where: { id: candidate.task.id },
               data: { status: TaskStatus.REVIEW, failureReason: regressionRepairHandoff.reason },
@@ -4588,6 +4805,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               ...(sourceSession ? { sessionId: sourceSession.id } : {}),
               reason: regressionRepairHandoff.reason,
             });
+            if (candidate.task.chainId) return null;
           }
           continue;
         }
@@ -4602,6 +4820,23 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           if (grantedEnvironmentVariables.has(envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
           grantedEnvironmentVariables.add(envVar);
+        }
+        const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
+        if (adjudicationTask) {
+          // Adjudication consumes evidence owned by sibling Tasks. Hold the
+          // candidate Run first, then the sole complete-chain mutex, and only
+          // validate the pinned range and reports after both locks are held.
+          // Every sibling status/output writer takes that same chain mutex, so
+          // the evidence cannot change between validation and the claim CAS.
+          await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${candidate.id} FOR UPDATE`;
+          const lockedRun = await tx.run.findUnique({
+            where: { id: candidate.id },
+            select: { status: true, leaseGeneration: true, taskId: true },
+          });
+          if (lockedRun?.status !== RunStatus.QUEUED
+            || lockedRun.leaseGeneration !== candidate.leaseGeneration
+            || lockedRun.taskId !== candidate.task.id) continue;
+          if (!await lockTaskMutationRows(tx, candidate.task.id)) continue;
         }
         let implementationRange: Awaited<ReturnType<typeof pinnedImplementationRange>>;
         try {
@@ -4627,6 +4862,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stopped.count === 1) {
+            await lockTaskMutationRows(tx, candidate.task.id);
             await tx.task.update({
               where: { id: candidate.task.id },
               data: { status: TaskStatus.BACKLOG, failureReason: reason },
@@ -4657,7 +4893,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               },
               update: {},
             });
+            if (candidate.task.chainId) return null;
           }
+          continue;
+        }
+        const reviewClaimRefusal = await reviewAdjudicationClaimRefusal(tx, {
+          task: candidate.task,
+          implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
+          implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
+        });
+        if (reviewClaimRefusal) {
+          adjudicationRefusal = reviewClaimRefusal;
           continue;
         }
         const generation = candidate.leaseGeneration + 1;
@@ -4681,7 +4927,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
         if (won.count !== 1) continue;
-        const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
+        if (!adjudicationTask) await lockTaskMutationRows(tx, candidate.task.id);
+        const priorResume = !adjudicationTask && candidate.session?.resumeInput && candidate.session.providerConversationId ? {
           providerConversationId: candidate.session.providerConversationId,
           input: candidate.session.resumeInput,
         } : null;
@@ -4693,6 +4940,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             requestedAt: now,
             endedAt: null,
             failureReason: null,
+            ...(adjudicationTask ? {
+              providerConversationId: null,
+              resumeInput: null,
+              resumableUntil: null,
+              waitingOnMessageId: null,
+              resumeAttempt: 0,
+            } : {}),
           },
         }) : await tx.session.create({ data: {
             runId: candidate.id,
@@ -4740,10 +4994,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
           })
           : null;
-        const priorOutputsRaw = candidate.task.chainId && candidate.task.chainIndex !== null
+        const blindReviewTask = isCanonicalBlindFindingsStep(candidate.task.templateStep);
+        const priorOutputsRaw = !blindReviewTask
+          && candidate.task.chainId && candidate.task.chainIndex !== null
           && (candidate.task.templateStepId === null || candidate.task.templateStep?.attachmentsFromPrevious !== false)
           ? await tx.taskStepOutput.findMany({
-            where: { task: { chainId: candidate.task.chainId, chainIndex: { lt: candidate.task.chainIndex } } },
+            where: { task: {
+              projectId: candidate.task.projectId,
+              chainId: candidate.task.chainId,
+              chainIndex: { lt: candidate.task.chainIndex },
+            } },
             select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
             orderBy: { task: { chainIndex: "asc" } },
           })
@@ -4801,7 +5061,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };
       }
-      return null;
+      return adjudicationRefusal ? { error: adjudicationRefusal } : null;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -4814,6 +5074,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           || attempt === 3) throw error;
       }
     }
+    if (claimed && "error" in claimed) return context.json({ error: claimed.error }, 409);
     return claimed ? context.json(claimed) : context.body(null, 204);
   });
 
@@ -5163,6 +5424,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (!run?.taskId) return context.json({ error: "Run not found" }, 404);
     const caller = await loadIntegratorTask(db, run.taskId);
     if (!caller) return context.json({ error: "Run not found" }, 404);
+    if (isCanonicalBlindFindingsStep(caller.templateStep)) {
+      return context.json({ error: "Forbidden: blind review sessions cannot read predecessor or sibling review activity" }, 403);
+    }
     // Eligibility: only the mechanical step may read across the chain at all.
     if (!taskIsIntegratorStep(caller)) return context.json({ error: "Forbidden for this step" }, 403);
     if (caller.chainId === null || caller.chainIndex === null) return context.json({ error: "Run is not part of a chain" }, 404);
@@ -5499,7 +5763,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // not get to raise the ceiling on this step either.
       const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
       const tailRows = succeeded && run.task
-        && !run.task.templateId && !run.task.chainId && !run.task.followUpTaskId
+        && !run.task.templateId && !run.task.chainId
         ? await tx.taskActivity.findMany({
             where: { taskId: run.task.id },
             select: { metadata: true },
@@ -5517,7 +5781,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         && typeof metadata.regressionTaskId === "string"
       ));
       const mergeTailAuxiliary = Boolean(repairMarker || reviewMarker);
-      const auxiliaryFollowUpTaskId = typeof repairMarker?.regressionTaskId === "string"
+      const auxiliaryTargetTaskId = typeof repairMarker?.regressionTaskId === "string"
         ? repairMarker.regressionTaskId
         : typeof reviewMarker?.readinessTaskId === "string"
           ? reviewMarker.readinessTaskId
@@ -5531,15 +5795,29 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // row: a task's budget being edited mid-run must not retroactively refuse
       // an attempt already authorized.
       const budgetGrants = run.budgetGrants + refunded;
-      if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
-        await lockTask(tx, run.task.id);
+      // Completion always mutates its Task, including terminal non-retryable
+      // failures. Run is already locked above; acquire the Task/chain mutex now
+      // for every outcome rather than only the branches that may retry or
+      // advance.
+      if (run.task) {
+        if (run.task.chainId) {
+          await lockChainRows(tx, { projectId: run.task.projectId, chainId: run.task.chainId });
+        } else {
+          await lockTask(tx, run.task.id);
+        }
       }
-      // Join the Task-row exclusion protocol only when this completion can
-      // create a retry. PATCH then retry creation are ordered by this lock, and
-      // the fresh read below snapshots exactly the value current at creation.
-      if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
-        await lockTask(tx, run.task.id);
+      if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
+        await lockTaskMutationRows(tx, auxiliaryTargetTaskId);
       }
+      if (run.task && typeof (tx.task as { findUnique?: unknown }).findUnique === "function") {
+        await tx.task.findUnique({ where: { id: run.task.id }, select: { status: true } });
+      }
+      // Keep the status observed with the fenced Run as the compare-and-set
+      // expectation. The locked re-read above supplies current chain state,
+      // but adopting its newer status as the expectation would let completion
+      // overwrite an operator decision that won while completion waited for
+      // the mutex (for example DONE -> REVIEW on a successful standalone run).
+      const completionTaskStatus = run.task?.status;
       const terminalStatus = succeeded
         ? RunStatus.SUCCEEDED
         : body.terminationReason?.includes("walltime") || body.terminationReason?.includes("stall")
@@ -5724,7 +6002,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           });
           const outcome = parseMergeResult(persisted);
           if (outcome.outcome === "merged") {
-            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
           } else {
             await recordIntegratorStop(tx, {
               integratorTaskId: run.taskId,
@@ -5744,7 +6022,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               : `Run ${run.runNumber} stopped before merging`,
             metadata: jsonValue({ exitCode: body.exitCode, mergeOutcome: outcome.outcome }),
           } });
-        } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
+        } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || mergeTailAuxiliary)) {
           // Body, runId, metadata, and commit binding describe one act of
           // authorship and only move together through task_output. Completion
           // validates that immutable binding; it never restamps an authored
@@ -5815,12 +6093,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               now,
             });
             if (result === "advance") {
-              await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+              await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
             }
           } else {
-            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, run.task.status);
+            await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
           }
-        } else if (succeeded && run.task && (run.task.chainId || run.task.followUpTaskId || mergeTailAuxiliary)) {
+        } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
           let repairUnable = false;
           let reviewRejected = false;
           if (reviewMarker
@@ -5967,26 +6245,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             // The failed repair owns the stop; never activate its follow-up.
           } else if (run.task.approvalGate) {
             const claimed = await tx.task.updateMany({
-              where: { id: run.taskId, status: run.task.status },
+              where: { id: run.taskId, status: completionTaskStatus! },
               data: { status: TaskStatus.REVIEW, failureReason: null },
             });
             if (claimed.count === 1) await gateQuestion(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null);
           } else {
             const completed = await tx.task.updateMany({
-              where: { id: run.taskId, status: run.task.status }, data: { status: TaskStatus.DONE, failureReason: null },
+              where: { id: run.taskId, status: completionTaskStatus! }, data: { status: TaskStatus.DONE, failureReason: null },
             });
             if (completed.count === 1) {
-              await activateChainSuccessor(tx, auxiliaryFollowUpTaskId
-                ? { ...run.task, followUpTaskId: auxiliaryFollowUpTaskId }
-                : run.task, {
-                sourceRunId: run.id,
-                chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
-              }, now);
+              if (run.task.chainId) {
+                await activateChainSuccessor(tx, run.task, {
+                  sourceRunId: run.id,
+                  chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
+                }, now);
+              }
+              if (auxiliaryTargetTaskId) await activateMergeTailTarget(tx, auxiliaryTargetTaskId, now);
             }
           }
         } else {
           await tx.task.updateMany({
-            where: { id: run.taskId, ...(run.task ? { status: run.task.status } : {}) },
+            where: { id: run.taskId, ...(completionTaskStatus ? { status: completionTaskStatus } : {}) },
             data: {
               status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
               failureReason: succeeded ? null : budgetExhausted
@@ -6001,7 +6280,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             actorType: "runner",
             actorId: body.runnerId,
             body: canonicalOutputFailure ? `Run ${run.runNumber} succeeded but canonical task output was refused`
-              : succeeded && (run.task?.templateId || run.task?.chainId || run.task?.followUpTaskId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
+              : succeeded && (run.task?.templateId || run.task?.chainId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
               : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
               : retryCreated ? `Run ${run.runNumber} failed; retry queued`
                 : `Run ${run.runNumber} failed; task moved to review`,
@@ -6165,7 +6444,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (!run) return { error: "Run not found", code: 404 as const };
       if (body.parkTask && !run.taskId) return { error: "Run has no Task to park", code: 409 as const };
-      const parkTarget = body.parkTask && run.taskId ? await lockTask(tx, run.taskId) : null;
+      const parkTarget = body.parkTask && run.taskId ? await lockTaskMutationRows(tx, run.taskId) : null;
       if (body.parkTask && run.taskId && !parkTarget) return { error: "Task not found", code: 404 as const };
       if (parkTarget && parkTarget.archivedAt !== null) {
         return { error: "Cannot park an archived task", code: 409 as const };

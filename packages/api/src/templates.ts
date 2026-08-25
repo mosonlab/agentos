@@ -175,13 +175,11 @@ export const instantiateTemplate = async (
             opensPullRequest: step.opensPullRequest,
             chainId,
             chainIndex: step.stepIndex,
+            chainLayer: step.layer,
             status: TaskStatus.TODO,
             source: options.source ?? TaskSource.MANUAL,
             targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
           } }));
-        }
-        for (let index = 0; index < tasks.length - 1; index += 1) {
-          await tx.task.update({ where: { id: tasks[index]!.id }, data: { followUpTaskId: tasks[index + 1]!.id } });
         }
         const first = tasks[0]!;
         if (first.assigneeType !== AssigneeType.AGENT) throw new Error("The first template step must be agent-executable");

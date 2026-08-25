@@ -2,9 +2,11 @@ import {
   ACTIVE_RUN_STATUSES,
   DIRECT_TEMPLATE_NAME,
   INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_INTEGRATOR_TEMPLATE_NAME,
   lockTaskRow,
   Prisma,
-  type RunStatus,
+  RunStatus,
   type TaskStepOutput,
 } from "@agentos/db";
 import { z } from "zod";
@@ -46,17 +48,75 @@ export type PreviousRunHandoff = {
   } | null;
 };
 
+/**
+ * Agent-authored node ranges are intentionally bounded before the
+ * server-owned readiness and mechanical merge nodes. Legacy-v1 template
+ * names retain the old ranges so output authority for already-instantiated
+ * chains does not move when canonical sync installs the new graph.
+ */
+export const DIRECT_CANONICAL_AGENT_STEP_LAST = 6;
+export const FULL_CANONICAL_AGENT_STEP_LAST = 11;
+export const DIRECT_LEGACY_AGENT_STEP_LAST = 5;
+export const FULL_LEGACY_AGENT_STEP_LAST = 10;
+
+export const DIRECT_BLIND_REVIEW_STEP_INDEX = 3;
+export const FULL_BLIND_REVIEW_STEP_INDEX = 7;
+export const DIRECT_SOL_REVIEW_STEP_INDEX = 2;
+export const FULL_SOL_REVIEW_STEP_INDEX = 6;
+export const DIRECT_ADJUDICATION_STEP_INDEX = 4;
+export const FULL_ADJUDICATION_STEP_INDEX = 8;
+
+const isNamedStep = (
+  step: TemplateStepIdentity | null | undefined,
+  templateName: string,
+  stepIndex: number,
+  outputKind: string,
+): boolean => step?.taskTemplate?.name === templateName
+  && step.stepIndex === stepIndex
+  && step.outputKind === outputKind;
+
 export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): step is CanonicalTemplateStepIdentity => {
   if (!step?.taskTemplate || step.stepIndex === undefined) return false;
-  if (step.taskTemplate.name === DIRECT_TEMPLATE_NAME) return step.stepIndex >= 1 && step.stepIndex <= 5;
-  if (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME) return step.stepIndex >= 1 && step.stepIndex <= 10;
+  if (step.taskTemplate.name === DIRECT_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_CANONICAL_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_LEGACY_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name === LEGACY_INTEGRATOR_TEMPLATE_NAME) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_LEGACY_AGENT_STEP_LAST;
+  }
   return false;
 };
 
+/** The old combined review node, recognized only on a renamed legacy graph. */
+export const isLegacyCombinedBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "must-fix")
+  || isNamedStep(step, LEGACY_INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "must-fix")
+);
+
 export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  step?.outputKind === "must-fix"
-  && ((step.taskTemplate?.name === DIRECT_TEMPLATE_NAME && step.stepIndex === 3)
-    || (step.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === 7))
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  || isLegacyCombinedBlindReviewStep(step)
+);
+
+export const isCanonicalAdjudicationStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_ADJUDICATION_STEP_INDEX, "must-fix")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_ADJUDICATION_STEP_INDEX, "must-fix")
+);
+
+export const isCanonicalBlindFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+);
+
+export const isCanonicalSolFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_SOL_REVIEW_STEP_INDEX, "sol-findings")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_SOL_REVIEW_STEP_INDEX, "sol-findings")
 );
 
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
@@ -92,8 +152,28 @@ const closedReviewArtifact = reviewArtifact.extend({
   mustFixIds: stringList,
 });
 
+/**
+ * The new adjudication node is not a review report. Its body carries only the
+ * range and the disposition package; the input finding details remain in the
+ * two immutable sibling reports. `findings` is accepted as an optional
+ * compatibility field because a few operator-created records predate the
+ * split, but the adjudicator contract never requires it.
+ */
+const adjudicationArtifact = canonicalEnvelope.extend({
+  reviewedBase: commitSha,
+  reviewedHead: commitSha,
+  dispositions: z.array(z.object({
+    id: nonEmptyString,
+    disposition: z.enum(["ADOPTED", "REJECTED", "MERGED"]),
+    reason: nonEmptyString,
+  })),
+  mustFixIds: stringList,
+  findings: z.array(reviewFinding).optional(),
+});
+
 type ReviewArtifact = z.infer<typeof reviewArtifact>;
 type ClosedReviewArtifact = z.infer<typeof closedReviewArtifact>;
+type AdjudicationArtifact = z.infer<typeof adjudicationArtifact>;
 
 const duplicateValues = (values: string[]): string[] => {
   const seen = new Set<string>();
@@ -150,6 +230,103 @@ const closedReviewRunRefusal = (
   return null;
 };
 
+const adjudicationPersistenceRefusal = async (
+  tx: DbTx,
+  task: AdjudicationClaimTask,
+  body: string,
+): Promise<string | null> => {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return "must-fix body is not valid JSON";
+  }
+  const parsed = adjudicationArtifact.safeParse(value);
+  if (!parsed.success) return "must-fix body does not satisfy its canonical schema";
+  const adjudication: AdjudicationArtifact = parsed.data;
+  if (!task.chainId || task.chainLayer === null) {
+    return "must-fix adjudication task has no chainId/chainLayer review boundary";
+  }
+  const predecessor = await tx.task.findFirst({
+    where: { projectId: task.projectId, chainId: task.chainId, chainLayer: { lt: task.chainLayer } },
+    select: { chainLayer: true },
+    orderBy: { chainLayer: "desc" },
+  });
+  if (predecessor?.chainLayer === null || !predecessor) {
+    return "must-fix adjudication task has no predecessor review layer";
+  }
+  const reviewTasks = await tx.task.findMany({
+    where: { projectId: task.projectId, chainId: task.chainId, chainLayer: predecessor.chainLayer },
+    select: {
+      id: true,
+      templateStep: { select: {
+        stepIndex: true,
+        outputKind: true,
+        taskTemplate: { select: { name: true } },
+      } },
+      stepOutput: { select: { kind: true, body: true, commitSha: true } },
+    },
+  });
+  const expectedKinds = ["sol-findings", "blind-findings"] as const;
+  const reports: ReviewArtifact[] = [];
+  for (const kind of expectedKinds) {
+    const matches = reviewTasks.filter((candidate) => (
+      kind === "sol-findings"
+        ? isCanonicalSolFindingsStep(candidate.templateStep)
+        : isCanonicalBlindFindingsStep(candidate.templateStep)
+    ));
+    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
+      return `must-fix adjudication requires exactly one immutable ${kind} sibling output`;
+    }
+    const output = matches[0]!.stepOutput!;
+    let reportValue: unknown;
+    try {
+      reportValue = JSON.parse(output.body);
+    } catch {
+      return `must-fix adjudication ${kind} sibling body is not valid JSON`;
+    }
+    const report = reviewArtifact.safeParse(reportValue);
+    if (!report.success) return `must-fix adjudication ${kind} sibling violates its review contract`;
+    if (output.commitSha !== adjudication.headSha
+      || report.data.headSha !== adjudication.headSha
+      || report.data.reviewedBase !== adjudication.reviewedBase
+      || report.data.reviewedHead !== adjudication.reviewedHead) {
+      return `must-fix adjudication range does not match immutable ${kind} sibling`;
+    }
+    reports.push(report.data);
+  }
+
+  const sourceSeverities = new Map<string, "P0" | "P1" | "P2">();
+  const rank = { P0: 0, P1: 1, P2: 2 } as const;
+  for (const finding of reports.flatMap((report) => report.findings)) {
+    const prior = sourceSeverities.get(finding.id);
+    if (!prior || rank[finding.severity] < rank[prior]) sourceSeverities.set(finding.id, finding.severity);
+  }
+  const duplicateDispositions = duplicateValues(adjudication.dispositions.map(({ id }) => id));
+  if (duplicateDispositions.length > 0) {
+    return `must-fix dispositions contain duplicate ids: ${duplicateDispositions.join(", ")}`;
+  }
+  const dispositionIds = new Set(adjudication.dispositions.map(({ id }) => id));
+  const missing = [...sourceSeverities.keys()].filter((id) => !dispositionIds.has(id)).sort();
+  const unknown = [...dispositionIds].filter((id) => !sourceSeverities.has(id)).sort();
+  if (missing.length > 0 || unknown.length > 0) {
+    return `must-fix dispositions must exactly cover sibling findings; missing: ${missing.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}`;
+  }
+  const duplicateMustFixIds = duplicateValues(adjudication.mustFixIds);
+  if (duplicateMustFixIds.length > 0) {
+    return `must-fix mustFixIds contain duplicates: ${duplicateMustFixIds.join(", ")}`;
+  }
+  const expectedMustFixIds = adjudication.dispositions
+    .filter(({ id, disposition }) => disposition !== "REJECTED" && sourceSeverities.get(id) !== "P2")
+    .map(({ id }) => id)
+    .sort();
+  const actualMustFixIds = [...adjudication.mustFixIds].sort();
+  if (JSON.stringify(actualMustFixIds) !== JSON.stringify(expectedMustFixIds)) {
+    return `must-fix mustFixIds must exactly equal accepted P0/P1 disposition ids; expected: ${expectedMustFixIds.join(", ") || "none"}; actual: ${actualMustFixIds.join(", ") || "none"}`;
+  }
+  return null;
+};
+
 const canonicalOutputSchemas: Record<string, z.ZodType> = {
   spec: canonicalEnvelope.extend({ spec: nonEmptyString }),
   plan: canonicalEnvelope.extend({ summary: nonEmptyString, sliceIds: stringList }),
@@ -165,7 +342,8 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
     testsRun: stringList,
   }),
   "sol-findings": reviewArtifact.extend({ commandsRun: stringList }),
-  "must-fix": reviewArtifact,
+  "blind-findings": reviewArtifact,
+  "must-fix": adjudicationArtifact,
   "fixed-implementation": canonicalEnvelope.extend({
     sourceHead: commitSha,
     closedFindings: z.array(z.object({
@@ -220,7 +398,10 @@ const canonicalBodyRefusal = (
   }
   const schema = kind === "must-fix" && phase === BLIND_REVIEW_PHASE.closed
     ? closedReviewArtifact
-    : canonicalOutputSchemas[kind];
+    : kind === "must-fix"
+      && (phase === BLIND_REVIEW_PHASE.independent || phase === BLIND_REVIEW_PHASE.evidenceUnlocked)
+      ? reviewArtifact
+      : canonicalOutputSchemas[kind];
   if (!schema) return `canonical output kind ${kind} has no versioned JSON contract`;
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
@@ -240,6 +421,151 @@ const canonicalBodyRefusal = (
   }
   if (kind === "must-fix" && phase === BLIND_REVIEW_PHASE.closed) {
     return closedReviewSelfRefusal(parsed.data as ClosedReviewArtifact);
+  }
+  return null;
+};
+
+type AdjudicationClaimTask = {
+  id: string;
+  projectId: string;
+  chainId: string | null;
+  chainLayer: number | null;
+  templateStep?: TemplateStepIdentity | null;
+};
+
+export type AdjudicationClaimInput = {
+  task: AdjudicationClaimTask;
+  implementationBaseSha: string | null;
+  implementationHeadSha: string | null;
+};
+
+type ReviewReportKind = "sol-findings" | "blind-findings";
+
+/**
+ * Validate the evidence boundary for the fresh adjudication Session.
+ *
+ * This deliberately has two reads. The first reads only task identity/status
+ * and output/run metadata. Report bodies are not selected until both sibling
+ * tasks are present, DONE, and backed by a successful run with the expected
+ * immutable output kind and pinned head. That ordering keeps an adjudicator
+ * from ever receiving a partial report set as if it were authoritative.
+ */
+export const reviewAdjudicationClaimRefusal = async (
+  tx: DbTx,
+  input: AdjudicationClaimInput,
+): Promise<string | null> => {
+  if (!isCanonicalAdjudicationStep(input.task.templateStep)) return null;
+  const refusalPrefix = "Adjudication claim refused";
+  if (!input.implementationBaseSha || !input.implementationHeadSha) {
+    return `${refusalPrefix}: claim has no immutable implementationBaseSha and implementationHeadSha`;
+  }
+  if (!input.task.chainId || input.task.chainLayer === null) {
+    return `${refusalPrefix}: adjudication task has no chainId/chainLayer review boundary`;
+  }
+
+  // The adjudication node is in the join layer after the two review siblings,
+  // not in the review layer itself. Layer values may be sparse, so derive the
+  // immediate predecessor by ordering the existing chain layers rather than
+  // subtracting one or searching arbitrary earlier nodes.
+  const predecessorLayer = await tx.task.findFirst({
+    where: {
+      projectId: input.task.projectId,
+      chainId: input.task.chainId,
+      chainLayer: { lt: input.task.chainLayer },
+    },
+    select: { chainLayer: true },
+    orderBy: { chainLayer: "desc" },
+  });
+  if (predecessorLayer?.chainLayer === null || predecessorLayer === null) {
+    return `${refusalPrefix}: adjudication task has no predecessor review layer before layer ${input.task.chainLayer}`;
+  }
+  const reviewLayer = predecessorLayer.chainLayer;
+  const reviewTasks = await tx.task.findMany({
+    where: {
+      projectId: input.task.projectId,
+      chainId: input.task.chainId,
+      chainLayer: reviewLayer,
+      id: { not: input.task.id },
+    },
+    select: {
+      id: true,
+      status: true,
+      templateStep: { select: {
+        stepIndex: true,
+        outputKind: true,
+        taskTemplate: { select: { name: true } },
+      } },
+    },
+  });
+  const solTasks = reviewTasks.filter((task) => isCanonicalSolFindingsStep(task.templateStep));
+  const blindTasks = reviewTasks.filter((task) => isCanonicalBlindFindingsStep(task.templateStep));
+  if (solTasks.length !== 1) {
+    return `${refusalPrefix}: expected exactly one sol-findings sibling in layer ${reviewLayer}, found ${solTasks.length}`;
+  }
+  if (blindTasks.length !== 1) {
+    return `${refusalPrefix}: expected exactly one blind-findings sibling in layer ${reviewLayer}, found ${blindTasks.length}`;
+  }
+
+  const siblings: Array<{ kind: ReviewReportKind; task: typeof solTasks[number] }> = [
+    { kind: "sol-findings", task: solTasks[0]! },
+    { kind: "blind-findings", task: blindTasks[0]! },
+  ];
+  for (const sibling of siblings) {
+    if (sibling.task.status !== "DONE") {
+      return `${refusalPrefix}: ${sibling.kind} task ${sibling.task.id} is ${sibling.task.status}, not DONE`;
+    }
+  }
+
+  const outputRows = await tx.taskStepOutput.findMany({
+    where: { taskId: { in: siblings.map(({ task }) => task.id) } },
+    select: {
+      taskId: true,
+      runId: true,
+      kind: true,
+      commitSha: true,
+      run: { select: { taskId: true, status: true } },
+    },
+  });
+  const outputByTaskId = new Map(outputRows.map((output) => [output.taskId, output]));
+  for (const sibling of siblings) {
+    const output = outputByTaskId.get(sibling.task.id);
+    if (!output) return `${refusalPrefix}: missing immutable ${sibling.kind} output for task ${sibling.task.id}`;
+    if (output.runId === null || output.run?.taskId !== sibling.task.id || output.run.status !== RunStatus.SUCCEEDED) {
+      return `${refusalPrefix}: ${sibling.kind} output for task ${sibling.task.id} is not backed by a successful completed Run`;
+    }
+    if (output.kind !== sibling.kind) {
+      return `${refusalPrefix}: ${sibling.kind} output for task ${sibling.task.id} has kind ${output.kind}`;
+    }
+    if (output.commitSha !== input.implementationHeadSha) {
+      return `${refusalPrefix}: ${sibling.kind} output for task ${sibling.task.id} is bound to ${output.commitSha ?? "no commit"}, expected ${input.implementationHeadSha}`;
+    }
+  }
+
+  // Only now select the report bodies. The two bodies are validated against
+  // both the output row and the claim's immutable implementation range.
+  const reports = await tx.taskStepOutput.findMany({
+    where: { taskId: { in: siblings.map(({ task }) => task.id) } },
+    select: { taskId: true, body: true, kind: true, commitSha: true },
+  });
+  const reportByTaskId = new Map(reports.map((report) => [report.taskId, report]));
+  for (const sibling of siblings) {
+    const report = reportByTaskId.get(sibling.task.id);
+    if (!report) return `${refusalPrefix}: ${sibling.kind} output disappeared before body validation`;
+    const bodyRefusal = canonicalBodyRefusal(report.kind, report.body, report.commitSha, null);
+    if (bodyRefusal) return `${refusalPrefix}: ${sibling.kind} report ${bodyRefusal}`;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(report.body);
+    } catch {
+      return `${refusalPrefix}: ${sibling.kind} report body is not valid JSON`;
+    }
+    const artifact = reviewArtifact.safeParse(parsed);
+    if (!artifact.success) return `${refusalPrefix}: ${sibling.kind} report body violates its review contract`;
+    if (artifact.data.reviewedBase !== input.implementationBaseSha
+      || artifact.data.reviewedHead !== input.implementationHeadSha
+      || artifact.data.headSha !== input.implementationHeadSha) {
+      return `${refusalPrefix}: ${sibling.kind} report range does not match implementationBaseSha/implementationHeadSha`;
+    }
   }
   return null;
 };
@@ -265,7 +591,7 @@ export const canonicalOutputRefusal = (
     metadataPhase(output.metadata),
   );
   if (bodyRefusal) return bodyRefusal;
-  if (isCanonicalBlindReviewStep(step) && metadataPhase(output.metadata) !== BLIND_REVIEW_PHASE.closed) {
+  if (isLegacyCombinedBlindReviewStep(step) && metadataPhase(output.metadata) !== BLIND_REVIEW_PHASE.closed) {
     return `blind review output is not in required ${BLIND_REVIEW_PHASE.closed} phase`;
   }
   return null;
@@ -312,6 +638,8 @@ export const persistSessionTaskOutput = async (
         projectId: true,
         chainId: true,
         chainIndex: true,
+        chainLayer: true,
+        status: true,
         templateStep: { select: {
           stepIndex: true,
           outputKind: true,
@@ -327,14 +655,27 @@ export const persistSessionTaskOutput = async (
     return { ok: false, reason: `task_output kind must be ${step.outputKind} for this canonical step` };
   }
 
-  const blind = isCanonicalBlindReviewStep(step);
+  const legacyBlind = isLegacyCombinedBlindReviewStep(step);
   const phase = metadataPhase(input.metadata);
   const existing = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
+  const immutableReviewOutput = isCanonicalSolFindingsStep(step)
+    || isCanonicalBlindFindingsStep(step)
+    || isCanonicalAdjudicationStep(step);
+  if (immutableReviewOutput && existing) {
+    return { ok: false, reason: `${step?.outputKind ?? input.kind} task output is immutable once persisted` };
+  }
   if (isCanonicalAgentStep(step)) {
     const bodyRefusal = canonicalBodyRefusal(input.kind, input.body, input.commitSha, phase);
     if (bodyRefusal) return { ok: false, reason: bodyRefusal };
   }
-  if (blind) {
+  if (isCanonicalAdjudicationStep(step)) {
+    const refusal = await adjudicationPersistenceRefusal(tx, task, input.body);
+    if (refusal) return { ok: false, reason: refusal };
+  }
+  // The old combined node is retained only for already-instantiated
+  // -legacy-v1 chains. New canonical blind nodes never enter this phased
+  // predecessor-evidence path.
+  if (legacyBlind) {
     if (phase !== BLIND_REVIEW_PHASE.independent
       && phase !== BLIND_REVIEW_PHASE.evidenceUnlocked
       && phase !== BLIND_REVIEW_PHASE.closed) {
@@ -407,7 +748,7 @@ export const persistSessionTaskOutput = async (
       ...(input.metadata ? { metadata: input.metadata } : {}),
     },
   });
-  const predecessorOutputs = blind && phase === BLIND_REVIEW_PHASE.evidenceUnlocked
+  const predecessorOutputs = legacyBlind && phase === BLIND_REVIEW_PHASE.evidenceUnlocked
     && task.chainId && task.chainIndex !== null
     ? await tx.taskStepOutput.findMany({
       where: {

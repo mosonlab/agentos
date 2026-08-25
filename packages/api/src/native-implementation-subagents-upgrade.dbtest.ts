@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,10 @@ test("the native-subagent migration backfills only active canonical implementati
   try {
     execute(`DROP SCHEMA IF EXISTS ${quoted} CASCADE; CREATE SCHEMA ${quoted};`);
     cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
-    rmSync(join(staging, "prisma", "migrations", targetMigration), { recursive: true });
+    const stagedMigrations = join(staging, "prisma", "migrations");
+    for (const migration of readdirSync(stagedMigrations)) {
+      if (migration >= targetMigration) rmSync(join(stagedMigrations, migration), { recursive: true });
+    }
     deploy();
 
     execute(`
@@ -84,7 +87,7 @@ test("the native-subagent migration backfills only active canonical implementati
 
     cpSync(
       join(dbDirectory, "prisma", "migrations", targetMigration),
-      join(staging, "prisma", "migrations", targetMigration),
+      join(stagedMigrations, targetMigration),
       { recursive: true },
     );
     deploy();

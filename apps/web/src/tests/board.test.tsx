@@ -24,7 +24,7 @@ const step = (position: number, overrides: Partial<BoardTask> = {}): BoardTask =
   chainId: "c1",
   chainIndex: position,
   chainProgress: {
-    chainId: "c1", done: 1, total: 9, activeStepName: "Implementation", activeStatus: "doing", position,
+    chainId: "c1", done: 1, total: 9, activeStepName: "Implementation", activeStatus: "doing", currentLayer: 2, layerCount: 7, position,
   } satisfies ChainProgress,
   ...overrides,
 });

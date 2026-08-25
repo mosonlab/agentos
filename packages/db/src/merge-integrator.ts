@@ -27,12 +27,22 @@ export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 /** v1.1 pins exactly one merge method (SPEC D4). */
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
-export const INTEGRATOR_STEP_INDEX = 12;
-export const DIRECT_INTEGRATOR_STEP_INDEX = 7;
+/**
+ * The canonical templates are versioned by their persisted name.  The node
+ * ordinal remains part of the binding, so keep the old ordinals available for
+ * the exact legacy-v1 identities below rather than accepting an index by
+ * itself.
+ */
+export const INTEGRATOR_STEP_INDEX = 13;
+export const DIRECT_INTEGRATOR_STEP_INDEX = 8;
+export const LEGACY_INTEGRATOR_STEP_INDEX = 12;
+export const LEGACY_DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
 export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
 export const DIRECT_INTEGRATOR_TEMPLATE_NAME = "direct-engineer-workflow";
+export const LEGACY_INTEGRATOR_TEMPLATE_NAME = `${INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
+export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
 export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
 export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
 export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-human-12-`;
@@ -68,7 +78,7 @@ const templateNameOf = (step: NonNullable<IntegratorStepShape>): string | null =
   step.taskTemplate?.name ?? step.taskTemplateName ?? null;
 
 /**
- * The canonical step-12 shape. All three facts are required: an outputKind alone
+ * The canonical step-13 shape. All three facts are required: an outputKind alone
  * is client-influenceable through a doctored template, and a stepIndex alone
  * collides with any other template that happens to use the same step index.
  */
@@ -81,15 +91,22 @@ export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean =>
 };
 
 /**
- * Runtime recognition includes the one historical shape the seed can mark
- * during a 10 -> 12 rollover. It is deliberately narrower than "step 10" or
- * "merge-result": only a seed-minted legacy template identity qualifies.
+ * Runtime recognition includes the exact legacy-v1 identities produced when
+ * canonical sync preserves the old seven-/twelve-step templates, as well as
+ * the older seed-marked rollover identities. It is deliberately narrower than
+ * "step 12" or "merge-result": only a known template identity qualifies.
  */
 export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
   if (!step) return false;
   const templateName = templateNameOf(step);
   return isCanonicalIntegratorStep(step)
-    || (step.stepIndex === INTEGRATOR_STEP_INDEX
+    || (step.stepIndex === LEGACY_INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName === LEGACY_INTEGRATOR_TEMPLATE_NAME)
+    || (step.stepIndex === LEGACY_DIRECT_INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME)
+    || (step.stepIndex === LEGACY_INTEGRATOR_STEP_INDEX
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX) === true)
     || (step.stepIndex === 10

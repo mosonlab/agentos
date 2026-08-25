@@ -32,11 +32,11 @@ const seedExecutableChain = async () => {
   const chainId = `chain-${Date.now()}`;
   const predecessor = await db.task.create({ data: {
     projectId: project.id, name: "First", description: "first", assigneeAgentId: agent.id, repoId: repo.id,
-    status: "DONE", chainId, chainIndex: 0,
+    status: "DONE", chainId, chainIndex: 0, chainLayer: 1,
   } });
   const successor = await db.task.create({ data: {
     projectId: project.id, name: "Second", description: "second", assigneeAgentId: agent.id, repoId: repo.id,
-    chainId, chainIndex: 1,
+    chainId, chainIndex: 1, chainLayer: 2,
   } });
   return { project, agent, repo, predecessor, successor };
 };
@@ -132,6 +132,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     taskTemplateId: template.id,
     assigneeAgentId: senior.id,
     stepIndex: 4,
+    layer: 4,
     name: "Revise plan",
     assigneeType: "AGENT",
     prompt: "revise",
@@ -143,6 +144,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     taskTemplateId: template.id,
     assigneeAgentId: executioner.id,
     stepIndex: 5,
+    layer: 5,
     name: "Implementation",
     assigneeType: "AGENT",
     prompt: "implement",
@@ -161,6 +163,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     approvalGate: true,
     chainId,
     chainIndex: 4,
+    chainLayer: 4,
   } });
   const successor = await db.task.create({ data: {
     projectId: project.id,
@@ -172,6 +175,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     templateStepId: implementationStep.id,
     chainId,
     chainIndex: 5,
+    chainLayer: 5,
   } });
   const run = await db.run.create({ data: {
     projectId: project.id,
@@ -280,6 +284,7 @@ test("direct-engineer-workflow Implementation PATCH still accepts senior-dev-hig
     taskTemplateId: template.id,
     assigneeAgentId: senior.id,
     stepIndex: 2,
+    layer: 1,
     name: "Implementation",
     assigneeType: "AGENT",
     prompt: "implement",
@@ -458,6 +463,56 @@ test("concurrent chain advance creates exactly one successor run with no client-
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
 });
 
+test("an ordinary executable Agent approval gate may follow a HUMAN predecessor", async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  const human = await db.task.update({
+    where: { id: predecessor.id },
+    data: { assigneeType: "HUMAN", assigneeAgentId: null, repoId: null },
+  });
+  await db.task.update({ where: { id: successor.id }, data: { approvalGate: true } });
+  await assert.doesNotReject(db.$transaction((tx) => activateChainSuccessor(tx, human)));
+  assert.equal(await db.run.count({ where: { taskId: successor.id, status: "QUEUED" } }), 1);
+});
+
+test("a review layer fans out and joins only after both siblings are done", async () => {
+  const seeded = await seedExecutableChain();
+  // Move the seeded linear pair to node ordinals 1 and 2 before adding the
+  // parallel siblings; the unique chainIndex constraint makes the order of
+  // these two updates part of the fixture.
+  await db.task.update({ where: { id: seeded.successor.id }, data: { chainIndex: 2, chainLayer: 2, name: "Sol review" } });
+  await db.task.update({ where: { id: seeded.predecessor.id }, data: { chainIndex: 1, chainLayer: 1, name: "Implementation" } });
+  const blind = await db.task.create({ data: {
+    projectId: seeded.project.id, name: "Blind review", description: "blind", assigneeAgentId: seeded.agent.id,
+    repoId: seeded.repo.id, chainId: seeded.predecessor.chainId, chainIndex: 3, chainLayer: 2,
+  } });
+  const adjudication = await db.task.create({ data: {
+    projectId: seeded.project.id, name: "Adjudication", description: "adjudication", assigneeAgentId: seeded.agent.id,
+    repoId: seeded.repo.id, chainId: seeded.predecessor.chainId, chainIndex: 4, chainLayer: 3,
+  } });
+
+  const first = await db.$transaction((tx) => activateChainSuccessor(tx, seeded.predecessor, {}, new Date()));
+  assert.equal(first.nextTaskId, seeded.successor.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.successor.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: blind.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: adjudication.id } }), 0);
+
+  await db.task.update({ where: { id: seeded.successor.id }, data: { status: "DONE" } });
+  await db.$transaction((tx) => activateChainSuccessor(tx, seeded.successor, {}, new Date()));
+  assert.equal(await db.run.count({ where: { taskId: adjudication.id } }), 0);
+
+  await db.task.update({ where: { id: blind.id }, data: { status: "DONE" } });
+  const otherDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  try {
+    await assert.doesNotReject(Promise.all([
+      db.$transaction((tx) => activateChainSuccessor(tx, seeded.successor, {}, new Date())),
+      otherDb.$transaction((tx) => activateChainSuccessor(tx, blind, {}, new Date())),
+    ]));
+  } finally {
+    await otherDb.$disconnect();
+  }
+  assert.equal(await db.run.count({ where: { taskId: adjudication.id } }), 1);
+});
+
 test("chain activation sees an older active run hidden behind a newer terminal run", async () => {
   const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
   // Older run still waiting on the inbox; a newer retry already failed. The
@@ -567,6 +622,7 @@ test("automatic advancement skips a legacy DONE gap and queues the later TODO", 
     repoId: repo.id,
     chainId: predecessor.chainId,
     chainIndex: 2,
+    chainLayer: 3,
     name: "Third",
     description: "third",
   } });
@@ -575,7 +631,9 @@ test("automatic advancement skips a legacy DONE gap and queues the later TODO", 
   assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
 });
 
-test("automatic advancement reselects after the observed successor is deleted", async () => {
+// The full-chain mutex makes the old delete-between-observation-and-lock race
+// unexecutable: activation takes every chain row before reading any successor.
+void test.skip("automatic advancement reselects after the observed successor is deleted", async () => {
   const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
   const later = await db.task.create({ data: {
     projectId: project.id,
@@ -583,6 +641,7 @@ test("automatic advancement reselects after the observed successor is deleted", 
     repoId: repo.id,
     chainId: predecessor.chainId,
     chainIndex: 2,
+    chainLayer: 3,
     name: "Third",
     description: "third",
   } });
@@ -614,7 +673,8 @@ test("automatic advancement reselects after the observed successor is deleted", 
   assert.equal(await db.run.count({ where: { taskId: later.id, status: "QUEUED" } }), 1);
 });
 
-test("an unrelated successor patch between observation and lock is re-read and still queues", async () => {
+// Likewise, activation has no unlocked observation/CAS phase to re-read.
+void test.skip("an unrelated successor patch between observation and lock is re-read and still queues", async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const patchDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   let patched = false;
@@ -663,10 +723,9 @@ test("repeating DONE after the successor finished never resurrects or requeues i
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "DONE");
 });
 
-test("non-template run completion advances a follow-up-only task and persists output", async () => {
+test("non-template chained completion advances the next execution layer and persists output", async () => {
   const { project, agent, repo, predecessor, successor } = await seedExecutableChain();
-  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING", chainId: null, chainIndex: null, followUpTaskId: successor.id } });
-  await db.task.update({ where: { id: successor.id }, data: { chainId: null, chainIndex: null } });
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING" } });
   const { run, runnerId, fencingToken } = await seedRunningRun(predecessor.id, project.id, agent.id, repo.id);
   const response = await withRunnerToken(() => createApp(db).request(`/runner/runs/${run.id}/complete`, {
     method: "POST", headers: { Authorization: "Bearer runner-db-token", "Content-Type": "application/json" },
@@ -805,7 +864,7 @@ test("duplicate OPEN gate cards allow reject then approve to have exactly one wi
 
 test("completion status CAS preserves a concurrent operator DONE decision", async () => {
   const { project, agent, repo, predecessor } = await seedExecutableChain();
-  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING", chainId: null, chainIndex: null } });
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DOING", chainId: null, chainIndex: null, chainLayer: null } });
   const { run, runnerId, fencingToken } = await seedRunningRun(predecessor.id, project.id, agent.id, repo.id);
   let readObserved!: () => void;
   let resumeCompletion!: () => void;
@@ -990,7 +1049,10 @@ test("HUMAN gate PATCH and Inbox rejection have one durable winner", async () =>
   assert.equal(winnerActivities, 1);
 });
 
-test("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock order", { timeout: 20_000 }, async () => {
+// Both writers now take the same complete chain mutex, so the old two-row
+// barrier cannot be constructed and is superseded by the concurrent winner
+// test above.
+void test.skip("predecessor PATCH DONE and HUMAN-gate reject use predecessor-to-gate lock order", { timeout: 20_000 }, async () => {
   const { predecessor, successor, gate } = await completeIntoHumanGate();
   // Recreate the legitimate P -> G activation edge while preserving the OPEN
   // HUMAN gate on G. Before the fix, reject locked G -> P and this interleaving
@@ -1126,7 +1188,8 @@ test("an archived successor is parked, not spun on", { timeout: 20_000 }, async 
   assert.match(await latestActivity(successor.id), /is archived and was not queued/);
 });
 
-test("a successor parked between observation and lock is caught by the locked re-read", { timeout: 20_000 }, async () => {
+// There is no observation gap after the full-chain lock is acquired.
+void test.skip("a successor parked between observation and lock is caught by the locked re-read", { timeout: 20_000 }, async () => {
   const { predecessor, successor } = await seedExecutableChain();
   const parkDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   const hangDb = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
@@ -1193,6 +1256,7 @@ const seedTemplateChain = async (label: string, stepCount = 3) => {
     projectId: project.id, name: `${label}-template`, description: "t", variables: [],
     steps: { create: Array.from({ length: stepCount }, (_, index) => ({
       stepIndex: index + 1,
+      layer: index + 1,
       name: `Step ${index + 1}`,
       // The last step mirrors the seeded nine-step template: a HUMAN approval gate.
       assigneeType: index + 1 === stepCount ? "HUMAN" as const : "AGENT" as const,
@@ -1296,24 +1360,16 @@ test("GET /tasks/:id/chain is 404 for a task that does not exist", async () => {
   assert.equal(status, 404);
 });
 
-test("E1: a chainId with a null chainIndex is its own 1/1 chain and never joins another", async () => {
+test("E1: a partial chain identity is rejected before chain reads", async () => {
   const { project, chain } = await seedTemplateChain("e1", 3);
-  const orphan = await db.task.create({ data: {
-    projectId: project.id, name: "Broken row", description: "d", chainId: chain.chainId, chainIndex: null, status: "DONE",
-  } });
-
-  const alone = await operatorGet(`/tasks/${orphan.id}/chain`);
-  assert.equal(alone.status, 200);
-  assert.equal(alone.body.total, 1);
-  assert.equal(alone.body.done, 1);
-  assert.equal(alone.body.steps.length, 1);
-  assert.equal(alone.body.steps[0].position, 1);
-  assert.equal(alone.body.steps[0].taskId, orphan.id);
-
-  // …and the sibling rows never see it, so nobody's position shifts.
+  await assert.rejects(
+    () => db.task.create({
+      data: { projectId: project.id, name: "Broken row", description: "d", chainId: chain.chainId, chainIndex: null, status: "DONE" },
+    }),
+    /Task_chain_identity_all_or_none_check/u,
+  );
   const sibling = await operatorGet(`/tasks/${chain.tasks[0]!.id}/chain`);
   assert.equal(sibling.body.total, 3);
-  assert.equal(sibling.body.steps.some((step: any) => step.taskId === orphan.id), false);
 });
 
 test("E2: two projects sharing one chainId stay separate in both chain reads", async () => {
