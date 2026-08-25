@@ -25,6 +25,8 @@ export type RunnerConfig = {
   heartbeatIntervalMs: number;
   path: string;
   home: string;
+  /** Optional operator-selected gate worker exposed to agent sessions. */
+  gateServer?: string;
   /** Proxy variables captured once, when the daemon starts. */
   proxyEnvironment?: NodeJS.ProcessEnv;
   /** Repository-owned baseline used to provision Codex session config roots. */
@@ -69,10 +71,19 @@ const positiveInteger = (name: string, value: string): number => {
   return parsed;
 };
 
+const optionalSshDestination = (name: string, value: string | undefined): string | undefined => {
+  if (value === undefined) return undefined;
+  if (!/^[A-Za-z0-9._@-]+$/u.test(value) || value.startsWith("-")) {
+    throw new Error(`${name} must be an ssh host alias or user@host`);
+  }
+  return value;
+};
+
 export const loadRunnerConfig = (): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
   const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
   const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
+  const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
   // First, and before this function returns anything a caller could dial: the
   // runner's own index.ts builds the client, the preflight and the poll loop out
   // of this object, so a destination refused here is refused before any DNS
@@ -88,6 +99,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
     path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
+    ...(gateServer ? { gateServer } : {}),
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,
