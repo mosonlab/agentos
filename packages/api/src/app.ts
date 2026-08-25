@@ -4820,6 +4820,23 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           if (grantedEnvironmentVariables.has(envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
           grantedEnvironmentVariables.add(envVar);
         }
+        const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
+        if (adjudicationTask) {
+          // Adjudication consumes evidence owned by sibling Tasks. Hold the
+          // candidate Run first, then the sole complete-chain mutex, and only
+          // validate the pinned range and reports after both locks are held.
+          // Every sibling status/output writer takes that same chain mutex, so
+          // the evidence cannot change between validation and the claim CAS.
+          await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${candidate.id} FOR UPDATE`;
+          const lockedRun = await tx.run.findUnique({
+            where: { id: candidate.id },
+            select: { status: true, leaseGeneration: true, taskId: true },
+          });
+          if (lockedRun?.status !== RunStatus.QUEUED
+            || lockedRun.leaseGeneration !== candidate.leaseGeneration
+            || lockedRun.taskId !== candidate.task.id) continue;
+          if (!await lockTaskMutationRows(tx, candidate.task.id)) continue;
+        }
         let implementationRange: Awaited<ReturnType<typeof pinnedImplementationRange>>;
         try {
           implementationRange = await pinnedImplementationRange(tx, candidate.task);
@@ -4909,8 +4926,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
         if (won.count !== 1) continue;
-        await lockTaskMutationRows(tx, candidate.task.id);
-        const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
+        if (!adjudicationTask) await lockTaskMutationRows(tx, candidate.task.id);
         const priorResume = !adjudicationTask && candidate.session?.resumeInput && candidate.session.providerConversationId ? {
           providerConversationId: candidate.session.providerConversationId,
           input: candidate.session.resumeInput,
@@ -6427,7 +6443,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       if (!run) return { error: "Run not found", code: 404 as const };
       if (body.parkTask && !run.taskId) return { error: "Run has no Task to park", code: 409 as const };
-      const parkTarget = body.parkTask && run.taskId ? await lockTask(tx, run.taskId) : null;
+      const parkTarget = body.parkTask && run.taskId ? await lockTaskMutationRows(tx, run.taskId) : null;
       if (body.parkTask && run.taskId && !parkTarget) return { error: "Task not found", code: 404 as const };
       if (parkTarget && parkTarget.archivedAt !== null) {
         return { error: "Cannot park an archived task", code: 409 as const };

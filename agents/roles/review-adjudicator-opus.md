@@ -41,4 +41,3 @@ the apply-fixes node and must be durable before the Run completes.
 
 Never write or commit a review report or session record to the checkout, and
 never launch a nested review subprocess.
-

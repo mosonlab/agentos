@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, lockChainRows, PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -342,6 +342,74 @@ test("adjudication claim succeeds only after both immutable reports match the pi
   });
   assert.equal(operatorRewrite.status, 409);
   assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } })).body, originalSol.body);
+});
+
+test("adjudication claim holds the full-chain mutex from evidence validation through claim", { timeout: 20_000 }, async () => {
+  const { template, repo } = await seedCanonicalTemplate();
+  const adjudication = await queueCanonicalStep(template, repo.id, 8);
+  const headSha = adjudication.run.targetBranch!;
+  const sol = await prepareReviewReport(adjudication.chain, 6, "sol-findings", headSha);
+  await prepareReviewReport(adjudication.chain, 7, "blind-findings", headSha);
+  assert.ok(sol.task.chainId);
+
+  const claimClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  const mutationClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let evidenceRead!: () => void;
+  let releaseClaim!: () => void;
+  const evidenceWasRead = new Promise<void>((resolve) => { evidenceRead = resolve; });
+  const claimMayProceed = new Promise<void>((resolve) => { releaseClaim = resolve; });
+  let intercepted = false;
+  const instrumentedClaimClient = new Proxy(claimClient, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const taskStepOutput = new Proxy(tx.taskStepOutput, { get(outputTarget, outputProperty, outputReceiver) {
+        if (outputProperty !== "findMany") return Reflect.get(outputTarget, outputProperty, outputReceiver);
+        return async (...args: any[]) => {
+          const rows = await Reflect.apply(outputTarget.findMany, outputTarget, args);
+          const query = args[0] as { select?: { body?: boolean } } | undefined;
+          if (!intercepted && query?.select?.body === true) {
+            intercepted = true;
+            evidenceRead();
+            await claimMayProceed;
+          }
+          return rows;
+        };
+      } });
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        return txProperty === "taskStepOutput" ? taskStepOutput : Reflect.get(txTarget, txProperty, txReceiver);
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+
+  const claimResponse = createApp(instrumentedClaimClient).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "adjudication-race-runner", leaseSeconds: 60 }),
+  });
+  try {
+    await evidenceWasRead;
+    await assert.rejects(
+      mutationClient.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
+        await lockChainRows(tx, { projectId: sol.task.projectId, chainId: sol.task.chainId! });
+        await tx.task.update({ where: { id: sol.task.id }, data: { status: "REVIEW" } });
+      }),
+      /lock timeout|55P03|Raw query failed/iu,
+    );
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: sol.task.id } })).status, "DONE");
+    releaseClaim();
+    const response = await claimResponse;
+    assert.equal(response.status, 200, await response.text());
+    assert.equal((await db.run.findUniqueOrThrow({ where: { id: adjudication.run.id } })).status, "CLAIMED");
+  } finally {
+    releaseClaim();
+    await Promise.resolve(claimResponse).catch(() => undefined);
+    await Promise.all([claimClient.$disconnect(), mutationClient.$disconnect()]);
+  }
 });
 
 test("Direct and Full adjudication persistence requires exact union dispositions and must-fix ids", async () => {
