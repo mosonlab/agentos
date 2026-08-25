@@ -16,9 +16,18 @@
 #                       drifted, or cleanup did not complete
 #   3  NOT AUTHORITATIVE the run was asked to leave state behind, so it may not
 #                       be used to authorise a merge even if every step passed
+#  76  GATE NOT RUN     a step was stopped from outside before it could be
+#                       judged, so no verdict about this commit exists
+# 130  GATE NOT RUN     the gate itself was interrupted (SIGINT), reported under
+# 143                   the signal that stopped it (SIGTERM)
+#
+# 1 is the only code that says the commit was judged and did not pass. A run
+# that was killed judged nothing, and must not hand its caller a FAIL: a
+# reviewer who records that string records a judgement nothing made.
 #
 # The last line of output is one of MERGE GATE: PASS <oid> / FAIL / NOT
-# AUTHORITATIVE, and a PASS always names the commit it is a statement about.
+# AUTHORITATIVE, or GATE NOT RUN: <reason> when the run was stopped rather than
+# finished. A PASS always names the commit it is a statement about.
 #
 # The gate owns its own throwaway PostgreSQL: it starts a container, binds it to
 # a loopback ephemeral port, and deletes it on the way out. There is deliberately
@@ -116,11 +125,12 @@ BUILD_CACHE_MAX_ENTRIES=32
 
 EXIT_FAIL=1
 EXIT_NOT_AUTHORITATIVE=3
+EXIT_NO_VERDICT=76
 
 usage() {
   # No gate ran, so the EXIT trap must not print a verdict.
   trap - EXIT
-  sed -n '2,61p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -169,6 +179,10 @@ GATED_HEAD=""
 GATE_PROFILE="full"
 FAILED_STEP=""
 STEP_REPORT=()
+# Set only when the run was stopped rather than decided. It is what turns the
+# last line into GATE NOT RUN instead of a FAIL nothing formed.
+NO_VERDICT_REASON=""
+NO_VERDICT_EXIT="${EXIT_NO_VERDICT}"
 
 # --- plumbing ---------------------------------------------------------------
 
@@ -272,6 +286,16 @@ cleanup() {
     for line in "${STEP_REPORT[@]}"; do printf '   %s\n' "${line}"; done
   fi
 
+  # Before the FAIL branch, because a run that was stopped reaches it with a
+  # non-zero status and a FAILED_STEP naming wherever it happened to be, and
+  # would otherwise print a judgement about the commit that nothing formed.
+  if [ -n "${NO_VERDICT_REASON}" ]; then
+    printf '\n\033[33mGATE NOT RUN: %s\033[0m\n' \
+      "${NO_VERDICT_REASON}${cleanup_error:+; ${cleanup_error}}"
+    printf 'Nothing judged %s. Re-run the gate; this is not a FAIL.\n' "${GATED_HEAD:-this commit}"
+    exit "${NO_VERDICT_EXIT}"
+  fi
+
   if [ "${status}" -ne 0 ] || [ -n "${FAILED_STEP}" ]; then
     printf '\n\033[31mMERGE GATE: FAIL (%s)\033[0m\n' "${FAILED_STEP:-unknown}"
     exit "${EXIT_FAIL}"
@@ -300,16 +324,52 @@ trap cleanup EXIT
 # Ctrl-C and `kill` have to run cleanup too, or an interrupted gate leaves its lock
 # and its container behind and the next run in this worktree has to reclaim both.
 # Exiting from the handler is what routes the signal through the EXIT trap.
-trap 'exit 130' INT
-trap 'exit 143' TERM
+#
+# What the handler records is the other half of it. A gate that is stopped mid
+# step arrives at cleanup with a non-zero status and a FAILED_STEP naming the
+# step it was in, which is indistinguishable from that step having failed. It
+# did not fail; it never finished. Naming the signal here is what lets the EXIT
+# trap say so.
+interrupted() {
+  NO_VERDICT_REASON="the gate was stopped by SIG${1}${FAILED_STEP:+ during ${FAILED_STEP}}"
+  NO_VERDICT_EXIT="$2"
+  exit "$2"
+}
+trap 'interrupted INT 130' INT
+trap 'interrupted TERM 143' TERM
+
+# A step that was stopped from outside against one that failed on its own. The
+# first set is what an operator, a supervisor or the OOM killer sends: nothing
+# was learned about the commit, so the run has no verdict to give. A crash the
+# step produced itself (SIGSEGV, SIGABRT, SIGBUS, SIGFPE) is the code under test
+# behaving badly and stays a FAIL, which is the direction this is allowed to be
+# wrong in: it never converts a real failure into an errand.
+stopped_from_outside() {
+  case "$1" in
+    129 | 130 | 131 | 137 | 143) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+record_stop() {
+  NO_VERDICT_REASON="${1} was stopped before it could be judged"
+  NO_VERDICT_EXIT="${EXIT_NO_VERDICT}"
+}
 
 step() {
   local label="$1"; shift
   say "${label}"
   local started; started=$(date +%s)
   FAILED_STEP="${label}"
-  if ! ( cd "${REPO_ROOT}" && "$@" ); then
-    STEP_REPORT+=("FAIL  ${label}")
+  local status=0
+  ( cd "${REPO_ROOT}" && "$@" ) || status=$?
+  if [ "${status}" -ne 0 ]; then
+    if stopped_from_outside "${status}"; then
+      STEP_REPORT+=("STOP  ${label}")
+      record_stop "${label}"
+    else
+      STEP_REPORT+=("FAIL  ${label}")
+    fi
     return 1
   fi
   STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${label}" "$(( $(date +%s) - started ))")")
@@ -379,7 +439,7 @@ terminate_group_steps() {
 
 parallel_steps() {
   local title="$1"; shift
-  local -a labels=() serialized=() pids=() statuses=() logs=() current=() failures=()
+  local -a labels=() serialized=() pids=() statuses=() logs=() current=() failures=() stopped=()
   local token index slot seconds
 
   for token in "$@" "${GATE_STEP_SEPARATOR}"; do
@@ -429,8 +489,11 @@ parallel_steps() {
     note "started ${labels[index]}"
   done
 
+  # The member's own status, not a flattened 1: 128+N is how a member that was
+  # killed is told apart from one that ran and failed, and the difference is
+  # whether this group has a verdict at all.
   for ((index=0; index<${#labels[@]}; index++)); do
-    if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=1; fi
+    if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=$?; fi
   done
   GATE_GROUP_PIDS=()
 
@@ -446,15 +509,27 @@ parallel_steps() {
     [ -n "${seconds}" ] || seconds="?"
     if [ "${statuses[index]}" -eq 0 ]; then
       STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${labels[index]}" "${seconds}")")
+    elif stopped_from_outside "${statuses[index]}"; then
+      STEP_REPORT+=("$(printf 'STOP  %-42s %4ss' "${labels[index]}" "${seconds}")")
+      stopped+=("${labels[index]}")
     else
       STEP_REPORT+=("$(printf 'FAIL  %-42s %4ss' "${labels[index]}" "${seconds}")")
       failures+=("${labels[index]}")
     fi
   done
 
+  # A member that ran and failed is a judgement about the commit and outranks a
+  # member that was stopped: the gate did learn something, and burying that
+  # under "no verdict" would let a real FAIL be re-dispatched as an errand.
   if [ "${#failures[@]}" -gt 0 ]; then
     FAILED_STEP="$(printf '%s, ' "${failures[@]}")"
     FAILED_STEP="${FAILED_STEP%, }"
+    return 1
+  fi
+  if [ "${#stopped[@]}" -gt 0 ]; then
+    FAILED_STEP="$(printf '%s, ' "${stopped[@]}")"
+    FAILED_STEP="${FAILED_STEP%, }"
+    record_stop "${FAILED_STEP}"
     return 1
   fi
   FAILED_STEP=""
@@ -1228,6 +1303,24 @@ done
 if overlaps "${RUNNER_WORKSPACE_ROOT}" "${FILES_ROOT}"; then
   die "RUNNER_WORKSPACE_ROOT and FILES_ROOT overlap"
 fi
+
+# The same isolation for the variables that change what the suites do rather
+# than where they write. AGENTOS_GATE_SERVER is the one that proved it matters:
+# a session configured to reach a gate worker exports it, gate-dispatch.sh reads
+# it as "one server, no fallback", and the gate-worker fixtures then wait out
+# their dispatcher's timeout for a slot that cannot open — a host setting
+# deciding the outcome of a test about topology. Everything this gate needs from
+# that namespace has already been read into GATE_* and POSTGRES_IMAGE above, so
+# unsetting the namespace here costs the gate nothing.
+say "Isolating the host gate configuration the suites could inherit"
+for var in $(compgen -e || true); do
+  case "${var}" in
+    AGENTOS_GATE_* | GATE_DISPATCH_*)
+      unset "${var}"
+      note "unset ${var}"
+      ;;
+  esac
+done
 
 # --- throwaway postgres -----------------------------------------------------
 

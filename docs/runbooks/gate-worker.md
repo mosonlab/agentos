@@ -168,8 +168,8 @@ so neither can produce a `1` of its own.
 | `2` | usage error | no gate ran |
 | `3` | `MERGE GATE: NOT AUTHORITATIVE` | yes |
 | `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
-| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, or `merge-gate.sh` died without printing a verdict | no gate ran |
-| `130` / `143` | interrupted | no gate ran |
+| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
+| `130` / `143` | interrupted — `merge-gate.sh` prints `GATE NOT RUN: <reason>` and exits under the signal that stopped it | no gate ran |
 | `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
 | `255` | ssh transport failure from direct `remote-gate.sh`; the dispatcher consumes this and tries its fallback | no gate ran |
 
@@ -191,7 +191,9 @@ Every code below `128` carries a matching stdout line, so a caller may read
 either: a verdict line starts `MERGE GATE:`, and everything that ran no gate
 starts `GATE NOT RUN:` or `GATE DISPATCH:`. The exception is a gate killed by a
 signal it cannot handle. `merge-gate.sh` traps `INT` and `TERM` and prints
-through its `EXIT` trap, so `130` and `143` still say what happened, but `SIGKILL`
+`GATE NOT RUN: <reason>` through its `EXIT` trap, so `130` and `143` still say
+what happened — and say it as the absence of a verdict, because a gate that was
+stopped mid-step judged nothing about the commit it was stopped on. `SIGKILL`
 cannot be trapped: a gate the OOM killer takes produces `137` and **no stdout
 line at all**. Read a missing verdict line as "no verdict", never as a pass —
 `128+N` with silence is the one case where the code is the only evidence.

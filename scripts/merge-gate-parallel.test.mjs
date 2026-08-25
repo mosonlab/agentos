@@ -1,10 +1,16 @@
-// Fixtures for parallel_steps in scripts/merge-gate.sh.
+// Fixtures for parallel_steps and for the verdict cleanup prints, both in
+// scripts/merge-gate.sh.
 //
 // The gate runs its steps in concurrent groups, and a parallel group is where
 // the two properties a verdict depends on are normally lost: that every failure
 // is reported, and that the report says which step each result belongs to. Both
 // are invisible on a green run, so they are tested here rather than inferred
 // from gates that happened to pass.
+//
+// The third property is that a run which was stopped does not report a verdict.
+// A gate killed mid-step used to print MERGE GATE: FAIL naming whichever step it
+// was in, so a reviewer reading that line recorded a judgement about the commit
+// that nothing had formed. Nothing about it is visible on a green run either.
 //
 // The function is extracted from merge-gate.sh and run for real. Re-typing it
 // into a fixture would test a copy, and the copy is the one thing that cannot
@@ -26,8 +32,16 @@ const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 // silently exercising nothing.
 const extractParallelSteps = () => {
   const source = readFileSync(gatePath, "utf8");
-  const start = source.indexOf('GATE_STEP_SEPARATOR="::"');
-  assert.notEqual(start, -1, "merge-gate.sh no longer defines GATE_STEP_SEPARATOR");
+  // From the stop classifier rather than from the separator: what a member's
+  // exit status means is part of what this group reports, so the fixture must
+  // run the gate's own classification and not a copy of it.
+  const start = source.indexOf("\nstopped_from_outside() {");
+  assert.notEqual(start, -1, "merge-gate.sh no longer defines stopped_from_outside");
+  assert.notEqual(
+    source.indexOf('GATE_STEP_SEPARATOR="::"', start),
+    -1,
+    "merge-gate.sh no longer defines GATE_STEP_SEPARATOR after the stop classifier",
+  );
   const bodyStart = source.indexOf("\nparallel_steps() {", start);
   assert.notEqual(bodyStart, -1, "merge-gate.sh no longer defines parallel_steps");
   const end = source.indexOf("\n}\n", bodyStart);
@@ -47,6 +61,9 @@ say() { printf '\\n== %s\\n' "$1"; }
 note() { printf '   %s\\n' "$1"; }
 STEP_REPORT=()
 FAILED_STEP=""
+EXIT_NO_VERDICT=76
+NO_VERDICT_REASON=""
+NO_VERDICT_EXIT=76
 GATE_TMP="$1"
 REPO_ROOT="$2"
 ${PARALLEL_STEPS}
@@ -66,6 +83,7 @@ const runGroup = (members) => {
         `for line in "\${STEP_REPORT[@]:-}"; do printf '%s\\n' "$line"; done\n` +
         `printf 'REPORT-END\\n'\n` +
         `printf 'FAILED_STEP=%s\\n' "$FAILED_STEP"\n` +
+        `printf 'NO_VERDICT=%s\\n' "$NO_VERDICT_REASON"\n` +
         `exit "$status"\n`,
     );
     const result = spawnSync("bash", [script, root, root], { encoding: "utf8" });
@@ -75,7 +93,8 @@ const runGroup = (members) => {
       .split("\n")
       .filter((line) => line.trim() !== "");
     const failedStep = /^FAILED_STEP=(.*)$/m.exec(stdout)?.[1] ?? "";
-    return { status: result.status, stdout, stderr: result.stderr ?? "", report, failedStep };
+    const noVerdict = /^NO_VERDICT=(.*)$/m.exec(stdout)?.[1] ?? "";
+    return { status: result.status, stdout, stderr: result.stderr ?? "", report, failedStep, noVerdict };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -142,11 +161,133 @@ test("PARALLEL-DURATION charges each member for its own time, not the wait befor
   assert.ok(seconds <= 1, `the quick member should not be charged for the slow one: ${quick}`);
 });
 
+test("PARALLEL-STOPPED a member killed from outside is not a FAIL", () => {
+  // The incident this exists for: an operator killed the process tree of a gate
+  // that had deadlocked, and the gate reported MERGE GATE: FAIL naming the
+  // group. Nothing in that group judged the commit — it was stopped — and a
+  // reviewer who copies that line records a verdict that was never formed.
+  const run = runGroup(`"a group" "good" true :: "killed" sh -c 'kill -TERM $$; sleep 30'`);
+  assert.equal(run.status, 1);
+  assert.equal(run.failedStep, "killed");
+  assert.match(run.noVerdict, /^killed was stopped before it could be judged$/);
+  assert.equal(run.report.filter((line) => line.startsWith("STOP")).length, 1);
+  assert.equal(run.report.filter((line) => line.startsWith("FAIL")).length, 0);
+});
+
+test("PARALLEL-STOPPED a member that crashed on its own is still a FAIL", () => {
+  // The boundary. SIGSEGV is the code under test behaving badly, not an
+  // operator stopping the run, and treating it as "no verdict" would let a real
+  // failure be re-dispatched as an errand until somebody read the log.
+  const run = runGroup(`"a group" "crashed" sh -c 'kill -SEGV $$; sleep 30'`);
+  assert.equal(run.status, 1);
+  assert.equal(run.failedStep, "crashed");
+  assert.equal(run.noVerdict, "");
+  assert.equal(run.report.filter((line) => line.startsWith("FAIL")).length, 1);
+});
+
+test("PARALLEL-STOPPED a real failure outranks a member that was stopped", () => {
+  // The gate did learn something about the commit, so the run has a verdict and
+  // the stopped member does not erase it.
+  const run = runGroup(
+    `"a group" "bad" false :: "killed" sh -c 'kill -TERM $$; sleep 30'`,
+  );
+  assert.equal(run.status, 1);
+  assert.equal(run.failedStep, "bad");
+  assert.equal(run.noVerdict, "");
+});
+
 test("PARALLEL-USAGE refuses a member with no command", () => {
   const run = runGroup(`"a group" "label only"`);
   assert.notEqual(run.status, 0);
   // Usage errors go to stderr, where every other refusal in the gate puts them.
   assert.match(run.stderr, /names no command/);
+});
+
+// --- the verdict cleanup prints ---------------------------------------------
+
+// cleanup() and the signal handlers, run for real against stubbed teardown. The
+// question these answer is only ever "which last line, and which code", so the
+// container, the lock and the temp directory are stubs; nothing they do changes
+// the answer.
+const extractVerdict = () => {
+  const source = readFileSync(gatePath, "utf8");
+  const start = source.indexOf("\ncleanup() {");
+  assert.notEqual(start, -1, "merge-gate.sh no longer defines cleanup");
+  const endMarker = "trap 'interrupted TERM 143' TERM";
+  const end = source.indexOf(endMarker, start);
+  assert.notEqual(end, -1, "merge-gate.sh no longer routes TERM through interrupted");
+  return source.slice(start, end + endMarker.length);
+};
+
+const VERDICT_HARNESS = `
+set -uo pipefail
+say() { printf '\\n== %s\\n' "$1"; }
+note() { printf '   %s\\n' "$1"; }
+terminate_group_steps() { :; }
+discard_gate_tmp() { :; }
+release_lock() { :; }
+KEEP_POSTGRES=0
+POSTGRES_STARTED=0
+CONTAINER=stub
+STEP_REPORT=()
+FAILED_STEP=""
+GATED_HEAD=abc123
+EXIT_FAIL=1
+EXIT_NOT_AUTHORITATIVE=3
+EXIT_NO_VERDICT=76
+NO_VERDICT_REASON=""
+NO_VERDICT_EXIT=76
+${extractVerdict()}
+`;
+
+const runVerdict = (scenario) => {
+  const root = mkdtempSync(join(tmpdir(), "merge-gate-verdict."));
+  try {
+    const script = join(root, "verdict.sh");
+    writeFileSync(script, `${VERDICT_HARNESS}\n${scenario}\n`);
+    const result = spawnSync("bash", [script], { encoding: "utf8" });
+    return { status: result.status, stdout: result.stdout ?? "" };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
+
+test("VERDICT an interrupted gate reports the absence of a verdict, not a FAIL", () => {
+  // The defect in full: the signal arrives while a step is in flight, so
+  // cleanup sees a non-zero status and a FAILED_STEP naming that step, which
+  // reads exactly like the step having failed. It did not fail. It never
+  // finished, and 143 is the code that says so.
+  const run = runVerdict(`FAILED_STEP="the suites"\nkill -TERM $$\nsleep 30`);
+  assert.equal(run.status, 143);
+  assert.match(run.stdout, /GATE NOT RUN: the gate was stopped by SIGTERM during the suites/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: FAIL/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: PASS/);
+});
+
+test("VERDICT a stopped step exits 76, the code that means no gate judged this", () => {
+  const run = runVerdict(
+    `NO_VERDICT_REASON="the suites was stopped before it could be judged"\n` +
+      `FAILED_STEP="the suites"\nexit 1`,
+  );
+  assert.equal(run.status, 76);
+  assert.match(run.stdout, /GATE NOT RUN: the suites was stopped before it could be judged/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: FAIL/);
+});
+
+test("VERDICT a step that really failed is still a FAIL naming it", () => {
+  // The direction this must not be wrong in: nothing above may turn a judgement
+  // the gate did form into an errand.
+  const run = runVerdict(`FAILED_STEP="a step"\nexit 1`);
+  assert.equal(run.status, 1);
+  assert.match(run.stdout, /MERGE GATE: FAIL \(a step\)/);
+  assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
+});
+
+test("VERDICT a clean run still passes and still names its commit", () => {
+  const run = runVerdict(`exit 0`);
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /MERGE GATE: PASS abc123/);
+  assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
 });
 
 test("PARALLEL-INTERRUPT stops members still running before the gate tears down", async () => {
