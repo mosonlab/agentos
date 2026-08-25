@@ -34,16 +34,19 @@ recomputed that same variable moments later, and the bound silently never took
 effect while both logs claimed it had.
 
 Measured on the 12-vCPU, 20 GiB desktop worker at capacity two, 2026-08-25.
-A single full gate is about **130 seconds** end to end with a build-cache miss —
-which is every ordinary new commit — and about **116 seconds** on an exact-head
-cache hit. The serial predecessor was 241 seconds. Two overlapping full gates
-take about **181 seconds each**, against 270 seconds before, with a 7.58 GiB
-peak and 12.00 GiB still available, and no leaked container, scratch database,
-worktree or lock. The install-free `docs-only` profile still takes about 4
-seconds.
+A single full gate is about **122 seconds** end to end with a build-cache miss —
+which is every ordinary new commit. The serial predecessor was 241 seconds. Two
+overlapping full gates take about **175 seconds each**, against 270 seconds
+before, with a 7.58 GiB peak and 12.00 GiB still available, and no leaked
+container, scratch database, worktree or lock. On the 4-vCPU fallback worker at
+capacity one a full gate is about **252 seconds**, against 367 before; that one
+was run three times in a row, 3/3 PASS, because the risk in the proof waves is
+flakiness rather than latency and one green run does not measure it. The
+install-free `docs-only` profile still takes about 4 seconds.
 
-Within a gate the proof waves are now the whole cost: roughly 86 seconds against
-27 for lint and 26 for a cold build. Widening the database lanes does not move
+Within a gate the proof waves are now the whole cost: 83 seconds for the
+database tests and 53 for the unit tests, running together, against 27 for lint
+and 26 for a cold build. Widening the database lanes does not move
 it — 4, 6 and 8 lanes all landed within 3 seconds of each other over one fixed
 commit — because the waves saturate PostgreSQL and the CPU share together rather
 than running out of lanes. `NODE_COMPILE_CACHE` was measured and rejected: 80
