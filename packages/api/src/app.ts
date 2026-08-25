@@ -4761,6 +4761,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           projectId: candidate.projectId,
           repoId: candidate.repo.id,
           runId: candidate.id,
+          runNumber: candidate.runNumber,
           branch: candidate.branch,
           outputKind: candidate.task.templateStep?.outputKind ?? null,
         });

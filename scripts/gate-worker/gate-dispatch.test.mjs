@@ -429,6 +429,34 @@ test("the remote path receives the exact candidate and frozen baseline", (t) => 
   assert.match(result.stderr, new RegExp(`remote args: .*${repo.head} --master ${repo.head}`));
 });
 
+test("origin HEAD discovery retries transient git failures before dispatch", (t) => {
+  const repo = fixtureRepo(t, {});
+  const shim = scratch(t);
+  const counter = join(shim, "ls-remote-count");
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const gitShim = join(shim, "git");
+  writeFileSync(gitShim, `#!/usr/bin/env bash
+if [ "$1" = "-C" ] && [ "$3" = "ls-remote" ]; then
+  count=0
+  [ ! -f "$GATE_GIT_COUNTER" ] || count="$(cat "$GATE_GIT_COUNTER")"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$GATE_GIT_COUNTER"
+  [ "$count" -gt 2 ] || exit 1
+fi
+exec "$REAL_GIT" "$@"
+`);
+  chmodSync(gitShim, 0o755);
+  const result = dispatch(t, repo, [repo.head], {
+    PATH: `${shim}:${process.env.PATH}`,
+    REAL_GIT: realGit,
+    GATE_GIT_COUNTER: counter,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(counter, "utf8").trim(), "4");
+  assert.match(result.stderr, /origin HEAD read failed; retrying attempt=2\/3/u);
+  assert.match(result.stderr, /origin HEAD read failed; retrying attempt=3\/3/u);
+});
+
 test("a configured single server is consumed by the dispatcher before child tools", (t) => {
   const repo = fixtureRepo(t, {
     mirrorPush: 'test -z "${AGENTOS_GATE_SERVER:-}"; test "$1" = agentos-gate; printf "MIRROR PUSH: OK\\n"',

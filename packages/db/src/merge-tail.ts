@@ -97,6 +97,10 @@ export type RegressionRepairHandoff = {
     outputKind: string;
     outputBody: string;
   };
+  retry?: {
+    previousRunId: string;
+    startHeadSha: string;
+  };
 };
 
 export type ResolverResult =
