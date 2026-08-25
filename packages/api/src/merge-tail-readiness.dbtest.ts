@@ -16,7 +16,12 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
-beforeEach(async () => { await resetTestDb(db); });
+const releasedChainLeases: string[] = [];
+const releaseChainLease = async (chainId: string) => { releasedChainLeases.push(chainId); };
+beforeEach(async () => {
+  releasedChainLeases.length = 0;
+  await resetTestDb(db);
+});
 after(async () => { await db.$disconnect(); });
 
 const HEAD = "a".repeat(40);
@@ -203,7 +208,7 @@ test("a conflict resolution that edits existing test lines opens the same review
 test("base drift invalidates a head-bound PASS and returns the chain to regression", async () => {
   const seeded = await seedReadiness();
   const driftedBase = "d".repeat(40);
-  assert.deepEqual(await readinessTick(db, reader([], snapshot({ baseSha: driftedBase }))), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
   const [readiness, regression] = await Promise.all([
     db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
     db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
@@ -211,6 +216,7 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.equal(readiness.status, TaskStatus.TODO);
   assert.equal(regression.status, TaskStatus.TODO);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+  assert.deepEqual(releasedChainLeases, [], "base drift requeue keeps the chain lease");
 });
 
 test("ordinary base requeue reuses an approved exact-head review", async () => {
@@ -277,10 +283,12 @@ test("an incomplete compare response and a behind head fail closed", async () =>
     readPullRequest: async () => snapshot(),
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: false, files: maxFiles }),
   };
-  assert.deepEqual(await readinessTick(db, incompleteReader), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
+  assert.deepEqual(await readinessTick(db, incompleteReader, new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
   assert.match((await db.task.findUniqueOrThrow({ where: { id: incomplete.readiness.id } })).failureReason ?? "", /completeness/u);
+  assert.deepEqual(releasedChainLeases, [incomplete.readiness.chainId]);
 
   await resetTestDb(db);
+  releasedChainLeases.length = 0;
   const behind = await seedReadiness();
   const behindReader: GitHubReader = {
     readPullRequest: async () => snapshot(),
@@ -288,6 +296,7 @@ test("an incomplete compare response and a behind head fail closed", async () =>
   };
   assert.deepEqual(await readinessTick(db, behindReader), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: behind.regression.id } })).status, TaskStatus.TODO);
+  assert.deepEqual(releasedChainLeases, []);
 });
 
 test("an absent runner-created PR identity stops loudly before authorization", async () => {
@@ -295,8 +304,9 @@ test("an absent runner-created PR identity stops loudly before authorization", a
   await db.run.updateMany({ where: { taskId: seeded.regression.id }, data: {
     pullRequestNumber: null, pullRequestUrl: null,
   } });
-  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
   assert.match((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).failureReason ?? "", /pull-request target/u);
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
 });
 
 test("manual start cannot turn server-owned readiness into a model run", async () => {

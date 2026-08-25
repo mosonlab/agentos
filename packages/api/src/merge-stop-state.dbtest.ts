@@ -29,7 +29,11 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
-beforeEach(async () => { await resetTestDb(db); });
+const releasedChainLeases: string[] = [];
+beforeEach(async () => {
+  releasedChainLeases.length = 0;
+  await resetTestDb(db);
+});
 after(async () => { await db.$disconnect(); });
 
 const OPERATOR = "operator-stop-state";
@@ -59,7 +63,9 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   process.env.MERGE_EXECUTOR_TOKEN = EXECUTOR;
   process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
   try {
-    const response = await createApp(db).request(path, {
+    const response = await createApp(db, {
+      releaseMergeLease: async (chainId) => { releasedChainLeases.push(chainId); },
+    }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -134,6 +140,7 @@ test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, ques
   assert.equal(activities.filter((row) => (row.metadata as any)?.kind === MERGE_INTEGRATOR_KIND.result).length, 1);
   assert.equal(activities.filter((row) => row.body.includes("Chain complete")).length, 0);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), 1, "no automatic retry");
+  assert.deepEqual(releasedChainLeases, [chain.integratorTask!.chainId]);
 });
 
 test("a legacy integrator base-drift stop retains an abandon-only manual exit", async () => {
@@ -296,6 +303,7 @@ test("a merged outcome advances the chain and lands DONE", async () => {
   assert.equal((await completeRun(run)).status, 200);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, "DONE");
   assert.equal(await stopQuestionFor(chain.integratorTask!.id), null);
+  assert.deepEqual(releasedChainLeases, [chain.integratorTask!.chainId]);
 });
 
 test("N19 no generic exit from a stop: PATCH, retry and enqueue are all refused", async () => {

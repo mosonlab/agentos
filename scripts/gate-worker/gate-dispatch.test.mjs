@@ -775,6 +775,54 @@ test("merge lease acquire is mutually exclusive and release removes the lease", 
   assert.match(status.stdout, /no lease held/u);
 });
 
+test("merge lease acquire is reentrant only for the same task", (t) => {
+  const fixture = leaseFixture(t);
+  const first = runLease(
+    fixture,
+    ["acquire", "--reason", "First chain tail", "--task", "chain-42"],
+    "first@fixture",
+  );
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  const original = readLease(fixture);
+
+  const reentrant = runLease(
+    fixture,
+    ["acquire", "--reason", "Retried chain tail", "--task", "chain-42", "--timeout-minutes", "0"],
+    "second@fixture",
+  );
+  assert.equal(reentrant.status, 0, reentrant.stdout + reentrant.stderr);
+  assert.match(reentrant.stdout, /already held for task chain-42/u);
+  assert.deepEqual(readLease(fixture), original, "reentry must not rewrite the lease object");
+
+  const other = runLease(
+    fixture,
+    ["acquire", "--reason", "Other chain tail", "--task", "chain-43", "--timeout-minutes", "0"],
+    "second@fixture",
+  );
+  assert.equal(other.status, 75, other.stdout + other.stderr);
+  assert.deepEqual(readLease(fixture), original);
+});
+
+test("merge lease task release ignores holder identity and skips a different task", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Chain tail", "--task", "chain-42"],
+    "runner@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const original = readLease(fixture);
+
+  const skipped = runLease(fixture, ["release", "--task", "chain-43"], "api@fixture");
+  assert.equal(skipped.status, 0, skipped.stdout + skipped.stderr);
+  assert.match(skipped.stdout, /release skipped/u);
+  assert.deepEqual(readLease(fixture), original);
+
+  const released = runLease(fixture, ["release", "--task", "chain-42"], "api@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  assert.match(runLease(fixture, ["status"]).stdout, /no lease held/u);
+});
+
 test("merge lease release refuses a caller that does not hold the lease", (t) => {
   const fixture = leaseFixture(t);
   const held = {

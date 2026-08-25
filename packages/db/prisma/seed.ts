@@ -2,7 +2,12 @@ import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, TaskStatus } from
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
-import { legacyTemplateShapeRefusal, type PersistedTransitionStep } from "../src/canonical-template-transition.js";
+import {
+  isPreChainLeaseTemplate,
+  legacyChainLeaseTemplateName,
+  legacyTemplateShapeRefusal,
+  type PersistedTransitionStep,
+} from "../src/canonical-template-transition.js";
 import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -206,6 +211,12 @@ const main = async (): Promise<void> => {
     });
     const legacyCanonical = existing
       && legacyTemplateShapeRefusal(INTEGRATOR_TEMPLATE_NAME, existing.steps as unknown as PersistedTransitionStep[]) === "legacy";
+    const preChainLease = existing
+      && isPreChainLeaseTemplate(
+        INTEGRATOR_TEMPLATE_NAME,
+        existing.steps as unknown as PersistedTransitionStep[],
+        templateSteps,
+      );
     const historicalIntegrator = existing?.steps.find((step) => step.stepIndex === 10);
     const isHistoricalNineStepTemplate = existing?.steps.length === HISTORICAL_NINE_STEP_CONTRACT.length
       && HISTORICAL_NINE_STEP_CONTRACT.every(([stepIndex, agentName, assigneeType, outputKind, approvalGate], index) => {
@@ -234,7 +245,7 @@ const main = async (): Promise<void> => {
       && existing.steps[11]?.outputKind === "merge-authorization"
       && existing.steps[12]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
       && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
-    if (existing && isRegressionFirstThirteenStepTemplate) {
+    if (existing && (isRegressionFirstThirteenStepTemplate || preChainLease)) {
       const unfinishedTasks = await tx.task.count({
         where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
       });
@@ -261,6 +272,8 @@ const main = async (): Promise<void> => {
       ? legacyHumanTwelveStepTemplateName(existing.id)
       : existing && isRegressionFirstThirteenStepTemplate
       ? legacyRegressionFirstThirteenStepTemplateName(existing.id)
+      : existing && preChainLease
+      ? legacyChainLeaseTemplateName(INTEGRATOR_TEMPLATE_NAME, existing.id)
       : existing && isHistoricalNineStepTemplate
       ? legacyNineStepTemplateName(existing.id)
       : existing && isHistoricalTenStepTemplate
@@ -338,8 +351,29 @@ const main = async (): Promise<void> => {
   });
   const legacyDirect = historicalDirect
     && legacyTemplateShapeRefusal(DIRECT_TEMPLATE_NAME, historicalDirect.steps as unknown as PersistedTransitionStep[]) === "legacy";
-  if (legacyDirect) {
-    const legacyName = LEGACY_CANONICAL_TEMPLATE_NAMES.get(DIRECT_TEMPLATE_NAME)!;
+  const preChainLeaseDirect = historicalDirect
+    && isPreChainLeaseTemplate(
+      DIRECT_TEMPLATE_NAME,
+      historicalDirect.steps as unknown as PersistedTransitionStep[],
+      directTemplateSteps,
+    );
+  if (preChainLeaseDirect) {
+    const unfinishedTasks = await prisma.task.count({
+      where: { templateId: historicalDirect.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+    });
+    if (unfinishedTasks > 0) {
+      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+    }
+    if (historicalDirect.webhookSecretId !== null || historicalDirect.webhookRepoId !== null
+      || historicalDirect.webhookPayloadMapping !== null || historicalDirect.webhookPausedAt !== null
+      || historicalDirect.webhookReplayWindowSec !== null) {
+      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+    }
+  }
+  if (legacyDirect || preChainLeaseDirect) {
+    const legacyName = preChainLeaseDirect
+      ? legacyChainLeaseTemplateName(DIRECT_TEMPLATE_NAME, historicalDirect.id)
+      : LEGACY_CANONICAL_TEMPLATE_NAMES.get(DIRECT_TEMPLATE_NAME)!;
     const collision = await prisma.taskTemplate.findUnique({
       where: { projectId_name: { projectId: project.id, name: legacyName } },
       select: { id: true },
@@ -355,12 +389,12 @@ const main = async (): Promise<void> => {
       data: { name: `${DIRECT_TEMPLATE_NAME}-legacy-human-6-${historicalDirect.id}` },
     });
   }
-  if (historicalDirect && !legacyDirect
+  if (historicalDirect && !legacyDirect && !preChainLeaseDirect
     && historicalDirect.steps.length !== directTemplateSteps.length
     && historicalDirect.steps.length !== 6) {
     throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: expected ${directTemplateSteps.length} steps, found ${historicalDirect.steps.length}`);
   }
-  if (historicalDirect && !legacyDirect && historicalDirect.steps.length === directTemplateSteps.length
+  if (historicalDirect && !legacyDirect && !preChainLeaseDirect && historicalDirect.steps.length === directTemplateSteps.length
     && historicalDirect.steps.some((step, index) => step.stepIndex !== index + 1)) {
     throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
   }

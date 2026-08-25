@@ -155,9 +155,10 @@ export const instantiateTemplate = async (
           }
         }
         const tasks = [];
+        const promptVariables = { ...input.variables, chainId };
         for (const step of template.steps) {
           const context = [
-            interpolate(step.prompt, input.variables),
+            interpolate(step.prompt, promptVariables),
             input.description ? `\nFeature brief:\n${input.description}` : "",
             step.attachmentsFromPrevious ? "\nRead the prior template steps' persisted outputs before working." : "",
             `\nPersist the final ${step.outputKind} output for this step through the AgentOS task output endpoint.`,

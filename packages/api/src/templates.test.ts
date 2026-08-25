@@ -45,7 +45,7 @@ test("instantiating the canonical feature template copies every layer and writes
       id: `step-${contract.stepIndex}`,
       stepIndex: contract.stepIndex,
       name: `Step ${contract.stepIndex}`,
-      prompt: `Work on {{branchName}} step ${contract.stepIndex}`,
+      prompt: `Work on {{branchName}} in chain {{chainId}} step ${contract.stepIndex}`,
       outputKind: contract.outputKind,
       attachmentsFromPrevious: contract.attachmentsFromPrevious,
       assigneeType: agent ? AssigneeType.AGENT : AssigneeType.HUMAN,
@@ -117,6 +117,7 @@ test("instantiating the canonical feature template copies every layer and writes
   assert.equal(result.tasks.length, 13);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
   assert.deepEqual(created.map((task) => task.chainLayer), canonicalTemplateSteps.map((step) => step.layer));
+  assert.ok(created.every((task) => task.description.includes(`chain ${result.chainId}`)), "chainId is a built-in template variable");
   assert.ok(created.every((task) => typeof task.chainLayer === "number"));
   assert.equal(created[11]!.assigneeType, AssigneeType.AGENT);
   assert.equal(created[11]!.approvalGate, false);

@@ -117,6 +117,11 @@ import {
   reviewAdjudicationClaimRefusal,
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
+import {
+  releaseMergeLease,
+  releaseMergeLeaseSafely,
+  type MergeLeaseReleaser,
+} from "./merge-lease.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
   nextStoredCliAvailability,
@@ -172,6 +177,7 @@ type AppEnvironment = { Variables: { principal: Principal } };
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
+  releaseMergeLease?: MergeLeaseReleaser;
 }
 
 type DbTx = Prisma.TransactionClient;
@@ -1733,6 +1739,7 @@ const goalInclude = {
 
 export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEnvironment> => {
   const app = new Hono<AppEnvironment>();
+  const releaseChainLease = options.releaseMergeLease ?? releaseMergeLease;
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
   const runners = createRunnerRegistry();
   // Authentication circuits are global backend state, so only one daemon must
@@ -5793,6 +5800,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           })
         : null;
+      const reviewRegression = typeof reviewMarker?.regressionTaskId === "string"
+        ? await tx.task.findUnique({
+            where: { id: reviewMarker.regressionTaskId },
+            select: { chainId: true },
+          })
+        : null;
       const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
         && repairRegression.chainIndex === 11
         && repairRegression.templateStep?.stepIndex === 11
@@ -5825,6 +5838,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // row: a task's budget being edited mid-run must not retroactively refuse
       // an attempt already authorized.
       const budgetGrants = run.budgetGrants + refunded;
+      const tailLeaseChainId = run.task?.chainId ?? repairRegression?.chainId ?? reviewRegression?.chainId ?? null;
+      let releaseMergeLeaseTask: string | null = null;
       // Completion always mutates its Task, including terminal non-retryable
       // failures. Run is already locked above; acquire the Task/chain mutex now
       // for every outcome rather than only the branches that may retry or
@@ -5975,6 +5990,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
         retryCreated = true;
       }
+      if (!succeeded && !retryCreated && (mechanical
+        || run.task?.templateStep?.outputKind === "regression-verification"
+        || mergeTailAuxiliary)) {
+        releaseMergeLeaseTask = tailLeaseChainId;
+      }
       if (run.taskId) {
         const budgetExhausted = !succeeded && retryable && !retryCreated;
         let canonicalOutputFailure: string | null = null;
@@ -6027,6 +6047,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // may touch it, because a synthesized body would read as a merge that
         // never happened.
         if (succeeded && mechanical && run.task) {
+          releaseMergeLeaseTask = tailLeaseChainId;
           const persisted = await tx.taskStepOutput.findUnique({
             where: { taskId: run.taskId }, select: { kind: true, body: true },
           });
@@ -6100,6 +6121,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 reason: outputRefusal,
               },
             } });
+            if (run.task.templateStep?.outputKind === "regression-verification") {
+              releaseMergeLeaseTask = tailLeaseChainId;
+            }
           }
           canonicalOutputFailure = outputRefusal;
         }
@@ -6124,6 +6148,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             });
             if (result === "advance") {
               await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
+            } else {
+              releaseMergeLeaseTask = tailLeaseChainId;
             }
           } else {
             await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
@@ -6282,6 +6308,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           if (repairUnable || reviewRejected) {
             // The failed repair owns the stop; never activate its follow-up.
+            releaseMergeLeaseTask = tailLeaseChainId;
           } else if (run.task.approvalGate) {
             const claimed = await tx.task.updateMany({
               where: { id: run.taskId, status: completionTaskStatus! },
@@ -6367,7 +6394,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           update: { consecutiveAuthFailures: 0 },
         });
       }
-      return { taskId: run.taskId, succeeded, retryCreated, failureClass };
+      return { taskId: run.taskId, succeeded, retryCreated, failureClass, releaseMergeLeaseTask };
     // ReadCommitted lets successor CAS losers observe count=0 instead of
     // surfacing a serialization failure to runners. Every task status write
     // above has its own status CAS so concurrent operator decisions win.
@@ -6378,6 +6405,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
         : context.json({ error: "Stale fencing token" }, 409);
     }
+    await releaseMergeLeaseSafely(releaseChainLease, result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
     // Nothing is deleted here, or anywhere else in this process. The runner
     // removed its own workspace before it called /complete and reported the

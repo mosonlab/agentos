@@ -56,6 +56,12 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   }
   assert.equal(direct.some(({ agentName }) => agentName === "review-adjudicator-opus"), true);
   assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), true);
+  for (const steps of [direct, full]) {
+    const regression = steps.find(({ outputKind }) => outputKind === "regression-verification")!;
+    assert.match(regression.prompt, /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
+    assert.match(regression.prompt, /retry it up to three times/u);
+    assert.match(regression.prompt, /exits 75 or 76[\s\S]*up to two[\s\S]*more times/u);
+  }
 });
 
 test("missing layer frontmatter is refused by the source loader", async () => {

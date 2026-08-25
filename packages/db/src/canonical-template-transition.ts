@@ -1,4 +1,8 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { AssigneeType, Prisma } from "@prisma/client";
+
+import type { TemplateStepSource } from "./template-sources.js";
 
 /**
  * The two graphs that existed immediately before the layered review split.
@@ -48,6 +52,68 @@ export type PersistedTransitionStep = {
   spawnPolicy: Prisma.JsonValue;
   prompt: string;
   _count?: { tasks: number };
+};
+
+const LEASE_PROMPT_STEP = new Map([
+  ["compound-engineer-workflow", 11],
+  ["direct-engineer-workflow", 6],
+]);
+
+const LEASE_FETCH_PROMPT = `text. Refresh \`{{branchName}}\` onto it before reviewing: before the first fetch,
+acquire the chain merge lease with \`scripts/merge-lease.sh acquire --task {{chainId}} --reason "chain merge tail {{chainId}}"\`.
+An acquire timeout (exit 75) or any other acquire error fails the run loudly.
+Fetch \`origin/<run.pullRequestBase>\`; if it fails, retry it up to three times
+before failing the run loudly. Then record its exact 40-hex head as \`baseHeadSha\` and
+merge that commit into the checked-out chain branch with a normal merge commit.
+If Git reports a conflict, record both pre-refresh head SHAs,`;
+
+const PRE_LEASE_FETCH_PROMPT = `text. Refresh \`{{branchName}}\` onto it before reviewing: fetch
+\`origin/<run.pullRequestBase>\`, record its exact 40-hex head as \`baseHeadSha\`,
+then merge that commit into the checked-out chain branch with a normal merge
+commit. If Git reports a conflict, record both pre-refresh head SHAs,`;
+
+const DISPATCH_RETRY_PROMPT = `If dispatch exits 75 or 76 without a verdict, retry dispatch in place up to two
+more times. If all three attempts return a non-verdict exit, or dispatch returns
+any other non-verdict exit, report it through the activity log and fail the run
+loudly.
+`;
+
+export const previousChainLeasePrompt = (prompt: string): string => prompt
+  .replace(LEASE_FETCH_PROMPT, PRE_LEASE_FETCH_PROMPT)
+  .replace(DISPATCH_RETRY_PROMPT, "")
+  .replace(
+    "No other output shape advances the chain. A non-verdict gate exit is neither\nPASS nor FAIL.\n",
+    "No other output shape advances the chain. A non-verdict gate exit is neither\nPASS nor FAIL: report it through the activity log and fail the run loudly.\n",
+  );
+
+export const legacyChainLeaseTemplateName = (templateName: string, templateId: string): string =>
+  `${templateName}-legacy-pre-merge-lease-${templateId}`;
+
+export const isPreChainLeaseTemplate = (
+  templateName: string,
+  steps: readonly PersistedTransitionStep[],
+  canonical: readonly TemplateStepSource[],
+): boolean => {
+  const transitionIndex = LEASE_PROMPT_STEP.get(templateName);
+  if (!transitionIndex || steps.length !== canonical.length) return false;
+  const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
+  return ordered.every((step, index) => {
+    const expected = canonical[index];
+    if (!expected || step.stepIndex !== expected.stepIndex) return false;
+    const expectedPrompt = expected.stepIndex === transitionIndex
+      ? previousChainLeasePrompt(expected.prompt)
+      : expected.prompt;
+    return (step.assigneeAgent?.name ?? null) === expected.agentName
+      && step.assigneeType === (expected.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT)
+      && step.layer === expected.layer
+      && step.approvalGate === expected.approvalGate
+      && step.outputKind === expected.outputKind
+      && step.attachmentsFromPrevious === expected.attachmentsFromPrevious
+      && step.opensPullRequest === expected.opensPullRequest
+      && step.baseFromStepIndex === expected.baseFromStepIndex
+      && isDeepStrictEqual(step.spawnPolicy, expected.spawnPolicy)
+      && step.prompt === expectedPrompt;
+  });
 };
 
 const legacyShapeFor = (templateName: string): readonly (readonly [

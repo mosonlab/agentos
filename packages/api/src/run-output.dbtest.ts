@@ -32,7 +32,11 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
-beforeEach(async () => { await resetTestDb(db); });
+const releasedChainLeases: string[] = [];
+beforeEach(async () => {
+  releasedChainLeases.length = 0;
+  await resetTestDb(db);
+});
 after(async () => { await db.$disconnect(); });
 
 const OPERATOR = "operator-run-output";
@@ -61,7 +65,9 @@ const withTokens = async <T>(operation: () => T | Promise<T>): Promise<T> => {
 const call = async (
   method: string, path: string, token: string, body?: unknown,
 ): Promise<{ status: number; body: any }> => withTokens(async () => {
-  const response = await createApp(db).request(path, {
+  const response = await createApp(db, {
+    releaseMergeLease: async (chainId) => { releasedChainLeases.push(chainId); },
+  }).request(path, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -346,6 +352,64 @@ test("regression completion keeps final prose as Run.output but requires this ru
   const activities = await db.taskActivity.findMany({ where: { taskId: task.id }, orderBy: { createdAt: "asc" } });
   assert.ok(activities.some(({ body }) => body === nonVerdict), "the agent's original non-verdict activity was lost");
   assert.ok(activities.some(({ body }) => body === "Regression did not advance: missing regression output"));
+  assert.deepEqual(releasedChainLeases, [task.chainId]);
+});
+
+test("every authored Regression stop verdict releases its chain lease", async () => {
+  for (const verdict of [
+    { schemaVersion: 1, outcome: "refresh-conflict", headSha: SHA, baseHeadSha: "b".repeat(40), summary: "conflict" },
+    { schemaVersion: 1, outcome: "review-fail", headSha: SHA, baseHeadSha: "b".repeat(40), summary: "must-fix remains" },
+    { schemaVersion: 1, outcome: "gate-fail", headSha: SHA, baseHeadSha: "b".repeat(40), gateVerdict: "FAIL", summary: "gate failed" },
+  ] as const) {
+    releasedChainLeases.length = 0;
+    const { task } = await seedTask({
+      chained: true,
+      outputKind: "regression-verification",
+      templateName: DIRECT_TEMPLATE_NAME,
+      stepIndex: 6,
+    });
+    const runId = await enqueue(task.id);
+    const { run, sessionToken, fencingToken } = await claimRun(runId, `runner-${verdict.outcome}`);
+    const written = await call("PUT", `/session/runs/${runId}/output`, sessionToken, {
+      fencingToken,
+      kind: "regression-verification",
+      body: JSON.stringify(verdict),
+      commitSha: SHA,
+    });
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    const completed = await call(
+      "POST",
+      `/runner/runs/${runId}/complete`,
+      RUNNER,
+      succeededCompletion(`runner-${verdict.outcome}`, fencingToken, run.branch ?? "master"),
+    );
+    assert.equal(completed.status, 200, JSON.stringify(completed.body));
+    assert.deepEqual(releasedChainLeases, [task.chainId], verdict.outcome);
+  }
+});
+
+test("a canonical Regression output refusal releases its chain lease", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "regression-verification",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 6,
+  });
+  const runId = await enqueue(task.id);
+  const { run, fencingToken } = await claimRun(runId, "runner-canonical-refusal");
+  const completed = await call(
+    "POST",
+    `/runner/runs/${runId}/complete`,
+    RUNNER,
+    succeededCompletion("runner-canonical-refusal", fencingToken, run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.match((await db.task.findUniqueOrThrow({ where: { id: task.id } })).failureReason ?? "", /missing regression-verification task output/u);
+  const refusal = await db.taskActivity.findFirst({
+    where: { taskId: task.id, metadata: { path: ["kind"], equals: "canonicalTaskOutput.refusal" } },
+  });
+  assert.ok(refusal, "the stop is the canonical output refusal path");
+  assert.deepEqual(releasedChainLeases, [task.chainId]);
 });
 
 test("a runner too old to send an output completes exactly as it always did", async () => {
