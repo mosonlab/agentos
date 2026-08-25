@@ -64,7 +64,8 @@ const fixture = async (label: string) => {
       },
       {
         stepIndex: 2, layer: 2, name: "Two", assigneeType: AssigneeType.AGENT, assigneeAgentId: canonicalTwo.id,
-        prompt: "two {{chainId}}", outputKind: "result", approvalGate: true, opensPullRequest: false,
+        prompt: "two {{chainId}}", outputKind: "review-result", approvalGate: true,
+        attachmentsFromPrevious: true, opensPullRequest: false,
       },
       {
         stepIndex: 3, layer: 3, name: "Human", assigneeType: AssigneeType.HUMAN,
@@ -127,7 +128,11 @@ test("valid step override copies only the targeted assignee and leaves template 
     stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } },
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
-  const tasks = await db.task.findMany({ where: { chainId: created.body.chainId }, orderBy: { chainIndex: "asc" } });
+  const tasks = await db.task.findMany({
+    where: { chainId: created.body.chainId },
+    orderBy: { chainIndex: "asc" },
+    include: { templateStep: { select: { prompt: true, outputKind: true, attachmentsFromPrevious: true } } },
+  });
   assert.deepEqual(tasks.map((task) => task.assigneeAgentId), [seed.canonicalOne.id, seed.replacement.id, null]);
   assert.deepEqual(tasks.map((task) => task.assigneeType), [AssigneeType.AGENT, AssigneeType.AGENT, AssigneeType.HUMAN]);
   assert.deepEqual(tasks.map((task) => ({
@@ -141,6 +146,36 @@ test("valid step override copies only the targeted assignee and leaves template 
     { approvalGate: true, opensPullRequest: false, chainIndex: 2, chainLayer: 2, targetBranch: `agentos/${created.body.chainId}` },
     { approvalGate: false, opensPullRequest: true, chainIndex: 3, chainLayer: 3, targetBranch: `agentos/${created.body.chainId}` },
   ]);
+  const control = await request(seed.project.id, seed.template.id, {
+    repoId: seed.repo.id,
+    variables: {},
+    autoStart: false,
+  });
+  assert.equal(control.status, 201, JSON.stringify(control.body));
+  const controlTasks = await db.task.findMany({
+    where: { chainId: control.body.chainId },
+    orderBy: { chainIndex: "asc" },
+    include: { templateStep: { select: { prompt: true, outputKind: true, attachmentsFromPrevious: true } } },
+  });
+  const producedContract = (
+    task: typeof tasks[number],
+    chainId: string,
+  ) => ({
+    description: task.description.replaceAll(chainId, "<chainId>"),
+    prompt: task.templateStep?.prompt ?? null,
+    outputKind: task.templateStep?.outputKind ?? null,
+    attachmentsFromPrevious: task.templateStep?.attachmentsFromPrevious ?? null,
+    approvalGate: task.approvalGate,
+    opensPullRequest: task.opensPullRequest,
+    chainIndex: task.chainIndex,
+    chainLayer: task.chainLayer,
+    targetBranch: task.targetBranch?.replaceAll(chainId, "<chainId>") ?? null,
+  });
+  assert.deepEqual(
+    tasks.map((task) => producedContract(task, created.body.chainId)),
+    controlTasks.map((task) => producedContract(task, control.body.chainId)),
+    "assignee-only overrides must preserve every other instantiated step field",
+  );
   const afterTemplate = await db.taskTemplate.findUniqueOrThrow({
     where: { id: seed.template.id },
     include: { steps: { orderBy: { stepIndex: "asc" } } },

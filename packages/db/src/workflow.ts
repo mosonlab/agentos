@@ -1019,17 +1019,6 @@ const dispatchBoundSuccessor = async (
   }) as BoundSuccessor | null;
   if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
 
-  if (!predecessorTerminal) {
-    await parkBoundSuccessor(
-      tx,
-      predecessor,
-      successor,
-      "bound predecessor is no longer terminal; successor was not queued",
-      { predecessorTerminal: false },
-    );
-    return;
-  }
-
   // A second completion/replay can arrive after the first transaction has
   // committed its Run. Treat that as an idempotent observation, not as a
   // refusal that would overwrite the successfully queued task with REVIEW.
@@ -1056,6 +1045,16 @@ const dispatchBoundSuccessor = async (
       predecessor,
       successor,
       `successor ${successor.name} is ${successor.status}; it was not queued`,
+    );
+    return;
+  }
+  if (!predecessorTerminal) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      "bound predecessor is no longer terminal; successor was not queued",
+      { predecessorTerminal: false },
     );
     return;
   }
@@ -1291,13 +1290,16 @@ const activateChainSuccessorInternal = async (
     .sort((left, right) => left - right)
     .find((value) => chainRows.some((row) => layerOf(row) === value && row.status !== TaskStatus.DONE));
   if (nextLayer === undefined) {
-    await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
+    const predecessorComplete = chainRows.every((row) => row.status === TaskStatus.DONE);
+    if (!boundSuccessor || predecessorComplete) {
+      await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
+    }
     // Archiving a predecessor does not resolve its binding. Production routes
     // cannot complete an archived task, but retaining this check also keeps
     // legacy/directly-seeded rows inert instead of dispatching from archived
     // history when an activation replay is attempted.
     if (boundSuccessor && current.archivedAt === null) {
-      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, true);
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, predecessorComplete);
     }
     return { nextTaskId: null, gated: false };
   }

@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { PrismaClient } from "@agentos/db";
+import { PrismaClient, TaskStatus } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -109,6 +109,15 @@ const instantiate = async (seed: Fixture, autoStart = false) => {
   return db.task.findMany({ where: { chainId: result.body.chainId }, orderBy: { chainIndex: "asc" } });
 };
 
+const patchTaskStatus = async (taskId: string, status: TaskStatus): Promise<Response> => createApp(db).request(
+  `/tasks/${taskId}`,
+  {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  },
+);
+
 const rowCounts = async () => ({
   tasks: await db.task.count(),
   activities: await db.taskActivity.count(),
@@ -175,6 +184,34 @@ test("afterTaskId binds only the first of thirteen tasks and writes both audit r
   });
   assert.equal((predecessorActivity.metadata as { chainId: string }).chainId, response.body.chainId);
   assert.equal((predecessorActivity.metadata as { successorChainId: string }).successorChainId, response.body.chainId);
+});
+
+test("status PATCH cannot move an unresolved bound first task away from TODO", async () => {
+  const seed = await fixture("bound-status-patch");
+  for (const status of [TaskStatus.DOING, TaskStatus.DONE]) {
+    const predecessor = (await instantiate(seed)).at(-1)!;
+    const binding = await request(seed.project.id, seed.template.id, {
+      repoId: seed.repo.id,
+      variables: {},
+      afterTaskId: predecessor.id,
+    });
+    assert.equal(binding.status, 201, JSON.stringify(binding.body));
+    const first = await db.task.findFirstOrThrow({
+      where: { chainId: binding.body.chainId },
+      orderBy: { chainIndex: "asc" },
+    });
+
+    const response = await patchTaskStatus(first.id, status);
+    const responseBody = await response.json() as { error: string };
+    assert.equal(response.status, 409, JSON.stringify(responseBody));
+    assert.match(responseBody.error, new RegExp(predecessor.name, "u"));
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: first.id } })).status, TaskStatus.TODO);
+    assert.equal(await db.run.count({ where: { task: { chainId: binding.body.chainId } } }), 0);
+    assert.equal(
+      await db.task.count({ where: { chainId: binding.body.chainId, status: { not: TaskStatus.TODO } } }),
+      0,
+    );
+  }
 });
 
 test("afterTaskId plus autoStart is a schema refusal before any database write", async () => {

@@ -289,6 +289,41 @@ test("approval-gate approval dispatches a bound successor through the inbox comp
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
 
+test("run completion, approval, and operator DONE replay dispatch one run on the same binding", async () => {
+  const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
+  await db.task.update({ where: { id: fixture.predecessor.id }, data: { approvalGate: true } });
+  const running = await seedRunningPredecessor(fixture);
+
+  const completion = await createApp(db).request(`/runner/runs/${running.run.id}/complete`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(completionBody(running.runnerId, running.fencingToken)),
+  });
+  assert.equal(completion.status, 200, await completion.text());
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.predecessor.id } })).status, TaskStatus.REVIEW);
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 0);
+
+  const gate = await db.inboxMessage.findFirstOrThrow({
+    where: { gateTaskId: fixture.predecessor.id, status: "OPEN" },
+  });
+  const decision = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: gate.id,
+    externalEventId: `dispatch-three-entrypoints-${randomUUID()}`,
+    decision: "approve",
+  }), { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+  assert.equal(decision.gateAction, "approved");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.predecessor.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
+
+  const replay = await createApp(db).request(`/tasks/${fixture.predecessor.id}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ status: TaskStatus.DONE }),
+  });
+  assert.equal(replay.status, 200, await replay.text());
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
+});
+
 test("operator DONE dispatches a bound successor through the production PATCH route", async () => {
   const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
   const response = await createApp(db).request(`/tasks/${fixture.predecessor.id}`, {
@@ -329,6 +364,42 @@ test("dispatch waits for the terminal layer after failed and retried predecessor
 
   await db.task.update({ where: { id: fixture.predecessor.id }, data: { status: TaskStatus.DONE } });
   await db.$transaction((tx) => activateChainSuccessor(tx, fixture.predecessor, {}, new Date()));
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
+});
+
+test("a DONE terminal task with an unfinished lower layer parks instead of dispatching", async () => {
+  const fixture = await seedBinding({ predecessorLayers: 2 });
+  await db.task.update({ where: { id: fixture.firstPredecessor.id }, data: { status: TaskStatus.TODO } });
+
+  await db.$transaction((tx) => activateChainSuccessor(tx, fixture.predecessor, {}, new Date()));
+
+  const successor = await db.task.findUniqueOrThrow({ where: { id: fixture.successor.id } });
+  assert.equal(successor.status, TaskStatus.REVIEW);
+  assert.match(successor.failureReason ?? "", /bound predecessor is no longer terminal/u);
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 0);
+});
+
+test("a non-terminal replay cannot park an already dispatched live successor", async () => {
+  const fixture = await seedBinding();
+  await db.$transaction((tx) => activateChainSuccessor(tx, fixture.predecessor, {}, new Date()));
+  assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
+
+  await db.task.create({ data: {
+    projectId: fixture.project.id,
+    repoId: fixture.repo.id,
+    assigneeAgentId: fixture.agent.id,
+    name: "Later predecessor layer",
+    description: "added after the binding resolved",
+    chainId: fixture.predecessor.chainId,
+    chainIndex: 1,
+    chainLayer: 1,
+    status: TaskStatus.TODO,
+  } });
+  await db.$transaction((tx) => activateChainSuccessor(tx, fixture.predecessor, {}, new Date()));
+
+  const successor = await db.task.findUniqueOrThrow({ where: { id: fixture.successor.id } });
+  assert.equal(successor.status, TaskStatus.TODO);
+  assert.equal(successor.failureReason, null);
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
 

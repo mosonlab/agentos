@@ -1484,6 +1484,8 @@ type LockedTask = {
   archivedAt: Date | null;
   projectId: string;
   chainId: string | null;
+  dispatchAfterTaskId: string | null;
+  dispatchAfter: { name: string; status: TaskStatus } | null;
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   templateStep: {
@@ -1506,6 +1508,8 @@ const lockedTaskSelect = {
   archivedAt: true,
   projectId: true,
   chainId: true,
+  dispatchAfterTaskId: true,
+  dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,
   assigneeAgentId: true,
   templateStep: {
@@ -3679,6 +3683,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
+        }
+        if (locked.dispatchAfterTaskId !== null
+          && locked.dispatchAfter?.status !== TaskStatus.DONE
+          && body.status !== locked.status
+          && body.status !== TaskStatus.TODO) {
+          const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
+          return {
+            error: `Cannot change bound task status before predecessor ${predecessorName} is done`,
+            code: 409 as const,
+          };
         }
         // Task rows first, then the Agent row — the one global lock order.
         if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
