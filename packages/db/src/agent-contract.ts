@@ -4,7 +4,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "implementation-plan-executioner", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
-  { name: "librarian", model: "gpt-5.6-terra:high", runner: RunnerPreference.CODEX },
+  { name: "librarian", model: "gpt-5.6-luna:xhigh", runner: RunnerPreference.CODEX },
   // Not an LLM role. The sentinel Agent row step 12 binds so a mechanical run
   // can carry a non-null `Run.agentId` without presenting a second human gate.
   // `catalogRunnerForModel` returns null for this model, so the runner/model
@@ -14,13 +14,12 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "merge-resolver", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "plan-reviser", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "regression-verifier", model: "openai-codex/gpt-5.6-sol:medium", runner: RunnerPreference.PI },
+  { name: "regression-verifier", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:high", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "review-adjudicator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:high", runner: RunnerPreference.PI },
-  { name: "senior-dev", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
-  { name: "senior-dev-high", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
+  { name: "review-adjudicator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
+  { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
+  { name: "senior-dev", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
   { name: "spec", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
 ] as const;
@@ -39,10 +38,27 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
     to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
   }],
   ["review-coordinator-sol", {
-    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
-    to: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+    from: { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI },
+    to: { model: "openai-codex/gpt-5.6-sol:xhigh", runnerPreference: RunnerPreference.PI },
   }],
   ["implementation-plan-executioner", {
+    from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+  }],
+  // 2026-08-24 tier rulings: reviewed model/effort re-pins for uncustomized rows.
+  ["librarian", {
+    from: { model: "gpt-5.6-terra:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "gpt-5.6-luna:xhigh", runnerPreference: RunnerPreference.CODEX },
+  }],
+  ["regression-verifier", {
+    from: { model: "openai-codex/gpt-5.6-sol:medium", runnerPreference: RunnerPreference.PI },
+    to: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+  }],
+  ["review-adjudicator-opus", {
+    from: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+    to: { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE },
+  }],
+  ["senior-dev", {
     from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },
     to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
   }],

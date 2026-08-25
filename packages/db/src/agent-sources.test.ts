@@ -84,7 +84,7 @@ test("the loader exposes the blind and fresh adjudication review roles exactly o
   assert.equal(reviewRoles.filter(({ name }) => name === "review-adjudicator-opus").length, 1);
   const adjudicator = reviewRoles.find(({ name }) => name === "review-adjudicator-opus");
   assert.ok(adjudicator);
-  assert.equal(adjudicator.model, "claude-opus-5:medium");
+  assert.equal(adjudicator.model, "claude-opus-5:high");
   assert.equal(adjudicator.runnerPreference, RunnerPreference.CLAUDE);
   assert.match(adjudicator.rolePrompt, /fresh provider Session/u);
   assert.match(adjudicator.rolePrompt, /immutable `implementationBaseSha` and `implementationHeadSha`\s+values/u);

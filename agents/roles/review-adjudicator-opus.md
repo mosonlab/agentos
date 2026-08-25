@@ -1,7 +1,7 @@
 ---
 name: review-adjudicator-opus
-title: Review Adjudicator (Opus)
-model: claude-opus-5:medium
+title: Review Adjudicator
+model: claude-opus-5:high
 runner: claude
 inboxAccess: false
 collaborators: []

@@ -34,6 +34,11 @@ import {
   type PersistedTemplateStepStructure,
   templateStepStructureDifferences,
 } from "../src/template-sources.js";
+import {
+  isPrePlanDecisionsTemplate,
+  preDecisionsPlanPrompt,
+  type PersistedTransitionStep,
+} from "../src/canonical-template-transition.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 const prismaRoot = fileURLToPath(new URL("./", import.meta.url));
@@ -100,23 +105,32 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   }
   assert.deepEqual(canonical.get("review-adjudicator-opus"), {
     name: "review-adjudicator-opus",
+    model: "claude-opus-5:high",
+    runner: RunnerPreference.CLAUDE,
+  });
+  assert.deepEqual(canonical.get("review-coordinator"), {
+    name: "review-coordinator",
+    model: "openai-codex/gpt-5.6-sol:high",
+    runner: RunnerPreference.PI,
+  });
+  assert.deepEqual(canonical.get("review-coordinator-sol"), {
+    name: "review-coordinator-sol",
+    model: "openai-codex/gpt-5.6-sol:xhigh",
+    runner: RunnerPreference.PI,
+  });
+  assert.deepEqual(canonical.get("regression-verifier"), {
+    name: "regression-verifier",
     model: "claude-opus-5:medium",
     runner: RunnerPreference.CLAUDE,
   });
-  for (const name of ["review-coordinator", "review-coordinator-sol"] as const) {
-    assert.deepEqual(canonical.get(name), {
-      name,
-      model: "openai-codex/gpt-5.6-sol:high",
-      runner: RunnerPreference.PI,
-    });
-  }
-  assert.deepEqual(canonical.get("regression-verifier"), {
-    name: "regression-verifier",
-    model: "openai-codex/gpt-5.6-sol:medium",
-    runner: RunnerPreference.PI,
+  assert.deepEqual(canonical.get("librarian"), {
+    name: "librarian",
+    model: "gpt-5.6-luna:xhigh",
+    runner: RunnerPreference.CODEX,
   });
-  assert.deepEqual(canonical.get("senior-dev-high"), {
-    name: "senior-dev-high",
+  assert.equal(canonical.has("senior-dev-high"), false);
+  assert.deepEqual(canonical.get("senior-dev"), {
+    name: "senior-dev",
     model: "gpt-5.6-sol:high",
     runner: RunnerPreference.CODEX,
   });
@@ -175,11 +189,11 @@ test("the split review prompts enforce persisted-range, blindness, adjudication,
   assert.match(adjudicatorReview, /ADOPTED.*REJECTED.*MERGED/u);
   assert.match(adjudicatorReview, /one final immutable `must-fix` task output/u);
   assert.doesNotMatch(adjudicatorReview, /codex exec review/u);
-  assert.equal(frontmatterValue(adjudicatorReview, "model"), "claude-opus-5:medium");
+  assert.equal(frontmatterValue(adjudicatorReview, "model"), "claude-opus-5:high");
   assert.equal(frontmatterValue(adjudicatorReview, "runner"), "claude");
 
-  assert.equal(frontmatterValue(regressionVerification, "model"), "openai-codex/gpt-5.6-sol:medium");
-  assert.equal(frontmatterValue(regressionVerification, "runner"), "pi");
+  assert.equal(frontmatterValue(regressionVerification, "model"), "claude-opus-5:medium");
+  assert.equal(frontmatterValue(regressionVerification, "runner"), "claude");
   assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
   assert.match(regressionVerification, /complete persisted review package/u);
   assert.match(regressionVerification, /entire fix diff as one unit/u);
@@ -232,11 +246,57 @@ test("the canonical thirteen-step layered template sources split review and pres
   assert.match(compoundRegression, /documentation result/u);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
-  assert.match(templateSteps[1]!.prompt, /this run's id/u);
+  assert.match(templateSteps[1]!.prompt, /load-bearing decisions in `decisions\.md`/u);
+  assert.doesNotMatch(templateSteps[1]!.prompt, /sessions\.md|plan_authoring/u);
   assert.match(templateSteps[1]!.prompt, /chain-level evidence, including the repository Merge Gate, remains outside the slice set/u);
   assert.match(templateSteps[2]!.prompt, /merge or split decisions priced against frontier width/u);
-  assert.match(templateSteps[3]!.prompt, /run id labelled `plan_authoring`/u);
+  assert.match(templateSteps[3]!.prompt, /Start a fresh session — never resume the planning conversation/u);
+  assert.match(templateSteps[3]!.prompt, /rewrite its `decisions\.md` entry/u);
+  assert.doesNotMatch(templateSteps[3]!.prompt, /sessions\.md|plan_authoring|plan_revision/u);
   assert.match(templateSteps[4]!.prompt, /platform-pinned Implementation proof boundary/u);
+});
+
+test("the pre-decisions compound shape is recognized for rollover and the current shape is not", async () => {
+  const canonical = await loadTemplateStepSources();
+  const asPersisted = (prompt: (step: (typeof canonical)[number]) => string): PersistedTransitionStep[] =>
+    canonical.map((step) => ({
+      id: `step-${step.stepIndex}`,
+      taskTemplateId: "template-1",
+      stepIndex: step.stepIndex,
+      name: `Step ${step.stepIndex}`,
+      assigneeAgent: step.agentName ? { name: step.agentName } : null,
+      assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
+      layer: step.layer,
+      approvalGate: step.approvalGate,
+      outputKind: step.outputKind,
+      attachmentsFromPrevious: step.attachmentsFromPrevious,
+      opensPullRequest: step.opensPullRequest,
+      baseFromStepIndex: step.baseFromStepIndex,
+      spawnPolicy: step.spawnPolicy,
+      prompt: prompt(step),
+    }));
+
+  const preDecisions = asPersisted((step) => preDecisionsPlanPrompt(step.stepIndex, step.prompt));
+  // The reconstruction must actually rewrite steps 2 and 4; a silent no-op
+  // replace would strand every pre-decisions row at the prompt-mutation guard.
+  assert.notEqual(preDecisions[1]!.prompt, canonical[1]!.prompt);
+  assert.match(preDecisions[1]!.prompt, /run's id in `sessions\.md` under the label `plan_authoring`/u);
+  assert.notEqual(preDecisions[3]!.prompt, canonical[3]!.prompt);
+  assert.match(preDecisions[3]!.prompt, /Attempt to resume the planning session/u);
+  assert.match(preDecisions[3]!.prompt, /add this session's id under `plan_revision`/u);
+  assert.equal(isPrePlanDecisionsTemplate("compound-engineer-workflow", preDecisions, canonical), true);
+
+  const current = asPersisted((step) => step.prompt);
+  assert.equal(isPrePlanDecisionsTemplate("compound-engineer-workflow", current, canonical), false);
+
+  const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
+  const directPersisted = direct.map((step) => ({
+    ...asPersisted((s) => s.prompt)[0]!,
+    stepIndex: step.stepIndex,
+    assigneeAgent: step.agentName ? { name: step.agentName } : null,
+    prompt: step.prompt,
+  }));
+  assert.equal(isPrePlanDecisionsTemplate(DIRECT_TEMPLATE_NAME, directPersisted, direct), false);
 });
 
 test("only implementation opens a pull request, and the integrator is not a model row", async () => {
