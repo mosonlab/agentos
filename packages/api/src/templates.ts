@@ -14,6 +14,7 @@ import {
 } from "@agentos/db";
 
 import { isValidBranchName } from "./branch-name.js";
+import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
 
 export type InstantiateTemplateInput = {
   repoId: string;
@@ -24,22 +25,9 @@ export type InstantiateTemplateInput = {
   description?: string | undefined;
 };
 
-/** serialization_failure and deadlock_detected: both mean "retry the whole transaction". */
-const SERIALIZATION_SQLSTATE = new Set(["40001", "40P01"]);
-
 const retryableTransactionConflict = (error: unknown): boolean => {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
-  if (error.code === "P2034" || error.code === "P2002") return true;
-  // The Agent-row mutex below is a raw statement, and a raw statement that loses
-  // a serializable conflict comes back as P2010 with the SQLSTATE in meta rather
-  // than as the P2034 Prisma raises for its own query builder. Without this the
-  // conflict escapes as a 500 instead of retrying into the named archive error.
-  const sqlstate = (error.meta as { code?: unknown } | undefined)?.code;
-  return error.code === "P2010" && typeof sqlstate === "string" && SERIALIZATION_SQLSTATE.has(sqlstate);
-};
-
-const retryDelay = async (attempt: number): Promise<void> => {
-  await new Promise((resolve) => setTimeout(resolve, attempt * 10 + Math.floor(Math.random() * 25)));
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return true;
+  return isSerializationConflict(error);
 };
 
 const interpolate = (source: string, variables: Record<string, string>): string => source.replace(
@@ -211,7 +199,7 @@ export const instantiateTemplate = async (
       // make the accepted burst deterministic while still surfacing persistent
       // conflicts instead of looping forever.
       if (!retryableTransactionConflict(error) || attempt >= 12) throw error;
-      await retryDelay(attempt);
+      await serializationRetryDelay(attempt);
     }
   }
 };

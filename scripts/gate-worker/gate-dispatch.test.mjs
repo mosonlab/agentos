@@ -768,7 +768,7 @@ test("merge lease acquire is mutually exclusive and release removes the lease", 
   assert.equal(second.status, 75, second.stdout + second.stderr);
   assert.equal(readLease(fixture).lease.holder, "first@fixture");
 
-  const released = runLease(fixture, ["release"], "first@fixture");
+  const released = runLease(fixture, ["release", "--force"], "first@fixture");
   assert.equal(released.status, 0, released.stdout + released.stderr);
   const status = runLease(fixture, ["status"]);
   assert.equal(status.status, 0, status.stderr);
@@ -833,15 +833,65 @@ test("merge lease release refuses a caller that does not hold the lease", (t) =>
   };
   installLease(fixture, held);
 
-  const refused = runLease(fixture, ["release"], "stranger@fixture");
+  const refused = runLease(fixture, ["release", "--force"], "stranger@fixture");
   assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
   assert.match(refused.stderr, /held by holder@fixture, not stranger@fixture/u);
   assert.deepEqual(readLease(fixture).lease, held);
 
-  const released = runLease(fixture, ["release"], "holder@fixture");
+  const released = runLease(fixture, ["release", "--force"], "holder@fixture");
   assert.equal(released.status, 0, released.stdout + released.stderr);
   const status = runLease(fixture, ["status"]);
   assert.match(status.stdout, /no lease held/u);
+});
+
+test("merge lease release without --task is refused rather than freeing a sibling window", (t) => {
+  const fixture = leaseFixture(t);
+  // Both windows are the same user on the same machine, so the holder string is
+  // identical and cannot tell them apart. Only the task id can.
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Window A merge", "--task", "chain-42"],
+    "agent@mac",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const original = readLease(fixture);
+
+  const refused = runLease(fixture, ["release"], "agent@mac");
+  assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /release requires --task/u);
+  assert.deepEqual(readLease(fixture), original);
+});
+
+test("merge lease acquire restamps acquiredAt on every attempt while it queues", async (t) => {
+  const fixture = leaseFixture(t);
+  const blocking = {
+    holder: "blocker@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Long merge",
+    token: "blocker-token",
+  };
+  installLease(fixture, blocking);
+
+  const waiter = runLeaseAsync(
+    fixture,
+    ["acquire", "--reason", "Queued merge", "--task", "chain-99", "--poll-seconds", "1"],
+    "waiter@fixture",
+  );
+  // Let the first attempt lose and the poll loop turn over at least once, so the
+  // blob the winner installs is not the one it built at the head of the queue.
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  const queuedFor = Date.now();
+  execFileSync("git", ["--git-dir", fixture.origin, "update-ref", "-d", "refs/merge-lease/holder"], {
+    env: GIT_ENV,
+  });
+
+  const result = await waiter;
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const acquiredAt = Date.parse(readLease(fixture).lease.acquiredAt);
+  assert.ok(
+    acquiredAt >= queuedFor - 1000,
+    `acquiredAt ${new Date(acquiredAt).toISOString()} must be stamped when the lease was won, not when queueing began`,
+  );
 });
 
 test("merge lease status prints every field of the current holder", (t) => {

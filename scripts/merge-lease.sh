@@ -2,16 +2,20 @@
 #
 # Serialize the final merge window through one ref on origin:
 #
-#   scripts/merge-lease.sh acquire --reason "Merge PR #123" [--task task-id]
+#   scripts/merge-lease.sh acquire --reason "Merge PR #123" --task task-id
 #   scripts/merge-lease.sh status
-#   scripts/merge-lease.sh release
+#   scripts/merge-lease.sh release --task task-id
 #   scripts/merge-lease.sh steal --reason "Recover abandoned merge" [--human]
 #
 # Writing code and pushing a feature branch do not need this lease. Hold it only
 # while integrating the latest main, proving the exact candidate, and advancing
 # main. There is deliberately no heartbeat: a machine may steal a lease only
 # after 45 minutes, while a human may steal it immediately. Release removes only
-# a lease you hold; breaking somebody else's lease requires steal.
+# a lease you hold; breaking somebody else's lease requires steal. Release needs
+# --task because the default holder is user@host, which every agent window on
+# one machine shares: without a task only the machine is identified, so one
+# window would release another window's lease. Use --force to fall back to the
+# holder check when the acquiring task id is genuinely unknown.
 set -uo pipefail
 
 LEASE_REF="refs/merge-lease/holder"
@@ -25,10 +29,11 @@ COMMAND="${1:-}"
 REASON=""
 TASK=""
 HUMAN=0
+FORCE=0
 HOLDER="${MERGE_LEASE_HOLDER:-}"
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  sed -n '2,18p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -65,6 +70,7 @@ while [ $# -gt 0 ]; do
       shift ;;
     --timeout-minutes=*) TIMEOUT_MINUTES="${1#--timeout-minutes=}" ;;
     --human) HUMAN=1 ;;
+    --force) FORCE=1 ;;
     -h|--help) usage 0 ;;
     *) die "unknown argument: $1" 2 ;;
   esac
@@ -80,11 +86,18 @@ esac
 case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "--poll-seconds needs a positive number, got: $POLL_SECONDS" 2 ;; esac
 case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) die "--timeout-minutes needs a number, got: $TIMEOUT_MINUTES" 2 ;; esac
 case "$HUMAN" in 0|1) ;; *) die "--human is invalid" 2 ;; esac
+case "$FORCE" in 0|1) ;; *) die "--force is invalid" 2 ;; esac
 if [ "$COMMAND" = "acquire" ] || [ "$COMMAND" = "steal" ]; then
   [ -n "$REASON" ] || die "$COMMAND requires --reason" 2
 fi
 if [ "$COMMAND" != "steal" ] && [ "$HUMAN" -eq 1 ]; then
   die "--human is valid only with steal" 2
+fi
+if [ "$COMMAND" != "release" ] && [ "$FORCE" -eq 1 ]; then
+  die "--force is valid only with release" 2
+fi
+if [ "$COMMAND" = "release" ] && [ -z "$TASK" ] && [ "$FORCE" -ne 1 ]; then
+  die "release requires --task; pass --force to release by holder instead" 2
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -263,9 +276,14 @@ case "$COMMAND" in
     fi
     ;;
   acquire)
-    make_lease_blob
     deadline=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
     while :; do
+      # Re-stamp before every attempt. acquiredAt is what the 45-minute machine
+      # steal threshold measures, so a blob built once at the top of the queue
+      # would hand the winner a protection window already shortened by however
+      # long it waited -- and past 45 minutes of queueing, a lease stealable the
+      # instant it is won.
+      make_lease_blob
       create_status=0
       try_create_lease || create_status=$?
       case "$create_status" in
@@ -322,6 +340,8 @@ case "$COMMAND" in
         exit 0
       fi
     else
+      # --force only: the holder is user@host, which does not distinguish two
+      # windows on one machine. The check still refuses another machine's lease.
       current_holder="$(printf '%s' "$LEASE_JSON" | node -e '
         let body = "";
         process.stdin.setEncoding("utf8");

@@ -48,6 +48,11 @@ acceptance criterion or caller requires it.
 - Run database tests only against a throwaway PostgreSQL server. Set
   `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL`, and give each
   worktree its own `?schema=`. `npm run test:db` drops and recreates its target.
+- Local verification before dispatching a gate is targeted, not exhaustive:
+  run only the test files your change touches
+  (`npm run test:db -w @agentos/api -- src/<file>.dbtest.ts` runs a subset).
+  The merge gate runs the full suite on the gate worker; repeating it locally
+  costs minutes without adding confidence.
 - Spawn the real API entrypoint in tests through
   `packages/api/src/test-startup-environment.ts`. The entrypoint loads the root
   `.env`, and dotenv restores omitted credentials unless the helper pins them
@@ -87,6 +92,15 @@ merge. Release it immediately after the delivery lands or fails. Writing code,
 pushing a feature branch, and opening a PR do not require the lease. The lease
 keeps an exact-head gate proof valid from the moment its baseline is fixed until
 that proof is consumed by the merge.
+
+Pass `--task <id>` to both `acquire` and `release`. The default holder is
+`user@host`, which every agent window on one machine shares, so without a task
+id a release cannot tell its own lease from a sibling window's.
+
+Several agent windows work one checkout at a time. Deliver from a dedicated
+`git worktree` on your own branch, never by switching the shared checkout's
+branch, and stage only the exact paths you changed. A branch switch in the
+shared checkout carries away another window's uncommitted work.
 
 ## Frozen records
 

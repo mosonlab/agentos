@@ -161,6 +161,7 @@ import {
   acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
 } from "./workspace-reclaim.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
 import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
@@ -5087,14 +5088,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       return adjudicationRefusal ? { error: adjudicationRefusal } : null;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    // Two runners claiming independent chains still touch the same Task pages
+    // through the `FOR UPDATE` chain mutex, and Serializable can abort either
+    // one on a read/write dependency it cannot order. Losing that race is not a
+    // claim failure -- the work is still queued -- so retry the whole
+    // transaction. Matching only P2034 missed the raw-statement half, which
+    // arrives as P2010 carrying SQLSTATE 40001, and that escaped as a 500.
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
       try {
         claimed = await claimOnce();
         break;
       } catch (error: unknown) {
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError)
-          || error.code !== "P2034"
-          || attempt === 3) throw error;
+        if (!isSerializationConflict(error) || attempt === 6) throw error;
+        await serializationRetryDelay(attempt);
       }
     }
     if (claimed && "error" in claimed) return context.json({ error: claimed.error }, 409);
