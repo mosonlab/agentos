@@ -33,6 +33,7 @@ import {
   isIncidentCondition,
   isIntegratorStep,
   legacyNineStepTemplateName,
+  legacyRegressionFirstThirteenStepTemplateName,
   legacyTenStepTemplateName,
   legacyHumanTwelveStepTemplateName,
   isTerminalDisposition,
@@ -357,6 +358,17 @@ test("historical human-gate rollover remains bound to its old step 12", () => {
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
   }), false);
+});
+
+test("a regression-first thirteen-step rollover keeps its merge execution mechanical", () => {
+  const legacy = {
+    stepIndex: INTEGRATOR_STEP_INDEX,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: legacyRegressionFirstThirteenStepTemplateName("template-old") },
+  };
+  assert.equal(isIntegratorStep(legacy), true);
+  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
+  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
 });
 
 test("a lookalike step in another template or with another output kind is not the integrator step", () => {

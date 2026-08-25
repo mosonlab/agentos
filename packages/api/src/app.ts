@@ -68,6 +68,7 @@ import {
   projectMergeOutcome,
   runOwnsMergeOutcome,
   INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_TEMPLATE_NAME,
   produceMergeAuthorization,
   MERGE_INTEGRATOR_KIND,
   isIntegratorStep,
@@ -5780,9 +5781,38 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         && typeof metadata.readinessTaskId === "string"
         && typeof metadata.regressionTaskId === "string"
       ));
+      const repairRegression = typeof repairMarker?.regressionTaskId === "string"
+        ? await tx.task.findUnique({
+            where: { id: repairMarker.regressionTaskId },
+            select: {
+              projectId: true,
+              chainId: true,
+              templateId: true,
+              chainIndex: true,
+              templateStep: { select: { stepIndex: true, taskTemplate: { select: { name: true } } } },
+            },
+          })
+        : null;
+      const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
+        && repairRegression.chainIndex === 11
+        && repairRegression.templateStep?.stepIndex === 11
+        && repairRegression.templateStep.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
+        ? await tx.task.findFirst({
+            where: {
+              projectId: repairRegression.projectId,
+              chainId: repairRegression.chainId,
+              templateId: repairRegression.templateId,
+              chainIndex: 10,
+              archivedAt: null,
+              templateStep: { stepIndex: 10, outputKind: "documentation" },
+            },
+            orderBy: { chainIndex: "desc" },
+            select: { id: true },
+          })
+        : null;
       const mergeTailAuxiliary = Boolean(repairMarker || reviewMarker);
       const auxiliaryTargetTaskId = typeof repairMarker?.regressionTaskId === "string"
-        ? repairMarker.regressionTaskId
+        ? repairDocumentationTask?.id ?? repairMarker.regressionTaskId
         : typeof reviewMarker?.readinessTaskId === "string"
           ? reviewMarker.readinessTaskId
           : null;
@@ -6239,6 +6269,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                   resolvedHeadSha,
                 }),
               } });
+              if (repairDocumentationTask) {
+                await tx.task.update({
+                  where: { id: repairDocumentationTask.id },
+                  data: {
+                    status: TaskStatus.TODO,
+                    failureReason: `documentation invalidated by ${String(repairMarker.repairKind)} repair ${run.taskId}`,
+                  },
+                });
+              }
             }
           }
           if (repairUnable || reviewRejected) {

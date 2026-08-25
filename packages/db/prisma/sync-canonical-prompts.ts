@@ -3,6 +3,10 @@ import { PrismaClient, Prisma, RunnerPreference, TaskStatus } from "@prisma/clie
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
+  INTEGRATOR_TEMPLATE_NAME,
+  legacyRegressionFirstThirteenStepTemplateName,
+} from "../src/merge-integrator.js";
+import {
   legacyTemplateShapeRefusal,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
@@ -24,8 +28,8 @@ const CANONICAL_TEMPLATE_DESCRIPTIONS = new Map([
 const CANONICAL_STEP_NAMES = new Map([
   ["compound-engineer-workflow", [
     "Write a spec", "Plan", "Plan review", "Revise plan", "Implementation", "Code review (Sol)",
-    "Code review (Opus blind)", "Opus adjudication", "Apply review fixes", "Regression verification",
-    "Librarian", "Merge authorization", "Merge execution",
+    "Code review (Opus blind)", "Opus adjudication", "Apply review fixes", "Librarian",
+    "Regression verification", "Merge authorization", "Merge execution",
   ]],
   ["direct-engineer-workflow", [
     "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Opus adjudication",
@@ -41,7 +45,7 @@ const LEGACY_BLIND_REVIEW_PROMPTS = [
 ] as const;
 type AssigneeTransition = { from: readonly string[]; to: string };
 const ASSIGNEE_TRANSITIONS = new Map<string, AssigneeTransition>([
-  ["compound-engineer-workflow:10", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
+  ["compound-engineer-workflow:11", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
   ["direct-engineer-workflow:6", { from: ["review-coordinator-opus", "review-coordinator-sol"], to: REGRESSION_AGENT_NAME }],
 ]);
 
@@ -61,6 +65,12 @@ const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPr
     || expected === agent.runnerPreference) return null;
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
+
+const regressionFirstCompoundContract = (canonical: TemplateStepSource[]): TemplateStepSource[] => canonical.map((step) => {
+  if (step.stepIndex === 10) return { ...canonical[10]!, stepIndex: 10, layer: 9 };
+  if (step.stepIndex === 11) return { ...canonical[9]!, stepIndex: 11, layer: 10 };
+  return step;
+});
 
 type CanonicalTransaction = Prisma.TransactionClient;
 type CanonicalSources = Map<CanonicalTemplateName, TemplateStepSource[]>;
@@ -166,6 +176,46 @@ const createCanonicalTemplate = async (
       },
     });
   }
+};
+
+const transitionRegressionFirstCompoundTemplate = async (
+  tx: CanonicalTransaction,
+  templateSources: CanonicalSources,
+): Promise<number> => {
+  const canonical = templateSources.get(INTEGRATOR_TEMPLATE_NAME);
+  if (!canonical) throw new Error(`Canonical template ${INTEGRATOR_TEMPLATE_NAME} was not found`);
+  const prior = regressionFirstCompoundContract(canonical);
+  const rows = await readCanonicalTemplateRows(tx, INTEGRATOR_TEMPLATE_NAME);
+  let created = 0;
+  for (const row of rows) {
+    const matchesPrior = row.steps.length === prior.length
+      && row.steps.every((step, index) => step.stepIndex === index + 1
+        && templateStepStructureDifferences(step, prior[index]!).length === 0);
+    if (!matchesPrior) continue;
+    const unfinishedTasks = await tx.task.count({
+      where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+    });
+    if (unfinishedTasks > 0) {
+      throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${row.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+    }
+    if (row.webhookSecretId !== null || row.webhookRepoId !== null
+      || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
+      || row.webhookReplayWindowSec !== null) {
+      throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${row.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+    }
+    const legacyName = legacyRegressionFirstThirteenStepTemplateName(row.id);
+    const collision = await tx.taskTemplate.findUnique({
+      where: { projectId_name: { projectId: row.projectId, name: legacyName } },
+      select: { id: true },
+    });
+    if (collision) {
+      throw new Error(`Canonical template ${INTEGRATOR_TEMPLATE_NAME} on project ${row.projectId} cannot rename to ${legacyName}: target already exists`);
+    }
+    await tx.taskTemplate.update({ where: { id: row.id }, data: { name: legacyName } });
+    await createCanonicalTemplate(tx, row.projectId, INTEGRATOR_TEMPLATE_NAME, canonical);
+    created += 1;
+  }
+  return created;
 };
 
 const transitionCanonicalTemplateRows = async (
@@ -290,7 +340,8 @@ const main = async (): Promise<void> => {
         }
         createdAgents += 1;
       }
-      const createdCanonicalTemplates = await transitionCanonicalTemplateRows(tx, templateSources);
+      const createdCanonicalTemplates = await transitionRegressionFirstCompoundTemplate(tx, templateSources)
+        + await transitionCanonicalTemplateRows(tx, templateSources);
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;

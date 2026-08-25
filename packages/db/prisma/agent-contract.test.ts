@@ -214,8 +214,8 @@ test("the canonical thirteen-step layered template sources split review and pres
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "review-adjudicator-opus", outputKind: "must-fix" },
       { stepIndex: 9, layer: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
-      { stepIndex: 11, layer: 10, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 10, layer: 9, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 11, layer: 10, agentName: "regression-verifier", outputKind: "regression-verification" },
       { stepIndex: 12, layer: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 13, layer: 12, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -224,11 +224,12 @@ test("the canonical thirteen-step layered template sources split review and pres
   assert.equal(templateSteps.find((step) => step.stepIndex === 6)?.baseFromStepIndex, 5);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 8)?.attachmentsFromPrevious, true);
-  assert.equal(templateSteps.find((step) => step.stepIndex === 10)?.attachmentsFromPrevious, true);
-  const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
+  assert.equal(templateSteps.find((step) => step.stepIndex === 11)?.attachmentsFromPrevious, true);
+  const compoundRegression = templateSteps.find((step) => step.stepIndex === 11)!.prompt;
   assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
+  assert.match(compoundRegression, /documentation result/u);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
   assert.match(templateSteps[1]!.prompt, /this run's id/u);

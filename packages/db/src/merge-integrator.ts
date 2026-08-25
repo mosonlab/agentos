@@ -46,6 +46,7 @@ export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_INTEGRATOR_TEMPL
 export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
 export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
 export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-human-12-`;
+export const LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-regression-first-13-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 
@@ -62,6 +63,9 @@ export const legacyNineStepTemplateName = (templateId: string): string =>
 
 export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
   `${LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX}${templateId}`;
+
+export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string): string =>
+  `${LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX}${templateId}`;
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant
@@ -109,6 +113,9 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
     || (step.stepIndex === LEGACY_INTEGRATOR_STEP_INDEX
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX) === true)
+    || (step.stepIndex === INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX) === true)
     || (step.stepIndex === 10
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);
