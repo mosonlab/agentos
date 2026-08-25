@@ -80,6 +80,14 @@ use `scripts/gate-worker/gate-dispatch.sh <oid>` so the first free local or
 remote slot runs it. Read [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-worker.md)
 before operating or troubleshooting a remote worker.
 
+Every delivery that advances `main` — PR merge or direct push, regardless of
+size — must acquire `scripts/merge-lease.sh` before beginning the final sequence
+of integrating the latest `main`, running the merge gate, and performing the
+merge. Release it immediately after the delivery lands or fails. Writing code,
+pushing a feature branch, and opening a PR do not require the lease. The lease
+keeps an exact-head gate proof valid from the moment its baseline is fixed until
+that proof is consumed by the merge.
+
 ## Frozen records
 
 `docs/reviews/`, `docs/merge-notes/`, `docs/briefs/`, and
