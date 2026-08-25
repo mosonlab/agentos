@@ -1137,6 +1137,7 @@ const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
   autoStart: z.boolean().default(false),
+  afterTaskId: id.optional(),
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
   stepOverrides: stepOverridesInput.optional(),
@@ -1144,6 +1145,14 @@ const instantiateTemplateInput = z.object({
   const branchName = value.variables.branchName;
   if (branchName !== undefined && !isValidBranchName(branchName)) {
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
+  }
+  if (value.afterTaskId && value.autoStart) {
+    context.addIssue({
+      code: "custom",
+      path: ["afterTaskId"],
+      message: `afterTaskId ${value.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
+      params: { templateRefusalCode: "dispatch_conflicts_with_auto_start" },
+    });
   }
 });
 const isTemplateInputError = (error: unknown): error is Error => (
