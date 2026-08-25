@@ -1,5 +1,6 @@
 ---
 stepIndex: 2
+layer: 2
 agent: review-coordinator-sol
 approvalGate: false
 outputKind: sol-findings

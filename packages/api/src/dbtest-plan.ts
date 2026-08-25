@@ -1,4 +1,4 @@
-import { basename } from "node:path";
+import { basename, normalize } from "node:path";
 
 /**
  * The plan a parallel database-test run is executed from.
@@ -149,9 +149,25 @@ export const perFileDatabaseUrl = (databaseUrl: string, limit: number): string =
 /** A short, PostgreSQL-safe label for a test file: `chain.dbtest.ts` -> `chain`. */
 export const fileLabel = (file: string): string => basename(file).replace(/\.dbtest\.ts$/u, "");
 
-/** A directory-safe name for the per-file roots; distinct files stay distinct. */
+/**
+ * A directory-safe name for the per-file roots; distinct files stay distinct.
+ *
+ * Derived from the whole path rather than the basename, because the gate now
+ * runs `packages/db` and `packages/api` as one pool and those two suites
+ * already contain same-named pairs — `preflight-goal-execution.dbtest.ts` and
+ * `service-maintenance-lock.dbtest.ts` exist in both. Keying on the basename
+ * hands each pair one set of roots, which is the single thing this function
+ * exists to prevent, and it does not fail: the files share state and stay
+ * green until one of them cleans up under the other.
+ *
+ * The path is normalised first so no `..` survives into a directory name and
+ * `join` cannot be walked out of the root it was given.
+ */
 export const fileDirectoryName = (file: string): string => {
-  const label = fileLabel(file).replaceAll(/[^A-Za-z0-9._-]+/gu, "-");
+  const label = normalize(file)
+    .replace(/\.dbtest\.ts$/u, "")
+    .replaceAll(/[^A-Za-z0-9_-]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "");
   return label === "" ? "dbtest" : label;
 };
 

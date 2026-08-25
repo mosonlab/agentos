@@ -56,9 +56,9 @@ const WAITING_STATUSES = new Set<TaskStatus>(["TODO", "BACKLOG"]);
 /**
  * Is this task's `runAt` a parking value rather than a schedule?
  *
- * A chain step past the first one is started by its predecessor finishing — the
- * control plane advances `followUpTaskId` and enqueues the successor — so the
- * clock is not what will start it, whatever `runAt` says. Chains are in fact
+ * A chain step past the first one is started by its execution layer becoming
+ * eligible — the control plane enqueues that layer — so the clock is not what
+ * will start it, whatever `runAt` says. Chains are in fact
  * created with `runAt` pushed far out (the live board's are all 2099-01-01)
  * precisely so the scheduler's `runAt <= now` sweep never picks them up.
  *

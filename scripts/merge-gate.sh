@@ -85,6 +85,25 @@
 # executes. Cache entries are write-once, and at most 32 valid entries are
 # retained, including the entry serving the current run. A malformed entry
 # falls back to the original slow command rather than being repaired or guessed at.
+#
+# The full profile runs as three concurrent groups rather than one serial chain.
+# Concurrency changes latency, never the question the gate asks: every step that
+# ran before still runs, with the same command, and a group passes only when all
+# of its members do. The order is the only order their real dependencies allow —
+# dependencies and the install-free suites, then everything that needs
+# node_modules but not dist/, then the proof waves that read dist/ — and the
+# throwaway PostgreSQL is started before the first group so its initdb overlaps
+# work rather than blocking it.
+#
+# How wide each group runs is not read from the core count. run-gate.sh states
+# what share of the worker this gate was given, and every fan-out below is
+# derived from that one number, so two gates on a two-slot worker still add up
+# to one machine. A gate invoked by hand states no share and has the host.
+#
+# A parallel group reports every member that failed, not the first one to fail,
+# and replays each member's output under its own heading in submission order.
+# Both properties are invisible on a run that passes, so they are held by
+# fixtures in scripts/merge-gate-parallel.test.mjs, which this gate runs.
 
 set -euo pipefail
 
@@ -232,6 +251,9 @@ cleanup() {
   trap - EXIT
   local cleanup_error=""
 
+  # Before anything below is torn down, not after.
+  terminate_group_steps
+
   discard_gate_tmp || cleanup_error="the temporary directory could not be removed"
   release_lock || cleanup_error="${cleanup_error:+${cleanup_error}; }the merge gate lock could not be released"
 
@@ -291,6 +313,150 @@ step() {
     return 1
   fi
   STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${label}" "$(( $(date +%s) - started ))")")
+  FAILED_STEP=""
+}
+
+# Run independent steps at the same time.
+#
+# Members are separated by `::`: each one is a label followed by the command it
+# runs, exactly as `step` takes them. Nothing about what a step proves changes
+# here — only how many of them are in flight at once. The gate is a chain of
+# eighteen serial steps on a worker with twelve cores, and for most of a run
+# eleven of them have nothing to do.
+#
+# Two properties this has to keep, because a parallel group is where both are
+# normally lost:
+#
+# Output stays readable. Each member writes to its own file and the files are
+# replayed in submission order after the group finishes, so the log reads like
+# the serial steps it replaced instead of interleaved fragments from a dozen
+# processes. `parallel_lint` already worked this way; this is that pattern with
+# more than two members.
+#
+# Every failure is named, not just the first. A group that stopped at the
+# earliest non-zero status would send someone back for a second gate to find
+# the second problem, and running these together is precisely what makes it
+# cheap to learn all of them in one pass. Each member is waited for, each keeps
+# its own duration, and the verdict line lists all of them.
+GATE_STEP_SEPARATOR="::"
+
+# The members a parallel group has in flight. cleanup has to be able to reach
+# them: it deletes GATE_TMP, releases the worktree lock and removes the
+# postgres container, and each of those is a statement that this gate has
+# stopped working. `kill` on this script alone interrupts the parent's `wait`
+# without touching the members, so the teardown would run while a build is
+# still writing dist/ and the next gate would take the lock this one just
+# released. The serial layout this replaced had one child at a time and no log
+# of its own to delete; nine at once is worth the accounting.
+GATE_GROUP_PIDS=()
+
+# Signalling the member alone is not enough, and the shape of the miss is easy
+# to reproduce: the member is a subshell, the work it runs is a process below
+# that, and `npm ci` or `tsc` is a process below *that*. Killing the member
+# leaves the rest orphaned and running. So members are started under `set -m`,
+# which makes each one a process-group leader, and the whole group is signalled
+# at once.
+terminate_group_steps() {
+  [ "${#GATE_GROUP_PIDS[@]}" -gt 0 ] || return 0
+  local group alive attempt
+  printf '\n   interrupted: stopping %s step(s) still running\n' "${#GATE_GROUP_PIDS[@]}"
+  for group in "${GATE_GROUP_PIDS[@]}"; do kill -TERM -"${group}" 2>/dev/null || true; done
+  # Five seconds to end on their own, then stop asking. Waiting without a
+  # deadline hands a member that ignores TERM the power to hang the gate
+  # forever, which is worse than the leak this is closing.
+  for ((attempt=0; attempt<50; attempt++)); do
+    alive=0
+    for group in "${GATE_GROUP_PIDS[@]}"; do kill -0 -"${group}" 2>/dev/null && alive=1; done
+    [ "${alive}" -eq 0 ] && break
+    sleep 0.1
+  done
+  for group in "${GATE_GROUP_PIDS[@]}"; do kill -KILL -"${group}" 2>/dev/null || true; done
+  # Reaped, not just signalled: returning while they are still dying is the
+  # race this exists to close.
+  for group in "${GATE_GROUP_PIDS[@]}"; do wait "${group}" 2>/dev/null || true; done
+  GATE_GROUP_PIDS=()
+}
+
+parallel_steps() {
+  local title="$1"; shift
+  local -a labels=() serialized=() pids=() statuses=() logs=() current=() failures=()
+  local token index slot seconds
+
+  for token in "$@" "${GATE_STEP_SEPARATOR}"; do
+    if [ "${token}" = "${GATE_STEP_SEPARATOR}" ]; then
+      if [ "${#current[@]}" -gt 0 ]; then
+        [ "${#current[@]}" -ge 2 ] \
+          || { printf 'parallel_steps: member "%s" names no command\n' "${current[0]}" >&2; return 1; }
+        labels+=("${current[0]}")
+        # %q quoting is produced by bash for bash, so the eval below restores
+        # exactly this argument vector. Every member here is a literal in this
+        # file; none of it comes from the commit being gated.
+        serialized+=("$(printf '%q ' "${current[@]:1}")")
+        current=()
+      fi
+      continue
+    fi
+    current+=("${token}")
+  done
+  [ "${#labels[@]}" -gt 0 ] || { printf 'parallel_steps: %s has no members\n' "${title}" >&2; return 1; }
+
+  # Set before anything is spawned: if this group dies without reaching its own
+  # accounting, the verdict still names where the gate was.
+  FAILED_STEP="${title}"
+  say "${title} (${#labels[@]} steps at once)"
+
+  for ((index=0; index<${#labels[@]}; index++)); do
+    slot="$(printf '%s' "${labels[index]}" | tr -c '[:alnum:]' '-')"
+    logs[index]="${GATE_TMP}/group-${index}-${slot}.log"
+    # The member times itself. Timing it from here would charge each member for
+    # however long the parent happened to wait on the members before it.
+    # Job control, on for the spawn only: it is what puts the member and
+    # everything it starts into one process group terminate_group_steps can
+    # reach. It changes nothing on the normal path -- exit codes still arrive
+    # through `wait`, and a group that ends on its own prints nothing.
+    set -m
+    (
+      cd "${REPO_ROOT}" || exit 1
+      __started=$(date +%s)
+      eval "${serialized[index]}"
+      __status=$?
+      printf '%s\n' "$(( $(date +%s) - __started ))" > "${logs[index]}.seconds"
+      exit "${__status}"
+    ) >"${logs[index]}" 2>&1 &
+    pids[index]=$!
+    GATE_GROUP_PIDS+=("$!")
+    set +m
+    note "started ${labels[index]}"
+  done
+
+  for ((index=0; index<${#labels[@]}; index++)); do
+    if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=1; fi
+  done
+  GATE_GROUP_PIDS=()
+
+  for ((index=0; index<${#labels[@]}; index++)); do
+    printf '\n--- %s ---\n' "${labels[index]}"
+    cat "${logs[index]}" 2>/dev/null || true
+  done
+
+  for ((index=0; index<${#labels[@]}; index++)); do
+    # A member killed before it could write its own duration reports `?` rather
+    # than a number this run did not measure.
+    seconds="$(cat "${logs[index]}.seconds" 2>/dev/null || printf '?')"
+    [ -n "${seconds}" ] || seconds="?"
+    if [ "${statuses[index]}" -eq 0 ]; then
+      STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${labels[index]}" "${seconds}")")
+    else
+      STEP_REPORT+=("$(printf 'FAIL  %-42s %4ss' "${labels[index]}" "${seconds}")")
+      failures+=("${labels[index]}")
+    fi
+  done
+
+  if [ "${#failures[@]}" -gt 0 ]; then
+    FAILED_STEP="$(printf '%s, ' "${failures[@]}")"
+    FAILED_STEP="${FAILED_STEP%, }"
+    return 1
+  fi
   FAILED_STEP=""
 }
 
@@ -577,6 +743,52 @@ publish_release_snapshot() {
   fi
 }
 
+# The full build, one dependency layer at a time, each layer concurrently.
+#
+# `npm run build` chains every workspace with `&&`, which waits for all of them
+# where it only has to wait for some. The layers come from scripts/build-layers.mjs,
+# which derives them from the same root build script and the manifests npm
+# itself resolves, so the set built here is the set that script names and the
+# order respects every first-party dependency.
+#
+# A layer's members write to different dist/ trees and are replayed in order, so
+# this reads like the serial build it replaces. Every failing workspace in a
+# layer is named: they were built together and a rerun should not have to
+# rediscover the second one.
+run_layered_build() {
+  local layer index name log failed=0
+  local -a names=() logs=() pids=() statuses=()
+  local plan
+  plan="$(node scripts/build-layers.mjs)" || { printf 'could not determine the build layers\n' >&2; return 1; }
+  [ -n "${plan}" ] || { printf 'the build layer plan is empty\n' >&2; return 1; }
+
+  while IFS= read -r layer; do
+    [ -n "${layer}" ] || continue
+    names=(); logs=(); pids=(); statuses=()
+    # shellcheck disable=SC2206 -- the plan is a space-separated workspace list this script produced
+    names=(${layer})
+    printf '\n   layer: %s\n' "${layer}"
+    for ((index=0; index<${#names[@]}; index++)); do
+      log="${GATE_TMP}/build-$(printf '%s' "${names[index]}" | tr -c '[:alnum:]' '-').log"
+      logs[index]="${log}"
+      (cd "${REPO_ROOT}" && npm run build -w "${names[index]}") >"${log}" 2>&1 &
+      pids[index]=$!
+    done
+    for ((index=0; index<${#names[@]}; index++)); do
+      if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=1; fi
+    done
+    for ((index=0; index<${#names[@]}; index++)); do
+      printf '\n--- build %s ---\n' "${names[index]}"
+      cat "${logs[index]}" 2>/dev/null || true
+      [ "${statuses[index]}" -eq 0 ] || { printf 'build failed: %s\n' "${names[index]}" >&2; failed=1; }
+    done
+    # A later layer compiles against this one's dist/, so a broken layer must
+    # not be built on top of.
+    [ "${failed}" -eq 0 ] || return 1
+  done <<< "${plan}"
+  return 0
+}
+
 build_all() {
   local key entry output
   mkdir -p "${CACHE_ROOT}/builds" || return 1
@@ -589,13 +801,13 @@ build_all() {
       copy_cache_tree "${entry}/tree/${output}" "${REPO_ROOT}/${output}" || {
         note "build cache clone failed at ${output}; falling back to a clean full build"
         clear_build_outputs || return 1
-        npm run build || return 1
+        run_layered_build || return 1
         return 0
       }
       chmod -R u+w "${REPO_ROOT}/${output}" || {
         note "build cache permissions could not be materialized at ${output}; falling back to a clean full build"
         clear_build_outputs || return 1
-        npm run build || return 1
+        run_layered_build || return 1
         return 0
       }
     done
@@ -610,7 +822,7 @@ build_all() {
   fi
   note "build cache miss: ${key}"
   clear_build_outputs || return 1
-  npm run build || return 1
+  run_layered_build || return 1
   if prepare_deferred_build_snapshot "${key}"; then
     record_release_build_key "${key}" || return 1
   else
@@ -639,9 +851,8 @@ workspace_names_with_script() {
 # Logs are replayed in stable workspace order.
 run_workspace_script_parallel() {
   local script="$1" ignore_lifecycle="${2:-0}" workspace="" safe="" log=""
-  local index=0 next_wait=0 failed=0 max_jobs=1
+  local index=0 next_wait=0 failed=0 max_jobs="${3:-1}"
   local -a workspaces=() logs=() pids=() statuses=()
-  max_jobs="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / 2))))')"
   note "workspace ${script}: at most ${max_jobs} concurrent jobs"
   while IFS= read -r workspace; do
     [ -n "${workspace}" ] || continue
@@ -679,7 +890,7 @@ parallel_unit_tests() {
   # every run, then suppress only those redundant lifecycle hooks. If any hook
   # gains another responsibility, this check fails instead of skipping it.
   verify_build_only_lifecycle_hooks pretest || return 1
-  run_workspace_script_parallel test 1
+  run_workspace_script_parallel test 1 "${GATE_UNIT_LANES}"
 }
 
 verify_build_only_lifecycle_hooks() {
@@ -704,24 +915,30 @@ verify_build_only_lifecycle_hooks() {
   ' "${hook}"
 }
 
-run_database_preflight_tests() {
+# One database wave, not two.
+#
+# packages/db and packages/api hand their files to the same runner, against the
+# same server, and each file already receives its own cloned database and its own
+# private roots. Running them as two waves meant dividing the lanes between five
+# files and forty-two, and any fixed division is a guess about a ratio nothing
+# maintains. The guess failed on the four-core fallback worker: the five-file
+# wave drew one lane and spent 201 seconds while the forty-two-file wave ran
+# beside it on three.
+#
+# One pool balances itself, and it migrates the template once instead of twice.
+# The Goal 5a0 preflight's first-run boundary still runs against this throwaway
+# server — the only evidence that an empty target passes and a non-empty one
+# still refuses — and node:test still names the file that failed.
+run_database_tests() {
   verify_build_only_lifecycle_hooks pretest:db || return 1
-  local suite_root="${GATE_TMP}/db-package-roots"
+  local suite_root="${GATE_TMP}/dbtest-roots"
   mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
+  AGENTOS_DBTEST_CONCURRENCY="${GATE_DB_LANES}" \
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \
-    node --import tsx packages/api/scripts/dbtest.mjs packages/db/src/*.dbtest.ts
-}
-
-run_api_database_tests() {
-  verify_build_only_lifecycle_hooks pretest:db || return 1
-  local suite_root="${GATE_TMP}/api-dbtest-roots"
-  mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
-  RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
-  CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
-  FILES_ROOT="${suite_root}/files" \
-    node --import tsx packages/api/scripts/dbtest.mjs
+    node --import tsx packages/api/scripts/dbtest.mjs \
+      packages/db/src/*.dbtest.ts packages/api/src/*.dbtest.ts
 }
 
 parallel_lint() {
@@ -928,17 +1145,6 @@ if [ "${GATE_PROFILE}" = "docs-only" ]; then
   exit 0
 fi
 
-# The checker is a gate rule, so it is gated too: PR #156 shipped one whose
-# date-prefix rule was unreachable by construction, and nothing ran to say so.
-step "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs
-# The gate worker's own mechanisms: the slot locks that ration how many gates
-# run at once, the exit codes that keep a verdict distinct from the absence of
-# one, and the allowlists on everything that reaches a remote shell. Node and
-# bash and nothing else, so it belongs with the install-free checks — and it has
-# to run here, because scripts/merge-gate.sh is this repository's only CI and a
-# concurrency invariant nobody re-checks is one that decays.
-step "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs
-
 # --- docker ----------------------------------------------------------------
 
 # Last of the preconditions, not the first: it is the expensive one, and the
@@ -949,6 +1155,46 @@ FAILED_STEP="docker preflight"
 command -v docker >/dev/null 2>&1 || die "docker is required: the gate runs its own throwaway PostgreSQL"
 docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
 FAILED_STEP=""
+
+# --- how much of this host the gate may use ---------------------------------
+
+# run-gate.sh states the worker's configured slot count, so a two-slot worker
+# gives each gate half the machine. Every parallel width below is derived from
+# this one number instead of each phase reading the CPU count for itself: two
+# concurrent gates then add up to one host, rather than each sizing itself for a
+# whole machine it does not have. A gate run by hand states no share and gets
+# the host, which is what it in fact has.
+GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-1}"
+case "${GATE_HOST_SHARE}" in
+  1|2) ;;
+  *) die "AGENTOS_GATE_HOST_SHARE must be 1 or 2, got ${GATE_HOST_SHARE}" ;;
+esac
+GATE_CPUS="$(node -e 'const { availableParallelism } = require("node:os");
+process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / Number(process.argv[1])))));' \
+  "${GATE_HOST_SHARE}")" || die "could not size this gate against the host"
+[[ "${GATE_CPUS}" =~ ^[1-9][0-9]*$ ]] || die "could not size this gate against the host: got '${GATE_CPUS}'"
+
+# The proof waves run together, and they are not contending for one resource.
+# The unit wave is processor-bound and ends when the slowest workspace ends. The
+# database waves spend most of their wall clock waiting on PostgreSQL, so lanes
+# beyond the core count are deliberate oversubscription of something already
+# idle, not a claim the machine has more processors than it has.
+#
+# These were serial until now, and the comment that serialised them cited a
+# 4 GiB worker where running them together turned passing suites into timeouts.
+# That was a memory ceiling, which is exactly why these widths come from a
+# stated share of a measured host instead of from a raw core count.
+#
+# Each is overridable so that scripts/gate-worker/bench-dbtest-concurrency.sh
+# can alternate arms over one fixed commit. A gate never chooses them itself.
+GATE_UNIT_LANES="${AGENTOS_GATE_UNIT_LANES:-${GATE_CPUS}}"
+GATE_DB_LANES="${AGENTOS_GATE_DB_LANES:-$(( GATE_CPUS < 2 ? 2 : GATE_CPUS ))}"
+for lane_setting in GATE_UNIT_LANES GATE_DB_LANES; do
+  [[ "${!lane_setting}" =~ ^[1-9][0-9]*$ ]] \
+    || die "${lane_setting} must be a positive integer, got '${!lane_setting}'"
+done
+note "host share: 1/${GATE_HOST_SHARE} of $(node -e 'process.stdout.write(String(require("node:os").availableParallelism()))') cores = ${GATE_CPUS}"
+note "lanes:      unit ${GATE_UNIT_LANES}, database ${GATE_DB_LANES}"
 
 # --- isolation --------------------------------------------------------------
 
@@ -1007,9 +1253,13 @@ fi
 # lets WAL grow to 1GB before forcing a checkpoint, which on a 4GB worker is the
 # one way a data directory in RAM could run the machine out of it. Checkpoints
 # are cheap here precisely because fsync is off.
+#
+# Started here and waited for later. initdb takes a few seconds during which
+# this gate has an npm ci and two install-free suites to be getting on with, and
+# nothing between here and the wait touches the server. The wait is still its
+# own step with its own verdict, so a server that never arrives fails as
+# plainly as it did when the wait was on this line.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
-DBTEST_CONCURRENCY="$(node -e 'const { availableParallelism } = require("node:os"); process.stdout.write(String(Math.max(1, Math.min(availableParallelism() - 1, 4))))')"
-export AGENTOS_DBTEST_CONCURRENCY="${DBTEST_CONCURRENCY}"
 docker run -d --rm --name "${CONTAINER}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
   -e POSTGRES_DB=agentos_gate \
@@ -1029,14 +1279,19 @@ PGPORT="$(docker port "${CONTAINER}" 5432/tcp | head -1 | sed 's/.*://')"
 # Self-check: 5432 is where docker-compose.yml puts the real local database.
 [ "${PGPORT}" != "5432" ] || die "refusing a container published on 5432"
 
-ready=0
-for _ in $(seq 1 90); do
-  if docker exec "${CONTAINER}" pg_isready -U agentos -d agentos_gate -q >/dev/null 2>&1; then ready=1; break; fi
-  sleep 1
-done
-[ "${ready}" -eq 1 ] || die "PostgreSQL did not become ready"
+await_postgres() {
+  local waited
+  for waited in $(seq 1 90); do
+    if docker exec "${CONTAINER}" pg_isready -U agentos -d agentos_gate -q >/dev/null 2>&1; then
+      printf 'ready after at most %ss\n' "${waited}"
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'PostgreSQL did not become ready within 90s\n' >&2
+  return 1
+}
 note "127.0.0.1:${PGPORT}, database agentos_gate, deleted when this script exits"
-note "dbtest concurrency: ${AGENTOS_DBTEST_CONCURRENCY} (min(available cores minus one, stable ceiling 4), via the per-file DBTEST plan)"
 
 # The database is called agentos_gate rather than agentos, and the schema is a
 # dedicated non-public one: the dbtest harness drops and re-applies whatever
@@ -1068,38 +1323,84 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 # therefore a hit on exactly the bytes the lockfile names. Every full run invokes
 # npm ci so lifecycle scripts and Prisma generation run under this run's actual
 # environment; only npm's tarball cache is reused.
-step "npm ci" install_dependencies
-# These execute project binaries, so they belong after dependencies. Keeping
-# them among the install-free frozen checks made a fresh clone fail on `tsx`
-# before npm ci had a chance to establish the dependency state being gated.
-step "release documentation executable contract" npm run test:release-docs
-step "templates release-demo harness" npm run test:demo-templates
-step "public snapshot scanner tests" npm run test:snapshot-scan
-step "public snapshot closed-scope scan" npm run snapshot:scan
-step "quiet-window auto-deploy harness" npm run test:auto-deploy
-step "typecheck (database CLI)" npm run typecheck:cli
-# The minimum lint gate (#143): Biome's opt-in safety rules, then the one
-# type-aware rule (no-floating-promises) through typescript-eslint. Both are
-# npm dependencies and nothing here shells out, so the remote gate worker runs
-# it unchanged. Formatting is deliberately not checked — see biome.jsonc.
-step "lint (biome + type-aware no-floating-promises)" parallel_lint
-# apps/web's CSS regression test reads the built stylesheet out of apps/web/dist,
-# and the dbtests spawn the real API out of packages/api/dist.
-step "build (all workspaces)" build_all
-# prisma resolves its schema from the working directory, so this has to run
-# inside packages/db rather than at the repository root.
-step "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deploy'
-# The Goal 5a0 preflight's first-run boundary, against this throwaway server: the
-# only evidence that an empty target passes and a non-empty one still refuses.
+# Three groups, in the only order their dependencies allow. What every step
+# proves is unchanged; what changed is how many of them are in flight. The gate
+# was an eighteen-step chain, and on a twelve-core worker that left most of the
+# machine idle for most of a run.
+#
+# The install-free suites move here to sit alongside `npm ci`. They import
+# nothing but `node:` builtins — that is the property that made them install-free
+# in the first place — so `npm ci` emptying and refilling node_modules beside
+# them cannot reach them, and the dependency install stops being a step nothing
+# else overlaps.
+#
+# What they cover: the frozen-record checker, because PR #156 shipped one whose
+# date-prefix rule was unreachable by construction and nothing ran to say so;
+# the worker's slot locks, exit codes and remote-shell allowlists, because
+# merge-gate.sh is this repository's only CI and a concurrency invariant nobody
+# re-checks is one that decays; the grouping mechanism this plan is built on,
+# whose failure reporting is invisible on every run that passes; and the build
+# layering, where a layer ordered too early compiles a workspace against a
+# sibling's stale dist/ and passes.
+parallel_steps "dependencies and the install-free suites" \
+  "npm ci" install_dependencies :: \
+  "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs :: \
+  "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs :: \
+  "parallel-group fixtures" node --test scripts/merge-gate-parallel.test.mjs :: \
+  "build layer fixtures" node --test scripts/build-layers.test.mjs
+
+# The container has had that whole group to finish initdb in. This is still a
+# step with its own verdict: a server that never arrives fails here and says so.
+step "throwaway PostgreSQL is accepting connections" await_postgres
+
+# Everything that needs dependencies but not build output. These were seven
+# serial steps whose slowest two were the only ones doing real work; lint and
+# build are now the width of the group rather than the sum of it.
+#
+# None of them reads dist/: they ran before the build when the gate was serial,
+# and both linters exclude `**/dist/**` by configuration. The snapshot scan
+# reads `git ls-tree`, not the worktree, so a build writing ignored output
+# underneath it is not something it can observe.
+#
+# The lint gate (#143) is Biome's opt-in safety rules plus the one type-aware
+# rule (no-floating-promises) through typescript-eslint. Both are npm
+# dependencies and neither shells out, so the remote worker runs it unchanged.
+# Formatting is deliberately not checked — see biome.jsonc.
+#
+# The migration needs the server and dependencies, not the build, so it belongs
+# in this group too. prisma resolves its schema from the working directory,
+# which is why it runs inside packages/db rather than at the repository root.
+parallel_steps "static analysis, build, and the suites that need no build output" \
+  "build (all workspaces)" build_all :: \
+  "lint (biome + type-aware no-floating-promises)" parallel_lint :: \
+  "quiet-window auto-deploy harness" npm run test:auto-deploy :: \
+  "typecheck (database CLI)" npm run typecheck:cli :: \
+  "public snapshot scanner tests" npm run test:snapshot-scan :: \
+  "public snapshot closed-scope scan" npm run snapshot:scan :: \
+  "release documentation executable contract" npm run test:release-docs :: \
+  "templates release-demo harness" npm run test:demo-templates :: \
+  "migrate the gate schema" sh -c 'cd packages/db && npx prisma migrate deploy'
+
+# The proof waves. apps/web's CSS regression test reads the built stylesheet out
+# of apps/web/dist and the dbtests spawn the real API out of packages/api/dist,
+# so this group is what the build above was blocking.
+#
 # Both packages' pretest:db hooks only rebuild subsets of the full build that
-# just passed. Invoke the shared DBTEST runner directly so each file receives a
-# cloned database and private host roots. Each wave already spends its own
-# bounded process budget. Running them together exceeded the machine budget and
-# turned passing standalone suites into transaction and unit-test timeouts, so
-# keep the proof waves serial and preserve their internal parallelism.
-step "unit tests (all workspaces)" parallel_unit_tests
-step "database preflight tests" run_database_preflight_tests
-step "api database tests" run_api_database_tests
+# just passed, so the shared DBTEST runner is invoked directly and each file
+# still receives a cloned database and private host roots.
+#
+# These were serial, and the reason recorded here was that running them together
+# "exceeded the machine budget" and turned passing suites into transaction and
+# unit-test timeouts. That was measured on the four-core, 4 GiB fallback worker.
+# The budget is now stated rather than assumed: each wave's fan-out is derived
+# from the share of the host this gate was given, so two concurrent gates on a
+# two-slot worker still add up to one machine. The unit wave is processor-bound;
+# the database wave is mostly waiting on PostgreSQL. Overlapping them spends one
+# wave's idle on the other's work.
+parallel_steps "the proof waves" \
+  "database tests (db + api)" run_database_tests :: \
+  "unit tests (all workspaces)" parallel_unit_tests
+
 step "verify the gated commit did not drift" verify_tree_did_not_drift
 publish_deferred_build_snapshot
 publish_release_snapshot

@@ -1,5 +1,6 @@
 ---
-stepIndex: 4
+stepIndex: 5
+layer: 4
 agent: senior-dev
 approvalGate: false
 outputKind: fixed-implementation

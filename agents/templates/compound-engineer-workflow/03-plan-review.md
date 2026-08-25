@@ -1,5 +1,6 @@
 ---
 stepIndex: 3
+layer: 3
 agent: review-coordinator
 approvalGate: false
 outputKind: plan-review

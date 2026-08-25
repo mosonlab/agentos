@@ -17,13 +17,13 @@ const OPERATOR = "active-cancel-operator";
 const RUNNER = "active-cancel-runner-token";
 const RUNNER_ID = "active-cancel-runner";
 
-const call = async (method: string, path: string, token: string, body?: unknown) => {
+const call = async (method: string, path: string, token: string, body?: unknown, client: PrismaClient = db) => {
   const priorOperator = process.env.OPERATOR_TOKEN;
   const priorRunner = process.env.RUNNER_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
   process.env.RUNNER_TOKEN = RUNNER;
   try {
-    const response = await createApp(db).request(path, {
+    const response = await createApp(client).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -56,7 +56,6 @@ const seed = async (status: RunStatus, leaseExpiresAt = new Date(Date.now() + 60
   const task = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, name: "Active", description: "cancel me",
     assigneeAgentId: agent.id, status: status === RunStatus.QUEUED ? TaskStatus.TODO : TaskStatus.DOING,
-    followUpTaskId: successor.id,
   } });
   const owned = status === RunStatus.QUEUED ? {} : {
     runnerId: RUNNER_ID,
@@ -158,7 +157,8 @@ test("mechanical merge Runs refuse cancellation before recording an intent", asy
   } });
   const step = await db.taskTemplateStep.create({ data: {
     taskTemplateId: template.id,
-    stepIndex: 7,
+    stepIndex: 8,
+    layer: 8,
     name: "Merge execution",
     prompt: "merge",
     outputKind: "merge-result",
@@ -344,6 +344,74 @@ test("stop-and-park records cancellation intent and keeps the Task in Backlog af
   assert.equal(await db.run.count({ where: { taskId: seeded.task.id, status: { in: [
     RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX,
   ] } } }), 0);
+});
+
+test("stop-and-park takes the full-chain mutex while a sibling row is locked", { timeout: 20_000 }, async () => {
+  const seeded = await seed(RunStatus.RUNNING);
+  const chainId = `cancel-chain-${Date.now()}`;
+  await db.task.update({
+    where: { id: seeded.task.id },
+    data: { chainId, chainIndex: 0, chainLayer: 0 },
+  });
+  await db.task.update({
+    where: { id: seeded.successor.id },
+    data: { chainId, chainIndex: 1, chainLayer: 1 },
+  });
+
+  const blockerClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  const cancellationClient = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
+  let releaseSibling!: () => void;
+  let siblingLocked!: () => void;
+  let reportLockScope!: (fullChain: boolean) => void;
+  const siblingLockHeld = new Promise<void>((resolve) => { siblingLocked = resolve; });
+  const siblingMayProceed = new Promise<void>((resolve) => { releaseSibling = resolve; });
+  const observedLockScope = new Promise<boolean>((resolve) => { reportLockScope = resolve; });
+  let scopeReported = false;
+  const instrumentedCancellationClient = new Proxy(cancellationClient, { get(target, property, receiver) {
+    if (property !== "$transaction") {
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
+      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
+        if (txProperty !== "$queryRaw") return Reflect.get(txTarget, txProperty, txReceiver);
+        return (...args: any[]) => {
+          const query = (tx.$queryRaw as any)(...args);
+          if (!scopeReported && (args[1] === seeded.task.id || args[2] === chainId)) {
+            scopeReported = true;
+            reportLockScope(args[2] === chainId);
+          }
+          return query;
+        };
+      } });
+      return operation(instrumentedTx);
+    }, options as any);
+  } }) as PrismaClient;
+
+  const blocker = blockerClient.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${seeded.successor.id} FOR UPDATE`;
+    siblingLocked();
+    await siblingMayProceed;
+  });
+  try {
+    await siblingLockHeld;
+    let cancellationSettled = false;
+    const cancellation = call("POST", `/runs/${seeded.run.id}/cancel`, OPERATOR, {
+      requestId: "cancel-chain-mutex",
+      reason: "pause chained implementation",
+      parkTask: true,
+    }, instrumentedCancellationClient).finally(() => { cancellationSettled = true; });
+    assert.equal(await observedLockScope, true);
+    assert.equal(cancellationSettled, false);
+    releaseSibling();
+    const response = await cancellation;
+    assert.equal(response.status, 200);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).status, TaskStatus.BACKLOG);
+  } finally {
+    releaseSibling();
+    await blocker;
+    await Promise.all([blockerClient.$disconnect(), cancellationClient.$disconnect()]);
+  }
 });
 
 test("lease reconciliation settles an unacknowledged cancellation without retrying", async () => {

@@ -188,7 +188,7 @@ The job then performs exactly this sequence and stops at the first failure:
    sync creates it from canonical role text in the active
    `review-coordinator-sol` environment, copies that source Agent's repository
    grants and disabled-tool boundary, and refuses an archived target or source.
-   Direct step 5 and Full Assurance step 10 may adopt it only from the frozen
+   Direct step 6 and Full Assurance step 11 may adopt it only from the frozen
    Opus or Sol assignees. Instantiated tasks are migrated only while unarchived,
    TODO, and free of every Run, Session, and step output; every other assignment
    is preserved and counted in the sync result. When the exact historical Full

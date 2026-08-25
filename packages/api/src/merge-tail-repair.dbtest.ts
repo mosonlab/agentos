@@ -51,24 +51,27 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
     projectId: project.id, name: options.withLibrarian ? "compound-engineer-workflow" : "direct-engineer-workflow",
     description: "tail", variables: [],
   } });
-  const fixIndex = options.withLibrarian ? 8 : 4;
-  const regressionIndex = options.withLibrarian ? 10 : 5;
-  const readinessIndex = options.withLibrarian ? 11 : 6;
+  const fixIndex = options.withLibrarian ? 9 : 5;
+  const fixLayer = options.withLibrarian ? 8 : 4;
+  const regressionIndex = options.withLibrarian ? 11 : 6;
+  const regressionLayer = options.withLibrarian ? 10 : 5;
+  const readinessIndex = options.withLibrarian ? 12 : 7;
+  const readinessLayer = options.withLibrarian ? 11 : 6;
   const [fixStep, regressionStep, readinessStep, librarianStep] = await Promise.all([
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: fixIndex, name: "Fix", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: fixIndex, layer: fixLayer, name: "Fix", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: fixAgent.id, prompt: "fix", approvalGate: false, outputKind: "fixed-implementation",
     } }),
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: regressionIndex, name: "Regression", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: regressionIndex, layer: regressionLayer, name: "Regression", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: regressionAgent.id, prompt: "verify", approvalGate: false, outputKind: "regression-verification",
     } }),
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: readinessIndex, name: "Readiness", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: readinessIndex, layer: readinessLayer, name: "Readiness", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: reviewAgent.id, prompt: "authorize", approvalGate: false, outputKind: "merge-authorization",
     } }),
     options.withLibrarian ? db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 9, name: "Librarian", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 10, layer: 9, name: "Librarian", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: librarianAgent.id, prompt: "document", approvalGate: false, outputKind: "documentation",
     } }) : null,
   ]);
@@ -76,20 +79,18 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
   const fix = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: fixStep.id,
     name: "Fix", description: "fix", assigneeType: AssigneeType.AGENT, assigneeAgentId: fixAgent.id,
-    status: TaskStatus.DONE, chainId, chainIndex: fixIndex, targetBranch: "main",
+    status: TaskStatus.DONE, chainId, chainIndex: fixIndex, chainLayer: fixLayer, targetBranch: "main",
   } });
   const librarian = librarianStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: librarianStep.id,
     name: "Librarian", description: "document", assigneeType: AssigneeType.AGENT, assigneeAgentId: librarianAgent.id,
-    status: TaskStatus.DONE, chainId, chainIndex: 9, targetBranch: "main",
+    status: TaskStatus.DONE, chainId, chainIndex: 10, chainLayer: 9, targetBranch: "main",
   } }) : null;
   const regression = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: regressionStep.id,
     name: "Regression", description: "verify", assigneeType: AssigneeType.AGENT, assigneeAgentId: regressionAgent.id,
-    status: TaskStatus.DOING, chainId, chainIndex: regressionIndex, targetBranch: "main",
+    status: TaskStatus.DOING, chainId, chainIndex: regressionIndex, chainLayer: regressionLayer, targetBranch: "main",
   } });
-  await db.task.update({ where: { id: fix.id }, data: { followUpTaskId: librarian?.id ?? regression.id } });
-  if (librarian) await db.task.update({ where: { id: librarian.id }, data: { followUpTaskId: regression.id } });
   const run = await db.run.create({ data: {
     projectId: project.id, taskId: regression.id, agentId: regressionAgent.id, repoId: repo.id,
     runNumber: 1, dedupeKey: `task:${regression.id}:run:1`, runner: "CODEX", model: regressionAgent.model,
@@ -100,7 +101,7 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
     runId: run.id, projectId: project.id, agentId: regressionAgent.id, taskId: regression.id,
     runner: "CODEX", executionStatus: "SUCCEEDED",
   } });
-  return { project, template, repo, regressionAgent, reviewAgent, readinessStep, librarian, regression, run, session };
+  return { project, template, repo, regressionAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
 };
 
 const verdict = (outcome: "refresh-conflict" | "review-fail" | "gate-fail") => JSON.stringify(outcome === "refresh-conflict"
@@ -196,6 +197,34 @@ const claimNext = async () => {
   }
 };
 
+test("successful auxiliary repair completion preserves success when its chain target or target assignee is archived", async () => {
+  for (const mode of ["task", "assignee"] as const) {
+    await resetTestDb(db);
+    const seeded = await exercise("gate-fail");
+    const repair = await repairFor(seeded, "gate-fix");
+    if (mode === "task") {
+      await db.task.update({ where: { id: seeded.regression.id }, data: { archivedAt: new Date() } });
+    } else {
+      await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.BACKLOG } });
+      await db.agent.update({ where: { id: seeded.regressionAgent.id }, data: { archivedAt: new Date() } });
+      await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.TODO } });
+    }
+
+    await completeRepair(seeded, repair.id, "repair completed", HEAD);
+    const completedRun = await db.run.findFirstOrThrow({ where: { taskId: repair.id }, orderBy: { runNumber: "desc" } });
+    assert.equal(completedRun.status, "SUCCEEDED", mode);
+    assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, status: "QUEUED" } }), 0, mode);
+    const target = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    if (mode === "assignee") {
+      assert.equal(target.status, TaskStatus.REVIEW);
+      assert.match(target.failureReason ?? "", /archived/u);
+    }
+    assert.equal(await db.taskActivity.count({
+      where: { taskId: seeded.regression.id, body: { contains: mode === "task" ? "target is archived" : "assignee" } },
+    }), 1, mode);
+  }
+});
+
 const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeof seedRegression>>) => {
   const pass = JSON.stringify({
     schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "PASS",
@@ -219,7 +248,8 @@ const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeo
     assigneeAgentId: seeded.reviewAgent.id,
     status: TaskStatus.REVIEW,
     chainId: seeded.regression.chainId,
-    chainIndex: 6,
+    chainIndex: seeded.readinessStep.stepIndex,
+    chainLayer: seeded.readinessStep.layer,
     targetBranch: "main",
   } });
   const review = await db.task.create({ data: {
@@ -321,7 +351,6 @@ const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeo
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
   const seeded = await exercise("refresh-conflict");
   const repair = await repairFor(seeded, "refresh-conflict");
-  assert.equal(repair.followUpTaskId, null);
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "merge-resolver");
   assert.equal(await repairCount(seeded), 1);
   await completeRepair(seeded, repair.id, JSON.stringify({
@@ -344,7 +373,6 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
 test("a gate FAIL creates one fix-agent task and a second FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
   const repair = await repairFor(seeded, "gate-fix");
-  assert.equal(repair.followUpTaskId, null);
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
   await completeRepair(seeded, repair.id, "Fixed the failing regression and reran the affected suite.");
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
@@ -358,7 +386,6 @@ test("a gate FAIL creates one fix-agent task and a second FAIL escalates with bo
 test("a semantic FAIL skips the gate path and creates one review-fix task", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");
-  assert.equal(repair.followUpTaskId, null);
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
   assert.match(repair.description, /MF-2 remains open/u);
   await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
@@ -418,6 +445,62 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
   assert.deepEqual(body.regressionRepairHandoff.repair, {
     kind: "review-fix", taskId: repair.id, startHeadSha: HEAD, targetHeadSha: BASE,
     resolvedHeadSha: RESOLVED, outputKind: "result", outputBody: repairOutput,
+  });
+});
+
+test("a repaired Regression retry pins the prior same-task published head without rewriting repair evidence", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  const firstClaim = await claimNext();
+  assert.equal(firstClaim.status, 200);
+  const firstBody = firstClaim.body as {
+    run: { id: string };
+    regressionRepairHandoff: { retry?: unknown };
+  };
+  assert.equal(firstBody.regressionRepairHandoff.retry, undefined);
+
+  const continuationHead = "d".repeat(40);
+  await db.run.update({
+    where: { id: firstBody.run.id },
+    data: {
+      status: "SUCCEEDED",
+      headSha: continuationHead,
+      pushedBranch: BRANCH,
+      pushStatus: "SUCCEEDED",
+      endedAt: new Date(),
+    },
+  });
+  await db.task.update({
+    where: { id: seeded.regression.id },
+    data: { status: TaskStatus.REVIEW, failureReason: "gate formed no verdict" },
+  });
+
+  const priorOperator = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
+  try {
+    const retried = await createApp(db).request(`/tasks/${seeded.regression.id}/retry`, {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-tail-operator-token" },
+    });
+    assert.equal(retried.status, 201, await retried.text());
+  } finally {
+    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = priorOperator;
+  }
+
+  const retryClaim = await claimNext();
+  assert.equal(retryClaim.status, 200);
+  const retryBody = retryClaim.body as {
+    regressionRepairHandoff: {
+      repair: { resolvedHeadSha: string };
+      retry: { previousRunId: string; startHeadSha: string };
+    };
+  };
+  assert.equal(retryBody.regressionRepairHandoff.repair.resolvedHeadSha, RESOLVED);
+  assert.deepEqual(retryBody.regressionRepairHandoff.retry, {
+    previousRunId: firstBody.run.id,
+    startHeadSha: continuationHead,
   });
 });
 

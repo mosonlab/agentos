@@ -11,42 +11,21 @@ import { parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
-  { name: INTEGRATOR_TEMPLATE_NAME, stepCount: 12 },
-  { name: DIRECT_TEMPLATE_NAME, stepCount: 7 },
+  {
+    name: INTEGRATOR_TEMPLATE_NAME,
+    stepCount: 13,
+    layers: [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11, 12],
+  },
+  {
+    name: DIRECT_TEMPLATE_NAME,
+    stepCount: 8,
+    layers: [1, 2, 2, 3, 4, 5, 6, 7],
+  },
 ] as const;
 export type CanonicalTemplateName = (typeof CANONICAL_TEMPLATE_SOURCE_SPECS)[number]["name"];
-const COMPOUND_TEMPLATE_STEP_NAMES = [
-  "Write a spec",
-  "Plan",
-  "Plan review",
-  "Revise plan",
-  "Implementation",
-  "Code review (Sol)",
-  "Code review and adjudication (Opus)",
-  "Apply review fixes",
-  "Librarian",
-  "Regression verification",
-  "Merge authorization",
-  "Merge execution",
-] as const;
-const DIRECT_TEMPLATE_STEP_NAMES = [
-  "Implementation",
-  "Code review (Sol)",
-  "Code review and adjudication (Opus)",
-  "Apply review fixes",
-  "Regression verification",
-  "Merge authorization",
-  "Merge execution",
-] as const;
-
-export const canonicalTemplateStepName = (templateName: CanonicalTemplateName, stepIndex: number): string => {
-  const names = templateName === INTEGRATOR_TEMPLATE_NAME ? COMPOUND_TEMPLATE_STEP_NAMES : DIRECT_TEMPLATE_STEP_NAMES;
-  const name = names[stepIndex - 1];
-  if (!name) throw new Error(`Missing canonical ${templateName} step name ${stepIndex}`);
-  return name;
-};
 const STRUCTURAL_FIELDS = [
   "stepIndex",
+  "layer",
   "agent",
   "approvalGate",
   "outputKind",
@@ -58,6 +37,7 @@ const STRUCTURAL_FIELDS = [
 
 export type TemplateStepSource = {
   stepIndex: number;
+  layer: number;
   agentName: string | null;
   approvalGate: boolean;
   outputKind: string;
@@ -71,6 +51,12 @@ export type TemplateStepSource = {
 export type PersistedTemplateStepStructure = {
   assigneeAgent: { name: string } | null;
   assigneeType: string;
+  /**
+   * Optional during the expand phase. The contract slice makes this column
+   * required after every writer has been migrated, while the source loader
+   * already treats an omitted value as structural drift.
+   */
+  layer?: number | null;
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
@@ -87,6 +73,7 @@ export const templateStepStructureDifferences = (
   const fields = [
     ["agent", actual.assigneeAgent?.name ?? null, expected.agentName],
     ["assigneeType", actual.assigneeType, expectedAssigneeType],
+    ["layer", actual.layer, expected.layer],
     ["approvalGate", actual.approvalGate, expected.approvalGate],
     ["outputKind", actual.outputKind, expected.outputKind],
     ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
@@ -109,6 +96,13 @@ const parseStepIndex = (value: string, filePath: string): number => {
   const stepIndex = Number(value);
   if (!Number.isSafeInteger(stepIndex) || stepIndex < 1) throw new Error(`${filePath} stepIndex must be a positive integer`);
   return stepIndex;
+};
+
+const parseLayer = (value: string, filePath: string): number => {
+  if (!/^-?\d+$/u.test(value)) throw new Error(`${filePath} layer must be an integer`);
+  const layer = Number(value);
+  if (!Number.isSafeInteger(layer)) throw new Error(`${filePath} layer must be an integer`);
+  return layer;
 };
 
 const parseOptionalStepIndex = (value: string, filePath: string): number | null => (
@@ -151,10 +145,12 @@ export const loadTemplateStepSources = async (
     }
     const stepIndex = parseStepIndex(requiredFrontmatter(document, "stepIndex", filePath), filePath);
     if (Number(filename.slice(0, 2)) !== stepIndex) throw new Error(`${filePath} prefix does not match stepIndex ${stepIndex}`);
+    const layer = parseLayer(requiredFrontmatter(document, "layer", filePath), filePath);
     const agent = requiredFrontmatter(document, "agent", filePath);
     if (document.body.length === 0) throw new Error(`${filePath} has an empty prompt body`);
     steps.push({
       stepIndex,
+      layer,
       agentName: agent === "null" ? null : agent,
       approvalGate: parseBoolean(requiredFrontmatter(document, "approvalGate", filePath), filePath, "approvalGate"),
       outputKind: requiredFrontmatter(document, "outputKind", filePath),
@@ -174,12 +170,56 @@ export const loadTemplateStepSources = async (
   if (JSON.stringify(indexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`${templateRoot} stepIndex values must be contiguous from 1 through ${sourceSpec.stepCount}`);
   }
+  for (let index = 1; index < steps.length; index += 1) {
+    const previous = steps[index - 1]!;
+    const current = steps[index]!;
+    if (current.layer < previous.layer) {
+      throw new Error(`${templateRoot} layer values must be non-decreasing at step ${current.stepIndex}`);
+    }
+  }
+
+  const stepsByIndex = new Map(steps.map((step) => [step.stepIndex, step]));
   for (const step of steps) {
     if (step.baseFromStepIndex !== null && !indexes.includes(step.baseFromStepIndex)) {
       throw new Error(`${templateRoot} step ${step.stepIndex} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`);
     }
     if (step.baseFromStepIndex !== null && step.baseFromStepIndex >= step.stepIndex) {
       throw new Error(`${templateRoot} step ${step.stepIndex} baseFromStepIndex must reference a strictly earlier stepIndex`);
+    }
+    if (step.baseFromStepIndex !== null) {
+      const baseStep = stepsByIndex.get(step.baseFromStepIndex)!;
+      if (baseStep.layer >= step.layer) {
+        throw new Error(`${templateRoot} step ${step.stepIndex} baseFromStepIndex ${step.baseFromStepIndex} must reference a strictly lower layer`);
+      }
+    }
+  }
+
+  const layerGroups = new Map<number, TemplateStepSource[]>();
+  for (const step of steps) {
+    const group = layerGroups.get(step.layer) ?? [];
+    group.push(step);
+    layerGroups.set(step.layer, group);
+  }
+  const hasMultiNodeLayer = [...layerGroups.values()].some((group) => group.length > 1);
+  const expectedLayers = [...sourceSpec.layers];
+  const actualLayers = steps.map((step) => step.layer);
+  if (hasMultiNodeLayer && JSON.stringify(actualLayers) !== JSON.stringify(expectedLayers)) {
+    throw new Error(`${templateRoot} contains a multi-node layer outside the exact canonical graph`);
+  }
+  for (const [layer, group] of layerGroups) {
+    if (group.length < 2) continue;
+    if (group.some((step) => step.approvalGate)) {
+      throw new Error(`${templateRoot} multi-node layer ${layer} cannot contain an approval gate`);
+    }
+    if (group.some((step) => step.baseFromStepIndex === null)) {
+      throw new Error(`${templateRoot} multi-node layer ${layer} requires a non-null baseFromStepIndex on every node`);
+    }
+    const baseFromStepIndex = group[0]!.baseFromStepIndex;
+    if (group.some((step) => step.baseFromStepIndex !== baseFromStepIndex)) {
+      throw new Error(`${templateRoot} multi-node layer ${layer} must use the same baseFromStepIndex on every node`);
+    }
+    if (group.some((step) => step.opensPullRequest)) {
+      throw new Error(`${templateRoot} multi-node layer ${layer} cannot contain a step with opensPullRequest: true`);
     }
   }
   return steps;

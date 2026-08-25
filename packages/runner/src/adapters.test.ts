@@ -234,6 +234,41 @@ test("buildPrompt gives a fresh Regression session only the head-bound repair ha
   assert.match(prompt, /verify the checked-out starting HEAD equals repair\.resolvedHeadSha/u);
 });
 
+test("buildPrompt pins a repaired Regression retry to the prior same-task pushed head", () => {
+  const prompt = buildPrompt({
+    ...claim,
+    regressionRepairHandoff: {
+      schemaVersion: 1,
+      trigger: {
+        kind: "regression-verdict",
+        verdict: {
+          schemaVersion: 1,
+          outcome: "review-fail",
+          headSha: "a".repeat(40),
+          baseHeadSha: "b".repeat(40),
+          summary: "MF-2 remains open",
+        },
+      },
+      repair: {
+        kind: "review-fix",
+        taskId: "repair-1",
+        startHeadSha: "a".repeat(40),
+        targetHeadSha: "b".repeat(40),
+        resolvedHeadSha: "c".repeat(40),
+        outputKind: "result",
+        outputBody: "Closed MF-2.",
+      },
+      retry: {
+        previousRunId: "regression-run-2",
+        startHeadSha: "d".repeat(40),
+      },
+    },
+  });
+  assert.match(prompt, new RegExp(`previousRunId":"regression-run-2","startHeadSha":"${"d".repeat(40)}`));
+  assert.match(prompt, /verify the checked-out starting HEAD equals retry\.startHeadSha/u);
+  assert.doesNotMatch(prompt, /verify the checked-out starting HEAD equals repair\.resolvedHeadSha/u);
+});
+
 test("buildPrompt gives a retry the immediate prior output without reusing provider context", () => {
   const prompt = buildPrompt({
     ...claim,
@@ -782,6 +817,32 @@ test("child environment is an explicit allowlist and excludes host variables", (
     if (previous === undefined) delete process.env.HOST_ONLY_CREDENTIAL;
     else process.env.HOST_ONLY_CREDENTIAL = previous;
   }
+});
+
+test("the runner pins its configured gate destination over task secrets", () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], gateServer: "agentos-gate" },
+    { ...claim, secrets: { ...claim.secrets, AGENTOS_GATE_SERVER: "ci-desktop-worker" } },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_GATE_SERVER, "agentos-gate");
+});
+
+test("a run-as launcher cannot strip the operator-selected gate destination", () => {
+  const env = buildChildEnvironment(
+    { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"], gateServer: "agentos-gate" },
+    claim,
+    scratch,
+    "/work",
+  );
+  const launch = launchArgv(
+    { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: ["/usr/bin/env", "-i"] },
+    "CODEX",
+    [],
+    env,
+  );
+  assert.equal(launch.args.includes("AGENTOS_GATE_SERVER=agentos-gate"), true);
 });
 
 // The launcher named by RUNNER_RUN_AS_PREFIX is an arbitrary command that may

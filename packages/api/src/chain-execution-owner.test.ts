@@ -12,11 +12,11 @@ const step = (stepIndex: number, outputKind: string, name: string) => ({
 test("chain execution owner exposes real system principals without changing assignees", () => {
   assert.equal(chainExecutionOwner({
     assigneeType: "AGENT",
-    templateStep: step(6, "merge-authorization", "direct-engineer-workflow"),
+    templateStep: step(7, "merge-authorization", "direct-engineer-workflow"),
   }), "control-plane");
   assert.equal(chainExecutionOwner({
     assigneeType: "AGENT",
-    templateStep: step(12, "merge-result", "compound-engineer-workflow"),
+    templateStep: step(13, "merge-result", "compound-engineer-workflow"),
   }), "merge-executor");
   assert.equal(chainExecutionOwner({
     assigneeType: "AGENT",

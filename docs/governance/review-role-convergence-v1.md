@@ -2,74 +2,87 @@
 
 Contract ID: ARC-2026-08-17
 
-Version: 1.1
+Version: 1.2
 
 Status: Active
 
 ## Objective
 
-Use one Review Coordinator for specification, plan, and implementation
-reviews, with explicit feasibility, scope, coherence, security, and
-risk-focused verification coverage.
+Keep plan review, independent implementation review, blind cross-vendor review,
+and adjudication as distinct authorities, while keeping the two independent
+implementation reviews concurrent and their join deterministic.
 
 ## In scope
 
-- Make `review-coordinator` the reviewer for Full Assurance plan-review and
-  code-review steps.
-- Add an evidence-driven security lens to the Review Coordinator prompt.
-- Bound security verification with an evidence ladder so ordinary review uses
-  existing named regressions and any custom destructive reproduction is
-  explicitly authorized, isolated, minimal, and checkpointed first.
-- Remove `feasibility` and `code-reviewer` from the canonical source roster.
-- Retire their database records only after every active chain that references
-  them reaches its human-review gate.
-- Align canonical contracts and current operational documentation.
+- Keep `review-coordinator` as the Full Assurance plan reviewer.
+- Run `review-coordinator-sol` and `review-coordinator-opus` as parallel,
+  independent implementation-review siblings.
+- Use `review-adjudicator-opus` as the fresh-session join authority after both
+  review reports are durable and valid.
+- Require the Sol role to cover Standards and Specification in one high session,
+  with no nested review subprocess.
+- Keep blind Opus unable to read predecessor or sibling review evidence for its
+  entire task/provider session.
+- Keep the evidence-driven security lens and its bounded evidence ladder for
+  each implementation reviewer.
 
 ## Out of scope
 
 - Rewriting or interrupting existing task assignments.
 - Creating a separate security Agent or security skill.
-- Changing provider, model, or reasoning-effort defaults.
+- Changing an existing task's stored assignment, run, session, or output.
+- Restoring provider-conversation continuation; adjudication is deliberately a
+  fresh session.
 - Publishing a repository, migrating production, or restarting services.
 - Retrospectively rewriting historical batch review evidence.
 
 ## Acceptance criteria and required evidence
 
-1. The canonical source roster contains nine roles and excludes
-   `feasibility` and `code-reviewer`.
-2. Full Assurance steps 3 and 6 both bind `review-coordinator`.
-3. The Review Coordinator accepts a spec, plan, or implementation diff and
-   performs four named lenses plus a distinct risk-focused pass.
-4. Security findings require an applicable trust boundary, reachable defect,
-   or missing required control, with repository or runtime evidence.
-5. The reviewer does not improvise bypass, exploit, or destructive shell
-   reproductions during ordinary review. A custom reproduction requires an
-   explicit Product Contract evidence requirement, isolated resources, a
-   pre-reproduction findings checkpoint, and the smallest decisive case.
-6. Source build, tests, typecheck, and diff checks pass.
-7. Live archival and database-template verification occur only after every
-   affected active chain reaches human review and no queued or active task
-   references either retiring Agent.
+1. The canonical source roster contains sixteen LLM roles and one mechanical
+   merge sentinel. Retired reviewer records remain only as archived history.
+2. Full Assurance node 3 binds `review-coordinator`; node 6 binds
+   `review-coordinator-sol`; node 7 binds `review-coordinator-opus`; and node 8
+   binds `review-adjudicator-opus`.
+3. Nodes 6 and 7 share one execution layer, are independently claimable from
+   the same pinned implementation range, and node 8 cannot activate until both
+   are `DONE`.
+4. Sol emits one immutable `sol-findings` report from sequential Standards and
+   Specification passes in one high session. Blind Opus emits one immutable
+   `blind-findings` report without ever reading the Sol report.
+5. The adjudicator begins a fresh Opus session, validates both immutable reports
+   and their pinned base/head before reading either, and emits one immutable
+   `must-fix` report with a disposition for every source finding id.
+6. Security findings require an applicable trust boundary, reachable defect, or
+   missing required control, with repository or runtime evidence. Ordinary
+   review uses existing named regressions; a custom destructive reproduction
+   requires an explicit Product Contract evidence requirement, isolated
+   resources, a pre-reproduction findings checkpoint, and the smallest decisive
+   case.
+7. Existing instantiated chains keep their captured assignments and prompts;
+   new canonical templates use the split review/adjudication graph.
 
 ## Risks and stopping conditions
 
-- Stop live convergence if either retiring Agent has a queued or active task.
-- Stop if source validation still finds a template or canonical reference to
-  a retiring role.
-- Stop if changing the review route would alter an already active task.
-- Archival is soft retirement; task history remains intact.
+- Stop a join when either review sibling is not exactly `DONE`; do not use a
+  partial, timeout, or degraded join.
+- Refuse adjudication if either report is absent, mutable, from a non-`DONE`
+  task, has the wrong kind, or does not match the implementation base/head.
+- Stop if a source/template change would alter an already instantiated task.
+- Archived roles and templates preserve task history; they are not candidates
+  for new work.
 
 ## Dependencies
 
-- Source convergence can proceed against current `origin/main`.
-- Live convergence depends on every affected active chain reaching its
-  human-review gate.
+- The layered scheduler, immutable output guards, and canonical template sync
+  must be available together.
+- Existing chains remain a compatibility dependency: their legacy output,
+  readiness, and mechanical-merge identities must continue to execute linearly.
 
 ## Routing snapshot
 
 ```text
-Routing Contract: v1.0
-Route: Direct Critical
-Implementation Agent: senior-dev
-Reason: This changes review governance and the canonical task-template route.
+Routing Contract: v1.2
+Route: Full Assurance
+Implementation Agent: implementation-plan-executioner
+Reason: Parallel review fan-out and a deterministic cross-vendor adjudication join.
 ```

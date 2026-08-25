@@ -489,6 +489,7 @@ model TaskTemplateStep {
   outputKind              String       @default("result")
   opensPullRequest        Boolean      @default(true)
   baseFromStepIndex       Int?
+  layer                   Int
   taskTemplate            TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
   assigneeAgent           Agent?       @relation(fields: [assigneeAgentId], references: [id], onDelete: SetNull)
   tasks                   Task[]
@@ -504,7 +505,6 @@ model Task {
   repoId                  String?
   templateId              String?
   templateStepId          String?
-  followUpTaskId          String?              @unique
   name                    String
   description             String
   workingDirectory        String?
@@ -522,6 +522,7 @@ model Task {
   opensPullRequest        Boolean              @default(true)
   chainId                 String?
   chainIndex              Int?
+  chainLayer              Int?
   scheduleKind            ScheduleKind         @default(NOW)
   runAt                   DateTime?
   cron                    String?
@@ -553,8 +554,6 @@ model Task {
   repo                    Repo?                @relation(fields: [repoId, projectId], references: [id, projectId], onDelete: Restrict)
   template                TaskTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
   templateStep            TaskTemplateStep?    @relation(fields: [templateStepId], references: [id], onDelete: SetNull)
-  followUpTask            Task?                @relation("TaskFollowUp", fields: [followUpTaskId], references: [id], onDelete: SetNull)
-  previousTask            Task?                @relation("TaskFollowUp")
   recurringSource         Task?                @relation("TaskRecurringSource", fields: [recurringSourceTaskId], references: [id], onDelete: SetNull)
   recurringCopies         Task[]               @relation("TaskRecurringSource")
   activity                TaskActivity[]

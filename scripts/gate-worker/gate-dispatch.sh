@@ -95,6 +95,21 @@ usage() {
 
 die() { printf 'gate-dispatch: %s\n' "$1" >&2; exit "${2:-$EXIT_USAGE}"; }
 
+read_origin_head() {
+  local attempt output
+  for attempt in 1 2 3; do
+    if output="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      printf 'gate-dispatch: origin HEAD read failed; retrying attempt=%s/3\n' "$((attempt + 1))" >&2
+      sleep 1
+    fi
+  done
+  return 1
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --master)
@@ -178,7 +193,7 @@ git -C "$REPO_ROOT" cat-file -e "${OID}^{commit}" 2>/dev/null \
 # advertised. If the branch moved beyond the fetched object, this dispatch stops
 # loudly and can be retried; it never substitutes a stale local ref.
 if [ -z "$MASTER_OID" ]; then
-  symref="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)" \
+  symref="$(read_origin_head)" \
     || die "could not read HEAD from origin; pass --master <oid> to state the baseline" "$EXIT_NO_VERDICT"
   DEFAULT_REF="$(printf '%s\n' "$symref" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
   [ -n "$DEFAULT_REF" ] \
@@ -187,7 +202,7 @@ if [ -z "$MASTER_OID" ]; then
     || die "origin named a default branch this dispatcher will not fetch: ${DEFAULT_REF}" "$EXIT_NO_VERDICT"
   GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" fetch --no-tags --no-write-fetch-head origin "$DEFAULT_REF" >/dev/null 2>&1 \
     || die "could not refresh ${DEFAULT_REF} from origin; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
-  refreshed="$(GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" ls-remote --symref origin HEAD 2>/dev/null)" \
+  refreshed="$(read_origin_head)" \
     || die "could not re-read HEAD from origin after refresh; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
   refreshed_ref="$(printf '%s\n' "$refreshed" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
   MASTER_OID="$(printf '%s\n' "$refreshed" | awk '$2 == "HEAD" {print $1; exit}')"
@@ -270,14 +285,14 @@ run_remote() {
   # so there is no verdict to report and 76 says exactly that; returning the
   # gate's FAIL code here would have dressed a transport or mirror problem up as
   # a judgement about the commit.
-  bash "${SCRIPT_DIR}/mirror-push.sh" "$server" \
+  AGENTOS_GATE_SERVER= bash "${SCRIPT_DIR}/mirror-push.sh" "$server" \
     --candidate "$OID" --baseline "$MASTER_OID" >&2 || {
     printf 'gate-dispatch: mirror-push failed; no gate was run and no verdict exists\n' >&2
     REMOTE_OUTPUT=""
     REMOTE_STATUS="$EXIT_NO_VERDICT"
     return 0
   }
-  REMOTE_OUTPUT="$(bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
+  REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER= bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
   REMOTE_STATUS=$?
 }
 

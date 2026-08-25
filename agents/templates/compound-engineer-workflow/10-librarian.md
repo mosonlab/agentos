@@ -1,5 +1,6 @@
 ---
-stepIndex: 9
+stepIndex: 10
+layer: 9
 agent: librarian
 approvalGate: false
 outputKind: documentation

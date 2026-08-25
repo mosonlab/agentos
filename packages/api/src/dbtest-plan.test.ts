@@ -58,8 +58,24 @@ test("DBTEST-PLAN-MAINTENANCE derives the maintenance URL on the same server, ne
 test("DBTEST-PLAN-LABELS keep one file's database and directories distinct from another's", () => {
   assert.equal(fileLabel("/repo/packages/api/src/chain-branch.dbtest.ts"), "chain-branch");
   assert.equal(fileLabel("merge-integrator-seed.dbtest.ts"), "merge-integrator-seed");
-  assert.equal(fileDirectoryName("/repo/src/chain.dbtest.ts"), "chain");
-  assert.equal(fileDirectoryName("/repo/src/../src/we ird$.dbtest.ts"), "we-ird-");
+  assert.equal(fileDirectoryName("/repo/src/chain.dbtest.ts"), "repo-src-chain");
+  assert.equal(fileDirectoryName("/repo/src/../src/we ird$.dbtest.ts"), "repo-src-we-ird");
+  // A `..` that survived into the name would let join() walk out of the root.
+  assert.doesNotMatch(fileDirectoryName("../elsewhere/chain.dbtest.ts"), /\.\./u);
+});
+
+test("DBTEST-PLAN-LABELS separate same-named files from different workspaces", () => {
+  // Not hypothetical: the gate runs packages/db and packages/api as one pool,
+  // and both of these pairs exist in the tree today. On the basename alone
+  // each pair would share one RUNNER_WORKSPACE_ROOT, CONTROL_PLANE_STATE_DIR
+  // and FILES_ROOT, which is silent — the tests pass while sharing state.
+  for (const duplicated of ["preflight-goal-execution", "service-maintenance-lock"]) {
+    assert.notEqual(
+      fileDirectoryName(`packages/db/src/${duplicated}.dbtest.ts`),
+      fileDirectoryName(`packages/api/src/${duplicated}.dbtest.ts`),
+      `${duplicated} exists in both workspaces and must not share roots`,
+    );
+  }
 });
 
 test("DBTEST-PLAN-ASSIGNMENT moves DATABASE_URL with the test URL and only the roots the caller set", () => {

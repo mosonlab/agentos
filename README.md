@@ -276,13 +276,12 @@ anything you care about.
 ## Templates release demo
 
 `npm run demo:templates -- preflight|setup|instantiate|capture|verify|reset`
-drives the guarded evidence workflow for the canonical twelve-step template. The
-current contract and exact commands are in
-[`docs/demos/templates-release-demo.md`](docs/demos/templates-release-demo.md).
-It proves one serial execution at named AgentOS and target SHAs. OSS-B separately
-authorizes any fresh-install claim, and CP-A separately authorizes the named
-provider path; a rehearsal or one provider run proves neither universal provider
-compatibility nor a fresh install.
+drives the retained v0.2 twelve-node release-demo workflow; it is not evidence
+for the current layered canonical templates. The demo's limits and exact
+commands are in [`docs/demos/templates-release-demo.md`](docs/demos/templates-release-demo.md).
+The current Direct and Full Assurance graphs are documented in
+[`agents/README.md`](agents/README.md). A rehearsal or one provider run proves
+neither universal provider compatibility nor a fresh install.
 
 ## Verification
 

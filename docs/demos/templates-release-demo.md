@@ -1,11 +1,17 @@
 # Templates release demo
 
-This page is the current OSS-C release-demo authority. The canonical workflow
-has twelve positions: agent steps 1-10, server-side mechanical readiness at
-step 11, and the mechanical `merge-integrator` at step 12. Steps 11 and 12 run
-no model, carry no human approval gate, and step 12 does not open a pull
-request. Earlier human-gated planning text is historical and must not drive a
-new recording.
+This page describes the retained OSS-C **legacy release demo**, not the current
+canonical workflow. Its harness and evidence schema expect the former
+twelve-node Full Assurance shape: agent steps 1-10, server-side mechanical
+readiness at step 11, and the mechanical `merge-integrator` at step 12.
+
+Current canonical workflows are an eight-node/seven-layer Direct chain and a
+thirteen-node/twelve-layer Full Assurance chain. Full Assurance has parallel
+Sol and blind Opus review siblings, followed by a fresh Opus adjudication node;
+its readiness and integrator are nodes 12 and 13. Do not use the OSS-C harness
+as current-template acceptance evidence until its implementation is migrated to
+that graph. The canonical source of the current workflow is
+[`agents/README.md`](../../agents/README.md).
 
 The harness proves one serial template execution against exact AgentOS and
 synthetic-target commits. It does not prove fresh installation, universal
@@ -74,10 +80,10 @@ npm run demo:templates -- verify --run-id oss-c0-demo-001 --evidence-dir <dir>
 canonical template, registers the exact target Repo, and grants `GIT_WRITE` to
 every agent-backed position, including readiness and the mechanical integrator.
 `instantiate` calls the ordinary API exactly once. `capture` is read-only and
-stores digests rather than output bodies or event payloads. `verify` requires
-positions 1-12, exact output kinds on every step, server-side mechanical
-readiness at step 11, mechanical merge execution at step 12, and, in public
-mode, an automatic GitHub PR with no manual fallback.
+stores digests rather than output bodies or event payloads. For its retained
+legacy workflow, `verify` requires positions 1-12, exact output kinds on every
+step, server-side mechanical readiness at step 11, mechanical merge execution
+at step 12, and, in public mode, an automatic GitHub PR with no manual fallback.
 A successful rehearsal is labeled `REHEARSAL_ONLY`; it cannot be relabeled
 `PASS`.
 

@@ -1,5 +1,6 @@
 ---
-stepIndex: 10
+stepIndex: 11
+layer: 10
 agent: regression-verifier
 approvalGate: false
 outputKind: regression-verification
@@ -23,7 +24,7 @@ documentation result from AgentOS step outputs. Review the full final diff as
 one unit, account for every must-fix ID, and rerun relevant regressions. If a
 must-fix remains open or the fix introduces a defect, do not run the full gate;
 emit the `review-fail` output below. Only after semantic verification passes,
-run `scripts/gate-worker/gate-dispatch.sh <head-sha> --master <baseHeadSha>`.
+`scripts/gate-worker/gate-dispatch.sh <head-sha> --master <baseHeadSha>`.
 Persist exactly one JSON object as the AgentOS task output and do not write a
 report file:
 

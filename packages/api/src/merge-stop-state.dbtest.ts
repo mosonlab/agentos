@@ -14,7 +14,6 @@ import {
   applyInboxDecisionTx,
   EVIDENCE_PLACEHOLDER_BODY,
   enqueueTaskRun,
-  legacyHumanTwelveStepTemplateName,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   parseAuthorizationMetadata,
@@ -73,7 +72,7 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   }
 };
 
-/** A live step-12 run the merge executor would be holding. */
+/** A live merge-execution run the merge executor would be holding. */
 const liveIntegratorRun = async (chain: IntegratorChain, runNumber = 1, maxRuns = 5) => {
   const run = await db.run.create({ data: {
     projectId: chain.project.id, taskId: chain.integratorTask!.id, agentId: chain.integratorAgent.id,
@@ -138,11 +137,7 @@ test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, ques
 });
 
 test("a legacy integrator base-drift stop retains an abandon-only manual exit", async () => {
-  const chain = await seedIntegratorChain(db, { label: "legacy-base-drift-exit" });
-  await db.taskTemplate.update({
-    where: { id: chain.template.id },
-    data: { name: legacyHumanTwelveStepTemplateName(chain.template.id) },
-  });
+  const chain = await seedIntegratorChain(db, { label: "legacy-base-drift-exit", shape: "twelve-step" });
   const run = await liveIntegratorRun(chain);
   await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
     outcome: "stopped",
@@ -178,7 +173,7 @@ test("a fresh regression completion preserves success and parks a legacy-stopped
   } });
   await db.task.update({
     where: { id: chain.integratorTask.id },
-    data: { status: "REVIEW", failureReason: "Mechanical merge stopped: base-drift" },
+    data: { failureReason: "Mechanical merge stopped: base-drift" },
   });
 
   const regression = await db.run.create({ data: {
@@ -430,7 +425,7 @@ test("legacy seven-step re-authorize fails loudly rather than crossing chains fo
   await db.session.delete({ where: { id: chain.gateSession.id } });
   const foreignTask = await db.task.create({ data: {
     projectId: chain.project.id, repoId: chain.repo.id, name: "Foreign evidence", description: "unrelated chain",
-    assigneeType: "AGENT", assigneeAgentId: chain.agent.id, chainId: "foreign-chain", chainIndex: 5,
+    assigneeType: "AGENT", assigneeAgentId: chain.agent.id, chainId: "foreign-chain", chainIndex: 5, chainLayer: 5,
     status: "DONE", targetBranch: "master",
   } });
   const foreignRun = await db.run.create({ data: {

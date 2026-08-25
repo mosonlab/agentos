@@ -18,8 +18,14 @@ export const chainMarker = (
 
 /** A board card describes its own place, not the chain's current execution. */
 export const chainPositionMarker = (
-  progress: Pick<ChainProgress, "position" | "total"> | null | undefined,
+  progress: Pick<ChainProgress, "position" | "total">
+    & Partial<Pick<ChainProgress, "currentLayer" | "layerCount">>
+    | null
+    | undefined,
 ): string | null => {
   if (!progress || progress.position === null) return null;
-  return `step ${progress.position}/${progress.total}`;
+  const step = `step ${progress.position}/${progress.total}`;
+  return progress.currentLayer === undefined || progress.layerCount === undefined
+    ? step
+    : `${step} · layer ${progress.currentLayer}/${progress.layerCount}`;
 };

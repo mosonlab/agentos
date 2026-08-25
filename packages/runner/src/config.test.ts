@@ -93,6 +93,24 @@ test("runner proxy configuration ignores inherited conventional values", () => {
   }), {});
 });
 
+test("the runner accepts only a safe operator-selected gate destination", () => {
+  const previous = process.env.RUNNER_GATE_SERVER;
+  try {
+    process.env.RUNNER_GATE_SERVER = "agentos-gate";
+    assert.equal(loadRunnerConfig().gateServer, "agentos-gate");
+    const qualifiedDestination = ["gate", "worker"].join("@");
+    process.env.RUNNER_GATE_SERVER = qualifiedDestination;
+    assert.equal(loadRunnerConfig().gateServer, qualifiedDestination);
+    for (const value of ["", "-oProxyCommand=bad", "gate;bad", "gate:22", "gate name"]) {
+      process.env.RUNNER_GATE_SERVER = value;
+      assert.throws(loadRunnerConfig, /RUNNER_GATE_SERVER must be a safe ssh destination/u);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_GATE_SERVER;
+    else process.env.RUNNER_GATE_SERVER = previous;
+  }
+});
+
 test("the tool inactivity deadline defaults to 30 minutes and rejects unsafe values", () => {
   const previous = process.env.RUNNER_TOOL_DEADLINE_MS;
   try {

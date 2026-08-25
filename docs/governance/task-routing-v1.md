@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.1
+Version: 1.2
 
 Status: Active
 
@@ -39,10 +39,13 @@ Work done directly in the current session is outside these tiers and does not re
 Choose the shortest tier that satisfies the Product Contract. This contract defines three tiers:
 
 - 顺手小活：本窗直接做，不上看板。
-- Direct：模板跳步（跳①②③④），保⑤→⑥a→⑥b→⑦→⑥c→⑨，⑧可选；无 spec/plan；实现步用 senior-dev 角色（executioner 硬前提是既存 plan）。
+- Direct：没有 spec/plan；八个 task node 跨七个 execution layer：实现 → 并行 Sol/盲 Opus 评审 → Opus 终裁 → 修复 → 回归 → 就绪 → 机械合并。实现步默认用 senior-dev-luna，命中 persisted data、defense-list 或无法枚举的 cross-cutting 风险时在派发前改用 senior-dev-high（executioner 硬前提是既存 plan）。
 - Full Assurance：全链。
 
-Direct is a formal chain route, not an exemption from review or exact-head human acceptance. Full Assurance is required when the Product Contract calls for specification, planning, plan review, or revised-plan implementation authorization.
+Direct is a formal chain route, not an exemption from review or exact-head
+mechanical authorization. Full Assurance is required when the Product Contract
+calls for specification, planning, plan review, or revised-plan implementation
+authorization.
 
 ## Critical classification
 
@@ -50,31 +53,68 @@ Critical means only that the work touches persisted data or performs an irrevers
 
 Critical is a risk label, not a child-model route. Step ⑤ keeps every native child on Luna max; the Sol-high root must inspect a risk slice's boundary, rollback behavior, and acceptance evidence before integration, and a child cannot perform an irreversible external action. A ⑦ repair diff that touches structural risk uses sol:high. Here, `persisted data` means runtime-created user or system data, including its schema, that must survive a version change. Structural risk means a change to a public interface, persisted data, a component boundary, or a foundational dependency.
 
-## Full Assurance eleven-step final table
+## Full Assurance canonical execution graph
 
-This is the target shape of the seeded `compound-engineer-workflow` template and the authoritative chain table for this contract:
+The seeded `compound-engineer-workflow` has thirteen task nodes across twelve
+execution layers. A layer becomes eligible together; its successor layer is
+eligible only after every task in the preceding layer is `DONE`. A failed,
+parked, stopped, or otherwise non-`DONE` sibling blocks the join. There is no
+partial join or timeout fallback.
 
-| 步 | 角色 | (入口, model, effort) | 要点 |
+`chainIndex` is the stable node ordinal. `chainLayer` is the execution key, so
+the two review siblings have distinct ordinals but the same layer. The console
+shows both the node ordinal and the dense execution-layer position; equal-layer
+rows are parallel siblings, not serial predecessor/successor rows.
+
+| 节点 / layer | 角色 | (入口, model, effort) | 要点 |
 | --- | --- | --- | --- |
-| ① spec | spec | CODEX, sol, high | 根据 Product Contract 产出可供 plan agent 直接执行的完整 specification；人工闸 |
-| ② plan | plan | CLAUDE, fable-5, medium | 产物=垂直切片集，一片一文件：{id, title, delivers, blocked_by[], acceptance[], files_hint[]}；切片判据：纵穿全层、独立可演示、单上下文窗装得下；宽重构走 expand→migrate（分批）→contract；plan 会话 session-id 落链分支文件 |
-| ③ 计划评审 | review-coordinator | PI, openai-codex/gpt-5.6-sol, high | 作者为 Fable，评审异厂；检查：粒度/依赖边真伪/该合该拆三问、每片「能演示什么」、每条验收判据在基点 commit 为红 |
-| ④ 计划修订 | plan-reviser | CLAUDE, fable-5, medium | resume ②会话（同模型同档；显式 session-id，禁 `--last`）；跨链步 resume 实测不通过则新窗读②③产出；不服 findings 须列明理由不得静默略过；实施授权闸在本步后 |
-| ⑤ 实现 | executioner | CODEX root 使用 executioner Agent 的 model、reasoning effort 与 service tier；子代理固定 luna, max | 保留 approved slice DAG，root 按实时 dependency frontier 调度，但按上下文与写入所有权组合 assignment，不做一切片一进程；子代理经 multi_agent_v2 spawn，模型固定 luna:max，最多八个 child threads（root 不计），在受控资源上限内尽量填满所有可安全并行的 slots；并发写入者各用独立 worktree，首个结果后保留一个长驻 Luna merger，通常七个 implementers 加一个 merger；结果就绪即依赖安全地合入，无全 wave 屏障；Implementation 只运行 assignment 窄验收、一次 affected-workspace compile 或 typecheck，以及跨 assignment seam tests，不跑 repository-wide suite 或正式 Merge Gate；失败在原 child 做一次有界纠正，再由 root 接管；risk slice 仍可由 Luna 实现，但 root 合入前核查 risk boundary、rollback 与 acceptance，child 禁止不可逆外部动作；整案单次 push，PR 仍由 platform 创建 |
-| ⑥a 代码评审（Sol 路） | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | base=⑤启动前冻结 commit，head=⑤记录的结束 commit，审完整 integrated diff；同一会话先完成 Standards pass 并闭合 findings，再单独执行逐项引用治理文本的 Spec pass，合并为一份报告；findings 仅持久化为 TaskStepOutput，不写入或推送链分支 |
-| ⑥b 代码评审+终裁（Opus 路） | review-coordinator-opus | CLAUDE, opus-5, medium | workspace 以⑤记录的结束 commit 做 fetch-level isolated detached checkout；claim 以 non-report metadata 提供 immutable base/head；先将独立 Standards/Spec 评审持久化为 intermediate TaskStepOutput，成功写入后才解锁并读取⑥a，再按正典合并矩阵终裁 must-fix 清单（Sol 独报须验证后采纳）；最终报告与 provider session id 仅落 platform output |
-| ⑦ 修复 | senior-dev | CODEX, sol, medium | 按封闭 must-fix 清单修；修复 diff 触及任一结构风险升 sol:high（本合同的 product-owner 裁定） |
-| ⑥c 回归核销 | regression-verifier | PI, openai-codex/gpt-5.6-sol, medium | 从完整 persisted review package 读取闭合 must-fix、⑥b 终裁与修复结果，对完整修复 diff 做窄范围 semantic verification；语义通过后只运行一次 exact-head mechanical gate，并绑定结构化 verdict；不 resume ⑥b 的 Opus session |
-| ⑧ wiki | librarian | CODEX, terra, medium | 自 luna:high 改此（luna:high 违「Luna 一律 max」硬禁令；Terra $2/$12） |
-| ⑨ 人工 PR 审查 | 人工闸 | — | 不变 |
+| ① / 1 spec | spec | CODEX, sol, high | 根据 Product Contract 产出可供 plan agent 直接执行的完整 specification；人工闸 |
+| ② / 2 plan | plan | CLAUDE, fable-5, medium | 产物=垂直切片集，一片一文件：{id, title, delivers, blocked_by[], acceptance[], files_hint[]}；切片判据：纵穿全层、独立可演示、单上下文窗装得下；宽重构走 expand→migrate（分批）→contract；plan 会话 session-id 落链分支文件 |
+| ③ / 3 计划评审 | review-coordinator | PI, openai-codex/gpt-5.6-sol, high | 检查切片的可演示性、依赖边、合并/拆分、迁移顺序，以及每条验收判据在冻结基点为红 |
+| ④ / 4 计划修订 | plan-reviser | CLAUDE, fable-5, medium | resume ②会话（同模型同档；显式 session-id，禁 `--last`）；跨链步 resume 不可用时新窗读取②③产出；实施授权闸在本步后 |
+| ⑤ / 5 实现 | executioner | CODEX root 使用 executioner Agent 的 model、reasoning effort 与 service tier；子代理固定 luna, max | 保留 approved slice DAG，root 按实时 dependency frontier 调度；子代理经 multi_agent_v2 spawn，最多八个 child threads；并发写入者各用独立 worktree，合并按依赖安全顺序；Implementation 只运行窄验收、affected-workspace compile/typecheck 和跨 assignment seam tests，不跑 repository-wide suite 或正式 Merge Gate |
+| ⑥a / 6 Sol 代码评审 | review-coordinator-sol | PI, openai-codex/gpt-5.6-sol, high | 与⑥b同时可领取。一个 Sol high session 对同一实现范围依次完成 Standards 和 Specification 两轴，持久化一份 immutable `sol-findings`；不启动嵌套评审子进程 |
+| ⑥b / 6 盲 Opus 代码评审 | review-coordinator-opus | CLAUDE, claude-opus-5, medium | 与⑥a同时可领取。使用同一 pinned implementation base/head 的隔离 checkout，持久化 immutable `blind-findings`；整个任务和 provider session 都不能读取 Sol 或其他 review evidence |
+| ⑥c / 7 Opus 终裁 | review-adjudicator-opus | CLAUDE, claude-opus-5, medium | ⑥a与⑥b均 `DONE` 后才可领取。新 provider session 先验证两份 immutable 输出、状态和 pinned base/head，再读取报告，输出涵盖每个 finding id 的 immutable `must-fix`；不恢复盲评审会话 |
+| ⑦ / 8 修复 | senior-dev | CODEX, sol, medium | 按封闭 `must-fix` 清单修；修复 diff 触及任一结构风险升 sol:high |
+| ⑧ / 9 回归核销 | regression-verifier | PI, openai-codex/gpt-5.6-sol, medium | 新 Sol session 在精确修复 head 上读取终裁和修复结果，核销每个 must-fix；语义通过后运行一次 exact-head mechanical gate，并绑定结构化 verdict |
+| ⑨ / 10 wiki | librarian | CODEX, terra, medium | 将内部文档更新为 delivered code 的当前行为 |
+| ⑩ / 11 合并就绪 | review-coordinator | server-owned mechanical | 控制面重算 PR head、defense-list 和 exact-head PASS 证据，输出 merge authorization；不运行模型 |
+| ⑪ / 12 机械合并 | merge-integrator | mechanical sentinel | 重新验证授权和 live PR 条件后执行合并；不运行模型 |
 
-In summary, Full Assurance runs specification and planning through implementation, two-route review, must-fix closure, regression verification, optional documentation, and exact-head human PR review. Step ⑤ uses `executioner` because a persisted Plan exists. Direct skips ①–④ and uses `senior-dev-luna` by default at ⑤, while `senior-dev-high` remains an allowed dispatch-time root under the repository routing rules. Either Direct Codex root receives the same platform-pinned Luna max native-child capability; non-implementation steps do not.
+Full Assurance runs specification and planning through implementation, a
+parallel two-route review layer, a deterministic Opus join, repair, fresh
+post-fix regression, documentation, server-side readiness, and mechanical
+merge. Step ⑤ uses `executioner` because a persisted Plan exists. Direct skips
+①–④ and uses `senior-dev-luna` by default at its implementation node, while
+`senior-dev-high` remains an allowed dispatch-time root under the repository
+routing rules. Either Direct Codex root receives the same platform-pinned Luna
+max native-child capability; non-implementation steps do not.
 
 ## Review structure
 
-Steps ⑥a, ⑥b, and ⑥c form the two-route blind-review flow. Review reports and session records live only in TaskStepOutput/platform output and never on the chain branch. ⑥a independently reviews the integrated diff and persists its findings there. ⑥b receives the immutable implementation base/head as non-report claim metadata and runs from a fetch-level isolated detached checkout pinned to ⑤'s recorded end commit; it completes and persists its own Standards/Spec review before the successful write unlocks ⑥a, then performs final adjudication. After ⑦ closes the must-fix list from predecessor outputs, ⑥c uses the dedicated Sol-medium regression verifier to read the complete persisted review package, verify the complete repair diff, and run the one exact-head mechanical gate that binds acceptance to the verified head.
+Steps ⑥a and ⑥b are a parallel blind-review layer; ⑥c is its only join
+successor. Review reports live only in immutable TaskStepOutput/platform output,
+never on the chain branch. The first completing reviewer merely persists its
+report; it cannot activate adjudication. The control plane activates ⑥c once,
+only when both review tasks are `DONE`; retrying a failed branch preserves the
+other valid report and re-evaluates the same join.
 
-Luna may write only when the implementation root enforces independent worktrees, bounded authority, narrow acceptance tests, and root review of risk boundaries. Blind review requires the adjudicator to persist an independent review before reading the other route. Findings carry a stable ID, location, evidence, and severity; P0/P1 findings are must-fix. After repair, the dedicated Sol-medium regression verifier accounts for the adjudicated must-fix list over the complete fix diff, and that verified exact head becomes the acceptance target.
+Both review nodes receive the same immutable implementation base/head and run
+from detached checkouts pinned to that range. Sol produces a single integrated
+two-axis report. Blind Opus has no route to Sol's report for the lifetime of its
+task/session, including after it persists `blind-findings`. The fresh Opus
+adjudicator verifies both outputs and their range before reading either one,
+then produces a separate `must-fix` report with exactly one disposition for
+every finding in the two source reports. It does not resume the blind-review
+conversation. P0/P1 findings are must-fix; P2 findings remain recorded.
+
+Luna may write only when the implementation root enforces independent
+worktrees, bounded authority, narrow acceptance tests, and root review of risk
+boundaries. After repair, the dedicated Sol-medium regression verifier runs in
+a fresh session on the repaired head, accounts for the adjudicated must-fix
+list over the complete fix diff, and binds the exact accepted head to its
+verdict.
 
 ## Human approval placement
 
@@ -84,19 +124,20 @@ Place the fewest gates that preserve human judgment:
 
 - Add a specification gate only when ① resolves product behavior, acceptance semantics, or a data-contract ambiguity left open by the approved Product Contract.
 - Do not gate ② before independent review. In Full Assurance, put implementation authorization after reviewed-plan closure at ④.
-- Keep ⑤, ⑥a, ⑥b, ⑦, ⑥c, and ⑧ automatic inside approved boundaries.
-- Require ⑨ exact-head human authorization before merging a pull request or performing a public, production, destructive, migration, or restore action. Head, base, required-check, or material-evidence drift invalidates that authorization.
+- Keep ⑤, the parallel ⑥a/⑥b layer, ⑥c, ⑦, ⑧, and ⑨ automatic inside approved boundaries.
+- The server-owned readiness node and mechanical integrator enforce exact-head authorization before merge. Head, base, required-check, or material-evidence drift invalidates that authorization and stops the mechanical tail.
 
-Direct normally has only ⑨ when it opens a pull request. Gate selection is recorded at dispatch; an active Agent does not rewrite it.
+Direct has no planning gates. Gate selection is recorded at dispatch; an active
+Agent does not rewrite it.
 
 ## Per-chain routing snapshot
 
 Record this block when creating or materially rerouting a chain:
 
 ```text
-Routing Contract: v1.1
+Routing Contract: v1.2
 Tier: Direct
-Implementation Agent: senior-dev
+Implementation Agent: senior-dev-luna
 Critical: no
 Reason: Bounded change; Direct review and exact-head acceptance remain intact.
 ```
@@ -105,6 +146,14 @@ If risk or ambiguity increases during execution, pause before the newly unsafe w
 
 ## Merge Integrator
 
-Version 1 ends at ⑨ human exact-head authorization. After the separately governed Merge Integrator is implemented, append a mechanical merge execution step after ⑨ (label ⑩, execution ordinal twelve). The integrator stops on drift, failed checks, or conflict and returns to renewed human authorization; it does not make the approval decision.
+The canonical templates already include the mechanical tail: server-owned merge
+readiness follows the librarian (or regression in Direct), then
+`merge-integrator` executes only with a current exact-head authorization. The
+integrator stops on drift, failed checks, missing PR identity, or conflict; it
+does not make an approval decision or silently renew evidence.
 
-Version 1 uses deterministic dispatch-time routing. It does not require a runtime router or a replacement template.
+Existing chains instantiated before layered scheduling retain their stored
+prompts, assignments, runs, sessions, and linear behavior. Canonical sync keeps
+the former seven-node Direct and twelve-node Full templates under deterministic
+`-legacy-v1` identities rather than rewriting instantiated work. New chains use
+the eight-node/seven-layer Direct or thirteen-node/twelve-layer Full graph.

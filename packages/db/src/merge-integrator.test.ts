@@ -10,6 +10,12 @@ import {
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
+  DIRECT_INTEGRATOR_STEP_INDEX,
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_DIRECT_INTEGRATOR_STEP_INDEX,
+  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_INTEGRATOR_STEP_INDEX,
+  LEGACY_INTEGRATOR_TEMPLATE_NAME,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   STOP_CHOICES,
@@ -27,8 +33,9 @@ import {
   isIncidentCondition,
   isIntegratorStep,
   legacyNineStepTemplateName,
-  legacyRegressionFirstTwelveStepTemplateName,
+  legacyRegressionFirstThirteenStepTemplateName,
   legacyTenStepTemplateName,
+  legacyHumanTwelveStepTemplateName,
   isTerminalDisposition,
   parseEvidence,
   parseMergeResult,
@@ -284,6 +291,35 @@ test("the binding predicate holds in both directions", () => {
   assert.ok(!integratorBindingValid("senior-dev", integratorStep));
 });
 
+test("canonical integrator bindings use the new graph and exact legacy-v1 names retain old positions", () => {
+  const shapes = [
+    { stepIndex: INTEGRATOR_STEP_INDEX, template: INTEGRATOR_TEMPLATE_NAME },
+    { stepIndex: DIRECT_INTEGRATOR_STEP_INDEX, template: DIRECT_INTEGRATOR_TEMPLATE_NAME },
+    { stepIndex: LEGACY_INTEGRATOR_STEP_INDEX, template: LEGACY_INTEGRATOR_TEMPLATE_NAME },
+    { stepIndex: LEGACY_DIRECT_INTEGRATOR_STEP_INDEX, template: LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME },
+  ];
+  for (const shape of shapes) {
+    const step = { ...shape, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: shape.template } };
+    assert.equal(isIntegratorStep(step), true, `${shape.template} step ${shape.stepIndex}`);
+    assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step), true);
+  }
+  assert.equal(isIntegratorStep({
+    stepIndex: 12,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME },
+  }), false);
+  assert.equal(isIntegratorStep({
+    stepIndex: 7,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME },
+  }), false);
+  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, {
+    stepIndex: LEGACY_INTEGRATOR_STEP_INDEX,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: LEGACY_INTEGRATOR_TEMPLATE_NAME },
+  }), false);
+});
+
 test("seed-marked legacy step 10 stays mechanical without widening new-template binding", () => {
   const legacy = {
     stepIndex: 10,
@@ -311,11 +347,24 @@ test("seed-marked legacy step 10 stays mechanical without widening new-template 
   }), false);
 });
 
-test("a regression-first twelve-step rollover keeps its merge execution mechanical", () => {
+test("historical human-gate rollover remains bound to its old step 12", () => {
+  assert.equal(isIntegratorStep({
+    stepIndex: LEGACY_INTEGRATOR_STEP_INDEX,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
+  }), true);
+  assert.equal(isIntegratorStep({
+    stepIndex: INTEGRATOR_STEP_INDEX,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
+  }), false);
+});
+
+test("a regression-first thirteen-step rollover keeps its merge execution mechanical", () => {
   const legacy = {
     stepIndex: INTEGRATOR_STEP_INDEX,
     outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: legacyRegressionFirstTwelveStepTemplateName("template-old") },
+    taskTemplate: { name: legacyRegressionFirstThirteenStepTemplateName("template-old") },
   };
   assert.equal(isIntegratorStep(legacy), true);
   assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);

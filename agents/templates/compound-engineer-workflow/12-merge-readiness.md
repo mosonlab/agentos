@@ -1,5 +1,6 @@
 ---
-stepIndex: 11
+stepIndex: 12
+layer: 11
 agent: review-coordinator
 approvalGate: false
 outputKind: merge-authorization

@@ -18,7 +18,7 @@ import {
 
 import { instantiateTemplate } from "./templates.js";
 
-test("instantiating the canonical feature template creates twelve tasks including the mechanical integrator", async () => {
+test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {
   const canonicalTemplateSteps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
   const created: Array<Record<string, any>> = [];
   const runs: Array<Record<string, any>> = [];
@@ -53,6 +53,7 @@ test("instantiating the canonical feature template creates twelve tasks includin
       assigneeAgent: agent,
       approvalGate: contract.approvalGate,
       opensPullRequest: contract.opensPullRequest,
+      layer: contract.layer,
       baseFromStepIndex: contract.baseFromStepIndex,
       runner: null,
       taskTemplate: { name: "compound-engineer-workflow" },
@@ -74,7 +75,6 @@ test("instantiating the canonical feature template creates twelve tasks includin
         const task = {
           id: `task-${created.length + 1}`,
           ...data,
-          followUpTaskId: null,
           assigneeAgent: data.assigneeAgentId
             ? [...agents.values()].find((agent) => agent.id === data.assigneeAgentId)
             : null,
@@ -114,37 +114,38 @@ test("instantiating the canonical feature template creates twelve tasks includin
   const result = await instantiateTemplate(db, "project-1", "template-1", {
     repoId: "repo-1", variables: { branchName: "feature/twelve-steps" }, autoStart: true, description: "Build it",
   });
-  assert.equal(result.tasks.length, 12);
+  assert.equal(result.tasks.length, 13);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
-  assert.equal(created[0]!.followUpTaskId, "task-2");
-  assert.equal(created[10]!.assigneeType, AssigneeType.AGENT);
-  assert.equal(created[10]!.approvalGate, false);
-  assert.equal(created[10]!.templateStep.outputKind, "merge-authorization");
-  assert.equal(created[11]!.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
-  assert.equal(created[11]!.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
-  assert.equal(created[11]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
-  assert.equal(created[11]!.opensPullRequest, false);
-  assert.equal(executionModeFor(created[11]!.templateStep), "mechanical");
+  assert.deepEqual(created.map((task) => task.chainLayer), canonicalTemplateSteps.map((step) => step.layer));
+  assert.ok(created.every((task) => typeof task.chainLayer === "number"));
+  assert.equal(created[11]!.assigneeType, AssigneeType.AGENT);
+  assert.equal(created[11]!.approvalGate, false);
+  assert.equal(created[11]!.templateStep.outputKind, "merge-authorization");
+  assert.equal(created[12]!.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
+  assert.equal(created[12]!.assigneeAgent?.model, INTEGRATOR_SENTINEL_MODEL);
+  assert.equal(created[12]!.assigneeAgent?.runnerPreference, RunnerPreference.INHERIT);
+  assert.equal(created[12]!.opensPullRequest, false);
+  assert.equal(executionModeFor(created[12]!.templateStep), "mechanical");
   assert.deepEqual(created.map((task) => task.outputKind ?? task.templateStep.outputKind), canonicalTemplateSteps.map((step) => step.outputKind));
   assert.equal(runs.length, 1);
   assert.equal(runs[0]!.runner, RunnerKind.CODEX);
   assert.equal(runs[0]!.branch, "feature/twelve-steps");
-  assert.equal(runs.some((run) => run.taskId === created[11]!.id), false, "step 12 waits for server-side readiness and never queues at instantiation");
+  assert.equal(runs.some((run) => run.taskId === created[12]!.id), false, "step 13 waits for server-side readiness and never queues at instantiation");
   assert.doesNotMatch(
     created[6]!.description,
     /Read the prior template steps' persisted outputs before working/u,
     "blind-review step 7 materializes without an upstream-read instruction",
   );
   assert.match(
-    created[9]!.description,
+    created[10]!.description,
     /Read the prior template steps' persisted outputs before working/u,
-    "regression-verification step 10 consumes the Librarian output",
+    "regression-verification step 11 consumes the Librarian output",
   );
 
   const inert = await instantiateTemplate(db, "project-1", "template-1", {
     repoId: "repo-1", variables: { branchName: "feature/inert-chain" }, description: "Build it later",
   });
-  assert.equal(inert.tasks.length, 12);
+  assert.equal(inert.tasks.length, 13);
   assert.equal(runs.length, 1, "omitting autoStart defaults to an inert chain with no queued run");
 });
 

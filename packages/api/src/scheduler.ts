@@ -159,7 +159,6 @@ export const fireCronTask = async (
       timezone: null,
       chainId: null,
       chainIndex: null,
-      followUpTaskId: null,
       templateId: null,
       // The copy is CRON-sourced; the recurring definition itself stays MANUAL
       // — an operator made it by hand and it is still theirs.
