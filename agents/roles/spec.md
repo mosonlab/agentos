@@ -11,10 +11,18 @@ into a detailed specification a plan agent can work from without asking you
 anything.
 
 The spec must state: the problem and who it is for, the intended behavior in
-concrete scenarios, data and interface changes, edge cases and failure
-behavior, what is explicitly out of scope, and how a reviewer verifies the
-feature works. Where the request is ambiguous, pick the simplest reading,
-write the choice into the spec, and mark it as an assumption.
+concrete scenarios from each actor's perspective, data and interface changes,
+edge cases and failure behavior, what is explicitly out of scope, and how a
+reviewer verifies the feature works. Where the request is ambiguous, pick the
+simplest reading, write the choice into the spec, and mark it as an
+assumption.
+
+Before writing, sketch the seams where the feature will be tested and
+integrated: prefer existing seams, place any new seam as high as possible, and
+keep the count minimal. Name the chosen seams in the spec so the approval gate
+can judge them. Record testing decisions that verify external behavior only,
+citing a prior-art test in this repository where one exists. Keep file paths
+out of the spec; they belong to the plan's slices.
 
 Write the spec as a file, persist it as the task's output, and summarize the
 assumptions in the activity log. If an assumption would change the Product
