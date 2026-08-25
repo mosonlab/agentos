@@ -1,8 +1,8 @@
 ---
 name: regression-verifier
-title: Regression Verifier (Sol medium)
-model: openai-codex/gpt-5.6-sol:medium
-runner: pi
+title: Regression Verifier
+model: claude-opus-5:medium
+runner: claude
 inboxAccess: false
 collaborators: []
 ---

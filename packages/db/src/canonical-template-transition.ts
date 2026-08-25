@@ -78,6 +78,60 @@ any other non-verdict exit, report it through the activity log and fail the run
 loudly.
 `;
 
+const PLAN_DECISIONS_PROMPT = `and the plan's load-bearing decisions in \`decisions.md\` — one entry per decision naming the choice made, the alternatives rejected, and the reason, so a fresh-context revision inherits the why without this session's transcript.`;
+
+const PRE_DECISIONS_SESSIONS_PROMPT = `and this run's id in \`sessions.md\` under the label \`plan_authoring\`.`;
+
+const REVISE_FRESH_SESSION_PROMPT = `Start a fresh session — never resume the planning conversation — and read the persisted spec, the slice files under \`.chain/{{branchName}}/slices/\`, \`decisions.md\`, and the consolidated plan-review findings before editing.`;
+
+const PRE_DECISIONS_RESUME_PROMPT = `Attempt to resume the planning session with the run id labelled \`plan_authoring\` in \`.chain/{{branchName}}/sessions.md\`; if exact resume is unavailable, follow your role's new-session fallback.`;
+
+const REVISE_DECISIONS_UPKEEP_PROMPT = `When a finding overturns a recorded decision, rewrite its \`decisions.md\` entry with the new choice and reason.`;
+
+const PRE_DECISIONS_BOOKKEEPING_PROMPT = `On a successful resume the \`plan_authoring\` id stands; in a new session add this session's id under \`plan_revision\`.`;
+
+/**
+ * Reconstruct a compound plan or revise-plan prompt as it read before the
+ * decisions.md contract replaced the session-resume convention. Identity for
+ * every other step: the fragments appear nowhere else.
+ */
+export const preDecisionsPlanPrompt = (stepIndex: number, prompt: string): string => {
+  if (stepIndex === 2) return prompt.replace(PLAN_DECISIONS_PROMPT, PRE_DECISIONS_SESSIONS_PROMPT);
+  if (stepIndex === 4) {
+    return prompt
+      .replace(REVISE_FRESH_SESSION_PROMPT, PRE_DECISIONS_RESUME_PROMPT)
+      .replace(REVISE_DECISIONS_UPKEEP_PROMPT, PRE_DECISIONS_BOOKKEEPING_PROMPT);
+  }
+  return prompt;
+};
+
+export const legacyPlanDecisionsTemplateName = (templateName: string, templateId: string): string =>
+  `${templateName}-legacy-pre-plan-decisions-${templateId}`;
+
+export const isPrePlanDecisionsTemplate = (
+  templateName: string,
+  steps: readonly PersistedTransitionStep[],
+  canonical: readonly TemplateStepSource[],
+): boolean => {
+  if (templateName !== "compound-engineer-workflow" || steps.length !== canonical.length) return false;
+  const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
+  return ordered.every((step, index) => {
+    const expected = canonical[index];
+    if (!expected || step.stepIndex !== expected.stepIndex) return false;
+    const expectedPrompt = preDecisionsPlanPrompt(expected.stepIndex, expected.prompt);
+    return (step.assigneeAgent?.name ?? null) === expected.agentName
+      && step.assigneeType === (expected.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT)
+      && step.layer === expected.layer
+      && step.approvalGate === expected.approvalGate
+      && step.outputKind === expected.outputKind
+      && step.attachmentsFromPrevious === expected.attachmentsFromPrevious
+      && step.opensPullRequest === expected.opensPullRequest
+      && step.baseFromStepIndex === expected.baseFromStepIndex
+      && isDeepStrictEqual(step.spawnPolicy, expected.spawnPolicy)
+      && step.prompt === expectedPrompt;
+  });
+};
+
 export const previousChainLeasePrompt = (prompt: string): string => prompt
   .replace(LEASE_FETCH_PROMPT, PRE_LEASE_FETCH_PROMPT)
   .replace(DISPATCH_RETRY_PROMPT, "")
@@ -100,9 +154,11 @@ export const isPreChainLeaseTemplate = (
   return ordered.every((step, index) => {
     const expected = canonical[index];
     if (!expected || step.stepIndex !== expected.stepIndex) return false;
+    // Pre-lease rows also predate the decisions.md contract, so their plan
+    // prompts carry the pre-decisions wording.
     const expectedPrompt = expected.stepIndex === transitionIndex
       ? previousChainLeasePrompt(expected.prompt)
-      : expected.prompt;
+      : preDecisionsPlanPrompt(expected.stepIndex, expected.prompt);
     return (step.assigneeAgent?.name ?? null) === expected.agentName
       && step.assigneeType === (expected.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT)
       && step.layer === expected.layer

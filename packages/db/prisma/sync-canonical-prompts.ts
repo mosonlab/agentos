@@ -8,7 +8,9 @@ import {
 } from "../src/merge-integrator.js";
 import {
   isPreChainLeaseTemplate,
+  isPrePlanDecisionsTemplate,
   legacyChainLeaseTemplateName,
+  legacyPlanDecisionsTemplateName,
   legacyTemplateShapeRefusal,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
@@ -279,6 +281,46 @@ const transitionPreChainLeaseTemplates = async (
   return created;
 };
 
+const transitionPrePlanDecisionsTemplates = async (
+  tx: CanonicalTransaction,
+  templateSources: CanonicalSources,
+): Promise<number> => {
+  let created = 0;
+  for (const [templateName, canonical] of templateSources) {
+    const rows = await readCanonicalTemplateRows(tx, templateName);
+    for (const row of rows) {
+      if (!isPrePlanDecisionsTemplate(
+        templateName,
+        row.steps as unknown as PersistedTransitionStep[],
+        canonical,
+      )) continue;
+      const unfinishedTasks = await tx.task.count({
+        where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+      });
+      if (unfinishedTasks > 0) {
+        throw new Error(`${templateName} ${row.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      }
+      if (row.webhookSecretId !== null || row.webhookRepoId !== null
+        || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
+        || row.webhookReplayWindowSec !== null) {
+        throw new Error(`${templateName} ${row.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+      }
+      const legacyName = legacyPlanDecisionsTemplateName(templateName, row.id);
+      const collision = await tx.taskTemplate.findUnique({
+        where: { projectId_name: { projectId: row.projectId, name: legacyName } },
+        select: { id: true },
+      });
+      if (collision) {
+        throw new Error(`Canonical template ${templateName} on project ${row.projectId} cannot rename to ${legacyName}: target already exists`);
+      }
+      await tx.taskTemplate.update({ where: { id: row.id }, data: { name: legacyName } });
+      await createCanonicalTemplate(tx, row.projectId, templateName, canonical);
+      created += 1;
+    }
+  }
+  return created;
+};
+
 // Every canonical template, every step of each, and every role under agents/
 // is synced. Omitting any source here would let a prompt edit silently miss
 // production, so the loader owns the complete template inventory.
@@ -384,7 +426,8 @@ const main = async (): Promise<void> => {
       }
       const createdCanonicalTemplates = await transitionRegressionFirstCompoundTemplate(tx, templateSources)
         + await transitionCanonicalTemplateRows(tx, templateSources)
-        + await transitionPreChainLeaseTemplates(tx, templateSources);
+        + await transitionPreChainLeaseTemplates(tx, templateSources)
+        + await transitionPrePlanDecisionsTemplates(tx, templateSources);
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;
