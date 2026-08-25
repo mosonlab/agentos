@@ -65,7 +65,8 @@ test("instantiating the canonical feature template copies every layer and writes
     // the first task write. Returning both row shapes lets the shared lock
     // helpers exercise their normal paths.
     $queryRaw: async () => [...agents.values()].map((agent) => ({
-      id: agent.id, archivedAt: null, agentId: agent.id, repoId: "repo-1",
+      id: agent.id, name: agent.name, projectId: "project-1", archivedAt: null,
+      agentId: agent.id, repoId: "repo-1",
     })),
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) =>
@@ -232,7 +233,7 @@ test("an agent archived after the step check still loses to the locked re-read",
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
     $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
-      $queryRaw: async () => [{ id: agent.id, archivedAt: new Date() }],
+      $queryRaw: async () => [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }],
       task: { create: async () => { taskCreates += 1; return { id: "task-1" }; } },
       run: { create: async () => { throw new Error("must not create run"); } },
       taskActivity: { createMany: async () => ({ count: 0 }) },
@@ -279,7 +280,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
             meta: { code: "40001", message: "could not serialize access due to concurrent update" },
           });
         }
-        return [{ id: agent.id, archivedAt: new Date() }];
+        return [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }];
       },
       task: { create: async () => { throw new Error("must not create task"); } },
       run: { create: async () => { throw new Error("must not create run"); } },
@@ -337,7 +338,12 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
     $queryRaw: async (query: TemplateStringsArray) => {
       lockQueries.push(query.join(" "));
       return [
-        ...[...agents, replacement].map((agent) => ({ id: agent.id, archivedAt: agent.archivedAt })),
+        ...[...agents, replacement].map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          projectId: agent.projectId,
+          archivedAt: agent.archivedAt,
+        })),
         ...[...agents, replacement].map((agent) => ({ agentId: agent.id, repoId: "repo-1" })),
       ];
     },

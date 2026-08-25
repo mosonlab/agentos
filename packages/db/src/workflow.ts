@@ -331,15 +331,19 @@ export const lockAgentRow = async (
 export const lockAgentRows = async (
   tx: Tx,
   agentIds: string[],
-): Promise<Map<string, Date | null>> => {
+): Promise<Map<string, { name: string; projectId: string; archivedAt: Date | null }>> => {
   const unique = [...new Set(agentIds)];
   if (unique.length === 0) return new Map();
-  const rows = await tx.$queryRaw<Array<{ id: string; archivedAt: Date | null }>>`
-    SELECT "id", "archivedAt" FROM "Agent"
+  const rows = await tx.$queryRaw<Array<{ id: string; name: string; projectId: string; archivedAt: Date | null }>>`
+    SELECT "id", "name", "projectId", "archivedAt" FROM "Agent"
     WHERE "id" = ANY(${unique})
     ORDER BY "id" FOR UPDATE
   `;
-  return new Map(rows.map((row) => [row.id, row.archivedAt]));
+  return new Map(rows.map((row) => [row.id, {
+    name: row.name,
+    projectId: row.projectId,
+    archivedAt: row.archivedAt,
+  }]));
 };
 
 /**

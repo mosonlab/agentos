@@ -105,6 +105,30 @@ const archiveUnderHeldLock = async <T>(agentId: string, operation: () => Promise
   }
 };
 
+const renameUnderHeldLock = async <T>(
+  agentId: string,
+  name: string,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const holder = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
+  let acquired!: () => void;
+  const held = new Promise<void>((resolve) => { acquired = resolve; });
+  try {
+    const renaming = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
+      await tx.agent.update({ where: { id: agentId }, data: { name } });
+      acquired();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }, { timeout: 10_000 });
+    await held;
+    const pending = operation();
+    await renaming;
+    return await pending;
+  } finally {
+    await holder.$disconnect();
+  }
+};
+
 before(() => {
   process.env.OPERATOR_TOKEN = OPERATOR;
   db = setupTestDb();
@@ -235,6 +259,20 @@ test("the override agent is re-read under its Agent-row mutex before any Task ex
   }));
   assert.equal(result.status, 400, JSON.stringify(result.body));
   assert.equal(result.body.code, "step_override_agent_archived");
+  assert.equal(await db.task.count(), 0);
+  assert.equal(await db.taskActivity.count(), 0);
+  assert.equal(await db.run.count(), 0);
+});
+
+test("an effective-assignee rename is revalidated under the Agent-row mutex before any Task exists", { timeout: 30_000 }, async () => {
+  const seed = await fixture("rename-race");
+  const result = await renameUnderHeldLock(seed.replacement.id, "merge-integrator", () => request(
+    seed.project.id,
+    seed.template.id,
+    { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } } },
+  ));
+  assert.equal(result.status, 400, JSON.stringify(result.body));
+  assert.equal(result.body.code, "step_override_integrator_binding");
   assert.equal(await db.task.count(), 0);
   assert.equal(await db.taskActivity.count(), 0);
   assert.equal(await db.run.count(), 0);

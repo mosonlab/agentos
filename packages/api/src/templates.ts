@@ -391,17 +391,20 @@ export const instantiateTemplate = async (
         // the first task exists: instantiation writes a whole chain plus its
         // first run, and an archive committing between the check and the write
         // would leave every step of that chain pointed at an agent no runner
-        // will ever claim for. One id-ordered statement, so two instantiations
-        // sharing agents cannot deadlock.
+        // will ever claim for. The name is equally authoritative here: a rename
+        // can change whether the assignee is a mechanical integrator or the
+        // pinned compound implementation agent. One id-ordered statement, so
+        // two instantiations sharing agents cannot deadlock.
         const canonicalAgentIds = template.steps.flatMap((step) => step.assigneeAgentId ? [step.assigneeAgentId] : []);
         const lockedAgents = await lockAgentRows(
           tx,
           [...new Set([...canonicalAgentIds, ...overrideAgentIds])].sort(),
         );
         for (const effective of effectiveSteps) {
-          const { step, override, assigneeAgentId, assigneeAgent } = effective;
+          const { step, override, assigneeAgentId } = effective;
           if (!assigneeAgentId) continue;
-          if (!lockedAgents.has(assigneeAgentId)) {
+          const lockedAgent = lockedAgents.get(assigneeAgentId);
+          if (!lockedAgent || lockedAgent.projectId !== projectId) {
             if (override) {
               throw overrideRefusal(
                 "step_override_agent_not_found",
@@ -410,14 +413,35 @@ export const instantiateTemplate = async (
             }
             throw new Error(`Template step ${step.name} agent was not found`);
           }
-          if (lockedAgents.get(assigneeAgentId)) {
+          if (lockedAgent.archivedAt) {
             if (override) {
               throw overrideRefusal(
                 "step_override_agent_archived",
-                `Override agent ${assigneeAgent?.name ?? assigneeAgentId} (${assigneeAgentId}) for step ${step.stepIndex} is archived`,
+                `Override agent ${lockedAgent.name} (${assigneeAgentId}) for step ${step.stepIndex} is archived`,
               );
             }
-            throw new Error(`Template step ${step.name} agent ${step.assigneeAgent?.name ?? assigneeAgentId} is archived`);
+            throw new Error(`Template step ${step.name} agent ${lockedAgent.name} is archived`);
+          }
+          const lockedBindingRefusal = canonicalIntegratorBindingRefusal(lockedAgent.name, {
+            stepIndex: step.stepIndex,
+            outputKind: step.outputKind,
+            taskTemplateName: template.name,
+          });
+          if (lockedBindingRefusal) {
+            if (override) {
+              throw overrideRefusal("step_override_integrator_binding", `Template step ${step.name}: ${lockedBindingRefusal}`);
+            }
+            throw new Error(`Template step ${step.name}: ${lockedBindingRefusal}`);
+          }
+          if (!compoundImplementationAssigneeValid(
+            projectId,
+            step.assigneeType,
+            lockedAgent,
+            { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
+          )) {
+            const message = `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`;
+            if (override) throw overrideRefusal("step_override_compound_implementation", message);
+            throw new Error(message);
           }
         }
         const grantedAgentIds = [...new Set(effectiveSteps.flatMap((effective) => (
