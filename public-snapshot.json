@@ -24,7 +24,7 @@
     { "glob": "agents/roles/*.md", "purpose": "reviewed agent role definitions" },
     { "glob": "agents/skills/*.md", "purpose": "reviewed agent skill definitions" },
     { "glob": "agents/templates/compound-engineer-workflow/*.md", "purpose": "reviewed step prompts for the twelve-step compound engineering chain: spec, plan, plan review, revision, implementation, two review passes, fix application, regression verification, librarian, human PR review and merge execution" },
-    { "glob": "agents/templates/direct-engineer-workflow/*.md", "purpose": "reviewed step prompts for the six-step direct engineering chain, which carries no spec or plan phase and takes the feature brief as its specification of record" },
+    { "glob": "agents/templates/direct-engineer-workflow/*.md", "purpose": "reviewed step prompts for the eight-step direct engineering chain, which carries no spec or plan phase and takes the feature brief as its specification of record" },
     { "glob": "apps/web/components.json", "purpose": "web component configuration" },
     { "glob": "apps/web/index.html", "purpose": "web application entry document" },
     { "glob": "apps/web/package.json", "purpose": "web package definition" },
@@ -202,16 +202,6 @@
       "glob": "GRILLING-STATE.md",
       "disposition": "later-release-follow-up",
       "reason": "internal planning state is not needed to build or run the product"
-    },
-    {
-      "glob": "pelican-bike.html",
-      "disposition": "later-release-follow-up",
-      "reason": "standalone animation demo is not AgentOS product source and requires a separate publication and license decision"
-    },
-    {
-      "glob": "pelican-bike-2.html",
-      "disposition": "later-release-follow-up",
-      "reason": "standalone animation demo is not AgentOS product source and requires a separate publication and license decision"
     },
     {
       "glob": "deploy/**",

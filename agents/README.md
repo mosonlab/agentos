@@ -44,7 +44,7 @@ must match `stepIndex`, and only these structural keys are accepted. Step
 display names remain seed-owned presentation metadata; all execution structure
 and prompt text live in the Markdown sources.
 
-Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort. The canonical values are used for new or uncustomized Agents; an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `senior-dev-high`, `senior-dev-luna`, `implementation-plan-executioner`, `review-coordinator-opus`, `review-adjudicator-opus`, `merge-resolver`).
+Exact canonical model and runner defaults live in the role frontmatter and `packages/db/src/agent-contract.ts`; task-chain routing is governed by the routing contract this repository's operator maintains outside the published tree. A task template binds roles, while each Agent owns its runtime runner, model, and reasoning effort. The canonical values are used for new or uncustomized Agents; an operator edit sets an explicit runtime override. Template steps normally leave `runner` unset so the Agent configuration remains the single runtime authority. `inboxAccess` is least-privilege: granted only where the role contract requires talking to the human (`default`, `spec`, `plan`, `plan-reviser`, `senior-dev`, `senior-dev-luna`, `implementation-plan-executioner`, `review-coordinator-opus`, `review-adjudicator-opus`, `merge-resolver`).
 
 Approval is task metadata, not an Agent personality. Roles read the current
 task's `approvalGate`; they do not hard-code a pause or send a second Inbox
@@ -62,12 +62,12 @@ Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities. Keep
 experiments out of `roles/`; create them as local overlays and archive them when
 no longer needed so a seed cannot silently turn an experiment into a release
-default. `senior-dev-high` is a canonical risk-routing role selected explicitly
-for persisted-data, defense-list, and cross-cutting work; templates do not bind
-it by default.
+default. `senior-dev` is the risk-routing escalation for persisted-data,
+defense-list, and cross-cutting work: a direct chain reassigns its
+implementation step to it before dispatch.
 
 `review-coordinator` reviews plans only. `review-coordinator-sol` performs the
-first integrated-diff review at Sol high. `regression-verifier` performs the
+first integrated-diff review at Sol xhigh. `regression-verifier` performs the
 bounded post-fix semantic verification and the one exact-head gate at Sol
 medium. `review-coordinator-opus` performs the blind final review, while
 `review-adjudicator-opus` performs the fresh must-fix adjudication. Existing

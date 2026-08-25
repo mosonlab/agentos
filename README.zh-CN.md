@@ -25,9 +25,9 @@ AgentOS 不捆绑或转售任何订阅，provider 条款和套餐限制仍然适
 本项目是受 Danny Postma 的视频 'How I Built My Own AgentOS on Claude's Agent
 SDK (So You Can Too)'（2026）启发的独立实现，从视频中的想法出发从零构建。
 
-![任务看板：十二步模板链运行中，每张卡片展示逐 run 状态与成本](docs/media/tasks-board.png)
+![任务看板：十二步模板链运行中，每张卡片展示逐 run 状态与成本](docs/media/tasks.png)
 
-![Agents：每个角色的模型、推理档位、runner 与 Inbox 权限](docs/media/agents.png)
+![链视图：十二步保障工作流，每一步标注其指派的 agent 角色](docs/media/chain.png)
 
 ## 发布候选证据状态
 
