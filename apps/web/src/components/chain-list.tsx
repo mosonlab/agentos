@@ -78,10 +78,11 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
 };
 
-export const ChainRow = ({ step, here, pending, onStart }: {
+export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
   step: ChainStep;
   here: boolean;
   pending: boolean;
+  blockedBy: readonly ChainStep[];
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
@@ -94,6 +95,11 @@ export const ChainRow = ({ step, here, pending, onStart }: {
         {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.viewedHere")}</span> : null}
         {step.currentExecution ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.currentExecution")}</span> : null}
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
+        {blockedBy.length > 0 && step.status !== "DONE" ? (
+          <span data-chain-join-blocked="" className={cn(HINT, "mt-[3px] block")}>
+            {t("chain.blockedBy", { names: blockedBy.map((blocker) => blocker.stepName).join(", ") })}
+          </span>
+        ) : null}
       </span>
       <ExecutionOwnerChip step={step} />
       {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
@@ -137,19 +143,14 @@ export const ChainList = ({ chain, taskId, pending, onStart }: {
           data-chain-layer={group.storedLayer}
           data-chain-layer-ordinal={group.ordinal}
           aria-label={t("chain.layer", { n: group.ordinal })}
+          className={cn(
+            "border-t border-[color:var(--border-soft)] first:border-t-0",
+            group.steps.length > 1 ? "grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))]" : undefined,
+          )}
         >
-          <div className="flex flex-wrap items-center gap-[8px] border-t border-[color:var(--border-soft)] bg-secondary/40 px-[20px] py-[7px] text-[11.5px] text-muted-foreground first:border-t-0">
-            <span className="font-medium text-secondary-foreground">{t("chain.layer", { n: group.ordinal })}</span>
-            {group.steps.length > 1 ? <span data-chain-parallel="">{t("chain.parallel", { n: group.steps.length })}</span> : null}
-            {group.blockers.length > 0 && group.steps.some((step) => step.status !== "DONE") ? (
-              <span data-chain-join-blocked="">{t("chain.blockedBy", { names: group.blockers.map((step) => step.stepName).join(", ") })}</span>
-            ) : null}
-          </div>
-          <div className={group.steps.length > 1 ? "grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))]" : undefined}>
-            {group.steps.map((step) => (
-              <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} onStart={onStart} />
-            ))}
-          </div>
+          {group.steps.map((step) => (
+            <ChainRow key={step.taskId} step={step} here={step.taskId === taskId} pending={pending} blockedBy={group.blockers} onStart={onStart} />
+          ))}
         </section>
       ))}
       {all || chain.steps.length <= CHAIN_PAGE ? null : (

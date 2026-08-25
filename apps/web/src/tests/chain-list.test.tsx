@@ -96,9 +96,11 @@ test("parallel nodes share one dense layer group and a blocked join names its ou
   const markup = render(chain(steps), "t4");
   assert.equal([...markup.matchAll(/data-chain-layer="40"/g)].length, 1);
   assert.match(markup, /data-chain-layer-ordinal="2"/);
-  assert.match(markup, /Layer 2/);
-  assert.match(markup, /Parallel · 2 tasks/);
-  assert.match(markup, /Blocked by: Blind review/);
+  // The layer is a grouping, not a row of its own: it names itself only to
+  // assistive tech, and the join it blocks is stated on the blocked step.
+  assert.equal([...markup.matchAll(/Layer 2/g)].length, 1);
+  assert.match(markup, /aria-label="Layer 2"/);
+  assert.match(markup, /data-chain-node="t4"[\s\S]*Blocked by: Blind review/);
   assert.doesNotMatch(markup, /Blocked by: Sol review/);
   assert.match(markup, /Sol review[\s\S]*Blind review/);
 });
@@ -114,7 +116,7 @@ test("sparse stored layers use dense one-based layer ordinals", () => {
     ["1", "2", "3"],
   );
   assert.deepEqual(
-    [...markup.matchAll(/>Layer (\d+)</g)].map((match) => match[1]),
+    [...markup.matchAll(/aria-label="Layer (\d+)"/g)].map((match) => match[1]),
     ["1", "2", "3"],
   );
 });

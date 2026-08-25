@@ -158,7 +158,6 @@ export const en = {
   "chain.humanAssignee": "Human responsibility",
   "chain.layer": "Layer {n}",
   "chain.loading": "Loading chain…",
-  "chain.parallel": "Parallel · {n} tasks",
   "chain.parked": "Parked in Backlog",
   "chain.recoverParked": "Recover parked step",
   "chain.showAll": "Show all {n} steps",
