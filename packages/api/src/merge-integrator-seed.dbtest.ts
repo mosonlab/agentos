@@ -35,6 +35,7 @@ import {
   legacyTenStepTemplateName,
   loadAgentSources,
   loadTemplateStepSources,
+  preDecisionsPlanPrompt,
   previousChainLeasePrompt,
   PrismaClient,
   type Task,
@@ -258,6 +259,14 @@ test("canonical sync rolls both pre-lease prompts only after their old tasks fin
     const oldPrompt = previousChainLeasePrompt(regression.prompt);
     assert.notEqual(oldPrompt, regression.prompt);
     await db.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: oldPrompt } });
+    // A genuinely pre-lease row also predates the decisions.md contract, so
+    // its plan prompts carry the pre-decisions wording.
+    for (const step of template.steps) {
+      const preDecisions = preDecisionsPlanPrompt(step.stepIndex, step.prompt);
+      if (template.name === INTEGRATOR_TEMPLATE_NAME && preDecisions !== step.prompt) {
+        await db.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: preDecisions } });
+      }
+    }
     oldTasks.push(await db.task.create({ data: {
       projectId: template.projectId,
       templateId: template.id,
@@ -295,6 +304,9 @@ test("canonical sync rolls both pre-lease prompts only after their old tasks fin
     });
     assert.notEqual(replacement.id, oldTemplate.id);
     assert.match(replacement.steps.find((step) => step.outputKind === "regression-verification")?.prompt ?? "", /merge-lease\.sh acquire/u);
+    if (oldTemplate.name === INTEGRATOR_TEMPLATE_NAME) {
+      assert.match(replacement.steps.find((step) => step.outputKind === "plan")?.prompt ?? "", /decisions\.md/u);
+    }
   }
 });
 

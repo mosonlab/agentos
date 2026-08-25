@@ -212,8 +212,10 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const names = ["review-coordinator", "review-coordinator-sol"];
   const frozenBase = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
+  const frozenSolBase = { model: "openai-codex/gpt-5.6-sol:high", runnerPreference: RunnerPreference.PI };
 
-  await prisma.agent.updateMany({ where: { projectId: project.id, name: { in: names } }, data: frozenBase });
+  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator" }, data: frozenBase });
+  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator-sol" }, data: frozenSolBase });
   await prisma.agent.updateMany({
     where: { projectId: project.id, name: "review-coordinator" },
     data: { title: "Unrelated drift" },
@@ -224,11 +226,12 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
   assert.match(rejected.output, /Agent review-coordinator .* differs from canonical Markdown structure: title/u);
   const rolledBack = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
-    select: { model: true, runnerPreference: true },
+    select: { name: true, model: true, runnerPreference: true },
   });
   assert.equal(rolledBack.length, 2);
-  assert.ok(rolledBack.every((agent) => agent.model === frozenBase.model
-    && agent.runnerPreference === frozenBase.runnerPreference));
+  assert.ok(rolledBack.every((agent) => (agent.name === "review-coordinator"
+    ? agent.model === frozenBase.model && agent.runnerPreference === frozenBase.runnerPreference
+    : agent.model === frozenSolBase.model && agent.runnerPreference === frozenSolBase.runnerPreference)));
 
   await prisma.agent.updateMany({
     where: { projectId: project.id, name: "review-coordinator" },
@@ -240,11 +243,13 @@ test("sync upgrades only the exact frozen-base review agent defaults", async () 
 
   const upgraded = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
-    select: { model: true, runnerPreference: true },
+    select: { name: true, model: true, runnerPreference: true },
   });
   assert.equal(upgraded.length, 2);
-  assert.ok(upgraded.every((agent) => agent.model === "openai-codex/gpt-5.6-sol:high"
-    && agent.runnerPreference === RunnerPreference.PI));
+  assert.ok(upgraded.every((agent) => agent.runnerPreference === RunnerPreference.PI
+    && agent.model === (agent.name === "review-coordinator"
+      ? "openai-codex/gpt-5.6-sol:high"
+      : "openai-codex/gpt-5.6-sol:xhigh")));
 });
 
 test("sync adopts the exact model-only executioner transition", async () => {
@@ -324,8 +329,8 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   const verifier = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
   });
-  assert.equal(verifier.model, "openai-codex/gpt-5.6-sol:medium");
-  assert.equal(verifier.runnerPreference, RunnerPreference.PI);
+  assert.equal(verifier.model, "claude-opus-5:medium");
+  assert.equal(verifier.runnerPreference, RunnerPreference.CLAUDE);
   assert.equal(verifier.inboxAccess, false);
   const canonicalSteps = regressionSteps.filter(({ taskTemplate }) =>
     taskTemplate.name === "compound-engineer-workflow" || taskTemplate.name === "direct-engineer-workflow");
