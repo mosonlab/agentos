@@ -105,9 +105,12 @@ npm run db:migrate:release -- --fresh
 `http://127.0.0.1:5173`。
 
 `npm ci` 必须被允许运行 lockfile 声明的生命周期脚本——本仓库的 `postinstall` 生成
-Prisma client——因此**不支持 `--ignore-scripts`**。Inbox 服务可选。v0.1.0 不交付、
-也不支持任何 launchd 定义；远程访问和本仓库内部 task-chain 模板同样不属于受支持
-流程。
+Prisma client——因此**不支持 `--ignore-scripts`**。Inbox 服务可选。前台的开发者预览
+流程不交付任何 launchd 定义；远程访问和本仓库内部 task-chain 模板同样不属于该流程。
+独立自托管的 merge executor 则另有已记录但未经验证的 macOS LaunchDaemon 与 Linux
+systemd profile，见公开的
+[`docs/runbooks/merge-executor.md`](docs/runbooks/merge-executor.md) runbook。这些流程
+不改变上面的平台分级，也不改变权威支持矩阵。
 
 在把它指向任何东西之前先读
 [`docs/release/v0.1.0-security.md`](docs/release/v0.1.0-security.md)，在往里放数据
@@ -130,6 +133,18 @@ token、session cookie secret、base64 编码的 32 字节加密密钥，以及�
 输出任何值。`--upgrade` 会保留所有已有 assignment，只补可在本机安全生成的缺键，且
 不会自动轮换弱凭据；它没有 overwrite 或 rotation 开关。`.env.example` 只是键位说明
 文档，不是用来复制的文件。
+
+要部署 fail-closed 的 merge executor，先读它的
+[操作 runbook](docs/runbooks/merge-executor.md)，然后在仓库根目录运行可重复执行、
+由人把关的采集向导：
+
+```sh
+bash scripts/setup-merge-executor.sh
+```
+
+该向导自己不注册任何 App，也不执行任何管理员操作。它采集安装本地的私有 GitHub App
+配置，在不读取密钥字节的前提下校验专用 OS 用户与密钥的边界，并把明确的 root 所有
+服务接管留给对应的 runbook profile。
 
 ## 以当前代码为依据的架构
 
@@ -191,6 +206,11 @@ Web 控制台
   字段。
 - 子进程只接收显式构建的环境：配置的 `PATH`/`HOME`、Run 身份、session 凭据和已
   授权 secret；runner 不会整体复制 host 环境。
+- Runner 的代理是显式开启的，经由 `RUNNER_HTTP_PROXY`、`RUNNER_HTTPS_PROXY` 和
+  `RUNNER_NO_PROXY` 配置。一旦配置，它作用于整条由 runner 控制的网络路径：Claude、
+  Codex、实验性的 Pi adapter，以及 Git 和工作区的准备与交付命令。常规的 host 代理
+  环境变量会被忽略。`RUNNER_RUN_AS_PREFIX` 启动器必须保留这份显式环境；代理 URL
+  不会被序列化进 provider 的 argv。
 - 持久化 secret 使用 AES-256-GCM；公开 API 的 secret 表示不包含明文或密文。
 - 控制平面要求存在 repository-access row，并检查 Files Root grant；该 access row
   的 read/write 级别目前不会约束交付 push。每次运行的凭据以 `0600` 模式写在临时
@@ -213,6 +233,16 @@ workspace，因此仍可删除自己此前的 workspace。此外，面对已经�
 
 [`docs/release/v0.1.0-security.md`](docs/release/v0.1.0-security.md) 逐条写明了这些
 限制，以及哪些被检查、哪些没有；在把它指向任何你在意的东西之前先读它。
+
+## 模板发布演示
+
+`npm run demo:templates -- preflight|setup|instantiate|capture|verify|reset` 驱动
+的是保留下来的 v0.2 十二节点发布演示流程；它不是当前分层版 canonical 模板的证据。
+该演示的边界和确切命令见
+[`docs/demos/templates-release-demo.md`](docs/demos/templates-release-demo.md)。当前
+的 Direct 与 Full Assurance 图记录在
+[`agents/README.md`](agents/README.md)。一次彩排或一个 provider 的运行，既不能证明
+所有 provider 都兼容，也不能证明全新安装可用。
 
 ## 验证
 
@@ -240,6 +270,20 @@ tests` 失败。
 `TEST_DATABASE_MAINTENANCE_URL` 指向一个 scratch 数据库——绝不能指向任何你还想保留
 的数据库。把它并进 `npm test`，只会让全新 clone 的默认检查因为缺一个服务而失败，
 而不是因为存在缺陷而失败。
+
+这些测试会同时跑多个文件，每个文件用自己的数据库：runner 迁移出一个模板，再给每
+个文件一份 `CREATE DATABASE ... TEMPLATE` 拷贝，以及各自的 `RUNNER_WORKSPACE_ROOT`、
+`CONTROL_PLANE_STATE_DIR` 和 `FILES_ROOT` 子目录。过去逼这些文件排队的正是那一个
+共享 schema，而分开的数据库还隔开了 schema 永远隔不开的东西——advisory lock 是按
+数据库计的。分发数据库需要 `AGENTOS_ALLOW_SCRATCH_DATABASES=1`，也就是 scratch 数
+据库管理器本来就要求的那个开关；没有它，整轮测试就退回到单一共享 schema 上串行执
+行，和以前完全一样。`AGENTOS_DBTEST_CONCURRENCY` 决定同时跑几个文件（默认为核数
+减一，最多四个——一个测试文件不止一个进程，超过四个笔记本是被压垮而不是变忙），
+`AGENTOS_DBTEST_PROVISION=0` 则关掉按文件分发数据库。每一次退出都会清掉自己创建的
+东西：失败、Ctrl-C、以及数据库还在分发过程中的失败。清不掉的那一轮会明说并判定失
+败，而不是只报告它同时拿到的那些绿色测试。只有被直接杀死的运行才可能留下
+`agentos_cp_a_*` 数据库，而下一轮会在开始前回收它们——按名字回收，且只回收创建它
+的进程已经消失、也没有任何连接的那些。
 
 `npm run test:dependency-gate` 之所以在这份清单里，是因为根 `npm test` 是
 `npm run test --workspaces --if-present`，它永远走不到 `scripts/`。没有这一行，已发布
