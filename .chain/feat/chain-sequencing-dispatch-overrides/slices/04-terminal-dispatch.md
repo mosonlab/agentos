@@ -6,7 +6,7 @@ blocked_by:
 files_hint:
   - packages/db/src/workflow.ts
   - packages/api/src/dispatch-activation.dbtest.ts
-risk: false
+risk: true
 ---
 
 ## Delivers
@@ -69,9 +69,16 @@ helper, then set the binding column directly on the successor first task.
    successor task, archived assignee, and revoked grant each park the
    successor in REVIEW with the specific failureReason, write both activity
    rows, and leave the predecessor DONE.
-6. Regressions (spec 12.2.6-12.2.7): an unbound chain completes with the
-   Chain complete activity line and no additional row; the legacy fixture
-   with a DONE gap and null chainLayer advances exactly as before.
+
+## Regression verification
+
+Already green at the frozen base; must stay green, and is not acceptance:
+
+- Spec 12.2.6-12.2.7: an unbound chain completes with the Chain complete
+  activity line and no additional row; the legacy fixture with a DONE gap and
+  null chainLayer advances exactly as before - existing chain.dbtest coverage
+  extended only where a fixture must additionally assert the absence of
+  dispatch side effects.
 
 Verification: `npm run typecheck`,
 `npm run test:db -w @agentos/api -- src/dispatch-activation.dbtest.ts`,

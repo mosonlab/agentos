@@ -8,7 +8,7 @@ files_hint:
   - packages/api/src/app.ts
   - packages/api/src/chain.test.ts
   - packages/api/src/chain.dbtest.ts
-risk: false
+risk: true
 ---
 
 ## Delivers
@@ -55,8 +55,12 @@ exist in the chain response.
    with the predecessor id, name and status while unresolved, and null once
    the predecessor is DONE; every other step and every unbound chain carries
    blockedOn null with the rest of the response byte-identical to today; the
-   predecessor lookup adds at most one query, asserted only if the suite
-   already has query-count instrumentation, otherwise by code review.
+   predecessor lookup is bounded by a deterministic executable assertion: a
+   dbtest Prisma client with a query-event listener (`$on("query")`, or an
+   equivalent counted adapter around the extracted lookup) counts statements
+   across the chain-detail request and asserts an unbound chain issues zero
+   predecessor-lookup queries and a bound chain exactly one. No code-review
+   fallback is acceptable.
 4. Legacy-chain display regression: an existing chain fixture renders the
    same chain response as before the feature.
 

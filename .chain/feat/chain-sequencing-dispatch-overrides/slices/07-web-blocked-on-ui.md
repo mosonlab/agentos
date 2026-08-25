@@ -5,11 +5,11 @@ blocked_by: []
 files_hint:
   - apps/web/src/lib/types.ts
   - apps/web/src/components/task-card.tsx
-  - apps/web/src/pages/TaskDetail.tsx
+  - apps/web/src/components/chain-list.tsx
   - apps/web/src/locales/en.ts
   - apps/web/src/locales/zh.ts
-  - apps/web/src/tests/board.test.tsx
-  - apps/web/src/tests/chain.test.tsx
+  - apps/web/src/tests/tasks-board.test.tsx
+  - apps/web/src/tests/chain-list.test.tsx
 risk: false
 ---
 
@@ -29,10 +29,15 @@ no build dependency on slices 05 and 06.
   additional meta line naming the predecessor, alongside the existing chain
   and schedule lines. No new column, lane, or status pill; a card with null
   blockedOn renders byte-identically to today.
-- Chain detail (`TaskDetail.tsx` chain step rows): render the same marker on
-  the bound first step; the Start control stays driven solely by `startable`
-  from the API, which the spec guarantees is false while the binding is
-  unresolved - no client-side re-derivation.
+- Chain detail rows (`components/chain-list.tsx`, the ChainRow render): at
+  base a Start button renders only when `startAction` is non-null, and the
+  spec-fixed unresolved-binding response has startable false and startAction
+  null, so unchanged code would hide the control instead of disabling it.
+  New ChainRow rule: when a step's `blockedOn` is non-null, render the
+  blocked-on marker naming the predecessor and render the Start control
+  disabled, driven solely by `startable`/`blockedOn` from the API with no
+  client-side re-derivation. A step with blockedOn null and startAction null
+  keeps today's behaviour: marker absent, no action rendered.
 - Locale keys `tasks.card.blockedOn` and `chain.blockedOnPredecessor` (both
   taking a name parameter) added to `en.ts` and `zh.ts`; no literal
   user-facing sentence in a component.
@@ -41,14 +46,17 @@ no build dependency on slices 05 and 06.
 
 All red at the frozen base: the fields, strings and keys do not exist.
 
-1. `apps/web/src/tests/board.test.tsx`: a card fixture with non-null
-   blockedOn renders the marker naming the predecessor; a card with null
-   blockedOn matches today's existing expectations unchanged; no new lane or
-   column appears (spec 12.3.1, 12.3.3).
-2. `apps/web/src/tests/chain.test.tsx`: a chain first step fixture with an
-   unresolved binding renders the marker and a disabled Start control
-   (startable false from the fixture); the same step with blockedOn null and
-   startable true renders the normal control (spec 12.3.2).
+1. `apps/web/src/tests/tasks-board.test.tsx` (the existing board card render
+   surface): a card fixture with non-null blockedOn renders the marker naming
+   the predecessor; a card with null blockedOn matches today's existing
+   expectations unchanged; no new lane or column appears (spec 12.3.1,
+   12.3.3).
+2. `apps/web/src/tests/chain-list.test.tsx` (the existing ChainRow render
+   surface): a chain first step fixture with an unresolved binding
+   (blockedOn non-null, startable false, startAction null) renders the marker
+   and a disabled Start control; the same step with blockedOn null and a
+   startable fixture renders the normal enabled control; an ordinary step
+   with no startAction renders no action, unchanged (spec 12.3.2).
 3. i18n parity and sweep tests pass with the two new keys present in every
    locale (spec 12.3.4).
 

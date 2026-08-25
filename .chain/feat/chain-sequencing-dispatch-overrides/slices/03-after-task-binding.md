@@ -8,14 +8,16 @@ files_hint:
   - packages/api/src/app.ts
   - packages/api/src/templates.ts
   - packages/api/src/template-dispatch-binding.dbtest.ts
-risk: false
+risk: true
 ---
 
 ## Delivers
 
 Spec sections 6.1 (afterTaskId half), 6.2, 6.3 (the after_task_* codes and
 dispatch_conflicts_with_auto_start), 6.4, and scenarios S1, S4-S10, plus edge
-cases 8.9, 8.10, 8.12, 8.13. Blocked by 01 for the column and by 02 because
+cases 8.9, 8.12, 8.13. The instantiate-versus-completion race (spec 8.10)
+needs the dispatch code from slice 04 on the other side, so its executable
+proof lives in the join slice 08, not here. Blocked by 01 for the column and by 02 because
 both slices rewrite the body of `instantiateTemplate` and share the typed
 refusal module.
 
@@ -57,19 +59,26 @@ below are new.
    first binding unchanged and refuse the second with
    after_task_already_bound; afterTaskId plus autoStart true is refused
    before any write.
-2. The same file asserts the unchanged-unbound contract: autoStart true still
-   queues run 1 inside the transaction and autoStart false still queues
-   nothing, asserted against the exact activity strings the code writes
-   today (spec S4).
-3. Race coverage at the transaction layer: two concurrent instantiate calls
+2. Race coverage at the transaction layer: two concurrent instantiate calls
    for one free predecessor produce exactly one chain and one
-   after_task_already_bound (spec 8.9); an instantiate racing a predecessor
-   completion yields either a resolvable binding or after_task_already_done,
-   never a binding no completion will see (spec 8.10) - drive both sides
-   through the same chain-mutex serialization the dbtest harness already
-   uses for concurrency tests.
-4. Binding activity rows exist on both the first task and the predecessor
+   after_task_already_bound (spec 8.9) - drive both sides through the same
+   chain-mutex serialization the dbtest harness already uses for concurrency
+   tests. The instantiate-versus-completion race (spec 8.10) is proved in
+   slice 08.
+3. Binding activity rows exist on both the first task and the predecessor
    with the ids in metadata (spec 6.4.5-6.4.6).
+4. A bound instantiation with `afterTaskId` and no autoStart writes the
+   first-task waiting activity line naming the predecessor (spec 6.4.5), new
+   at base.
+
+## Regression verification
+
+Already green at the frozen base; must stay green, and is not acceptance:
+
+- The unchanged-unbound contract: autoStart true still queues run 1 inside
+  the transaction and autoStart false still queues nothing, asserted against
+  the exact activity strings the code writes today (spec S4), already covered
+  by `templates.test.ts:114-150`.
 
 Verification: `npm run typecheck`,
 `npm run test:db -w @agentos/api -- src/template-dispatch-binding.dbtest.ts`,

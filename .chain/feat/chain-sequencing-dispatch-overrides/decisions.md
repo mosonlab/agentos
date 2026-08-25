@@ -16,10 +16,15 @@ on the instantiate-binding slice (03) so their fixtures use the public API.
 
 Reason: the column plus its storage constraints fully define a valid binding
 (spec section 5), so direct seeding tests exactly the same rows the route
-would produce, and cutting the 03 dependency turns a 4-deep chain into a
-2-deep graph with four slices runnable in parallel after 01. End-to-end
-route-to-dispatch coverage still exists: the manual walkthrough (spec 12.6)
-and slice 03's own tests cover the route side.
+would produce, and cutting the 03 dependency keeps four slices runnable in
+parallel after 01. Revised per plan-review finding PLAN-RACE-001: direct
+seeding cannot prove the cross-path mutex contract between instantiation and
+terminal completion (spec 8.10), and the manual walkthrough is human evidence,
+not executable slice acceptance. Executable end-to-end route-to-dispatch
+coverage therefore lives in the dedicated join slice 08, blocked by 03 and 04,
+which drives both race outcomes through the production entry points. The
+frontier stays four wide after 01; the critical path gains one third-level
+join slice, a cost the cross-path proof requires.
 
 ## D2. Overrides (02) before binding (03), sequenced by blocked_by
 
@@ -86,23 +91,32 @@ Reason: spec section 5 mandates an additive-only migration with no backfill
 and no change to existing constraints; there is nothing to migrate or
 contract, so staging would add empty slices.
 
-## D7. risk=true only on the migration slice
+## D7. risk=true for every slice that creates or governs persisted runtime data
 
-Choice: 01 carries risk: true; all other slices risk: false.
+Choice: slices 01 through 06 and 08 carry risk: true; only the web-only
+slice 07 is risk: false.
 
-Rejected: marking 04 risky because dispatch creates Run rows and parks tasks.
+Rejected: the earlier reading that limited risk to persisted data shape
+(schema) and treated Runs, Task rows, bindings and activity as ordinary
+reversible writes.
 
-Reason: the frontmatter contract sets risk true exactly when a slice touches
-persisted data shape or an irreversible external action. Only 01 alters the
-database schema. Runs, activity rows and REVIEW parking are ordinary
-reversible application writes that every server slice performs in tests, and
-no slice performs an external action.
+Reason: revised per plan-review finding PLAN-RISK-001. The plan contract and
+docs/governance/task-routing-v1.md define persisted data as runtime-created
+user or system data, including its schema; reversibility is not an exemption.
+01 changes the schema; 02 persists effective assignees on new Task rows; 03
+persists the dispatch binding and its activity rows; 04 creates Runs and
+updates Task and activity state; 05 gates durable Run creation; 06 reads the
+durable binding and predecessor state for the public projection; 08 drives
+durable binding and Run creation through the production entry points. Slice 07
+renders API fixtures in apps/web and touches no persisted data.
 
 ## D8. New dbtest files per feature area instead of growing chain.dbtest.ts
 
-Choice: 02, 03 and 04 each introduce a focused dbtest file
-(template-overrides, template-dispatch-binding, dispatch-activation); 05 and
-06 extend the existing chain/board test files they change behaviour in.
+Choice: 02, 03, 04, 06 and 08 each introduce a focused dbtest file
+(template-overrides, template-dispatch-binding, dispatch-activation,
+board-blocked-on, dispatch-lifecycle); 05 extends the existing chain test
+files it changes behaviour in, and 06 additionally extends board.test.ts for
+the pure projection.
 
 Rejected: appending all coverage to `packages/api/src/chain.dbtest.ts`.
 
@@ -119,5 +133,9 @@ Brief change 4 (blocked-on marker): API board 06-board-blocked-on; API chain
 detail and manual-start refusal 05-start-guard-chain-detail; web rendering
 07-web-blocked-on-ui.
 Brief change 5 (migration and schema tests): 01-dispatch-binding-schema.
+Cross-path race proof (spec 8.10, route-to-completion lifecycle):
+08-binding-dispatch-integration, a verification join slice over the
+implementations delivered by 03 and 04; it owns no implementation requirement
+of its own.
 Chain-level evidence (full typecheck across slices, merge gate, merge-lease
 delivery) stays outside the slice set per the task contract.

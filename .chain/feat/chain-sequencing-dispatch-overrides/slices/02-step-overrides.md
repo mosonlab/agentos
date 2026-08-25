@@ -8,7 +8,7 @@ files_hint:
   - packages/api/src/template-errors.ts
   - packages/api/src/template-overrides.dbtest.ts
   - packages/api/src/templates.test.ts
-risk: false
+risk: true
 ---
 
 ## Delivers
@@ -72,8 +72,13 @@ below is new.
 3. Schema-shape refusals (unknown property inside an override value, wrong
    value type) are covered in `templates.test.ts` or the dbtest, returning
    400 before any row exists.
-4. Existing instantiate tests pass unchanged, proving the no-override path is
-   untouched.
+
+## Regression verification
+
+Already green at the frozen base; must stay green, and is not acceptance:
+
+- Existing instantiate tests pass unchanged, proving the no-override path is
+  untouched (including `templates.test.ts` autoStart coverage).
 
 Verification: `npm run typecheck`, `npm run test -w @agentos/api`,
 `npm run test:db -w @agentos/api -- src/template-overrides.dbtest.ts`.
