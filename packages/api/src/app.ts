@@ -166,6 +166,7 @@ import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
+import { isTemplateInstantiationRefusal } from "./template-errors.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
@@ -1119,12 +1120,26 @@ const inboxQuestionInput = z.object({
   chatId: z.string().min(1).optional(),
   resumableUntil: z.coerce.date().nullable().optional(),
 });
+const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
+const stepOverridesInput = z.record(z.string(), stepOverrideInput).superRefine((overrides, context) => {
+  for (const stepIndex of Object.keys(overrides)) {
+    if (!/^[1-9]\d*$/u.test(stepIndex)) {
+      context.addIssue({
+        code: "custom",
+        path: [stepIndex],
+        message: `Step override key ${stepIndex} must be a positive decimal step index without leading zeros`,
+        params: { templateRefusalCode: "step_override_invalid_key" },
+      });
+    }
+  }
+});
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
   autoStart: z.boolean().default(false),
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
+  stepOverrides: stepOverridesInput.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;
   if (branchName !== undefined && !isValidBranchName(branchName)) {
@@ -1135,6 +1150,18 @@ const isTemplateInputError = (error: unknown): error is Error => (
   error instanceof Error
   && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
 );
+const templateSchemaRefusal = (error: unknown): { error: string; code: string } | null => {
+  if (!(error instanceof z.ZodError)) return null;
+  const issue = error.issues.find((candidate) => {
+    const params = (candidate as unknown as { params?: Record<string, unknown> }).params;
+    return typeof params?.templateRefusalCode === "string";
+  });
+  if (!issue) return null;
+  const params = (issue as unknown as { params?: Record<string, unknown> }).params;
+  return typeof params?.templateRefusalCode === "string"
+    ? { error: issue.message, code: params.templateRefusalCode }
+    : null;
+};
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -2794,6 +2821,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await readJson(context.req.raw, instantiateTemplateInput),
       ), 201);
     } catch (error: unknown) {
+      if (isTemplateInstantiationRefusal(error)) {
+        return context.json({ error: error.message, code: error.code }, 400);
+      }
+      const schemaRefusal = templateSchemaRefusal(error);
+      if (schemaRefusal) return context.json(schemaRefusal, 400);
       if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }
