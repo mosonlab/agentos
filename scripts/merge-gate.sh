@@ -183,6 +183,10 @@ STEP_REPORT=()
 # last line into GATE NOT RUN instead of a FAIL nothing formed.
 NO_VERDICT_REASON=""
 NO_VERDICT_EXIT="${EXIT_NO_VERDICT}"
+# Named the moment a step is seen to have failed on its own, which is earlier
+# than its group's accounting: a signal arriving while a later member is still
+# stuck must not erase a failure this run already observed.
+GATE_REAL_FAILURE=""
 
 # --- plumbing ---------------------------------------------------------------
 
@@ -331,8 +335,15 @@ trap cleanup EXIT
 # did not fail; it never finished. Naming the signal here is what lets the EXIT
 # trap say so.
 interrupted() {
-  NO_VERDICT_REASON="the gate was stopped by SIG${1}${FAILED_STEP:+ during ${FAILED_STEP}}"
-  NO_VERDICT_EXIT="$2"
+  # A failure this run already saw is a judgement about the commit, and a signal
+  # arriving afterwards does not unmake it. Only a run that learned nothing
+  # reports the absence of a verdict.
+  if [ -n "${GATE_REAL_FAILURE}" ]; then
+    FAILED_STEP="${GATE_REAL_FAILURE}"
+  else
+    NO_VERDICT_REASON="the gate was stopped by SIG${1}${FAILED_STEP:+ during ${FAILED_STEP}}"
+    NO_VERDICT_EXIT="$2"
+  fi
   exit "$2"
 }
 trap 'interrupted INT 130' INT
@@ -356,6 +367,10 @@ record_stop() {
   NO_VERDICT_EXIT="${EXIT_NO_VERDICT}"
 }
 
+record_real_failure() {
+  GATE_REAL_FAILURE="${GATE_REAL_FAILURE:+${GATE_REAL_FAILURE}, }${1}"
+}
+
 step() {
   local label="$1"; shift
   say "${label}"
@@ -369,6 +384,7 @@ step() {
       record_stop "${label}"
     else
       STEP_REPORT+=("FAIL  ${label}")
+      record_real_failure "${label}"
     fi
     return 1
   fi
@@ -494,6 +510,11 @@ parallel_steps() {
   # whether this group has a verdict at all.
   for ((index=0; index<${#labels[@]}; index++)); do
     if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=$?; fi
+    # Recorded here rather than in the accounting below, which a signal arriving
+    # while a later member is still stuck would never reach.
+    if [ "${statuses[index]}" -ne 0 ] && ! stopped_from_outside "${statuses[index]}"; then
+      record_real_failure "${labels[index]}"
+    fi
   done
   GATE_GROUP_PIDS=()
 

@@ -64,6 +64,7 @@ FAILED_STEP=""
 EXIT_NO_VERDICT=76
 NO_VERDICT_REASON=""
 NO_VERDICT_EXIT=76
+GATE_REAL_FAILURE=""
 GATE_TMP="$1"
 REPO_ROOT="$2"
 ${PARALLEL_STEPS}
@@ -237,6 +238,7 @@ EXIT_NOT_AUTHORITATIVE=3
 EXIT_NO_VERDICT=76
 NO_VERDICT_REASON=""
 NO_VERDICT_EXIT=76
+GATE_REAL_FAILURE=""
 ${extractVerdict()}
 `;
 
@@ -287,6 +289,95 @@ test("VERDICT a clean run still passes and still names its commit", () => {
   const run = runVerdict(`exit 0`);
   assert.equal(run.status, 0);
   assert.match(run.stdout, /MERGE GATE: PASS abc123/);
+  assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
+});
+
+// A group and the verdict together, which is the only way to observe what a
+// signal arriving mid-group actually prints. Both extractions are the gate's
+// own source; cleanup's teardown is stubbed for the same reason as above.
+const COMBINED_HARNESS = `
+set -uo pipefail
+say() { printf '\\n== %s\\n' "$1"; }
+note() { printf '   %s\\n' "$1"; }
+discard_gate_tmp() { :; }
+release_lock() { :; }
+KEEP_POSTGRES=0
+POSTGRES_STARTED=0
+CONTAINER=stub
+STEP_REPORT=()
+FAILED_STEP=""
+GATED_HEAD=abc123
+EXIT_FAIL=1
+EXIT_NOT_AUTHORITATIVE=3
+EXIT_NO_VERDICT=76
+NO_VERDICT_REASON=""
+NO_VERDICT_EXIT=76
+GATE_REAL_FAILURE=""
+GATE_GROUP_PIDS=()
+GATE_TMP="$1"
+REPO_ROOT="$2"
+${extractVerdict()}
+${PARALLEL_STEPS}
+`;
+
+// Runs a group, waits until the member that is meant to block has reported its
+// pid, then signals the harness the way an operator kills a hung gate.
+const interruptGroup = async (members) => {
+  const root = mkdtempSync(join(tmpdir(), "merge-gate-interrupted-group."));
+  try {
+    const memberPidFile = join(root, "member.pid");
+    const script = join(root, "harness.sh");
+    writeFileSync(script, `${COMBINED_HARNESS}\n${members(JSON.stringify(memberPidFile))}\n`);
+    const harness = spawn("bash", [script, root, root]);
+    let stdout = "";
+    harness.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    harness.stderr.on("data", () => {});
+
+    const deadline = Date.now() + 15_000;
+    let memberPid = "";
+    while (Date.now() < deadline) {
+      try {
+        memberPid = readFileSync(memberPidFile, "utf8").trim();
+        if (memberPid !== "") break;
+      } catch {
+        // Not written yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.notEqual(memberPid, "", "the blocking member never reported its pid");
+
+    harness.kill("SIGTERM");
+    const status = await new Promise((resolve) => harness.on("exit", (code, signal) => resolve(code ?? signal)));
+    return { status, stdout };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
+
+test("VERDICT the incident shape: a group stopped mid-flight prints no verdict", async () => {
+  // What the 2026-08-25 gate should have printed. Its group was stuck, the
+  // operator killed it, and it answered MERGE GATE: FAIL naming the group.
+  const run = await interruptGroup(
+    (pidFile) => `parallel_steps "the suites" "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+  );
+  assert.equal(run.status, 143);
+  assert.match(run.stdout, /GATE NOT RUN: the gate was stopped by SIGTERM during the suites/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: FAIL/);
+});
+
+test("VERDICT a failure seen before the signal survives it", async () => {
+  // The other direction, and the reason the failure is recorded as each member
+  // is reaped rather than in the group's closing accounting: that accounting
+  // never runs when a later member is still blocked. Without it the gate would
+  // answer "no verdict" about a commit one of its steps had already failed.
+  const run = await interruptGroup(
+    (pidFile) =>
+      `parallel_steps "the suites" "bad" sh -c 'exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stdout, /MERGE GATE: FAIL \(bad\)/);
   assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
 });
 
