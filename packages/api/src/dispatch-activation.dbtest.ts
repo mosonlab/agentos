@@ -7,7 +7,12 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   activateChainSuccessor,
   applyInboxDecisionTx,
+  COMPOUND_IMPLEMENTATION_AGENT_NAME,
   enqueueTaskRun,
+  INTEGRATOR_AGENT_NAME,
+  INTEGRATOR_OUTPUT_KIND,
+  INTEGRATOR_STEP_INDEX,
+  INTEGRATOR_TEMPLATE_NAME,
   Prisma,
   PrismaClient,
   TaskStatus,
@@ -245,6 +250,80 @@ test("run completion dispatches a bound successor through the production runner 
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.predecessor.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
+
+for (const invariant of [
+  {
+    name: "merge-integrator",
+    canonicalAgentName: INTEGRATOR_AGENT_NAME,
+    renamedAgentName: "renamed-merge-integrator",
+    templateName: INTEGRATOR_TEMPLATE_NAME,
+    stepIndex: INTEGRATOR_STEP_INDEX,
+    outputKind: INTEGRATOR_OUTPUT_KIND,
+    expectedReason: /violates the merge-integrator binding invariant: A merge-execution step may bind only agent merge-integrator/u,
+    expectedRefusal: "integrator-binding",
+  },
+  {
+    name: "compound implementation",
+    canonicalAgentName: COMPOUND_IMPLEMENTATION_AGENT_NAME,
+    renamedAgentName: "renamed-implementation-plan-executioner",
+    templateName: INTEGRATOR_TEMPLATE_NAME,
+    stepIndex: 5,
+    outputKind: "implementation",
+    expectedReason: /violates the compound implementation assignee invariant/u,
+    expectedRefusal: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID",
+  },
+] as const) {
+  test(`runner completion preserves DONE and parks a post-instantiation ${invariant.name} rename`, async () => {
+    const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
+    await db.agent.update({
+      where: { id: fixture.agent.id },
+      data: { name: invariant.canonicalAgentName },
+    });
+    const template = await db.taskTemplate.create({ data: {
+      projectId: fixture.project.id,
+      name: invariant.templateName,
+      description: `${invariant.name} rename regression`,
+      variables: [],
+    } });
+    const step = await db.taskTemplateStep.create({ data: {
+      taskTemplateId: template.id,
+      assigneeAgentId: fixture.agent.id,
+      stepIndex: invariant.stepIndex,
+      layer: invariant.stepIndex,
+      name: "Bound successor",
+      assigneeType: "AGENT",
+      prompt: "dispatch after predecessor",
+      outputKind: invariant.outputKind,
+    } });
+    await db.task.update({
+      where: { id: fixture.successor.id },
+      data: { templateId: template.id, templateStepId: step.id },
+    });
+    await db.agent.update({
+      where: { id: fixture.agent.id },
+      data: { name: invariant.renamedAgentName },
+    });
+    const running = await seedRunningPredecessor(fixture);
+
+    const response = await createApp(db).request(`/runner/runs/${running.run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(completionBody(running.runnerId, running.fencingToken)),
+    });
+
+    assert.equal(response.status, 200, await response.text());
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.predecessor.id } })).status, TaskStatus.DONE);
+    const successor = await db.task.findUniqueOrThrow({ where: { id: fixture.successor.id } });
+    assert.equal(successor.status, TaskStatus.REVIEW);
+    assert.match(successor.failureReason ?? "", invariant.expectedReason);
+    assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 0);
+    const activity = await db.taskActivity.findFirstOrThrow({
+      where: { taskId: fixture.successor.id, body: { contains: "parked in REVIEW" } },
+      orderBy: { id: "desc" },
+    });
+    assert.equal(bindingMetadata(activity.metadata).refusal, invariant.expectedRefusal);
+  });
+}
 
 test("approval-gate approval dispatches a bound successor through the inbox completion path", async () => {
   const fixture = await seedBinding({ terminalStatus: TaskStatus.REVIEW });

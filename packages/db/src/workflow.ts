@@ -36,6 +36,7 @@ import {
   assertIntegratorBinding,
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
+  isIntegratorBindingError,
   parseStopQuestionKey,
   recoverRefreshRequestedConfirmationCard,
   requestMergeEvidence,
@@ -1157,6 +1158,26 @@ const dispatchBoundSuccessor = async (
         successor,
         `merge integrator stopped on ${error.condition}; predecessor success preserved and successor not activated`,
         { condition: error.condition },
+      );
+      return;
+    }
+    if (isIntegratorBindingError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `successor ${successor.name} violates the merge-integrator binding invariant: ${error.refusal}; restore the canonical assignee binding and retry dispatch`,
+        { refusal: "integrator-binding", detail: error.refusal },
+      );
+      return;
+    }
+    if (isCompoundImplementationAssigneeError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `successor ${successor.name} violates the compound implementation assignee invariant: ${error.message}; restore the canonical assignee binding and retry dispatch`,
+        { refusal: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
       );
       return;
     }
