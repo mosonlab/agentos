@@ -3153,6 +3153,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
           templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
+          dispatchAfterTaskId: true,
           assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
@@ -3169,7 +3170,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       const progressFor = await chainProgressLookup(rows);
       const displayByTask = chainDisplayByTask(rows);
-      return validated(context, rows.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
+      // A bound first task is the only board row that can carry this marker.
+      // Resolve all page bindings in one batch, and skip the query entirely for
+      // the overwhelmingly common unbound page. The projection remains pure:
+      // it receives the resolved predecessor rather than reaching into Prisma.
+      const predecessorIds = [...new Set(rows
+        .map((row) => row.dispatchAfterTaskId)
+        .filter((value): value is string => typeof value === "string" && value.length > 0))];
+      const predecessorById = new Map<string, { id: string; name: string; status: TaskStatus }>();
+      if (predecessorIds.length > 0) {
+        const predecessors = await db.task.findMany({
+          where: { id: { in: predecessorIds } },
+          select: { id: true, name: true, status: true },
+        });
+        for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
+      }
+      return validated(context, rows.map((row) => boardCard(
+        row,
+        progressFor(row),
+        displayByTask.get(row.id),
+        row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+      )));
     }
 
     const tasks = await db.task.findMany({
