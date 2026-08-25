@@ -48,6 +48,11 @@ acceptance criterion or caller requires it.
 - Run database tests only against a throwaway PostgreSQL server. Set
   `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL`, and give each
   worktree its own `?schema=`. `npm run test:db` drops and recreates its target.
+- Local verification before dispatching a gate is targeted, not exhaustive:
+  run only the test files your change touches
+  (`npm run test:db -w @agentos/api -- src/<file>.dbtest.ts` runs a subset).
+  The merge gate runs the full suite on the gate worker; repeating it locally
+  costs minutes without adding confidence.
 - Spawn the real API entrypoint in tests through
   `packages/api/src/test-startup-environment.ts`. The entrypoint loads the root
   `.env`, and dotenv restores omitted credentials unless the helper pins them
