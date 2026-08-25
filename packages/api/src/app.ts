@@ -3684,7 +3684,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
         }
-        if (locked.dispatchAfterTaskId !== null
+        if (typeof locked.dispatchAfterTaskId === "string"
           && locked.dispatchAfter?.status !== TaskStatus.DONE
           && body.status !== locked.status
           && body.status !== TaskStatus.TODO) {
