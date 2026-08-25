@@ -10,7 +10,7 @@
 // into a fixture would test a copy, and the copy is the one thing that cannot
 // drift into disagreeing with the gate while still passing.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -147,6 +147,69 @@ test("PARALLEL-USAGE refuses a member with no command", () => {
   assert.notEqual(run.status, 0);
   // Usage errors go to stderr, where every other refusal in the gate puts them.
   assert.match(run.stderr, /names no command/);
+});
+
+test("PARALLEL-INTERRUPT stops members still running before the gate tears down", async () => {
+  // The danger a signal creates is not a slow exit, it is a fast one: cleanup
+  // removes GATE_TMP, releases the worktree lock and deletes the postgres
+  // container, and a member that outlived all three keeps writing into a
+  // checkout the next gate has already claimed.
+  const root = mkdtempSync(join(tmpdir(), "merge-gate-interrupt."));
+  try {
+    const memberPidFile = join(root, "member.pid");
+    const script = join(root, "harness.sh");
+    writeFileSync(
+      script,
+      `${HARNESS}\n` +
+        `trap 'terminate_group_steps; exit 143' TERM\n` +
+        `parallel_steps "a group" "long" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${JSON.stringify(memberPidFile)}\n`,
+    );
+    const harness = spawn("bash", [script, root, root], { stdio: "ignore" });
+
+    // The member has to have reported its own pid before the signal, or the
+    // test would pass by racing rather than by stopping anything.
+    const deadline = Date.now() + 15_000;
+    let memberPid = "";
+    while (Date.now() < deadline) {
+      try {
+        memberPid = readFileSync(memberPidFile, "utf8").trim();
+        if (memberPid !== "") break;
+      } catch {
+        // Not written yet.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.notEqual(memberPid, "", "the member never reported its pid");
+    assert.doesNotThrow(() => process.kill(Number(memberPid), 0), "the member should be running before the signal");
+
+    harness.kill("SIGTERM");
+    await new Promise((resolve) => harness.on("exit", resolve));
+
+    // Checked after the harness has exited: that is the moment cleanup would
+    // have finished deleting everything the member is still writing to.
+    let alive = true;
+    try {
+      process.kill(Number(memberPid), 0);
+    } catch {
+      alive = false;
+    }
+    assert.equal(alive, false, `member ${memberPid} outlived the gate that started it`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("PARALLEL-INTERRUPT stops the members before cleanup removes what they use", () => {
+  // Order, not just presence. Signalling the members after GATE_TMP is gone
+  // and the lock is released closes nothing.
+  const source = readFileSync(gatePath, "utf8");
+  const cleanup = source.slice(source.indexOf("\ncleanup() {"));
+  const stop = cleanup.indexOf("terminate_group_steps");
+  const discard = cleanup.indexOf("discard_gate_tmp");
+  const release = cleanup.indexOf("release_lock");
+  assert.ok(stop !== -1, "cleanup no longer stops in-flight members");
+  assert.ok(stop < discard, "cleanup removes GATE_TMP before stopping the members writing into it");
+  assert.ok(stop < release, "cleanup releases the worktree lock before the members using it have stopped");
 });
 
 test("PARALLEL-ARGUMENTS passes arguments through without re-splitting them", () => {

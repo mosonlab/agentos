@@ -251,6 +251,9 @@ cleanup() {
   trap - EXIT
   local cleanup_error=""
 
+  # Before anything below is torn down, not after.
+  terminate_group_steps
+
   discard_gate_tmp || cleanup_error="the temporary directory could not be removed"
   release_lock || cleanup_error="${cleanup_error:+${cleanup_error}; }the merge gate lock could not be released"
 
@@ -337,6 +340,43 @@ step() {
 # its own duration, and the verdict line lists all of them.
 GATE_STEP_SEPARATOR="::"
 
+# The members a parallel group has in flight. cleanup has to be able to reach
+# them: it deletes GATE_TMP, releases the worktree lock and removes the
+# postgres container, and each of those is a statement that this gate has
+# stopped working. `kill` on this script alone interrupts the parent's `wait`
+# without touching the members, so the teardown would run while a build is
+# still writing dist/ and the next gate would take the lock this one just
+# released. The serial layout this replaced had one child at a time and no log
+# of its own to delete; nine at once is worth the accounting.
+GATE_GROUP_PIDS=()
+
+# Signalling the member alone is not enough, and the shape of the miss is easy
+# to reproduce: the member is a subshell, the work it runs is a process below
+# that, and `npm ci` or `tsc` is a process below *that*. Killing the member
+# leaves the rest orphaned and running. So members are started under `set -m`,
+# which makes each one a process-group leader, and the whole group is signalled
+# at once.
+terminate_group_steps() {
+  [ "${#GATE_GROUP_PIDS[@]}" -gt 0 ] || return 0
+  local group alive attempt
+  printf '\n   interrupted: stopping %s step(s) still running\n' "${#GATE_GROUP_PIDS[@]}"
+  for group in "${GATE_GROUP_PIDS[@]}"; do kill -TERM -"${group}" 2>/dev/null || true; done
+  # Five seconds to end on their own, then stop asking. Waiting without a
+  # deadline hands a member that ignores TERM the power to hang the gate
+  # forever, which is worse than the leak this is closing.
+  for ((attempt=0; attempt<50; attempt++)); do
+    alive=0
+    for group in "${GATE_GROUP_PIDS[@]}"; do kill -0 -"${group}" 2>/dev/null && alive=1; done
+    [ "${alive}" -eq 0 ] && break
+    sleep 0.1
+  done
+  for group in "${GATE_GROUP_PIDS[@]}"; do kill -KILL -"${group}" 2>/dev/null || true; done
+  # Reaped, not just signalled: returning while they are still dying is the
+  # race this exists to close.
+  for group in "${GATE_GROUP_PIDS[@]}"; do wait "${group}" 2>/dev/null || true; done
+  GATE_GROUP_PIDS=()
+}
+
 parallel_steps() {
   local title="$1"; shift
   local -a labels=() serialized=() pids=() statuses=() logs=() current=() failures=()
@@ -370,6 +410,11 @@ parallel_steps() {
     logs[index]="${GATE_TMP}/group-${index}-${slot}.log"
     # The member times itself. Timing it from here would charge each member for
     # however long the parent happened to wait on the members before it.
+    # Job control, on for the spawn only: it is what puts the member and
+    # everything it starts into one process group terminate_group_steps can
+    # reach. It changes nothing on the normal path -- exit codes still arrive
+    # through `wait`, and a group that ends on its own prints nothing.
+    set -m
     (
       cd "${REPO_ROOT}" || exit 1
       __started=$(date +%s)
@@ -379,12 +424,15 @@ parallel_steps() {
       exit "${__status}"
     ) >"${logs[index]}" 2>&1 &
     pids[index]=$!
+    GATE_GROUP_PIDS+=("$!")
+    set +m
     note "started ${labels[index]}"
   done
 
   for ((index=0; index<${#labels[@]}; index++)); do
     if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=1; fi
   done
+  GATE_GROUP_PIDS=()
 
   for ((index=0; index<${#labels[@]}; index++)); do
     printf '\n--- %s ---\n' "${labels[index]}"

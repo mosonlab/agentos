@@ -8,13 +8,21 @@ profile.
 
 A full profile is `npm ci` with Prisma generation in postinstall, the database
 CLI typecheck, lint, a whole-workspace compile, unit tests, a throwaway
-PostgreSQL, database preflight tests and the API dbtests. It runs as three
+PostgreSQL, and the database tests from both packages. It runs as three
 concurrent groups rather than one serial chain, in the only order their real
 dependencies allow: dependencies alongside the install-free suites, then
 everything that needs `node_modules` but not `dist/`, then the three proof waves
 together. PostgreSQL starts before the first group so its initdb overlaps work.
 Concurrency changes latency, never the question the gate asks — every step still
 runs, with the same command, and a group passes only when all of its members do.
+
+An interrupted gate stops its members before it tears anything down. Members run
+as process-group leaders, and `cleanup` signals each group, gives it five
+seconds, then kills it — all before it removes `GATE_TMP`, releases the worktree
+lock and deletes the container. Signalling the gate process alone would leave a
+build still writing `dist/` while the next gate takes the lock this one just
+released, so do not remove the `set -m` around the spawn: it is what makes the
+whole tree reachable rather than just the member's own shell.
 
 How wide each group runs is derived from a stated share of the host, not from
 the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
