@@ -137,9 +137,9 @@ test("instantiating the canonical feature template copies every layer and writes
     "blind-review step 7 materializes without an upstream-read instruction",
   );
   assert.match(
-    created[9]!.description,
+    created[10]!.description,
     /Read the prior template steps' persisted outputs before working/u,
-    "regression-verification step 9 still consumes prior outputs",
+    "regression-verification step 11 consumes the Librarian output",
   );
 
   const inert = await instantiateTemplate(db, "project-1", "template-1", {

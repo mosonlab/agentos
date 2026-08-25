@@ -188,10 +188,17 @@ The job then performs exactly this sequence and stops at the first failure:
    sync creates it from canonical role text in the active
    `review-coordinator-sol` environment, copies that source Agent's repository
    grants and disabled-tool boundary, and refuses an archived target or source.
-   Direct step 5 and Full Assurance step 9 may adopt it only from the frozen
+   Direct step 6 and Full Assurance step 11 may adopt it only from the frozen
    Opus or Sol assignees. Instantiated tasks are migrated only while unarchived,
    TODO, and free of every Run, Session, and step output; every other assignment
-   is preserved and counted in the sync result;
+   is preserved and counted in the sync result. When the exact historical Full
+   Assurance shape has Regression before Librarian, sync preserves that template
+   and its task foreign keys under a deterministic legacy identity, then creates
+   the documentation-before-regression canonical replacement for new chains.
+   It refuses this rollover while any unarchived Task on the old template is
+   unfinished, or when the old template carries webhook configuration, rather
+   than changing live-chain semantics or moving operator-owned trigger state
+   implicitly;
 7. verify the staged generated Prisma client, recheck the barrier and blocking
    statuses, swap the staged `dist/` trees and target `node_modules`, and
    restart the services;

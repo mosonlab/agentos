@@ -1,4 +1,4 @@
-import { AssigneeType, CodexServiceTier, Prisma, PrismaClient } from "@prisma/client";
+import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, TaskStatus } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
@@ -7,9 +7,10 @@ import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_TEMPLATE_NAME,
-  legacyNineStepTemplateName,
-  legacyTenStepTemplateName,
   legacyHumanTwelveStepTemplateName,
+  legacyNineStepTemplateName,
+  legacyRegressionFirstThirteenStepTemplateName,
+  legacyTenStepTemplateName,
 } from "../src/merge-integrator.js";
 import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
@@ -224,6 +225,28 @@ const main = async (): Promise<void> => {
       && existing.steps[10]?.outputKind === "approval"
       && existing.steps[11]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
       && existing.steps[11]?.outputKind === INTEGRATOR_OUTPUT_KIND;
+    const isRegressionFirstThirteenStepTemplate = existing?.steps.length === 13
+      && existing.steps.every((step, index) => step.stepIndex === index + 1)
+      && existing.steps[9]?.assigneeAgent?.name === "regression-verifier"
+      && existing.steps[9]?.outputKind === "regression-verification"
+      && existing.steps[10]?.assigneeAgent?.name === "librarian"
+      && existing.steps[10]?.outputKind === "documentation"
+      && existing.steps[11]?.outputKind === "merge-authorization"
+      && existing.steps[12]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
+      && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
+    if (existing && isRegressionFirstThirteenStepTemplate) {
+      const unfinishedTasks = await tx.task.count({
+        where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+      });
+      if (unfinishedTasks > 0) {
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      }
+      if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
+        || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
+        || existing.webhookReplayWindowSec !== null) {
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+      }
+    }
 
     // A historical 9- or 10-row template cannot be rewritten in place: its
     // in-flight tasks keep foreign keys to rows 6-10, whose meanings changed in
@@ -236,6 +259,8 @@ const main = async (): Promise<void> => {
       ? LEGACY_CANONICAL_TEMPLATE_NAMES.get(INTEGRATOR_TEMPLATE_NAME)!
       : existing && isHistoricalHumanTwelveStepTemplate
       ? legacyHumanTwelveStepTemplateName(existing.id)
+      : existing && isRegressionFirstThirteenStepTemplate
+      ? legacyRegressionFirstThirteenStepTemplateName(existing.id)
       : existing && isHistoricalNineStepTemplate
       ? legacyNineStepTemplateName(existing.id)
       : existing && isHistoricalTenStepTemplate
@@ -288,8 +313,8 @@ const main = async (): Promise<void> => {
     "Code review (Opus blind)",
     "Opus adjudication",
     "Apply review fixes",
-    "Regression verification",
     "Librarian",
+    "Regression verification",
     "Merge authorization",
     "Merge execution",
   ] as const;
