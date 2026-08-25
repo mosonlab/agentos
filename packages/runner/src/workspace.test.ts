@@ -240,6 +240,45 @@ test("cloning carries a per-command ceiling while local git commands stay uncapp
   }
 });
 
+test("the pinned-range fetch carries the clone ceiling, not the incremental-fetch one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-pinned-timeout-"));
+  try {
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: process.env.HOME ?? root,
+    } as unknown as RunnerConfig;
+    const claim = {
+      task: { id: "task-pinned-timeout" },
+      repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
+      run: {
+        id: "run-pinned-timeout",
+        runNumber: 1,
+        targetBranch: "main",
+        branch: "agentos/task-pinned-timeout/run-1",
+        pinnedBaseSha: "pinned-sha",
+        implementationBaseSha: "impl-base-sha",
+        implementationHeadSha: "pinned-sha",
+      },
+    } as ClaimedTask;
+    const ceilings = new Map<string, number | undefined>();
+    const fake: WorkspaceCommandExecutor = async (_config, executable, args, _cwd, _env, options) => {
+      ceilings.set(`${executable} ${args[0]}`, options?.timeoutMs);
+      if (args[0] === "rev-parse") return "pinned-sha";
+      return "";
+    };
+    await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
+    // Into an empty object database this fetch transfers a clone's worth of
+    // history, so it must get the clone profile a slow link needs.
+    assert.equal(ceilings.get("git fetch"), CLONE_COMMAND_TIMEOUT_MS);
+    assert.equal(ceilings.get("git init"), undefined);
+    assert.equal(ceilings.get("git checkout"), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("session credentials are created through the run-as prefix, with the token off the command line", async () => {
   // Without this, the daemon's own uid writes into a tree owned by the launched
   // account: the mkdir fails outright, and if it did not, the 0600 file would
