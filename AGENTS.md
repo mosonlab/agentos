@@ -97,6 +97,11 @@ Pass `--task <id>` to both `acquire` and `release`. The default holder is
 `user@host`, which every agent window on one machine shares, so without a task
 id a release cannot tell its own lease from a sibling window's.
 
+Open the PR right after pushing the feature branch, before dispatching the
+gate. After the exact-head fast-forward lands, GitHub refuses to create a PR
+from a branch main already contains, so a delivery that waits loses its PR
+record; one opened beforehand flips to merged on its own.
+
 Several agent windows work one checkout at a time. Deliver from a dedicated
 `git worktree` on your own branch, never by switching the shared checkout's
 branch, and stage only the exact paths you changed. A branch switch in the
