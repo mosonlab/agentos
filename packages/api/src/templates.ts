@@ -7,6 +7,7 @@ import {
   enqueueTaskRun,
   lockAgentRepoGrant,
   lockAgentRows,
+  lockChainRows,
   Prisma,
   type PrismaClient,
   TaskSource,
@@ -25,6 +26,8 @@ export type InstantiateTemplateInput = {
   autoStart?: boolean;
   name?: string | undefined;
   description?: string | undefined;
+  /** Existing terminal task whose completion will dispatch this chain. */
+  afterTaskId?: string | undefined;
   /** Per-instantiation assignee changes, keyed by template stepIndex. */
   stepOverrides?: Record<string, { assigneeAgentId: string }> | undefined;
 };
@@ -59,12 +62,53 @@ type EffectiveTemplateStep = {
   assigneeAgent: OverrideAgent | EffectiveTemplateStep["step"]["assigneeAgent"];
 };
 
+type DispatchPredecessor = {
+  id: string;
+  projectId: string;
+  chainId: string;
+  chainIndex: number | null;
+  chainLayer: number | null;
+  status: TaskStatus;
+  archivedAt: Date | null;
+  name: string;
+};
+
+type DispatchChainRow = {
+  id: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  chainLayer: number | null;
+  status: TaskStatus;
+  archivedAt: Date | null;
+  name: string;
+};
+
 const overrideRefusal = (
   code: string,
   message: string,
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
 
+const bindingRefusal = (
+  code: string,
+  message: string,
+): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
+
+const executionLayer = (task: { chainLayer: number | null; chainIndex: number | null }): number | null => (
+  task.chainLayer ?? task.chainIndex
+);
+
+const dispatchBindingUniqueConflict = (error: unknown): boolean => {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") return false;
+  const meta = error.meta as { target?: unknown } | undefined;
+  const targets = Array.isArray(meta?.target)
+    ? meta.target.map((target) => String(target))
+    : [String(meta?.target ?? "")];
+  return targets.some((target) => target.includes("dispatchAfterTaskId"))
+    || error.message.includes("dispatchAfterTaskId");
+};
+
 const retryableTransactionConflict = (error: unknown): boolean => {
+  if (dispatchBindingUniqueConflict(error)) return false;
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return true;
   return isSerializationConflict(error);
 };
@@ -108,6 +152,12 @@ export const instantiateTemplate = async (
     fire?: { source: TriggerFireSource; dedupeKey?: string | null };
   } = {},
 ) => {
+  if (input.afterTaskId && input.autoStart) {
+    throw bindingRefusal(
+      "dispatch_conflicts_with_auto_start",
+      `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
+    );
+  }
   const overrideEntries = Object.entries(input.stepOverrides ?? {});
   if (overrideEntries.length > 64) {
     throw overrideRefusal(
@@ -249,6 +299,93 @@ export const instantiateTemplate = async (
     const branchName = input.variables.branchName ?? `agentos/${chainId}`;
     try {
       return await db.$transaction(async (tx) => {
+        let predecessor: DispatchPredecessor | null = null;
+        if (input.afterTaskId) {
+          // The first read only discovers the chain mutex to take. No
+          // predecessor state is trusted until the full chain is locked and
+          // re-read below. A missing or non-chain task has no chain mutex to
+          // take and is refused directly.
+          const predecessorIdentity = await tx.task.findFirst({
+            where: { id: input.afterTaskId, projectId },
+            select: { id: true, chainId: true },
+          });
+          if (!predecessorIdentity) {
+            throw bindingRefusal(
+              "after_task_not_found",
+              `Predecessor task ${input.afterTaskId} was not found in this project`,
+            );
+          }
+          if (!predecessorIdentity.chainId) {
+            throw bindingRefusal(
+              "after_task_not_chained",
+              `Predecessor task ${input.afterTaskId} is not a chained task`,
+            );
+          }
+          await lockChainRows(tx, { projectId, chainId: predecessorIdentity.chainId });
+          const chainRows: DispatchChainRow[] = await tx.task.findMany({
+            where: { projectId, chainId: predecessorIdentity.chainId },
+            select: {
+              id: true,
+              chainId: true,
+              chainIndex: true,
+              chainLayer: true,
+              status: true,
+              archivedAt: true,
+              name: true,
+            },
+          });
+          const lockedPredecessor = chainRows.find((row) => row.id === input.afterTaskId);
+          if (!lockedPredecessor || !lockedPredecessor.chainId) {
+            throw bindingRefusal(
+              "after_task_not_found",
+              `Predecessor task ${input.afterTaskId} was not found in this project`,
+            );
+          }
+          // The pointer is one-to-one. Check it while the predecessor chain
+          // mutex is held so the create-binding and completion paths serialize
+          // on the same rows; the unique index remains the final backstop.
+          const occupied = await tx.task.findFirst({
+            where: { projectId, dispatchAfterTaskId: input.afterTaskId },
+            select: { id: true },
+          });
+          if (occupied) {
+            throw bindingRefusal(
+              "after_task_already_bound",
+              `Predecessor task ${input.afterTaskId} is already bound to another chain`,
+            );
+          }
+          if (lockedPredecessor.archivedAt) {
+            throw bindingRefusal(
+              "after_task_archived",
+              `Predecessor task ${lockedPredecessor.name} (${lockedPredecessor.id}) is archived`,
+            );
+          }
+          if (lockedPredecessor.status === TaskStatus.DONE) {
+            throw bindingRefusal(
+              "after_task_already_done",
+              `Predecessor task ${lockedPredecessor.name} (${lockedPredecessor.id}) is already DONE`,
+            );
+          }
+          const layers = chainRows
+            .map(executionLayer)
+            .filter((layer): layer is number => layer !== null);
+          const terminalLayer = layers.length > 0 ? Math.max(...layers) : null;
+          const predecessorLayer = executionLayer(lockedPredecessor);
+          const terminalRows = terminalLayer === null
+            ? []
+            : chainRows.filter((row) => executionLayer(row) === terminalLayer);
+          if (predecessorLayer === null || terminalRows.length !== 1 || terminalRows[0]!.id !== lockedPredecessor.id) {
+            throw bindingRefusal(
+              "after_task_not_terminal",
+              `Predecessor task ${lockedPredecessor.name} (${lockedPredecessor.id}) is not the sole terminal task of its chain`,
+            );
+          }
+          predecessor = {
+            ...lockedPredecessor,
+            projectId,
+            chainId: lockedPredecessor.chainId,
+          };
+        }
         // The step validation above read every assignee outside this
         // transaction. Re-read them all under the shared Agent-row mutex before
         // the first task exists: instantiation writes a whole chain plus its
@@ -302,7 +439,7 @@ export const instantiateTemplate = async (
         }
         const tasks = [];
         const promptVariables = { ...input.variables, chainId };
-        for (const effective of effectiveSteps) {
+        for (const [index, effective] of effectiveSteps.entries()) {
           const { step } = effective;
           const context = [
             interpolate(step.prompt, promptVariables),
@@ -327,6 +464,7 @@ export const instantiateTemplate = async (
             status: TaskStatus.TODO,
             source: options.source ?? TaskSource.MANUAL,
             targetBranch: step.stepIndex === template.steps[0]!.stepIndex ? repo.defaultBranch : branchName,
+            ...(index === 0 && input.afterTaskId ? { dispatchAfterTaskId: input.afterTaskId } : {}),
           } }));
         }
         const first = tasks[0]!;
@@ -338,10 +476,39 @@ export const instantiateTemplate = async (
           taskId: task.id,
           actorType: options.actorType ?? "control-plane",
           body: index === 0
-            ? (input.autoStart ?? false) ? "Template instantiated; first step queued" : "Template instantiated; ready to start"
+            ? predecessor
+              ? `Template instantiated; waiting for predecessor ${predecessor.name}`
+              : (input.autoStart ?? false) ? "Template instantiated; first step queued" : "Template instantiated; ready to start"
             : "Template instantiated; waiting for predecessor",
-          metadata: { chainId, templateId: template.id, ...options.activityMetadata },
+          metadata: {
+            chainId,
+            templateId: template.id,
+            ...(predecessor ? {
+              afterTaskId: predecessor.id,
+              dispatchAfterTaskId: predecessor.id,
+              predecessorTaskId: predecessor.id,
+              predecessorChainId: predecessor.chainId,
+            } : {}),
+            ...options.activityMetadata,
+          },
         })) });
+        if (predecessor) {
+          await tx.taskActivity.create({ data: {
+            taskId: predecessor.id,
+            actorType: options.actorType ?? "control-plane",
+            body: `Chain ${chainId} bound to predecessor ${predecessor.name}`,
+            metadata: {
+              chainId,
+              templateId: template.id,
+              afterTaskId: predecessor.id,
+              dispatchAfterTaskId: predecessor.id,
+              predecessorTaskId: predecessor.id,
+              predecessorChainId: predecessor.chainId,
+              successorChainId: chainId,
+              ...options.activityMetadata,
+            },
+          } });
+        }
         const fire = options.fire
           ? await tx.triggerFire.create({ data: {
             templateId: template.id,
@@ -353,6 +520,12 @@ export const instantiateTemplate = async (
         return { chainId, branchName, tasks, fireId: fire?.id ?? null };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error: unknown) {
+      if (dispatchBindingUniqueConflict(error)) {
+        throw bindingRefusal(
+          "after_task_already_bound",
+          `Predecessor task ${input.afterTaskId} is already bound to another chain`,
+        );
+      }
       // Six simultaneous webhook fires can form a longer serialization queue
       // than five attempts, even with per-attempt jitter. Twelve bounded tries
       // make the accepted burst deterministic while still surfacing persistent
