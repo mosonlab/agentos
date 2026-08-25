@@ -458,7 +458,7 @@ test("a DONE terminal task with an unfinished lower layer parks instead of dispa
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 0);
 });
 
-test("a non-terminal replay cannot park an already dispatched live successor", async () => {
+test("a non-terminal replay parks an already dispatched queued successor", async () => {
   const fixture = await seedBinding();
   await db.$transaction((tx) => activateChainSuccessor(tx, fixture.predecessor, {}, new Date()));
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
@@ -477,9 +477,32 @@ test("a non-terminal replay cannot park an already dispatched live successor", a
   await db.$transaction((tx) => activateChainSuccessor(tx, fixture.predecessor, {}, new Date()));
 
   const successor = await db.task.findUniqueOrThrow({ where: { id: fixture.successor.id } });
-  assert.equal(successor.status, TaskStatus.TODO);
-  assert.equal(successor.failureReason, null);
+  const failureReason = "bound predecessor is no longer terminal; successor was not queued";
+  assert.equal(successor.status, TaskStatus.REVIEW);
+  assert.equal(successor.failureReason, failureReason);
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
+  const activities = await db.taskActivity.findMany({
+    where: {
+      taskId: { in: [fixture.predecessor.id, fixture.successor.id] },
+      body: { contains: failureReason },
+    },
+  });
+  assert.deepEqual(new Set(activities.map((row) => row.taskId)), new Set([
+    fixture.predecessor.id,
+    fixture.successor.id,
+  ]));
+  assert.equal(activities.length, 2);
+  for (const activity of activities) {
+    assert.deepEqual(bindingMetadata(activity.metadata), {
+      predecessorTaskId: fixture.predecessor.id,
+      predecessorChainId: fixture.predecessor.chainId,
+      successorTaskId: fixture.successor.id,
+      successorChainId: fixture.successor.chainId,
+      state: "parked",
+      failureReason,
+      predecessorTerminal: false,
+    });
+  }
 });
 
 test("unbound terminal completion keeps the legacy Chain complete activity and has no dispatch side effect", async () => {

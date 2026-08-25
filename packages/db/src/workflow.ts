@@ -1029,6 +1029,17 @@ const dispatchBoundSuccessor = async (
   }) as BoundSuccessor | null;
   if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
 
+  if (!predecessorTerminal) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      "bound predecessor is no longer terminal; successor was not queued",
+      { predecessorTerminal: false },
+    );
+    return;
+  }
+
   // A second completion/replay can arrive after the first transaction has
   // committed its Run. Treat that as an idempotent observation, not as a
   // refusal that would overwrite the successfully queued task with REVIEW.
@@ -1055,16 +1066,6 @@ const dispatchBoundSuccessor = async (
       predecessor,
       successor,
       `successor ${successor.name} is ${successor.status}; it was not queued`,
-    );
-    return;
-  }
-  if (!predecessorTerminal) {
-    await parkBoundSuccessor(
-      tx,
-      predecessor,
-      successor,
-      "bound predecessor is no longer terminal; successor was not queued",
-      { predecessorTerminal: false },
     );
     return;
   }
