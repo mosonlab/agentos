@@ -886,6 +886,276 @@ const isUniqueConflict = (error: unknown): boolean => (
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
 );
 
+type BoundDispatchMetadata = {
+  predecessorTaskId: string;
+  predecessorChainId: string;
+  successorTaskId: string;
+  successorChainId: string;
+};
+
+const boundDispatchMetadata = (
+  predecessor: ChainTask,
+  successor: ChainTask,
+): BoundDispatchMetadata => ({
+  predecessorTaskId: predecessor.id,
+  predecessorChainId: predecessor.chainId!,
+  successorTaskId: successor.id,
+  successorChainId: successor.chainId!,
+});
+
+/**
+ * Records the two sides of a binding decision together. The pointer remains
+ * on the successor task forever; these rows are the durable audit trail for
+ * both a successful dispatch and a fail-closed refusal.
+ */
+const boundDispatchActivities = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainTask,
+  input: {
+    successorBody: string;
+    predecessorBody: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> => {
+  const metadata = {
+    ...boundDispatchMetadata(predecessor, successor),
+    ...input.metadata,
+  };
+  await tx.taskActivity.create({
+    data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: input.successorBody,
+      metadata,
+    },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId: predecessor.id,
+      actorType: "control-plane",
+      body: input.predecessorBody,
+      metadata,
+    },
+  });
+};
+
+const parkBoundSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  reason: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> => {
+  await tx.task.update({
+    where: { id: successor.id },
+    data: { status: TaskStatus.REVIEW, failureReason: reason },
+  });
+  await boundDispatchActivities(tx, predecessor, successor, {
+    successorBody: `Bound predecessor completed; successor parked in REVIEW: ${reason}`,
+    predecessorBody: `Bound chain dispatch refused; successor parked in REVIEW: ${reason}`,
+    metadata: { state: "parked", failureReason: reason, ...metadata },
+  });
+};
+
+const boundSuccessorQueuedActivity = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  state: "queued" | "already-queued",
+  runId: string | null,
+): Promise<void> => {
+  await boundDispatchActivities(tx, predecessor, successor, {
+    successorBody: state === "queued"
+      ? "Bound predecessor completed; first step queued"
+      : "Bound predecessor completed; successor already queued",
+    predecessorBody: state === "queued"
+      ? "Bound chain dispatched"
+      : "Bound chain dispatch observed an already queued successor",
+    metadata: { state, runId },
+  });
+};
+
+type BoundSuccessor = Prisma.TaskGetPayload<{
+  include: { runs: true; assigneeAgent: true; repo: true };
+}>;
+
+/**
+ * Resolves the one successor bound to a completed predecessor. The caller
+ * already owns the predecessor chain mutex; this function acquires the
+ * successor chain mutex second and never the other way around. That order is
+ * total because a binding can only point at a chain that pre-dates its own.
+ */
+const dispatchBoundSuccessor = async (
+  tx: Tx,
+  predecessor: ChainSuccessor,
+  successorId: string,
+  now: Date,
+  predecessorTerminal: boolean,
+): Promise<void> => {
+  const successorIdentity = await tx.task.findUnique({
+    where: { id: successorId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!successorIdentity?.chainId) {
+    // The binding shape check makes this unreachable for persisted rows. Keep
+    // the refusal explicit if a legacy or hand-written fixture violates it.
+    throw new Error(`Bound successor ${successorId} has no chain identity`);
+  }
+  await lockChainRows(tx, {
+    projectId: successorIdentity.projectId,
+    chainId: successorIdentity.chainId,
+  });
+  const successor = await tx.task.findUnique({
+    where: { id: successorId },
+    include: {
+      runs: {
+        where: { status: { in: ACTIVE_RUN_STATUSES } },
+        orderBy: { runNumber: "desc" },
+      },
+      assigneeAgent: true,
+      repo: true,
+    },
+  }) as BoundSuccessor | null;
+  if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
+
+  if (!predecessorTerminal) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      "bound predecessor is no longer terminal; successor was not queued",
+      { predecessorTerminal: false },
+    );
+    return;
+  }
+
+  // A second completion/replay can arrive after the first transaction has
+  // committed its Run. Treat that as an idempotent observation, not as a
+  // refusal that would overwrite the successfully queued task with REVIEW.
+  if (successor.runs.length > 0) {
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", successor.runs[0]!.id);
+    return;
+  }
+  if (successor.archivedAt) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `successor ${successor.name} is archived; unarchive the task and retry dispatch`,
+    );
+    return;
+  }
+  if (successor.status === TaskStatus.DONE) {
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", null);
+    return;
+  }
+  if (successor.status !== TaskStatus.TODO) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `successor ${successor.name} is ${successor.status}; it was not queued`,
+    );
+    return;
+  }
+  if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.assigneeAgent || !successor.repoId || !successor.repo) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `successor ${successor.name} cannot be queued without an agent and repo`,
+    );
+    return;
+  }
+  if (successor.assigneeAgent.archivedAt) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry dispatch`,
+    );
+    return;
+  }
+  if (!await lockAgentRepoGrant(tx, {
+    projectId: successor.projectId,
+    agentId: successor.assigneeAgentId,
+    repoId: successor.repoId,
+  })) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `repository-grant-missing: assignee ${successor.assigneeAgent.name} has no grant for Repo ${successor.repo.name}; restore the grant and retry dispatch`,
+    );
+    return;
+  }
+
+  const stopped = await stopStateFor(tx, successor.id);
+  if (stopped) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`,
+      { condition: stopped.stop.condition, sourceStopId: stopped.stop.stopId },
+    );
+    return;
+  }
+
+  const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
+  const savepoint = "chain_dispatch_enqueue";
+  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
+  try {
+    const run = await enqueueTaskRunInternal(tx, successor.id, now, null);
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", run.id);
+  } catch (error: unknown) {
+    if (isUniqueConflict(error)) {
+      if (hasSavepoint) {
+        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", null);
+      return;
+    }
+    if (hasSavepoint) {
+      await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    }
+    if (isArchivedTaskError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `successor ${successor.name} is archived; unarchive the task and retry dispatch`,
+      );
+      return;
+    }
+    if (isArchivedAssigneeError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry dispatch`,
+      );
+      return;
+    }
+    if (isIntegratorStoppedError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `merge integrator stopped on ${error.condition}; predecessor success preserved and successor not activated`,
+        { condition: error.condition },
+      );
+      return;
+    }
+    throw error;
+  }
+};
+
 /**
  * Why this successor must not be claimed, or null if it may be.
  *
@@ -997,9 +1267,18 @@ const activateChainSuccessorInternal = async (
   }
 
   const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  const boundSuccessor = current.status === TaskStatus.DONE
+    ? await tx.task.findUnique({
+      where: { dispatchAfterTaskId: current.id },
+      select: { id: true },
+    })
+    : null;
   if (!currentRows.every((row) => row.status === TaskStatus.DONE)) {
     // The first review completion exits here while its blind sibling is still
     // unfinished; the second completion owns the join.
+    if (boundSuccessor) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+    }
     return { nextTaskId: null, gated: false };
   }
   // A legacy chain can contain a historical DONE gap (for example an operator
@@ -1013,7 +1292,22 @@ const activateChainSuccessorInternal = async (
     .find((value) => chainRows.some((row) => layerOf(row) === value && row.status !== TaskStatus.DONE));
   if (nextLayer === undefined) {
     await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
+    // Archiving a predecessor does not resolve its binding. Production routes
+    // cannot complete an archived task, but retaining this check also keeps
+    // legacy/directly-seeded rows inert instead of dispatching from archived
+    // history when an activation replay is attempted.
+    if (boundSuccessor && current.archivedAt === null) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, true);
+    }
     return { nextTaskId: null, gated: false };
+  }
+
+  // A binding to a non-terminal layer is rejected at instantiation time. If a
+  // legacy row or a direct fixture nevertheless carries one, park it while the
+  // predecessor chain still has work above this layer instead of silently
+  // leaving the successor inert forever.
+  if (boundSuccessor) {
+    await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
   }
 
   const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
