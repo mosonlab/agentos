@@ -8,25 +8,61 @@ profile.
 
 A full profile is `npm ci` with Prisma generation in postinstall, the database
 CLI typecheck, lint, a whole-workspace compile, unit tests, a throwaway
-PostgreSQL, database preflight tests and the API dbtests. The pre-optimization
-worker baseline measured on 2026-08-23 was about 6 minutes 7 seconds with the
-worker to themselves. Two
-overlapping full gates took 8 minutes 14 seconds and 8 minutes 42 seconds on the
-same four vCPUs, which is why a worker exposes one execution slot unless that
-exact host has been accepted for two. The current gate removes the redundant
-whole-workspace typecheck and generates Prisma Client inside `npm ci`; an
-exact-head build-cache hit also removes the roughly 42-second build. Unit and
-database proof waves run serially inside each gate because each already uses
-bounded internal concurrency. Database files use at most four workers in a
-single-slot worker; a capacity-two worker automatically uses two per gate so
-the host-wide database fan-out remains four. A 12-vCPU
-worker measured 93 seconds at concurrency 3 and 83–85 seconds across ten
-consecutive green runs at concurrency 4, with no leaked scratch databases. The
-install-free `docs-only` profile takes about 4 seconds. Use
+PostgreSQL, and the database tests from both packages. It runs as three
+concurrent groups rather than one serial chain, in the only order their real
+dependencies allow: dependencies alongside the install-free suites, then
+everything that needs `node_modules` but not `dist/`, then the three proof waves
+together. PostgreSQL starts before the first group so its initdb overlaps work.
+Concurrency changes latency, never the question the gate asks — every step still
+runs, with the same command, and a group passes only when all of its members do.
+
+An interrupted gate stops its members before it tears anything down. Members run
+as process-group leaders, and `cleanup` signals each group, gives it five
+seconds, then kills it — all before it removes `GATE_TMP`, releases the worktree
+lock and deletes the container. Signalling the gate process alone would leave a
+build still writing `dist/` while the next gate takes the lock this one just
+released, so do not remove the `set -m` around the spawn: it is what makes the
+whole tree reachable rather than just the member's own shell.
+
+How wide each group runs is derived from a stated share of the host, not from
+the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
+slot count, so on the two-slot desktop each gate sizes itself for half the
+machine and two concurrent gates still add up to one host. A gate invoked by
+hand states no share and has the machine. Do not restore a per-phase fan-out in
+`run-gate.sh`: `7886fad` set `AGENTOS_DBTEST_CONCURRENCY` there, `merge-gate.sh`
+recomputed that same variable moments later, and the bound silently never took
+effect while both logs claimed it had.
+
+Measured on the 12-vCPU, 20 GiB desktop worker at capacity two, 2026-08-25.
+A single full gate is about **122 seconds** end to end with a build-cache miss —
+which is every ordinary new commit. The serial predecessor was 241 seconds. Two
+overlapping full gates take about **175 seconds each**, against 270 seconds
+before, with a 7.58 GiB peak and 12.00 GiB still available, and no leaked
+container, scratch database, worktree or lock. On the 4-vCPU fallback worker at
+capacity one a full gate is about **252 seconds**, against 367 before; that one
+was run three times in a row, 3/3 PASS, because the risk in the proof waves is
+flakiness rather than latency and one green run does not measure it. The
+install-free `docs-only` profile still takes about 4 seconds.
+
+Within a gate the proof waves are now the whole cost: 83 seconds for the
+database tests and 53 for the unit tests, running together, against 27 for lint
+and 26 for a cold build. Widening the database lanes does not move
+it — 4, 6 and 8 lanes all landed within 3 seconds of each other over one fixed
+commit — because the waves saturate PostgreSQL and the CPU share together rather
+than running out of lanes. `NODE_COMPILE_CACHE` was measured and rejected: 80
+seconds cold against 82 warm, for 77 MiB of cache. Use
 `scripts/gate-worker/bench-postgres.sh` and
 `scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
 runner itself; each alternates its arms over one fixed commit so a tuning claim
-is not inferred from unrelated gate runs.
+is not inferred from unrelated gate runs. The lane widths are overridable
+(`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`) for exactly that purpose; a
+gate never chooses them itself.
+
+`packages/db` and `packages/api` hand their database files to one pool rather
+than two waves. Dividing lanes between a five-file wave and a forty-two-file one
+is a guess about a ratio nothing maintains, and on the four-core fallback worker
+the guess starved the small wave to a single lane and 201 seconds. One pool
+balances itself and migrates the template once.
 
 Everything here is `scripts/gate-worker/`:
 
@@ -233,6 +269,13 @@ Each worker needs an SSH-reachable Ubuntu account that can `sudo`, plus a
 to `ci-desktop-worker` as primary and `agentos-gate` as fallback;
 `AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` override them.
 `--server <alias>` remains the explicit one-worker form.
+
+Agent sessions receive a single operator-selected worker only when their runner
+daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
+that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
+puts `gate-dispatch.sh` into its existing single-server mode. Task secrets cannot
+override this runner-owned choice. Leave `RUNNER_GATE_SERVER` unset when the
+normal primary/fallback topology is intended.
 
 ```
 Host ci-desktop-worker

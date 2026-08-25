@@ -38,8 +38,10 @@ snapshot scan, and final HEAD/worktree drift. Adds, deletes, renames, mode
 changes, runtime-coupled documentation, code, configuration, and unknown paths
 use the full profile: a clean `npm ci` whose postinstall generates the database
 client, the database CLI typecheck, repository lint, the whole-workspace build,
-unit tests, the gate schema's migration, database preflight tests, API database
-tests, and final drift verification. A caller cannot select the cheaper profile.
+unit tests, the gate schema's migration, the database tests, and final drift
+verification. A caller cannot select the cheaper profile. Those steps run as
+three concurrent groups rather than one serial chain; every one of them still
+runs, and a group passes only when all of its members do.
 
 ```sh
 scripts/merge-gate.sh --expect-head <oid>

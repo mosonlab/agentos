@@ -145,7 +145,7 @@ export const buildPrompt = (claim: ClaimedTask): string => {
 
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix">
-    & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
+    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent">,
   scratch: AgentScratch,
   workspacePath: string,
@@ -160,6 +160,7 @@ export const buildChildEnvironment = (
     PI_CODING_AGENT_SESSION_DIR: _piCodingAgentSessionDir,
     AGENTOS_CODEX_SERVICE_TIER: _codexServiceTier,
     AGENTOS_PI_EXPECTS_OPENAI_CODEX: _piExpectsOpenAICodex,
+    AGENTOS_GATE_SERVER: _gateServer,
     HTTP_PROXY: _httpProxy,
     HTTPS_PROXY: _httpsProxy,
     NO_PROXY: _noProxy,
@@ -192,7 +193,7 @@ export const buildChildEnvironment = (
 
 const isolationVariables = [
   "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
-  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
+  "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX", "AGENTOS_GATE_SERVER",
 ] as const;
 
 /**

@@ -191,14 +191,13 @@ if [ -e "$WORKER_CAPACITY_FILE" ] || [ -L "$WORKER_CAPACITY_FILE" ]; then
   esac
 fi
 
-# Each full gate normally lets the database harness run four test files at
-# once. Two gates would therefore turn the measured two-slot desktop into an
-# eight-file database host, which is exactly the oversubscription the harness's
-# stable ceiling avoids. Keep the host-wide database fan-out at four when the
-# worker has two slots; every other gate phase remains free to use all CPUs.
-if [ "$WORKER_CAPACITY" -eq 2 ]; then
-  export AGENTOS_DBTEST_CONCURRENCY=2
-fi
+# A gate runs many phases in parallel and every one of them has to fit inside
+# the share of the host this slot represents. State the share once; the gate
+# sizes each phase from it. Naming a single phase's fan-out here instead is what
+# 7886fad did, and merge-gate.sh recomputed that exact variable a moment later,
+# so the bound never took effect: a two-slot worker ran eight database files at
+# once while this script's own line claimed two.
+export AGENTOS_GATE_HOST_SHARE="$WORKER_CAPACITY"
 
 # Slot one retains the original lock path, so a rollout beside an older
 # run-gate.sh still counts the old process. Slot two has one additional lock
@@ -304,8 +303,8 @@ printf 'run-gate: %s\n' "$OID" > "$LOG" 2>/dev/null \
   printf 'run-gate: worker %s\n' "$(uname -srm)"
   printf 'run-gate: node %s, npm %s\n' "$(node -v 2>/dev/null)" "$(npm -v 2>/dev/null)"
   printf 'run-gate: started %s\n' "$STAMP"
-  printf 'run-gate: capacity %s, dbtest concurrency %s\n' \
-    "$WORKER_CAPACITY" "${AGENTOS_DBTEST_CONCURRENCY:-default}"
+  printf 'run-gate: capacity %s, this gate gets 1/%s of the host\n' \
+    "$WORKER_CAPACITY" "$WORKER_CAPACITY"
   printf 'run-gate: worktree %s\n\n' "$WORKTREE"
 } >> "$LOG"
 
