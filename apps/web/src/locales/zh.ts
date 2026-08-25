@@ -150,6 +150,7 @@ export const zh = {
 
   "chain.archived": "已归档",
   "chain.blockedBy": "阻塞于：{names}",
+  "chain.blockedOnPredecessor": "等待前置任务：{name}",
   "chain.completed": "已完成 {done}/{total}",
   "chain.currentExecution": "当前执行",
   "chain.error": "无法加载任务链。",
@@ -786,6 +787,7 @@ export const zh = {
   "tasks.board.scrollRight": "向右滚动一列",
   "tasks.card.actionsFor": "{name} 的操作",
   "tasks.card.assignee": "负责人：{name}",
+  "tasks.card.blockedOn": "等待前置任务：{name}",
   "tasks.card.filterChain": "仅显示任务链 {name}",
   "tasks.card.model": "模型：{model}",
   "tasks.card.noRuns": "还没有运行",

@@ -151,6 +151,7 @@ export const en = {
 
   "chain.archived": "archived",
   "chain.blockedBy": "Blocked by: {names}",
+  "chain.blockedOnPredecessor": "Blocked on: {name}",
   "chain.completed": "Completed {done}/{total}",
   "chain.currentExecution": "Current execution",
   "chain.error": "The chain could not be loaded.",
@@ -793,6 +794,7 @@ export const en = {
   "tasks.board.scrollRight": "Scroll one column right",
   "tasks.card.actionsFor": "Actions for {name}",
   "tasks.card.assignee": "Assignee {name}",
+  "tasks.card.blockedOn": "Blocked on: {name}",
   "tasks.card.filterChain": "Show only chain {name}",
   "tasks.card.model": "Model {model}",
   "tasks.card.noRuns": "no runs",

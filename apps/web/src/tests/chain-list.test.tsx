@@ -19,7 +19,7 @@ const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep =
   stepName: `Step ${position}`, status: "TODO", approvalGate: false, assigneeType: "AGENT",
   executionOwner: "agent",
   agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
-  startable: false, startAction: null, currentExecution: false,
+  startable: false, startAction: null, blockedOn: null, currentExecution: false,
   ...overrides,
 });
 
@@ -71,6 +71,29 @@ test("start and recovery copy appear only where the API supplied an action", () 
   assert.equal([...startMarkup.matchAll(new RegExp(en("chain.startNext"), "g"))].length, 1);
   const recoverMarkup = render(chain([step(1, { status: "BACKLOG", startable: true, startAction: "recover" }), step(2)]), "t1");
   assert.equal([...recoverMarkup.matchAll(new RegExp(en("chain.recoverParked"), "g"))].length, 1);
+});
+
+test("an unresolved binding names its predecessor and disables Start", () => {
+  const markup = render(chain([step(1, {
+    blockedOn: { taskId: "a13", name: "Merge release", status: "DOING" },
+    startable: false, startAction: null,
+  })]), "t1");
+  assert.match(markup, new RegExp(en("chain.blockedOnPredecessor", { name: "Merge release" })));
+  assert.match(markup, /data-chain-blocked-on=""/);
+  assert.match(markup, new RegExp(`<button[^>]*disabled=""[^>]*>${en("chain.startNext")}<\/button>`));
+});
+
+test("a resolved binding uses the ordinary enabled Start action", () => {
+  const markup = render(chain([step(1, { startable: true, startAction: "start", blockedOn: null })]), "t1");
+  assert.doesNotMatch(markup, /data-chain-blocked-on=/);
+  assert.match(markup, new RegExp(`<button[^>]*>${en("chain.startNext")}<\/button>`));
+  assert.doesNotMatch(markup, new RegExp(`<button[^>]*disabled=""[^>]*>${en("chain.startNext")}<\/button>`));
+});
+
+test("an ordinary step without an API start action still renders no action", () => {
+  const markup = render(chain([step(1, { startable: false, startAction: null, blockedOn: null })]), "t1");
+  assert.doesNotMatch(markup, new RegExp(en("chain.startNext")));
+  assert.doesNotMatch(markup, /data-chain-blocked-on=/);
 });
 
 test("sparse template indices renumber to 1 2 3 and the header still reads n/m", () => {
