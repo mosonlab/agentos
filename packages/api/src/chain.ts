@@ -22,6 +22,17 @@ export type ChainRow = {
   status: TaskStatus;
   archivedAt: Date | null;
   templateStep: { name: string } | null;
+  /** A bound first task carries the predecessor id. The predecessor relation
+   * is fetched only by the chain-detail route when that id is present; making
+   * both fields optional keeps legacy board/progress callers unchanged. */
+  dispatchAfterTaskId?: string | null;
+  dispatchAfter?: Pick<DispatchPredecessor, "status"> | null;
+};
+
+export type DispatchPredecessor = {
+  id: string;
+  name: string;
+  status: TaskStatus;
 };
 
 export type ChainProgress = {
@@ -142,6 +153,9 @@ export type StartableRow = {
   assigneeAgent: { archivedAt: Date | null } | null;
   /** The exact AgentRepoAccess row exists at decision time. */
   hasRepoGrant: boolean;
+  /** Optional binding facts. Omitted means this is a historical/unbound row. */
+  dispatchAfterTaskId?: string | null;
+  dispatchAfter?: Pick<DispatchPredecessor, "status"> | null;
 };
 
 export type StartabilityChecklist = {
@@ -158,6 +172,12 @@ export type TaskStartability = {
   checklist: StartabilityChecklist;
 };
 
+/** A binding is resolved only after its predecessor is durably DONE. A caller
+ * that knows a row is bound but did not load the relation fails closed. */
+export const dispatchBindingResolved = (
+  row: Pick<StartableRow, "dispatchAfterTaskId" | "dispatchAfter">,
+): boolean => row.dispatchAfterTaskId == null || row.dispatchAfter?.status === TaskStatus.DONE;
+
 /** One verdict shared by every read surface and the authoritative start guard.
  *  The checklist is intentionally the operator-configurable subset requested by
  *  the board contract; task archive/status and archived-agent guards still
@@ -168,13 +188,14 @@ export const taskStartability = (
   maxSessionsPerTask: number,
   predecessorsDone = true,
 ): TaskStartability => {
+  const bindingResolved = dispatchBindingResolved(row);
   const checklist = {
     repoBound: row.repoId !== null,
     agentAssignee: row.assigneeType === AssigneeType.AGENT && row.assigneeAgentId !== null,
     repoAccessGrant: row.hasRepoGrant,
     budgetRemaining: facts.total < runBudgetCeiling(maxSessionsPerTask, facts.budgetGrants),
     noActiveRun: !facts.active,
-    predecessorsDone,
+    predecessorsDone: predecessorsDone && bindingResolved,
   };
   return {
     checklist,

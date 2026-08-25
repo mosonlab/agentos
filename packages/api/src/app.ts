@@ -3390,6 +3390,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: {
         assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
         repo: { select: { id: true, name: true, defaultBranch: true } },
+        dispatchAfter: { select: { id: true, name: true, status: true } },
       },
     });
     if (!task) return context.json({ error: "Task not found" }, 404);
@@ -3474,10 +3475,32 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         include: chainInclude,
       });
 
+    // Bindings are stored only on the first task. Keep the common unbound path
+    // at zero predecessor lookups, and resolve the one pointer only when the
+    // chain's first execution row carries it. This is deliberately separate
+    // from the row include above: including the self-relation would make every
+    // historical chain pay for a relation query it cannot use.
+    const firstTask = [...rows].sort((left, right) => (
+      (left.chainLayer ?? left.chainIndex ?? 0) - (right.chainLayer ?? right.chainIndex ?? 0)
+        || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
+        || left.id.localeCompare(right.id)
+    ))[0];
+    const dispatchAfterTaskId = firstTask?.dispatchAfterTaskId ?? null;
+    const dispatchAfter = dispatchAfterTaskId === null
+      ? null
+      : await db.task.findFirst({
+        where: { id: dispatchAfterTaskId, projectId: subject.projectId },
+        select: { id: true, name: true, status: true },
+      });
+    const chainRows = rows.map((row) => ({
+      ...row,
+      dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
+    }));
+
     const [runGroups, recoveryRow] = await Promise.all([
-      rows.length === 0 ? [] : db.run.groupBy({
+      chainRows.length === 0 ? [] : db.run.groupBy({
         by: ["taskId", "status"],
-        where: { taskId: { in: rows.map((row) => row.id) } },
+        where: { taskId: { in: chainRows.map((row) => row.id) } },
         _count: { _all: true },
         // The grants travel with the count, in the same one query: a step whose
         // failures were all provisioning failures has been refunded them, and its
@@ -3491,18 +3514,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     ]);
     const mergeRecovery = mergeRecoveryProjection(recoveryRow);
     const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
-    const ordinals = positions(rows);
-    const progress = chainProgress(rows);
-    const decisions = chainStartDecisions(rows.map((row) => ({
+    const ordinals = positions(chainRows);
+    const progress = chainProgress(chainRows);
+    const decisions = chainStartDecisions(chainRows.map((row) => ({
       ...row,
       hasRepoGrant: Boolean(row.repoId && row.assigneeAgent?.repoAccess.some((grant) => grant.repoId === row.repoId)),
     })), facts);
 
     return context.json({
       chainId: subject.chainId,
-      total: progress?.total ?? rows.length,
+      total: progress?.total ?? chainRows.length,
       done: progress?.done ?? 0,
-      steps: rows.map((row) => ({
+      steps: chainRows.map((row) => ({
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,
         chainIndex: row.chainIndex,
@@ -3522,6 +3545,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         startable: decisions.get(row.id)?.startable ?? false,
         startAction: decisions.get(row.id)?.startAction ?? null,
         currentExecution: decisions.get(row.id)?.currentExecution ?? false,
+        blockedOn: row.id === firstTask?.id
+          && row.dispatchAfterTaskId !== null
+          && dispatchAfter !== null
+          && dispatchAfter.status !== TaskStatus.DONE
+          ? { taskId: dispatchAfter.id, name: dispatchAfter.name, status: dispatchAfter.status }
+          : null,
         mergeRecovery,
       })),
     });
@@ -3991,6 +4020,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           where: { id: taskId },
           include: {
             assigneeAgent: { select: { archivedAt: true } },
+            dispatchAfter: { select: { id: true, name: true, status: true } },
             templateStep: { include: { taskTemplate: { select: { name: true } } } },
           },
         });
@@ -4016,6 +4046,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               code: 409 as const,
             };
           }
+        }
+        if (task.dispatchAfterTaskId !== null && task.dispatchAfter?.status !== TaskStatus.DONE) {
+          const predecessorName = task.dispatchAfter?.name ?? task.dispatchAfterTaskId;
+          return {
+            error: `Cannot start ${task.name}; bound predecessor ${predecessorName} is not done`,
+            code: 409 as const,
+          };
         }
         if (task.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
         if (task.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
