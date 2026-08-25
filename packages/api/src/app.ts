@@ -682,6 +682,23 @@ export const handleRegressionCompletion = async (
   return "handled";
 };
 
+/**
+ * An approval gate's `taskId` is the gate step itself; the artifact the approver
+ * is being asked about was produced by the *previous* step, whose run opened the
+ * card. That producing task needs no stored column: the card carries the
+ * producing run's `sessionId`, and `Session.taskId` is that run's task
+ * (`app.ts` writes `candidate.taskId` when the session is created). Exposing it
+ * as `artifactTaskId` is what lets the board render the full artifact next to
+ * the decision instead of the truncated preview the card body carries for
+ * Feishu — and it works for cards opened before this field existed.
+ */
+const withArtifactTask = <T extends { gateTaskId: string | null; session: { taskId: string | null } | null }>(
+  message: T,
+): Omit<T, "session"> & { artifactTaskId: string | null } => {
+  const { session, ...rest } = message;
+  return { ...rest, artifactTaskId: message.gateTaskId === null ? null : session?.taskId ?? null };
+};
+
 const id = z.string().min(1);
 const fence = z.string().min(1);
 const projectFields = {
@@ -4450,7 +4467,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.get("/inbox/messages", async (context) => {
     const projectId = context.req.query("projectId");
-    return context.json(await db.inboxMessage.findMany({
+    const messages = await db.inboxMessage.findMany({
     where: {
       replyToMessageId: null,
       ...(projectId ? { OR: [
@@ -4460,9 +4477,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         { session: { projectId } },
       ] } : {}),
     },
-    include: { decisions: true, replies: { orderBy: { createdAt: "asc" } } },
+    include: { decisions: true, replies: { orderBy: { createdAt: "asc" } }, session: { select: { taskId: true } } },
     orderBy: { createdAt: "desc" },
-    }));
+    });
+    return context.json(messages.map(withArtifactTask));
   });
   app.get("/inbox/messages/:messageId", async (context) => {
     const message = await db.inboxMessage.findUnique({
@@ -4471,9 +4489,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         decisions: true,
         replies: { orderBy: { createdAt: "asc" } },
         replyTo: true,
+        session: { select: { taskId: true } },
       },
     });
-    return message ? context.json(message) : context.json({ error: "Inbox message not found" }, 404);
+    return message ? context.json(withArtifactTask(message)) : context.json({ error: "Inbox message not found" }, 404);
   });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const body = await readJson(context.req.raw, inboxDecisionInput);

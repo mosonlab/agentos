@@ -578,6 +578,9 @@ export type InboxMessage = {
   taskId: string | null;
   goalId: string | null;
   gateTaskId: string | null;
+  /** Approval gates only: the task whose step output the gate is asking about,
+   *  derived by the API from the card's session. Absent on non-gate cards. */
+  artifactTaskId: string | null;
   threadId: string | null;
   replyToMessageId: string | null;
   kind: InboxKind;

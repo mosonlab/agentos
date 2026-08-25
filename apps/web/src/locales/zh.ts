@@ -310,6 +310,7 @@ export const zh = {
   "inbox.sender.system": "系统",
   "inbox.sender.you": "你",
   "inbox.sender.youWeb": "你（网页）",
+  "inbox.stat.artifactTask": "产出步 {id}",
   "inbox.stat.attempts": "投递 {n} 次",
   "inbox.stat.goal": "目标 {id}",
   "inbox.stat.task": "任务 {id}",

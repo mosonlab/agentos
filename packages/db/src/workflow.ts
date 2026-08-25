@@ -722,14 +722,19 @@ const enqueueTaskRunInternal = async (
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =>
   enqueueTaskRunInternal(tx, taskId, now, null);
 
-const GATE_OUTPUT_PREVIEW = 1_000;
+// The card body is one string serving two readers. Feishu is the binding one:
+// `cards.ts` caps the rendered body at 3 000 characters because Feishu rejects
+// oversized cards, so the preview must leave room for the gate's own prose. The
+// board no longer depends on this preview at all — it renders the producing
+// step's full output beside the decision (`artifactTaskId`).
+const GATE_OUTPUT_PREVIEW = 2_000;
 
 const outputPreview = async (tx: Tx, taskId: string | null): Promise<string> => {
   if (!taskId) return "";
   const output = await tx.taskStepOutput.findUnique({ where: { taskId }, select: { kind: true, body: true } });
   if (!output) return "";
   const body = output.body.trim();
-  const shown = body.length > GATE_OUTPUT_PREVIEW ? `${body.slice(0, GATE_OUTPUT_PREVIEW)}\n…（已截断，完整产物见 Tasks 页）` : body;
+  const shown = body.length > GATE_OUTPUT_PREVIEW ? `${body.slice(0, GATE_OUTPUT_PREVIEW)}\n…（预览已截断，完整产物见 Inbox 页的产物卡片）` : body;
   return `\n\n产物（${output.kind}）：\n${shown}`;
 };
 

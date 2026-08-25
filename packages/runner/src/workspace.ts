@@ -351,6 +351,11 @@ export const provisionWorkspace = async (
       // implementation range endpoints by object id, and stay detached at its
       // head. With no fetch of the chain branch, successor commits and their
       // report artifacts are not reachable from this object database.
+      //
+      // Into an empty object database this fetch transfers the same history a
+      // clone would, so it runs under the clone profile: a large repository is
+      // slow, not hung, and the 20s command ceiling built for incremental
+      // fetches kills every attempt on a slow link.
       await execute(config, "git", ["init"], workspace, env);
       await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
       await runWithNetworkRetry("git", ["fetch"],
@@ -362,7 +367,7 @@ export const provisionWorkspace = async (
           env,
           { timeoutMs },
         ),
-        retryOptions,
+        { commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS, budgetMs: CLONE_OPERATION_BUDGET_MS, ...retryOptions },
       );
       await execute(config, "git", ["checkout", "--detach", pinnedBaseSha], workspace, env);
       const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);

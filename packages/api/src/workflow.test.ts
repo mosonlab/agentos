@@ -231,7 +231,7 @@ test("a template approval gate persists an outbox card and leaves the task in re
     run: { findUniqueOrThrow: async () => ({ id: "run-1", taskId: task.id, agentId: "agent-1", pullRequestUrl: "https://github.com/acme/app/pull/7", session: { id: "session-1" } }) },
     inboxThread: { upsert: async () => ({ id: "thread-1" }) },
     inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { gate = data; return { id: "gate-1", ...data }; } },
-    taskStepOutput: { findUnique: async () => ({ kind: "spec", body: "S".repeat(1_500) }) },
+    taskStepOutput: { findUnique: async () => ({ kind: "spec", body: "S".repeat(2_500) }) },
   } as any;
   const result = await advanceTemplateTask(tx, task.id, "run-1", "chat-1");
   assert.equal(result.gated, true);
@@ -241,7 +241,7 @@ test("a template approval gate persists an outbox card and leaves the task in re
   assert.match(String(gate?.body), /pull\/7/);
   assert.match(String(gate?.body), /产物（spec）/);
   assert.match(String(gate?.body), /已截断/);
-  assert.ok(String(gate?.body).length < 1_500);
+  assert.ok(String(gate?.body).length < 2_500);
   assert.deepEqual(gate?.choices, [{ id: "approve", label: "批准并继续" }, { id: "reject", label: "打回上一步" }]);
 });
 

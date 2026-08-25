@@ -12,7 +12,6 @@ const FAST_DOCUMENTS = new Set([
   "docs/governance/task-routing-v1.md",
   "docs/public-snapshot.md",
   "docs/runbooks/gate-worker.md",
-  "docs/runbooks/legacy-integrator-stop.md",
 ]);
 
 const FROZEN_RECORD_DIRECTORIES = [

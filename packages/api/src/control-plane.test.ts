@@ -107,6 +107,25 @@ test("Secrets encrypt writes and never return plaintext or ciphertext", async ()
   });
 });
 
+test("an approval gate card carries the producing step's task, so the board can show the full artifact", async () => {
+  await withOperator(async () => {
+    // The card's own taskId is the gate step; the artifact belongs to the step
+    // whose run opened it, reachable only through the card's session.
+    const database = { inboxMessage: { findMany: async () => [
+      { id: "gate-1", from: "AGENT", gateTaskId: "gate-task", taskId: "gate-task", session: { taskId: "producing-task" } },
+      { id: "plain-1", from: "AGENT", gateTaskId: null, taskId: "some-task", session: { taskId: "some-task" } },
+    ] } } as unknown as PrismaClient;
+    const response = await request(database, "/inbox/messages");
+    assert.equal(response.status, 200);
+    const messages = await response.json() as Array<Record<string, unknown>>;
+    assert.equal(messages[0]?.artifactTaskId, "producing-task");
+    // A question that is not a gate has no artifact to offer, and the raw
+    // session relation never reaches the client either way.
+    assert.equal(messages[1]?.artifactTaskId, null);
+    assert.equal(messages[0]?.session, undefined);
+  });
+});
+
 test("Inbox list applies project scope and returns stored human replies", async () => {
   await withOperator(async () => {
     let query: Record<string, unknown> | undefined;

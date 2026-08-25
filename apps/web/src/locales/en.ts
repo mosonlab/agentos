@@ -313,6 +313,7 @@ export const en = {
   "inbox.sender.system": "System",
   "inbox.sender.you": "You",
   "inbox.sender.youWeb": "You (web)",
+  "inbox.stat.artifactTask": "Producing step {id}",
   "inbox.stat.attempts": "{n} delivery attempts",
   "inbox.stat.goal": "Goal {id}",
   "inbox.stat.task": "Task {id}",
