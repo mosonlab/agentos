@@ -30,10 +30,12 @@ import {
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
   legacyNineStepTemplateName,
+  legacyChainLeaseTemplateName,
   legacyRegressionFirstThirteenStepTemplateName,
   legacyTenStepTemplateName,
   loadAgentSources,
   loadTemplateStepSources,
+  previousChainLeasePrompt,
   PrismaClient,
   type Task,
   TaskStatus,
@@ -96,6 +98,8 @@ test("a fresh seed writes the thirteen-step and eight-step autonomous merge temp
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.assigneeAgentId,
     (await db.agent.findFirstOrThrow({ where: { name: "librarian" } })).id);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 11)?.attachmentsFromPrevious, true);
+  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 11)?.prompt ?? "", /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
+  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 11)?.prompt ?? "", /exits 75 or 76[\s\S]*up to two[\s\S]*more times/u);
   assert.match(
     step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
     /vertical slice[\s\S]*blocked_by[\s\S]*expand-migrate-contract[\s\S]*fail at base/iu,
@@ -115,6 +119,7 @@ test("a fresh seed writes the thirteen-step and eight-step autonomous merge temp
   assert.equal(direct.steps[6]?.outputKind, "merge-authorization");
   assert.equal(direct.steps[7]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(direct.steps[7]?.outputKind, INTEGRATOR_OUTPUT_KIND);
+  assert.match(direct.steps[5]?.prompt ?? "", /retry it up to three times/u);
   const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
   assert.equal(resolver.model, "gpt-5.6-sol:high");
   assert.equal(resolver.runnerPreference, "CODEX");
@@ -237,6 +242,60 @@ test("canonical sync rolls the regression-first thirteen-step template without r
   assert.equal(preserved.templateStepId, regression.id);
   assert.equal(preserved.templateStep?.outputKind, "regression-verification");
   assert.equal(preserved.templateStep?.taskTemplate.name, legacy.name);
+});
+
+test("canonical sync rolls both pre-lease prompts only after their old tasks finish", async () => {
+  assert.equal((await seed()).code, 0);
+  const direct = await directTemplate();
+  const compound = await db.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: direct.projectId, name: INTEGRATOR_TEMPLATE_NAME } },
+    include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+  });
+  const oldTemplates = [direct, compound];
+  const oldTasks = [];
+  for (const template of oldTemplates) {
+    const regression = template.steps.find((step) => step.outputKind === "regression-verification")!;
+    const oldPrompt = previousChainLeasePrompt(regression.prompt);
+    assert.notEqual(oldPrompt, regression.prompt);
+    await db.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: oldPrompt } });
+    oldTasks.push(await db.task.create({ data: {
+      projectId: template.projectId,
+      templateId: template.id,
+      templateStepId: regression.id,
+      name: `Pre-lease ${template.name}`,
+      description: oldPrompt,
+      assigneeType: regression.assigneeType,
+      assigneeAgentId: regression.assigneeAgentId,
+      status: TaskStatus.TODO,
+      chainId: `pre-lease-${template.name}-${process.pid}`,
+      chainIndex: regression.stepIndex,
+      chainLayer: regression.layer,
+    } }));
+  }
+
+  const refused = await sync();
+  assert.notEqual(refused.code, 0, refused.output);
+  assert.match(refused.output, /still has 1 unfinished tasks/u);
+  for (const task of oldTasks) {
+    await db.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE } });
+  }
+
+  const synced = await sync();
+  assert.equal(synced.code, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":2/u);
+  for (const oldTemplate of oldTemplates) {
+    const preserved = await db.taskTemplate.findUniqueOrThrow({
+      where: { id: oldTemplate.id },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(preserved.name, legacyChainLeaseTemplateName(oldTemplate.name, oldTemplate.id));
+    const replacement = await db.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: oldTemplate.projectId, name: oldTemplate.name } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.notEqual(replacement.id, oldTemplate.id);
+    assert.match(replacement.steps.find((step) => step.outputKind === "regression-verification")?.prompt ?? "", /merge-lease\.sh acquire/u);
+  }
 });
 
 test("canonical sync refuses to mutate instantiated canonical steps", async () => {

@@ -272,7 +272,23 @@ case "$COMMAND" in
         0)
           printf 'merge-lease: acquired %s (%s)\n' "$LEASE_REF" "$NEW_SHA"
           exit 0 ;;
-        1) ;;
+        1)
+          load_lease
+          if [ -n "$TASK" ] && [ -n "$REMOTE_SHA" ]; then
+            current_task="$(printf '%s' "$LEASE_JSON" | node -e '
+              let body = "";
+              process.stdin.setEncoding("utf8");
+              process.stdin.on("data", (chunk) => { body += chunk; });
+              process.stdin.on("end", () => {
+                const task = JSON.parse(body).task;
+                if (typeof task === "string") process.stdout.write(task);
+              });
+            ')" || die "could not read the current lease task"
+            if [ "$current_task" = "$TASK" ]; then
+              printf 'merge-lease: already held for task %s (%s)\n' "$TASK" "$REMOTE_SHA"
+              exit 0
+            fi
+          fi ;;
         *) die "could not create ${LEASE_REF} after 3 attempts" ;;
       esac
       if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -290,14 +306,31 @@ case "$COMMAND" in
       exit 0
     fi
     released_sha="$REMOTE_SHA"
-    current_holder="$(printf '%s' "$LEASE_JSON" | node -e '
-      let body = "";
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (chunk) => { body += chunk; });
-      process.stdin.on("end", () => process.stdout.write(JSON.parse(body).holder));
-    ')" || die "could not read the current lease holder"
-    if [ "$current_holder" != "$HOLDER" ]; then
-      die "release refused: ${LEASE_REF} is held by ${current_holder}, not ${HOLDER}; use steal to break it"
+    if [ -n "$TASK" ]; then
+      current_task="$(printf '%s' "$LEASE_JSON" | node -e '
+        let body = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", (chunk) => { body += chunk; });
+        process.stdin.on("end", () => {
+          const task = JSON.parse(body).task;
+          if (typeof task === "string") process.stdout.write(task);
+        });
+      ')" || die "could not read the current lease task"
+      if [ "$current_task" != "$TASK" ]; then
+        printf 'merge-lease: release skipped; %s is held for task %s, not %s\n' \
+          "$LEASE_REF" "${current_task:-<none>}" "$TASK"
+        exit 0
+      fi
+    else
+      current_holder="$(printf '%s' "$LEASE_JSON" | node -e '
+        let body = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", (chunk) => { body += chunk; });
+        process.stdin.on("end", () => process.stdout.write(JSON.parse(body).holder));
+      ')" || die "could not read the current lease holder"
+      if [ "$current_holder" != "$HOLDER" ]; then
+        die "release refused: ${LEASE_REF} is held by ${current_holder}, not ${HOLDER}; use steal to break it"
+      fi
     fi
     delete_lease "$released_sha"
     printf 'merge-lease: released %s (%s)\n' "$LEASE_REF" "$released_sha"
