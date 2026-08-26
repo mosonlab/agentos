@@ -89,11 +89,14 @@ import {
   type DecisionRow,
   asJsonObject,
   isMergeReadinessStep,
+  MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   MergeRecoveryStatus,
   mergeRecoveryPhase,
+  parseIndependentReviewDecision,
   parseRegressionVerdict,
   parseResolverResult,
+  type IndependentReviewFinding,
   type MergeRecoveryAttempt,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
@@ -302,27 +305,81 @@ const stopBaseDriftRecoveryTail = async (
   ] });
 };
 
-const openMergeTailReviewDecisionInbox = async (
+/**
+ * Resolves the agent that repairs what this chain's independent review found:
+ * the chain's own fix step assignee, or `senior-dev` when the chain has none.
+ */
+const mergeTailFixAgentName = async (
   tx: DbTx,
-  input: { taskId: string; agentId: string; sessionId?: string; reason: string },
-): Promise<void> => {
-  await tx.inboxMessage.create({ data: {
-    from: "AGENT",
-    agentId: input.agentId,
-    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-    taskId: input.taskId,
-    kind: "MULTIPLE_CHOICE",
-    body: [
-      `Autonomous merge tail stopped: ${input.reason}`,
-      "Choose one explicit operator action. No repair or merge will start automatically.",
+  regression: { projectId: string; chainId: string | null; templateId: string | null } | null,
+): Promise<string> => {
+  if (!regression) return "senior-dev";
+  const fixTask = await tx.task.findFirst({
+    where: {
+      projectId: regression.projectId,
+      chainId: regression.chainId,
+      templateId: regression.templateId,
+      templateStep: { outputKind: "fixed-implementation" },
+    },
+    select: { assigneeAgent: { select: { name: true } } },
+  });
+  return fixTask?.assigneeAgent?.name ?? "senior-dev";
+};
+
+/**
+ * Parks one follow-up finding as a backlog card.
+ *
+ * A follow-up is by contract not a reachable behavioural defect, so it never
+ * holds the merge; the card is what keeps it from being lost instead.
+ */
+const createReviewFollowUpCard = async (
+  tx: DbTx,
+  input: {
+    projectId: string;
+    repoId: string | null;
+    agentName: string;
+    reviewTaskId: string;
+    headSha: string;
+    finding: IndependentReviewFinding;
+  },
+): Promise<{ taskId: string } | { refusal: string }> => {
+  if (!input.repoId) return { refusal: "independent review task has no repository" };
+  const agent = await tx.agent.findFirst({
+    where: { projectId: input.projectId, name: input.agentName, archivedAt: null },
+  });
+  if (!agent) return { refusal: `follow-up agent ${input.agentName} is absent or archived` };
+  const grant = await tx.agentRepoAccess.findFirst({
+    where: { projectId: input.projectId, agentId: agent.id, repoId: input.repoId },
+  });
+  if (!grant) return { refusal: `follow-up agent ${input.agentName} has no repository grant` };
+  const task = await tx.task.create({ data: {
+    projectId: input.projectId,
+    repoId: input.repoId,
+    name: `Merge tail follow-up: ${input.finding.title}`,
+    description: [
+      input.finding.detail,
+      `Raised as a follow-up by the autonomous merge tail independent review ${input.reviewTaskId} at exact head ${input.headSha}. It did not block that merge.`,
     ].join("\n\n"),
-    choices: [
-      { id: "create-repair", label: "Create one review-fix task" },
-      { id: "adopt-head", label: "Adopt current exact head and rerun Regression" },
-      { id: "operator-takeover", label: "Park autonomous tail for operator takeover" },
-    ],
-    dedupeKey: `merge-tail-review-rejection:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`,
+    assigneeType: "AGENT",
+    assigneeAgentId: agent.id,
+    approvalGate: false,
+    opensPullRequest: false,
+    status: TaskStatus.BACKLOG,
   } });
+  await tx.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "control-plane",
+    body: `Follow-up finding from independent review ${input.reviewTaskId} at ${input.headSha}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.reviewObligation,
+      schemaVersion: 1,
+      state: "follow-up",
+      reviewTaskId: input.reviewTaskId,
+      headSha: input.headSha,
+      title: input.finding.title,
+    },
+  } });
+  return { taskId: task.id };
 };
 
 const openMergeTailStopNotice = async (
@@ -428,148 +485,6 @@ const createMergeTailRepairTask = async (
     data: { status: TaskStatus.REVIEW, failureReason: `${input.repairKind}: automatic repair ${task.id} queued at ${input.headSha}` },
   });
   return { taskId: task.id };
-};
-
-const applyMergeTailOperatorDecision = async (
-  tx: DbTx,
-  input: { messageId: string; requestId: string; decision: string; now: Date },
-): Promise<null | { duplicate: boolean; resumed: false; messageId: string; action?: string; error?: string }> => {
-  const card = await tx.inboxMessage.findUnique({
-    where: { id: input.messageId },
-    include: {
-      session: { include: { run: true } },
-      task: { include: { templateStep: true, runs: { orderBy: { runNumber: "desc" }, take: 5 } } },
-    },
-  });
-  if (!card?.dedupeKey?.startsWith("merge-tail-review-rejection:")) return null;
-  if (!card.task || !card.session?.run) return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail decision is missing its Regression task or source Run" };
-  if (!["create-repair", "adopt-head", "operator-takeover"].includes(input.decision)) {
-    return { duplicate: false, resumed: false, messageId: card.id, error: "Unknown merge-tail operator decision" };
-  }
-  if (card.status !== InboxStatus.OPEN) {
-    return {
-      duplicate: true,
-      resumed: false,
-      messageId: card.id,
-      ...(card.selectedChoiceId ? { action: card.selectedChoiceId } : {}),
-    };
-  }
-  const regression = card.task;
-  if (regression.templateStep?.outputKind !== "regression-verification" || !regression.chainId || !regression.templateId) {
-    return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail decision is not bound to a canonical Regression task" };
-  }
-  if (regression.chainId) {
-    await lockChainRows(tx, { projectId: regression.projectId, chainId: regression.chainId });
-  } else {
-    await lockTask(tx, regression.id);
-  }
-  const readiness = await tx.task.findFirst({
-    where: {
-      projectId: regression.projectId,
-      chainId: regression.chainId,
-      templateId: regression.templateId,
-      templateStep: { outputKind: "merge-authorization" },
-    },
-  });
-  if (!readiness) return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail readiness task is missing" };
-  const rows = await tx.taskActivity.findMany({
-    where: {
-      taskId: readiness.id,
-      actorType: "control-plane",
-      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.reviewObligation },
-    },
-    select: { createdAt: true, metadata: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: 50,
-  });
-  const rejection = rows.map((row) => ({ row, metadata: asJsonObject(row.metadata) })).find(({ metadata }) => (
-    metadata?.state === "rejected" && typeof metadata.headSha === "string"
-  ));
-  const headSha = typeof rejection?.metadata?.headSha === "string" ? rejection.metadata.headSha : null;
-  const baseHeadSha = typeof rejection?.metadata?.baseSha === "string" ? rejection.metadata.baseSha : null;
-  const summary = typeof rejection?.metadata?.summary === "string" ? rejection.metadata.summary : null;
-  if (!headSha || !baseHeadSha || !summary || !/^[0-9a-f]{40}$/u.test(headSha) || !/^[0-9a-f]{40}$/u.test(baseHeadSha)) {
-    return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail rejection lacks exact head/base evidence" };
-  }
-  const claimed = await tx.inboxMessage.updateMany({
-    where: { id: card.id, status: InboxStatus.OPEN },
-    data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: input.now },
-  });
-  if (claimed.count !== 1) return { duplicate: true, resumed: false, messageId: card.id };
-  const externalEventId = `web:${input.requestId}`;
-  await tx.inboxDecision.create({ data: {
-    inboxMessageId: card.id,
-    runId: card.session.run.id,
-    externalEventId,
-    decision: input.decision,
-    actorOpenId: "web-operator",
-  } });
-  await tx.inboxMessage.create({ data: {
-    from: "HUMAN",
-    agentId: card.agentId,
-    sessionId: card.sessionId,
-    taskId: card.taskId,
-    replyToMessageId: card.id,
-    kind: "TEXT",
-    body: input.decision,
-    selectedChoiceId: input.decision,
-    status: InboxStatus.CLOSED,
-    dedupeKey: `decision:${externalEventId}:reply`,
-    deliveryStatus: "DELIVERED",
-    deliveredAt: input.now,
-  } });
-  await tx.taskActivity.create({ data: {
-    taskId: regression.id,
-    actorType: "operator",
-    body: `Merge-tail operator decision ${input.decision} for exact head ${headSha}`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.operatorDecision,
-      schemaVersion: 1,
-      action: input.decision,
-      headSha,
-      baseHeadSha,
-      reviewTaskId: typeof rejection?.metadata?.reviewTaskId === "string" ? rejection.metadata.reviewTaskId : null,
-      requestId: input.requestId,
-    },
-  } });
-
-  if (input.decision === "create-repair") {
-    const fixTask = await tx.task.findFirst({
-      where: {
-        projectId: regression.projectId,
-        chainId: regression.chainId,
-        templateId: regression.templateId,
-        templateStep: { outputKind: "fixed-implementation" },
-      },
-      select: { assigneeAgent: { select: { name: true } } },
-    });
-    const sourceRun = regression.runs.find((run) => run.branch !== null);
-    const repair = await createMergeTailRepairTask(tx, {
-      regressionTask: regression,
-      sourceRun: { id: card.session.run.id, branch: sourceRun?.branch ?? null },
-      agentName: fixTask?.assigneeAgent?.name ?? "senior-dev",
-      repairKind: "review-fix",
-      headSha,
-      baseHeadSha,
-      summary,
-      now: input.now,
-    });
-    if ("refusal" in repair) throw new Error(repair.refusal);
-  } else if (input.decision === "adopt-head") {
-    await tx.task.update({ where: { id: regression.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-    await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-    await enqueueTaskRun(tx, regression.id, input.now);
-  } else {
-    const integrator = await tx.task.findFirst({
-      where: { projectId: regression.projectId, chainId: regression.chainId, templateId: regression.templateId, templateStep: { outputKind: "merge-result" } },
-      select: { id: true },
-    });
-    await tx.task.updateMany({
-      where: { id: { in: [regression.id, readiness.id, ...(integrator ? [integrator.id] : [])] } },
-      data: { status: TaskStatus.REVIEW, failureReason: `Autonomous merge tail parked by operator at ${headSha}` },
-    });
-  }
-  return { duplicate: false, resumed: false, messageId: card.id, action: input.decision };
 };
 
 export const handleRegressionCompletion = async (
@@ -1625,10 +1540,20 @@ const activateMergeTailTarget = async (
     return;
   }
   if (isMergeReadinessStep(target.templateStep)) {
+    // Readiness runs on the server worker, which only claims TODO/DOING. The
+    // obligation parked this step in REVIEW while the review ran, so resolving
+    // the review has to hand it back; anything else in REVIEW is a real stop
+    // and stays stopped.
+    const resumed = await tx.task.updateMany({
+      where: { id: taskId, status: TaskStatus.REVIEW, failureReason: { startsWith: "independent-review-open:" } },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
     await tx.taskActivity.create({ data: {
       taskId,
       actorType: "control-plane",
-      body: "Merge-tail readiness target queued for server worker",
+      body: resumed.count === 1
+        ? "Independent review resolved; readiness target returned to the server worker"
+        : "Merge-tail readiness target queued for server worker",
       metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
     } });
     return;
@@ -4506,17 +4431,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const body = await readJson(context.req.raw, inboxDecisionInput);
     try {
-      const mergeTail = await db.$transaction((tx) => applyMergeTailOperatorDecision(tx, {
-        messageId: id.parse(context.req.param("messageId")),
-        requestId: body.requestId,
-        decision: body.decision,
-        now: new Date(),
-      }));
-      if (mergeTail) {
-        return mergeTail.error
-          ? context.json({ error: mergeTail.error }, 409)
-          : context.json(mergeTail, mergeTail.duplicate ? 200 : 201);
-      }
       const result = await applyInboxDecision(db, {
         inboxMessageId: id.parse(context.req.param("messageId")),
         externalEventId: `web:${body.requestId}`,
@@ -5968,7 +5882,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const reviewRegression = typeof reviewMarker?.regressionTaskId === "string"
         ? await tx.task.findUnique({
             where: { id: reviewMarker.regressionTaskId },
-            select: { chainId: true },
+            select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
           })
         : null;
       const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
@@ -6326,72 +6240,126 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             && typeof reviewMarker.readinessTaskId === "string"
             && typeof reviewMarker.regressionTaskId === "string"
             && typeof reviewMarker.headSha === "string") {
+            const readinessTaskId = reviewMarker.readinessTaskId;
+            const regressionTaskId = reviewMarker.regressionTaskId;
+            const reviewHeadSha = reviewMarker.headSha;
+            const reviewBaseSha = typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null;
             const reviewOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
-            let decision: Record<string, unknown> | null = null;
-            try { decision = JSON.parse(reviewOutput?.body ?? "null") as Record<string, unknown> | null; } catch { decision = null; }
-            const validHead = decision?.schemaVersion === 1 && decision.headSha === reviewMarker.headSha;
-            if (!validHead || (decision?.outcome !== "approved" && decision?.outcome !== "rejected")) {
+            const parsedReview = parseIndependentReviewDecision(reviewOutput?.body, reviewHeadSha);
+            const reviewSessionId = run.session.id;
+            const stopTail = async (reason: string): Promise<void> => {
+              await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await tx.task.update({ where: { id: regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: reviewSessionId, reason });
+            };
+            if (parsedReview.status === "invalid") {
               reviewRejected = true;
-              const reason = `independent review returned missing, malformed, or stale decision for ${reviewMarker.headSha}`;
+              const reason = `independent review returned an unusable decision for ${reviewHeadSha}: ${parsedReview.reason}`;
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
-              await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-              await openMergeTailStopNotice(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-            } else if (decision.outcome === "approved") {
-              await tx.taskActivity.create({ data: {
-                taskId: reviewMarker.readinessTaskId,
-                actorType: "control-plane",
-                body: `Independent review approved exact head ${reviewMarker.headSha}`,
-                metadata: jsonValue({
-                  kind: MERGE_TAIL_KIND.reviewObligation,
-                  schemaVersion: 1,
-                  state: "approved",
+              await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+            } else if (parsedReview.decision.outcome !== "rejected") {
+              // Follow-up findings never hold the merge. Each becomes a backlog
+              // card, so the merge proceeds with the work recorded instead of
+              // with the finding lost.
+              const followUpCardIds: string[] = [];
+              let followUpRefusal: string | null = null;
+              const followUpAgentName = await mergeTailFixAgentName(tx, reviewRegression);
+              for (const finding of parsedReview.decision.findings) {
+                const card = await createReviewFollowUpCard(tx, {
+                  projectId: run.task.projectId,
+                  repoId: run.task.repoId,
+                  agentName: followUpAgentName,
                   reviewTaskId: run.taskId,
-                  headSha: reviewMarker.headSha,
-                  baseSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null,
-                }),
-              } });
+                  headSha: reviewHeadSha,
+                  finding,
+                });
+                if ("refusal" in card) { followUpRefusal = card.refusal; break; }
+                followUpCardIds.push(card.taskId);
+              }
+              if (followUpRefusal) {
+                reviewRejected = true;
+                const reason = `independent review follow-up card could not be created: ${followUpRefusal}`;
+                await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
+                await stopTail(reason);
+              } else {
+                await tx.taskActivity.create({ data: {
+                  taskId: readinessTaskId,
+                  actorType: "control-plane",
+                  body: followUpCardIds.length === 0
+                    ? `Independent review approved exact head ${reviewHeadSha}`
+                    : `Independent review accepted exact head ${reviewHeadSha} with ${followUpCardIds.length} follow-up card(s)`,
+                  metadata: jsonValue({
+                    kind: MERGE_TAIL_KIND.reviewObligation,
+                    schemaVersion: 1,
+                    state: parsedReview.decision.outcome,
+                    reviewTaskId: run.taskId,
+                    headSha: reviewHeadSha,
+                    baseSha: reviewBaseSha,
+                    followUpCardIds,
+                  }),
+                } });
+              }
             } else {
               reviewRejected = true;
+              const summary = parsedReview.decision.blockingSummary;
               const prior = await tx.taskActivity.findMany({
-                where: { taskId: reviewMarker.readinessTaskId }, select: { metadata: true },
+                where: { taskId: readinessTaskId }, select: { metadata: true },
               });
-              const alreadyRejected = prior.some((row) => {
+              const round = prior.filter((row) => {
                 const metadata = asJsonObject(row.metadata);
                 return metadata?.kind === MERGE_TAIL_KIND.reviewObligation && metadata.state === "rejected";
-              });
-              const summary = typeof decision.summary === "string" ? decision.summary : "independent review rejected without a summary";
+              }).length + 1;
               await tx.taskActivity.create({ data: {
-                taskId: reviewMarker.readinessTaskId,
+                taskId: readinessTaskId,
                 actorType: "control-plane",
-                body: `Independent review rejected exact head ${reviewMarker.headSha}`,
+                body: `Independent review rejected exact head ${reviewHeadSha} on blocking round ${round}`,
                 metadata: {
                   kind: MERGE_TAIL_KIND.reviewObligation,
                   schemaVersion: 1,
                   state: "rejected",
                   reviewTaskId: run.taskId,
-                  headSha: reviewMarker.headSha,
-                  baseSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null,
+                  headSha: reviewHeadSha,
+                  baseSha: reviewBaseSha,
                   summary,
+                  blockingRound: round,
                 },
               } });
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: `independent review rejected: ${summary}` } });
               const driftRecovery = await baseDriftRecoveryContext(
                 tx,
-                reviewMarker.regressionTaskId,
+                regressionTaskId,
                 undefined,
                 typeof reviewMarker.recoverySourceStopId === "string" ? reviewMarker.recoverySourceStopId : "no-recovery-context",
               );
               if (driftRecovery) {
-                await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewMarker.headSha}: ${summary}`);
-              } else if (alreadyRejected) {
-                const reason = `second independent review rejection at ${reviewMarker.headSha}: ${summary}`;
-                await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await openMergeTailReviewDecisionInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewHeadSha}: ${summary}`);
+              } else if (round >= MAX_BLOCKING_REVIEW_ROUNDS) {
+                // The ceiling is an exception path, not an approval gate: three
+                // blocking rounds mean the repair loop is not converging, so the
+                // tail stops and says so instead of spending a fourth round.
+                await stopTail(`independent review rejected ${reviewHeadSha} on blocking round ${round} of ${MAX_BLOCKING_REVIEW_ROUNDS}; automatic repair is exhausted: ${summary}`);
+              } else if (!reviewRegression || !reviewBaseSha) {
+                await stopTail(`independent review rejected ${reviewHeadSha} but its Regression task or base head is unavailable for automatic repair`);
               } else {
-                const reason = `independent review rejected exact head ${reviewMarker.headSha}: ${summary}`;
-                await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await tx.task.update({ where: { id: reviewMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await openMergeTailReviewDecisionInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                const repair = await createMergeTailRepairTask(tx, {
+                  regressionTask: { id: regressionTaskId, ...reviewRegression },
+                  sourceRun: { id: run.id, branch: run.branch },
+                  agentName: await mergeTailFixAgentName(tx, reviewRegression),
+                  repairKind: "review-fix",
+                  headSha: reviewHeadSha,
+                  baseHeadSha: reviewBaseSha,
+                  summary,
+                  now,
+                });
+                if ("refusal" in repair) {
+                  await stopTail(`independent review rejected ${reviewHeadSha} and automatic repair was refused: ${repair.refusal}`);
+                } else {
+                  await tx.task.update({
+                    where: { id: readinessTaskId },
+                    data: { status: TaskStatus.REVIEW, failureReason: `review-fix: automatic repair ${repair.taskId} queued at ${reviewHeadSha}` },
+                  });
+                }
               }
             }
           }

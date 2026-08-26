@@ -19,7 +19,6 @@ export const MERGE_TAIL_KIND = {
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
   reviewObligation: "mergeTail.reviewObligation",
-  operatorDecision: "mergeTail.operatorDecision",
   readiness: "mergeTail.readiness",
 } as const;
 
@@ -253,3 +252,109 @@ export const resolutionTestTriggers = (files: ChangedFile[]): Array<{ path: stri
 export const asJsonObject = (value: Prisma.JsonValue | null | undefined): Record<string, unknown> | null => (
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
 );
+
+/**
+ * A single defect the independent merge-tail review found, with the severity
+ * that decides whether the merge stops for it.
+ *
+ * `blocking` is reserved for a reachable behavioural defect — correctness, data
+ * integrity, or security — and the reviewer owes a reachability argument for it.
+ * Everything else (specification consistency that no caller can reach, style,
+ * defensive hardening) is `follow-up`: it becomes a backlog card and the merge
+ * proceeds.
+ */
+export type IndependentReviewFinding = {
+  severity: "blocking" | "follow-up";
+  title: string;
+  detail: string;
+  reachability?: string;
+};
+
+export type IndependentReviewDecision = {
+  headSha: string;
+  findings: IndependentReviewFinding[];
+  /** Derived from the findings; the reviewer never states it. */
+  outcome: "approved" | "accepted-with-followups" | "rejected";
+  /** The blocking findings rendered for the repair agent; empty when none. */
+  blockingSummary: string;
+};
+
+export type IndependentReviewParse =
+  | { status: "ok"; decision: IndependentReviewDecision }
+  | { status: "invalid"; reason: string };
+
+/** Blocking rejections the autonomous tail repairs before it stops for a human. */
+export const MAX_BLOCKING_REVIEW_ROUNDS = 3;
+
+const reviewFinding = (value: unknown, index: number): IndependentReviewFinding | string => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return `finding ${index} is not an object`;
+  }
+  const finding = value as Record<string, unknown>;
+  if (finding.severity !== "blocking" && finding.severity !== "follow-up") {
+    return `finding ${index} has no blocking or follow-up severity`;
+  }
+  if (typeof finding.title !== "string" || finding.title.trim().length === 0) {
+    return `finding ${index} has no title`;
+  }
+  if (typeof finding.detail !== "string" || finding.detail.trim().length === 0) {
+    return `finding ${index} has no detail`;
+  }
+  if (finding.severity === "blocking"
+    && (typeof finding.reachability !== "string" || finding.reachability.trim().length === 0)) {
+    return `blocking finding ${index} has no reachability argument`;
+  }
+  return {
+    severity: finding.severity,
+    title: finding.title.trim(),
+    detail: finding.detail.trim(),
+    ...(typeof finding.reachability === "string" ? { reachability: finding.reachability.trim() } : {}),
+  };
+};
+
+/**
+ * Reads the independent review's decision and derives its outcome server-side.
+ *
+ * The reviewer reports findings and their severity; it does not report a
+ * verdict. One authority over "does this stop the merge" is the whole point —
+ * a stated outcome could disagree with the severities under it, and there would
+ * be no non-arbitrary way to settle that disagreement inside the tail.
+ */
+export const parseIndependentReviewDecision = (
+  body: string | null | undefined,
+  expectedHeadSha: string,
+): IndependentReviewParse => {
+  if (!body) return { status: "invalid", reason: "missing independent review output" };
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return { status: "invalid", reason: "independent review output is not JSON" }; }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { status: "invalid", reason: "independent review output is not an object" };
+  }
+  const value = parsed as Record<string, unknown>;
+  if (value.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION) {
+    return { status: "invalid", reason: "unsupported independent review schemaVersion" };
+  }
+  if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) {
+    return { status: "invalid", reason: "invalid independent review headSha" };
+  }
+  if (value.headSha !== expectedHeadSha) {
+    return { status: "invalid", reason: `independent review decision is bound to ${value.headSha}, not ${expectedHeadSha}` };
+  }
+  if (!Array.isArray(value.findings)) return { status: "invalid", reason: "independent review output has no findings array" };
+  const findings: IndependentReviewFinding[] = [];
+  for (const [index, entry] of value.findings.entries()) {
+    const finding = reviewFinding(entry, index);
+    if (typeof finding === "string") return { status: "invalid", reason: finding };
+    findings.push(finding);
+  }
+  const blocking = findings.filter((finding) => finding.severity === "blocking");
+  return {
+    status: "ok",
+    decision: {
+      headSha: value.headSha,
+      findings,
+      outcome: blocking.length > 0 ? "rejected" : findings.length > 0 ? "accepted-with-followups" : "approved",
+      blockingSummary: blocking.map((finding) => `${finding.title}: ${finding.detail}`).join("\n"),
+    },
+  };
+};

@@ -225,7 +225,24 @@ test("successful auxiliary repair completion preserves success when its chain ta
   }
 });
 
-const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeof seedRegression>>) => {
+const BLOCKING_FINDING = {
+  severity: "blocking",
+  title: "defense-list change lacks a fail-closed regression",
+  detail: "the new merge-tail branch has no test that fails when it regresses",
+  reachability: "every merge that touches the defense list reaches it",
+};
+const FOLLOW_UP_FINDING = {
+  severity: "follow-up",
+  title: "comment names a field no caller reads",
+  detail: "the doc comment above the parser describes a retired shape",
+};
+const blockingSummary = `${BLOCKING_FINDING.title}: ${BLOCKING_FINDING.detail}`;
+
+const rejectIndependentReviewAfterPass = async (
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
+  findings: unknown[] = [BLOCKING_FINDING],
+  priorBlockingRounds = 0,
+) => {
   const pass = JSON.stringify({
     schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "PASS",
   });
@@ -247,6 +264,7 @@ const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeo
     assigneeType: AssigneeType.AGENT,
     assigneeAgentId: seeded.reviewAgent.id,
     status: TaskStatus.REVIEW,
+    failureReason: "independent-review-open:pending",
     chainId: seeded.regression.chainId,
     chainIndex: seeded.readinessStep.stepIndex,
     chainLayer: seeded.readinessStep.layer,
@@ -291,12 +309,12 @@ const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeo
     runner: "CODEX",
     executionStatus: "RUNNING",
   } });
-  const summary = "defense-list change lacks a fail-closed regression";
+  const outputBody = JSON.stringify({ schemaVersion: 1, headSha: HEAD, findings });
   await db.taskStepOutput.create({ data: {
     taskId: review.id,
     runId: reviewRun.id,
     kind: "result",
-    body: JSON.stringify({ schemaVersion: 1, outcome: "rejected", headSha: HEAD, summary }),
+    body: outputBody,
     commitSha: HEAD,
   } });
   await db.taskActivity.createMany({ data: [
@@ -320,6 +338,16 @@ const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeo
       },
     },
   ] });
+  if (priorBlockingRounds > 0) await db.taskActivity.createMany({ data:
+    Array.from({ length: priorBlockingRounds }, (_unused, index) => ({
+      taskId: readiness.id,
+      actorType: "control-plane",
+      body: `Independent review rejected exact head ${HEAD} on blocking round ${String(index + 1)}`,
+      metadata: {
+        kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "rejected",
+        headSha: HEAD, baseSha: BASE, summary: blockingSummary, blockingRound: index + 1,
+      },
+    })) });
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "merge-tail-review-token";
   try {
@@ -345,7 +373,7 @@ const rejectIndependentReviewAfterPass = async (seeded: Awaited<ReturnType<typeo
     if (prior === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = prior;
   }
-  return { readiness, review, summary };
+  return { readiness, review, summary: blockingSummary, outputBody };
 };
 
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
@@ -504,29 +532,16 @@ test("a repaired Regression retry pins the prior same-task published head withou
   });
 });
 
-test("independent-review rejection stops for an explicit repair decision before a fresh Regression claim", async () => {
+test("a blocking independent-review rejection repairs itself and hands the rejection to the fresh Regression", async () => {
   const seeded = await seedRegression();
   const rejected = await rejectIndependentReviewAfterPass(seeded);
-  assert.equal(await db.task.count({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" } }), 0);
-  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
-  assert.equal(card.kind, "MULTIPLE_CHOICE");
-  const priorOperator = process.env.OPERATOR_TOKEN;
-  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
-  try {
-    const response = await createApp(db).request(`/inbox/messages/${card.id}/decision`, {
-      method: "POST",
-      headers: { Authorization: "Bearer merge-tail-operator-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId: "create-repair-1", decision: "create-repair" }),
-    });
-    assert.equal(response.status, 201, await response.text());
-  } finally {
-    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
-    else process.env.OPERATOR_TOKEN = priorOperator;
-  }
   const repair = await db.task.findFirstOrThrow({ where: {
     projectId: seeded.project.id,
     name: "Autonomous merge tail: review-fix",
   } });
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
+  // The rejection is repaired, not asked about: no operator card is opened.
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id, kind: "MULTIPLE_CHOICE" } }), 0);
   const repairOutput = "Added the fail-closed regression and verified the defense-list path.";
   await completeRepair(seeded, repair.id, repairOutput);
 
@@ -553,7 +568,7 @@ test("independent-review rejection stops for an explicit repair decision before 
       baseHeadSha: BASE,
       summary: rejected.summary,
       outputKind: "result",
-      outputBody: JSON.stringify({ schemaVersion: 1, outcome: "rejected", headSha: HEAD, summary: rejected.summary }),
+      outputBody: rejected.outputBody,
     },
   });
   assert.deepEqual(body.regressionRepairHandoff.repair, {
@@ -567,64 +582,65 @@ test("independent-review rejection stops for an explicit repair decision before 
   });
 });
 
-test("operator exact-head adoption re-runs Regression without manufacturing repair evidence", async () => {
+test("follow-up findings alone become backlog cards and hand readiness back to the server worker", async () => {
   const seeded = await seedRegression();
-  await rejectIndependentReviewAfterPass(seeded);
-  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
-  const priorOperator = process.env.OPERATOR_TOKEN;
-  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
-  try {
-    const response = await createApp(db).request(`/inbox/messages/${card.id}/decision`, {
-      method: "POST",
-      headers: { Authorization: "Bearer merge-tail-operator-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId: "adopt-head-1", decision: "adopt-head" }),
-    });
-    assert.equal(response.status, 201, await response.text());
-  } finally {
-    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
-    else process.env.OPERATOR_TOKEN = priorOperator;
-  }
-  assert.equal(await db.task.count({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" } }), 0);
-  const claimed = await claimNext();
-  assert.equal(claimed.status, 200);
-  assert.equal((claimed.body as { regressionRepairHandoff: unknown }).regressionRepairHandoff, null);
-  const decision = await db.taskActivity.findFirstOrThrow({ where: {
-    taskId: seeded.regression.id,
-    metadata: { path: ["kind"], equals: "mergeTail.operatorDecision" },
+  const accepted = await rejectIndependentReviewAfterPass(seeded, [FOLLOW_UP_FINDING, FOLLOW_UP_FINDING]);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id, name: "Autonomous merge tail: review-fix",
+  } }), 0);
+  const cards = await db.task.findMany({ where: {
+    projectId: seeded.project.id, name: `Merge tail follow-up: ${FOLLOW_UP_FINDING.title}`,
   } });
-  assert.match(decision.body, new RegExp(HEAD));
+  assert.equal(cards.length, 2);
+  assert.deepEqual([...new Set(cards.map((card) => card.status))], [TaskStatus.BACKLOG]);
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: accepted.readiness.id } });
+  assert.equal(readiness.status, TaskStatus.TODO);
+  assert.equal(readiness.failureReason, null);
+  const obligation = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: accepted.readiness.id,
+    metadata: { path: ["state"], equals: "accepted-with-followups" },
+  } });
+  assert.match(obligation.body, /accepted exact head/u);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
-test("operator takeover parks the autonomous tail without creating work", async () => {
+test("an empty findings array approves the head and no follow-up card is created", async () => {
   const seeded = await seedRegression();
-  const rejected = await rejectIndependentReviewAfterPass(seeded);
-  const card = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
-  const priorOperator = process.env.OPERATOR_TOKEN;
-  process.env.OPERATOR_TOKEN = "merge-tail-operator-token";
-  try {
-    const response = await createApp(db).request(`/inbox/messages/${card.id}/decision`, {
-      method: "POST",
-      headers: { Authorization: "Bearer merge-tail-operator-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId: "operator-takeover-1", decision: "operator-takeover" }),
-    });
-    assert.equal(response.status, 201, await response.text());
-  } finally {
-    if (priorOperator === undefined) delete process.env.OPERATOR_TOKEN;
-    else process.env.OPERATOR_TOKEN = priorOperator;
-  }
-  const [regression, readiness] = await Promise.all([
-    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
-    db.task.findUniqueOrThrow({ where: { id: rejected.readiness.id } }),
-  ]);
-  assert.equal(regression.status, TaskStatus.REVIEW);
-  assert.equal(readiness.status, TaskStatus.REVIEW);
-  assert.match(regression.failureReason ?? "", /parked by operator/u);
+  const approved = await rejectIndependentReviewAfterPass(seeded, []);
   assert.equal(await db.task.count({ where: {
-    projectId: seeded.project.id,
-    name: { startsWith: "Autonomous merge tail:" },
-    id: { not: rejected.review.id },
+    projectId: seeded.project.id, name: { startsWith: "Merge tail follow-up:" },
   } }), 0);
-  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, runNumber: { gt: 1 } } }), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: approved.readiness.id } })).status, TaskStatus.TODO);
+  await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: approved.readiness.id,
+    metadata: { path: ["state"], equals: "approved" },
+  } });
+});
+
+test("the third blocking round stops the tail with a notice instead of a fourth repair", async () => {
+  const seeded = await seedRegression();
+  const stopped = await rejectIndependentReviewAfterPass(seeded, [BLOCKING_FINDING], 2);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id, name: "Autonomous merge tail: review-fix",
+  } }), 0);
+  const [readiness, regression] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: stopped.readiness.id } }),
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  ]);
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.match(readiness.failureReason ?? "", /blocking round 3 of 3; automatic repair is exhausted/u);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(notice.kind, "TEXT");
+  assert.match(notice.body, /automatic repair is exhausted/u);
+});
+
+test("a second blocking round still repairs itself", async () => {
+  const seeded = await seedRegression();
+  await rejectIndependentReviewAfterPass(seeded, [BLOCKING_FINDING], 1);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id, name: "Autonomous merge tail: review-fix",
+  } }), 1);
 });
 
 test("a stale repair output stops the queued Regression Run before a provider session starts", async () => {

@@ -676,7 +676,12 @@ test("a recovery-cycle independent-review rejection stops once without a review-
   await db.task.update({ where: { id: reviewTask.id }, data: { status: TaskStatus.DOING } });
   await db.taskStepOutput.create({ data: {
     taskId: reviewTask.id, runId: reviewRun.id, kind: "review",
-    body: JSON.stringify({ schemaVersion: 1, outcome: "rejected", headSha: HEAD, summary: "must fix" }), commitSha: HEAD,
+    body: JSON.stringify({ schemaVersion: 1, headSha: HEAD, findings: [{
+      severity: "blocking",
+      title: "must fix",
+      detail: "the recovery head reintroduces the defect",
+      reachability: "every merge of this head reaches it",
+    }] }), commitSha: HEAD,
   } });
   const priorToken = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "review-runner-token";

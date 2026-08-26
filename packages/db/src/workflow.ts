@@ -1189,17 +1189,105 @@ const dispatchBoundSuccessor = async (
 /**
  * Why this successor must not be claimed, or null if it may be.
  *
- * The CAS below only matches TODO/DOING/REVIEW. A successor outside that set
- * and not DONE — archived, or parked in BACKLOG — makes `updateMany` match zero
- * rows forever while the re-read keeps returning the same row, so the loop spins
- * inside the caller's transaction and run completion never returns. Returning
- * early is what makes Backlog a place a chain step can sit.
+ * Both answers are an operator's explicit intent: an archived task is retired
+ * and a Backlog task is parked, so a predecessor completing does not get to
+ * drag either back into execution.
+ *
+ * A REVIEW successor is deliberately absent. It used to sit here as a
+ * fall-through, which is how a chain could stop for hours with nothing but an
+ * activity row to say so; `resumeParkedSuccessor` now owns that case.
  */
 const parkedReason = (successor: { status: TaskStatus; archivedAt?: Date | null }): string | null => {
   if (successor.archivedAt) return "successor is archived and was not queued";
   if (successor.status === TaskStatus.BACKLOG) return "successor is parked in Backlog — use Start now";
-  if (successor.status === TaskStatus.REVIEW) return "successor is awaiting operator retry or approval";
   return null;
+};
+
+/** Activity kind recording one automatic recovery of a REVIEW successor. */
+export const CHAIN_AUTO_RESUME_KIND = "chainDispatch.autoResume";
+
+/**
+ * How many times a chain may return the same successor to TODO by itself.
+ *
+ * The recovery exists because a REVIEW successor at dispatch time is a stalled
+ * chain, not a decision anyone made. The ceiling exists because a step that
+ * keeps landing back in REVIEW is failing for a reason no requeue fixes, and
+ * spinning on it is worse than stopping and saying so.
+ *
+ * Five, not three: a merge-readiness step is legitimately parked and re-queued
+ * once per automatic repair round, and the tail allows three of those, so a
+ * lower ceiling would stop a converging chain rather than a thrashing one.
+ */
+export const MAX_AUTOMATIC_SUCCESSOR_RESUMES = 5;
+
+/**
+ * Returns a stalled REVIEW successor to the queue, or stops the chain when it
+ * has already been returned too many times.
+ *
+ * `true` means the caller may go on to dispatch it; `false` means this
+ * successor is parked for a human and the caller must skip it.
+ */
+const resumeParkedSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+): Promise<boolean> => {
+  const priorResumes = await tx.taskActivity.count({
+    where: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
+    },
+  });
+  const attempt = priorResumes + 1;
+  if (attempt > MAX_AUTOMATIC_SUCCESSOR_RESUMES) {
+    const reason = `successor returned to REVIEW after ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)} automatic resumes; chain stopped for an operator`;
+    await tx.task.update({
+      where: { id: successor.id },
+      data: { status: TaskStatus.REVIEW, failureReason: reason },
+    });
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor layer completed; ${reason}`,
+      metadata: {
+        kind: CHAIN_AUTO_RESUME_KIND,
+        schemaVersion: 1,
+        state: "exhausted",
+        attempt,
+        predecessorTaskId: predecessor.id,
+      },
+    } });
+    await tx.inboxMessage.upsert({
+      where: { dedupeKey: `chain-successor-auto-resume-exhausted:${successor.id}` },
+      create: {
+        from: "AGENT",
+        taskId: successor.id,
+        kind: "TEXT",
+        body: `Chain step ${successor.name} was automatically resumed ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)} times and is back in REVIEW; the chain is stopped and needs an operator.`,
+        dedupeKey: `chain-successor-auto-resume-exhausted:${successor.id}`,
+      },
+      update: {},
+    });
+    return false;
+  }
+  await tx.task.update({
+    where: { id: successor.id },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  });
+  await tx.taskActivity.create({ data: {
+    taskId: successor.id,
+    actorType: "control-plane",
+    body: `Predecessor layer completed; successor was stalled in REVIEW and was automatically returned to the queue (resume ${String(attempt)} of ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)})`,
+    metadata: {
+      kind: CHAIN_AUTO_RESUME_KIND,
+      schemaVersion: 1,
+      state: "resumed",
+      attempt,
+      predecessorTaskId: predecessor.id,
+    },
+  } });
+  return true;
 };
 
 type ChainSuccessorOptions = {
@@ -1378,6 +1466,7 @@ const activateChainSuccessorInternal = async (
       } });
       continue;
     }
+    if (successor.status === TaskStatus.REVIEW && !await resumeParkedSuccessor(tx, current, successor)) continue;
 
     const successorStep = successor.templateStepId
       ? await tx.taskTemplateStep.findUnique({

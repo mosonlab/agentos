@@ -244,7 +244,14 @@ const createReviewObligation = async (
     description: [
       `Blindly review the exact diff ${input.baseSha}..${input.headSha}.`,
       `The server-side trigger set is ${JSON.stringify(input.triggers)}.`,
-      "Do not read prior review outputs. Find correctness or safety defects in the triggered merge-tail surface, run focused checks, then persist exactly one JSON object: {\"schemaVersion\":1,\"outcome\":\"approved\",\"headSha\":\"<40 hex>\"} or {\"schemaVersion\":1,\"outcome\":\"rejected\",\"headSha\":\"<40 hex>\",\"summary\":\"<must-fix>\"}.",
+      "Do not read prior review outputs. Find defects in the triggered merge-tail surface, run focused checks, then persist exactly one JSON object:",
+      `{"schemaVersion":1,"headSha":"${input.headSha}","findings":[{"severity":"blocking"|"follow-up","title":"<short>","detail":"<what is wrong and where>","reachability":"<required for blocking>"}]}`,
+      [
+        "Severity is the whole decision and the server derives the verdict from it; you do not state a verdict.",
+        "Mark a finding `blocking` only when it is a reachable behavioural defect — correctness, data integrity, or security — and prove reachability in `reachability`: name the concrete inputs, state, or interleaving that reaches it. A blocking finding without that argument voids the whole decision.",
+        "Everything else is `follow-up`: specification inconsistency no caller can reach, style, naming, defensive hardening, and any concern you cannot show a caller reaching. Each follow-up becomes a backlog card and the merge proceeds.",
+        "An empty `findings` array is the approval.",
+      ].join("\n"),
     ].join("\n\n"),
     assigneeType: AssigneeType.AGENT,
     assigneeAgentId: agent.id,
@@ -527,7 +534,8 @@ export const readinessTick = async (
         verdict.verdict.headSha,
         recovery ? snapshot.baseSha : null,
       );
-      if (triggers.length > 0 && review?.state !== "approved") {
+      const reviewCleared = review?.state === "approved" || review?.state === "accepted-with-followups";
+      if (triggers.length > 0 && !reviewCleared) {
         if (review?.state === "open") {
           await db.$transaction(async (tx) => {
             await lockTaskMutationRows(tx, readiness.id);
