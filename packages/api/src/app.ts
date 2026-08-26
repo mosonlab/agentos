@@ -127,7 +127,15 @@ import {
   acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
 } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
-import { activeRunStatuses, explainFenceRefusal, fencedRunWhere, type RunFence } from "./run-fence.js";
+import {
+  activeRunStatuses,
+  explainFenceRefusal,
+  fenceRefusalResponse,
+  fencedRunWhere,
+  isFenceRefusalResponse,
+  type RunFence,
+  withFencedRun,
+} from "./run-fence.js";
 import { supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
@@ -3674,7 +3682,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     return started === null
       ? context.json({ ok: true })
-      : context.json({ error: "Stale fencing token", reason: started }, 409);
+      : context.json(fenceRefusalResponse(started), 409);
   });
 
   app.post("/runner/runs/:runId/heartbeat", async (context) => {
@@ -3724,7 +3732,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
     return waiting
       ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-      : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+      : context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
   });
 
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
@@ -3765,7 +3773,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const owned = run?.runnerId === body.runnerId && run.fencingToken === body.fencingToken;
     const live = owned && run.cancelRequestedAt === null && run.leaseExpiresAt !== null && run.leaseExpiresAt > now
-      && activeRunStatuses.includes(run.status as typeof activeRunStatuses[number]);
+      && activeRunStatuses.includes(run.status);
     // Salvage is the one publication allowed after lease loss. It is confined
     // to this run's deterministic per-run ref, requires the same runner and
     // fencing token that owned the workspace, and cannot replace a different
@@ -3779,7 +3787,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       && body.pushedBranch === salvageBranch
       && (run?.pushedBranch === null || run?.pushedBranch === body.pushedBranch);
     if (!live && !salvage) {
-      return context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+      return context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
     }
     const updated = await db.$transaction(async (tx) => {
       const ack = await tx.run.updateMany({
@@ -3805,7 +3813,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ? context.json({ ok: true, replacementRepair: updated.repair })
       : updated.count === 1
         ? context.json({ error: "Salvage is durable, but the replacement already started from its prior base" }, 409)
-      : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+      : context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
   });
 
   // Cleanup is still runner-owned after the live lease is gone. This endpoint
@@ -3822,7 +3830,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const expiredOrTerminal = run && (
       run.leaseExpiresAt === null || run.leaseExpiresAt <= now
-      || !activeRunStatuses.includes(run.status as typeof activeRunStatuses[number])
+      || !activeRunStatuses.includes(run.status)
     );
     if (!run || run.runnerId !== body.runnerId || run.fencingToken !== body.fencingToken || !expiredOrTerminal) {
       return context.json({ error: "Cleanup outcome is not authorized for a live or foreign run" }, 409);
@@ -3848,18 +3856,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, eventsInput);
     const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: new Date() };
-    const result = await db.$transaction(async (tx) => {
-      await lockRunRow(tx, runId);
-      const run = await tx.run.findFirst({
-        where: fencedRunWhere(fence),
-        include: { session: true },
-      });
-      if (!run?.session) {
-        const waiting = await tx.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
-        return waiting
-          ? { error: "Run suspended for Inbox", code: "WAITING_INBOX" as const }
-          : { error: "Stale fencing token", code: "STALE" as const, reason: await explainFenceRefusal(tx, fence) };
-      }
+    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+      session: { select: { id: true, providerConversationId: true } },
+    }, async (run) => {
+      if (!run.session) return fenceRefusalResponse("stale-fence");
       await tx.sessionEvent.createMany({
         data: body.events.map((event) => ({
           sessionId: run.session!.id,
@@ -3882,11 +3882,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await tx.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
       }
       return { sessionId: run.session.id };
-    });
-    if ("error" in result) {
-      return result.code === "WAITING_INBOX"
-        ? context.json({ error: result.error, code: result.code }, 409)
-        : context.json({ error: result.error, reason: result.reason }, 409);
+    }));
+    if (isFenceRefusalResponse(result)) {
+      const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
+      return waiting
+        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+        : context.json(result, 409);
     }
     // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
     // whose event was already stored still recomputes, which is what self-heals a
@@ -3915,24 +3916,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, fencedActivityInput);
     const principal = context.get("principal");
     const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
-    const result = await db.$transaction(async (tx) => {
-      await lockRunRow(tx, runId);
-      const run = await tx.run.findFirst({
-        where: {
-          ...fencedRunWhere(fence),
-          // A session principal carries its own generation of the same fence.
-          ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
-        },
-        select: {
-          taskId: true,
-          task: { select: { templateStep: { select: {
-            stepIndex: true,
-            outputKind: true,
-            taskTemplate: { select: { name: true } },
-          } } } },
-        },
-      });
-      if (!run?.taskId) return { refusal: await explainFenceRefusal(tx, fence) };
+    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+      taskId: true,
+      leaseGeneration: true,
+      task: { select: { templateStep: { select: {
+        stepIndex: true,
+        outputKind: true,
+        taskTemplate: { select: { name: true } },
+      } } } },
+    }, async (run) => {
+      // A session principal carries its own generation of the same fence.
+      const leaseGeneration = principal.kind === "session" ? principal.leaseGeneration : null;
+      if (!run.taskId || leaseGeneration !== null && run.leaseGeneration !== leaseGeneration) {
+        return fenceRefusalResponse("stale-fence");
+      }
       const metadata = body.metadata
         ? {
             ...body.metadata,
@@ -3952,9 +3949,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           ...(metadata ? { metadata: jsonValue(metadata) } : {}),
         },
       });
-    });
-    return "refusal" in result
-      ? context.json({ error: "Stale fencing token", reason: result.refusal }, 409)
+    }));
+    return isFenceRefusalResponse(result)
+      ? context.json(result, 409)
       : context.json(result, 201);
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
@@ -4082,52 +4079,51 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, taskOutputInput);
     if (!body.fencingToken) return context.json({ error: "fencingToken is required" }, 400);
     const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
-    const run = await db.run.findFirst({
-      where: fencedRunWhere(fence),
-      select: {
-        taskId: true,
-        runnerId: true,
-        // §4.0. The step-12 output is the only evidence the chain has that a
-        // merge happened, so writing one is bound to the executor identity as
-        // well as to the session token: a session issued to anything but an
-        // allowlisted merge executor cannot author a `merge-result`, and the
-        // executor's session cannot author an ordinary step's output.
-        task: { select: {
-          id: true,
-          projectId: true,
-          chainId: true,
-          chainIndex: true,
-          templateStep: { select: {
-            stepIndex: true,
-            outputKind: true,
-            baseFromStepIndex: true,
-            taskTemplate: { select: { name: true } },
-          } },
+    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+      taskId: true,
+      runnerId: true,
+      // §4.0. The step-12 output is the only evidence the chain has that a
+      // merge happened, so writing one is bound to the executor identity as
+      // well as to the session token: a session issued to anything but an
+      // allowlisted merge executor cannot author a `merge-result`, and the
+      // executor's session cannot author an ordinary step's output.
+      task: { select: {
+        id: true,
+        projectId: true,
+        chainId: true,
+        chainIndex: true,
+        templateStep: { select: {
+          stepIndex: true,
+          outputKind: true,
+          baseFromStepIndex: true,
+          taskTemplate: { select: { name: true } },
         } },
-      },
-    });
-    if (!run?.taskId) {
-      return context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
-    }
-    const executionMode = executionModeFor(run.task?.templateStep ?? null);
-    if (executionMode !== "mechanical" && !body.commitSha) {
-      return context.json({ error: "commitSha is required" }, 400);
-    }
-    const outputRefusal = mechanicalPrincipalRefusal(
-      executionMode,
-      isMergeExecutorRunnerId(run.runnerId ?? "") ? "merge-executor" : "runner",
-      run.runnerId ?? "",
-    );
-    if (outputRefusal) return context.json({ error: outputRefusal }, 403);
-    const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
-      task: run.task!,
-      runId,
-      fencingToken: body.fencingToken!,
-      kind: body.kind,
-      body: body.body,
-      commitSha: body.commitSha ?? null,
-      ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+      } },
+    }, async (run) => {
+      if (!run.taskId || !run.task) return fenceRefusalResponse("stale-fence");
+      const executionMode = executionModeFor(run.task.templateStep);
+      if (executionMode !== "mechanical" && !body.commitSha) {
+        return { requestError: "commitSha is required", status: 400 as const };
+      }
+      const outputRefusal = mechanicalPrincipalRefusal(
+        executionMode,
+        isMergeExecutorRunnerId(run.runnerId ?? "") ? "merge-executor" : "runner",
+        run.runnerId ?? "",
+      );
+      if (outputRefusal) return { requestError: outputRefusal, status: 403 as const };
+      return { persisted: await persistSessionTaskOutput(tx, {
+        task: run.task,
+        fence,
+        kind: body.kind,
+        body: body.body,
+        commitSha: body.commitSha ?? null,
+        ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+      }) };
     }));
+    if (isFenceRefusalResponse(result)) return context.json(result, 409);
+    if ("requestError" in result) return context.json({ error: result.requestError }, result.status);
+    const { persisted } = result;
+    if (isFenceRefusalResponse(persisted)) return context.json(persisted, 409);
     if (!persisted.ok) return context.json({ error: persisted.reason }, 409);
     return context.json({ ...persisted.output, predecessorOutputs: persisted.predecessorOutputs });
   });
@@ -4149,6 +4145,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         choices: body.choices,
         ...(body.resumableUntil !== undefined ? { resumableUntil: body.resumableUntil } : {}),
       });
+      if (isFenceRefusalResponse(question)) return context.json(question, 409);
       return context.json(question, 201);
     } catch (error: unknown) {
       if (error instanceof Error && error.message.startsWith("Run is not resumable")) return context.json({ error: error.message }, 409);
@@ -4253,7 +4250,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (result.kind === "principal") return context.json({ error: result.error }, 403);
       return result.kind === "waiting-inbox"
         ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-        : context.json({ error: "Stale fencing token", reason: result.reason }, 409);
+        : context.json(fenceRefusalResponse(result.reason), 409);
     }
     await releaseMergeLeaseSafely(releaseChainLease, result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();

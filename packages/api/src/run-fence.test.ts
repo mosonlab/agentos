@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { type Prisma, RunStatus } from "@agentos/db";
 
-import { explainFenceRefusal, fencedRunWhere, type RunFence } from "./run-fence.js";
+import { explainFenceRefusal, fencedRunWhere, type RunFence, withFencedRun } from "./run-fence.js";
 
 const fence: RunFence = {
   runId: "run-1",
@@ -33,15 +33,38 @@ const explain = (row: Row | null, asked: RunFence = fence) => explainFenceRefusa
   asked,
 );
 
-test("one fence is one instant, however many predicates a request builds from it", async () => {
-  const first = fencedRunWhere(fence);
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const second = fencedRunWhere(fence);
-  // The defect this module exists for: a request that built one predicate from
-  // a captured `now` and another from `new Date()` could call the same lease
-  // live in one and expired in the other.
-  assert.deepEqual(first.leaseExpiresAt, { gt: fence.at });
-  assert.deepEqual(second.leaseExpiresAt, first.leaseExpiresAt);
+test("one fenced read owns its clock and Run -> Task lock order", async () => {
+  const calls: string[] = [];
+  const predicates: Prisma.RunWhereInput[] = [];
+  let read = 0;
+  const tx = {
+    $queryRaw: async (query: TemplateStringsArray) => {
+      if (query.join("?").includes('FROM "Run"')) {
+        calls.push("lock.run");
+        return [{ id: "run-1" }];
+      }
+      calls.push("lock.task");
+      return [{ id: "task-1", archivedAt: null }];
+    },
+    run: {
+      findFirst: async ({ where }: { where: Prisma.RunWhereInput }) => {
+        predicates.push(where);
+        calls.push(`read.${++read}`);
+        return read === 1 ? { taskId: "task-1" } : { id: "run-1" };
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  const result = await withFencedRun(tx, fence, { id: true }, (run) => {
+    calls.push("body");
+    return run.id;
+  });
+
+  assert.equal(result, "run-1");
+  assert.deepEqual(calls, ["lock.run", "read.1", "lock.task", "read.2", "body"]);
+  assert.equal(predicates.length, 2);
+  assert.equal((predicates[0]?.leaseExpiresAt as { gt: Date }).gt, fence.at);
+  assert.equal((predicates[1]?.leaseExpiresAt as { gt: Date }).gt, fence.at);
 });
 
 test("the predicate carries the six clauses that make a run this request's to write", () => {

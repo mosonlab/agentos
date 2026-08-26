@@ -1,5 +1,4 @@
 import {
-  ACTIVE_RUN_STATUSES,
   DIRECT_TEMPLATE_NAME,
   INTEGRATOR_TEMPLATE_NAME,
   LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
@@ -7,12 +6,18 @@ import {
   LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
-  lockTaskRow,
   Prisma,
   RunStatus,
   type TaskStepOutput,
 } from "@agentos/db";
 import { z } from "zod";
+
+import {
+  fenceRefusalResponse,
+  type FenceRefusalResponse,
+  type RunFence,
+  withFencedRun,
+} from "./run-fence.js";
 
 type DbTx = Prisma.TransactionClient;
 
@@ -548,45 +553,28 @@ export const persistSessionTaskOutput = async (
   tx: DbTx,
   input: {
     task: OutputTask;
-    runId: string;
-    fencingToken: string;
+    fence: RunFence;
     kind: string;
     body: string;
     commitSha: string | null;
     metadata?: Prisma.InputJsonValue;
   },
-): Promise<PersistOutputResult> => {
-  // Run is the cancellation authority. Take its row before Task so every
-  // output writer serializes with cancellation/completion and follows the
-  // same Run -> Task lock order as those terminal paths.
-  await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${input.runId} FOR UPDATE`;
-  await lockTaskRow(tx, input.task.id);
-  const authorized = await tx.run.findFirst({
-    where: {
-      id: input.runId,
-      taskId: input.task.id,
-      fencingToken: input.fencingToken,
-      cancelRequestedAt: null,
-      leaseExpiresAt: { gt: new Date() },
-      status: { in: ACTIVE_RUN_STATUSES },
-    },
-    select: {
-      task: { select: {
-        id: true,
-        projectId: true,
-        chainId: true,
-        chainIndex: true,
-        chainLayer: true,
-        status: true,
-        templateStep: { select: {
-          stepIndex: true,
-          outputKind: true,
-          taskTemplate: { select: { name: true } },
-        } },
-      } },
-    },
-  });
-  if (!authorized?.task) return { ok: false, reason: "Stale fencing token" };
+): Promise<PersistOutputResult | FenceRefusalResponse> => withFencedRun(tx, input.fence, {
+  task: { select: {
+    id: true,
+    projectId: true,
+    chainId: true,
+    chainIndex: true,
+    chainLayer: true,
+    status: true,
+    templateStep: { select: {
+      stepIndex: true,
+      outputKind: true,
+      taskTemplate: { select: { name: true } },
+    } },
+  } },
+}, async (authorized) => {
+  if (!authorized.task || authorized.task.id !== input.task.id) return fenceRefusalResponse("stale-fence");
   const task = authorized.task;
   const step = task.templateStep;
   if (isCanonicalAgentStep(step) && input.kind !== step.outputKind) {
@@ -618,14 +606,14 @@ export const persistSessionTaskOutput = async (
       return { ok: false, reason: `blind review task_output metadata.phase must be ${BLIND_REVIEW_PHASE.independent}, ${BLIND_REVIEW_PHASE.evidenceUnlocked}, or ${BLIND_REVIEW_PHASE.closed}` };
     }
     if (phase === BLIND_REVIEW_PHASE.evidenceUnlocked
-      && (existing?.runId !== input.runId || metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.independent)) {
+      && (existing?.runId !== input.fence.runId || metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.independent)) {
       return { ok: false, reason: `blind review must persist ${BLIND_REVIEW_PHASE.independent} in this Run before unlocking predecessor evidence` };
     }
     if (phase === BLIND_REVIEW_PHASE.evidenceUnlocked && existing?.body !== input.body) {
       return { ok: false, reason: "blind review evidence unlock must repeat the exact independent-findings body" };
     }
     if (phase === BLIND_REVIEW_PHASE.closed
-      && (existing?.runId !== input.runId || metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.evidenceUnlocked)) {
+      && (existing?.runId !== input.fence.runId || metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.evidenceUnlocked)) {
       return { ok: false, reason: `blind review must unlock predecessor evidence in this Run before ${BLIND_REVIEW_PHASE.closed}` };
     }
     if (phase === BLIND_REVIEW_PHASE.closed && existing) {
@@ -646,7 +634,7 @@ export const persistSessionTaskOutput = async (
       if (refusal) return { ok: false, reason: refusal };
     }
     if (phase === BLIND_REVIEW_PHASE.independent
-      && existing?.runId === input.runId && metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.independent) {
+      && existing?.runId === input.fence.runId && metadataPhase(existing.metadata) !== BLIND_REVIEW_PHASE.independent) {
       return { ok: false, reason: "closed blind review output cannot return to independent-findings" };
     }
     if (phase === BLIND_REVIEW_PHASE.evidenceUnlocked && existing) {
@@ -657,7 +645,7 @@ export const persistSessionTaskOutput = async (
         metadata: {
           kind: "canonicalTaskOutput.blindIndependentFindings",
           schemaVersion: 1,
-          runId: input.runId,
+          runId: input.fence.runId,
           outputKind: existing.kind,
           commitSha: existing.commitSha,
           phase: BLIND_REVIEW_PHASE.independent,
@@ -670,14 +658,14 @@ export const persistSessionTaskOutput = async (
     where: { taskId: input.task.id },
     create: {
       taskId: input.task.id,
-      runId: input.runId,
+      runId: input.fence.runId,
       kind: input.kind,
       body: input.body,
       commitSha: input.commitSha,
       ...(input.metadata ? { metadata: input.metadata } : {}),
     },
     update: {
-      runId: input.runId,
+      runId: input.fence.runId,
       kind: input.kind,
       body: input.body,
       ...(input.commitSha ? { commitSha: input.commitSha } : {}),
@@ -699,7 +687,7 @@ export const persistSessionTaskOutput = async (
     })
     : [];
   return { ok: true, output, predecessorOutputs };
-};
+});
 
 export const previousRunHandoffForClaim = async (
   tx: DbTx,

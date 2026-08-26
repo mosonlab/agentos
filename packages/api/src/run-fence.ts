@@ -1,4 +1,4 @@
-import { Prisma, RunStatus } from "@agentos/db";
+import { lockRunRow, lockTaskRow, Prisma, RunStatus } from "@agentos/db";
 
 /**
  * The statuses a lease can still be live under. Distinct from the database
@@ -49,6 +49,24 @@ export type FenceRefusal =
   | "lease-expired"
   | "not-active";
 
+export type FenceRefusalResponse = {
+  error: "Stale fencing token";
+  reason: FenceRefusal;
+};
+
+export const fenceRefusalResponse = (reason: FenceRefusal): FenceRefusalResponse => ({
+  error: "Stale fencing token",
+  reason,
+});
+
+export const isFenceRefusalResponse = (value: unknown): value is FenceRefusalResponse => (
+  typeof value === "object"
+  && value !== null
+  && "error" in value
+  && value.error === "Stale fencing token"
+  && "reason" in value
+);
+
 /** The six clauses that make a run this request's to write. */
 export const fencedRunWhere = (fence: RunFence): Prisma.RunWhereInput => ({
   id: fence.runId,
@@ -86,4 +104,38 @@ export const explainFenceRefusal = async (
   if (run.leaseExpiresAt === null || run.leaseExpiresAt <= fence.at) return "lease-expired";
   if (!(fence.statuses ?? activeRunStatuses).includes(run.status)) return "not-active";
   return "stale-fence";
+};
+
+/**
+ * Runs one write-authorizing read behind the complete fence.
+ *
+ * Run owns fencing and cancellation, while Task owns the lifecycle mutations
+ * that a fenced callback may make. The callback therefore starts only after
+ * Run and then its Task have been locked in that order. The selected row is
+ * read after both locks, so Task fields cannot go stale while the Task lock is
+ * being acquired.
+ *
+ * Both reads are built here from the same required `fence.at`. A caller can
+ * neither omit one of the six clauses nor introduce a second clock instant.
+ */
+export const withFencedRun = async <Select extends Prisma.RunSelect, Result>(
+  tx: Prisma.TransactionClient,
+  fence: RunFence,
+  select: Select,
+  body: (run: Prisma.RunGetPayload<{ select: Select }>) => Promise<Result> | Result,
+): Promise<Result | FenceRefusalResponse> => {
+  await lockRunRow(tx, fence.runId);
+  const owner = await tx.run.findFirst({
+    where: fencedRunWhere(fence),
+    select: { taskId: true },
+  });
+  if (!owner) return fenceRefusalResponse(await explainFenceRefusal(tx, fence));
+  if (owner.taskId !== null) await lockTaskRow(tx, owner.taskId);
+
+  const run = await tx.run.findFirst({
+    where: fencedRunWhere(fence),
+    select,
+  });
+  if (!run) return fenceRefusalResponse(await explainFenceRefusal(tx, fence));
+  return body(run);
 };

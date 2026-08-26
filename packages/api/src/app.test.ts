@@ -21,6 +21,7 @@ import { completionSucceeded, externalFailure } from "./execution.js";
 import { isStarterMountPath, isValidBranchName, onboardingInput, parseRepoRemote, slugify } from "./onboarding.js";
 import { RepositoryPreflightError } from "./onboarding-preflight.js";
 import { noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
+import { activeRunStatuses } from "./run-fence.js";
 
 const withTokens = async (callback: () => Promise<void>): Promise<void> => {
   const operator = process.env.OPERATOR_TOKEN;
@@ -505,6 +506,55 @@ test("fencing rejects an expired generation token", async () => {
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), { error: "Stale fencing token", reason: "stale-fence" });
   });
+});
+
+test("session output authorization cannot introduce a second fence instant", async () => {
+  const fencedPredicates: Prisma.RunWhereInput[] = [];
+  const task = {
+    id: "task-1",
+    projectId: "project-1",
+    chainId: null,
+    chainIndex: null,
+    chainLayer: null,
+    status: "IN_PROGRESS",
+    templateStep: {
+      stepIndex: 1,
+      outputKind: "implementation",
+      baseFromStepIndex: null,
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  };
+  const database: Record<string, unknown> = {
+    $queryRaw: async (query: TemplateStringsArray) => query.join("?").includes('FROM "Run"')
+      ? [{ id: "run-1" }]
+      : [{ id: "task-1", archivedAt: null }],
+    run: { findFirst: async ({ where }: { where: Prisma.RunWhereInput }) => {
+      if ("sessionTokenHash" in where) return { id: "run-1", leaseGeneration: 1 };
+      fencedPredicates.push(where);
+      return { taskId: "task-1", runnerId: "runner-1", task };
+    } },
+  };
+  database.$transaction = async (operation: (tx: unknown) => Promise<unknown>) => operation(database);
+
+  const response = await createApp(database as unknown as PrismaClient).request("/session/runs/run-1/output", {
+    method: "PUT",
+    headers: { Authorization: "Bearer agos_session_current", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fencingToken: "1:run-1:current",
+      kind: "wrong-kind",
+      body: "not persisted",
+      commitSha: "a".repeat(40),
+    }),
+  });
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "task_output kind must be implementation for this canonical step" });
+  assert.equal(fencedPredicates.length, 4);
+  const instants = fencedPredicates.map((where) => (where.leaseExpiresAt as { gt: Date }).gt);
+  assert.ok(instants.every((at) => at === instants[0]));
+  assert.ok(fencedPredicates.every((where) => (
+    where.status as { in: RunStatus[] }
+  ).in === activeRunStatuses));
 });
 
 test("resuming a run preserves its original Run and Session start timestamps", async () => {
