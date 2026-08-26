@@ -150,7 +150,7 @@ const integratorStep = {
   taskTemplate: { name: "compound-engineer-workflow" },
 };
 
-test("every OpenRunIntent applies the shared Run-birth invariants", async () => {
+test("every OpenRunIntent applies shared Run-birth invariants unless its branch names the exception", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const stopRows = [{
     id: "stop-1",
@@ -216,6 +216,7 @@ test("every OpenRunIntent applies the shared Run-birth invariants", async () => 
 
   for (const intent of intents()) {
     for (const invariant of cases) {
+      if (intent.kind === "integrator-authorized" && invariant.name === "integrator stop state") continue;
       const { tx, creates } = fakeTx(invariant.task, invariant.options);
       const opened = await openRun(tx, invariant.task.id, intent);
       assert.equal(opened.ok, false, `${intent.kind} must refuse ${invariant.name}`);
@@ -223,6 +224,38 @@ test("every OpenRunIntent applies the shared Run-birth invariants", async () => 
       assert.equal(creates.length, 0, `${intent.kind} must not create after ${invariant.name}`);
     }
   }
+});
+
+test("integrator-authorized is the named human reauthorization exit from an unresolved stop", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const integrator = agent({ name: "merge-integrator" });
+  const task = taskRow({
+    assigneeAgent: integrator,
+    repoId: repo.id,
+    repo,
+    templateStepId: integratorStep.id,
+    templateStep: integratorStep,
+    maxSessionsPerTask: 3,
+    runs: [priorRun({ runNumber: 3, maxRunsPerTask: 3, budgetGrants: 0 })],
+  });
+  const stopRows = [{
+    id: "stop-1",
+    createdAt: now,
+    metadata: {
+      kind: "mergeIntegrator.result",
+      schemaVersion: 1,
+      outcome: "stopped",
+      condition: "head-drift",
+      evidence: "head moved",
+      sourceRunId: "run-3",
+    },
+  }];
+  const { tx, creates } = fakeTx(task, { lockedAgent: integrator, stopRows });
+  const opened = await openRun(tx, task.id, { kind: "integrator-authorized", readyAt: now });
+  assert.equal(opened.ok, true);
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0]?.runNumber, 4);
+  assert.equal(creates[0]?.maxRunsPerTask, 4);
 });
 
 test("openRun names every intent-specific refusal exit", async () => {

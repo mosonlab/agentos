@@ -768,7 +768,12 @@ export const openRun = async (
   // refusal by construction rather than by remembering to ask.
   const stopped = await stopStateFor(tx, task.id);
   const stopBypass = intent.kind === "enqueue" ? intent.stopBypass ?? null : null;
-  if (stopped && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
+  // A recovered confirmation approval is itself the human-authorized exit
+  // from this unresolved stop. Its named intent is the only path that may open
+  // the renewed mechanical Run while the original stop remains in history.
+  const humanReauthorization = intent.kind === "integrator-authorized";
+  if (stopped && !humanReauthorization
+    && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
     return openRunRefusal(
       "integrator-stopped",
       `Merge integrator stopped on ${stopped.stop.condition}; answer the stop question before starting another run`,
