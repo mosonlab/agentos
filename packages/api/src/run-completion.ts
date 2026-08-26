@@ -70,7 +70,8 @@ import {
   openMergeTailStopNotice,
   stopBaseDriftRecoveryTail,
 } from "./merge-tail-actions.js";
-import { explainFenceRefusal, fencedRunWhere, type FenceRefusal, type RunFence } from "./run-fence.js";
+import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
+import type { Refusal } from "./refusal.js";
 import { lockTask, lockTaskMutationRows } from "./task-write.js";
 
 /** Full Assurance regression and the documentation node a repair must reopen. */
@@ -222,10 +223,7 @@ export type RunCompletion = {
 
 /** Why a completion wrote nothing. Three distinct answers the route used to
  *  distinguish with an inline `null` plus a follow-up query of its own. */
-export type CompleteRunRefusal =
-  | { kind: "principal"; error: string }
-  | { kind: "waiting-inbox" }
-  | { kind: "fence"; reason: FenceRefusal };
+export type CompleteRunRefusal = Refusal;
 
 export type CompleteRunInput = {
   runId: string;
@@ -268,7 +266,7 @@ export const completeRun = async (
       claimantClass,
       completing.runnerId ?? body.runnerId,
     );
-    if (refusal) return { kind: "principal", error: refusal };
+    if (refusal) return { reason: "forbidden", message: refusal };
   }
   const result = await db.$transaction(async (tx) => {
     // Run owns fencing, cancellation, and terminalization. Take that mutex
@@ -1098,9 +1096,19 @@ export const completeRun = async (
   // "stale fence" would be re-deriving a distinction this action already made.
   if (!result) {
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
-    return waiting
-      ? { kind: "waiting-inbox" }
-      : { kind: "fence", reason: await explainFenceRefusal(db, fence) };
+    if (waiting) {
+      return {
+        reason: "conflict",
+        message: "Run suspended for Inbox",
+        detail: { code: "WAITING_INBOX" },
+      };
+    }
+    const fenceRefusal = fenceRefusalResponse(await explainFenceRefusal(db, fence));
+    return {
+      reason: "conflict",
+      message: fenceRefusal.error,
+      detail: { reason: fenceRefusal.reason },
+    };
   }
   return result;
 };
