@@ -47,8 +47,8 @@ owns.
 database on every deploy. It refuses to guess. For each canonically-named row it
 compares the persisted graph against exactly two accepted shapes:
 
-- the current source graph — the row is already correct, and only prompt text
-  and bounded fields are updated in place; or
+- the current source graph — the row is already correct, and prompt text is
+  updated in place; or
 - an enumerated legacy graph in
   `packages/db/src/canonical-template-transition.ts` — the row is the previous
   generation, so it is renamed out of the way and a fresh canonical row is
@@ -57,6 +57,13 @@ compares the persisted graph against exactly two accepted shapes:
 Anything else is structural drift and the whole sync refuses, as one
 all-or-none transaction. This is what stops a half-migrated template set.
 
+Two narrow exceptions sit beside those shapes. `ASSIGNEE_TRANSITIONS`,
+`STEP_NAME_TRANSITIONS` and `STEP_BASE_TRANSITIONS` in
+`sync-canonical-prompts.ts` name one step at a time and let it adopt a new
+assignee, display name or base pin in place instead of refusing. Each entry is a
+one-shot for a migration that has already happened; do not reach for one to
+avoid registering a legacy shape.
+
 So a change that alters the *shape* of a template — adding, removing or
 reordering a step, or moving a layer, a base pin or an output kind — has to
 register the outgoing graph as the legacy shape in the same change. Without
@@ -64,7 +71,21 @@ that registration the deploy does not degrade quietly; it stops.
 
 A rename also refuses while the outgoing row still has unfinished tasks, or
 while it carries webhook configuration. Both are deliberate: a rollover is for a
-row whose chains are done.
+row whose chains are done. "Unfinished" counts unarchived tasks that are not
+`DONE`, so archiving a live chain's remaining tasks hides them from the guard —
+do not do that to get a rollover through.
+
+## Prompt text is frozen once a step has been instantiated
+
+The in-place prompt update above only reaches a step that no task references.
+Once any task has been created from a step, sync refuses to change that step's
+prompt at all, so a text-only edit to a template that has already run stops the
+deploy exactly like structural drift does.
+
+The consequence is worth stating plainly: on a template with live history, there
+is no prompt-only change. Rewriting a prompt has to ride a shape change that
+rolls the row over — the new canonical row starts with no tasks and carries the
+new text, and the old row keeps the text its own chains were dispatched under.
 
 ## What a template change does and does not affect
 
@@ -79,6 +100,13 @@ the readiness poll and the base-drift recovery poll all have to recognise the
 renamed row at its old ordinals, or an in-flight chain silently loses its merge
 tail or its output immutability. When you register a legacy shape, extend those
 predicates in the same change.
+
+The narrower predicates in `packages/api/src/canonical-task-output.ts` —
+`isCanonicalSolFindingsStep`, `isCanonicalBlindFindingsStep` and
+`isCanonicalFixStep` — match the canonical names only, on purpose: they carry
+obligations that belong to the current graph's division of labour. Their cover
+therefore ends at the rollover, which is sound only because a rollover requires
+the outgoing row's chains to be finished.
 
 ## The procedure
 
