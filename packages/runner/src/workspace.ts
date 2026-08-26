@@ -7,9 +7,10 @@ import type { ClaimedTask } from "./api.js";
 import { defaultSessionConfigBaselineRoot, runnerProxyEnvironment, type RunnerConfig, type RunnerKind } from "./config.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import { runCommand, type CommandOptions } from "./exec.js";
+import { type RetryOptions } from "./network-retry.js";
 import {
-  CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
-} from "./network-retry.js";
+  ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
+} from "./repo-mirror.js";
 
 export type Workspace = {
   path: string;
@@ -310,6 +311,7 @@ export const provisionWorkspace = async (
   execute: WorkspaceCommandExecutor = command,
   retryOptions: RetryOptions = {},
   dependencyCacheOptions: DependencyCacheOptions = {},
+  mirrorOptions: RepoMirrorOptions = {},
 ): Promise<Workspace> => {
   const root = resolve(config.workspaceRoot);
   const workspace = resolve(root, claim.run.id);
@@ -341,70 +343,96 @@ export const provisionWorkspace = async (
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
     const pinnedBaseSha = claim.run.pinnedBaseSha;
-    if (pinnedBaseSha) {
-      const implementationBaseSha = claim.run.implementationBaseSha;
-      if (!implementationBaseSha || claim.run.implementationHeadSha !== pinnedBaseSha) {
-        throw new Error(`Pinned run ${claim.run.id} is missing its immutable implementation range`);
-      }
-      // A branch clone would advertise and fetch the shared chain ref before a
-      // blind reviewer starts. Build an empty repository, fetch the immutable
-      // implementation range endpoints by object id, and stay detached at its
-      // head. With no fetch of the chain branch, successor commits and their
-      // report artifacts are not reachable from this object database.
-      //
-      // Into an empty object database this fetch transfers the same history a
-      // clone would, so it runs under the clone profile: a large repository is
-      // slow, not hung, and the 20s command ceiling built for incremental
-      // fetches kills every attempt on a slow link.
-      await execute(config, "git", ["init"], workspace, env);
-      await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
-      await runWithNetworkRetry("git", ["fetch"],
-        ({ timeoutMs }) => execute(
-          config,
-          "git",
-          ["fetch", "--no-tags", "origin", implementationBaseSha, pinnedBaseSha],
-          workspace,
-          env,
-          { timeoutMs },
-        ),
-        { commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS, budgetMs: CLONE_OPERATION_BUDGET_MS, ...retryOptions },
-      );
-      await execute(config, "git", ["checkout", "--detach", pinnedBaseSha], workspace, env);
-      const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
-      if (baseSha !== pinnedBaseSha) {
-        throw new Error(`Pinned workspace resolved ${baseSha}, expected ${pinnedBaseSha}`);
-      }
-      await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
-      return { path: workspace, branch, baseSha, pinnedBaseSha };
-    }
-    // The publication ACK is fenced and immediate, but no database protocol can
-    // eliminate a crash between the remote accepting git push and that ACK.
-    // When the run's intended head already exists remotely, clone that durable
-    // truth instead of the stale fallback base. Derived chain heads are unique
-    // per project+chain, so this cannot accidentally adopt another chain.
-    let cloneTarget = target;
-    if (branch !== target && !claim.run.targetBranchPublished) {
-      try {
-        await runWithNetworkRetry("git", ["ls-remote"],
-          ({ timeoutMs }) => execute(config, "git", ["ls-remote", "--exit-code", "--heads", claim.repo.remoteUrl, `refs/heads/${branch}`], root, env, { timeoutMs }),
-          retryOptions,
-        );
-        cloneTarget = branch;
-      } catch {
-        // Exit 2 means the head is absent; clone the resolver-selected fallback.
-      }
-    }
-    // The clone profile, not delivery's: provisioning heartbeats keep the lease
-    // alive, so the ceiling only has to separate "hung" from "slow" — and a
-    // large repo is slow, not hung. See network-retry.ts for the derivation.
-    await runWithNetworkRetry("git", ["clone"],
-      ({ timeoutMs }) => execute(config, "git", ["clone", "--no-local", "--branch", cloneTarget, "--single-branch", claim.repo.remoteUrl, workspace], root, env, { timeoutMs }),
-      { commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS, budgetMs: CLONE_OPERATION_BUDGET_MS, ...retryOptions },
+    // Dependencies are materialised after the mirror lock is released: `npm ci`
+    // is bounded in half-hours, and holding a machine-wide lock across it would
+    // serialise every other run on the host behind an install that never
+    // touches the mirror.
+    //
+    // The mirror belongs to the account that runs the task, and `root` is what
+    // the daemon can chdir into before the run-as prefix takes over.
+    const provisioned = await withRepoMirror(
+      config,
+      claim.repo.remoteUrl,
+      root,
+      env,
+      execute,
+      { fetchRetryOptions: retryOptions, ...mirrorOptions },
+      async (mirror): Promise<Workspace> => {
+        if (pinnedBaseSha) {
+          const implementationBaseSha = claim.run.implementationBaseSha;
+          if (!implementationBaseSha || claim.run.implementationHeadSha !== pinnedBaseSha) {
+            throw new Error(`Pinned run ${claim.run.id} is missing its immutable implementation range`);
+          }
+          // A branch clone would advertise and fetch the shared chain ref before
+          // a blind reviewer starts. Build an empty repository, fetch the
+          // immutable implementation range endpoints by object id, and stay
+          // detached at its head. With no fetch of the chain branch, successor
+          // commits and their report artifacts are not reachable from this
+          // object database — and fetching by object id keeps that true when the
+          // source is the mirror, which does carry the chain ref: a fetch
+          // transfers only what the requested objects reach, never the mirror's
+          // other refs.
+          //
+          // What this has never been is a sandbox. The mirror sits in the
+          // reviewer's own account home, and the reviewer could already fetch
+          // the chain ref straight from GitHub: no runtime reads
+          // Environment.networking, and a session is not isolated from other
+          // processes of its own user (see api/src/onboarding.ts). The property
+          // is that provisioning does not *hand* a blind reviewer its
+          // predecessor's report, and that is what the object-id fetch keeps.
+          await ensureMirrorRevisions(
+            config, mirror, [implementationBaseSha, pinnedBaseSha], root, env, execute, retryOptions,
+          );
+          await execute(config, "git", ["init"], workspace, env);
+          await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
+          // Local transport: slow on a large range, but it cannot hang on a
+          // network that is no longer in the path, so it carries no ceiling.
+          await execute(config, "git", ["fetch", "--no-tags", mirror, implementationBaseSha, pinnedBaseSha], workspace, env);
+          await execute(config, "git", ["checkout", "--detach", pinnedBaseSha], workspace, env);
+          const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
+          if (baseSha !== pinnedBaseSha) {
+            throw new Error(`Pinned workspace resolved ${baseSha}, expected ${pinnedBaseSha}`);
+          }
+          return { path: workspace, branch, baseSha, pinnedBaseSha };
+        }
+        // The publication ACK is fenced and immediate, but no database protocol
+        // can eliminate a crash between the remote accepting git push and that
+        // ACK. When the run's intended head already exists remotely, clone that
+        // durable truth instead of the stale fallback base. Derived chain heads
+        // are unique per project+chain, so this cannot accidentally adopt
+        // another chain.
+        //
+        // The mirror was pruned against the remote moments ago, so its refs are
+        // the same answer `git ls-remote` used to make a round trip for.
+        let cloneTarget = target;
+        if (branch !== target && !claim.run.targetBranchPublished
+          && await mirrorHasBranch(config, mirror, branch, root, env, execute)) {
+          cloneTarget = branch;
+        }
+        if (!await mirrorHasBranch(config, mirror, cloneTarget, root, env, execute)) {
+          // The mirror was pruned against the remote moments ago, so this is the
+          // remote's answer, not a mirror fault: the branch the run was told to
+          // start from does not exist.
+          throw new Error(`Branch ${cloneTarget} is absent from ${claim.repo.remoteUrl}`);
+        }
+        // Local clone: git hardlinks the object database instead of copying it,
+        // which is what turns a two-minute transfer into a disk operation. The
+        // hardlinks survive the mirror repacking later, because unlinking a
+        // packfile the workspace also links does not free it. Where the kernel
+        // refuses the link — Linux protected_hardlinks, with the mirror owned by
+        // the daemon and the clone running as another account — git copies the
+        // file instead. That is still local disk, and still not the remote.
+        await execute(config, "git", ["clone", "--branch", cloneTarget, "--single-branch", mirror, workspace], root, env);
+        // Delivery pushes to `origin`; the mirror is a provisioning detail and
+        // must never become the run's publication target.
+        await execute(config, "git", ["remote", "set-url", "origin", claim.repo.remoteUrl], workspace, env);
+        const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
+        if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
+        return { path: workspace, branch, baseSha };
+      },
     );
-    const baseSha = await execute(config, "git", ["rev-parse", "HEAD"], workspace, env);
-    if (branch !== cloneTarget) await execute(config, "git", ["switch", "-c", branch], workspace, env);
     await materializeWorkspaceDependencies(config, workspace, env, execute, dependencyCacheOptions);
-    return { path: workspace, branch, baseSha };
+    return provisioned;
   } catch (error: unknown) {
     await cleanupWorkspace(config, workspace).catch(() => undefined);
     throw error;

@@ -62,7 +62,8 @@ something outside the checkout.
 - `export RUNNER_WORKSPACE_ROOT=$(mktemp -d)` before any test run. The runner's
   tests provision real workspaces, and without this they are provisioned wherever
   the configuration points — which on a working checkout is a directory holding
-  someone's runs.
+  someone's runs. The same applies to `home` in a hand-built `RunnerConfig`:
+  provisioning keeps its persistent repository mirror under it.
 - Database tests target a scratch PostgreSQL and nothing else. Point
   `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL` at a throwaway server,
   and give each worktree its own `?schema=` so parallel runs stay apart. Never
