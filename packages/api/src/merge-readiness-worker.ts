@@ -45,6 +45,7 @@ import { createGitHubReader, type GitHubReader } from "./github-read.js";
 import {
   releaseMergeLease,
   releaseMergeLeaseSafely,
+  reportMergeLeaseAnomaly,
   type MergeLeaseReleaser,
 } from "./merge-lease.js";
 
@@ -163,7 +164,7 @@ const stopReadiness = async (
     });
     return readiness?.chainId ?? null;
   });
-  await releaseMergeLeaseSafely(releaseChainLease, chainId);
+  reportMergeLeaseAnomaly(chainId, await releaseMergeLeaseSafely(releaseChainLease, chainId));
 };
 
 // The whole history, newest first: a review obligation for this exact head can
@@ -343,7 +344,7 @@ export const readinessTick = async (
   reader: GitHubReader | null = createGitHubReader(),
   now = new Date(),
   limit = 5,
-  releaseChainLease: MergeLeaseReleaser = async () => {},
+  releaseChainLease: MergeLeaseReleaser = async () => ({ outcome: "not-held" }),
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
   const candidates = await db.task.findMany({

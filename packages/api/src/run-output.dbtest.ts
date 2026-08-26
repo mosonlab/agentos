@@ -66,7 +66,10 @@ const call = async (
   method: string, path: string, token: string, body?: unknown,
 ): Promise<{ status: number; body: any }> => withTokens(async () => {
   const response = await createApp(db, {
-    releaseMergeLease: async (chainId) => { releasedChainLeases.push(chainId); },
+    releaseMergeLease: async (chainId) => {
+      releasedChainLeases.push(chainId);
+      return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
+    },
   }).request(path, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

@@ -10,6 +10,7 @@ import {
 } from "@agentos/db";
 
 import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
+import type { MergeLeaseReleaser } from "./merge-lease.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -17,7 +18,10 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
-const releaseChainLease = async (chainId: string) => { releasedChainLeases.push(chainId); };
+const releaseChainLease: MergeLeaseReleaser = async (chainId) => {
+  releasedChainLeases.push(chainId);
+  return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
+};
 beforeEach(async () => {
   releasedChainLeases.length = 0;
   await resetTestDb(db);

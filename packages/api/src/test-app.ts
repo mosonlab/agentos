@@ -91,7 +91,7 @@ export const createApp = (db: PrismaClient, options: {
   return createLiveApp(db, {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
     onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
-    releaseMergeLease: options.releaseMergeLease ?? (async () => {}),
+    releaseMergeLease: options.releaseMergeLease ?? (async () => ({ outcome: "not-held" })),
   });
 };
 
