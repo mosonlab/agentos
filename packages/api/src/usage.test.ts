@@ -193,7 +193,9 @@ const PI_AGENT_SETTLED_WITH_USAGE = {
     output: 24,
     cacheRead: 3584,
     cacheWrite: 0,
-    costUsd: 0.00123808,
+    // Integer nano-USD: the runner cannot reach Prisma.Decimal, so it sums the
+    // per-message costs in an exact integer domain instead of in doubles.
+    costNanoUsd: 1_238_080,
   },
 };
 
@@ -321,6 +323,7 @@ test("the PI aggregate is exclusive of the provider vocabularies it replaces", (
   const usage = extractUsage({ ...PI_AGENT_SETTLED_WITH_USAGE, usage: { input_tokens: 99 }, total_cost_usd: 7 });
   assert.equal(usage.inputTokens, 5688);
   assert.equal(usage.costUsd?.toString(), "0.00123808");
+  assert.equal(usage.costUsd?.equals(new Prisma.Decimal("0.00123808")), true);
 });
 
 test("a PI aggregate that reports nothing usable leaves every column null", async () => {
@@ -331,17 +334,35 @@ test("a PI aggregate that reports nothing usable leaves every column null", asyn
     assert.deepEqual(extractUsage({ type: "agent_settled", agentosPiUsage: totals }), {}, JSON.stringify(totals ?? null));
   }
   const { result: usage, warnings } = await withCapturedWarnings(
-    () => extractUsage({ agentosPiUsage: { input: -1, output: 8, cacheRead: 1.5, costUsd: "free" } }),
+    () => extractUsage({ agentosPiUsage: { input: -1, output: 8, cacheRead: 1.5, costNanoUsd: 0.5 } }),
   );
   assert.deepEqual(usage, { outputTokens: 8 });
   assert.equal(warnings.length, 3);
   assert.match(warnings.join("\n"), /agentosPiUsage\.input/u);
-  assert.match(warnings.join("\n"), /agentosPiUsage\.costUsd/u);
+  // A fractional nano-USD did not come from the PI parser, so its exactness —
+  // the whole reason for the integer transport — cannot be assumed.
+  assert.match(warnings.join("\n"), /agentosPiUsage\.costNanoUsd/u);
+});
+
+test("the PI cost transport is exact where a double sum would round the wrong way", () => {
+  // 0.000001 + 0.000049 as doubles is 0.0000499999…, which the column rounds to
+  // 0.0000. The runner sends 1000 + 49000 nano-USD instead, and this is where
+  // that integer becomes the 0.0001 the session actually cost.
+  const usage = extractUsage({ agentosPiUsage: { input: 2, output: 2, costNanoUsd: 50_000 } });
+  assert.equal(usage.costUsd?.toString(), "0.00005");
+  assert.equal(deriveUsageColumns(usage).costUsd?.toString(), "0.0001");
 });
 
 test("PI sessions accumulate across attempts the way every other runner does", () => {
-  // A resumed PI session spawns a fresh process with a fresh accumulator, so
-  // each attempt contributes its own FINAL_OUTPUT row.
+  // A PI session that resumes after SETTLING spawns a fresh process with a fresh
+  // accumulator, so each attempt contributes its own FINAL_OUTPUT row.
+  //
+  // Known limitation, shared with CLAUDE and CODEX rather than introduced here:
+  // an attempt whose process is killed before it settles — an Inbox suspension
+  // is the live case — produces no FINAL_OUTPUT, and its usage is lost. The
+  // fencing rejection that triggers the kill has already cleared the delivery
+  // lease, so there is no event this adapter could emit that would still be
+  // accepted. Closing that needs a control-plane change, not a parser change.
   const total = sumUsage([PI_AGENT_SETTLED_WITH_USAGE, PI_AGENT_SETTLED_WITH_USAGE].map(extractUsage));
   assert.equal(total.inputTokens, 11376);
   assert.equal(total.costUsd?.toString(), "0.00247616");

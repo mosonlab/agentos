@@ -66,15 +66,15 @@ const tokenCount = (value: unknown, field: string): number | null => {
  * once at the column boundary. Adding binary JS numbers first is not exact —
  * 0.000001 + 0.000049 lands just below the half-unit and rounds to 0.0000.
  */
-const costAmount = (value: unknown, field = "total_cost_usd"): Prisma.Decimal | null => {
+const costAmount = (value: unknown): Prisma.Decimal | null => {
   if (value === undefined) return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    console.warn(`[usage] ignoring ${field}=${render(value)}: not a storable cost`);
+    console.warn(`[usage] ignoring total_cost_usd=${render(value)}: not a storable cost`);
     return null;
   }
   const decimal = new Prisma.Decimal(String(value));
   if (decimal.toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
-    console.warn(`[usage] ignoring ${field}=${render(value)}: exceeds Decimal(12, 4)`);
+    console.warn(`[usage] ignoring total_cost_usd=${render(value)}: exceeds Decimal(12, 4)`);
     return null;
   }
   return decimal;
@@ -139,14 +139,37 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
  *   therefore includes them.
  * - `output` already contains PI's reasoning tokens, so there is no reasoning
  *   field to fold in here.
- * - `costUsd` is PI's own per-message `cost.total` summed, not derived from the
- *   pricing table. PI is the only one of the three that prices itself per
- *   message.
+ * - `costNanoUsd` is PI's own per-message `cost.total` summed, not derived from
+ *   the pricing table — PI is the only one of the three that prices itself per
+ *   message. It arrives as an INTEGER count of nano-USD because the runner
+ *   cannot reach Prisma.Decimal and summing the raw doubles would hit the very
+ *   half-unit error `costAmount` exists to avoid. Dividing by a power of ten in
+ *   decimal is exact, so nothing is lost on the way to the column.
  *
  * `messages` and `reported` are the runner's diagnostics and are read by nobody
  * here; they exist so a stored event can answer "was the cost missing, or was
  * it genuinely nothing".
  */
+const NANOS_PER_USD = 1_000_000_000;
+
+/** The PI aggregate's integer nano-USD as an exact Decimal. Same drop-with-a-
+ * diagnostic discipline as `costAmount`, against the integer domain the runner
+ * actually sends: a non-integer here means the payload was not written by the
+ * PI parser and its value cannot be trusted to be exact. */
+const piCostAmount = (value: unknown): Prisma.Decimal | null => {
+  if (value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    console.warn(`[usage] ignoring agentosPiUsage.costNanoUsd=${render(value)}: not a storable cost`);
+    return null;
+  }
+  const decimal = new Prisma.Decimal(value).dividedBy(NANOS_PER_USD);
+  if (decimal.toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
+    console.warn(`[usage] ignoring agentosPiUsage.costNanoUsd=${render(value)}: exceeds Decimal(12, 4)`);
+    return null;
+  }
+  return decimal;
+};
+
 const extractPiUsage = (value: unknown): SessionUsage | null => {
   const totals = asRecord(value);
   if (!totals) return null;
@@ -158,7 +181,7 @@ const extractPiUsage = (value: unknown): SessionUsage | null => {
   const cacheRead = tokenCount(totals.cacheRead, "agentosPiUsage.cacheRead");
   const cacheWrite = tokenCount(totals.cacheWrite, "agentosPiUsage.cacheWrite");
   if (cacheRead !== null || cacheWrite !== null) result.cachedInputTokens = (cacheRead ?? 0) + (cacheWrite ?? 0);
-  const cost = costAmount(totals.costUsd, "agentosPiUsage.costUsd");
+  const cost = piCostAmount(totals.costNanoUsd);
   if (cost !== null) result.costUsd = cost;
   // Nothing usable routes back to the other branches rather than claiming the
   // payload, exactly as an unusable `modelUsage` does.

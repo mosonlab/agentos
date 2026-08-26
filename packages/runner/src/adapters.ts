@@ -357,7 +357,7 @@ export type PiUsageTotals = {
   output: number | null;
   cacheRead: number | null;
   cacheWrite: number | null;
-  costUsd: number | null;
+  costNanoUsd: number | null;
 };
 
 export type RuntimeHandle = {
@@ -535,8 +535,11 @@ const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink:
   } else emit(handle, sink, "PROVIDER_STATUS", event);
 };
 
+/** PI prices per message in USD; the accumulator carries integer nano-USD. */
+const NANOS_PER_USD = 1_000_000_000;
+
 const emptyPiUsage = (): PiUsageTotals =>
-  ({ messages: 0, reported: 0, input: null, output: null, cacheRead: null, cacheWrite: null, costUsd: null });
+  ({ messages: 0, reported: 0, input: null, output: null, cacheRead: null, cacheWrite: null, costNanoUsd: null });
 
 /**
  * One number out of a PI usage object, or null when PI said nothing usable.
@@ -576,8 +579,15 @@ const piNumber = (value: unknown, field: string, integral: boolean): number | nu
  *   `reasoning_output_tokens` already gets.
  *
  * PI reports cost directly, per message, in `cost.total` USD, so no pricing
- * lookup is involved. Summing those doubles in JS is exact enough: the single
- * rounding that matters happens once, at the Decimal(12, 4) column boundary.
+ * lookup is involved. Those costs are summed as INTEGER nano-USD rather than as
+ * JS doubles, and the payload carries the integer. Adding the doubles would
+ * reintroduce exactly the error `usage.ts` documents and avoids — 0.000001 +
+ * 0.000049 lands just below the half-unit and rounds to 0.0000 — and this
+ * package cannot reach that module's Prisma.Decimal without pulling a database
+ * client into the runner. Nano-USD is five orders of magnitude finer than the
+ * Decimal(12, 4) column and every cost PI has been observed to report is an
+ * exact multiple of it, so the scaling is lossless in practice and the one
+ * rounding that matters still happens once, at the column boundary.
  */
 const harvestPiUsage = (totals: PiUsageTotals, message: Record<string, unknown>): void => {
   totals.messages += 1;
@@ -593,7 +603,15 @@ const harvestPiUsage = (totals: PiUsageTotals, message: Record<string, unknown>)
   const cacheWrite = piNumber(usage.cacheWrite, "cacheWrite", true);
   if (cacheWrite !== null) totals.cacheWrite = (totals.cacheWrite ?? 0) + cacheWrite;
   const cost = piNumber(asRecord(usage.cost)?.total, "cost.total", false);
-  if (cost !== null) totals.costUsd = (totals.costUsd ?? 0) + cost;
+  if (cost !== null) {
+    const nanos = Math.round(cost * NANOS_PER_USD);
+    // The sum stays exact only while it is an exact integer double. A total past
+    // 9e6 USD is not a session, it is a bug, and it is dropped rather than
+    // silently losing precision from there on.
+    if (!Number.isSafeInteger(nanos) || !Number.isSafeInteger((totals.costNanoUsd ?? 0) + nanos)) {
+      console.warn(JSON.stringify({ audit: "pi-usage", event: "field-dropped", field: "cost.total", value: String(cost) }));
+    } else totals.costNanoUsd = (totals.costNanoUsd ?? 0) + nanos;
+  }
 };
 
 /** The totals as the FINAL_OUTPUT payload carries them: only fields PI actually
@@ -605,25 +623,36 @@ const piUsagePayload = (totals: PiUsageTotals): Record<string, unknown> => ({
   ...(totals.output === null ? {} : { output: totals.output }),
   ...(totals.cacheRead === null ? {} : { cacheRead: totals.cacheRead }),
   ...(totals.cacheWrite === null ? {} : { cacheWrite: totals.cacheWrite }),
-  ...(totals.costUsd === null ? {} : { costUsd: totals.costUsd }),
+  ...(totals.costNanoUsd === null ? {} : { costNanoUsd: totals.costNanoUsd }),
 });
 
 /**
- * Why a PI session's cost would be invisible, or null when it is not.
+ * Every way this session's cost ends up wrong or invisible, or an empty list.
  *
  * A session that reports nothing must not settle quietly: the columns stay NULL
  * either way, and NULL that nobody was told about reads exactly like a session
- * that cost nothing. A zero total counts as reporting nothing for the same
- * reason — PI emitted usage objects, but they say the session was free, which
- * for a session that ran a model is not a fact, it is a gap.
+ * that cost nothing. The partial cases are the dangerous ones, because they do
+ * not stay NULL — they store a real-looking number that is too small:
+ *
+ * - Fewer reporting messages than messages: the total is the reporting ones
+ *   alone, and nothing downstream can tell it is short.
+ * - A zero token or cost total: PI emitted usage objects that say the session
+ *   was free, which for a session that ran a model is not a fact, it is a gap.
+ *
+ * Absent reads as zero here on purpose. This is the diagnostic, not the
+ * ingest — a field PI never reported is precisely what the operator must hear
+ * about, and the columns themselves still keep absent and zero apart.
  */
-const piUsageGap = (totals: PiUsageTotals): string | null => {
-  if (totals.messages === 0) return "PI settled without ending a single assistant message";
-  if (totals.reported === 0) return `PI reported no usage on any of ${totals.messages} assistant message(s)`;
-  if ((totals.input ?? 0) + (totals.output ?? 0) === 0) {
-    return `PI reported usage on ${totals.reported} of ${totals.messages} assistant message(s) but no tokens`;
+const piUsageGaps = (totals: PiUsageTotals): string[] => {
+  if (totals.messages === 0) return ["PI settled without ending a single assistant message"];
+  if (totals.reported === 0) return [`PI reported no usage on any of ${totals.messages} assistant message(s)`];
+  const gaps: string[] = [];
+  if (totals.reported < totals.messages) {
+    gaps.push(`PI reported usage on only ${totals.reported} of ${totals.messages} assistant message(s)`);
   }
-  return null;
+  if ((totals.input ?? 0) + (totals.output ?? 0) === 0) gaps.push("PI reported no tokens");
+  if ((totals.costNanoUsd ?? 0) === 0) gaps.push("PI reported no cost");
+  return gaps;
 };
 
 const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
@@ -677,10 +706,11 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
     // attached here, under a name that says who computed them, because
     // FINAL_OUTPUT is the one event the usage ingest reads. The provider's own
     // untouched event is still on record: PROVIDER_RAW emitted it first.
-    const gap = piUsageGap(handle.piUsage);
-    if (gap) {
-      console.warn(JSON.stringify({ audit: "pi-usage", event: "unavailable", runId: handle.runId, reason: gap }));
-      emit(handle, sink, "ADAPTER_ERROR", { error: `Session cost will be unavailable: ${gap}`, ...piUsagePayload(handle.piUsage) });
+    const gaps = piUsageGaps(handle.piUsage);
+    if (gaps.length > 0) {
+      const reason = gaps.join("; ");
+      console.warn(JSON.stringify({ audit: "pi-usage", event: "incomplete", runId: handle.runId, reason }));
+      emit(handle, sink, "ADAPTER_ERROR", { error: `Session cost is incomplete: ${reason}`, ...piUsagePayload(handle.piUsage) });
     }
     emit(handle, sink, "FINAL_OUTPUT", handle.piUsage.reported === 0
       ? event

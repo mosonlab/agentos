@@ -796,7 +796,10 @@ const PI_EXPECTED = {
   output: 19 + 5,
   cacheRead: 3584,
   cacheWrite: 0,
-  costUsd: 0.0009468000000000001 + 0.00029128000000000004,
+  // Integer nano-USD, written out rather than summed as doubles: adding the two
+  // captured costs in JS gives 0.0012380800000000001, and the point of the
+  // integer transport is that the stored value does not depend on that error.
+  costNanoUsd: 1_238_080,
 };
 
 /** Drive the PI parser over a literal event stream: the stub reads the prompt
@@ -851,22 +854,76 @@ test("a PI session that reports no usage settles loudly instead of leaving silen
   assert.equal("agentosPiUsage" in payload, false);
   const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
   assert.equal(reported.length, 1);
-  assert.match(String(reported[0]!.payload.error), /cost will be unavailable.*no usage on any of 1/u);
+  assert.match(String(reported[0]!.payload.error), /cost is incomplete.*no usage on any of 1/u);
   assert.equal(reported[0]!.payload.messages, 1);
   assert.equal(reported[0]!.payload.reported, 0);
 });
 
-test("a PI session whose reported usage sums to zero tokens is a gap, not a free session", { timeout: 30_000 }, async () => {
+test("a PI session whose reported usage sums to zero is a gap, not a free session", { timeout: 30_000 }, async () => {
   const events = await piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } },
     { type: "agent_settled" },
   ]);
   assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
-    messages: 1, reported: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0,
+    messages: 1, reported: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costNanoUsd: 0,
   });
   const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
   assert.equal(reported.length, 1);
-  assert.match(String(reported[0]!.payload.error), /but no tokens/u);
+  assert.match(String(reported[0]!.payload.error), /no tokens; PI reported no cost/u);
+});
+
+test("real tokens with no cost is diagnosed rather than left as a silent null column", { timeout: 30_000 }, async () => {
+  // The dangerous half of a partial report: the token columns land, look
+  // healthy, and the cost column stays NULL with nothing saying why.
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 100, output: 10 } } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, { messages: 1, reported: 1, input: 100, output: 10 });
+  const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(reported.length, 1);
+  assert.match(String(reported[0]!.payload.error), /^Session cost is incomplete: PI reported no cost$/u);
+});
+
+test("a session only some of whose messages reported usage does not pass off a short total as whole", { timeout: 30_000 }, async () => {
+  // Without this the stored total is the reporting messages' alone, and nothing
+  // downstream can tell that it is short.
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 100, output: 10, cost: { total: 0.002 } } } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "no usage on this one" }] } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
+    messages: 2, reported: 1, input: 100, output: 10, costNanoUsd: 2_000_000,
+  });
+  const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(reported.length, 1);
+  assert.match(String(reported[0]!.payload.error), /usage on only 1 of 2 assistant message\(s\)/u);
+});
+
+test("PI costs are summed exactly, not through the binary addition the column would round away", { timeout: 30_000 }, async () => {
+  // usage.ts documents this exact pair: 0.000001 + 0.000049 as doubles lands
+  // just below the half-unit and rounds to 0.0000 instead of 0.0001.
+  assert.ok(0.000001 + 0.000049 < 0.00005, "the double sum must really fall short, or this proves nothing");
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.000001 } } } },
+    { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.000049 } } } },
+    { type: "agent_settled" },
+  ]);
+  assert.equal((finalOutputOf(events).agentosPiUsage as { costNanoUsd: number }).costNanoUsd, 50_000);
+});
+
+test("PI reasoning tokens are a breakdown of output and cacheWrite is cached input", { timeout: 30_000 }, async () => {
+  // output 29 / reasoning 22 is the real second capture; a nonzero cacheWrite is
+  // constructed, because neither capture produced one and the fold must still
+  // be exercised. Adding reasoning to output would give 51, not 29.
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 4627, output: 29, cacheRead: 100, cacheWrite: 200, reasoning: 22, cost: { total: 0.0009602 } } } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
+    messages: 1, reported: 1, input: 4627, output: 29, cacheRead: 100, cacheWrite: 200, costNanoUsd: 960_200,
+  });
 });
 
 test("one unusable PI usage field is dropped without taking its siblings with it", { timeout: 30_000 }, async () => {
@@ -877,7 +934,7 @@ test("one unusable PI usage field is dropped without taking its siblings with it
   ]);
   // input and cacheRead are rejected, so they stay ABSENT rather than becoming
   // zero; the user message is not an assistant turn and is never harvested.
-  assert.deepEqual(finalOutputOf(events).agentosPiUsage, { messages: 1, reported: 1, output: 7, costUsd: 0.5 });
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, { messages: 1, reported: 1, output: 7, costNanoUsd: 500_000_000 });
 });
 
 // A run's checkout may predate any given safety fix (chain and salvage runs
