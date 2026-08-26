@@ -33,8 +33,13 @@ export const AUTHORIZED_MERGE_METHOD = "merge";
  * the exact legacy-v1 identities below rather than accepting an index by
  * itself.
  */
-export const INTEGRATOR_STEP_INDEX = 13;
-export const DIRECT_INTEGRATOR_STEP_INDEX = 8;
+export const INTEGRATOR_STEP_INDEX = 12;
+export const DIRECT_INTEGRATOR_STEP_INDEX = 7;
+/** The regression-first thirteen-step graph put the integrator one node later; that ordinal is frozen with the renamed row. */
+export const LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX = 13;
+/** The adjudication-era graphs carried one extra node before the integrator; those ordinals are frozen with the renamed rows. */
+export const LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX = 13;
+export const LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX = 8;
 export const LEGACY_INTEGRATOR_STEP_INDEX = 12;
 export const LEGACY_DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
@@ -47,6 +52,8 @@ export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-leg
 export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
 export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-human-12-`;
 export const LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-regression-first-13-`;
+export const LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-pre-adjudication-`;
+export const LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-pre-adjudication-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 
@@ -82,7 +89,7 @@ const templateNameOf = (step: NonNullable<IntegratorStepShape>): string | null =
   step.taskTemplate?.name ?? step.taskTemplateName ?? null;
 
 /**
- * The canonical step-13 shape. All three facts are required: an outputKind alone
+ * The canonical integrator shape. All three facts are required: an outputKind alone
  * is client-influenceable through a doctored template, and a stepIndex alone
  * collides with any other template that happens to use the same step index.
  */
@@ -113,9 +120,15 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
     || (step.stepIndex === LEGACY_INTEGRATOR_STEP_INDEX
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === INTEGRATOR_STEP_INDEX
+    || (step.stepIndex === LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX) === true)
+    || (step.stepIndex === LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX) === true)
+    || (step.stepIndex === LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX) === true)
     || (step.stepIndex === 10
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);

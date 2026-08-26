@@ -5,14 +5,19 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
+  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
 } from "./merge-integrator.js";
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
-export const DIRECT_MERGE_READINESS_STEP_INDEX = 7;
-export const MERGE_READINESS_STEP_INDEX = 12;
+export const DIRECT_MERGE_READINESS_STEP_INDEX = 6;
+export const MERGE_READINESS_STEP_INDEX = 11;
 export const LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX = 6;
 export const LEGACY_MERGE_READINESS_STEP_INDEX = 11;
+/** The adjudication-era graphs carried one extra node, so their readiness sat one ordinal later. */
+export const LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX = 7;
+export const LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX = 12;
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
   regression: "mergeTail.regression",
@@ -189,7 +194,11 @@ export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean => 
   return (name === DIRECT_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === DIRECT_MERGE_READINESS_STEP_INDEX)
     || (name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === MERGE_READINESS_STEP_INDEX)
     || (name === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX)
-    || (name === LEGACY_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_MERGE_READINESS_STEP_INDEX);
+    || (name === LEGACY_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_MERGE_READINESS_STEP_INDEX)
+    || (name?.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX) === true
+      && step.stepIndex === LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX)
+    || (name?.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX) === true
+      && step.stepIndex === LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX);
 };
 
 const DEFENSE_EXACT = new Set([

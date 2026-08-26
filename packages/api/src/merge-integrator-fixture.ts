@@ -1,7 +1,7 @@
 /**
  * Shared fixture for the Merge Integrator v1.1 database tests.
  *
- * The default shape models the canonical thirteen-step Full Assurance tail.
+ * The default shape models the canonical Full Assurance tail.
  * Tests that need legacy or production topology opt into the exact named
  * shape; the server-owned readiness row sits between the nearest
  * session-bearing source and the integrator. Both are load-bearing:
@@ -35,10 +35,9 @@ const unique = (label: string): string => {
 export type IntegratorChain = Awaited<ReturnType<typeof seedIntegratorChain>>;
 
 type IntegratorFixtureShape =
-  | "thirteen-step"
-  | "thirteen-step-readiness"
-  | "canonical-eight-step-direct"
-  | "eight-step-direct"
+  | "canonical-compound"
+  | "canonical-compound-readiness"
+  | "canonical-direct"
   | "twelve-step"
   | "twelve-step-readiness"
   | "legacy-seven-step-direct";
@@ -55,11 +54,13 @@ export const seedIntegratorChain = async (
   const label = options.label ?? "mi";
   // The fixture's default represents the current canonical graph. The
   // twelve-/seven-step variants intentionally model rows preserved under the
-  // exact legacy-v1 names so old tail behavior can still be exercised.
-  const shape = options.shape ?? "thirteen-step";
-  const direct = shape === "canonical-eight-step-direct" || shape === "eight-step-direct" || shape === "legacy-seven-step-direct";
+  // exact legacy-v1 names so old tail behavior can still be exercised. Step
+  // indexes come from the shared constants, so the canonical shapes follow the
+  // graph without carrying its node count in their names.
+  const shape = options.shape ?? "canonical-compound";
+  const direct = shape === "canonical-direct" || shape === "legacy-seven-step-direct";
   const legacy = shape === "twelve-step" || shape === "twelve-step-readiness" || shape === "legacy-seven-step-direct";
-  const realReadinessTail = direct || shape === "thirteen-step-readiness" || shape === "twelve-step-readiness";
+  const realReadinessTail = direct || shape === "canonical-compound-readiness" || shape === "twelve-step-readiness";
   const integratorIndex = direct
     ? (legacy ? LEGACY_DIRECT_INTEGRATOR_STEP_INDEX : DIRECT_INTEGRATOR_STEP_INDEX)
     : (legacy ? LEGACY_INTEGRATOR_STEP_INDEX : INTEGRATOR_STEP_INDEX);
@@ -91,8 +92,8 @@ export const seedIntegratorChain = async (
     projectId: project.id,
     name: templateName,
     description: direct
-      ? (legacy ? "Legacy seven-step Direct workflow" : "Canonical eight-step Direct workflow")
-      : (legacy ? "Legacy twelve-step Full Assurance workflow" : "Canonical thirteen-step Full Assurance workflow"),
+      ? (legacy ? "Legacy seven-step Direct workflow" : "Canonical Direct workflow")
+      : (legacy ? "Legacy twelve-step Full Assurance workflow" : "Canonical Full Assurance workflow"),
     variables: [],
   } });
   const gateStep = await db.taskTemplateStep.create({ data: {

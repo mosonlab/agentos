@@ -297,20 +297,20 @@ test("integrator and pinned compound implementation bindings are checked after o
   }
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "compound-engineer-workflow", description: "canonical fixture", variables: [],
-    steps: { create: Array.from({ length: 13 }, (_, offset) => {
+    steps: { create: Array.from({ length: 12 }, (_, offset) => {
       const stepIndex = offset + 1;
       return {
         stepIndex, layer: stepIndex, name: `Step ${stepIndex}`,
         assigneeType: AssigneeType.AGENT,
-        assigneeAgentId: stepIndex === 5 ? executioner.id : stepIndex === 13 ? sentinel.id : seed.canonicalOne.id,
-        prompt: `step ${stepIndex} {{chainId}}`, outputKind: stepIndex === 5 ? "implementation" : stepIndex === 13 ? "merge-result" : "result",
-        opensPullRequest: stepIndex !== 13,
+        assigneeAgentId: stepIndex === 5 ? executioner.id : stepIndex === 12 ? sentinel.id : seed.canonicalOne.id,
+        prompt: `step ${stepIndex} {{chainId}}`, outputKind: stepIndex === 5 ? "implementation" : stepIndex === 12 ? "merge-result" : "result",
+        opensPullRequest: stepIndex !== 12,
       };
     }) },
   } });
   for (const [stepOverrides, code] of [
     [{ "1": { assigneeAgentId: sentinel.id } }, "step_override_integrator_binding"],
-    [{ "13": { assigneeAgentId: seed.replacement.id } }, "step_override_integrator_binding"],
+    [{ "12": { assigneeAgentId: seed.replacement.id } }, "step_override_integrator_binding"],
     [{ "5": { assigneeAgentId: seed.replacement.id } }, "step_override_compound_implementation"],
   ] as const) {
     const result = await request(seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, stepOverrides });
