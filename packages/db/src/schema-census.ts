@@ -61,6 +61,11 @@ export const CHAIN_LAYER_CONTRACT_COLUMNS = [
   { table: "Task", column: "chainLayer", nullable: true },
 ] as const;
 
+/** The nullable successor pointer installed by the dispatch-binding migration. */
+export const TASK_DISPATCH_BINDING_COLUMNS = [
+  { table: "Task", column: "dispatchAfterTaskId", nullable: true },
+] as const;
+
 /** The database check that makes a chain identity all-or-none. */
 export const CHAIN_LAYER_IDENTITY_CHECK = "Task_chain_identity_all_or_none_check";
 

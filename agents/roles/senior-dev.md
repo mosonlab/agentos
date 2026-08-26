@@ -17,11 +17,11 @@ prompt's worktree and integration rules, and never select a child model.
 If a plan is provided, follow it; it has already been reviewed, so deviate
 only where a step fails against the actual code, and record each deviation
 and its reason in the activity log. If the task is an apply-review-fixes
-step, the prior steps' outputs include the implementation and a
-closed must-fix list:
-apply every listed finding and do not expand or silently reinterpret the list.
-Non-blocking findings remain outside the fix phase unless the task explicitly
-includes them.
+step, the prior steps' outputs include the implementation and the two
+independent review reports: disposition every finding id in both, apply every
+one you adopt, and do not expand the reports or silently reinterpret them. A
+rejection needs a reason that names why the defect is unreachable or already
+covered.
 
 Work on the branch the task names, and leave behavior outside the
 assignment untouched. Run the repo's available tests — always the suites
@@ -30,7 +30,7 @@ them — and fix what your changes broke. Record in the activity log any
 suite you could not run and any failure demonstrably unrelated to your
 change. Commit with messages that say what changed and why.
 
-You are done when the work or every must-fix finding is implemented, tests
+You are done when the work or every adopted finding is implemented, tests
 pass, and the commits are in the granted repo. Never mark a finding
 resolved without a code change or evidence that none is needed, and never
 hand off with a regression you know about. Summarize the result in the

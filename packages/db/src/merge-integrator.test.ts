@@ -16,6 +16,9 @@ import {
   LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_INTEGRATOR_STEP_INDEX,
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX,
+  LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX,
+  LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   STOP_CHOICES,
@@ -46,6 +49,7 @@ import {
   serializeEvidence,
   serializeMergeResult,
 } from "./merge-integrator.js";
+import { legacyAdjudicationTemplateName } from "./canonical-template-transition.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -304,12 +308,12 @@ test("canonical integrator bindings use the new graph and exact legacy-v1 names 
     assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step), true);
   }
   assert.equal(isIntegratorStep({
-    stepIndex: 12,
+    stepIndex: LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX,
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME },
   }), false);
   assert.equal(isIntegratorStep({
-    stepIndex: 7,
+    stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX,
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME },
   }), false);
@@ -354,15 +358,28 @@ test("historical human-gate rollover remains bound to its old step 12", () => {
     taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
   }), true);
   assert.equal(isIntegratorStep({
-    stepIndex: INTEGRATOR_STEP_INDEX,
+    stepIndex: LEGACY_INTEGRATOR_STEP_INDEX + 1,
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
   }), false);
 });
 
+test("an adjudication-era rollover keeps merge execution mechanical at its own ordinal", () => {
+  for (const shape of [
+    { stepIndex: LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX, name: legacyAdjudicationTemplateName(INTEGRATOR_TEMPLATE_NAME, "template-old") },
+    { stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX, name: legacyAdjudicationTemplateName(DIRECT_INTEGRATOR_TEMPLATE_NAME, "template-old") },
+  ]) {
+    const legacy = { stepIndex: shape.stepIndex, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: shape.name } };
+    assert.equal(isIntegratorStep(legacy), true, shape.name);
+    assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
+    assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
+    assert.equal(isIntegratorStep({ ...legacy, stepIndex: shape.stepIndex - 1 }), false);
+  }
+});
+
 test("a regression-first thirteen-step rollover keeps its merge execution mechanical", () => {
   const legacy = {
-    stepIndex: INTEGRATOR_STEP_INDEX,
+    stepIndex: LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX,
     outputKind: INTEGRATOR_OUTPUT_KIND,
     taskTemplate: { name: legacyRegressionFirstThirteenStepTemplateName("template-old") },
   };

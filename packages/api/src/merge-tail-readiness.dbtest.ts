@@ -101,17 +101,17 @@ const seedReadiness = async () => {
   } });
   const [regressionStep, readinessStep, integratorStep] = await Promise.all([
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 6, layer: 6, name: "Regression", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 5, layer: 5, name: "Regression", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: regressionAgent.id, prompt: "verify", approvalGate: false,
       outputKind: "regression-verification", opensPullRequest: false,
     } }),
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 7, layer: 7, name: "Readiness", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 6, layer: 6, name: "Readiness", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: reviewAgent.id, prompt: "mechanical", approvalGate: false,
       outputKind: "merge-authorization", opensPullRequest: false,
     } }),
     db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 8, layer: 8, name: "Merge", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: 7, layer: 7, name: "Merge", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: integratorAgent.id, prompt: "merge", approvalGate: false,
       outputKind: "merge-result", opensPullRequest: false,
     } }),
@@ -120,17 +120,17 @@ const seedReadiness = async () => {
   const regression = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: regressionStep.id,
     name: "Regression", description: "verify", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: regressionAgent.id, status: TaskStatus.DONE, chainId, chainIndex: 6, chainLayer: 6, targetBranch: "main",
+    assigneeAgentId: regressionAgent.id, status: TaskStatus.DONE, chainId, chainIndex: 5, chainLayer: 5, targetBranch: "main",
   } });
   const readiness = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: readinessStep.id,
     name: "Readiness", description: "authorize", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: reviewAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 7, chainLayer: 7, targetBranch: "main",
+    assigneeAgentId: reviewAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 6, chainLayer: 6, targetBranch: "main",
   } });
   const integrator = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: integratorStep.id,
     name: "Merge", description: "merge", assigneeType: AssigneeType.AGENT,
-    assigneeAgentId: integratorAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 8, chainLayer: 8,
+    assigneeAgentId: integratorAgent.id, status: TaskStatus.TODO, chainId, chainIndex: 7, chainLayer: 7,
     targetBranch: "main", opensPullRequest: false,
   } });
   const run = await db.run.create({ data: {

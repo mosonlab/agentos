@@ -69,23 +69,19 @@ test("the extracted loader still reads the whole contract the internal seed cons
   );
 });
 
-test("the loader exposes the blind and fresh adjudication review roles exactly once", async () => {
+test("the loader exposes the two independent review roles exactly once", async () => {
   const sources = await loadAgentSources();
   const reviewRoles = sources.roles.filter(({ name }) => (
     name === "review-coordinator-sol"
     || name === "review-coordinator-opus"
-    || name === "review-adjudicator-opus"
   ));
   assert.deepEqual(reviewRoles.map(({ name }) => name).sort(), [
-    "review-adjudicator-opus",
     "review-coordinator-opus",
     "review-coordinator-sol",
   ]);
-  assert.equal(reviewRoles.filter(({ name }) => name === "review-adjudicator-opus").length, 1);
-  const adjudicator = reviewRoles.find(({ name }) => name === "review-adjudicator-opus");
-  assert.ok(adjudicator);
-  assert.equal(adjudicator.model, "claude-opus-5:high");
-  assert.equal(adjudicator.runnerPreference, RunnerPreference.CLAUDE);
-  assert.match(adjudicator.rolePrompt, /fresh provider Session/u);
-  assert.match(adjudicator.rolePrompt, /immutable `implementationBaseSha` and `implementationHeadSha`\s+values/u);
+  // The adjudication role is archived: the fix step dispositions both reports itself.
+  assert.equal(sources.roles.some(({ name }) => name === "review-adjudicator-opus"), false);
+  const blind = reviewRoles.find(({ name }) => name === "review-coordinator-opus");
+  assert.ok(blind);
+  assert.equal(blind.runnerPreference, RunnerPreference.CLAUDE);
 });

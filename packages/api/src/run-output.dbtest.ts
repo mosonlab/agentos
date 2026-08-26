@@ -366,7 +366,7 @@ test("every authored Regression stop verdict releases its chain lease", async ()
       chained: true,
       outputKind: "regression-verification",
       templateName: DIRECT_TEMPLATE_NAME,
-      stepIndex: 6,
+      stepIndex: 5,
     });
     const runId = await enqueue(task.id);
     const { run, sessionToken, fencingToken } = await claimRun(runId, `runner-${verdict.outcome}`);
@@ -393,7 +393,7 @@ test("a canonical Regression output refusal releases its chain lease", async () 
     chained: true,
     outputKind: "regression-verification",
     templateName: DIRECT_TEMPLATE_NAME,
-    stepIndex: 6,
+    stepIndex: 5,
   });
   const runId = await enqueue(task.id);
   const { run, fencingToken } = await claimRun(runId, "runner-canonical-refusal");

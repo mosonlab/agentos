@@ -15,13 +15,13 @@ import { BOARD_PAGE, ChainFilterControl, TasksPage, archiveDoneNotice, moveActio
 import type { BoardTask, ChainProgress, TaskStatus } from "../lib/types";
 import { installDom, reactDom } from "./dom-harness";
 
-const en = (key: string): string => translate("en", key);
+const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
-  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null, taskCost: null,
+  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
   ...overrides,
 });
 
@@ -237,6 +237,26 @@ test("cards in one chain render their own positions and never the active-step na
   assert.match(fourth, /layer 2\/7/);
   assert.doesNotMatch(first + fourth, /Implementation · doing/);
   assert.doesNotMatch(card(), /·/);
+});
+
+test("a bound board card names its unresolved predecessor without adding a board column", () => {
+  const markup = card({
+    chainId: "c1", chainName: "Release", chainProgress: progress({ position: 1 }),
+    blockedOn: { taskId: "a13", taskName: "Merge release" },
+  });
+  assert.match(markup, new RegExp(en("tasks.card.blockedOn", { name: "Merge release" })));
+  assert.match(markup, /data-card-blocked-on=""/);
+  assert.match(markup, /step 1\/9/);
+  assert.equal((markup.match(/data-card-blocked-on=/gu) ?? []).length, 1);
+});
+
+test("an unbound board card keeps the existing meta rendering", () => {
+  const markup = card({
+    chainId: "c1", chainName: "Release", chainProgress: progress({ position: 1 }), blockedOn: null,
+  });
+  assert.doesNotMatch(markup, /data-card-blocked-on=/);
+  assert.doesNotMatch(markup, /Blocked on:/);
+  assert.match(markup, /step 1\/9/);
 });
 
 test("chain badges filter to one chain, can be cleared, and titles drop the shared prefix", () => {

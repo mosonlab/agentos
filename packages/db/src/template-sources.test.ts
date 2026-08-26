@@ -44,19 +44,27 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
   const full = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);
 
-  assert.equal(direct.length, 8);
-  assert.deepEqual(direct.map(({ layer }) => layer), [1, 2, 2, 3, 4, 5, 6, 7]);
-  assert.equal(full.length, 13);
-  assert.deepEqual(full.map(({ layer }) => layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11, 12]);
+  assert.equal(direct.length, 7);
+  assert.deepEqual(direct.map(({ layer }) => layer), [1, 2, 2, 3, 4, 5, 6]);
+  assert.equal(full.length, 12);
+  assert.deepEqual(full.map(({ layer }) => layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
   for (const templateName of [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME]) {
     assert.equal(
       (await readdir(join(templatesRoot, templateName))).some((filename) => filename.includes("code-review-and-adjudication")),
       false,
     );
   }
-  assert.equal(direct.some(({ agentName }) => agentName === "review-adjudicator-opus"), true);
-  assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), true);
+  // The fix step now dispositions both review reports itself; no canonical step binds the adjudicator.
+  assert.equal(direct.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
+  assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   for (const steps of [direct, full]) {
+    // The contract the removed adjudication node used to carry, now on the step that replaced it.
+    const fix = steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
+    assert.match(fix.prompt, /`sol-findings` and `blind-findings`/u);
+    assert.match(fix.prompt, /No adjudication step stands between the reviews and this one/u);
+    assert.match(fix.prompt, /exactly one disposition per finding id/u);
+    assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
+    assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
     const regression = steps.find(({ outputKind }) => outputKind === "regression-verification")!;
     assert.match(regression.prompt, /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
     assert.match(regression.prompt, /retry it up to three times/u);
@@ -92,7 +100,7 @@ test("source layers must be non-decreasing and bases must cross to a lower layer
 test("only the exact canonical graphs may contain a multi-node layer", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-opus-adjudication.md", (source) => source.replace("layer: 3\n", "layer: 2\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-apply-review-fixes.md", (source) => source.replace("layer: 3\n", "layer: 2\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /multi-node layer outside the exact canonical graph/u),
   );
 });

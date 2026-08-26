@@ -294,7 +294,7 @@ test("Codex provision auth failure is PROVISION, retains its root, and never spa
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-provision-failure" },
+      session: testSession(root),
     }, { adapter });
     assert.equal(preflightCalls, 0);
     assert.equal(startCalls, 0);
@@ -339,7 +339,7 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-baseline-failure" },
+      session: testSession(root),
     }, { adapter });
     assert.equal(preflightCalls, 0);
     assert.equal(startCalls, 0);
@@ -734,7 +734,7 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-claim" },
+      session: testSession(root),
     });
 
     const started = posts.find((post) => post.path.endsWith("/start"));
@@ -811,7 +811,7 @@ test("a suspended PI claim retains the session config root for reuse", async () 
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "openai-codex/gpt-5.1-codex-max" },
       run: { ...mechanicalClaim.run, model: "openai-codex/gpt-5.1-codex-max", maxRunsPerTask: 3 },
-      session: { id: "session-pi-waiting-inbox" },
+      session: testSession(root),
     }, {
       provisionSessionConfig: async (runnerConfig, runner, provisionedScratch, options) => {
         observed.scratch = provisionedScratch;
@@ -851,7 +851,7 @@ test("session-config cleanup failure does not turn delivered work into a failed 
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-cleanup-failure" },
+      session: testSession(root),
     }, {
       cleanupAgentScratch: async (runnerConfig, scratch) => {
         await cleanupAgentScratch(runnerConfig, scratch, { retainConfigRoot: true });
@@ -1389,7 +1389,7 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-secret" },
+      session: testSession(root),
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
     assert.equal(completion.body.terminalSuccess, false);
@@ -1436,7 +1436,7 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-      session: { id: "session-codex-absent" },
+      session: testSession(root),
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
     assert.equal(completion.body.failureClass, "BINARY_NOT_FOUND");
