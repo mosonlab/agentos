@@ -34,6 +34,8 @@ export type RunnerConfig = {
   workspaceRoot: string;
   /** Runner-owned, write-once dependency snapshots. Defaults beside workspaceRoot. */
   dependencyCacheRoot?: string;
+  /** Runner-owned persistent bare mirrors. Defaults beside workspaceRoot. */
+  repoMirrorRoot?: string;
   failedWorkspaceRetention: number;
   workspaceReclaimIntervalMs: number;
   toolDeadlineMs: number;
@@ -104,6 +106,10 @@ export const loadRunnerConfig = (): RunnerConfig => {
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,
     dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
+    // One bare mirror per remote, per machine. Provisioning clones every
+    // workspace out of it and only ever fetches incrementally from GitHub; see
+    // repo-mirror.ts for why a full clone per run had to go.
+    repoMirrorRoot: process.env.RUNNER_REPO_MIRROR_ROOT ?? join(dirname(workspaceRoot), "repo-mirrors"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     // How often this runner asks the control plane which of its directories may
     // be reclaimed (issue #115). Workspace disposal is not urgent — the runner

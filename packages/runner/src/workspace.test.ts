@@ -7,7 +7,7 @@ import test from "node:test";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { CLONE_COMMAND_TIMEOUT_MS, NETWORK_COMMAND_TIMEOUT_MS } from "./network-retry.js";
+import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import {
   cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
@@ -173,9 +173,10 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
   }
 });
 
-test("workspace clone retries two transient failures and succeeds on the third attempt", async () => {
+test("the mirror fetch retries two transient failures and succeeds on the third attempt", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-retry-"));
   try {
+    let fetchCalls = 0;
     let cloneCalls = 0;
     const config = {
       workspaceRoot: join(root, "workspaces"),
@@ -189,22 +190,38 @@ test("workspace clone retries two transient failures and succeeds on the third a
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     } as ClaimedTask;
     const fake = async (_config: RunnerConfig, executable: string, args: string[]): Promise<string> => {
-      if (executable === "git" && args[0] === "clone") {
-        cloneCalls += 1;
-        if (cloneCalls < 3) throw new Error("fatal: unable to access remote: ECONNRESET");
+      if (executable === "git" && args[0] === "fetch") {
+        fetchCalls += 1;
+        if (fetchCalls < 3) throw new Error("fatal: unable to access remote: ECONNRESET");
       }
+      if (executable === "git" && args[0] === "clone") cloneCalls += 1;
+      if (executable === "git" && args[0] === "for-each-ref") return args[2] ?? "";
       if (executable === "git" && args[0] === "rev-parse") return "base-sha";
       return "";
     };
     const workspace = await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
-    assert.equal(cloneCalls, 3);
+    // The retried operation is now the mirror's fetch. The clone that follows
+    // reads local disk, so retrying it would only repeat a failure that no
+    // amount of waiting can change.
+    assert.equal(fetchCalls, 3);
+    assert.equal(cloneCalls, 1);
     assert.equal(workspace.baseSha, "base-sha");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("cloning carries a per-command ceiling while local git commands stay uncapped", async () => {
+type RecordedCommand = { args: string[]; cwd: string; timeoutMs: number | undefined };
+
+const recordingExecutor = (
+  calls: RecordedCommand[],
+  answer: (args: string[]) => string,
+): WorkspaceCommandExecutor => async (_config, _executable, args, cwd, _env, options) => {
+  calls.push({ args, cwd, timeoutMs: options?.timeoutMs });
+  return answer(args);
+};
+
+test("the mirror's remote fetch carries a per-command ceiling while local git commands stay uncapped", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-timeout-"));
   try {
     const config = {
@@ -218,29 +235,42 @@ test("cloning carries a per-command ceiling while local git commands stay uncapp
       repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
       run: { id: "run-timeout", runNumber: 1, targetBranch: "main", branch: "agentos/task-timeout/run-1" },
     } as ClaimedTask;
-    const ceilings = new Map<string, number | undefined>();
-    const fake: WorkspaceCommandExecutor = async (_config, executable, args, _cwd, _env, options) => {
-      ceilings.set(`${executable} ${args[0]}`, options?.timeoutMs);
-      // Exit 2 from ls-remote: the intended head is not published yet.
-      if (args[0] === "ls-remote") throw new Error("git failed (2): ");
+    const calls: RecordedCommand[] = [];
+    // Only main is published: the intended head's probe finds nothing, exactly
+    // as the `ls-remote` round trip it replaced used to report.
+    const fake = recordingExecutor(calls, (args) => {
+      if (args[0] === "for-each-ref") return args[2] === "refs/heads/main" ? "refs/heads/main" : "";
       if (args[0] === "rev-parse") return "base-sha";
       return "";
-    };
+    });
     await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
-    // Nothing bounds a hung clone before the agent starts, so the two commands
-    // that talk to a remote are capped — the clone generously, because a large
-    // repo is slow rather than hung and provisioning heartbeats cover slow.
-    assert.equal(ceilings.get("git ls-remote"), NETWORK_COMMAND_TIMEOUT_MS);
-    assert.equal(ceilings.get("git clone"), CLONE_COMMAND_TIMEOUT_MS);
-    // ...while checkout of a huge tree is slow, not hung, and stays uncapped.
-    assert.equal(ceilings.get("git rev-parse"), undefined);
-    assert.equal(ceilings.get("git switch"), undefined);
+    const ceiling = (name: string): number | undefined => calls.find(({ args }) => args[0] === name)?.timeoutMs;
+    // The only command still talking to GitHub is the mirror's fetch, and a
+    // hung one is what nothing else bounds before the agent starts.
+    assert.equal(ceiling("fetch"), CLONE_COMMAND_TIMEOUT_MS);
+    // The clone now reads local disk. Capping it would kill a working run on a
+    // large repository to protect against a network that is no longer in play.
+    assert.equal(ceiling("clone"), undefined);
+    assert.equal(ceiling("for-each-ref"), undefined);
+    assert.equal(ceiling("rev-parse"), undefined);
+    assert.equal(ceiling("switch"), undefined);
+    const clone = calls.find(({ args }) => args[0] === "clone");
+    // macOS resolves the temp root through /var -> /private/var; the mirror
+    // root is realpath'd before anything is created under it.
+    const mirrors = join(await realpath(root), "repo-mirrors");
+    assert.equal(clone?.args.at(-2)?.startsWith(mirrors), true, "the clone source must be the mirror");
+    // Delivery pushes to origin: the mirror must not survive as the run's
+    // publication target.
+    assert.deepEqual(
+      calls.find(({ args }) => args[0] === "remote" && args[1] === "set-url")?.args,
+      ["remote", "set-url", "origin", "https://github.com/acme/app.git"],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("the pinned-range fetch carries the clone ceiling, not the incremental-fetch one", async () => {
+test("the pinned range is fetched out of the mirror, and only the mirror's own fetch is capped", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-pinned-timeout-"));
   try {
     const config = {
@@ -262,18 +292,23 @@ test("the pinned-range fetch carries the clone ceiling, not the incremental-fetc
         implementationHeadSha: "pinned-sha",
       },
     } as ClaimedTask;
-    const ceilings = new Map<string, number | undefined>();
-    const fake: WorkspaceCommandExecutor = async (_config, executable, args, _cwd, _env, options) => {
-      ceilings.set(`${executable} ${args[0]}`, options?.timeoutMs);
+    const calls: RecordedCommand[] = [];
+    const fake = recordingExecutor(calls, (args) => {
+      if (args[0] === "cat-file") return "impl-base-sha commit\npinned-sha commit";
       if (args[0] === "rev-parse") return "pinned-sha";
       return "";
-    };
+    });
     await provisionWorkspace(config, claim, fake, { wait: async () => undefined });
-    // Into an empty object database this fetch transfers a clone's worth of
-    // history, so it must get the clone profile a slow link needs.
-    assert.equal(ceilings.get("git fetch"), CLONE_COMMAND_TIMEOUT_MS);
-    assert.equal(ceilings.get("git init"), undefined);
-    assert.equal(ceilings.get("git checkout"), undefined);
+    const remoteFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("origin"));
+    const rangeFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("pinned-sha"));
+    assert.equal(remoteFetch?.timeoutMs, CLONE_COMMAND_TIMEOUT_MS);
+    // Both endpoints were already in the mirror, so the range is assembled from
+    // local disk: slow on a long history, but it cannot hang.
+    assert.equal(rangeFetch?.timeoutMs, undefined);
+    assert.equal(rangeFetch?.args[2]?.startsWith(join(await realpath(root), "repo-mirrors")), true);
+    assert.equal(calls.some(({ args }) => args[0] === "clone"), false);
+    assert.equal(calls.find(({ args }) => args[0] === "init" && args.length === 1)?.timeoutMs, undefined);
+    assert.equal(calls.find(({ args }) => args[0] === "checkout")?.timeoutMs, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
