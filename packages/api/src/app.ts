@@ -109,7 +109,7 @@ import { authenticate, issueSessionToken, principalMayAccess, type Principal } f
 import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
-import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
+import { FAILURE_REASON_LIMIT, failureReasonText, truncateFailureReason } from "./failure-reason.js";
 import {
   canonicalOutputRefusal,
   isCanonicalAdjudicationStep,
@@ -6247,7 +6247,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             const reviewOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
             const parsedReview = parseIndependentReviewDecision(reviewOutput?.body, reviewHeadSha);
             const reviewSessionId = run.session.id;
-            const stopTail = async (reason: string): Promise<void> => {
+            // A finding's own text reaches these reasons, so every one of them
+            // is bounded exactly where a client-supplied reason would be.
+            const stopTail = async (unbounded: string): Promise<void> => {
+              const reason = truncateFailureReason(unbounded, FAILURE_REASON_LIMIT);
               await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
               await tx.task.update({ where: { id: regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
               await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: reviewSessionId, reason });
@@ -6325,7 +6328,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                   blockingRound: round,
                 },
               } });
-              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: `independent review rejected: ${summary}` } });
+              await tx.task.update({ where: { id: run.taskId }, data: {
+                status: TaskStatus.DONE,
+                failureReason: truncateFailureReason(`independent review rejected: ${summary}`, FAILURE_REASON_LIMIT),
+              } });
               const driftRecovery = await baseDriftRecoveryContext(
                 tx,
                 regressionTaskId,
