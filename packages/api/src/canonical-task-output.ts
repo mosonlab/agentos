@@ -4,6 +4,8 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
+  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   lockTaskRow,
   Prisma,
   RunStatus,
@@ -58,6 +60,9 @@ export const DIRECT_CANONICAL_AGENT_STEP_LAST = 5;
 export const FULL_CANONICAL_AGENT_STEP_LAST = 10;
 export const DIRECT_LEGACY_AGENT_STEP_LAST = 5;
 export const FULL_LEGACY_AGENT_STEP_LAST = 10;
+/** The adjudication-era graphs carried one more agent node before readiness. */
+export const DIRECT_PRE_ADJUDICATION_AGENT_STEP_LAST = 6;
+export const FULL_PRE_ADJUDICATION_AGENT_STEP_LAST = 11;
 
 export const DIRECT_BLIND_REVIEW_STEP_INDEX = 3;
 export const FULL_BLIND_REVIEW_STEP_INDEX = 7;
@@ -88,6 +93,12 @@ export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefin
   }
   if (step.taskTemplate.name === LEGACY_INTEGRATOR_TEMPLATE_NAME) {
     return step.stepIndex >= 1 && step.stepIndex <= FULL_LEGACY_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX)) {
+    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_PRE_ADJUDICATION_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_PRE_ADJUDICATION_AGENT_STEP_LAST;
   }
   return false;
 };
@@ -322,7 +333,13 @@ const fixedImplementationPersistenceRefusal = async (
         outputKind: true,
         taskTemplate: { select: { name: true } },
       } },
-      stepOutput: { select: { kind: true, body: true, commitSha: true } },
+      stepOutput: { select: {
+        kind: true,
+        body: true,
+        commitSha: true,
+        runId: true,
+        run: { select: { taskId: true, status: true } },
+      } },
     },
   });
   const reports: ReviewArtifact[] = [];
@@ -336,6 +353,9 @@ const fixedImplementationPersistenceRefusal = async (
       return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
     }
     const output = matches[0]!.stepOutput!;
+    if (output.runId === null || output.run?.taskId !== matches[0]!.id || output.run.status !== RunStatus.SUCCEEDED) {
+      return `fixed-implementation ${kind} sibling output is not backed by a successful completed Run`;
+    }
     let reportValue: unknown;
     try {
       reportValue = JSON.parse(output.body);

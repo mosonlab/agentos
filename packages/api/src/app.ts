@@ -97,6 +97,7 @@ import {
   parseIndependentReviewDecision,
   parseRegressionVerdict,
   parseResolverResult,
+  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   type IndependentReviewFinding,
   type MergeRecoveryAttempt,
 } from "@agentos/db";
@@ -194,6 +195,10 @@ class PinnedRunTargetError extends Error {
     this.name = "PinnedRunTargetError";
   }
 }
+
+/** Full Assurance regression and the documentation node a repair must reopen. */
+const FULL_REPAIR_DOCUMENTATION_ORDINALS = { regression: 10, documentation: 9 } as const;
+const LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS = { regression: 11, documentation: 10 } as const;
 
 type CandidateActivationFailure = PinnedBaseCommitError | PinnedRunTargetError;
 
@@ -5855,18 +5860,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
           })
         : null;
+      // The ordinals are the Full Assurance graph's, and the renamed
+      // adjudication-era rows keep the ones they were created under: a repair
+      // that lands on a chain from either graph still has to put its
+      // documentation node back.
+      const repairDocumentationOrdinals = repairRegression?.templateStep?.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
+        ? FULL_REPAIR_DOCUMENTATION_ORDINALS
+        : repairRegression?.templateStep?.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)
+          ? LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS
+          : null;
       const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
-        && repairRegression.chainIndex === 11
-        && repairRegression.templateStep?.stepIndex === 11
-        && repairRegression.templateStep.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
+        && repairDocumentationOrdinals
+        && repairRegression.chainIndex === repairDocumentationOrdinals.regression
+        && repairRegression.templateStep?.stepIndex === repairDocumentationOrdinals.regression
         ? await tx.task.findFirst({
             where: {
               projectId: repairRegression.projectId,
               chainId: repairRegression.chainId,
               templateId: repairRegression.templateId,
-              chainIndex: 10,
+              chainIndex: repairDocumentationOrdinals.documentation,
               archivedAt: null,
-              templateStep: { stepIndex: 10, outputKind: "documentation" },
+              templateStep: { stepIndex: repairDocumentationOrdinals.documentation, outputKind: "documentation" },
             },
             orderBy: { chainIndex: "desc" },
             select: { id: true },

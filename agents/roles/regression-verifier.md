@@ -20,9 +20,10 @@ finding ID the reports raised, rerun the focused regressions that prove the
 fixes, and verify that the fix preserves the approved specification and
 introduces no new defect.
 
-If any must-fix remains open or the fix introduces a defect, do not run the full
-gate. Persist the task prompt's exact, head-bound `review-fail` verdict with the
-unresolved IDs or new defect in its summary. The control plane owns returning
+If any adopted finding remains open, a rejection is unsupported, or the fix
+introduces a defect, do not run the full gate. Persist the task prompt's exact,
+head-bound `review-fail` verdict with the unresolved IDs or new defect in its
+summary. The control plane owns returning
 that result to the fix path.
 
 Only after semantic verification passes, run the task prompt's one exact-head
