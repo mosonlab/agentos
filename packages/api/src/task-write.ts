@@ -1,8 +1,10 @@
 import {
+  ACTIVE_RUN_STATUSES,
   AssigneeType,
   compoundImplementationAssigneeValid,
   CompoundImplementationAssigneeError,
   isCompoundImplementationStep,
+  LIVE_TASK_STATUSES,
   lockAgentRow,
   lockChainRows,
   Prisma,
@@ -237,4 +239,51 @@ export const writeTask = async <T>(
     chainLocked: locked.chainId !== null,
     value: plan.value,
   };
+};
+
+/** Live means exactly what blocks an agent's archival: the same
+ *  `LIVE_TASK_STATUSES` `agentArchiveBlocker` reads, so the two halves of the
+ *  protocol cannot drift into disagreeing about which tasks count. Everything
+ *  else — DONE and BACKLOG — is history or a parking bay, which is why moving
+ *  out of it is the moment the assignee has to be re-validated. */
+export const isLiveStatus = (status: TaskStatus): boolean => LIVE_TASK_STATUSES.includes(status);
+
+export const hasActiveRun = async (tx: Prisma.TransactionClient, taskId: string): Promise<boolean> => (
+  await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } })
+) > 0;
+
+/**
+ * The reactivation half of the same protocol: the message if this *stored*
+ * assignee may not own a live task right now, or null.
+ *
+ * `assignmentBlocked` only ever sees an assignee the request named, so a
+ * request that carries no `assigneeAgentId` — a status-only promotion out of
+ * Backlog, an unarchive — used to skip the Agent row entirely and hand a live
+ * task back to an archived agent. The runner claims only unarchived TODO|DOING
+ * tasks whose agent is unarchived, so that task is not "assigned": it is stuck,
+ * on a board that shows it as work in progress.
+ *
+ * Called with the Task row already locked, so the order stays the one global
+ * order: Task row first, Agent row second. The name is read outside the Agent
+ * lock because it only decorates the message; `lockAgentRow` is what decides.
+ */
+export const reactivationBlocked = async (
+  tx: Prisma.TransactionClient,
+  task: { projectId: string; assigneeAgentId: string | null },
+): Promise<string | null> => {
+  // A human step or an unassigned one has no agent to be archived, so it
+  // reactivates exactly as it did before this guard existed.
+  if (task.assigneeAgentId === null) return null;
+  const assignee = await tx.agent.findFirst({
+    where: { id: task.assigneeAgentId, projectId: task.projectId },
+    select: { id: true, name: true },
+  });
+  if (!assignee) return "Assignee does not belong to this project";
+  const locked = await lockAgentRow(tx, assignee.id);
+  if (!locked) return "Assignee does not belong to this project";
+  // The sentence names the two ways out, because the operator who pressed this
+  // did not name the assignee in the request and cannot see it in the error.
+  return locked.archivedAt
+    ? `Assignee ${assignee.name} is archived; unarchive the agent or reassign this task first`
+    : null;
 };
