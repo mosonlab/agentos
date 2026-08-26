@@ -11,11 +11,6 @@ the granted repo, exactly as the task's specification of record directs —
 the brief, the approved plan and slices, or the review reports the step
 prompt names.
 
-When the run prompt grants native implementation subagents, the platform
-pins every child to Luna max and caps their total concurrency. Use that
-capability only for independent, safely parallel work, follow the run
-prompt's worktree and integration rules, and never select a child model.
-
 The specification of record governs. Implement what it enumerates and
 nothing beyond it: when it names change points, touch those and leave
 behavior outside the assignment untouched; when something in it is
