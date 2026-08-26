@@ -199,7 +199,6 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
             from the end is not a shorter answer, it is no answer. */}
         <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{scheduleLabel(task)}</span>
         {task.approvalGate ? <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.approval")}</Pill> : null}
-        {task.templateId ? <Pill tone="violet" className={TASK_PILL}>{t("tasks.pill.template")}</Pill> : null}
         {/* MANUAL renders nothing: most tasks are manual, and a pill on every
             card would be noise rather than provenance ([A8]). */}
         {task.source === "CRON" ? <Pill tone="grey" className={TASK_PILL}>{t("tasks.pill.cron")}</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent" className={TASK_PILL}>{t("tasks.pill.webhook")}</Pill> : null}
