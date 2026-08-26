@@ -44,7 +44,7 @@ const stubApi = (
     ? {
       ...plan,
       reclaim: (plan as { reclaim: Array<Record<string, unknown>> }).reclaim.map((offer) => addCompatibilityEvidence
-        ? { pushedBranch: "already/durable", ...offer }
+        ? { pinnedBaseSha: null, pushedBranch: "already/durable", ...offer }
         : offer),
     }
     : plan;
@@ -131,6 +131,44 @@ test("a delayed reclaim salvages an unpublished retained workspace before deleti
   assert.deepEqual(calls[2]!.body.results, [{ runId: "run-1", outcome: "REMOVED" }]);
 });
 
+test("a delayed reclaim removes a dirty pinned checkout without salvage publication", async () => {
+  const workspaceRoot = await root("pinned");
+  const remote = join(workspaceRoot, "origin.git");
+  const seed = join(workspaceRoot, "seed");
+  const runPath = join(workspaceRoot, "run-1");
+  git(workspaceRoot, "init", "--bare", "--initial-branch=master", remote);
+  git(workspaceRoot, "init", "--initial-branch=master", seed);
+  git(seed, "config", "user.name", "AgentOS Test");
+  git(seed, "config", "user.email", "runner@agentos.local");
+  await writeFile(join(seed, "base.txt"), "base\n");
+  git(seed, "add", "base.txt");
+  git(seed, "commit", "-m", "base");
+  git(seed, "remote", "add", "origin", remote);
+  git(seed, "push", "origin", "master");
+  git(workspaceRoot, "clone", "--branch", "master", remote, runPath);
+  const pinnedBaseSha = git(runPath, "rev-parse", "HEAD");
+  await writeFile(join(runPath, "review.txt"), "scratch only\n");
+  const calls = stubApi({
+    reclaim: [{
+      runId: "run-1", workspacePath: runPath, taskId: "task-1", runNumber: 3,
+      baseSha: pinnedBaseSha, pinnedBaseSha, pushedBranch: null,
+    }],
+    verify: [], keep: [],
+  });
+
+  const sweep = await reclaimWorkspaces(config(workspaceRoot), {
+    listDirectories: async () => ["run-1"],
+  });
+
+  assert.deepEqual(sweep, { offered: 1, removed: 1, refused: 0, failed: 0, settled: 0 });
+  await assert.rejects(access(runPath));
+  assert.deepEqual(calls.map(({ path }) => path), [
+    "http://api.invalid/runner/workspaces/reclaimable",
+    "http://api.invalid/runner/workspaces/reclaimed",
+  ]);
+  assert.throws(() => git(workspaceRoot, `--git-dir=${remote}`, "show-ref", "refs/heads/agentos/task-1/run-3"));
+});
+
 test("a delayed salvage ACK refusal retains the workspace after publishing its recovery ref", async () => {
   const workspaceRoot = await root("salvage-started-replacement");
   const remote = join(workspaceRoot, "origin.git");
@@ -199,6 +237,20 @@ test("a legacy reclaim offer without pushedBranch refuses deletion", async () =>
   assert.match(String(calls[1]!.body.results[0].failureReason), /omitted salvage publication evidence/u);
 });
 
+test("a reclaim offer without pinned checkout evidence refuses deletion", async () => {
+  const workspaceRoot = await root("legacy-pinned-offer");
+  const runPath = join(workspaceRoot, "legacy-run");
+  await mkdir(runPath);
+  const calls = stubApi({
+    reclaim: [{ runId: "legacy-run", workspacePath: runPath, pushedBranch: "already/durable" }],
+    verify: [], keep: [],
+  }, 200, false);
+  const sweep = await reclaimWorkspaces(config(workspaceRoot));
+  assert.deepEqual(sweep, { offered: 1, removed: 0, refused: 1, failed: 0, settled: 0 });
+  await access(runPath);
+  assert.match(String(calls[1]!.body.results[0].failureReason), /omitted pinned checkout evidence/u);
+});
+
 test("refuses an offer that escapes the configured root and deletes nothing", async () => {
   const workspaceRoot = await root("escape");
   const outside = await root("outside");
@@ -222,11 +274,11 @@ test("refuses a run id that is a traversal rather than a bare directory name", a
   const parent = resolve(workspaceRoot, "..");
   const offers = ["../..", "nested/child", ".", ".."];
   for (const runId of offers) {
-    const authorized = authorizeOffer(workspaceRoot, new Set(offers), { runId, workspacePath: null });
+    const authorized = authorizeOffer(workspaceRoot, new Set(offers), { runId, workspacePath: null, pinnedBaseSha: null });
     assert.ok("refused" in authorized, `${runId} must be refused, not resolved to a path`);
   }
   // And nothing in the refusal path can name the root's parent.
-  assert.ok("refused" in authorizeOffer(workspaceRoot, new Set(["x"]), { runId: "x", workspacePath: parent }));
+  assert.ok("refused" in authorizeOffer(workspaceRoot, new Set(["x"]), { runId: "x", workspacePath: parent, pinnedBaseSha: null }));
 });
 
 test("refuses an offer for a directory this sweep never reported", async () => {

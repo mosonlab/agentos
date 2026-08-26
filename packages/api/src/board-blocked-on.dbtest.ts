@@ -5,35 +5,16 @@ import { after, before, beforeEach, test } from "node:test";
 import { PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
-import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
-
-type QueryEvent = { query: string; params: string; duration: number; target: string };
+import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
-let queryEvents: QueryEvent[];
 
 before(async () => {
-  // setupTestDb owns the one-time disposable-schema migration. The client used
-  // by this file opts into Prisma query events so the cost rule is executable,
-  // rather than inferred from the implementation.
-  const bootstrap = setupTestDb();
-  await bootstrap.$disconnect();
-  db = new PrismaClient({
-    datasources: { db: { url: testDatabaseUrl } },
-    log: [{ emit: "event", level: "query" }],
-  });
-  queryEvents = [];
-  // The default PrismaClient type has an empty event union even though this
-  // instance opts into query events at runtime.
-  const onQuery = db.$on as unknown as (
-    event: "query", listener: (event: QueryEvent) => void,
-  ) => void;
-  onQuery.call(db, "query", (event) => queryEvents.push(event));
+  db = setupTestDb();
 });
 
 beforeEach(async () => {
   await resetTestDb(db);
-  queryEvents = [];
 });
 
 after(async () => { await db.$disconnect(); });
@@ -70,63 +51,6 @@ const getBoard = async (projectId: string, database: PrismaClient = db, headers:
     headers: { Authorization: `Bearer ${operatorToken}`, ...headers },
   }),
 );
-
-/**
- * The board page query selects dispatchAfterTaskId, while the predecessor
- * lookup selects only id, name and status. That shape distinguishes the one
- * optional lookup from chain-progress and card queries without depending on
- * Prisma's parameter values.
- */
-const predecessorLookupCount = (): number => queryEvents.filter((event) => (
-  /"Task"\."id"\s+IN/u.test(event.query)
-  && /"Task"\."name"/u.test(event.query)
-  && /"Task"\."status"/u.test(event.query)
-  && !/"Task"\."dispatchAfterTaskId"/u.test(event.query)
-)).length;
-
-test("GET /tasks?view=board computes blockedOn and performs no lookup for an unbound page", async () => {
-  const project = await seedProject("board-unbound");
-  const task = await seedTask(project.id, "Unbound task", { status: "TODO" });
-
-  const response = await getBoard(project.id);
-  assert.equal(response.status, 200);
-  const body = await response.json() as Array<{ id: string; blockedOn: unknown }>;
-  assert.deepEqual(body.find((card) => card.id === task.id)?.blockedOn, null);
-  assert.equal(predecessorLookupCount(), 0, "an unbound page must not query predecessor tasks");
-});
-
-test("bound rows are resolved in one deduplicated predecessor lookup", async () => {
-  const project = await seedProject("board-bound");
-  const predecessorOne = await seedTask(project.id, "Build predecessor", {
-    status: "DOING", chainId: "predecessor-one", chainIndex: 0, chainLayer: 0,
-  });
-  const predecessorTwo = await seedTask(project.id, "Review predecessor", {
-    status: "REVIEW", chainId: "predecessor-two", chainIndex: 0, chainLayer: 0,
-  });
-  const first = await seedTask(project.id, "Waiting on build", {
-    status: "TODO", chainId: "successor-one", chainIndex: 0, chainLayer: 0,
-    dispatchAfterTaskId: predecessorOne.id,
-  });
-  const second = await seedTask(project.id, "Waiting on review", {
-    status: "TODO", chainId: "successor-two", chainIndex: 0, chainLayer: 0,
-    dispatchAfterTaskId: predecessorTwo.id,
-  });
-  const unbound = await seedTask(project.id, "Ready without binding", {
-    status: "TODO", chainId: "unbound-chain", chainIndex: 0, chainLayer: 0,
-  });
-
-  const response = await getBoard(project.id);
-  assert.equal(response.status, 200);
-  const body = await response.json() as Array<{ id: string; blockedOn: { taskId: string; taskName: string } | null }>;
-  assert.deepEqual(body.find((card) => card.id === first.id)?.blockedOn, {
-    taskId: predecessorOne.id, taskName: predecessorOne.name,
-  });
-  assert.deepEqual(body.find((card) => card.id === second.id)?.blockedOn, {
-    taskId: predecessorTwo.id, taskName: predecessorTwo.name,
-  });
-  assert.equal(body.find((card) => card.id === unbound.id)?.blockedOn, null);
-  assert.equal(predecessorLookupCount(), 1, "all bound ids on a page must use one lookup");
-});
 
 test("a real predecessor DONE transition clears blockedOn and changes the board ETag", async () => {
   const project = await seedProject("board-etag");

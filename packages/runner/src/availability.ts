@@ -2,9 +2,10 @@ import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
+import { RUNNER_KINDS } from "./adapters.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
-export const SUPPORTED_RUNNERS = ["CLAUDE", "CODEX", "PI"] as const satisfies readonly RunnerKind[];
+export const SUPPORTED_RUNNERS: readonly RunnerKind[] = RUNNER_KINDS;
 
 export type CliAvailability = {
   runner: RunnerKind;

@@ -28,7 +28,6 @@ import {
   startRun,
   type ClaimedTask,
   type CancellationRequest,
-  type CleanupStatus,
   type SessionEventPayload,
 } from "./api.js";
 import {
@@ -38,7 +37,8 @@ import {
 } from "./availability.js";
 import { evaluateBudget } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
-import { deliverFailedWorkspace, deliverWorkspace } from "./delivery.js";
+import { deliverWorkspace } from "./delivery.js";
+import { disposeWorkspace, type WorkspaceDisposal } from "./dispose-workspace.js";
 import {
   buildFailureEnvelope,
   completionEnvelope,
@@ -48,7 +48,7 @@ import {
 } from "./envelope.js";
 import { deliverUnderLease, openDeliveryLease, type DeliveryLease } from "./lease.js";
 import {
-  captureWorkspaceResult, cleanupAgentScratch, cleanupWorkspace, provisionAgentScratch, provisionSessionConfig,
+  captureWorkspaceResult, cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, sessionConfigRootExists, workspaceEnvironment, writeSessionCredentials,
   type AgentScratch, type Workspace,
 } from "./workspace.js";
@@ -76,79 +76,12 @@ const cleanup = async (
   workspace: Workspace | null,
   retain: boolean,
   alreadyDurable = false,
-): Promise<{
-  cleanupStatus: CleanupStatus;
-  cleanupFailureReason?: string;
-  workspaceRetained: boolean;
-  salvage: Awaited<ReturnType<typeof deliverFailedWorkspace>>;
-}> => {
+): Promise<WorkspaceDisposal> => {
   if (!workspace) return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage: null };
-  let salvage: Awaited<ReturnType<typeof deliverFailedWorkspace>> = null;
-  // A pinned review/verification checkout is disposable by contract. It may
-  // be intentionally stale and dirty, but it never owns a publishable branch:
-  // neither success nor failure may turn its scratch state into chain
-  // publication evidence.
-  if (!alreadyDurable && !workspace.pinnedBaseSha) {
-    let gitResult = { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha };
-    try {
-      gitResult = await captureWorkspaceResult(config, workspace);
-    } catch (error: unknown) {
-      return {
-        cleanupStatus: "FAILED",
-        cleanupFailureReason: `Salvage preflight failed: ${errorMessage(error)}`,
-        workspaceRetained: true,
-        salvage: null,
-      };
-    }
-    salvage = await deliverFailedWorkspace(config, claim, { ...workspace, branch: gitResult.branch });
-    if (salvage?.pushStatus === "FAILED") {
-      return {
-        cleanupStatus: "FAILED",
-        cleanupFailureReason: salvage.pushError ?? "WIP salvage failed",
-        workspaceRetained: true,
-        salvage,
-      };
-    }
-    if (salvage?.pushedBranch) {
-      try {
-        await recordPublishedBranch(config, claim, salvage.pushedBranch);
-      } catch (error: unknown) {
-        await appendActivity(config, claim,
-          `Salvage ref '${salvage.pushedBranch}' is durable, but its publication ACK failed: ${errorMessage(error)}`,
-          { stream: "runner" }).catch(() => undefined);
-        return {
-          cleanupStatus: "FAILED",
-          cleanupFailureReason: `Salvage publication ACK failed: ${errorMessage(error)}`,
-          workspaceRetained: true,
-          salvage,
-        };
-      }
-    } else {
-      console.warn(JSON.stringify({
-        audit: "workspace-cleanup",
-        event: "nothing-to-salvage",
-        runId: claim.run.id,
-        reason: "clean tree with no commits past the clone base",
-      }));
-      await appendActivity(config, claim,
-        "Workspace cleanup verified there was nothing to salvage: clean tree with no commits past the clone base",
-        { stream: "runner" }).catch((error: unknown) => {
-        console.error(JSON.stringify({
-          audit: "workspace-cleanup",
-          event: "nothing-to-salvage-activity-failed",
-          runId: claim.run.id,
-          error: errorMessage(error),
-        }));
-      });
-    }
-  }
-  if (retain) return { cleanupStatus: "RETAINED", workspaceRetained: true, salvage };
-  try {
-    await cleanupWorkspace(config, workspace.path);
-    return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage };
-  } catch (error: unknown) {
-    return { cleanupStatus: "FAILED", cleanupFailureReason: errorMessage(error), workspaceRetained: true, salvage };
-  }
+  return disposeWorkspace(config, { source: "runner", claim }, {
+    ...workspace,
+    pinnedBaseSha: workspace.pinnedBaseSha ?? null,
+  }, { retain, alreadyDurable });
 };
 
 const preflightEvidence = (message: string): ExitEvidence => ({
