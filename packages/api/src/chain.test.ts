@@ -141,6 +141,35 @@ test("a TODO agent step with no runs is startable", () => {
   assert.equal(startable(startableRow(), { total: 0, active: false }, 3), true);
 });
 
+test("an unresolved dispatch binding blocks the first-step decision", () => {
+  const rowWithBinding = startableRow({
+    dispatchAfterTaskId: "predecessor",
+    dispatchAfter: { status: "DOING" },
+  });
+  const verdict = taskStartability(rowWithBinding, { total: 0, active: false }, 3, true);
+  assert.equal(verdict.startable, false);
+  assert.equal(verdict.checklist.predecessorsDone, false);
+  const decision = chainStartDecisions([
+    decisionRow(1, {
+      dispatchAfterTaskId: "predecessor",
+      dispatchAfter: { status: "TODO" },
+    }),
+  ], new Map()).get("step-1")!;
+  assert.equal(decision.startable, false);
+  assert.equal(decision.startAction, null);
+});
+
+test("a resolved dispatch binding restores the ordinary first-step decision", () => {
+  const decision = chainStartDecisions([
+    decisionRow(1, {
+      dispatchAfterTaskId: "predecessor",
+      dispatchAfter: { status: "DONE" },
+    }),
+  ], new Map()).get("step-1")!;
+  assert.equal(decision.startable, true);
+  assert.equal(decision.startAction, "start");
+});
+
 test("the exposed checklist and overall verdict come from the shared start predicate", () => {
   assert.deepEqual(taskStartability(startableRow(), { total: 0, active: false }, 3, true), {
     startable: true,

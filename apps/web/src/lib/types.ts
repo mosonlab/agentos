@@ -363,6 +363,8 @@ export type BoardTask = {
   updatedAt: string;
   assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: ChainProgress | null;
+  /** API-computed predecessor binding state; absent for older board responses. */
+  blockedOn?: { taskId: string; taskName: string } | null;
   latestRun: {
     id: string;
     runNumber: number;
@@ -440,6 +442,8 @@ export type ChainStep = {
    *  and the route's guard must not be able to disagree. */
   startable: boolean;
   startAction: "start" | "recover" | null;
+  /** API-computed predecessor binding state; absent for older chain responses. */
+  blockedOn?: { taskId: string; name: string; status: TaskStatus } | null;
   currentExecution: boolean;
   mergeRecovery?: MergeRecovery | null;
 };

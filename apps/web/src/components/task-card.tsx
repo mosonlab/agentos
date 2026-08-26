@@ -202,6 +202,13 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
             card would be noise rather than provenance ([A8]). */}
         {task.source === "CRON" ? <Pill tone="grey" className={TASK_PILL}>{t("tasks.pill.cron")}</Pill> : task.source === "WEBHOOK" ? <Pill tone="accent" className={TASK_PILL}>{t("tasks.pill.webhook")}</Pill> : null}
       </div>
+      {task.blockedOn ? (
+        <div data-card-blocked-on="" className={TASK_META_ROW}>
+          <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">
+            {t("tasks.card.blockedOn", { name: task.blockedOn.taskName })}
+          </span>
+        </div>
+      ) : null}
       {/* No placeholder for a chain-less card (K4). */}
       {task.chainProgress ? (
         <div className={cn(TASK_META_ROW, "overflow-hidden text-ellipsis whitespace-nowrap")}>

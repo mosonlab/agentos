@@ -125,6 +125,70 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
 };
 
 /**
+ * PI's totals, aggregated by the runner's PI parser and attached to the
+ * FINAL_OUTPUT payload as `agentosPiUsage`. The name is deliberate: unlike
+ * `usage` and `modelUsage`, which are the providers' own vocabularies, this
+ * object is AgentOS-computed, and reading it as a provider payload would hide
+ * that.
+ *
+ * CALIBER, which is not the same as the other two runners':
+ * - `input` is uncached input only — PI reports `cacheRead` DISJOINT from it,
+ *   so the stored `totalTokens` (input + output) excludes cache reads. That
+ *   matches CLAUDE and deliberately differs from CODEX, whose `input_tokens`
+ *   already contains `cached_input_tokens` and whose stored `totalTokens`
+ *   therefore includes them.
+ * - `output` already contains PI's reasoning tokens, so there is no reasoning
+ *   field to fold in here.
+ * - `costNanoUsd` is PI's own per-message `cost.total` summed, not derived from
+ *   the pricing table — PI is the only one of the three that prices itself per
+ *   message. It arrives as an INTEGER count of nano-USD because the runner
+ *   cannot reach Prisma.Decimal and summing the raw doubles would hit the very
+ *   half-unit error `costAmount` exists to avoid. Dividing by a power of ten in
+ *   decimal is exact, so nothing is lost on the way to the column.
+ *
+ * `messages` and `reported` are the runner's diagnostics and are read by nobody
+ * here; they exist so a stored event can answer "was the cost missing, or was
+ * it genuinely nothing".
+ */
+const NANOS_PER_USD = 1_000_000_000;
+
+/** The PI aggregate's integer nano-USD as an exact Decimal. Same drop-with-a-
+ * diagnostic discipline as `costAmount`, against the integer domain the runner
+ * actually sends: a non-integer here means the payload was not written by the
+ * PI parser and its value cannot be trusted to be exact. */
+const piCostAmount = (value: unknown): Prisma.Decimal | null => {
+  if (value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    console.warn(`[usage] ignoring agentosPiUsage.costNanoUsd=${render(value)}: not a storable cost`);
+    return null;
+  }
+  const decimal = new Prisma.Decimal(value).dividedBy(NANOS_PER_USD);
+  if (decimal.toDecimalPlaces(COST_SCALE).greaterThanOrEqualTo(MAX_COST)) {
+    console.warn(`[usage] ignoring agentosPiUsage.costNanoUsd=${render(value)}: exceeds Decimal(12, 4)`);
+    return null;
+  }
+  return decimal;
+};
+
+const extractPiUsage = (value: unknown): SessionUsage | null => {
+  const totals = asRecord(value);
+  if (!totals) return null;
+  const result: SessionUsage = {};
+  const input = tokenCount(totals.input, "agentosPiUsage.input");
+  if (input !== null) result.inputTokens = input;
+  const output = tokenCount(totals.output, "agentosPiUsage.output");
+  if (output !== null) result.outputTokens = output;
+  const cacheRead = tokenCount(totals.cacheRead, "agentosPiUsage.cacheRead");
+  const cacheWrite = tokenCount(totals.cacheWrite, "agentosPiUsage.cacheWrite");
+  if (cacheRead !== null || cacheWrite !== null) result.cachedInputTokens = (cacheRead ?? 0) + (cacheWrite ?? 0);
+  const cost = piCostAmount(totals.costNanoUsd);
+  if (cost !== null) result.costUsd = cost;
+  // Nothing usable routes back to the other branches rather than claiming the
+  // payload, exactly as an unusable `modelUsage` does.
+  return Object.keys(result).length === 0 ? null : result;
+};
+
+/**
  * One event payload → whatever usage it carries. Shape-driven rather than
  * runner-driven, and total over `unknown`: any payload that does not match
  * yields `{}` and nothing throws.
@@ -139,12 +203,20 @@ const extractModelUsage = (value: unknown): ModelTotals | null => {
  *   it already equals the sum of the per-model `costUSD` values.
  * - CODEX `turn.completed`: `usage.{input_tokens,cached_input_tokens,output_tokens}`,
  *   no `modelUsage`, no cost anywhere — the fallback branch, unchanged.
- * - PI `agent_settled`: literally `{"type":"agent_settled"}` — no usage, no cost.
- *   PI reports usage per message instead, which this batch does not harvest.
+ * - PI `agent_settled`: literally `{"type":"agent_settled"}` — no usage, no
+ *   cost. PI prices itself per message instead, so the runner's PI parser sums
+ *   those messages and attaches `agentosPiUsage`, which is EXCLUSIVE of the two
+ *   provider vocabularies above and carries its own caliber. See
+ *   `extractPiUsage`.
  */
 export const extractUsage = (payload: unknown): SessionUsage => {
   const event = asRecord(payload);
   if (!event) return {};
+  // Exclusive and first: an `agentosPiUsage` payload is already a whole
+  // session's totals, cost included, and PI's terminal event carries no other
+  // usage vocabulary for the branches below to add to it.
+  const pi = extractPiUsage(event.agentosPiUsage);
+  if (pi) return pi;
   const usage = asRecord(event.usage);
   const result: SessionUsage = {};
 
