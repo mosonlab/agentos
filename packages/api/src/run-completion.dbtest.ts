@@ -81,11 +81,16 @@ test("the merge-executor principal on an ordinary run is refused before anything
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.RUNNING);
 });
 
-test("a run suspended for Inbox refuses as waiting-inbox, not as a stale fence", async () => {
+// WAITING_INBOX is an active status, so a suspended run whose fence is still
+// good completes normally. The refusal exists for what `suspendForInbox`
+// actually leaves behind: a suspended run the caller no longer holds the fence
+// for. That is one stale token away from the case below, and the two must not
+// answer the same thing.
+test("a suspended run refuses as waiting-inbox, not as a stale fence", async () => {
   const { run } = await seed(RunStatus.WAITING_INBOX);
   const refused = await completeRun(db, {
     runId: run.id,
-    body: completion(run.fencingToken!),
+    body: completion("fence-from-a-previous-generation"),
     claimantClass: "runner",
   });
   assert.deepEqual(refused, { kind: "waiting-inbox" });

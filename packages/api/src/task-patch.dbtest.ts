@@ -37,7 +37,7 @@ const seed = async (overrides: {
     projectId: project.id, name: "Patchable", description: "work",
     assigneeAgentId: agent.id, status: overrides.status ?? TaskStatus.TODO,
     chainId: overrides.chainId ?? null,
-    ...(overrides.chainId ? { chainIndex: 0 } : {}),
+    ...(overrides.chainId ? { chainIndex: 0, chainLayer: 0 } : {}),
     archivedAt: overrides.archivedAt ?? null,
   } });
   return { project, agent, task };
