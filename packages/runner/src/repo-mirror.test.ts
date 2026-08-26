@@ -191,6 +191,26 @@ test("a held lock is waited for, and one left behind by a dead holder is stolen"
   }
 });
 
+test("a file where the lock directory belongs is stolen rather than waited on", async () => {
+  const { root, remote, config, mirror } = await fixture("lock-file");
+  const env = workspaceEnvironment(config);
+  try {
+    // What a heartbeat that raced its own release leaves behind. No mkdir can
+    // ever acquire it, so waiting out the stale window would wedge the machine
+    // for nothing.
+    await mkdir(join(root, "mirrors"), { recursive: true });
+    await writeFile(`${mirror}.lock`, "");
+    const taken = await withRepoMirror(
+      config, remote, root, env, passthrough,
+      { lockWaitMs: 10, lockPollMs: 1, report: silent() },
+      async (path) => path,
+    );
+    assert.equal(taken, mirror);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a holder that was taken over does not delete its successor's lock", async () => {
   const { root, remote, config, mirror } = await fixture("release");
   const env = workspaceEnvironment(config);

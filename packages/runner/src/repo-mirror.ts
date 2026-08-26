@@ -176,8 +176,15 @@ const PROBE = 'if [ -L "$1" ]; then printf unusable;'
 // mkdir is the atomic acquisition. The steal is a rename, which is the other
 // atomic operation: two contenders that both judge a lock dead cannot both
 // succeed, so the loser retries instead of deleting the winner's fresh lock.
-const ACQUIRE = 'if mkdir "$1" 2>/dev/null; then printf %s "$2" > "$1/owner" && printf acquired;'
-  + ' elif [ -n "$(find "$1" -maxdepth 0 -mmin +"$3" 2>/dev/null)" ]; then'
+//
+// A lock whose owner file could not be written is removed rather than left for
+// the staleness path: it would otherwise block every run on this machine for
+// the whole stale window over a failure that is already known here. Anything at
+// the path that is not a directory was never a lock — only a heartbeat that
+// raced its own release can put a file there — and is stolen on sight.
+const ACQUIRE = 'if mkdir "$1" 2>/dev/null; then'
+  + ' if printf %s "$2" > "$1/owner"; then printf acquired; else rm -rf "$1"; exit 1; fi;'
+  + ' elif [ ! -d "$1" ] || [ -n "$(find "$1" -maxdepth 0 -mmin +"$3" 2>/dev/null)" ]; then'
   + ' if mv "$1" "$1.dead.$$" 2>/dev/null; then rm -rf "$1.dead.$$"; printf stolen; else printf held; fi;'
   + ' else printf held; fi';
 
@@ -211,7 +218,10 @@ const acquireMirrorLock = async (
       // this, the staleness threshold would have to bound the uncapped local
       // clone under the lock — and a suspended machine bounds nothing.
       const heartbeat = setInterval(() => {
-        void shell(config, execute, cwd, env, 'touch "$1" 2>/dev/null || true', lockPath).catch(() => undefined);
+        // Guarded: an unguarded touch that lost a race with its own release
+        // would create a *file* where the lock directory was, and no later
+        // mkdir could acquire it.
+        void shell(config, execute, cwd, env, 'if [ -d "$1" ]; then touch "$1"; fi', lockPath).catch(() => undefined);
       }, heartbeatMs);
       heartbeat.unref?.();
       return async (): Promise<void> => {
