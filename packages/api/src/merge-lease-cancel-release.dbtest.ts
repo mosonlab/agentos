@@ -20,7 +20,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { DIRECT_TEMPLATE_NAME, MERGE_TAIL_KIND, PrismaClient, RunStatus, TaskStatus } from "@agentos/db";
 
-import type { MergeLeaseReleaser } from "./merge-lease.js";
+import type { ReleaseMergeLease } from "./merge-lease.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -48,8 +48,7 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   try {
     const response = await createApp(db, {
       releaseMergeLease: async (chainId) => {
-      releasedChainLeases.push(chainId);
-      return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
+      if (chainId) releasedChainLeases.push(chainId);
     },
     }).request(path, {
       method,
@@ -64,9 +63,9 @@ const call = async (method: string, path: string, token: string, body?: unknown)
   }
 };
 
-const collectRelease: MergeLeaseReleaser = async (chainId) => {
+const collectRelease: ReleaseMergeLease = async (chainId) => {
+  if (!chainId) return;
   releasedChainLeases.push(chainId);
-  return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
 };
 
 let sequence = 0;

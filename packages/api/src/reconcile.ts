@@ -12,7 +12,7 @@ import {
 } from "@agentos/db";
 
 import { makeDedupeKey } from "./execution.js";
-import { mergeTailLeaseChainId, releaseMergeLease, releaseMergeLeaseSafely, type MergeLeaseReleaser } from "./merge-lease.js";
+import { mergeTailLeaseChainId, releaseMergeLease, type ReleaseMergeLease } from "./merge-lease.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 
 const activeStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] as const;
@@ -80,7 +80,7 @@ export const createArchivedRunNoticeScheduler = (
 export const reconcileDatabaseRuns = async (
   db: PrismaClient,
   now = new Date(),
-  releaseChainLease: MergeLeaseReleaser = releaseMergeLease,
+  releaseChainLease: ReleaseMergeLease = releaseMergeLease,
 ): Promise<number> => {
   const [candidates, expiredInboxRuns] = await Promise.all([
     db.run.findMany({
@@ -376,7 +376,7 @@ export const reconcileDatabaseRuns = async (
     }
     return [...stranded];
   });
-  for (const chainId of strandedChainLeases) await releaseMergeLeaseSafely(releaseChainLease, chainId);
+  for (const chainId of strandedChainLeases) await releaseChainLease(chainId);
   return orphans.length + expiredInboxRuns.length;
 };
 

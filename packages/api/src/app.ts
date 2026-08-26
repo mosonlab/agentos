@@ -91,8 +91,7 @@ import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin
 import {
   mergeTailLeaseChainId,
   releaseMergeLease,
-  releaseMergeLeaseSafely,
-  type MergeLeaseReleaser,
+  type ReleaseMergeLease,
 } from "./merge-lease.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
@@ -165,7 +164,7 @@ type AppEnvironment = { Variables: { principal: Principal } };
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
-  releaseMergeLease?: MergeLeaseReleaser;
+  releaseMergeLease?: ReleaseMergeLease;
 }
 
 
@@ -3502,7 +3501,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }));
     if ("error" in result) return context.json({ error: result.error }, result.code);
     const { releaseMergeLeaseTask, ...settlement } = result;
-    await releaseMergeLeaseSafely(releaseChainLease, releaseMergeLeaseTask);
+    await releaseChainLease(releaseMergeLeaseTask);
     return context.json(settlement);
   });
 
@@ -4003,7 +4002,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
         : context.json(fenceRefusalResponse(result.reason), 409);
     }
-    await releaseMergeLeaseSafely(releaseChainLease, result.releaseMergeLeaseTask);
+    await releaseChainLease(result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
     // Nothing is deleted here, or anywhere else in this process. The runner
     // removed its own workspace before it called /complete and reported the
@@ -4200,7 +4199,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     const { releaseMergeLeaseTask, ...cancellation } = result;
-    await releaseMergeLeaseSafely(releaseChainLease, releaseMergeLeaseTask);
+    await releaseChainLease(releaseMergeLeaseTask);
     return context.json(cancellation);
   });
 
