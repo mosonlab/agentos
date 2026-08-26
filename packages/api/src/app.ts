@@ -87,23 +87,29 @@ import {
   type CandidateActivity,
   type CardRow,
   type DecisionRow,
-  asJsonObject,
   AUTHORITY_RESIGN_DEDUPE_PREFIX,
   AUTHORITY_RESIGN_OPEN_PREFIX,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
+  latestMarker,
   MAX_AUTHORITY_RESIGN_ROUNDS,
   MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   MergeRecoveryStatus,
   mergeRecoveryPhase,
+  openReviewObligation,
   parseIndependentReviewDecision,
   parseRegressionVerdict,
   parseResolverResult,
+  readMarkerHistory,
+  readMarkers,
+  recoveryContext,
+  writeMarker,
   RELEASE_AUTHORITY_FILE,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   type IndependentReviewFinding,
   type MergeRecoveryAttempt,
+  type RecoveryContext,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
@@ -211,50 +217,6 @@ const isCandidateActivationFailure = (error: unknown): error is CandidateActivat
 
 const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
 
-type QueuedBaseDriftRecoveryContext = {
-  aggregateId: string;
-  attempt: number;
-  sourceStopId: string;
-  sourceRunId: string;
-  authorizationActivityId: string;
-  repository: string;
-  prNumber: number;
-  targetBranch: string;
-  authorizedHeadSha: string;
-  authorizedBaseSha: string;
-  observedBaseSha: string;
-  currentBaseSha: string;
-  readinessTaskId: string;
-  regressionTaskId: string;
-  integratorTaskId: string;
-  recoveryRunId: string;
-};
-
-const queuedRecoveryContext = (row: MergeRecoveryAttempt | null): QueuedBaseDriftRecoveryContext | null => {
-  if (!row?.boundSourceRunId || !row.authorizationActivityId || !row.recoveryRunId
-    || !row.readinessTaskId || !row.regressionTaskId || !row.repository
-    || row.prNumber === null || !row.targetBranch || !row.authorizedHeadSha
-    || !row.authorizedBaseSha || !row.observedBaseSha || !row.currentBaseSha) return null;
-  return {
-    aggregateId: row.id,
-    attempt: row.attempt,
-    sourceStopId: row.sourceStopId,
-    sourceRunId: row.boundSourceRunId,
-    authorizationActivityId: row.authorizationActivityId,
-    repository: row.repository,
-    prNumber: row.prNumber,
-    targetBranch: row.targetBranch,
-    authorizedHeadSha: row.authorizedHeadSha,
-    authorizedBaseSha: row.authorizedBaseSha,
-    observedBaseSha: row.observedBaseSha,
-    currentBaseSha: row.currentBaseSha,
-    readinessTaskId: row.readinessTaskId,
-    regressionTaskId: row.regressionTaskId,
-    integratorTaskId: row.integratorTaskId,
-    recoveryRunId: row.recoveryRunId,
-  };
-};
-
 const mergeRecoveryProjection = (row: MergeRecoveryAttempt | null) => row ? ({
   id: row.id,
   attempt: row.attempt,
@@ -272,7 +234,7 @@ const baseDriftRecoveryContext = async (
   regressionTaskId: string,
   recoveryRunId?: string,
   sourceStopId?: string,
-): Promise<QueuedBaseDriftRecoveryContext | null> => {
+): Promise<RecoveryContext | null> => {
   const row = await tx.mergeRecoveryAttempt.findFirst({
     where: {
       regressionTaskId,
@@ -282,12 +244,12 @@ const baseDriftRecoveryContext = async (
     },
     orderBy: [{ attempt: "desc" }, { id: "desc" }],
   });
-  return queuedRecoveryContext(row);
+  return recoveryContext(row);
 };
 
 const stopBaseDriftRecoveryTail = async (
   tx: DbTx,
-  context: QueuedBaseDriftRecoveryContext,
+  context: RecoveryContext,
   phase: "regression" | "independent-review",
   reason: string,
 ): Promise<void> => {
@@ -305,12 +267,10 @@ const stopBaseDriftRecoveryTail = async (
   await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
     from: "AGENT", taskId: context.regressionTaskId, kind: "TEXT", body, dedupeKey,
   }, update: {} });
-  const metadata = { ...context, kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1,
-    state: "tail-stopped", phase, reason, dedupeKey } as Prisma.InputJsonObject;
-  await tx.taskActivity.createMany({ data: [
-    { taskId: context.integratorTaskId, actorType: "control-plane", body, metadata },
-    { taskId: context.regressionTaskId, actorType: "control-plane", body, metadata },
-  ] });
+  const metadata = { ...context, state: "tail-stopped", phase, reason, dedupeKey };
+  for (const taskId of [context.integratorTaskId, context.regressionTaskId]) {
+    await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
+  }
 };
 
 /**
@@ -380,19 +340,16 @@ const createReviewFollowUpCard = async (
     opensPullRequest: false,
     status: TaskStatus.BACKLOG,
   } });
-  await tx.taskActivity.create({ data: {
-    taskId: task.id,
+  await writeMarker(tx, task.id, "reviewObligation", {
     actorType: "control-plane",
     body: `Follow-up finding from independent review ${input.reviewTaskId} at ${input.headSha}`,
     metadata: {
-      kind: MERGE_TAIL_KIND.reviewObligation,
-      schemaVersion: 1,
       state: "follow-up",
       reviewTaskId: input.reviewTaskId,
       headSha: input.headSha,
       title: input.finding.title,
     },
-  } });
+  });
   return { taskId: task.id };
 };
 
@@ -532,34 +489,26 @@ const createMergeTailRepairTask = async (
     where: { id: repairRun.id },
     data: { branch: input.sourceRun.branch, targetBranch: input.sourceRun.branch },
   });
-  await tx.taskActivity.createMany({ data: [
-    {
-      taskId: regressionTask.id,
-      actorType: "control-plane",
-      body: `Automatic ${input.repairKind} attempt queued at chain head ${input.headSha} against ${input.baseHeadSha}`,
-      metadata: {
-        kind: MERGE_TAIL_KIND.repairAttempt,
-        schemaVersion: 1,
-        repairKind: input.repairKind,
-        repairTaskId: task.id,
-        headSha: input.headSha,
-        baseHeadSha: input.baseHeadSha,
-      },
+  await writeMarker(tx, regressionTask.id, "repairAttempt", {
+    actorType: "control-plane",
+    body: `Automatic ${input.repairKind} attempt queued at chain head ${input.headSha} against ${input.baseHeadSha}`,
+    metadata: {
+      repairKind: input.repairKind,
+      repairTaskId: task.id,
+      headSha: input.headSha,
+      baseHeadSha: input.baseHeadSha,
     },
-    {
-      taskId: task.id,
-      actorType: "control-plane",
-      body: `Automatic ${input.repairKind} attempt for regression task ${regressionTask.id}`,
-      metadata: {
-        kind: MERGE_TAIL_KIND.repairAttempt,
-        schemaVersion: 1,
-        repairKind: input.repairKind,
-        regressionTaskId: regressionTask.id,
-        headSha: input.headSha,
-        baseHeadSha: input.baseHeadSha,
-      },
+  });
+  await writeMarker(tx, task.id, "repairAttempt", {
+    actorType: "control-plane",
+    body: `Automatic ${input.repairKind} attempt for regression task ${regressionTask.id}`,
+    metadata: {
+      repairKind: input.repairKind,
+      regressionTaskId: regressionTask.id,
+      headSha: input.headSha,
+      baseHeadSha: input.baseHeadSha,
     },
-  ] });
+  });
   await tx.task.update({
     where: { id: regressionTask.id },
     data: { status: TaskStatus.REVIEW, failureReason: `${input.repairKind}: automatic repair ${task.id} queued at ${input.headSha}` },
@@ -588,12 +537,11 @@ export const handleRegressionCompletion = async (
       return "handled";
     }
     await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-    await tx.taskActivity.create({ data: {
-      taskId: input.task.id,
+    await writeMarker(tx, input.task.id, "regression", {
       actorType: "control-plane",
       body: `Regression did not advance: ${reason}`,
-      metadata: { kind: MERGE_TAIL_KIND.regression, schemaVersion: 1, state: "stopped", reason },
-    } });
+      metadata: { state: "stopped", reason },
+    });
     await openMergeTailStopNotice(tx, { taskId: input.task.id, agentId: input.run.agentId, sessionId: input.run.sessionId, reason });
     return "handled";
   };
@@ -603,12 +551,11 @@ export const handleRegressionCompletion = async (
   if (effectiveHead !== verdict.headSha || output?.commitSha !== verdict.headSha) {
     return stop(`stale regression evidence: verdict ${verdict.headSha}, output ${output?.commitSha ?? "missing"}, run ${effectiveHead ?? "missing"}`);
   }
-  await tx.taskActivity.create({ data: {
-    taskId: input.task.id,
+  await writeMarker(tx, input.task.id, "regression", {
     actorType: "control-plane",
     body: `Regression ${verdict.outcome} recorded for chain head ${verdict.headSha} against target ${verdict.baseHeadSha}`,
-    metadata: { kind: MERGE_TAIL_KIND.regression, ...verdict },
-  } });
+    metadata: { ...verdict },
+  });
   if (verdict.outcome === "pass") {
     if (recovery) {
       await tx.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
@@ -649,27 +596,21 @@ export const handleRegressionCompletion = async (
       data: { status: TaskStatus.REVIEW, failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${verdict.headSha}` },
     });
     if (parked.count !== 1) {
-      await tx.taskActivity.create({ data: {
-        taskId: input.task.id,
+      await writeMarker(tx, input.task.id, "authorityResign", {
         actorType: "control-plane",
         body: `Release authority re-signature is required at ${verdict.headSha} but this step is no longer the tail's to park`,
         metadata: {
-          kind: MERGE_TAIL_KIND.authorityResign,
-          schemaVersion: 1,
           state: "park-skipped",
           headSha: verdict.headSha,
           summary: verdict.summary,
         },
-      } });
+      });
       return "handled";
     }
-    await tx.taskActivity.create({ data: {
-      taskId: input.task.id,
+    await writeMarker(tx, input.task.id, "authorityResign", {
       actorType: "control-plane",
       body: `Release authority re-signature requested at ${verdict.headSha}: ${verdict.summary}`,
       metadata: {
-        kind: MERGE_TAIL_KIND.authorityResign,
-        schemaVersion: 1,
         state: "open",
         headSha: verdict.headSha,
         baseHeadSha: verdict.baseHeadSha,
@@ -677,7 +618,7 @@ export const handleRegressionCompletion = async (
         round,
         summary: verdict.summary,
       },
-    } });
+    });
     await openAuthorityResignNotice(tx, {
       taskId: input.task.id,
       agentId: input.run.agentId,
@@ -710,17 +651,18 @@ export const handleRegressionCompletion = async (
     return "handled";
   }
 
-  const attempts = await tx.taskActivity.findMany({
-    where: { taskId: input.task.id }, select: { metadata: true }, orderBy: { createdAt: "asc" },
-  });
+  // The whole history, not the recent-state window: one automatic attempt per
+  // repair kind is the rule, and an attempt pushed past the window by later
+  // activity would license a second one.
+  const attempts = await readMarkerHistory(tx, input.task.id);
   const repairKind = verdict.outcome === "refresh-conflict"
     ? "refresh-conflict"
     : verdict.outcome === "review-fail" ? "review-fix" : "gate-fix";
-  const alreadyAttempted = attempts.some((row) => {
-    const metadata = asJsonObject(row.metadata);
-    if (metadata?.kind !== MERGE_TAIL_KIND.repairAttempt || metadata.repairKind !== repairKind) return false;
-    return repairKind !== "refresh-conflict" || metadata.headSha === verdict.headSha;
-  });
+  const alreadyAttempted = attempts.some((marker) => (
+    marker.kind === "repairAttempt"
+    && marker.repairKind === repairKind
+    && (repairKind !== "refresh-conflict" || marker.headSha === verdict.headSha)
+  ));
   if (alreadyAttempted) {
     return stop(repairKind === "refresh-conflict"
       ? `second refresh conflict on chain head ${verdict.headSha}`
@@ -5864,25 +5806,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // envelope's verdict decides *whether* the failure was external; it does
       // not get to raise the ceiling on this step either.
       const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
-      const tailRows = succeeded && run.task
-        && !run.task.templateId && !run.task.chainId
-        ? await tx.taskActivity.findMany({
-            where: { taskId: run.task.id },
-            select: { metadata: true },
-            orderBy: { createdAt: "desc" },
-            take: 20,
-          })
+      const refunded = external && !mechanical ? 1 : 0;
+      const budgetCeiling = run.maxRunsPerTask + refunded;
+      // One marker read for both completion outcomes; this handler used to
+      // declare `tailRows` twice and scan twice. The success path consults it
+      // only for a standalone auxiliary task — an automatic repair or an
+      // independent review, neither of which is a chain step — while the
+      // failure path consults it only for a failure that is not about to be
+      // retried, which is why the ceiling is computed above the read.
+      const failureIsFinal = !succeeded && !(retryable && run.runNumber < budgetCeiling);
+      const tailMarkers = run.task && (failureIsFinal || (succeeded && !run.task.templateId && !run.task.chainId))
+        ? await readMarkers(tx, run.task.id)
         : [];
-      const repairMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
-        metadata?.kind === MERGE_TAIL_KIND.repairAttempt && typeof metadata.regressionTaskId === "string"
-      ));
-      const reviewMarker = tailRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
-        metadata?.kind === MERGE_TAIL_KIND.reviewObligation
-        && metadata.state === "open"
-        && typeof metadata.readinessTaskId === "string"
-        && typeof metadata.regressionTaskId === "string"
-      ));
-      const repairRegression = typeof repairMarker?.regressionTaskId === "string"
+      const succeededMarkers = succeeded ? tailMarkers : [];
+      const repairMarker = latestMarker(succeededMarkers, "repairAttempt");
+      const reviewMarker = openReviewObligation(succeededMarkers);
+      const repairRegression = repairMarker?.regressionTaskId
         ? await tx.task.findUnique({
             where: { id: repairMarker.regressionTaskId },
             select: {
@@ -5894,7 +5833,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           })
         : null;
-      const reviewRegression = typeof reviewMarker?.regressionTaskId === "string"
+      const reviewRegression = reviewMarker?.regressionTaskId
         ? await tx.task.findUnique({
             where: { id: reviewMarker.regressionTaskId },
             select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
@@ -5926,14 +5865,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             select: { id: true },
           })
         : null;
-      const mergeTailAuxiliary = Boolean(repairMarker || reviewMarker);
-      const auxiliaryTargetTaskId = typeof repairMarker?.regressionTaskId === "string"
+      // An auxiliary task is one whose own marker names the Regression it serves.
+      const mergeTailAuxiliary = Boolean(
+        repairMarker?.regressionTaskId || (reviewMarker?.readinessTaskId && reviewMarker.regressionTaskId),
+      );
+      const auxiliaryTargetTaskId = repairMarker?.regressionTaskId
         ? repairDocumentationTask?.id ?? repairMarker.regressionTaskId
-        : typeof reviewMarker?.readinessTaskId === "string"
-          ? reviewMarker.readinessTaskId
-          : null;
-      const refunded = external && !mechanical ? 1 : 0;
-      const budgetCeiling = run.maxRunsPerTask + refunded;
+        : reviewMarker?.readinessTaskId ?? null;
       // The same refund, recorded apart from the ceiling it produced. The gates
       // an operator can reach read this rather than `maxRunsPerTask`, because
       // only this can still be told apart from the configured budget after that
@@ -6102,47 +6040,32 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         const budgetExhausted = !succeeded && retryable && !retryCreated;
         let canonicalOutputFailure: string | null = null;
         if (!succeeded && !retryCreated && run.task) {
-          const tailRows = await tx.taskActivity.findMany({
-            where: { taskId: run.taskId },
-            select: { metadata: true },
-            orderBy: { createdAt: "desc" },
-            take: 20,
-          });
-          const metadataRows = tailRows.map((row) => asJsonObject(row.metadata));
-          const repairMarker = metadataRows.find((metadata) => (
-            metadata?.kind === MERGE_TAIL_KIND.repairAttempt && typeof metadata.regressionTaskId === "string"
-          ));
-          const reviewMarker = metadataRows.find((metadata) => (
-            metadata?.kind === MERGE_TAIL_KIND.reviewObligation
-            && typeof metadata.readinessTaskId === "string"
-            && typeof metadata.regressionTaskId === "string"
-          ));
-          if (repairMarker && typeof repairMarker.regressionTaskId === "string") {
-            const reason = `${String(repairMarker.repairKind)} repair ${run.taskId} failed without closing the repair at ${String(repairMarker.headSha)}`;
-            await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await tx.taskActivity.create({ data: {
-              taskId: repairMarker.regressionTaskId,
+          // The same markers the success path above read, from the same scan.
+          // A failed auxiliary task closes the obligation it was carrying, so
+          // its review obligation counts in any state, not only `open`.
+          const failedRepair = latestMarker(tailMarkers, "repairAttempt");
+          const failedReview = latestMarker(tailMarkers, "reviewObligation");
+          if (failedRepair?.regressionTaskId) {
+            const reason = `${failedRepair.repairKind} repair ${run.taskId} failed without closing the repair at ${failedRepair.headSha}`;
+            await tx.task.update({ where: { id: failedRepair.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await writeMarker(tx, failedRepair.regressionTaskId, "repairResult", {
               actorType: "control-plane",
-              body: `Automatic ${String(repairMarker.repairKind)} attempt failed: ${String(repairMarker.headSha)} -> ${body.headSha ?? "no-delivered-head"}`,
-              metadata: jsonValue({
-                kind: MERGE_TAIL_KIND.repairResult,
-                schemaVersion: 1,
-                repairKind: typeof repairMarker.repairKind === "string" ? repairMarker.repairKind : null,
+              body: `Automatic ${failedRepair.repairKind} attempt failed: ${failedRepair.headSha} -> ${body.headSha ?? "no-delivered-head"}`,
+              metadata: {
+                repairKind: failedRepair.repairKind,
                 repairTaskId: run.taskId,
-                startHeadSha: typeof repairMarker.headSha === "string" ? repairMarker.headSha : null,
-                targetHeadSha: typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null,
+                startHeadSha: failedRepair.headSha,
+                targetHeadSha: failedRepair.baseHeadSha,
                 resolvedHeadSha: body.headSha ?? null,
                 state: "failed",
-              }),
-            } });
-            await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-          } else if (reviewMarker
-            && typeof reviewMarker.readinessTaskId === "string"
-            && typeof reviewMarker.regressionTaskId === "string") {
-            const reason = `independent review ${run.taskId} failed without an exact-head decision for ${String(reviewMarker.headSha)}`;
-            await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await tx.task.update({ where: { id: reviewMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-            await openMergeTailStopNotice(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+              },
+            });
+            await openMergeTailStopNotice(tx, { taskId: failedRepair.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+          } else if (failedReview?.readinessTaskId && failedReview.regressionTaskId) {
+            const reason = `independent review ${run.taskId} failed without an exact-head decision for ${failedReview.headSha}`;
+            await tx.task.update({ where: { id: failedReview.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await tx.task.update({ where: { id: failedReview.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await openMergeTailStopNotice(tx, { taskId: failedReview.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
           }
         }
         // §4.0 outcome branching. The executor's own fenced write is the only
@@ -6260,14 +6183,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
           let repairUnable = false;
           let reviewRejected = false;
-          if (reviewMarker
-            && typeof reviewMarker.readinessTaskId === "string"
-            && typeof reviewMarker.regressionTaskId === "string"
-            && typeof reviewMarker.headSha === "string") {
+          if (reviewMarker?.readinessTaskId && reviewMarker.regressionTaskId && reviewMarker.headSha) {
             const readinessTaskId = reviewMarker.readinessTaskId;
             const regressionTaskId = reviewMarker.regressionTaskId;
             const reviewHeadSha = reviewMarker.headSha;
-            const reviewBaseSha = typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null;
+            const reviewBaseSha = reviewMarker.baseSha;
             // Review evidence is run-scoped even though TaskStepOutput is not.
             // An earlier attempt's decision is not this attempt's decision, and
             // a decision not bound to the reviewed head is not evidence about
@@ -6329,40 +6249,34 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
                 await stopTail(reason);
               } else {
-                await tx.taskActivity.create({ data: {
-                  taskId: readinessTaskId,
+                await writeMarker(tx, readinessTaskId, "reviewObligation", {
                   actorType: "control-plane",
                   body: followUpCardIds.length === 0
                     ? `Independent review approved exact head ${reviewHeadSha}`
                     : `Independent review accepted exact head ${reviewHeadSha} with ${followUpCardIds.length} follow-up card(s)`,
-                  metadata: jsonValue({
-                    kind: MERGE_TAIL_KIND.reviewObligation,
-                    schemaVersion: 1,
+                  metadata: {
                     state: parsedReview.decision.outcome,
                     reviewTaskId: run.taskId,
                     headSha: reviewHeadSha,
                     baseSha: reviewBaseSha,
                     followUpCardIds,
-                  }),
-                } });
+                  },
+                });
               }
             } else {
               reviewRejected = true;
               const summary = parsedReview.decision.blockingSummary;
-              const prior = await tx.taskActivity.findMany({
-                where: { taskId: readinessTaskId }, select: { metadata: true },
-              });
-              const round = prior.filter((row) => {
-                const metadata = asJsonObject(row.metadata);
-                return metadata?.kind === MERGE_TAIL_KIND.reviewObligation && metadata.state === "rejected";
-              }).length + 1;
-              await tx.taskActivity.create({ data: {
-                taskId: readinessTaskId,
+              // The whole history, not the recent-state window: the blocking-round
+              // ceiling counts every rejection this readiness ever took, and one
+              // pushed past the window by later activity would reset the count.
+              const prior = await readMarkerHistory(tx, readinessTaskId);
+              const round = prior.filter((marker) => (
+                marker.kind === "reviewObligation" && marker.state === "rejected"
+              )).length + 1;
+              await writeMarker(tx, readinessTaskId, "reviewObligation", {
                 actorType: "control-plane",
                 body: `Independent review rejected exact head ${reviewHeadSha} on blocking round ${round}`,
                 metadata: {
-                  kind: MERGE_TAIL_KIND.reviewObligation,
-                  schemaVersion: 1,
                   state: "rejected",
                   reviewTaskId: run.taskId,
                   headSha: reviewHeadSha,
@@ -6370,7 +6284,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                   summary,
                   blockingRound: round,
                 },
-              } });
+              });
               await tx.task.update({ where: { id: run.taskId }, data: {
                 status: TaskStatus.DONE,
                 failureReason: truncateFailureReason(`independent review rejected: ${summary}`, FAILURE_REASON_LIMIT),
@@ -6379,7 +6293,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 tx,
                 regressionTaskId,
                 undefined,
-                typeof reviewMarker.recoverySourceStopId === "string" ? reviewMarker.recoverySourceStopId : "no-recovery-context",
+                reviewMarker.recoverySourceStopId ?? "no-recovery-context",
               );
               if (driftRecovery) {
                 await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewHeadSha}: ${summary}`);
@@ -6409,18 +6323,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 if (!lockedRegression) {
                   await stopTail(`independent review rejected ${reviewHeadSha} but its Regression task is gone`);
                 } else if (claimedPark.count !== 1) {
-                  await tx.taskActivity.create({ data: {
-                    taskId: readinessTaskId,
+                  await writeMarker(tx, readinessTaskId, "reviewObligation", {
                     actorType: "control-plane",
                     body: `Independent review rejected ${reviewHeadSha}, but readiness is no longer parked on that review; automatic repair was not started`,
                     metadata: {
-                      kind: MERGE_TAIL_KIND.reviewObligation,
-                      schemaVersion: 1,
                       state: "repair-skipped",
                       reviewTaskId: run.taskId,
                       headSha: reviewHeadSha,
                     },
-                  } });
+                  });
                 } else {
                   const repair = await createMergeTailRepairTask(tx, {
                     regressionTask: { id: regressionTaskId, ...lockedRegression },
@@ -6444,14 +6355,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               }
             }
           }
-          if (repairMarker && typeof repairMarker.regressionTaskId === "string") {
+          if (repairMarker?.regressionTaskId) {
             const repairOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
             let reportedUnable = false;
             let resolvedHeadSha = body.headSha ?? null;
             if (repairMarker.repairKind === "refresh-conflict") {
               const parsedResolver = parseResolverResult(repairOutput?.body);
-              const expectedStart = typeof repairMarker.headSha === "string" ? repairMarker.headSha : null;
-              const expectedTarget = typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null;
+              const expectedStart = repairMarker.headSha;
+              const expectedTarget = repairMarker.baseHeadSha;
               const bindingError = parsedResolver.status === "invalid"
                 ? parsedResolver.reason
                 : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
@@ -6464,13 +6375,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 const reason = `refresh-conflict repair ${run.taskId} returned invalid output: ${bindingError}`;
                 await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
                 await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await tx.taskActivity.create({ data: {
-                  taskId: repairMarker.regressionTaskId,
+                await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
                   actorType: "control-plane",
                   body: `Automatic refresh-conflict attempt stopped: ${reason}`,
-                  metadata: jsonValue({
-                    kind: MERGE_TAIL_KIND.repairResult,
-                    schemaVersion: 1,
+                  metadata: {
                     repairKind: "refresh-conflict",
                     repairTaskId: run.taskId,
                     startHeadSha: expectedStart,
@@ -6478,8 +6386,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                     resolvedHeadSha: body.headSha ?? null,
                     state: "invalid-output",
                     reason: bindingError,
-                  }),
-                } });
+                  },
+                });
                 await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
               } else if (parsedResolver.status === "ok") {
                 reportedUnable = parsedResolver.result.outcome === "unable";
@@ -6495,20 +6403,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
               await openMergeTailStopNotice(tx, { taskId: repairMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
             } else if (!repairUnable) {
-              await tx.taskActivity.create({ data: {
-                taskId: repairMarker.regressionTaskId,
+              await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
                 actorType: "control-plane",
                 body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${body.headSha ?? "missing-head"}`,
-                metadata: jsonValue({
-                  kind: MERGE_TAIL_KIND.repairResult,
-                  schemaVersion: 1,
-                  repairKind: typeof repairMarker.repairKind === "string" ? repairMarker.repairKind : null,
+                metadata: {
+                  repairKind: repairMarker.repairKind,
                   repairTaskId: run.taskId,
-                  startHeadSha: typeof repairMarker.headSha === "string" ? repairMarker.headSha : null,
-                  targetHeadSha: typeof repairMarker.baseHeadSha === "string" ? repairMarker.baseHeadSha : null,
+                  startHeadSha: repairMarker.headSha,
+                  targetHeadSha: repairMarker.baseHeadSha,
                   resolvedHeadSha,
-                }),
-              } });
+                },
+              });
               if (repairDocumentationTask) {
                 await tx.task.update({
                   where: { id: repairDocumentationTask.id },
