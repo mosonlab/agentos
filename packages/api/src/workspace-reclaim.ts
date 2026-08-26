@@ -64,6 +64,8 @@ export type ReclaimOffer = {
    * clone window, before /start persisted a path.
    */
   workspacePath: string | null;
+  /** Null is an ordinary checkout. A SHA forbids salvage publication. */
+  pinnedBaseSha: string | null;
   taskId?: string | null;
   runNumber?: number;
   baseSha?: string | null;
@@ -121,6 +123,8 @@ type ReclaimCandidate = {
   runNumber: number;
   baseSha: string | null;
   pushedBranch: string | null;
+  targetBranch: string | null;
+  task: { templateStep: { baseFromStepIndex: number | null } | null } | null;
   runnerId: string | null;
   workspacePath: string | null;
   status: RunStatus;
@@ -174,7 +178,8 @@ export const publishReclaimIntents = async (
   const runs = directories.length === 0 ? [] : await db.run.findMany({
     where: { id: { in: directories } },
     select: {
-      id: true, taskId: true, runNumber: true, baseSha: true, pushedBranch: true,
+      id: true, taskId: true, runNumber: true, baseSha: true, pushedBranch: true, targetBranch: true,
+      task: { select: { templateStep: { select: { baseFromStepIndex: true } } } },
       runnerId: true, workspacePath: true, status: true,
       workspaceRetained: true, endedAt: true, workspaceReclaimAt: true, workspaceReclaimedAt: true,
     },
@@ -243,6 +248,7 @@ export const publishReclaimIntents = async (
     reclaim.push({
       runId: run.id,
       workspacePath: run.workspacePath,
+      pinnedBaseSha: run.task?.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
       taskId: run.taskId,
       runNumber: run.runNumber,
       baseSha: run.baseSha,
@@ -272,10 +278,17 @@ export const publishReclaimIntents = async (
       workspaceReclaimedAt: null,
       id: { notIn: directories },
     },
-    select: { id: true, workspacePath: true },
+    select: {
+      id: true, workspacePath: true, targetBranch: true,
+      task: { select: { templateStep: { select: { baseFromStepIndex: true } } } },
+    },
     orderBy: { workspaceReclaimAt: "asc" },
     take: settlementPageSize,
-  })).map((run) => ({ runId: run.id, workspacePath: run.workspacePath }));
+  })).map((run) => ({
+    runId: run.id,
+    workspacePath: run.workspacePath,
+    pinnedBaseSha: run.task?.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
+  }));
   for (const { directory, reason } of keep) {
     if (reason === "unknown-run") audit("keep-unknown-directory", { root, directory, caller: inventory.runnerId });
   }
