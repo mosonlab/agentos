@@ -23,7 +23,6 @@ import {
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
-  defenseTriggers,
   enqueueTaskRun,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
@@ -31,7 +30,6 @@ import {
   readMarkerHistory,
   recoveryContext,
   resolveChainTarget,
-  resolutionTestTriggers,
   runnerFor,
   writeMarker,
   type PrismaClient,
@@ -41,7 +39,12 @@ import {
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
-import { createGitHubReader, type GitHubReader } from "./github-read.js";
+import { createGitHubReader, GitHubReadError, type GitHubReader } from "./github-read.js";
+import {
+  readinessDecision,
+  type ReadinessDecision,
+  type ReadinessInput,
+} from "./readiness-decision.js";
 import {
   acquireMergeLease,
   releaseMergeLease,
@@ -64,6 +67,11 @@ const READINESS_CANDIDATE_INCLUDE = {
   repo: true,
 } as const;
 type ReadinessCandidate = Prisma.TaskGetPayload<{ include: typeof READINESS_CANDIDATE_INCLUDE }>;
+const READINESS_REGRESSION_INCLUDE = {
+  stepOutput: true,
+  runs: { orderBy: { runNumber: "desc" as const }, take: 1, select: { id: true } },
+} as const;
+type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
 
 const readinessCandidates = async function* (
   db: PrismaClient,
@@ -424,6 +432,419 @@ const requeueRegression = async (
     return true;
 });
 
+type ClaimedReadiness = {
+  claimed: true;
+  readiness: ReadinessCandidate;
+  regression: ReadinessRegression;
+  recovery: RecoveryContext | null;
+  claimReason: string;
+  input: ReadinessInput;
+};
+
+type ReadinessRead = ClaimedReadiness | { claimed: false; input: ReadinessInput };
+
+const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
+  readiness: {
+    id: readiness.id,
+    chainId: readiness.chainId,
+    projectId: readiness.projectId,
+    repoId: readiness.repoId,
+  },
+  now,
+});
+
+const readReadiness = async (
+  db: PrismaClient,
+  reader: GitHubReader | null,
+  readiness: ReadinessCandidate,
+  now: Date,
+): Promise<ReadinessRead> => {
+  const context = decisionContext(readiness, now);
+  const regression = await db.task.findFirst({
+    where: {
+      projectId: readiness.projectId,
+      chainId: readiness.chainId,
+      templateId: readiness.templateId,
+      templateStep: { outputKind: "regression-verification" },
+    },
+    include: READINESS_REGRESSION_INCLUDE,
+  });
+  if (!regression || regression.status !== TaskStatus.DONE) {
+    return { claimed: false, input: { ...context, stage: "regression-pending" } };
+  }
+
+  const claimReason = readinessClaim(now);
+  const claimWhere = readiness.status === TaskStatus.TODO
+    ? { id: readiness.id, status: TaskStatus.TODO }
+    : expiredReadinessClaim(readiness.failureReason, now)
+      ? { id: readiness.id, status: TaskStatus.DOING, failureReason: readiness.failureReason }
+      : null;
+  if (!claimWhere) return { claimed: false, input: { ...context, stage: "claim-lost" } };
+  const claimed = await db.$transaction(async (tx) => {
+    await lockTaskMutationRows(tx, readiness.id);
+    return tx.task.updateMany({
+      where: claimWhere,
+      data: { status: TaskStatus.DOING, failureReason: claimReason },
+    });
+  });
+  if (claimed.count !== 1) return { claimed: false, input: { ...context, stage: "claim-lost" } };
+
+  let recovery: RecoveryContext | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
+    if (recovery) {
+      await db.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
+        status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+        failureReason: null,
+      } });
+    }
+    const claimedRead = (input: ReadinessInput): ClaimedReadiness => ({
+      claimed: true,
+      readiness,
+      regression,
+      recovery,
+      claimReason,
+      input,
+    });
+    if (!regression.stepOutput) {
+      return claimedRead({ ...context, stage: "missing-regression-evidence" });
+    }
+    const verdict = parseRegressionVerdict(regression.stepOutput.body);
+    if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass"
+      || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
+      return claimedRead({ ...context, stage: "invalid-regression-evidence" });
+    }
+    if (!reader?.compareCommits) {
+      return claimedRead({ ...context, stage: "reader-unavailable" });
+    }
+    const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
+    if (!target.resolved) {
+      return claimedRead({ ...context, stage: "target-unresolved", unresolvable: target.unresolvable });
+    }
+
+    const controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
+    const snapshot = await reader.readPullRequest(
+      target.repository,
+      target.prNumber,
+      readiness.repo?.defaultBranch ?? "main",
+      controller.signal,
+    );
+    const readyInput = (
+      values: Partial<Extract<ReadinessInput, { stage: "ready" }>> = {},
+    ): ClaimedReadiness => claimedRead({
+      ...context,
+      stage: "ready",
+      regression: {
+        headSha: verdict.verdict.headSha,
+        baseHeadSha: verdict.verdict.baseHeadSha,
+      },
+      target: { repository: target.repository, prNumber: target.prNumber },
+      snapshot,
+      comparison: null,
+      resolutions: [],
+      review: null,
+      branch: null,
+      evidence: null,
+      ...values,
+    });
+    if (snapshot.headRefOid !== verdict.verdict.headSha
+      || !snapshot.baseSha
+      || !snapshot.baseRefName
+      || snapshot.baseSha !== verdict.verdict.baseHeadSha) {
+      return readyInput();
+    }
+    const comparison = await reader.compareCommits(
+      target.repository,
+      snapshot.baseSha,
+      verdict.verdict.headSha,
+      controller.signal,
+    );
+    if (!comparison.filesComplete
+      || ((comparison.status !== "ahead" && comparison.status !== "identical")
+        || comparison.behindBy !== 0)) {
+      return readyInput({ comparison });
+    }
+    const markers = await readMarkerHistory(db, regression.id);
+    const resolutions: Extract<ReadinessInput, { stage: "ready" }>["resolutions"] = [];
+    for (const marker of markers) {
+      if (marker.kind !== "repairResult" || marker.repairKind !== "refresh-conflict") continue;
+      if (!marker.startHeadSha || !marker.resolvedHeadSha) {
+        resolutions.push({ status: "unverifiable" });
+        continue;
+      }
+      resolutions.push({
+        status: "read",
+        comparison: await reader.compareCommits(
+          target.repository,
+          marker.startHeadSha,
+          marker.resolvedHeadSha,
+          controller.signal,
+        ),
+      });
+    }
+    const review = await latestReviewState(
+      db,
+      readiness.id,
+      verdict.verdict.headSha,
+      recovery ? snapshot.baseSha : null,
+    );
+    const branchRun = await db.run.findFirst({
+      where: {
+        task: { projectId: readiness.projectId, chainId: readiness.chainId },
+        branch: { not: null },
+      },
+      select: { branch: true },
+      orderBy: { createdAt: "desc" },
+    });
+    return readyInput({
+      comparison,
+      resolutions,
+      review: review ? { state: review.state, reviewTaskId: review.reviewTaskId } : null,
+      branch: branchRun?.branch ?? null,
+      evidence: evidenceFromSnapshot(snapshot, randomUUID()),
+    });
+  } catch (error: unknown) {
+    const kind = error instanceof GitHubReadError ? error.kind : "unexpected";
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      claimed: true,
+      readiness,
+      regression,
+      recovery,
+      claimReason,
+      input: { ...context, stage: "read-failed", failure: { kind, message } },
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+const deferReadiness = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+  claimReason: string,
+): Promise<boolean> => db.$transaction(async (tx) => {
+  await lockTaskMutationRows(tx, readinessTaskId);
+  const deferred = await tx.task.updateMany({
+    where: { id: readinessTaskId, status: TaskStatus.DOING, failureReason: claimReason },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  });
+  return deferred.count === 1;
+});
+
+const applyReadinessDecision = async (
+  db: PrismaClient,
+  read: ClaimedReadiness,
+  decision: ReadinessDecision,
+  result: ReadinessTickResult,
+  releaseChainLease: MergeLeaseReleaser,
+  acquireChainLease: MergeLeaseAcquirer,
+): Promise<void> => {
+  const { readiness, regression, recovery } = read;
+  let claimReason = read.claimReason;
+  const stop = async (reason: string): Promise<boolean> => {
+    const stopped = await stopReadiness(db, {
+      readinessTaskId: readiness.id,
+      regressionTaskId: regression.id,
+      reason,
+      recovery,
+      claimReason,
+    }, releaseChainLease);
+    if (stopped) result.stopped += 1;
+    return stopped;
+  };
+  const requeue = async (input: {
+    staleBaseSha: string;
+    currentBaseSha: string;
+    reason: string;
+  }): Promise<boolean> => {
+    const requeued = await requeueRegression(db, {
+      readinessTaskId: readiness.id,
+      regressionTaskId: regression.id,
+      ...input,
+      now: read.input.now,
+      recovery,
+      claimReason,
+    });
+    if (requeued) result.requeued += 1;
+    return requeued;
+  };
+
+  switch (decision.kind) {
+    case "skip":
+      return;
+    case "defer":
+      await deferReadiness(db, readiness.id, claimReason);
+      return;
+    case "stop":
+      await stop(decision.evidence);
+      return;
+    case "requeue-regression":
+      await requeue(decision);
+      return;
+    case "review": {
+      if (decision.action === "park") {
+        // The obligation is re-read inside the mutex before the park is
+        // written. Between the read and here the review can have completed and
+        // handed this Step back; parking on that stale read would strand it.
+        const parked = await db.$transaction(async (tx) => {
+          await lockTaskMutationRows(tx, readiness.id);
+          const current = await latestReviewState(
+            tx,
+            readiness.id,
+            decision.headSha,
+            recovery ? decision.baseSha : null,
+          );
+          if (current?.state !== "open") return false;
+          const reparked = await tx.task.updateMany({
+            where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
+            data: {
+              status: TaskStatus.REVIEW,
+              failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${String(current.reviewTaskId)}`,
+            },
+          });
+          return reparked.count === 1;
+        });
+        if (parked) await releaseForReview(releaseChainLease, readiness.chainId);
+        result.reviewing += 1;
+        return;
+      }
+      const opened = await createReviewObligation(db, {
+        readinessTask: readiness,
+        regressionTaskId: regression.id,
+        branch: decision.branch,
+        baseSha: decision.baseSha,
+        headSha: decision.headSha,
+        triggers: decision.triggers,
+        recovery,
+        claimReason,
+      });
+      if (opened.ok) {
+        await releaseForReview(releaseChainLease, readiness.chainId);
+        result.reviewing += 1;
+      } else if ("lost" in opened) {
+        // Another worker owns this readiness Step now. Leaving its state alone
+        // is the whole point of noticing.
+        result.reviewing += 1;
+      } else {
+        await stop(opened.reason);
+      }
+      return;
+    }
+    case "authorize":
+      break;
+  }
+
+  // Renew immediately before the only network call outside the GitHub read
+  // budget. The original claim covered the reads; this one covers the acquire
+  // and authorization transaction.
+  const renewedClaim = await renewReadinessClaim(db, readiness.id, claimReason);
+  if (!renewedClaim) return;
+  claimReason = renewedClaim;
+  read.claimReason = renewedClaim;
+
+  // From the base this authorization pins to the merge that consumes it,
+  // `main` must not move. Earlier reads and Blind review can be repeated.
+  if (readiness.chainId) {
+    const acquisition = await acquireChainLease(readiness.chainId);
+    if (acquisition.outcome === "contended") return;
+    if (acquisition.outcome === "unreachable") {
+      await stop(`merge lease acquire is unreachable: ${acquisition.detail}`);
+      return;
+    }
+  }
+  const authorization = await db.$transaction(async (tx) => {
+    await lockTaskMutationRows(tx, readiness.id);
+    const held = await tx.task.updateMany({
+      where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
+      data: { status: TaskStatus.DONE, failureReason: null },
+    });
+    if (held.count !== 1) {
+      const current = await tx.task.findUnique({
+        where: { id: readiness.id },
+        select: { status: true, failureReason: true },
+      });
+      const activeSuccessor = current?.status === TaskStatus.DONE
+        || (current?.status === TaskStatus.DOING
+          && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
+      return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+    }
+    const binding = `mechanical:${readiness.id}:${randomUUID()}`;
+    const payload = {
+      ...decision.evidence,
+      mergeMethod: AUTHORIZED_MERGE_METHOD,
+      issuedAt: decision.issuedAt,
+      decision: {
+        channel: "mechanical" as const,
+        inboxDecisionId: binding,
+        inboxMessageId: binding,
+      },
+    };
+    const activity = await tx.taskActivity.create({ data: {
+      taskId: readiness.id,
+      actorType: "control-plane",
+      body: `Mechanical merge authorized for PR #${decision.prNumber} at ${decision.evidence.headSha}`,
+      metadata: {
+        ...authorizationMetadata(payload),
+        recoverySourceStopId: recovery?.sourceStopId ?? null,
+      } as Prisma.InputJsonObject,
+    } });
+    await tx.taskStepOutput.upsert({
+      where: { taskId: readiness.id },
+      create: {
+        taskId: readiness.id,
+        kind: "merge-authorization",
+        body: JSON.stringify({
+          authorizationActivityId: activity.id,
+          headSha: decision.evidence.headSha,
+        }),
+        commitSha: decision.evidence.headSha,
+      },
+      update: {
+        kind: "merge-authorization",
+        body: JSON.stringify({
+          authorizationActivityId: activity.id,
+          headSha: decision.evidence.headSha,
+        }),
+        commitSha: decision.evidence.headSha,
+      },
+    });
+    await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
+    await writeMarker(tx, readiness.id, "readiness", {
+      actorType: "control-plane",
+      body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
+      metadata: {
+        state: "authorized",
+        headSha: decision.evidence.headSha,
+        authorizationActivityId: activity.id,
+        recoverySourceStopId: recovery?.sourceStopId ?? null,
+      },
+    });
+    if (recovery) {
+      await activateRecoveryIntegratorSuccessor(tx, {
+        readinessTaskId: readiness.id,
+        integratorTaskId: recovery.integratorTaskId,
+        sourceStopId: recovery.sourceStopId,
+        recoveryRunId: recovery.recoveryRunId,
+        authorizationActivityId: activity.id,
+      }, read.input.now);
+    } else {
+      await activateChainSuccessor(tx, readiness, {}, read.input.now);
+    }
+    return "authorized" as const;
+  });
+  if (authorization === "authorized") {
+    result.authorized += 1;
+  } else if (authorization === "claim-lost-inactive") {
+    reportMergeLeaseAnomaly(
+      readiness.chainId,
+      await releaseMergeLeaseSafely(releaseChainLease, readiness.chainId),
+    );
+  }
+};
+
 export const readinessTick = async (
   db: PrismaClient,
   reader: GitHubReader | null = createGitHubReader(),
@@ -437,300 +858,30 @@ export const readinessTick = async (
   for await (const readiness of readinessCandidates(db, pageSize)) {
     if (result.claimed >= limit) break;
     if (!isMergeReadinessStep(readiness.templateStep)) continue;
-    const regression = await db.task.findFirst({
-      where: {
-        projectId: readiness.projectId,
-        chainId: readiness.chainId,
-        templateId: readiness.templateId,
-        templateStep: { outputKind: "regression-verification" },
-      },
-      include: {
-        stepOutput: true,
-        runs: { orderBy: { runNumber: "desc" }, take: 1, select: { id: true } },
-      },
-    });
-    if (!regression || regression.status !== TaskStatus.DONE) continue;
-    let claimReason = readinessClaim(now);
-    const claimWhere = readiness.status === TaskStatus.TODO
-      ? { id: readiness.id, status: TaskStatus.TODO }
-      : expiredReadinessClaim(readiness.failureReason, now)
-        ? { id: readiness.id, status: TaskStatus.DOING, failureReason: readiness.failureReason }
-        : null;
-    if (!claimWhere) continue;
-    const claimed = await db.$transaction(async (tx) => {
-      await lockTaskMutationRows(tx, readiness.id);
-      return tx.task.updateMany({ where: claimWhere, data: { status: TaskStatus.DOING, failureReason: claimReason } });
-    });
-    if (claimed.count !== 1) continue;
+
+    const read = await readReadiness(db, reader, readiness, now);
+    const decision = readinessDecision(read.input);
+    if (!read.claimed) continue;
     result.claimed += 1;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let recovery: RecoveryContext | null = null;
-    const stop = async (reason: string): Promise<boolean> => {
+    try {
+      await applyReadinessDecision(
+        db,
+        read,
+        decision,
+        result,
+        releaseChainLease,
+        acquireChainLease,
+      );
+    } catch (error: unknown) {
+      const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
       const stopped = await stopReadiness(db, {
         readinessTaskId: readiness.id,
-        regressionTaskId: regression.id,
+        regressionTaskId: read.regression.id,
         reason,
-        recovery,
-        claimReason,
+        recovery: read.recovery,
+        claimReason: read.claimReason,
       }, releaseChainLease);
       if (stopped) result.stopped += 1;
-      return stopped;
-    };
-    const requeue = async (input: {
-      staleBaseSha: string;
-      currentBaseSha: string;
-      reason: string;
-    }): Promise<boolean> => {
-      const requeued = await requeueRegression(db, {
-        readinessTaskId: readiness.id,
-        regressionTaskId: regression.id,
-        ...input,
-        now,
-        recovery,
-        claimReason,
-      });
-      if (requeued) result.requeued += 1;
-      return requeued;
-    };
-    try {
-      recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
-      if (recovery) {
-        await db.mergeRecoveryAttempt.update({ where: { id: recovery.aggregateId }, data: {
-          status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
-          failureReason: null,
-        } });
-      }
-      if (!regression.stepOutput) {
-        await stop("missing head-bound regression PASS evidence");
-        continue;
-      }
-      const verdict = parseRegressionVerdict(regression.stepOutput.body);
-      if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass" || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
-        await stop("missing or stale head-bound regression PASS evidence");
-        continue;
-      }
-      if (!reader?.compareCommits) {
-        await stop("server-side GitHub comparison reader is unavailable");
-        continue;
-      }
-      const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
-      if (!target.resolved) {
-        await stop(`pull-request target is ${target.unresolvable}`);
-        continue;
-      }
-      const controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
-      const snapshot = await reader.readPullRequest(target.repository, target.prNumber, readiness.repo?.defaultBranch ?? "main", controller.signal);
-      if (snapshot.headRefOid !== verdict.verdict.headSha) {
-        await requeue({
-          staleBaseSha: verdict.verdict.baseHeadSha,
-          currentBaseSha: snapshot.baseSha ?? "missing",
-          reason: `stale PASS head ${verdict.verdict.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
-        });
-        continue;
-      }
-      if (!snapshot.baseSha || !snapshot.baseRefName) {
-        await stop("pull request base identity is unavailable");
-        continue;
-      }
-      if (snapshot.baseSha !== verdict.verdict.baseHeadSha) {
-        await requeue({
-          staleBaseSha: verdict.verdict.baseHeadSha,
-          currentBaseSha: snapshot.baseSha,
-          reason: "target base advanced after regression PASS",
-        });
-        continue;
-      }
-      const diff = await reader.compareCommits(target.repository, snapshot.baseSha, verdict.verdict.headSha, controller.signal);
-      if (!diff.filesComplete) {
-        await stop("GitHub comparison file list is truncated or completeness is unproven");
-        continue;
-      }
-      if ((diff.status !== "ahead" && diff.status !== "identical") || diff.behindBy !== 0) {
-        await requeue({
-          staleBaseSha: verdict.verdict.baseHeadSha,
-          currentBaseSha: snapshot.baseSha,
-          reason: `server-side ancestry check refused ${diff.status} comparison with behind_by=${diff.behindBy}`,
-        });
-        continue;
-      }
-      const triggers = defenseTriggers(diff.files);
-      // Every refresh-conflict resolution this Regression ever recorded has to
-      // be re-proved, however far back it sits.
-      const resolutions = await readMarkerHistory(db, regression.id);
-      for (const marker of resolutions) {
-        if (marker.kind !== "repairResult" || marker.repairKind !== "refresh-conflict") continue;
-        if (!marker.startHeadSha || !marker.resolvedHeadSha) {
-          triggers.push({ path: "<resolution-range>", reason: "existing-test-lines-unverifiable" });
-          continue;
-        }
-        const resolution = await reader.compareCommits(target.repository, marker.startHeadSha, marker.resolvedHeadSha, controller.signal);
-        if (!resolution.filesComplete) {
-          triggers.push({ path: "<resolution-range>", reason: "existing-test-lines-unverifiable" });
-          continue;
-        }
-        triggers.push(...resolutionTestTriggers(resolution.files));
-      }
-      const review = await latestReviewState(
-        db,
-        readiness.id,
-        verdict.verdict.headSha,
-        recovery ? snapshot.baseSha : null,
-      );
-      const reviewCleared = review?.state === "approved" || review?.state === "accepted-with-followups";
-      if (triggers.length > 0 && !reviewCleared) {
-        if (review?.state === "open") {
-          // The obligation is re-read inside the mutex before the park is
-          // written. Between the read above and here the review can have
-          // completed and handed this step back; parking on that stale read
-          // would strand a step no review is coming back for.
-          const parked = await db.$transaction(async (tx) => {
-            await lockTaskMutationRows(tx, readiness.id);
-            const current = await latestReviewState(tx, readiness.id, verdict.verdict.headSha, recovery ? snapshot.baseSha : null);
-            if (current?.state !== "open") return false;
-            const reparked = await tx.task.updateMany({
-              where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
-              data: { status: TaskStatus.REVIEW, failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${String(current.reviewTaskId)}` },
-            });
-            return reparked.count === 1;
-          });
-          if (parked) await releaseForReview(releaseChainLease, readiness.chainId);
-          result.reviewing += 1;
-          continue;
-        }
-        const branchRun = await db.run.findFirst({
-          where: { task: { projectId: readiness.projectId, chainId: readiness.chainId }, branch: { not: null } },
-          select: { branch: true },
-          orderBy: { createdAt: "desc" },
-        });
-        if (!branchRun?.branch) {
-          await stop("chain branch is unavailable for independent review");
-          continue;
-        }
-        const opened = await createReviewObligation(db, {
-          readinessTask: readiness,
-          regressionTaskId: regression.id,
-          branch: branchRun.branch,
-          baseSha: snapshot.baseSha,
-          headSha: verdict.verdict.headSha,
-          triggers,
-          recovery,
-          claimReason,
-        });
-        if (opened.ok) {
-          await releaseForReview(releaseChainLease, readiness.chainId);
-          result.reviewing += 1;
-        } else if ("lost" in opened) {
-          // Another worker owns this readiness step now. Leaving its state
-          // alone is the whole point of noticing.
-          result.reviewing += 1;
-        } else {
-          await stop(opened.reason);
-        }
-        continue;
-      }
-      const evidence = evidenceFromSnapshot(snapshot, randomUUID());
-      if ("error" in evidence) {
-        await stop(evidence.error);
-        continue;
-      }
-      // Renew immediately before the only network call outside the GitHub read
-      // budget. The original claim covered the reads; this one covers the
-      // acquire and the authorization transaction. CAS still decides every
-      // transition, so an overrun remains safe rather than merely unlikely.
-      const renewedClaim = await renewReadinessClaim(db, readiness.id, claimReason);
-      if (!renewedClaim) continue;
-      claimReason = renewedClaim;
-
-      // The lock belongs here and only here. From the base this authorization
-      // pins to the merge that consumes it, `main` must not move; everything
-      // earlier in the tail -- the refresh, the semantic verification, the
-      // review -- can be redone if it does.
-      if (readiness.chainId) {
-        const acquisition = await acquireChainLease(readiness.chainId);
-        if (acquisition.outcome === "contended") continue;
-        if (acquisition.outcome === "unreachable") {
-          await stop(`merge lease acquire is unreachable: ${acquisition.detail}`);
-          continue;
-        }
-      }
-      const authorization = await db.$transaction(async (tx) => {
-        await lockTaskMutationRows(tx, readiness.id);
-        // The claim is evidence until it is re-read under the mutex, and the
-        // acquire above is a network round trip spent inside the claim's lease.
-        // A worker that lost the step while acquiring must write nothing here:
-        // two authorizations would queue two merge executions.
-        const held = await tx.task.updateMany({
-          where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
-          data: { status: TaskStatus.DONE, failureReason: null },
-        });
-        if (held.count !== 1) {
-          const current = await tx.task.findUnique({
-            where: { id: readiness.id },
-            select: { status: true, failureReason: true },
-          });
-          const activeSuccessor = current?.status === TaskStatus.DONE
-            || (current?.status === TaskStatus.DOING
-              && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
-          return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
-        }
-        // Every exact-head/current-base cycle gets a distinct binding. The
-        // obsolete authorization remains append-only evidence and cannot make a
-        // refreshed authorization ambiguous or be reused by the executor.
-        const binding = `mechanical:${readiness.id}:${randomUUID()}`;
-        const payload = {
-          ...evidence,
-          mergeMethod: AUTHORIZED_MERGE_METHOD,
-          issuedAt: now.toISOString(),
-          decision: { channel: "mechanical" as const, inboxDecisionId: binding, inboxMessageId: binding },
-        };
-        const activity = await tx.taskActivity.create({ data: {
-          taskId: readiness.id,
-          actorType: "control-plane",
-          body: `Mechanical merge authorized for PR #${target.prNumber} at ${evidence.headSha}`,
-          metadata: { ...authorizationMetadata(payload), recoverySourceStopId: recovery?.sourceStopId ?? null } as Prisma.InputJsonObject,
-        } });
-        await tx.taskStepOutput.upsert({
-          where: { taskId: readiness.id },
-          create: { taskId: readiness.id, kind: "merge-authorization", body: JSON.stringify({ authorizationActivityId: activity.id, headSha: evidence.headSha }), commitSha: evidence.headSha },
-          update: { kind: "merge-authorization", body: JSON.stringify({ authorizationActivityId: activity.id, headSha: evidence.headSha }), commitSha: evidence.headSha },
-        });
-        await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
-        await writeMarker(tx, readiness.id, "readiness", {
-          actorType: "control-plane",
-          body: `Merge readiness authorized exact head ${evidence.headSha}; merge execution queued`,
-          metadata: {
-            state: "authorized",
-            headSha: evidence.headSha,
-            authorizationActivityId: activity.id,
-            recoverySourceStopId: recovery?.sourceStopId ?? null,
-          },
-        });
-        if (recovery) {
-          await activateRecoveryIntegratorSuccessor(tx, {
-            readinessTaskId: readiness.id,
-            integratorTaskId: recovery.integratorTaskId,
-            sourceStopId: recovery.sourceStopId,
-            recoveryRunId: recovery.recoveryRunId,
-            authorizationActivityId: activity.id,
-          }, now);
-        } else {
-          await activateChainSuccessor(tx, readiness, {}, now);
-        }
-        return "authorized" as const;
-      });
-      if (authorization === "authorized") {
-        result.authorized += 1;
-      } else if (authorization === "claim-lost-inactive") {
-        reportMergeLeaseAnomaly(
-          readiness.chainId,
-          await releaseMergeLeaseSafely(releaseChainLease, readiness.chainId),
-        );
-      }
-    } catch (error: unknown) {
-      await stop(`readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   }
   return result;
