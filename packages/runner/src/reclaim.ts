@@ -2,12 +2,11 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 import {
-  fetchReclaimPlan, recordReclaimPublication, reportReclaimOutcomes,
+  fetchReclaimPlan, reportReclaimOutcomes,
   type ReclaimOffer, type ReclaimResult,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
-import { salvageWorkspace } from "./delivery.js";
-import { captureWorkspaceResult, cleanupWorkspace } from "./workspace.js";
+import { disposeWorkspace } from "./dispose-workspace.js";
 
 /**
  * Workspace GC, from the side that owns the disk (issue #115).
@@ -37,7 +36,6 @@ const empty: ReclaimSweep = { offered: 0, removed: 0, refused: 0, failed: 0, set
 
 export type ReclaimDeps = {
   listDirectories?: (root: string) => Promise<string[]>;
-  remove?: (config: RunnerConfig, path: string) => Promise<void>;
 };
 
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -141,7 +139,6 @@ export const reclaimWorkspaces = async (
 ): Promise<ReclaimSweep> => {
   const root = resolve(config.workspaceRoot);
   const list = deps.listDirectories ?? listRunDirectories;
-  const remove = deps.remove ?? cleanupWorkspace;
   // Pinned once, re-checked before every removal. A root that cannot be
   // resolved has not been provisioned yet, and an unreadable root is not
   // evidence that anything under it is gone — in both cases the sweep asks
@@ -190,56 +187,31 @@ export const reclaimWorkspaces = async (
       refuse(offer, "Reclaim offer omitted salvage publication evidence; refusing mixed-version deletion");
       continue;
     }
+    if (offer.pinnedBaseSha === undefined) {
+      refuse(offer, "Reclaim offer omitted pinned checkout evidence; refusing mixed-version deletion");
+      continue;
+    }
     try {
-      let pushedBranch: string | undefined;
-      // New control planes always include pushedBranch. Null means no durable
-      // publication exists yet, so this delayed cleanup owns the same salvage
-      // obligation as inline runner cleanup. An omitted field is accepted only
-      // for compatibility with the pre-salvage reclaim protocol.
-      if (offer.pushedBranch === null) {
-        // baseSha is written only after provisioning completes. Null therefore
-        // proves this run never had a cloned base against which local work could
-        // exist; audit that fact and reclaim the directory left by the failed
-        // clone. Identity fields are required only once a base exists.
-        if (offer.baseSha === null) {
-          audit("nothing-to-salvage", {
-            runId: offer.runId,
-            reason: "run never completed provisioning and has no clone base",
-          });
-        } else if (!offer.taskId || offer.runNumber === undefined || !offer.baseSha) {
-          throw new Error("Salvage required before reclaim, but taskId, runNumber, or clone base is missing");
-        } else {
-          const workspace = {
-            path: authorized.path,
-            branch: "",
-            baseSha: offer.baseSha,
-          };
-          const gitResult = await captureWorkspaceResult(config, workspace);
-          const salvage = await salvageWorkspace(config, {
-            taskId: offer.taskId,
-            runId: offer.runId,
-            runNumber: offer.runNumber,
-          }, { ...workspace, branch: gitResult.branch });
-          if (salvage?.pushStatus === "FAILED") {
-            throw new Error(salvage.pushError ?? "WIP salvage failed before reclaim");
-          }
-          pushedBranch = salvage?.pushedBranch;
-          if (pushedBranch) {
-            await recordReclaimPublication(config, {
-              runnerId: config.runnerId,
-              runId: offer.runId,
-              pushedBranch,
-            });
-          }
-          if (!pushedBranch) {
-            audit("nothing-to-salvage", {
-              runId: offer.runId,
-              reason: "clean tree with no commits past the clone base",
-            });
-          }
-        }
+      if (offer.pushedBranch === null && offer.baseSha === undefined) {
+        throw new Error("Salvage required before reclaim, but clone base evidence is missing");
       }
-      await remove(config, authorized.path);
+      const disposed = await disposeWorkspace(config, {
+        source: "reclaim",
+        runId: offer.runId,
+        taskId: offer.taskId ?? null,
+        runNumber: offer.runNumber,
+      }, {
+        path: authorized.path,
+        branch: "",
+        baseSha: offer.baseSha ?? null,
+        pinnedBaseSha: offer.pinnedBaseSha,
+      }, {
+        alreadyDurable: offer.pushedBranch !== null,
+        retain: false,
+      });
+      if (disposed.cleanupStatus !== "SUCCEEDED") {
+        throw new Error(disposed.cleanupFailureReason ?? `Workspace disposal returned ${disposed.cleanupStatus}`);
+      }
       sweep.removed += 1;
       results.push({ runId: offer.runId, outcome: "REMOVED" });
     } catch (error: unknown) {
