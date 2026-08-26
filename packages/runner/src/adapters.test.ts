@@ -766,6 +766,177 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
   }
 });
 
+// A REAL `pi --mode json` transcript, captured 2026-08-25 against pi 0.84.2 and
+// openai-codex/gpt-5.6-luna with the exact flags argsForRunner builds:
+//
+//   echo "Run the bash command 'echo hello' and then tell me its output." \
+//     | pi -p --mode json --session-dir ./sess --model openai-codex/gpt-5.6-luna \
+//         --thinking low --no-skills --no-prompt-templates --no-themes \
+//         --no-context-files --no-approve
+//
+// Trimmed to the events that decide the harvest, each one byte-verbatim: the two
+// assistant `message_end`s, the two `turn_end`s that REPEAT them (the double
+// count this must not make), and the empty terminal event. If an assertion below
+// ever disagrees with these numbers, the code is wrong, never the capture.
+const PI_TRANSCRIPT: unknown[] = [
+  {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "name": "bash", "arguments": {"command": "echo hello"}}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 4620, "output": 19, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4639, "cost": {"input": 0.0009240000000000001, "output": 2.28e-05, "cacheRead": 0, "cacheWrite": 0, "total": 0.0009468000000000001}}, "stopReason": "toolUse", "timestamp": 1787703240541, "responseId": "resp_00e0eb3701447702016a8e2fcb669887d0ade1277f25377b3a", "rawStopReason": "completed"}},
+  {"type": "turn_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "name": "bash", "arguments": {"command": "echo hello"}}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 4620, "output": 19, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4639, "cost": {"input": 0.0009240000000000001, "output": 2.28e-05, "cacheRead": 0, "cacheWrite": 0, "total": 0.0009468000000000001}}, "stopReason": "toolUse", "timestamp": 1787703240541, "responseId": "resp_00e0eb3701447702016a8e2fcb669887d0ade1277f25377b3a", "rawStopReason": "completed"}, "toolResults": [{"role": "toolResult", "toolCallId": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "toolName": "bash", "content": [{"type": "text", "text": "hello\n"}], "isError": false, "timestamp": 1787703245849}]},
+  {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello", "textSignature": "{\"v\":1,\"id\":\"msg_00e0eb3701447702016a8e2fd2dea087d09a0c85f07de241ae\",\"phase\":\"final_answer\"}"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 1068, "output": 5, "cacheRead": 3584, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4657, "cost": {"input": 0.00021360000000000001, "output": 6e-06, "cacheRead": 7.168e-05, "cacheWrite": 0, "total": 0.00029128000000000004}}, "stopReason": "stop", "timestamp": 1787703245851, "responseId": "resp_00e0eb3701447702016a8e2fcebd1087d0be678fe9ff2a3a20", "rawStopReason": "completed"}},
+  {"type": "turn_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello", "textSignature": "{\"v\":1,\"id\":\"msg_00e0eb3701447702016a8e2fd2dea087d09a0c85f07de241ae\",\"phase\":\"final_answer\"}"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 1068, "output": 5, "cacheRead": 3584, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4657, "cost": {"input": 0.00021360000000000001, "output": 6e-06, "cacheRead": 7.168e-05, "cacheWrite": 0, "total": 0.00029128000000000004}}, "stopReason": "stop", "timestamp": 1787703245851, "responseId": "resp_00e0eb3701447702016a8e2fcebd1087d0be678fe9ff2a3a20", "rawStopReason": "completed"}, "toolResults": []},
+  {"type": "agent_settled"},
+];
+
+// The second message is the one that settles the caliber: input 1068 and
+// cacheRead 3584 are DISJOINT (1068 + 5 + 3584 = 4657, PI's own totalTokens),
+// so uncached input is what reaches inputTokens.
+const PI_EXPECTED = {
+  messages: 2,
+  reported: 2,
+  input: 4620 + 1068,
+  output: 19 + 5,
+  cacheRead: 3584,
+  cacheWrite: 0,
+  // Integer nano-USD, written out rather than summed as doubles: adding the two
+  // captured costs in JS gives 0.0012380800000000001, and the point of the
+  // integer transport is that the stored value does not depend on that error.
+  costNanoUsd: 1_238_080,
+};
+
+/** Drive the PI parser over a literal event stream: the stub reads the prompt
+ * off stdin exactly as a real CLI does, then writes the lines and exits. */
+const piStream = async (lines: unknown[]): Promise<Array<{ type: string; payload: Record<string, unknown> }>> => {
+  const emitScript = [
+    'const chunks = [];',
+    'process.stdin.on("data", (chunk) => chunks.push(chunk));',
+    `process.stdin.on("end", () => process.stdout.write(${JSON.stringify(lines.map((line) => `${JSON.stringify(line)}\n`).join(""))}));`,
+  ].join("");
+  const spec = {
+    ...runSpec(),
+    config: {
+      binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
+      runAsPrefix: [process.execPath, "-e", emitScript],
+    } as unknown as RunnerConfig,
+    claim: { ...claim, runner: "PI" as const },
+    workingDirectory: process.cwd(),
+    env: process.env,
+  };
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const handle = await adapters.PI.start(spec, (event) => { events.push(event); });
+  await handle.exit;
+  return events;
+};
+
+const finalOutputOf = (events: Array<{ type: string; payload: Record<string, unknown> }>): Record<string, unknown> => {
+  const final = events.filter((event) => event.type === "FINAL_OUTPUT");
+  assert.equal(final.length, 1, "a PI session settles exactly once");
+  return final[0]!.payload;
+};
+
+test("PI per-message usage is aggregated onto the terminal event, counting each message once", { timeout: 30_000 }, async () => {
+  const events = await piStream(PI_TRANSCRIPT);
+  const payload = finalOutputOf(events);
+  assert.equal(payload.type, "agent_settled", "the provider's own terminal event is preserved");
+  assert.deepEqual(payload.agentosPiUsage, PI_EXPECTED);
+  // The failure this guards is silent arithmetic: turn_end carries the same
+  // message object, so a parser that harvested both would report exactly double.
+  assert.notEqual((payload.agentosPiUsage as { input: number }).input, PI_EXPECTED.input * 2);
+  assert.equal(events.some((event) => event.type === "ADAPTER_ERROR"), false);
+});
+
+test("a PI session that reports no usage settles loudly instead of leaving silent nulls", { timeout: 30_000 }, async () => {
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+    { type: "agent_settled" },
+  ]);
+  const payload = finalOutputOf(events);
+  // No invented zeroes: the columns must stay NULL, which means the aggregate
+  // must be absent from the payload entirely.
+  assert.equal("agentosPiUsage" in payload, false);
+  const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(reported.length, 1);
+  assert.match(String(reported[0]!.payload.error), /cost is incomplete.*no usage on any of 1/u);
+  assert.equal(reported[0]!.payload.messages, 1);
+  assert.equal(reported[0]!.payload.reported, 0);
+});
+
+test("a PI session whose reported usage sums to zero is a gap, not a free session", { timeout: 30_000 }, async () => {
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
+    messages: 1, reported: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costNanoUsd: 0,
+  });
+  const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(reported.length, 1);
+  assert.match(String(reported[0]!.payload.error), /no tokens; PI reported no cost/u);
+});
+
+test("real tokens with no cost is diagnosed rather than left as a silent null column", { timeout: 30_000 }, async () => {
+  // The dangerous half of a partial report: the token columns land, look
+  // healthy, and the cost column stays NULL with nothing saying why.
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 100, output: 10 } } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, { messages: 1, reported: 1, input: 100, output: 10 });
+  const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(reported.length, 1);
+  assert.match(String(reported[0]!.payload.error), /^Session cost is incomplete: PI reported no cost$/u);
+});
+
+test("a session only some of whose messages reported usage does not pass off a short total as whole", { timeout: 30_000 }, async () => {
+  // Without this the stored total is the reporting messages' alone, and nothing
+  // downstream can tell that it is short.
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 100, output: 10, cost: { total: 0.002 } } } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "no usage on this one" }] } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
+    messages: 2, reported: 1, input: 100, output: 10, costNanoUsd: 2_000_000,
+  });
+  const reported = events.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(reported.length, 1);
+  assert.match(String(reported[0]!.payload.error), /usage on only 1 of 2 assistant message\(s\)/u);
+});
+
+test("PI costs are summed exactly, not through the binary addition the column would round away", { timeout: 30_000 }, async () => {
+  // usage.ts documents this exact pair: 0.000001 + 0.000049 as doubles lands
+  // just below the half-unit and rounds to 0.0000 instead of 0.0001.
+  assert.ok(0.000001 + 0.000049 < 0.00005, "the double sum must really fall short, or this proves nothing");
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.000001 } } } },
+    { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.000049 } } } },
+    { type: "agent_settled" },
+  ]);
+  assert.equal((finalOutputOf(events).agentosPiUsage as { costNanoUsd: number }).costNanoUsd, 50_000);
+});
+
+test("PI reasoning tokens are a breakdown of output and cacheWrite is cached input", { timeout: 30_000 }, async () => {
+  // output 29 / reasoning 22 is the real second capture; a nonzero cacheWrite is
+  // constructed, because neither capture produced one and the fold must still
+  // be exercised. Adding reasoning to output would give 51, not 29.
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: 4627, output: 29, cacheRead: 100, cacheWrite: 200, reasoning: 22, cost: { total: 0.0009602 } } } },
+    { type: "agent_settled" },
+  ]);
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, {
+    messages: 1, reported: 1, input: 4627, output: 29, cacheRead: 100, cacheWrite: 200, costNanoUsd: 960_200,
+  });
+});
+
+test("one unusable PI usage field is dropped without taking its siblings with it", { timeout: 30_000 }, async () => {
+  const events = await piStream([
+    { type: "message_end", message: { role: "assistant", usage: { input: "lots", output: 7, cacheRead: -1, cost: { total: 0.5 } } } },
+    { type: "message_end", message: { role: "user", usage: { input: 999, output: 999 } } },
+    { type: "agent_settled" },
+  ]);
+  // input and cacheRead are rejected, so they stay ABSENT rather than becoming
+  // zero; the user message is not an assistant turn and is never harvested.
+  assert.deepEqual(finalOutputOf(events).agentosPiUsage, { messages: 1, reported: 1, output: 7, costNanoUsd: 500_000_000 });
+});
+
 // A run's checkout may predate any given safety fix (chain and salvage runs
 // are pinned to old bases), so the runner — always current code — has to point
 // the session's roots at throwaway directories itself. Both 2026-08-18
