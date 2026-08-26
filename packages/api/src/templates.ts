@@ -16,8 +16,8 @@ import {
 } from "@agentos/db";
 
 import { isValidBranchName } from "./branch-name.js";
-import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
 import { TemplateInstantiationRefusal } from "./template-errors.js";
+import { serializable } from "./transaction.js";
 
 export type InstantiateTemplateInput = {
   repoId: string;
@@ -107,10 +107,9 @@ const dispatchBindingUniqueConflict = (error: unknown): boolean => {
     || error.message.includes("dispatchAfterTaskId");
 };
 
-const retryableTransactionConflict = (error: unknown): boolean => {
+const retryableTemplateUniqueConflict = (error: unknown): boolean => {
   if (dispatchBindingUniqueConflict(error)) return false;
-  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return true;
-  return isSerializationConflict(error);
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 };
 
 const interpolate = (source: string, variables: Record<string, string>): string => source.replace(
@@ -294,11 +293,10 @@ export const instantiateTemplate = async (
       }
     }
   }
-  for (let attempt = 1; ; attempt += 1) {
-    const chainId = randomUUID();
-    const branchName = input.variables.branchName ?? `agentos/${chainId}`;
-    try {
-      return await db.$transaction(async (tx) => {
+  try {
+    return await serializable(db, async (tx) => {
+      const chainId = randomUUID();
+      const branchName = input.variables.branchName ?? `agentos/${chainId}`;
         let predecessor: DispatchPredecessor | null = null;
         if (input.afterTaskId) {
           // The first read only discovers the chain mutex to take. No
@@ -541,21 +539,22 @@ export const instantiateTemplate = async (
             dedupeKey: options.fire.dedupeKey ?? null,
           } })
           : null;
-        return { chainId, branchName, tasks, fireId: fire?.id ?? null };
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-    } catch (error: unknown) {
-      if (dispatchBindingUniqueConflict(error)) {
-        throw bindingRefusal(
-          "after_task_already_bound",
-          `Predecessor task ${input.afterTaskId} is already bound to another chain`,
-        );
-      }
+      return { chainId, branchName, tasks, fireId: fire?.id ?? null };
+    }, {
       // Six simultaneous webhook fires can form a longer serialization queue
       // than five attempts, even with per-attempt jitter. Twelve bounded tries
       // make the accepted burst deterministic while still surfacing persistent
       // conflicts instead of looping forever.
-      if (!retryableTransactionConflict(error) || attempt >= 12) throw error;
-      await serializationRetryDelay(attempt);
+      attempts: 12,
+      alsoRetry: retryableTemplateUniqueConflict,
+    });
+  } catch (error: unknown) {
+    if (dispatchBindingUniqueConflict(error)) {
+      throw bindingRefusal(
+        "after_task_already_bound",
+        `Predecessor task ${input.afterTaskId} is already bound to another chain`,
+      );
     }
+    throw error;
   }
 };

@@ -4,20 +4,38 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
-import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import type { InFlightTool } from "./budget.js";
+import type { RunnerConfig, RunnerKind } from "./config.js";
 import { isTransientNetworkError } from "./network-retry.js";
-import { workspaceEnvironment, type AgentScratch } from "./workspace.js";
+import type { AgentScratch } from "./workspace.js";
+import { createClaudeAdapter, claudeArgs, claudeChildEnvironment, provisionClaudeSessionConfig } from "./adapters/claude.js";
+import {
+  codexArgs, codexChildEnvironment, codexNativeSubagentProfile, codexPlatformBaselinePath, createCodexAdapter,
+  provisionCodexSessionConfig,
+} from "./adapters/codex.js";
+import { workspaceEnvironment } from "./adapters/environment.js";
+import { createPiAdapter, piArgs, piChildEnvironment, provisionPiSessionConfig } from "./adapters/pi.js";
+import type { SessionConfigOptions } from "./adapters/session-config.js";
+
+export { CODEX_STARTER_MODEL } from "./adapters/codex.js";
 
 export const ADAPTER_VERSION = "2.1.0";
+
+export type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
+export const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
+export const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
+  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
+  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
+};
+export const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
+  BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit",
+};
 
 // The seat manual tells the agent to use the AgentOS tools; the manifest has to
 // name them, or the agent has no way to know what it was actually granted.
 const toolManifest = (claim: ClaimedTask): string[] => [
   "",
-  claim.runner === "PI"
-    ? "AgentOS tools attached to this session (pi extension tools):"
-    : "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+  RUNNER_DEFINITIONS[claim.runner].toolIntroduction,
   "- task_activity_log(body): record notable progress in the task activity log. Routine channel; never interrupts a human.",
   "- task_output(kind, body, metadata?): persist this step's deliverable using the task's exact output contract. Rejected writes change nothing; never submit placeholder probes. Closed final outputs may be immutable.",
   "- task_status(): read the current task and run status, budget, branch, and whether an output exists.",
@@ -34,25 +52,8 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
 ];
 
-const nativeSubagentProfile = (run: ClaimedTask["run"], runner: RunnerKind): {
-  model: string;
-  effort: string;
-  maxConcurrent: number;
-} | null => {
-  if (run.subagentModel === null && run.subagentMaxConcurrent === null) return null;
-  if (run.subagentModel === null || run.subagentMaxConcurrent === null) {
-    throw new Error("Run contains an incomplete native subagent snapshot");
-  }
-  if (runner !== "CODEX") throw new Error("Native implementation subagents require a Codex root Run");
-  const { model, effort } = modelSpec(run.subagentModel);
-  if (model !== "gpt-5.6-luna" || effort !== "max" || run.subagentMaxConcurrent !== 8) {
-    throw new Error("Native implementation subagents must use gpt-5.6-luna:max with concurrency 8");
-  }
-  return { model, effort, maxConcurrent: run.subagentMaxConcurrent };
-};
-
 export const buildPrompt = (claim: ClaimedTask): string => {
-  const subagents = nativeSubagentProfile(claim.run, claim.runner);
+  const subagents = codexNativeSubagentProfile(claim.run, claim.runner);
   return [
   claim.agent.foundationalPrompt,
   "",
@@ -183,16 +184,12 @@ export const buildChildEnvironment = (
     AGENTOS_FENCING_TOKEN: claim.fencingToken,
     AGENTOS_WORKSPACE_PATH: workspacePath,
     AGENTOS_CODEX_SERVICE_TIER: claim.run.codexServiceTier.toLowerCase(),
-    ...(claim.runner === "PI" && claim.run.model.startsWith("openai-codex/")
-      ? { AGENTOS_PI_EXPECTS_OPENAI_CODEX: "1" }
-      : {}),
+    ...RUNNER_DEFINITIONS[claim.runner].childEnvironment(claim, scratch),
     // Last on purpose, so no task secret can point a session back at the
     // production roots. See provisionAgentScratch for why this containment has
     // to live in the runner rather than in the run's checkout.
     RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,
     CONTROL_PLANE_STATE_DIR: scratch.stateDir,
-    ...(claim.runner === "CODEX" ? { CODEX_HOME: scratch.configRoot } : {}),
-    ...(claim.runner === "PI" ? { PI_CODING_AGENT_DIR: scratch.configRoot } : {}),
   };
 };
 
@@ -257,12 +254,6 @@ export const piExtensionPath = (): string => process.env.RUNNER_PI_EXTENSION_PAT
 export const claudePlatformSettingsPath = (): string =>
   process.env.RUNNER_CLAUDE_SETTINGS_PATH ?? join(packageRoot, "assets", "claude-platform-settings.json");
 
-const codexPlatformBaselinePath = (): string => join(
-  process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
-  "codex",
-  "config.toml",
-);
-
 /**
  * The interpreter the CLI is told to run the MCP server with.
  *
@@ -300,7 +291,7 @@ export const runtimeDescriptor = (runnerId: string, runAsPrefix: string[]): stri
  * no credentials: they reach the server through the inherited child environment,
  * so nothing secret ends up in a command line other processes can read.
  */
-const mcpServerArgs = (credentialsPath: string): string[] => [mcpServerPath(), "--credentials", credentialsPath];
+export const mcpServerArgs = (credentialsPath: string): string[] => [mcpServerPath(), "--credentials", credentialsPath];
 
 export const mcpConfig = (credentialsPath: string): { mcpServers: Record<string, { type: string; command: string; args: string[] }> } => ({
   mcpServers: { agentos: { type: "stdio", command: nodeBinaryPath(), args: mcpServerArgs(credentialsPath) } },
@@ -360,11 +351,9 @@ export type PiUsageTotals = {
   costNanoUsd: number | null;
 };
 
-export type RuntimeHandle = {
+export type AdapterState = {
   runId: string;
   runner: RunnerKind;
-  child: ChildProcess;
-  pid: number | null;
   startedAt: Date;
   lastProcessAliveAt: Date;
   lastProgressEventAt: Date;
@@ -381,6 +370,11 @@ export type RuntimeHandle = {
   finalOutput: string | null;
   stdout: string;
   stderr: string;
+};
+
+export type RuntimeHandle = AdapterState & {
+  child: ChildProcess;
+  pid: number | null;
   exit: Promise<ExitEvidence>;
 };
 
@@ -413,6 +407,15 @@ export type ResumeSpec = RunSpec & { providerConversationId: string; input: stri
 
 export type KillResult = { signal: "SIGTERM" | "SIGKILL" | null; processAlive: boolean };
 
+/**
+ * One CLI implementation at the runner seam.
+ *
+ * `claim.agent.disabledTools` is not a universal capability: Claude enforces
+ * all eight current tool keys, PI enforces BASH/READ/WRITE/EDIT, and Codex
+ * exposes no supported per-tool deny mechanism. An adapter must keep that
+ * limitation explicit in its argv implementation; callers must not infer that
+ * a non-empty disabledTools list was enforced merely because start succeeded.
+ */
 export interface CliAdapter {
   preflight(spec: PreflightSpec): Promise<PreflightResult>;
   start(spec: RunSpec, sink: SessionEventSink): Promise<RuntimeHandle>;
@@ -422,367 +425,103 @@ export interface CliAdapter {
   classifyError(evidence: ExitEvidence): ClassifiedFailure;
 }
 
-const cap = (value: string, limit = 1_000_000): string => value.length <= limit ? value : value.slice(value.length - limit);
+export type AdapterEventParser = (
+  state: AdapterState,
+  event: Record<string, unknown>,
+  sink: SessionEventSink,
+) => void;
 
-const sourceFor = (runner: RunnerKind): AdapterEvent["source"] => runner;
-
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
-
-const stringField = (object: Record<string, unknown> | null, field: string): string | null =>
-  typeof object?.[field] === "string" ? object[field] as string : null;
-
-const eventErrorMessage = (event: Record<string, unknown>): string | null =>
-  stringField(event, "message")
-  ?? stringField(event, "error")
-  ?? stringField(asRecord(event.error), "message");
-
-const emit = (handle: RuntimeHandle, sink: SessionEventSink, type: string, payload: Record<string, unknown>, toolCallId?: string | null): void => {
-  handle.lastProgressEventAt = new Date();
-  sink({ source: sourceFor(handle.runner), type, payload, ...(toolCallId !== undefined ? { toolCallId } : {}) });
+export type AdapterImplementation = {
+  runner: RunnerKind;
+  args(spec: RunSpec, resume?: ResumeSpec): string[];
+  parseEvent: AdapterEventParser;
 };
-
-const markInFlightToolProgress = (handle: RuntimeHandle): void => {
-  if (handle.inFlightTool) handle.inFlightTool.lastProgressAt = new Date();
-};
-
-const parseClaude = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
-  const type = stringField(event, "type");
-  if (type === "system") {
-    handle.providerConversationId = stringField(event, "session_id") ?? handle.providerConversationId;
-    emit(handle, sink, "MODEL_STARTED", event);
-  } else if (type === "assistant") {
-    const message = asRecord(event.message);
-    const content = Array.isArray(message?.content) ? message.content : [];
-    for (const item of content) {
-      const part = asRecord(item);
-      if (stringField(part, "type") === "tool_use") {
-        const toolId = stringField(part, "id") ?? "unknown";
-        const now = new Date();
-        handle.inFlightTool = { id: toolId, name: stringField(part, "name") ?? "tool", startedAt: now, lastProgressAt: now };
-        emit(handle, sink, "TOOL_STARTED", part ?? {}, toolId);
-      }
-    }
-    emit(handle, sink, "MODEL_DELTA", event);
-  } else if (type === "user") {
-    const message = asRecord(event.message);
-    const content = Array.isArray(message?.content) ? message.content : [];
-    for (const item of content) {
-      const part = asRecord(item);
-      if (stringField(part, "type") === "tool_result") {
-        const toolId = stringField(part, "tool_use_id");
-        handle.inFlightTool = null;
-        emit(handle, sink, "TOOL_COMPLETED", part ?? {}, toolId);
-      }
-    }
-  } else if (type === "result") {
-    handle.terminalEventSeen = true;
-    handle.terminalSuccess = event.is_error === false && event.terminal_reason === "completed";
-    if (!handle.terminalSuccess) handle.sawError = true;
-    // An is_error result is the provider's own account of why the run died.
-    // Without it, classifyError falls back to grepping the agent's stdout,
-    // where task content (a literal "401" in code under edit) once turned a
-    // dropped connection into AUTH_REQUIRED.
-    if (event.is_error === true) handle.providerError = stringField(event, "result") ?? handle.providerError;
-    handle.finalOutput = stringField(event, "result") ?? handle.finalOutput;
-    emit(handle, sink, "FINAL_OUTPUT", event);
-  } else {
-    emit(handle, sink, "PROVIDER_STATUS", event);
-  }
-};
-
-const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
-  const type = stringField(event, "type");
-  if (type === "thread.started") {
-    handle.providerConversationId = stringField(event, "thread_id") ?? handle.providerConversationId;
-    emit(handle, sink, "MODEL_STARTED", event);
-  } else if (type === "item.started") {
-    const item = asRecord(event.item);
-    if (stringField(item, "type") === "command_execution") {
-      const toolId = stringField(item, "id") ?? "unknown";
-      const now = new Date();
-      handle.inFlightTool = { id: toolId, name: "command_execution", startedAt: now, lastProgressAt: now };
-      emit(handle, sink, "TOOL_STARTED", item ?? {}, toolId);
-    } else emit(handle, sink, "MODEL_DELTA", event);
-  } else if (type === "item.completed") {
-    const item = asRecord(event.item);
-    if (stringField(item, "type") === "command_execution") {
-      handle.inFlightTool = null;
-      emit(handle, sink, "TOOL_COMPLETED", item ?? {}, stringField(item, "id"));
-    } else {
-      if (item && stringField(item, "type") === "agent_message") {
-        // Codex may report an agent progress message while a long-running
-        // command_execution remains open. That structured message is the only
-        // positive evidence here that the tool is still advancing. Raw stderr
-        // deliberately does not reach this path: background CLI warnings must
-        // not keep a genuinely stuck command alive.
-        markInFlightToolProgress(handle);
-        handle.finalOutput = stringField(item, "text") ?? handle.finalOutput;
-      }
-      emit(handle, sink, "MODEL_DELTA", event);
-    }
-    // A nonzero shell command inside the session (status "failed") is normal
-    // agent behavior, not a run failure; only item-level errors count.
-    if (item?.error) handle.sawError = true;
-  } else if (type === "error") {
-    handle.sawError = true;
-    handle.providerError = eventErrorMessage(event) ?? handle.providerError;
-    emit(handle, sink, "ADAPTER_ERROR", event);
-  } else if (type === "turn.completed") {
-    handle.terminalEventSeen = true;
-    handle.terminalSuccess = !handle.sawError;
-    emit(handle, sink, "FINAL_OUTPUT", event);
-  } else emit(handle, sink, "PROVIDER_STATUS", event);
-};
-
-/** PI prices per message in USD; the accumulator carries integer nano-USD. */
-const NANOS_PER_USD = 1_000_000_000;
 
 const emptyPiUsage = (): PiUsageTotals =>
   ({ messages: 0, reported: 0, input: null, output: null, cacheRead: null, cacheWrite: null, costNanoUsd: null });
 
-/**
- * One number out of a PI usage object, or null when PI said nothing usable.
- * Rejection is per field and never throws: one absurd value must not discard
- * the siblings that were fine, and a usage object must not be able to kill the
- * session that carried it.
- */
-const piNumber = (value: unknown, field: string, integral: boolean): number | null => {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integral || Number.isInteger(value))) return value;
-  console.warn(JSON.stringify({ audit: "pi-usage", event: "field-dropped", field, value: String(value) }));
-  return null;
-};
-
-/**
- * Fold one PI message's usage into the session totals.
- *
- * Source, verified against a real `pi --mode json` capture (0.84.2,
- * openai-codex/gpt-5.6-luna): the usage object on a `message_end` event whose
- * message role is `assistant`. Shape:
- *
- *   {"input":1068,"output":5,"cacheRead":3584,"cacheWrite":0,"reasoning":0,
- *    "totalTokens":4657,"cost":{"input":…,"output":…,"cacheRead":…,"cacheWrite":…,"total":…}}
- *
- * Three properties of that capture drive this function, and none of them are
- * guesses:
- *
- * - `message_end` is the ONLY event harvested. `message_start` and every
- *   `message_update` carry a usage object too, and `turn_end` repeats the last
- *   message's object verbatim — summing any of them double counts.
- * - `input` EXCLUDES `cacheRead`: the captured message reconciles as
- *   1068 + 5 + 3584 = 4657, PI's own `totalTokens`. So `input` maps straight
- *   onto `inputTokens` with nothing to subtract.
- * - `output` INCLUDES `reasoning` (a second capture reported output 29 with
- *   reasoning 22 and totalTokens = input + output). `reasoning` is therefore
- *   read as a breakdown of output, never added to it — the same rule CODEX's
- *   `reasoning_output_tokens` already gets.
- *
- * PI reports cost directly, per message, in `cost.total` USD, so no pricing
- * lookup is involved. Those costs are summed as INTEGER nano-USD rather than as
- * JS doubles, and the payload carries the integer. Adding the doubles would
- * reintroduce exactly the error `usage.ts` documents and avoids — 0.000001 +
- * 0.000049 lands just below the half-unit and rounds to 0.0000 — and this
- * package cannot reach that module's Prisma.Decimal without pulling a database
- * client into the runner. Nano-USD is five orders of magnitude finer than the
- * Decimal(12, 4) column and every cost PI has been observed to report is an
- * exact multiple of it, so the scaling is lossless in practice and the one
- * rounding that matters still happens once, at the column boundary.
- */
-const harvestPiUsage = (totals: PiUsageTotals, message: Record<string, unknown>): void => {
-  totals.messages += 1;
-  const usage = asRecord(message.usage);
-  if (!usage) return;
-  totals.reported += 1;
-  const input = piNumber(usage.input, "input", true);
-  if (input !== null) totals.input = (totals.input ?? 0) + input;
-  const output = piNumber(usage.output, "output", true);
-  if (output !== null) totals.output = (totals.output ?? 0) + output;
-  const cacheRead = piNumber(usage.cacheRead, "cacheRead", true);
-  if (cacheRead !== null) totals.cacheRead = (totals.cacheRead ?? 0) + cacheRead;
-  const cacheWrite = piNumber(usage.cacheWrite, "cacheWrite", true);
-  if (cacheWrite !== null) totals.cacheWrite = (totals.cacheWrite ?? 0) + cacheWrite;
-  const cost = piNumber(asRecord(usage.cost)?.total, "cost.total", false);
-  if (cost !== null) {
-    const nanos = Math.round(cost * NANOS_PER_USD);
-    // The sum stays exact only while it is an exact integer double. A total past
-    // 9e6 USD is not a session, it is a bug, and it is dropped rather than
-    // silently losing precision from there on.
-    if (!Number.isSafeInteger(nanos) || !Number.isSafeInteger((totals.costNanoUsd ?? 0) + nanos)) {
-      console.warn(JSON.stringify({ audit: "pi-usage", event: "field-dropped", field: "cost.total", value: String(cost) }));
-    } else totals.costNanoUsd = (totals.costNanoUsd ?? 0) + nanos;
-  }
-};
-
-/** The totals as the FINAL_OUTPUT payload carries them: only fields PI actually
- * reported, so an absent field stays absent all the way to the column. */
-const piUsagePayload = (totals: PiUsageTotals): Record<string, unknown> => ({
-  messages: totals.messages,
-  reported: totals.reported,
-  ...(totals.input === null ? {} : { input: totals.input }),
-  ...(totals.output === null ? {} : { output: totals.output }),
-  ...(totals.cacheRead === null ? {} : { cacheRead: totals.cacheRead }),
-  ...(totals.cacheWrite === null ? {} : { cacheWrite: totals.cacheWrite }),
-  ...(totals.costNanoUsd === null ? {} : { costNanoUsd: totals.costNanoUsd }),
+export const createAdapterState = (
+  runner: RunnerKind,
+  runId: string,
+  startedAt = new Date(),
+): AdapterState => ({
+  runId,
+  runner,
+  startedAt,
+  lastProcessAliveAt: startedAt,
+  lastProgressEventAt: startedAt,
+  inFlightTool: null,
+  providerConversationId: null,
+  terminalEventSeen: false,
+  terminalSuccess: false,
+  terminationReason: null,
+  sawError: false,
+  providerError: null,
+  piTurnCompleted: false,
+  piFinalAttemptFailed: false,
+  piUsage: emptyPiUsage(),
+  finalOutput: null,
+  stdout: "",
+  stderr: "",
 });
 
-/**
- * Every way this session's cost ends up wrong or invisible, or an empty list.
- *
- * A session that reports nothing must not settle quietly: the columns stay NULL
- * either way, and NULL that nobody was told about reads exactly like a session
- * that cost nothing. The partial cases are the dangerous ones, because they do
- * not stay NULL — they store a real-looking number that is too small:
- *
- * - Fewer reporting messages than messages: the total is the reporting ones
- *   alone, and nothing downstream can tell it is short.
- * - A zero token or cost total: PI emitted usage objects that say the session
- *   was free, which for a session that ran a model is not a fact, it is a gap.
- *
- * Absent reads as zero here on purpose. This is the diagnostic, not the
- * ingest — a field PI never reported is precisely what the operator must hear
- * about, and the columns themselves still keep absent and zero apart.
- */
-const piUsageGaps = (totals: PiUsageTotals): string[] => {
-  if (totals.messages === 0) return ["PI settled without ending a single assistant message"];
-  if (totals.reported === 0) return [`PI reported no usage on any of ${totals.messages} assistant message(s)`];
-  const gaps: string[] = [];
-  if (totals.reported < totals.messages) {
-    gaps.push(`PI reported usage on only ${totals.reported} of ${totals.messages} assistant message(s)`);
-  }
-  if ((totals.input ?? 0) + (totals.output ?? 0) === 0) gaps.push("PI reported no tokens");
-  if ((totals.costNanoUsd ?? 0) === 0) gaps.push("PI reported no cost");
-  return gaps;
+const cap = (value: string, limit = 1_000_000): string => value.length <= limit ? value : value.slice(value.length - limit);
+
+const sourceFor = (runner: RunnerKind): AdapterEvent["source"] => runner;
+
+export const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+export const stringField = (object: Record<string, unknown> | null, field: string): string | null =>
+  typeof object?.[field] === "string" ? object[field] as string : null;
+
+export const eventErrorMessage = (event: Record<string, unknown>): string | null =>
+  stringField(event, "message")
+  ?? stringField(event, "error")
+  ?? stringField(asRecord(event.error), "message");
+
+export const emitAdapterEvent = (state: AdapterState, sink: SessionEventSink, type: string, payload: Record<string, unknown>, toolCallId?: string | null): void => {
+  state.lastProgressEventAt = new Date();
+  sink({ source: sourceFor(state.runner), type, payload, ...(toolCallId !== undefined ? { toolCallId } : {}) });
 };
 
-const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
-  const type = stringField(event, "type");
-  if (type === "session") {
-    handle.providerConversationId = stringField(event, "id") ?? handle.providerConversationId;
-    emit(handle, sink, "MODEL_STARTED", event);
-  } else if (type === "tool_execution_start") {
-    const toolId = stringField(event, "toolCallId") ?? "unknown";
-    const now = new Date();
-    handle.inFlightTool = { id: toolId, name: stringField(event, "toolName") ?? "tool", startedAt: now, lastProgressAt: now };
-    emit(handle, sink, "TOOL_STARTED", event, toolId);
-  } else if (type === "tool_execution_update") {
-    if (handle.inFlightTool) handle.inFlightTool.lastProgressAt = new Date();
-    emit(handle, sink, "TOOL_PROGRESS", event, stringField(event, "toolCallId"));
-  } else if (type === "tool_execution_end") {
-    handle.inFlightTool = null;
-    // Tool errors mid-session are recoverable; the terminal events decide.
-    emit(handle, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
-  } else if (type === "turn_end" || type === "message_end") {
-    handle.piTurnCompleted = true;
-    const message = asRecord(event.message);
-    // Usage is harvested from message_end alone; see harvestPiUsage for why
-    // turn_end, which repeats the same message, must not contribute.
-    if (type === "message_end" && message && stringField(message, "role") === "assistant") {
-      harvestPiUsage(handle.piUsage, message);
-    }
-    if (message && stringField(message, "role") === "assistant" && Array.isArray(message.content)) {
-      const text = message.content
-        .map((part) => stringField(asRecord(part) ?? {}, "text"))
-        .filter((part): part is string => part !== null)
-        .join("\n");
-      if (text) handle.finalOutput = text;
-    }
-    emit(handle, sink, "MODEL_COMPLETED", event);
-  } else if (type === "agent_end") {
-    const messages = Array.isArray(event.messages) ? event.messages : [];
-    const finalMessage = asRecord(messages.at(-1));
-    const stopReason = stringField(finalMessage, "stopReason");
-    const errorMessage = stringField(finalMessage, "errorMessage");
-    handle.piFinalAttemptFailed = event.willRetry === true || stopReason === "error" || errorMessage !== null;
-    handle.providerError = handle.piFinalAttemptFailed
-      ? errorMessage ?? (stopReason ? `PI stopped with ${stopReason}` : "PI provider retry failed")
-      : null;
-    emit(handle, sink, "PROVIDER_STATUS", event);
-  } else if (type === "agent_settled") {
-    handle.terminalEventSeen = true;
-    handle.terminalSuccess = handle.piTurnCompleted && !handle.piFinalAttemptFailed && !handle.sawError;
-    // PI's terminal event is literally {"type":"agent_settled"} — it carries no
-    // usage and no cost. The per-message totals this parser accumulated are
-    // attached here, under a name that says who computed them, because
-    // FINAL_OUTPUT is the one event the usage ingest reads. The provider's own
-    // untouched event is still on record: PROVIDER_RAW emitted it first.
-    const gaps = piUsageGaps(handle.piUsage);
-    if (gaps.length > 0) {
-      const reason = gaps.join("; ");
-      console.warn(JSON.stringify({ audit: "pi-usage", event: "incomplete", runId: handle.runId, reason }));
-      emit(handle, sink, "ADAPTER_ERROR", { error: `Session cost is incomplete: ${reason}`, ...piUsagePayload(handle.piUsage) });
-    }
-    emit(handle, sink, "FINAL_OUTPUT", handle.piUsage.reported === 0
-      ? event
-      : { ...event, agentosPiUsage: piUsagePayload(handle.piUsage) });
-  } else {
-    if (type?.includes("error")) handle.sawError = true;
-    emit(handle, sink, type?.includes("message") ? "MODEL_DELTA" : "PROVIDER_STATUS", event);
-  }
+export const markInFlightToolProgress = (state: AdapterState): void => {
+  if (state.inFlightTool) state.inFlightTool.lastProgressAt = new Date();
 };
 
-const processLine = (handle: RuntimeHandle, line: string, sink: SessionEventSink): void => {
+export const processProviderEvent = (
+  state: AdapterState,
+  event: Record<string, unknown>,
+  sink: SessionEventSink,
+  parseEvent: AdapterEventParser,
+): void => {
+  sink({ source: sourceFor(state.runner), type: "PROVIDER_RAW", payload: event });
+  parseEvent(state, event, sink);
+};
+
+const processLine = (
+  state: AdapterState,
+  line: string,
+  sink: SessionEventSink,
+  parseEvent: AdapterEventParser,
+): void => {
   if (!line.trim()) return;
   let event: Record<string, unknown>;
   try {
     const parsed = JSON.parse(line) as unknown;
     event = asRecord(parsed) ?? { value: parsed };
   } catch {
-    handle.sawError = true;
-    emit(handle, sink, "ADAPTER_ERROR", { error: "invalid-json", line });
+    state.sawError = true;
+    emitAdapterEvent(state, sink, "ADAPTER_ERROR", { error: "invalid-json", line });
     return;
   }
-  sink({ source: sourceFor(handle.runner), type: "PROVIDER_RAW", payload: event });
-  if (handle.runner === "CLAUDE") parseClaude(handle, event, sink);
-  else if (handle.runner === "CODEX") parseCodex(handle, event, sink);
-  else parsePi(handle, event, sink);
+  processProviderEvent(state, event, sink, parseEvent);
 };
 
 // Run.model carries an optional reasoning-effort suffix: "<model>[:<effort>]".
-const modelSpec = (raw: string): { model: string; effort: string | null } => {
+export const modelSpec = (raw: string): { model: string; effort: string | null } => {
   const at = raw.lastIndexOf(":");
   return at > 0 ? { model: raw.slice(0, at), effort: raw.slice(at + 1) } : { model: raw, effort: null };
-};
-
-// Each CLI takes the AgentOS tool surface through a different door: claude has a
-// native MCP config flag, codex takes MCP servers as config overrides, and pi
-// ships no MCP client at all, so it gets the same four tools as an extension.
-const codexMcpArgs = (credentialsPath: string): string[] => [
-  "-c", `mcp_servers.agentos.command=${JSON.stringify(nodeBinaryPath())}`,
-  "-c", `mcp_servers.agentos.args=${JSON.stringify(mcpServerArgs(credentialsPath))}`,
-  "-c", "mcp_servers.agentos.startup_timeout_sec=30",
-];
-
-const codexNativeSubagentArgs = (run: ClaimedTask["run"]): string[] => {
-  const profile = nativeSubagentProfile(run, "CODEX");
-  if (!profile) return [];
-  return [
-    "--enable", "multi_agent_v2",
-    "-c", `agents.default_subagent_model=${JSON.stringify(profile.model)}`,
-    "-c", `agents.default_subagent_reasoning_effort=${JSON.stringify(profile.effort)}`,
-    "-c", `agents.max_concurrent_threads_per_session=${profile.maxConcurrent}`,
-  ];
-};
-
-type ToolKey = "BASH" | "READ" | "WRITE" | "EDIT" | "GLOB" | "GREP" | "WEB_FETCH" | "WEB_SEARCH";
-const TOOL_ORDER: ToolKey[] = ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"];
-const CLAUDE_TOOL_NAMES: Record<ToolKey, string> = {
-  BASH: "Bash", READ: "Read", WRITE: "Write", EDIT: "Edit",
-  GLOB: "Glob", GREP: "Grep", WEB_FETCH: "WebFetch", WEB_SEARCH: "WebSearch",
-};
-const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
-  BASH: "bash", READ: "read", WRITE: "write", EDIT: "edit",
-};
-
-const denyArgs = (runner: "CLAUDE" | "PI", disabledTools: string[]): string[] => {
-  const denied = new Set(disabledTools);
-  const names = TOOL_ORDER.flatMap((tool) => {
-    if (!denied.has(tool)) return [];
-    const name = runner === "CLAUDE" ? CLAUDE_TOOL_NAMES[tool] : PI_TOOL_NAMES[tool];
-    return name ? [name] : [];
-  });
-  if (names.length === 0) return [];
-  return [runner === "CLAUDE" ? "--disallowedTools" : "--exclude-tools", names.join(",")];
 };
 
 /**
@@ -806,60 +545,13 @@ const denyArgs = (runner: "CLAUDE" | "PI", disabledTools: string[]): string[] =>
  */
 export const inputForRunner = (spec: RunSpec, resume?: ResumeSpec): string => resume?.input ?? spec.prompt;
 
-export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] => {
-  const { model, effort } = modelSpec(spec.claim.run.model);
-  const serviceTier = spec.claim.run.codexServiceTier.toLowerCase();
-  if (runner === "CLAUDE") return [
-    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
-    // Model must be pinned explicitly; the CLI otherwise inherits the
-    // operator's personal default, which is reserved quota.
-    "--model", model, "--effort", effort ?? "high",
-    ...denyArgs("CLAUDE", spec.claim.agent.disabledTools),
-    // Excluding the user source prevents host CLAUDE.md, settings, hooks,
-    // skills, plugins, and memory instructions from entering the session.
-    // Authentication remains the CLI's existing Keychain flow: no
-    // CLAUDE_CONFIG_DIR or HOME override is supplied here.
-    "--setting-sources", "project,local", "--settings", claudePlatformSettingsPath(),
-    // strict keeps the operator's personal MCP servers out of an agent session:
-    // the manifest is supposed to be the whole tool surface.
-    "--mcp-config", JSON.stringify(mcpConfig(spec.credentialsPath)), "--strict-mcp-config",
-    ...(resume ? ["--resume", resume.providerConversationId] : []),
-  ];
-  if (runner === "CODEX") return resume
-    ? [
-      "exec", "resume", "--json", "-m", model,
-      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
-      "-c", `service_tier="${serviceTier}"`,
-      ...codexNativeSubagentArgs(spec.claim.run),
-      ...codexMcpArgs(spec.credentialsPath), resume.providerConversationId, "-",
-    ]
-    : [
-      "exec", "--json", "-m", model,
-      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
-      "-c", `service_tier="${serviceTier}"`,
-      ...codexNativeSubagentArgs(spec.claim.run),
-      ...codexMcpArgs(spec.credentialsPath),
-      "--dangerously-bypass-approvals-and-sandbox", "-",
-    ];
-  return [
-    "-p", "--mode", "json", "--session-dir", join(spec.workingDirectory, ".agentos-pi"),
-    "--model", model,
-    ...(effort ? ["--thinking", effort] : []),
-    ...denyArgs("PI", spec.claim.agent.disabledTools),
-    // Disable host-level pi discovery. PI_CODING_AGENT_DIR points at a fresh
-    // config root with no extensions directory, so the explicit AgentOS
-    // extension below remains enabled. The reviewer's role prompt supplies its
-    // rules, and repository context files remain review material rather than
-    // instructions.
-    "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
-    "--extension", piExtensionPath(),
-    ...(resume ? ["--session", resume.providerConversationId] : []),
-  ];
-};
+export const argsForRunner = (runner: RunnerKind, spec: RunSpec, resume?: ResumeSpec): string[] =>
+  RUNNER_DEFINITIONS[runner].args(spec, resume);
 
-const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink, resume?: ResumeSpec): RuntimeHandle => {
+export const spawnAdapterRuntime = (implementation: AdapterImplementation, spec: RunSpec, sink: SessionEventSink, resume?: ResumeSpec): RuntimeHandle => {
+  const { runner } = implementation;
   const binary = spec.config.binaries[runner];
-  const args = argsForRunner(runner, spec, resume);
+  const args = implementation.args(spec, resume);
   const input = inputForRunner(spec, resume);
   const { executable, args: fullArgs } = launchArgv(spec.config, runner, args, spec.env);
   const startedAt = new Date();
@@ -872,26 +564,9 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     stdio: ["pipe", "pipe", "pipe"],
   });
   const handle: RuntimeHandle = {
-    runId: spec.claim.run.id,
-    runner,
+    ...createAdapterState(runner, spec.claim.run.id, startedAt),
     child,
     pid: child.pid ?? null,
-    startedAt,
-    lastProcessAliveAt: startedAt,
-    lastProgressEventAt: startedAt,
-    inFlightTool: null,
-    providerConversationId: null,
-    terminalEventSeen: false,
-    terminalSuccess: false,
-    terminationReason: null,
-    sawError: false,
-    providerError: null,
-    piTurnCompleted: false,
-    piFinalAttemptFailed: false,
-    piUsage: emptyPiUsage(),
-    finalOutput: null,
-    stdout: "",
-    stderr: "",
     exit: Promise.resolve({} as ExitEvidence),
   };
   let buffer = "";
@@ -902,7 +577,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     buffer += chunk;
     const lines = buffer.split(/\r?\n/u);
     buffer = lines.pop() ?? "";
-    for (const line of lines) processLine(handle, line, sink);
+    for (const line of lines) processLine(handle, line, sink, implementation.parseEvent);
   });
   child.stderr!.on("data", (chunk: string) => {
     handle.stderr = cap(handle.stderr + chunk);
@@ -913,7 +588,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     const finish = (exitCode: number | null, signal: string | null): void => {
       if (settled) return;
       settled = true;
-      if (buffer.trim()) processLine(handle, buffer, sink);
+      if (buffer.trim()) processLine(handle, buffer, sink, implementation.parseEvent);
       resolvePromise({
         exitCode,
         signal,
@@ -957,7 +632,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
   return handle;
 };
 
-const capture = async (config: RunnerConfig, runner: RunnerKind, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> =>
+export const capturePreflight = async (config: RunnerConfig, runner: RunnerKind, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> =>
   new Promise((resolvePromise) => {
     const launch = launchArgv(config, runner, args, env);
     const child = spawn(launch.executable, launch.args, {
@@ -1015,98 +690,8 @@ export const PREFLIGHT_REASONS = {
   unsupportedModel: `${PREFLIGHT_CLASS.unsupportedModel}: an explicit provider/model is required`,
 } as const;
 
-const preflightFailure = (reason: string, code: number | null): string =>
+export const preflightFailure = (reason: string, code: number | null): string =>
   code === null ? reason : `${reason} (exit ${code})`;
-
-export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
-
-const codexExecHelpIsCompatible = (help: string, resumeHelp: string): boolean => [
-  "--json",
-  "--model",
-  "--config",
-  "--dangerously-bypass-approvals-and-sandbox",
-].every((flag) => help.includes(flag) && resumeHelp.includes(flag))
-  && help.includes("resume")
-  && resumeHelp.includes("SESSION_ID")
-  && resumeHelp.includes("read from stdin");
-
-const piHelpIsCompatible = (help: string): boolean => [
-  "--no-skills",
-  "--no-prompt-templates",
-  "--no-themes",
-  "--no-context-files",
-  "--no-approve",
-].every((flag) => help.includes(flag));
-
-const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
-  const capabilities = { structuredEvents: true, resume: true, killProcessGroup: true, heartbeat: true, classifyError: true };
-  if (spec.runner === "PI" && !spec.model.includes("/")) {
-    return {
-      ok: false,
-      cliVersion: null,
-      authMode: null,
-      capabilities,
-      error: PREFLIGHT_REASONS.unsupportedModel,
-    };
-  }
-  if (spec.runner === "PI" && spec.model.startsWith("openai-codex/") && spec.env.AGENTOS_RUN_ID
-    && spec.env.AGENTOS_CODEX_SERVICE_TIER !== "default" && spec.env.AGENTOS_CODEX_SERVICE_TIER !== "fast") {
-    return {
-      ok: false,
-      cliVersion: null,
-      authMode: null,
-      capabilities,
-      error: "PI openai-codex runs require an explicit AgentOS Codex service tier",
-    };
-  }
-  const version = await capture(spec.config, spec.runner, ["--version"], spec.env);
-  if (version.code !== 0) {
-    return { ok: false, cliVersion: null, authMode: null, capabilities, error: preflightFailure(PREFLIGHT_REASONS.cliMissing, version.code) };
-  }
-  if (spec.runner === "CODEX") {
-    const help = await capture(spec.config, spec.runner, ["exec", "--help"], spec.env);
-    const resumeHelp = await capture(spec.config, spec.runner, ["exec", "resume", "--help"], spec.env);
-    if (help.code !== 0 || resumeHelp.code !== 0 || !codexExecHelpIsCompatible(help.stdout, resumeHelp.stdout)) {
-      return {
-        ok: false,
-        cliVersion: version.stdout.trim() || version.stderr.trim(),
-        authMode: null,
-        capabilities,
-        error: PREFLIGHT_REASONS.cliIncompatible,
-      };
-    }
-    Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "exec-json-stdin-resume" });
-  }
-  if (spec.runner === "PI") {
-    const help = await capture(spec.config, spec.runner, ["--help"], spec.env);
-    if (help.code !== 0 || !piHelpIsCompatible(`${help.stdout}\n${help.stderr}`)) {
-      return {
-        ok: false,
-        cliVersion: version.stdout.trim() || version.stderr.trim(),
-        authMode: null,
-        capabilities,
-        error: PREFLIGHT_REASONS.cliIncompatible,
-      };
-    }
-    Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "json-stdin-resume-isolated" });
-  }
-  const authArgs = spec.runner === "CLAUDE" ? ["auth", "status"]
-    : spec.runner === "CODEX" ? ["login", "status"]
-      : ["auth", "check", "--provider", spec.model.split("/")[0] ?? "openai-codex"];
-  const auth = await capture(spec.config, spec.runner, authArgs, spec.env);
-  const text = `${auth.stdout}\n${auth.stderr}`;
-  const ok = auth.code === 0 && (spec.runner !== "CLAUDE" || /"loggedIn"\s*:\s*true/u.test(text));
-  return {
-    ok,
-    cliVersion: version.stdout.trim() || version.stderr.trim(),
-    authMode: spec.runner === "CLAUDE" ? (/"authMethod"\s*:\s*"([^"]+)"/u.exec(text)?.[1] ?? null)
-      : spec.runner === "CODEX" ? (text.includes("ChatGPT") ? "chatgpt" : null) : spec.model.split("/")[0] ?? null,
-    capabilities,
-    // `text` is read for the two verdicts above and never forwarded: what the
-    // CLI printed is the operator's to read in their own terminal.
-    ...(!ok ? { error: preflightFailure(PREFLIGHT_REASONS.notAuthenticated, auth.code) } : {}),
-  };
-};
 
 export const adapterExecutionSucceeded = (evidence: ExitEvidence): boolean =>
   evidence.exitCode === 0
@@ -1133,7 +718,7 @@ export const failureReasonFromEvidence = (evidence: ExitEvidence): string =>
   || evidence.stderr.trim()
   || `CLI exited with code ${evidence.exitCode}`;
 
-const classifyError = (evidence: ExitEvidence): ClassifiedFailure => {
+export const classifyRuntimeError = (evidence: ExitEvidence): ClassifiedFailure => {
   const text = evidence.providerError?.trim()
     ? `${evidence.providerError}\n${evidence.stderr}`
     : `${evidence.stderr}\n${evidence.stdout}`;
@@ -1211,7 +796,7 @@ const waitForRunDrain = async (runId: string, timeoutMs: number): Promise<number
   return remaining;
 };
 
-const kill = async (handle: RuntimeHandle, reason: string): Promise<KillResult> => {
+export const killRuntime = async (handle: RuntimeHandle, reason: string): Promise<KillResult> => {
   handle.terminationReason = reason;
   const pid = handle.pid;
   if (pid && handle.child.exitCode === null && handle.child.signalCode === null) {
@@ -1233,7 +818,7 @@ const kill = async (handle: RuntimeHandle, reason: string): Promise<KillResult> 
   return { signal: "SIGKILL", processAlive: false };
 };
 
-const heartbeat = async (handle: RuntimeHandle): Promise<HeartbeatSnapshot> => {
+export const heartbeatRuntime = async (handle: RuntimeHandle): Promise<HeartbeatSnapshot> => {
   const processAlive = handle.child.exitCode === null && handle.child.signalCode === null;
   if (processAlive) handle.lastProcessAliveAt = new Date();
   return {
@@ -1244,22 +829,85 @@ const heartbeat = async (handle: RuntimeHandle): Promise<HeartbeatSnapshot> => {
   };
 };
 
-const makeAdapter = (runner: RunnerKind): CliAdapter => Object.freeze({
-  preflight: (spec: PreflightSpec) => preflight({ ...spec, runner }),
-  start: async (spec: RunSpec, sink: SessionEventSink) => spawnRuntime(runner, spec, sink),
-  resume: async (spec: ResumeSpec, sink: SessionEventSink) => spawnRuntime(runner, spec, sink, spec),
-  kill,
-  heartbeat,
-  classifyError,
+export type RunnerDefinition = {
+  binaryEnvironment: string;
+  defaultBinary: string;
+  toolIntroduction: string;
+  toolTransport: "mcp-stdio" | "pi-extension";
+  toolEntrypoint(): string;
+  adapter: CliAdapter;
+  args(spec: RunSpec, resume?: ResumeSpec): string[];
+  childEnvironment(claim: Pick<ClaimedTask, "run">, scratch: AgentScratch): NodeJS.ProcessEnv;
+  provisionSessionConfig(
+    config: RunnerConfig,
+    scratch: AgentScratch,
+    options?: SessionConfigOptions,
+  ): Promise<void>;
+};
+
+const deferredAdapter = (create: () => CliAdapter): CliAdapter => {
+  let concrete: CliAdapter | null = null;
+  const get = (): CliAdapter => {
+    concrete ??= create();
+    return concrete;
+  };
+  return Object.freeze<CliAdapter>({
+    preflight: (spec) => get().preflight(spec),
+    start: (spec, sink) => get().start(spec, sink),
+    resume: (spec, sink) => get().resume(spec, sink),
+    kill: (handle, reason) => get().kill(handle, reason),
+    heartbeat: (handle) => get().heartbeat(handle),
+    classifyError: (evidence) => get().classifyError(evidence),
+  });
+};
+
+/**
+ * The only per-CLI registry. Binary configuration, adapter selection,
+ * availability enumeration, child config roots, and argv all derive from it.
+ */
+export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, Readonly<RunnerDefinition>>> = Object.freeze({
+  CLAUDE: Object.freeze<RunnerDefinition>({
+    binaryEnvironment: "CLAUDE_BINARY",
+    defaultBinary: "claude",
+    toolIntroduction: "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+    toolTransport: "mcp-stdio",
+    toolEntrypoint: mcpServerPath,
+    adapter: deferredAdapter(() => createClaudeAdapter()),
+    args: (spec, resume) => claudeArgs(spec, resume),
+    childEnvironment: (claim, scratch) => claudeChildEnvironment(claim, scratch),
+    provisionSessionConfig: (config, scratch, options) => provisionClaudeSessionConfig(config, scratch, options),
+  }),
+  CODEX: Object.freeze<RunnerDefinition>({
+    binaryEnvironment: "CODEX_BINARY",
+    defaultBinary: "codex",
+    toolIntroduction: "AgentOS tools attached to this session (MCP server 'agentos'; your client may prefix them, e.g. mcp__agentos__task_output):",
+    toolTransport: "mcp-stdio",
+    toolEntrypoint: mcpServerPath,
+    adapter: deferredAdapter(() => createCodexAdapter()),
+    args: (spec, resume) => codexArgs(spec, resume),
+    childEnvironment: (claim, scratch) => codexChildEnvironment(claim, scratch),
+    provisionSessionConfig: (config, scratch, options) => provisionCodexSessionConfig(config, scratch, options),
+  }),
+  PI: Object.freeze<RunnerDefinition>({
+    binaryEnvironment: "PI_BINARY",
+    defaultBinary: "pi",
+    toolIntroduction: "AgentOS tools attached to this session (pi extension tools):",
+    toolTransport: "pi-extension",
+    toolEntrypoint: piExtensionPath,
+    adapter: deferredAdapter(() => createPiAdapter()),
+    args: (spec, resume) => piArgs(spec, resume),
+    childEnvironment: (claim, scratch) => piChildEnvironment(claim, scratch),
+    provisionSessionConfig: (config, scratch, options) => provisionPiSessionConfig(config, scratch, options),
+  }),
 });
 
+export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_DEFINITIONS) as RunnerKind[]);
+
 /** Frozen: a caller substitutes an adapter by passing one to `executeClaim`,
- *  not by writing over this record. */
-export const adapters: Readonly<Record<RunnerKind, CliAdapter>> = Object.freeze({
-  CLAUDE: makeAdapter("CLAUDE"),
-  CODEX: makeAdapter("CODEX"),
-  PI: makeAdapter("PI"),
-});
+ *  not by writing over this derived view. */
+export const adapters: Readonly<Record<RunnerKind, CliAdapter>> = Object.freeze(Object.fromEntries(
+  RUNNER_KINDS.map((runner) => [runner, RUNNER_DEFINITIONS[runner].adapter]),
+) as Record<RunnerKind, CliAdapter>);
 
 export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   adapterVersion: ADAPTER_VERSION,
@@ -1275,8 +923,8 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   structuredEvents: true,
   // What the seat manual promises the agent, and how it was actually injected.
   agentosTools: {
-    transport: spec.claim.runner === "PI" ? "pi-extension" : "mcp-stdio",
-    entrypoint: spec.claim.runner === "PI" ? piExtensionPath() : mcpServerPath(),
+    transport: RUNNER_DEFINITIONS[spec.claim.runner].toolTransport,
+    entrypoint: RUNNER_DEFINITIONS[spec.claim.runner].toolEntrypoint(),
     tools: ["task_activity_log", "task_output", "task_status", "inbox_ask"],
   },
 });
