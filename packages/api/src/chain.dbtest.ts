@@ -6,6 +6,9 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   activateChainSuccessor,
   applyInboxDecisionTx,
+  CHAIN_AUTO_RESUME_KIND,
+  INDEPENDENT_REVIEW_OPEN_PREFIX,
+  MAX_AUTOMATIC_SUCCESSOR_RESUMES,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   Prisma,
   PrismaClient,
@@ -1178,6 +1181,57 @@ test("a BACKLOG successor is parked, not spun on", { timeout: 20_000 }, async ()
   assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "BACKLOG");
   assert.match(await latestActivity(successor.id), /parked in Backlog/);
+});
+
+// A REVIEW successor at dispatch time is a stalled chain, not a decision: it is
+// where a failed attempt, a park, or an operator drag leaves the row. It used to
+// be logged and abandoned, which is how a chain can sit for hours with nothing
+// watching it.
+test("a stalled REVIEW successor is automatically returned to the queue", { timeout: 20_000 }, async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: successor.id }, data: { status: "REVIEW", failureReason: "Execution failed" } });
+  await activateOnParkedSuccessor(predecessor);
+  const resumed = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  assert.equal(resumed.status, "TODO");
+  assert.equal(resumed.failureReason, null);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: successor.id, metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
+  } }), 1);
+});
+
+test("a successor held by an open independent review is left to that review", { timeout: 20_000 }, async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  await db.task.update({ where: { id: successor.id }, data: {
+    status: "REVIEW", failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}review-task-id:${"a".repeat(40)}`,
+  } });
+  await activateOnParkedSuccessor(predecessor);
+  const held = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  assert.equal(held.status, "REVIEW");
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: successor.id, metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
+  } }), 0);
+  assert.match(await latestActivity(successor.id), /held by an open independent review/u);
+});
+
+test("a successor that keeps returning to REVIEW stops the chain and opens an inbox notice", { timeout: 20_000 }, async () => {
+  const { predecessor, successor } = await seedExecutableChain();
+  for (let attempt = 1; attempt <= MAX_AUTOMATIC_SUCCESSOR_RESUMES; attempt += 1) {
+    await db.task.update({ where: { id: successor.id }, data: { status: "REVIEW", failureReason: "Execution failed" } });
+    await activateOnParkedSuccessor(predecessor);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).status, "TODO");
+    await db.run.deleteMany({ where: { taskId: successor.id } });
+  }
+  await db.task.update({ where: { id: successor.id }, data: { status: "REVIEW", failureReason: "Execution failed" } });
+  await activateOnParkedSuccessor(predecessor);
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: successor.id } });
+  assert.equal(stopped.status, "REVIEW");
+  assert.match(stopped.failureReason ?? "", /automatic resumes/u);
+  assert.equal(await db.run.count({ where: { taskId: successor.id } }), 0);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: successor.id } });
+  assert.equal(notice.kind, "TEXT");
+  assert.match(notice.body, /needs an operator/u);
 });
 
 test("an archived successor is parked, not spun on", { timeout: 20_000 }, async () => {

@@ -21,6 +21,7 @@ import {
   authorizationMetadata,
   defenseTriggers,
   enqueueTaskRun,
+  INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
   lockChainRows,
   lockTaskRow,
@@ -204,7 +205,7 @@ const stopReadiness = async (
 };
 
 const latestReviewState = async (
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   readinessTaskId: string,
   headSha: string,
   recoveryBaseSha: string | null,
@@ -229,9 +230,21 @@ const createReviewObligation = async (
     headSha: string;
     triggers: Array<{ path: string; reason: string }>;
     recovery: RecoveryContext | null;
+    claimReason: string;
   },
-): Promise<{ ok: true } | { ok: false; reason: string }> => db.$transaction(async (tx) => {
+): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; lost: true }> => db.$transaction(async (tx) => {
   await lockTaskMutationRows(tx, input.readinessTask.id);
+  // The claim is only evidence until it is re-read under the chain mutex. A
+  // worker whose lease expired while it read GitHub has already been replaced,
+  // and opening a second obligation for the same head would double every
+  // decision the tail makes from it: two repairs, two backlog cards, two
+  // blocking rounds off the ceiling.
+  const held = await tx.task.count({
+    where: { id: input.readinessTask.id, status: TaskStatus.DOING, failureReason: input.claimReason },
+  });
+  if (held !== 1) return { ok: false as const, lost: true as const };
+  const open = await latestReviewState(tx, input.readinessTask.id, input.headSha, input.recovery ? input.baseSha : null);
+  if (open?.state === "open") return { ok: false as const, lost: true as const };
   if (!input.readinessTask.repoId) return { ok: false as const, reason: "readiness task has no repository" };
   const agent = await tx.agent.findFirst({ where: { projectId: input.readinessTask.projectId, name: "review-coordinator", archivedAt: null } });
   if (!agent) return { ok: false as const, reason: "review-coordinator is absent or archived" };
@@ -244,7 +257,14 @@ const createReviewObligation = async (
     description: [
       `Blindly review the exact diff ${input.baseSha}..${input.headSha}.`,
       `The server-side trigger set is ${JSON.stringify(input.triggers)}.`,
-      "Do not read prior review outputs. Find correctness or safety defects in the triggered merge-tail surface, run focused checks, then persist exactly one JSON object: {\"schemaVersion\":1,\"outcome\":\"approved\",\"headSha\":\"<40 hex>\"} or {\"schemaVersion\":1,\"outcome\":\"rejected\",\"headSha\":\"<40 hex>\",\"summary\":\"<must-fix>\"}.",
+      "Do not read prior review outputs. Find defects in the triggered merge-tail surface, run focused checks, then persist exactly one JSON object:",
+      `{"schemaVersion":1,"headSha":"${input.headSha}","findings":[{"severity":"blocking"|"follow-up","title":"<short>","detail":"<what is wrong and where>","reachability":"<required for blocking>"}]}`,
+      [
+        "Severity is the whole decision and the server derives the verdict from it; you do not state a verdict.",
+        "Mark a finding `blocking` only when it is a reachable behavioural defect — correctness, data integrity, or security — and prove reachability in `reachability`: name the concrete inputs, state, or interleaving that reaches it. A blocking finding without that argument voids the whole decision.",
+        "Everything else is `follow-up`: specification inconsistency no caller can reach, style, naming, defensive hardening, and any concern you cannot show a caller reaching. Each follow-up becomes a backlog card and the merge proceeds.",
+        "An empty `findings` array is the approval.",
+      ].join("\n"),
     ].join("\n\n"),
     assigneeType: AssigneeType.AGENT,
     assigneeAgentId: agent.id,
@@ -295,7 +315,7 @@ const createReviewObligation = async (
   ] });
   await tx.task.update({ where: { id: input.readinessTask.id }, data: {
     status: TaskStatus.REVIEW,
-    failureReason: `independent-review-open:${task.id}:${input.headSha}`,
+    failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${task.id}:${input.headSha}`,
   } });
   return { ok: true as const };
 });
@@ -527,11 +547,21 @@ export const readinessTick = async (
         verdict.verdict.headSha,
         recovery ? snapshot.baseSha : null,
       );
-      if (triggers.length > 0 && review?.state !== "approved") {
+      const reviewCleared = review?.state === "approved" || review?.state === "accepted-with-followups";
+      if (triggers.length > 0 && !reviewCleared) {
         if (review?.state === "open") {
+          // The obligation is re-read inside the mutex before the park is
+          // written. Between the read above and here the review can have
+          // completed and handed this step back; parking on that stale read
+          // would strand a step no review is coming back for.
           await db.$transaction(async (tx) => {
             await lockTaskMutationRows(tx, readiness.id);
-            await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW, failureReason: `independent-review-open:${String(review.reviewTaskId)}` } });
+            const current = await latestReviewState(tx, readiness.id, verdict.verdict.headSha, recovery ? snapshot.baseSha : null);
+            if (current?.state !== "open") return;
+            await tx.task.updateMany({
+              where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
+              data: { status: TaskStatus.REVIEW, failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${String(current.reviewTaskId)}` },
+            });
           });
           result.reviewing += 1;
           continue;
@@ -554,12 +584,17 @@ export const readinessTick = async (
           headSha: verdict.verdict.headSha,
           triggers,
           recovery,
+          claimReason,
         });
-        if (!opened.ok) {
+        if (opened.ok) {
+          result.reviewing += 1;
+        } else if ("lost" in opened) {
+          // Another worker owns this readiness step now. Leaving its state
+          // alone is the whole point of noticing.
+          result.reviewing += 1;
+        } else {
           await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: opened.reason, recovery }, releaseChainLease);
           result.stopped += 1;
-        } else {
-          result.reviewing += 1;
         }
         continue;
       }

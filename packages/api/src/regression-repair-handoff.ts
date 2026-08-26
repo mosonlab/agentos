@@ -1,6 +1,7 @@
 import {
   asJsonObject,
   MERGE_TAIL_KIND,
+  parseIndependentReviewDecision,
   parseRegressionVerdict,
   Prisma,
   PushStatus,
@@ -125,35 +126,12 @@ export const regressionRepairHandoffForClaim = async (
       || reviewOutput.run.headSha !== parsed.verdict.headSha) {
       return invalid(`independent-review task ${reviewTaskId} is not bound to successful head ${parsed.verdict.headSha}`);
     }
-    let decision: Record<string, unknown> | null = null;
-    try { decision = asJsonObject(JSON.parse(reviewOutput.body) as Prisma.JsonValue); } catch { decision = null; }
-    if (decision?.schemaVersion !== 1
-      || decision.outcome !== "rejected"
-      || decision.headSha !== parsed.verdict.headSha
-      || decision.summary !== summary) {
+    const decision = parseIndependentReviewDecision(reviewOutput.body, parsed.verdict.headSha);
+    if (decision.status === "invalid"
+      || decision.decision.outcome !== "rejected"
+      || decision.decision.blockingSummary !== summary) {
       return invalid(`independent-review task ${reviewTaskId} output does not match its rejection record`);
     }
-    const operatorRows = await tx.taskActivity.findMany({
-      where: {
-        taskId: input.taskId,
-        actorType: "operator",
-        createdAt: { gte: rejectedRow.createdAt },
-        metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.operatorDecision },
-      },
-      select: { metadata: true },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 20,
-    });
-    const adopted = operatorRows.map((row) => asJsonObject(row.metadata)).some((metadata) => (
-      metadata?.action === "adopt-head"
-      && metadata.headSha === parsed.verdict.headSha
-      && metadata.baseHeadSha === parsed.verdict.baseHeadSha
-      && metadata.reviewTaskId === reviewTaskId
-    ));
-    // Explicit operator adoption licenses one fresh exact-head Regression run;
-    // it does not authorize readiness or merge. The fresh verdict must still
-    // bind the head/base pair before the autonomous tail can continue.
-    if (adopted) return { status: "none" };
     trigger = {
       kind: "independent-review-rejection",
       verdict: parsed.verdict,
