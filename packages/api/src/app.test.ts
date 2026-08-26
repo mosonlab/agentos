@@ -2056,7 +2056,7 @@ test("the board binds a chain-detached repair task to the chain its marker names
         taskRow({ id: "repair", name: "Autonomous merge tail: gate-fix", templateStep: null }),
       ],
       {
-        related: [{ id: "regression", chainId: "c1" }],
+        related: [{ id: "regression", projectId: "p1", chainId: "c1" }],
         activity: [{ taskId: "repair", metadata: {
           schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression",
         } }],
@@ -2070,6 +2070,44 @@ test("the board binds a chain-detached repair task to the chain its marker names
     assert.equal(repair.chainId, null);
     assert.deepEqual(repair.repairOf, { chainId: "c1", chainName: "Release", repairKind: "gate-fix" });
     assert.equal(body.find((card) => card.id === "regression")!.repairOf, null);
+  });
+});
+
+test("a global board keeps two projects' same-named chains apart when it binds their repairs", async () => {
+  await withTokens(async () => {
+    // `chainId` is unique per project, not globally, so a board that spans
+    // projects can hold the same one twice. A repair card must be named by its
+    // own project's chain, not by whichever came first on the page.
+    const response = await getTasks(boardDatabase(
+      [
+        taskRow({ id: "regression-1", chainId: "c1", chainIndex: 1, name: "Release: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair-1", name: "Autonomous merge tail: gate-fix", templateStep: null }),
+        taskRow({ id: "regression-2", projectId: "p2", chainId: "c1", chainIndex: 1, name: "Hotfix: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair-2", projectId: "p2", name: "Autonomous merge tail: review-fix", templateStep: null }),
+      ],
+      {
+        related: [
+          { id: "regression-1", projectId: "p1", chainId: "c1" },
+          { id: "regression-2", projectId: "p2", chainId: "c1" },
+        ],
+        activity: [
+          { taskId: "repair-1", metadata: {
+            schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression-1",
+          } },
+          { taskId: "repair-2", metadata: {
+            schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "review-fix", regressionTaskId: "regression-2",
+          } },
+        ],
+      },
+    ), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; repairOf: unknown }>;
+    assert.deepEqual(body.find((card) => card.id === "repair-1")!.repairOf, {
+      chainId: "c1", chainName: "Release", repairKind: "gate-fix",
+    });
+    assert.deepEqual(body.find((card) => card.id === "repair-2")!.repairOf, {
+      chainId: "c1", chainName: "Hotfix", repairKind: "review-fix",
+    });
   });
 });
 

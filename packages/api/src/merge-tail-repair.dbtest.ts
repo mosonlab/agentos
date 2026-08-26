@@ -35,6 +35,7 @@ const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const BRANCH = "agentos/repair-test";
 const RESOLVED = "c".repeat(40);
+const REPAIRED = "d".repeat(40);
 const exec = promisify(execFile);
 
 let seedCounter = 0;
@@ -161,13 +162,13 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
 
 const RESIGN_SUMMARY = "added packages/db/prisma/migrations/20260826000000_probe/migration.sql";
 
-const verdict = (outcome: RegressionOutcome) => JSON.stringify(outcome === "refresh-conflict"
-  ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: "merge conflict" }
+const verdict = (outcome: RegressionOutcome, headSha: string = HEAD) => JSON.stringify(outcome === "refresh-conflict"
+  ? { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, summary: "merge conflict" }
   : outcome === "review-fail"
-    ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: "MF-2 remains open" }
+    ? { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, summary: "MF-2 remains open" }
     : outcome === "authority-resign"
-      ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: RESIGN_SUMMARY }
-      : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
+      ? { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, summary: RESIGN_SUMMARY }
+      : { schemaVersion: 1, outcome, headSha, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
 
 type RegressionOutcome = "refresh-conflict" | "review-fail" | "gate-fail" | "authority-resign";
 
@@ -211,6 +212,38 @@ const repairFor = (
   projectId: seeded.project.id,
   name: `Autonomous merge tail: ${repairKind}`,
 } });
+
+/**
+ * The next turn of the repair loop, as the tail actually runs it: the queued
+ * Regression Run the last repair completion created publishes its own verdict,
+ * bound to that Run and to the head the repair produced, and completes.
+ *
+ * Re-invoking the first completion would exercise the attempt counter without
+ * exercising the loop it bounds.
+ */
+const failRegressionAgain = async (
+  seeded: Awaited<ReturnType<typeof exercise>>,
+  outcome: RegressionOutcome,
+  runNumber: number,
+  headSha: string,
+) => {
+  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber } });
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH, targetBranch: "main", headSha,
+  } });
+  const session = await db.session.create({ data: {
+    runId: run.id, projectId: seeded.project.id, agentId: seeded.regressionAgent.id, taskId: seeded.regression.id,
+    runner: "CODEX", executionStatus: "SUCCEEDED",
+  } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: run.id, body: verdict(outcome, headSha), commitSha: headSha,
+  } });
+  return db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.regression,
+    run: { id: run.id, agentId: seeded.regressionAgent.id, branch: BRANCH, headSha, sessionId: session.id },
+    now: new Date(),
+  }));
+};
 
 const repairCount = (seeded: Awaited<ReturnType<typeof exercise>>) => db.task.count({ where: {
   projectId: seeded.project.id,
@@ -474,16 +507,22 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
 
 test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
-  const repair = await repairFor(seeded, "gate-fix");
-  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
-  await completeRepair(seeded, repair.id, "Fixed the failing regression and reran the affected suite.");
+  const first = await repairFor(seeded, "gate-fix");
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev");
+  await completeRepair(seeded, first.id, "Fixed the failing regression and reran the affected suite.", RESOLVED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
-  // The first repair moved the tree, so the second FAIL is a verdict on a
-  // different tree and buys one more automatic attempt rather than a stop.
-  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  // The first repair moved the tree, so this FAIL is a verdict on a different
+  // head and buys one more automatic attempt rather than a stop.
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 2, RESOLVED), "handled");
   assert.equal(await repairCount(seeded), 2);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
-  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  const second = await db.task.findFirstOrThrow({
+    where: { projectId: seeded.project.id, name: "Autonomous merge tail: gate-fix" },
+    orderBy: { createdAt: "desc" },
+  });
+  await completeRepair(seeded, second.id, "Fixed the remaining failure and reran the affected suite.", REPAIRED);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 3, REPAIRED), "handled");
   assert.equal(await repairCount(seeded), 2);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
   assert.match(notice.body, /after 2 automatic repair attempts/u);
@@ -493,15 +532,23 @@ test("a gate FAIL is repaired twice and the third FAIL escalates with both heads
 
 test("a semantic FAIL skips the gate path and is repaired twice before it escalates", async () => {
   const seeded = await exercise("review-fail");
-  const repair = await repairFor(seeded, "review-fix");
-  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
-  assert.match(repair.description, /MF-2 remains open/u);
-  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  const first = await repairFor(seeded, "review-fix");
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev");
+  assert.match(first.description, /MF-2 remains open/u);
+  await completeRepair(seeded, first.id, "Closed MF-2 and reran its focused regression.", RESOLVED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
-  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  assert.equal(await failRegressionAgain(seeded, "review-fail", 2, RESOLVED), "handled");
   assert.equal(await repairCount(seeded), 2);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
-  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  const second = await db.task.findFirstOrThrow({
+    where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" },
+    orderBy: { createdAt: "desc" },
+  });
+  // The second repair carries the chain's context too, not only the first one.
+  assert.ok(second.description.includes(SOL_FINDINGS_BODY));
+  await completeRepair(seeded, second.id, "Closed the remaining finding and reran its focused regression.", REPAIRED);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
+  assert.equal(await failRegressionAgain(seeded, "review-fail", 3, REPAIRED), "handled");
   assert.equal(await repairCount(seeded), 2);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
   assert.match(notice.body, /after 2 automatic repair attempts/u);

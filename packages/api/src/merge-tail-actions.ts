@@ -485,7 +485,10 @@ export const handleRegressionCompletion = async (
 
   // The whole history, not the recent-state window: the automatic attempt
   // budget per repair kind is the rule, and an attempt pushed past the window
-  // by later activity would license an extra one.
+  // by later activity would license an extra one. The count includes the
+  // review-fix repairs the independent-review rejection path opened on this
+  // task, which is what makes a chain that has already been repaired reach this
+  // ceiling sooner; that path keeps its own separate round ceiling.
   const attempts = await readMarkerHistory(tx, input.task.id);
   const repairKind = verdict.outcome === "refresh-conflict"
     ? "refresh-conflict"

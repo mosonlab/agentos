@@ -2339,19 +2339,29 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }))];
         const regressionTasks = await db.task.findMany({
           where: { id: { in: regressionIds }, ...(projectId ? { projectId } : {}) },
-          select: { id: true, chainId: true },
+          select: { id: true, projectId: true, chainId: true },
         });
-        // The chain's display name is already derived once for this page. A
-        // chain with no step of its own on the page has none, and the card falls
-        // back to naming it by id exactly as a chain step's card does.
-        const chainNameById = new Map<string, string | null>();
+        const chainOfTask = new Map<string, { key: string; chainId: string }>();
+        for (const task of regressionTasks) {
+          if (task.chainId === null) continue;
+          chainOfTask.set(task.id, { key: chainKey({ projectId: task.projectId, chainId: task.chainId }), chainId: task.chainId });
+        }
+        // The chain's display name is already derived once for this page. Keyed
+        // by `chainKey` rather than `chainId` for the same reason the page's own
+        // grouping is: a global board carries several projects, and two of them
+        // may hold the same chain id. A chain with no step of its own on the
+        // page has no name here, and the card falls back to naming it by id
+        // exactly as a chain step's card does.
+        const chainNameByKey = new Map<string, string | null>();
         for (const row of rows) {
-          if (row.chainId === null || chainNameById.has(row.chainId)) continue;
-          chainNameById.set(row.chainId, displayByTask.get(row.id)?.chainName ?? null);
+          if (row.chainId === null) continue;
+          const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+          if (chainNameByKey.has(key)) continue;
+          chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
         }
         const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
-          const chainId = regressionTasks.find((task) => task.id === taskId)?.chainId ?? null;
-          return chainId === null ? null : { chainId, chainName: chainNameById.get(chainId) ?? null };
+          const chain = chainOfTask.get(taskId);
+          return chain === undefined ? null : { chainId: chain.chainId, chainName: chainNameByKey.get(chain.key) ?? null };
         };
         for (const marker of repairMarkers) {
           if (repairByTask.has(marker.taskId)) continue;
