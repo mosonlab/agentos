@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { COLUMNS, type Counts, countByStatus, defaultTab, focusAfterMove, parseStatus, statusLabel, tabKey } from "../lib/board";
+import { COLUMNS, type Counts, chainBinding, chainBindingLabel, countByStatus, defaultTab, focusAfterMove, parseStatus, statusLabel, tabKey } from "../lib/board";
 import { formatT } from "../lib/format";
 import { useAction, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -46,8 +46,11 @@ export const archiveDoneNotice = (result: { archived: number; skipped: number })
     ? formatT("tasks.archiveDone.some", result)
     : formatT("tasks.archiveDone.all", result));
 
+/** Every card the chain owns, which includes the merge-tail repair tasks the
+ *  chain produced — those carry no chain columns of their own, so filtering on
+ *  `chainId` alone dropped them out of the group they belong to. */
 export const tasksForChain = (tasks: readonly BoardTask[], chainId: string | null): BoardTask[] =>
-  (chainId === null ? [...tasks] : tasks.filter((task) => task.chainId === chainId));
+  (chainId === null ? [...tasks] : tasks.filter((task) => chainBinding(task)?.id === chainId));
 
 export const ChainFilterControl = ({ name, onClear }: { name: string; onClear: () => void }): ReactNode => {
   const t = useT();
@@ -329,7 +332,8 @@ export const TasksPage = (): ReactNode => {
     onDelete: remove,
     onCopyError: copyError,
     onFilterChain: (task) => {
-      if (task.chainId !== null) setChainFilter({ id: task.chainId, name: task.chainName ?? task.chainId });
+      const chain = chainBinding(task);
+      if (chain !== null) setChainFilter({ id: chain.id, name: chainBindingLabel(chain) });
     },
   }), [move, retry, archive, remove, copyError]);
 

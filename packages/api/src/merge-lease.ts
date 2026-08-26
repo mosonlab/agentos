@@ -155,3 +155,50 @@ export const mergeTailLeaseChainId = async (
   });
   return regression?.chainId ?? null;
 };
+
+/**
+ * What one `merge-lease.sh acquire --timeout-minutes 0` did. Unlike release,
+ * the exit code alone separates these, so there is no machine line to read: 0
+ * means this chain holds the lease -- freshly taken, or already held for the
+ * same task id, which is what its own regression run leaves behind -- and 75
+ * means somebody else holds it. Anything else never got far enough to say.
+ */
+export type MergeLeaseAcquisition =
+  | { outcome: "acquired" }
+  | { outcome: "contended" }
+  | { outcome: "unreachable"; detail: string };
+
+export type MergeLeaseAcquirer = (chainId: string) => Promise<MergeLeaseAcquisition>;
+
+const CONTENDED_EXIT = 75;
+
+/**
+ * One attempt, never a poll. The caller is the readiness tick, which cannot
+ * block on a lock another delivery line may hold for minutes; a tick that
+ * cannot take the lease leaves its step claimed and comes back. The reason
+ * string matches the one the chain's own regression run writes, so an operator
+ * reading `merge-lease.sh status` sees the same lease either way.
+ */
+export const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
+  try {
+    const { stdout, stderr } = await execFileAsync("bash", [
+      mergeLeaseScript,
+      "acquire",
+      "--task",
+      chainId,
+      "--reason",
+      `chain merge tail ${chainId}`,
+      "--timeout-minutes",
+      "0",
+    ], { timeout: 30_000, encoding: "utf8" });
+    const detail = `${stdout}${stderr}`.trim();
+    if (detail) console.log(detail);
+    return { outcome: "acquired" };
+  } catch (error: unknown) {
+    const failure = error as { code?: number; stdout?: string; stderr?: string };
+    if (failure.code === CONTENDED_EXIT) return { outcome: "contended" };
+    const detail = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
+    console.error(`Merge lease acquire failed for chain ${chainId}${detail ? `: ${detail}` : ""}`);
+    return { outcome: "unreachable", detail: detail || String(error) };
+  }
+};
