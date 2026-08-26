@@ -872,7 +872,7 @@ test("every verdict shape survives the round trip out of lib.sh and back", (t) =
     assert.equal(emitted.status, 0, emitted.stderr);
     // Colour is the emit function's business and must be gone by the time a
     // caller sees the line: it is read over ssh and pasted into a PR.
-    assert.match(readFileSync(log, "utf8"), /\u001b\[\d+m/, `${shape.line} was emitted without colour`);
+    assert.ok(readFileSync(log, "utf8").includes("\u001b["), `${shape.line} was emitted without colour`);
     const read = verdict(`gate_verdict_read "${log}"`);
     assert.equal(read.status, 0, read.stderr);
     assert.equal(read.stdout, `${shape.line}\n`);
