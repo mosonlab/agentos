@@ -24,7 +24,6 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   isCompoundImplementationAssigneeError,
-  isCompoundImplementationStep,
   isIntegratorStoppedError,
   isPinnedBaseCommitError,
   LIVE_TASK_STATUSES,
@@ -187,6 +186,12 @@ import { filesRootGrantKey, getFileStore } from "./files/config.js";
 import { grantAdmits, type FileOperation, type GrantLike } from "./files/grants.js";
 import { isCanonicalRelPath, normalizeRelPath } from "./files/paths.js";
 import { DirectoryNotEmptyError, InvalidPathError, IsADirectoryError, NotADirectoryError, NotFoundError, SymlinkError, type FileStore } from "./files/store.js";
+import {
+  lockTask,
+  lockTaskMutationRows,
+  writeTask,
+  type TaskWriteRefusal,
+} from "./task-write.js";
 import { versionPayload } from "./version.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
@@ -1500,23 +1505,6 @@ const settleCancellation = async (
   };
 };
 
-type LockedTask = {
-  id: string;
-  status: TaskStatus;
-  archivedAt: Date | null;
-  projectId: string;
-  chainId: string | null;
-  dispatchAfterTaskId: string | null;
-  dispatchAfter: { name: string; status: TaskStatus } | null;
-  assigneeType: AssigneeType;
-  assigneeAgentId: string | null;
-  templateStep: {
-    stepIndex: number;
-    outputKind: string;
-    taskTemplate: { name: string };
-  } | null;
-};
-
 /** Live means exactly what blocks an agent's archival: the same
  *  `LIVE_TASK_STATUSES` `agentArchiveBlocker` reads, so the two halves of the
  *  protocol cannot drift into disagreeing about which tasks count. Everything
@@ -1524,69 +1512,25 @@ type LockedTask = {
  *  out of it is the moment the assignee has to be re-validated. */
 const isLiveStatus = (status: TaskStatus): boolean => LIVE_TASK_STATUSES.includes(status);
 
-const lockedTaskSelect = {
-  id: true,
-  status: true,
-  archivedAt: true,
-  projectId: true,
-  chainId: true,
-  dispatchAfterTaskId: true,
-  dispatchAfter: { select: { name: true, status: true } },
-  assigneeType: true,
-  assigneeAgentId: true,
-  templateStep: {
-    select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
-  },
-} satisfies Prisma.TaskSelect;
+/** What the status write plans under the lock: a refusal this route owns, a
+ *  replay of an already-decided gate, or the write itself. */
+type StatusWritePlan =
+  | { error: string; code: 409 }
+  | { replay: true }
+  | { gate: GateWinner; previousStatus: TaskStatus };
 
-/**
- * The exclusion protocol every writer that can give a task a run shares.
- *
- * Start, retry, archive, archive-done and the AT fire all answer "may this task
- * gain a run right now?" in different transactions. Reading `runs` and then
- * writing is not atomic under ReadCommitted: PostgreSQL re-checks a predicate on
- * the *locked row* after a blocking write commits, but a subquery over another
- * table is re-evaluated against the statement's original snapshot. So the Task
- * row is the mutex — every writer takes it before it reads anything else.
- *
- * `fireCronTask` is already compliant: its claim is a single-statement CAS on
- * the Task row, whose predicate does get re-checked.
- */
-const lockTask = async (tx: Prisma.TransactionClient, taskId: string): Promise<LockedTask | null> => {
-  const [locked] = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT "id" FROM "Task" WHERE "id" = ${taskId} FOR UPDATE
-  `;
-  if (!locked) return null;
-  // Read the typed row only after the lock is held. $queryRaw hands back raw
-  // PostgreSQL enum labels ('backlog'), not Prisma's member names, so comparing
-  // its status against TaskStatus.BACKLOG silently never matches — and the lock
-  // is exactly what makes this second read consistent for the rest of the
-  // transaction.
-  return tx.task.findUniqueOrThrow({
-    where: { id: taskId },
-    select: lockedTaskSelect,
-  });
-};
+type GateWinner = {
+  card: { id: string; body: string; gateTaskId: string | null; sessionId: string | null };
+  runId: string;
+} | null;
 
-/**
- * The mutation entry point for a task whose chain identity is not already
- * known under a lock. Chain identity itself is immutable after dispatch, so an
- * unlocked identity read can safely choose the mutex without first taking one
- * Task row and later expanding to its siblings.
- */
-const lockTaskMutationRows = async (
-  tx: Prisma.TransactionClient,
-  taskId: string,
-): Promise<LockedTask | null> => {
-  const identity = await tx.task.findUnique({
-    where: { id: taskId },
-    select: { projectId: true, chainId: true },
-  });
-  if (!identity) return null;
-  if (!identity.chainId) return lockTask(tx, taskId);
-  await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-  return tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect });
-};
+/** A refusal from `writeTask` in this route layer's terms: the task is gone, or
+ *  the assignee the request named may not be written onto it. */
+const taskWriteRefusal = (refusal: TaskWriteRefusal): { error: string; code: 404 | 400 } => (
+  refusal.kind === "absent"
+    ? { error: "Task not found", code: 404 }
+    : { error: refusal.reason, code: 400 }
+);
 
 /**
  * Merge-tail repair markers point at an existing canonical task rather than a
@@ -1599,10 +1543,7 @@ const activateMergeTailTarget = async (
   taskId: string,
   now: Date,
 ): Promise<void> => {
-  const identity = await tx.task.findUnique({ where: { id: taskId }, select: { projectId: true, chainId: true } });
-  if (!identity) return;
-  if (identity.chainId) await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-  else if (!await lockTask(tx, taskId)) return;
+  if (!await lockTaskMutationRows(tx, taskId)) return;
   const target = await tx.task.findUnique({
     where: { id: taskId },
     include: {
@@ -1736,41 +1677,6 @@ const lockDoneTasks = async (
 const hasActiveRun = async (tx: Prisma.TransactionClient, taskId: string): Promise<boolean> => (
   await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } })
 ) > 0;
-
-/**
- * The assignment half of the Agent-row exclusion protocol: the 400 message if
- * this agent may not be written onto a task right now, or null.
- *
- * Callers check the assignee once before the transaction to answer fast; this
- * re-read under `lockAgentRow` is the one that decides. Without it the check
- * and the write straddle a concurrent archive, and the task — or the run
- * created with it — belongs to an agent the runner will never claim for.
- */
-const assignmentBlocked = async (
-  tx: Prisma.TransactionClient,
-  assignee: { id: string; name: string } | null,
-): Promise<string | null> => {
-  if (!assignee) return null;
-  const locked = await lockAgentRow(tx, assignee.id);
-  if (!locked) return "Assignee does not belong to this project";
-  return locked.archivedAt ? `Assignee ${assignee.name} is archived` : null;
-};
-
-/** Rechecks the compound binding after the Task lock and under the Agent lock.
- * The unlocked route check gives a fast refusal; this one decides against
- * concurrent archive or persisted-state corruption before the write commits. */
-const assertCompoundImplementationAssignment = async (
-  tx: Prisma.TransactionClient,
-  task: LockedTask,
-  assigneeType: AssigneeType,
-  assigneeAgentId: string | null,
-): Promise<void> => {
-  if (task.archivedAt !== null || !isCompoundImplementationStep(task.templateStep)) return;
-  const agent = assigneeAgentId ? await lockAgentRow(tx, assigneeAgentId) : null;
-  if (!compoundImplementationAssigneeValid(task.projectId, assigneeType, agent, task.templateStep)) {
-    throw new CompoundImplementationAssigneeError();
-  }
-};
 
 /**
  * The reactivation half of the same protocol: the message if this *stored*
@@ -3622,160 +3528,163 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // transaction it wrote that TODO back with no lock and no guard at all.
     if (body.status !== undefined) {
       const written = await db.$transaction(async (tx) => {
-        const locked = await lockTaskMutationRows(tx, taskId);
-        if (!locked) return { error: "Task not found", code: 404 as const };
-        if (locked.archivedAt !== null) {
-          return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
-        }
-        if (typeof locked.dispatchAfterTaskId === "string"
-          && locked.dispatchAfter?.status !== TaskStatus.DONE
-          && body.status !== locked.status
-          && body.status !== TaskStatus.TODO) {
-          const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
-          return {
-            error: `Cannot change bound task status before predecessor ${predecessorName} is done`,
-            code: 409 as const,
-          };
-        }
-        // Task rows first, then the Agent row — the one global lock order.
-        if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
-          await assertCompoundImplementationAssignment(
-            tx,
-            locked,
-            body.assigneeType ?? locked.assigneeType,
-            body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
-          );
-        }
-        const blockedAssignment = await assignmentBlocked(tx, assignee);
-        if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
-        // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
-        // task back to whoever it is *already* assigned to, and that assignee is
-        // in no request field for `assignmentBlocked` to have checked. So the
-        // stored one joins the same protocol here, read under the Agent-row
-        // mutex the locked Task row above already ordered us into. `locked` is
-        // the authority on it, not the pre-transaction `before` read.
-        //
-        // 409, not the 400 above: nothing in the request is malformed — the
-        // conflict is in the state of the assignee, which the operator can fix
-        // and retry, exactly like Retry's archived-assignee refusal.
-        if (body.assigneeAgentId === undefined
-          && !isLiveStatus(locked.status)
-          && body.status !== undefined
-          && isLiveStatus(body.status)) {
-          const blockedReactivation = await reactivationBlocked(tx, locked);
-          if (blockedReactivation) return { error: blockedReactivation, code: 409 as const };
-        }
-        // Against `locked`, not `before`: a park is a park whenever the row this
-        // transaction holds is not already in Backlog.
-        if (body.status === TaskStatus.BACKLOG
-          && locked.status !== TaskStatus.BACKLOG
-          && await hasActiveRun(tx, taskId)) {
-          return { error: "Cannot move a task with an active run to Backlog", code: 409 as const };
-        }
-        // §D-P7 / Step 5. The exclusivity guard, composed rather than
-        // duplicated: while a recorded stop has no terminal-disposition answer,
-        // this task does not move. Keyed on the disposition, not on an answer
-        // existing, because `flag-incident` writes an answer and must still
-        // hold the chain.
-        const stopped = await stopStateFor(tx, taskId);
-        if (stopped && body.status !== undefined && body.status !== locked.status) {
-          return { error: stopStateRefusal(stopped), code: 409 as const };
-        }
-        let winningGateCard: { id: string; body: string; gateTaskId: string | null; sessionId: string | null } | null = null;
-        let winningGateRunId: string | null = null;
-        if (body.status === TaskStatus.DONE) {
-          if (await hasActiveRun(tx, taskId)) {
-            return { error: "Cannot mark a task done while it has an active run", code: 409 as const };
+        const result = await writeTask<StatusWritePlan>(tx, taskId, async (locked) => {
+          const refuse = (error: string) => ({ update: null, activity: null, value: { error, code: 409 as const } });
+          if (locked.archivedAt !== null) {
+            return refuse("Cannot change the status of an archived task; unarchive it first");
           }
-          if (locked.chainId) {
-            const chainRows = await tx.task.findMany({
-              where: {
+          if (typeof locked.dispatchAfterTaskId === "string"
+            && locked.dispatchAfter?.status !== TaskStatus.DONE
+            && body.status !== locked.status
+            && body.status !== TaskStatus.TODO) {
+            const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
+            return refuse(`Cannot change bound task status before predecessor ${predecessorName} is done`);
+          }
+          // Promoting BACKLOG or DONE history into TODO|DOING|REVIEW gives the
+          // task back to whoever it is *already* assigned to, and that assignee is
+          // in no request field for the module's assignment guard to have checked.
+          // So the stored one joins the same protocol here, read under the
+          // Agent-row mutex the locked Task row already ordered us into. `locked`
+          // is the authority on it, not the pre-transaction `before` read.
+          //
+          // 409, not the 400 the module answers with: nothing in the request is
+          // malformed — the conflict is in the state of the assignee, which the
+          // operator can fix and retry, exactly like Retry's archived-assignee
+          // refusal.
+          if (body.assigneeAgentId === undefined
+            && !isLiveStatus(locked.status)
+            && body.status !== undefined
+            && isLiveStatus(body.status)) {
+            const blockedReactivation = await reactivationBlocked(tx, locked);
+            if (blockedReactivation) return refuse(blockedReactivation);
+          }
+          // Against `locked`, not `before`: a park is a park whenever the row this
+          // transaction holds is not already in Backlog.
+          if (body.status === TaskStatus.BACKLOG
+            && locked.status !== TaskStatus.BACKLOG
+            && await hasActiveRun(tx, taskId)) {
+            return refuse("Cannot move a task with an active run to Backlog");
+          }
+          // §D-P7 / Step 5. The exclusivity guard, composed rather than
+          // duplicated: while a recorded stop has no terminal-disposition answer,
+          // this task does not move. Keyed on the disposition, not on an answer
+          // existing, because `flag-incident` writes an answer and must still
+          // hold the chain.
+          const stopped = await stopStateFor(tx, taskId);
+          if (stopped && body.status !== undefined && body.status !== locked.status) {
+            return refuse(stopStateRefusal(stopped));
+          }
+          let gate: GateWinner = null;
+          if (body.status === TaskStatus.DONE) {
+            if (await hasActiveRun(tx, taskId)) {
+              return refuse("Cannot mark a task done while it has an active run");
+            }
+            if (locked.chainId) {
+              const chainRows = await tx.task.findMany({
+                where: {
+                  projectId: locked.projectId,
+                  chainId: locked.chainId,
+                },
+                orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
+                select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
+              });
+              const blocker = blockingPredecessor(chainRows.map((row) => ({
+                ...row,
                 projectId: locked.projectId,
                 chainId: locked.chainId,
-              },
-              orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-              select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
+                archivedAt: null,
+                templateStep: null,
+              })), taskId);
+              if (blocker) {
+                return refuse(`Cannot complete ${before.name}; predecessor ${blocker.name} is not done`);
+              }
+            }
+            // A Human approval has one durable decision identity on both API
+            // channels. The earliest OPEN card is the deterministic winner; the
+            // gate Task lock the module took makes this selection and the Inbox
+            // route's OPEN claim one compare-and-set rather than two competing
+            // decisions. Selecting is a read; the CAS that writes it runs below,
+            // once the module has accepted the status write — a refusal after
+            // the CAS would commit a decision the request was refused.
+            const winningGateCard = await tx.inboxMessage.findFirst({
+              where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+              select: { id: true, body: true, gateTaskId: true, sessionId: true },
             });
-            const blocker = blockingPredecessor(chainRows.map((row) => ({
-              ...row,
-              projectId: locked.projectId,
-              chainId: locked.chainId,
-              archivedAt: null,
-              templateStep: null,
-            })), taskId);
-            if (blocker) {
-              return {
-                error: `Cannot complete ${before.name}; predecessor ${blocker.name} is not done`,
-                code: 409 as const,
-              };
+            if (winningGateCard) {
+              const session = winningGateCard.sessionId
+                ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
+                : null;
+              if (!session?.runId) {
+                return refuse("Gate card has no session run to bind a decision to");
+              }
+              gate = { card: winningGateCard, runId: session.runId };
+            } else {
+              // A gate exists but none is OPEN only after another channel won or
+              // this request is a replay. Do not overwrite a concurrent reject
+              // or activate the successor a second time. No decision row is
+              // created on this branch, and no authorization: the SPEC's
+              // fail-closed resolution (missing-authorization) is preserved.
+              //
+              // The OPEN rows are counted rather than inferred from the CAS: the
+              // CAS is a write, and it now runs only once the status write has
+              // been accepted, so the replay decision cannot be taken from it.
+              const openGates = await tx.inboxMessage.count({
+                where: { gateTaskId: taskId, status: InboxStatus.OPEN },
+              });
+              if (openGates === 0) {
+                const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
+                if (decidedGate > 0) return { update: null, activity: null, value: { replay: true as const } };
+              }
             }
           }
-          // A Human approval has one durable decision identity on both API
-          // channels. The earliest OPEN card is the deterministic winner; the
-          // gate Task lock above makes this selection and the Inbox route's OPEN
-          // claim one compare-and-set rather than two competing decisions.
-          winningGateCard = await tx.inboxMessage.findFirst({
-            where: { gateTaskId: taskId, status: InboxStatus.OPEN },
-            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-            select: { id: true, body: true, gateTaskId: true, sessionId: true },
-          });
-          if (winningGateCard) {
-            const session = winningGateCard.sessionId
-              ? await tx.session.findUnique({ where: { id: winningGateCard.sessionId }, select: { runId: true } })
-              : null;
-            if (!session?.runId) {
-              return { error: "Gate card has no session run to bind a decision to", code: 409 as const };
-            }
-            winningGateRunId = session.runId;
+          const statusChanged = body.status !== undefined && body.status !== locked.status;
+          return {
+            update: updateData,
+            activity: statusChanged
+              ? { actorType: "operator", body: `Status changed: ${locked.status} → ${body.status}` }
+              : null,
+            value: { gate, previousStatus: locked.status },
+          };
+        });
+        if (!result.ok) return taskWriteRefusal(result.refusal);
+        const plan = result.value;
+        if ("error" in plan) return plan;
+        // The replay branch wrote nothing, so what the caller gets back is the
+        // row the gate was already decided on.
+        if ("replay" in plan) return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
+        const updated = result.written!;
+        // This OPEN row is the gate-decision CAS. It deliberately depends on
+        // neither templateId nor approvalGate: gate creation records the
+        // relationship in gateTaskId, and that is the only authority here.
+        if (body.status === TaskStatus.DONE) {
+          if (plan.gate) {
             await tx.inboxMessage.update({
-              where: { id: winningGateCard.id },
+              where: { id: plan.gate.card.id },
               data: { status: InboxStatus.ANSWERED, selectedChoiceId: "approve", answeredAt: new Date() },
             });
           }
-          // This OPEN row is the gate-decision CAS. It deliberately depends on
-          // neither templateId nor approvalGate: gate creation records the
-          // relationship in gateTaskId, and that is the only authority here.
-          const closed = await tx.inboxMessage.updateMany({
+          await tx.inboxMessage.updateMany({
             where: { gateTaskId: taskId, status: InboxStatus.OPEN },
             data: { status: InboxStatus.CLOSED },
           });
-          if (closed.count === 0 && !winningGateCard) {
-            // A gate exists but none is OPEN only after another channel won or
-            // this request is a replay. Do not overwrite a concurrent reject
-            // or activate the successor a second time. No decision row is
-            // created on this branch, and no authorization: the SPEC's
-            // fail-closed resolution (missing-authorization) is preserved.
-            const decidedGate = await tx.inboxMessage.count({ where: { gateTaskId: taskId } });
-            if (decidedGate > 0) {
-              return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
-            }
-          }
-        }
-        const statusChanged = body.status !== undefined && body.status !== locked.status;
-        const updated = await tx.task.update({ where: { id: taskId }, data: updateData });
-        let statusActivityId: string | null = null;
-        if (statusChanged) {
-          const statusActivity = await tx.taskActivity.create({ data: {
-            taskId, actorType: "operator", body: `Status changed: ${locked.status} → ${body.status}`,
-          } });
-          statusActivityId = statusActivity.id;
         }
         let authorization: Awaited<ReturnType<typeof produceMergeAuthorization>> = null;
-        if (winningGateCard) {
+        if (plan.gate) {
           const decisionRow = await tx.inboxDecision.create({ data: {
-            inboxMessageId: winningGateCard.id,
-            runId: winningGateRunId!,
-            externalEventId: `patch:${taskId}:${statusActivityId ?? winningGateCard.id}`,
+            inboxMessageId: plan.gate.card.id,
+            runId: plan.gate.runId,
+            externalEventId: `patch:${taskId}:${result.activityId ?? plan.gate.card.id}`,
             decision: "approve",
             actorOpenId: "patch-operator",
           } });
           authorization = await produceMergeAuthorization(tx, {
-            card: winningGateCard,
+            card: plan.gate.card,
             inboxDecisionId: decisionRow.id,
             channel: "patch",
           }, new Date());
         }
-        if (locked.status !== TaskStatus.DONE
+        if (plan.previousStatus !== TaskStatus.DONE
           && body.status === TaskStatus.DONE
           && Boolean(updated.chainId)
           && authorization?.purpose !== "confirmation") {
@@ -3791,49 +3700,38 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // same Task-row serialization point as completion retries and lost-lease
       // requeues; otherwise a request that commits first can still be missed by
       // a creator holding a stale task relation.
-      const updated = await db.$transaction(async (tx) => {
-        const locked = await lockTaskMutationRows(tx, taskId);
-        if (!locked) return { error: "Task not found", code: 404 as const };
-        if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
-          await assertCompoundImplementationAssignment(
-            tx,
-            locked,
-            body.assigneeType ?? locked.assigneeType,
-            body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
-          );
-        }
-        const blockedAssignment = await assignmentBlocked(tx, assignee);
-        if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
-        return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-      if ("error" in updated) return context.json({ error: updated.error }, updated.code);
-      return context.json(updated.task);
+      const updated = await db.$transaction(
+        async (tx) => writeTask(tx, taskId, async () => ({ update: updateData, activity: null, value: null })),
+        { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+      );
+      if (!updated.ok) {
+        const refused = taskWriteRefusal(updated.refusal);
+        return context.json({ error: refused.error }, refused.code);
+      }
+      return context.json(updated.written!);
     }
     // A plain field edit that hands the task to an agent is still an assignment
     // writer, so it joins the same protocol: Task row first, Agent row second.
     if (assignee) {
-      const written = await db.$transaction(async (tx) => {
-        const locked = await lockTaskMutationRows(tx, taskId);
-        if (!locked) return { error: "Task not found", code: 404 as const };
-        await assertCompoundImplementationAssignment(
-          tx,
-          locked,
-          body.assigneeType ?? locked.assigneeType,
-          body.assigneeAgentId === undefined ? locked.assigneeAgentId : body.assigneeAgentId,
-        );
-        const blockedAssignment = await assignmentBlocked(tx, assignee);
-        if (blockedAssignment) return { error: blockedAssignment, code: 400 as const };
-        return { task: await tx.task.update({ where: { id: taskId }, data: updateData }) };
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-      if ("error" in written) return context.json({ error: written.error }, written.code);
-      return context.json(written.task);
+      const written = await db.$transaction(
+        async (tx) => writeTask(tx, taskId, async () => ({ update: updateData, activity: null, value: null })),
+        { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+      );
+      if (!written.ok) {
+        const refused = taskWriteRefusal(written.refusal);
+        return context.json({ error: refused.error }, refused.code);
+      }
+      return context.json(written.written!);
     }
-    const written = await db.$transaction(async (tx) => {
-      const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return null;
-      return tx.task.update({ where: { id: taskId }, data: updateData });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-    return written ? context.json(written) : context.json({ error: "Task not found" }, 404);
+    const written = await db.$transaction(
+      async (tx) => writeTask(tx, taskId, async () => ({ update: updateData, activity: null, value: null })),
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
+    if (!written.ok) {
+      const refused = taskWriteRefusal(written.refusal);
+      return context.json({ error: refused.error }, refused.code);
+    }
+    return context.json(written.written!);
   });
   app.delete("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
@@ -3850,15 +3748,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const taskId = id.parse(context.req.param("taskId"));
     const now = new Date();
     const result = await db.$transaction(async (tx) => {
-      // Obtain the chain identity before taking any Task lock, then acquire the
-      // complete chain in layer order. Locking one row first and expanding to
-      // siblings would invert the completion transaction's Run -> chain order.
-      const identity = await tx.task.findUnique({ where: { id: taskId }, select: { projectId: true, chainId: true } });
-      if (!identity) return { error: "Task not found", code: 404 as const };
-      if (identity.chainId) await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-      const locked = identity.chainId
-        ? await tx.task.findUnique({ where: { id: taskId }, select: lockedTaskSelect })
-        : await lockTask(tx, taskId);
+      const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       // Retry joins the exclusion protocol: a guard set in which one writer
       // ignores archivedAt excludes nothing.
@@ -3974,12 +3864,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (!identity) return context.json({ error: "Task not found" }, 404);
     try {
       const result = await db.$transaction(async (tx) => {
-        if (identity.chainId) {
-          await lockChainRows(tx, {
-            projectId: identity.projectId,
-            chainId: identity.chainId,
-          });
-        } else if (!await lockTask(tx, taskId)) {
+        if (!await lockTaskMutationRows(tx, taskId)) {
           return { error: "Task not found", code: 404 as const };
         }
         const task = await tx.task.findUniqueOrThrow({
@@ -4756,24 +4641,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stranded.count === 1) {
-            await lockTaskMutationRows(tx, candidate.task.id);
-            await tx.task.update({
-              where: { id: candidate.task.id },
-              data: { status: TaskStatus.BACKLOG, failureReason: reason },
-            });
-            await tx.taskActivity.create({
-              data: {
-                taskId: candidate.task.id,
+            const parked = await writeTask(tx, candidate.task.id, async () => ({
+              update: { status: TaskStatus.BACKLOG, failureReason: reason },
+              activity: {
                 actorType: "control-plane",
                 body: "Queued run stopped because its repository grant is missing; restore the grant and retry",
                 metadata: { runId: candidate.id, condition: "repository-grant-missing" },
               },
-            });
+              value: null,
+            }));
             // A chained park expands the lock order from this Run to every Task
             // in the chain. End the transaction here: scanning another
             // candidate could next wait on a sibling Run while its claimant
             // already holds that Run and waits for this chain mutex.
-            if (candidate.task.chainId) return null;
+            if (parked.ok && parked.chainLocked) return null;
           }
           continue;
         }
@@ -4846,24 +4727,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stopped.count === 1) {
-            await lockTaskMutationRows(tx, candidate.task.id);
-            await tx.task.update({
-              where: { id: candidate.task.id },
-              data: { status: TaskStatus.REVIEW, failureReason: regressionRepairHandoff.reason },
-            });
-            await tx.taskActivity.create({ data: {
-              taskId: candidate.task.id,
-              actorType: "control-plane",
-              body: `Fresh Regression Run stopped: ${regressionRepairHandoff.reason}`,
-              metadata: {
-                kind: MERGE_TAIL_KIND.repairResult,
-                schemaVersion: 1,
-                state: "handoff-invalid",
-                runId: candidate.id,
-                previousRunId: regressionRepairHandoff.previousRunId,
-                reason: regressionRepairHandoff.reason,
+            const parked = await writeTask(tx, candidate.task.id, async () => ({
+              update: { status: TaskStatus.REVIEW, failureReason: regressionRepairHandoff.reason },
+              activity: {
+                actorType: "control-plane",
+                body: `Fresh Regression Run stopped: ${regressionRepairHandoff.reason}`,
+                metadata: {
+                  kind: MERGE_TAIL_KIND.repairResult,
+                  schemaVersion: 1,
+                  state: "handoff-invalid",
+                  runId: candidate.id,
+                  previousRunId: regressionRepairHandoff.previousRunId,
+                  reason: regressionRepairHandoff.reason,
+                },
               },
-            } });
+              value: null,
+            }));
             const sourceSession = await tx.session.findUnique({
               where: { runId: regressionRepairHandoff.previousRunId },
               select: { id: true },
@@ -4874,7 +4753,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               ...(sourceSession ? { sessionId: sourceSession.id } : {}),
               reason: regressionRepairHandoff.reason,
             });
-            if (candidate.task.chainId) return null;
+            if (parked.ok && parked.chainLocked) return null;
           }
           continue;
         }
@@ -4914,14 +4793,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             },
           });
           if (stopped.count === 1) {
-            await lockTaskMutationRows(tx, candidate.task.id);
-            await tx.task.update({
-              where: { id: candidate.task.id },
-              data: { status: TaskStatus.BACKLOG, failureReason: reason },
-            });
-            await tx.taskActivity.create({
-              data: {
-                taskId: candidate.task.id,
+            const parked = await writeTask(tx, candidate.task.id, async () => ({
+              update: { status: TaskStatus.BACKLOG, failureReason: reason },
+              activity: {
                 actorType: "control-plane",
                 body: `Queued run activation failed: ${reason}`,
                 metadata: {
@@ -4931,7 +4805,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                   reason,
                 },
               },
-            });
+              value: null,
+            }));
             const dedupeKey = `candidate-activation-failed:${candidate.id}`;
             await tx.inboxMessage.upsert({
               where: { dedupeKey },
@@ -4945,7 +4820,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               },
               update: {},
             });
-            if (candidate.task.chainId) return null;
+            if (parked.ok && parked.chainLocked) return null;
           }
           continue;
         }

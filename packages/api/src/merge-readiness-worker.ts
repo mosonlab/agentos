@@ -26,8 +26,6 @@ import {
   enqueueTaskRun,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
-  lockChainRows,
-  lockTaskRow,
   parseRegressionVerdict,
   readMarkerHistory,
   recoveryContext,
@@ -40,6 +38,7 @@ import {
   type RecoveryContext,
 } from "@agentos/db";
 
+import { lockTaskMutationRows } from "./task-write.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
 import { createGitHubReader, type GitHubReader } from "./github-read.js";
 import {
@@ -57,22 +56,6 @@ export const readinessPollIntervalMs = (): number => {
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 export const READINESS_READ_BUDGET_MS = 20_000;
 export const READINESS_CLAIM_LEASE_MS = 30_000;
-
-const lockTaskMutationRows = async (
-  tx: Prisma.TransactionClient,
-  taskId: string,
-): Promise<void> => {
-  const identity = await tx.task.findUnique({
-    where: { id: taskId },
-    select: { projectId: true, chainId: true },
-  });
-  if (!identity) throw new Error(`Task ${taskId} no longer exists`);
-  if (identity.chainId) {
-    await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-  } else {
-    await lockTaskRow(tx, taskId);
-  }
-};
 
 const recoveryContextFor = async (
   db: PrismaClient,
