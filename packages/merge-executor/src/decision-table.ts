@@ -170,6 +170,13 @@ export const synchronousExecution = (snapshot: RepositorySnapshot): SyncVerdict 
 export const idempotencyKeyFor = (prNumber: number, headSha: string, authorizationActivityId: string): string =>
   `${prNumber}:${headSha}:${authorizationActivityId}`;
 
+const hasAuthorizedParents = (
+  commit: PullRequestSnapshot["mergeCommit"],
+  authorization: AuthorizationPayload,
+): commit is NonNullable<PullRequestSnapshot["mergeCommit"]> => commit !== null && commit.parents.length >= 2
+  && commit.parents[0] === authorization.baseSha
+  && commit.parents[1] === authorization.headSha;
+
 /**
  * §5.1 — the replay determination, applied whenever the PR is already merged.
  * All three durable facts must hold, plus the landed commit's parent check.
@@ -199,9 +206,7 @@ export const classifyMerged = (
     // it. That is an incident to be judged by a human, never a success.
     return stop("changed-underneath-me", evidence);
   }
-  if (!commit || commit.parents.length < 2) return stop("base-drift-post-merge", evidence);
-  if (commit.parents[0] !== authorization.baseSha) return stop("base-drift-post-merge", evidence);
-  if (commit.parents[1] !== authorization.headSha) return stop("base-drift-post-merge", evidence);
+  if (!hasAuthorizedParents(commit, authorization)) return stop("base-drift-post-merge", evidence);
   return { outcome: "merged", mergeCommitSha: commit.oid };
 };
 
@@ -552,12 +557,17 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
     }));
   }
   const landed = verify.snapshot.pullRequest.mergeCommit;
-  const landedIdentifiesMerge = landed !== null && landed.oid === mergeCommitSha && landed.parents.length >= 2
-    && landed.parents[0] === authorization.baseSha && landed.parents[1] === authorization.headSha;
-  if (!landedIdentifiesMerge && (verify.snapshot.baseRefOid !== mergeCommitSha || landed !== null)) {
+  const landedIdentifiesMerge = verify.snapshot.baseRefOid !== null
+    && landed !== null
+    && landed.oid === mergeCommitSha
+    && hasAuthorizedParents(landed, authorization);
+  // The ref can land before GitHub's pull-request mergeCommit projection catches up.
+  const refAloneProvesMerge = verify.snapshot.baseRefOid === mergeCommitSha && landed === null;
+  if (!landedIdentifiesMerge && !refAloneProvesMerge) {
     return stop("base-drift-post-merge", JSON.stringify({
       mergeCommitSha,
       landed,
+      observedBaseRefOid: verify.snapshot.baseRefOid,
       authorizedBase: authorization.baseSha,
       authorizedHead: authorization.headSha,
     }));

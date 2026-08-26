@@ -77,8 +77,22 @@ test("post-merge verification stops after a concurrent base advance without posi
       ],
     });
 
-    assert.equal(stopped(await execute(fake.deps)).condition, "base-drift-post-merge", label);
+    const verdict = stopped(await execute(fake.deps));
+    assert.equal(verdict.condition, "base-drift-post-merge", label);
+    assert.equal(JSON.parse(verdict.evidence).observedBaseRefOid, concurrentMergeSha, label);
   }
+});
+
+test("post-merge verification stops when the base ref cannot be resolved", async () => {
+  const fake = makeFake({
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: { ...mergedSnapshot(), baseRefOid: null } },
+    ],
+  });
+
+  assert.equal(stopped(await execute(fake.deps)).condition, "base-drift-post-merge");
 });
 
 test("a successful atomic ref update is not falsely rejected while GitHub still reports the PR open", async () => {
