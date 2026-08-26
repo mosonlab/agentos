@@ -20,7 +20,7 @@ import {
   writeMarker,
 } from "@agentos/db";
 
-import { handleRegressionCompletion } from "./app.js";
+import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { authorityResignTick } from "./authority-resign-worker.js";
 import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";

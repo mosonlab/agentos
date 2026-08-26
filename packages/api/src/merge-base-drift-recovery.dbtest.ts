@@ -19,7 +19,7 @@ import {
   type StopCondition,
 } from "@agentos/db";
 
-import { handleRegressionCompletion } from "./app.js";
+import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { readinessTick } from "./merge-readiness-worker.js";

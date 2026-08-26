@@ -1,6 +1,7 @@
 import {
   AssigneeType,
   CleanupStatus,
+  type ClaimantClass,
   claimantMayTake,
   deployBarrierAllowsClaim,
   executionModeFor,
@@ -45,10 +46,6 @@ const isCandidateActivationFailure = (error: unknown): error is CandidateActivat
   isPinnedBaseCommitError(error) || error instanceof PinnedRunTargetError;
 
 const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
-
-/** §D-P1 rule 3. The bearer the caller presented, not the `runnerId` label it
- *  writes about itself: only the former can carry mechanical authority. */
-export type ClaimantClass = "merge-executor" | "runner";
 
 export type ClaimRunInput = {
   body: ClaimInput;
