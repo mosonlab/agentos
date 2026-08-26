@@ -44,7 +44,13 @@ import {
 import { z } from "zod";
 
 import type { CompletionInput } from "./app.js";
-import { canonicalOutputRefusal, isCanonicalAgentStep } from "./canonical-task-output.js";
+import {
+  canonicalOutputRefusal,
+  isCanonicalAgentStep,
+  outputIsImmutableOncePersisted,
+  REGRESSION_VERIFICATION_KIND,
+  requiredOutputKind,
+} from "./canonical-task-output.js";
 import {
   classifyEnvelope,
   completionSucceeded,
@@ -279,13 +285,46 @@ export const completeRun = async (
       },
     });
     if (!run?.session) return null;
-    const succeeded = completionSucceeded({
+    const reportedSuccess = completionSucceeded({
       exitCode: body.exitCode,
       signal: body.signal ?? null,
       terminalEventSeen: body.terminalEventSeen,
       terminalSuccess: body.terminalSuccess,
       terminationReason: body.terminationReason ?? null,
     });
+    // A step whose deliverable only its own agent can author is not done
+    // because its session ended. An adapter reads the end of a turn as the end
+    // of the session, so a step that parked on a background wait — a merge
+    // lease, a gate verdict — settled SUCCEEDED with nothing persisted, and the
+    // chain stopped at a fail-loud only an operator could clear. Deciding it
+    // here, before the terminal status, makes the miss an ordinary retryable
+    // failure that the retry path below re-queues inside the task's existing
+    // budget.
+    //
+    // Two bounds keep this narrow. Only this run's own absence counts: an
+    // output bound to this run belongs to `canonicalOutputRefusal`, the
+    // authority on whether a persisted artifact counts, and a findings artifact
+    // an earlier run persisted can never be replaced — a retry there would
+    // author nothing and spend the budget proving it. And the diversion applies
+    // only while an attempt is left: the ceiling is the run's own, because a
+    // missing deliverable is never an external failure and so never refunds
+    // one. Once the budget is spent the completion settles exactly as it did
+    // before this — the terminal park naming the absent output, with the
+    // chain-lease release, the merge-tail stop notice and the refusal activity
+    // that park has always written.
+    const requiredKind = requiredOutputKind(run.task?.templateStep);
+    const outputTaskId = reportedSuccess && requiredKind && run.runNumber < run.maxRunsPerTask
+      ? run.taskId
+      : null;
+    const persistedOutput = outputTaskId
+      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId }, select: { runId: true } })
+      : null;
+    const missingOutputReason = outputTaskId && requiredKind
+      && persistedOutput?.runId !== run.id
+      && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
+      ? `missing ${requiredKind} task output for current Run ${run.id}`
+      : null;
+    const succeeded = reportedSuccess && !missingOutputReason;
     // The runner is on the untrusted side of this boundary. When it reports a
     // structured envelope, the API classifies from the facts in it and
     // ignores the runner's own `failureClass`/`retryable`/`externalFailure`
@@ -300,19 +339,33 @@ export const completeRun = async (
     const known = body.failureEnvelope?.version === FAILURE_ENVELOPE_VERSION
       ? failureEnvelopeV1Input.safeParse(body.failureEnvelope)
       : null;
-    const envelope = !succeeded && known?.success ? known.data : null;
+    const envelope = !reportedSuccess && known?.success ? known.data : null;
     const verdict = envelope ? classifyEnvelope(envelope) : null;
     const failureClass = succeeded
       ? null
-      : verdict?.failureClass ?? body.failureClass ?? (body.exitCode === 0 ? FailureClass.PROTOCOL_ERROR : FailureClass.TASK_FAILED);
-    const retryable = failureClass
-      ? verdict?.retryable ?? body.retryable ?? failureIsRetryable(failureClass)
-      : false;
+      : missingOutputReason
+        ? FailureClass.PROTOCOL_ERROR
+        : verdict?.failureClass ?? body.failureClass ?? (body.exitCode === 0 ? FailureClass.PROTOCOL_ERROR : FailureClass.TASK_FAILED);
+    // The runner reported a success, so it reported no verdict about this
+    // failure: the control plane owns both answers here rather than reading
+    // fields a successful completion never filled in.
+    const retryable = missingOutputReason
+      ? true
+      : failureClass
+        ? verdict?.retryable ?? body.retryable ?? failureIsRetryable(failureClass)
+        : false;
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
-    // An external failure buys the task one more attempt rather than spending one.
-    const external = verdict
-      ? verdict.externalFailure
-      : externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
+    // An external failure buys the task one more attempt rather than spending
+    // one. A missing deliverable is the agent's own attempt, not the
+    // environment's, so it spends the attempt like any other failed one.
+    const external = missingOutputReason
+      ? false
+      : verdict
+        ? verdict.externalFailure
+        : externalFailure({ succeeded, signal: body.signal ?? null, reported: body.externalFailure, failureClass });
+    // One reason for the Run, the Session and — unless the budget replaces it
+    // with its own — the parked Task.
+    const failureReason = succeeded ? null : missingOutputReason ?? body.failureReason ?? "Execution failed";
     // §D-P5 / MF-5. For the integrator step that compensation is switched off
     // entirely, so the answer transaction is the *only* writer of a ceiling
     // above the task's original. Otherwise a run authorized once could buy
@@ -437,7 +490,7 @@ export const completeRun = async (
         leaseExpiresAt: null,
         sessionTokenRevokedAt: now,
         failureClass,
-        failureReason: succeeded ? null : body.failureReason ?? "Execution failed",
+        failureReason,
         retryable,
         retryAt,
         // Stored whether or not this API understood it: an envelope from a
@@ -482,7 +535,7 @@ export const completeRun = async (
         terminationReason: body.terminationReason ?? null,
         endedAt: now,
         cleanupEndedAt: now,
-        failureReason: succeeded ? null : body.failureReason ?? "Execution failed",
+        failureReason,
         cleanupFailureReason: body.cleanupFailureReason ?? null,
       },
     });
@@ -552,7 +605,7 @@ export const completeRun = async (
       retryCreated = true;
     }
     if (!succeeded && !retryCreated && (mechanical
-      || run.task?.templateStep?.outputKind === "regression-verification"
+      || run.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_KIND
       || mergeTailAuxiliary)) {
       releaseMergeLeaseTask = tailLeaseChainId;
     }
@@ -626,8 +679,7 @@ export const completeRun = async (
         // body or synthesizes a canonical step's deliverable.
         let existingOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId } });
         const canonicalAgentStep = isCanonicalAgentStep(run.task.templateStep);
-        const requiresExplicitOutput = canonicalAgentStep
-          || run.task.templateStep?.outputKind === "regression-verification";
+        const requiresExplicitOutput = requiredOutputKind(run.task.templateStep) !== null;
         if (!existingOutput && !requiresExplicitOutput) {
           await tx.taskStepOutput.create({ data: {
             taskId: run.taskId,
@@ -667,7 +719,7 @@ export const completeRun = async (
               reason: outputRefusal,
             },
           } });
-          if (run.task.templateStep?.outputKind === "regression-verification") {
+          if (run.task.templateStep?.outputKind === REGRESSION_VERIFICATION_KIND) {
             releaseMergeLeaseTask = tailLeaseChainId;
           }
         }
@@ -680,7 +732,7 @@ export const completeRun = async (
           // The current Run succeeded as a process, but it did not publish a
           // canonical deliverable bound to that Run and head. The REVIEW
           // state written above is the terminal control-plane outcome.
-        } else if (run.task.templateStep?.outputKind === "regression-verification") {
+        } else if (run.task.templateStep?.outputKind === REGRESSION_VERIFICATION_KIND) {
           const result = await handleRegressionCompletion(tx, {
             task: run.task,
             run: {
@@ -973,9 +1025,12 @@ export const completeRun = async (
           where: { id: run.taskId, ...(completionTaskStatus ? { status: completionTaskStatus } : {}) },
           data: {
             status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
-            failureReason: succeeded ? null : budgetExhausted
+            // The fail-loud park keeps naming the absent deliverable once the
+            // budget is spent; the budget itself is reported by the Inbox
+            // message below.
+            failureReason: succeeded ? null : missingOutputReason ?? (budgetExhausted
               ? `Maximum ${budgetCeiling} runs reached`
-              : body.failureReason ?? "Execution failed",
+              : body.failureReason ?? "Execution failed"),
           },
         });
       }
