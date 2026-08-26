@@ -6,9 +6,14 @@ import {
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
+  LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX,
+  LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX,
   LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
+  isRegressionVerificationOutputKind,
   lockTaskRow,
   Prisma,
+  REGRESSION_VERIFICATION_OUTPUT_KIND,
+  REGRESSION_VERIFICATION_SCHEMA_VERSION,
   RunStatus,
   type TaskStepOutput,
 } from "@agentos/db";
@@ -17,7 +22,7 @@ import { z } from "zod";
 type DbTx = Prisma.TransactionClient;
 
 /** The Full Assurance and Direct Regression node's deliverable. */
-export const REGRESSION_VERIFICATION_KIND = "regression-verification";
+export const REGRESSION_VERIFICATION_KIND = REGRESSION_VERIFICATION_OUTPUT_KIND;
 
 export const BLIND_REVIEW_PHASE = {
   independent: "independent-findings",
@@ -105,6 +110,12 @@ export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefin
     return step.stepIndex >= 1 && step.stepIndex <= FULL_PRE_ADJUDICATION_AGENT_STEP_LAST;
   }
   if (step.taskTemplate.name.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX)) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX)) {
+    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_CANONICAL_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX)) {
     return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
   }
   return false;
@@ -437,6 +448,39 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
       summary: nonEmptyString,
     }),
   ]),
+  [REGRESSION_VERIFICATION_OUTPUT_KIND]: z.discriminatedUnion("outcome", [
+    canonicalEnvelope.extend({
+      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
+      outcome: z.literal("pass"),
+      baseHeadSha: commitSha,
+      gateVerdict: z.literal("PASS"),
+    }),
+    canonicalEnvelope.extend({
+      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
+      outcome: z.literal("review-fail"),
+      baseHeadSha: commitSha,
+      summary: nonEmptyString,
+    }),
+    canonicalEnvelope.extend({
+      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
+      outcome: z.literal("gate-fail"),
+      baseHeadSha: commitSha,
+      gateVerdict: z.literal("FAIL"),
+      summary: nonEmptyString,
+    }),
+    canonicalEnvelope.extend({
+      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
+      outcome: z.literal("refresh-conflict"),
+      baseHeadSha: commitSha,
+      summary: nonEmptyString,
+    }),
+    canonicalEnvelope.extend({
+      schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
+      outcome: z.literal("authority-resign"),
+      baseHeadSha: commitSha,
+      summary: nonEmptyString,
+    }),
+  ]),
   documentation: canonicalEnvelope.extend({
     summary: nonEmptyString,
     changes: z.array(z.object({ path: nonEmptyString, action: z.enum(["ADDED", "UPDATED", "DELETED"]) })),
@@ -472,7 +516,10 @@ const canonicalBodyRefusal = (
     const additional = remaining.length > 0
       ? `; additional violations: ${remaining.map((issue) => `${issue.location}: ${issue.message}`).join("; ")}`
       : "";
-    return `${kind} task output body violates schemaVersion 1 at ${first?.location ?? "body"}: ${first?.message ?? "invalid value"}${additional}`;
+    const schemaVersion = kind === REGRESSION_VERIFICATION_OUTPUT_KIND
+      ? REGRESSION_VERIFICATION_SCHEMA_VERSION
+      : 1;
+    return `${kind} task output body violates schemaVersion ${String(schemaVersion)} at ${first?.location ?? "body"}: ${first?.message ?? "invalid value"}${additional}`;
   }
   const bodyHead = (parsed.data as { headSha: string }).headSha;
   if (bodyHead !== authoredHead) {
@@ -532,7 +579,7 @@ export const outputIsImmutableOncePersisted = (step: TemplateStepIdentity | null
  */
 export const requiredOutputKind = (step: TemplateStepIdentity | null | undefined): string | null => {
   if (!step) return null;
-  return isCanonicalAgentStep(step) || step.outputKind === REGRESSION_VERIFICATION_KIND ? step.outputKind : null;
+  return isCanonicalAgentStep(step) || isRegressionVerificationOutputKind(step.outputKind) ? step.outputKind : null;
 };
 
 type PersistOutputResult =

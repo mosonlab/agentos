@@ -2,7 +2,14 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { executionModeFor, latestMarker, openReviewObligation, readMarkers, type Prisma } from "@agentos/db";
+import {
+  executionModeFor,
+  isRegressionVerificationOutputKind,
+  latestMarker,
+  openReviewObligation,
+  readMarkers,
+  type Prisma,
+} from "@agentos/db";
 
 const execFileAsync = promisify(execFile);
 
@@ -144,7 +151,7 @@ export const mergeTailLeaseChainId = async (
     ?? openReviewObligation(markers)?.regressionTaskId
     ?? null;
   const tail = executionModeFor(task.templateStep) === "mechanical"
-    || task.templateStep?.outputKind === "regression-verification"
+    || isRegressionVerificationOutputKind(task.templateStep?.outputKind)
     || auxiliaryRegressionTaskId !== null;
   if (!tail) return null;
   if (task.chainId) return task.chainId;

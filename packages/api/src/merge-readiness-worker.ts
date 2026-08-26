@@ -28,6 +28,7 @@ import {
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
   parseRegressionVerdict,
+  REGRESSION_VERIFICATION_OUTPUT_KINDS,
   readMarkerHistory,
   recoveryContext,
   resolveChainTarget,
@@ -442,7 +443,7 @@ export const readinessTick = async (
         projectId: readiness.projectId,
         chainId: readiness.chainId,
         templateId: readiness.templateId,
-        templateStep: { outputKind: "regression-verification" },
+        templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
       },
       include: {
         stepOutput: true,
@@ -504,7 +505,7 @@ export const readinessTick = async (
         await stop("missing head-bound regression PASS evidence");
         continue;
       }
-      const verdict = parseRegressionVerdict(regression.stepOutput.body);
+      const verdict = parseRegressionVerdict(regression.stepOutput.body, regression.stepOutput.kind);
       if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass" || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
         await stop("missing or stale head-bound regression PASS evidence");
         continue;

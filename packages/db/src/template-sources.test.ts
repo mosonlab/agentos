@@ -65,8 +65,11 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(fix.prompt, /exactly one disposition per finding id/u);
     assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
     assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
-    const regression = steps.find(({ outputKind }) => outputKind === "regression-verification")!;
+    const regression = steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
     assert.match(regression.prompt, /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
+    assert.ok(regression.prompt.indexOf("semantic verification passes") < regression.prompt.indexOf("merge-lease.sh acquire"));
+    assert.match(regression.prompt, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
+    assert.match(regression.prompt, /"schemaVersion":2/u);
     assert.match(regression.prompt, /retry it up to three times/u);
     assert.match(regression.prompt, /exits 75 or 76[\s\S]*up to two[\s\S]*more times/u);
   }

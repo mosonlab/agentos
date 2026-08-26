@@ -23,6 +23,7 @@ import {
   enqueueTaskRun,
   lockChainRows,
   lockTaskRow,
+  REGRESSION_VERIFICATION_OUTPUT_KINDS,
   resolveChainTarget,
   type PrismaClient,
 } from "@agentos/db";
@@ -71,7 +72,7 @@ export const authorityResignTick = async (
     where: {
       status: TaskStatus.REVIEW,
       failureReason: { startsWith: AUTHORITY_RESIGN_OPEN_PREFIX },
-      templateStep: { outputKind: "regression-verification" },
+      templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
     },
     include: { repo: { select: { defaultBranch: true } } },
     orderBy: { createdAt: "asc" },

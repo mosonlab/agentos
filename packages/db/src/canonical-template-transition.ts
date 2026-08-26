@@ -17,6 +17,8 @@ type LegacyStepTuple = readonly [
  * either one of these exact graphs or the current source graph. It is never
  * guessed at and it is never linearized as a fallback.
  *
+ * `pre-narrow-regression-lease`: the v1 Regression graphs that acquired before
+ * semantic verification and let a model share the lease protocol.
  * `pre-adjudication`: the graphs that existed immediately before the
  * adjudication node was removed.
  * `pre-zero-gate`: the compound graph that existed immediately before the
@@ -28,6 +30,18 @@ const LEGACY_TEMPLATE_GENERATIONS: Record<string, ReadonlyArray<{
   shape: readonly LegacyStepTuple[];
 }>> = {
   "direct-engineer-workflow": [
+    {
+      marker: "pre-narrow-regression-lease",
+      shape: [
+        ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 1, 2],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 3],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 4],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 5],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 6],
+      ],
+    },
     {
       marker: "pre-adjudication",
       shape: [
@@ -43,6 +57,23 @@ const LEGACY_TEMPLATE_GENERATIONS: Record<string, ReadonlyArray<{
     },
   ],
   "compound-engineer-workflow": [
+    {
+      marker: "pre-narrow-regression-lease",
+      shape: [
+        ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
+        ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
+        ["review-coordinator", AssigneeType.AGENT, false, "plan-review", true, false, null, 3],
+        ["plan-reviser", AssigneeType.AGENT, false, "revised-plan", true, false, null, 4],
+        ["implementation-plan-executioner", AssigneeType.AGENT, false, "implementation", true, true, null, 5],
+        ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 5, 6],
+        ["review-coordinator-opus", AssigneeType.AGENT, false, "blind-findings", false, false, 5, 6],
+        ["senior-dev", AssigneeType.AGENT, false, "fixed-implementation", true, false, null, 7],
+        ["librarian", AssigneeType.AGENT, false, "documentation", true, false, null, 8],
+        ["regression-verifier", AssigneeType.AGENT, false, "regression-verification", true, false, null, 9],
+        ["review-coordinator", AssigneeType.AGENT, false, "merge-authorization", true, false, null, 10],
+        ["merge-integrator", AssigneeType.AGENT, false, "merge-result", true, false, null, 11],
+      ],
+    },
     {
       marker: "pre-adjudication",
       shape: [

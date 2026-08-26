@@ -374,7 +374,7 @@ export const handleRegressionCompletion = async (
   // not be reused when the current agent finishes without calling task_output.
   const output = persistedOutput?.runId === input.run.id ? persistedOutput : null;
   const recovery = await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
-  const parsed = parseRegressionVerdict(output?.body);
+  const parsed = parseRegressionVerdict(output?.body, output?.kind);
   const stop = async (reason: string): Promise<"handled"> => {
     if (recovery) {
       await stopBaseDriftRecoveryTail(tx, recovery, "regression", reason);

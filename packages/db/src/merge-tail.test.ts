@@ -53,6 +53,15 @@ test("regression verdicts are exact-head, versioned, and fail closed", () => {
   assert.equal(parseRegressionVerdict("MERGE GATE: PASS").status, "invalid");
 });
 
+test("the narrowed Regression contract requires v2 while legacy output remains readable", () => {
+  const v2 = JSON.stringify({ schemaVersion: 2, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "PASS" });
+  const v1 = JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "PASS" });
+  assert.equal(parseRegressionVerdict(v2, "regression-verification-v2").status, "ok");
+  assert.equal(parseRegressionVerdict(v1, "regression-verification").status, "ok");
+  assert.equal(parseRegressionVerdict(v1, "regression-verification-v2").status, "invalid");
+  assert.equal(parseRegressionVerdict(v2, "regression-verification").status, "invalid");
+});
+
 test("both canonical readiness steps are mechanical server-owned shapes", () => {
   assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow" }), true);
   assert.equal(isMergeReadinessStep({ stepIndex: 11, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow" }), true);

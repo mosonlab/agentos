@@ -74,7 +74,11 @@ implementation step to it before dispatch.
 
 `review-coordinator` reviews plans only. `review-coordinator-sol` performs the
 first integrated-diff review. `regression-verifier` performs the bounded
-post-fix semantic verification and the one exact-head gate.
+post-fix semantic verification and the one exact-head gate. New templates bind
+that step to `regression-verification-v2`: semantic checks run before lease
+acquire, the target base is rechecked after acquire, and only the control plane
+may release or steal the chain lease. Renamed v1 template rows retain the
+original `regression-verification` contract for their historical tasks.
 `review-coordinator-opus` performs the blind final review. The
 `review-adjudicator-opus` role is archived: the fix step reads both immutable
 reports and records a disposition for every finding itself, and its output

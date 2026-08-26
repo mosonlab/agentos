@@ -211,7 +211,7 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian", outputKind: "documentation" },
-      { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
+      { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
       { stepIndex: 11, layer: 10, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -230,6 +230,9 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
+  assert.ok(compoundRegression.indexOf("semantic verification passes") < compoundRegression.indexOf("merge-lease.sh acquire"));
+  assert.match(compoundRegression, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
+  assert.match(compoundRegression, /fetch `origin\/<run\.pullRequestBase>` again/u);
   assert.match(compoundRegression, /documentation result/u);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
@@ -269,7 +272,7 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 2, layer: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 3, layer: 2, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
       { stepIndex: 4, layer: 3, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 5, layer: 4, agentName: "regression-verifier", outputKind: "regression-verification" },
+      { stepIndex: 5, layer: 4, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
       { stepIndex: 6, layer: 5, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 7, layer: 6, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -288,6 +291,8 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
+  assert.ok(directRegression.indexOf("semantic verification passes") < directRegression.indexOf("merge-lease.sh acquire"));
+  assert.match(directRegression, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
   const directImplementation = directTemplateSteps[0]!.prompt;
   assert.match(directImplementation, /brief is the specification of record/u);
   assert.match(directImplementation, /at least two child-writer branches need integration/u);
