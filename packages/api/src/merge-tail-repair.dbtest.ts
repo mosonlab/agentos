@@ -51,12 +51,14 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
     projectId: project.id, name: options.withLibrarian ? "compound-engineer-workflow" : "direct-engineer-workflow",
     description: "tail", variables: [],
   } });
-  const fixIndex = options.withLibrarian ? 9 : 5;
-  const fixLayer = options.withLibrarian ? 8 : 4;
-  const regressionIndex = options.withLibrarian ? 11 : 6;
-  const regressionLayer = options.withLibrarian ? 10 : 5;
-  const readinessIndex = options.withLibrarian ? 12 : 7;
-  const readinessLayer = options.withLibrarian ? 11 : 6;
+  const fixIndex = options.withLibrarian ? 8 : 4;
+  const fixLayer = options.withLibrarian ? 7 : 3;
+  const librarianIndex = 9;
+  const librarianLayer = 8;
+  const regressionIndex = options.withLibrarian ? 10 : 5;
+  const regressionLayer = options.withLibrarian ? 9 : 4;
+  const readinessIndex = options.withLibrarian ? 11 : 6;
+  const readinessLayer = options.withLibrarian ? 10 : 5;
   const [fixStep, regressionStep, readinessStep, librarianStep] = await Promise.all([
     db.taskTemplateStep.create({ data: {
       taskTemplateId: template.id, stepIndex: fixIndex, layer: fixLayer, name: "Fix", assigneeType: AssigneeType.AGENT,
@@ -71,7 +73,7 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
       assigneeAgentId: reviewAgent.id, prompt: "authorize", approvalGate: false, outputKind: "merge-authorization",
     } }),
     options.withLibrarian ? db.taskTemplateStep.create({ data: {
-      taskTemplateId: template.id, stepIndex: 10, layer: 9, name: "Librarian", assigneeType: AssigneeType.AGENT,
+      taskTemplateId: template.id, stepIndex: librarianIndex, layer: librarianLayer, name: "Librarian", assigneeType: AssigneeType.AGENT,
       assigneeAgentId: librarianAgent.id, prompt: "document", approvalGate: false, outputKind: "documentation",
     } }) : null,
   ]);
@@ -84,7 +86,7 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
   const librarian = librarianStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: librarianStep.id,
     name: "Librarian", description: "document", assigneeType: AssigneeType.AGENT, assigneeAgentId: librarianAgent.id,
-    status: TaskStatus.DONE, chainId, chainIndex: 10, chainLayer: 9, targetBranch: "main",
+    status: TaskStatus.DONE, chainId, chainIndex: librarianIndex, chainLayer: librarianLayer, targetBranch: "main",
   } }) : null;
   const regression = await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: regressionStep.id,
