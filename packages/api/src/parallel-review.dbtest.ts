@@ -170,8 +170,8 @@ const canonicalInstallation = async (): Promise<CanonicalInstallation> => {
       include: { steps: { orderBy: { stepIndex: "asc" } } },
     }),
   ]);
-  assert.deepEqual(direct.steps.map((step) => step.layer), [1, 2, 2, 3, 4, 5, 6, 7]);
-  assert.deepEqual(full.steps.map((step) => step.layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11, 12]);
+  assert.deepEqual(direct.steps.map((step) => step.layer), [1, 2, 2, 3, 4, 5, 6]);
+  assert.deepEqual(full.steps.map((step) => step.layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
   return {
     projectId: project.id,
     directTemplateId: direct.id,

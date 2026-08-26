@@ -16,6 +16,8 @@ const execFileAsync = promisify(execFile);
 const DB_DIRECTORY = fileURLToPath(new URL("../../db", import.meta.url));
 const RUNNER_TOKEN = "blind-claim-runner-token";
 const OPERATOR_TOKEN = "blind-claim-operator-token";
+/** The head both reviews were bound to, and the head the fix starts from. */
+const REVIEWED_HEAD = "e".repeat(40);
 const UNIQUE_PREDECESSOR_FINDING = {
   id: "SOL-UNIQUE-1",
   severity: "P1",
@@ -102,7 +104,13 @@ const queueCanonicalStep = async (
   });
   const target = chain.tasks.find((task) => task.chainIndex === stepIndex);
   assert.ok(target, `canonical step ${stepIndex} must exist`);
-  const sourceStepIndex = template.steps.find((step) => step.stepIndex === stepIndex)?.baseFromStepIndex ?? null;
+  // The pinned base belongs to the review layer, not necessarily to the target
+  // step: the fix step that now follows the reviews pins nothing itself, and
+  // its review siblings still need the implementation output they point at.
+  const sourceStepIndex = template.steps.find((step) => step.stepIndex === stepIndex)?.baseFromStepIndex
+    ?? template.steps
+      .filter((step) => step.stepIndex < stepIndex)
+      .reduce<number | null>((found, step) => step.baseFromStepIndex ?? found, null);
   const sourceTask = sourceStepIndex === null
     ? null
     : priorTasks.find((task) => task.chainIndex === sourceStepIndex) ?? null;
@@ -272,7 +280,7 @@ test("blind session cannot read Sol evidence before or after its immutable repor
 test("the fix step claims both immutable reports and cannot rewrite either", async () => {
   const { template, repo } = await seedCanonicalTemplate();
   const fix = await queueCanonicalStep(template, repo.id, 8);
-  const headSha = fix.run.targetBranch!;
+  const headSha = REVIEWED_HEAD;
   await prepareReviewReport(fix.chain, 6, "sol-findings", headSha);
   await prepareReviewReport(fix.chain, 7, "blind-findings", headSha);
 
@@ -288,8 +296,10 @@ test("the fix step claims both immutable reports and cannot rewrite either", asy
     priorOutputs: Array<{ kind: string; body: string }>;
   };
   assert.equal(claimBody.run.id, fix.run.id);
-  assert.equal(claimBody.run.implementationBaseSha, "b".repeat(40));
-  assert.equal(claimBody.run.implementationHeadSha, headSha);
+  // The fix step pins nothing: a pinned run is a detached empty checkout, and
+  // this step has to commit the fixes on the chain branch.
+  assert.equal(claimBody.run.implementationBaseSha, null);
+  assert.equal(claimBody.run.implementationHeadSha, null);
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "sol-findings"));
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "blind-findings"));
 
@@ -314,7 +324,7 @@ test("Direct and Full fix-step persistence requires exact union dispositions bou
     await resetTestDb(db);
     const { template, repo } = await seedCanonicalTemplate(shape.name);
     const fix = await queueCanonicalStep(template, repo.id, shape.fix);
-    const headSha = fix.run.targetBranch!;
+    const headSha = REVIEWED_HEAD;
     await prepareReviewReport(fix.chain, shape.sol, "sol-findings", headSha);
     await prepareReviewReport(fix.chain, shape.blind, "blind-findings", headSha);
     const claimed = await claim();
