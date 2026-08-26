@@ -3,7 +3,11 @@ import { hostname, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { RUNNER_DEFINITIONS, RUNNER_KINDS } from "./adapters.js";
+import { runnerProxyEnvironment } from "./adapters/environment.js";
 import { requireLocalApiDestination } from "./local-origin.js";
+
+export { runnerProxyEnvironment } from "./adapters/environment.js";
 
 const require = createRequire(import.meta.url);
 const packageMetadata = require("../package.json") as { version: string };
@@ -46,23 +50,6 @@ export type RunnerConfig = {
 
 export const defaultSessionConfigBaselineRoot = (): string =>
   fileURLToPath(new URL("../assets/session-config-baseline", import.meta.url));
-
-const runnerProxyVariables = [
-  [["HTTP_PROXY", "http_proxy"], "RUNNER_HTTP_PROXY"],
-  [["HTTPS_PROXY", "https_proxy"], "RUNNER_HTTPS_PROXY"],
-  [["NO_PROXY", "no_proxy"], "RUNNER_NO_PROXY"],
-] as const;
-
-/**
- * Builds the proxy environment owned by the runner, not by a CLI's user
- * settings. RUNNER_* is the only operator surface, so an unrelated proxy in
- * the runner daemon's own environment cannot silently reach child processes.
- */
-export const runnerProxyEnvironment = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv =>
-  Object.fromEntries(runnerProxyVariables.flatMap(([childNames, configuredName]) => {
-    const value = env[configuredName];
-    return value ? childNames.map((childName) => [childName, value]) : [];
-  }));
 
 const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
 
@@ -129,10 +116,9 @@ export const loadRunnerConfig = (): RunnerConfig => {
     // no work — so a flat ceiling is safe.
     apiTimeoutMs: positiveInteger("RUNNER_API_TIMEOUT_MS", process.env.RUNNER_API_TIMEOUT_MS ?? "10000"),
     runAsPrefix,
-    binaries: {
-      CLAUDE: process.env.CLAUDE_BINARY ?? "claude",
-      CODEX: process.env.CODEX_BINARY ?? "codex",
-      PI: process.env.PI_BINARY ?? "pi",
-    },
+    binaries: Object.fromEntries(RUNNER_KINDS.map((runner) => {
+      const definition = RUNNER_DEFINITIONS[runner];
+      return [runner, process.env[definition.binaryEnvironment] ?? definition.defaultBinary];
+    })) as Record<RunnerKind, string>,
   };
 };
