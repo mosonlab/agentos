@@ -1176,6 +1176,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
         return context.json({ error: "Webhook instantiation is busy; retry later" }, 503);
       }
+      if (isTemplateInstantiationRefusal(error)) {
+        return context.json({ error: error.message, code: error.code }, 400);
+      }
       if (isTemplateInputError(error)) return context.json({ error: error.message }, 400);
       throw error;
     }
@@ -2173,6 +2176,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
     } catch (error: unknown) {
+      if (isTemplateInstantiationRefusal(error)) {
+        return context.json({ error: error.message, code: error.code }, 400);
+      }
       if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }

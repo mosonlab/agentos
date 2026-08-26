@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import type { PrismaClient } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, type PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 import { encryptSecret } from "./secrets.js";
@@ -311,6 +311,40 @@ test("a manual fire and a webhook delivery released together produce two indepen
   // value order, which is not alphabetical.
   const sources = (await db.triggerFire.findMany({ where: { templateId: template.id } })).map((fire) => fire.source).sort();
   assert.deepEqual(sources, ["MANUAL", "WEBHOOK"]);
+});
+
+test("a direct canonical trigger refuses manual and webhook fire without creating a chain", async () => {
+  const { template } = await seedTrigger("direct-brief-authority");
+  await db.taskTemplate.update({
+    where: { id: template.id },
+    data: { name: DIRECT_TEMPLATE_NAME },
+  });
+  await db.taskTemplateStep.updateMany({
+    where: { taskTemplateId: template.id },
+    data: { stepIndex: 2, layer: 2, outputKind: "sol-findings" },
+  });
+
+  const responses = await asOperator(() => Promise.all([
+    createApp(db).request(`/task-templates/${template.id}/fire`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPERATOR}` },
+    }),
+    createApp(db).request(`/hooks/templates/${template.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AgentOS-Webhook-Secret": "wh-secret-batch25" },
+      body: JSON.stringify({ issue: { title: "From the wire" } }),
+    }),
+  ]));
+
+  for (const response of responses) {
+    assert.equal(response.status, 400);
+    const body = await response.json() as { error: string; code: string };
+    assert.equal(body.code, "feature_brief_required");
+    assert.match(body.error, /task brief/u);
+  }
+  assert.equal(await db.task.count(), 0);
+  assert.equal(await db.run.count(), 0);
+  assert.equal(await db.triggerFire.count(), 0);
 });
 
 // --- review fixes: the fires ledger is project-scoped (SOL-REVIEW M4) --------
