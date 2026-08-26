@@ -19,7 +19,12 @@ import {
   legacyRegressionFirstThirteenStepTemplateName,
   legacyTenStepTemplateName,
 } from "../src/merge-integrator.js";
-import { loadAllTemplateStepSources, type TemplateStepSource } from "../src/template-sources.js";
+import {
+  loadAllTemplateStepSources,
+  templateStepStructureDifferences,
+  type PersistedTemplateStepStructure,
+  type TemplateStepSource,
+} from "../src/template-sources.js";
 
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
 // so that OSS-B0's first-run onboarding can read the same `agents/` contract
@@ -38,6 +43,34 @@ const HISTORICAL_NINE_STEP_CONTRACT = [
   [8, "librarian", AssigneeType.AGENT, "documentation", false],
   [9, null, AssigneeType.HUMAN, "approval", true],
 ] as const;
+
+/**
+ * A row that still carries the canonical name after every registered legacy
+ * generation failed to match must be the current source graph, field for
+ * field. A half-migrated graph is neither: the step upsert below would
+ * silently rewrite it into the current shape, skipping the unfinished-task
+ * and webhook guards a registered rollover runs and leaving no legacy row
+ * behind. Refuse it the way canonical sync refuses it.
+ */
+const assertCurrentCanonicalGraph = (
+  templateName: string,
+  persistedSteps: readonly (PersistedTemplateStepStructure & { stepIndex: number })[],
+  sourceSteps: readonly TemplateStepSource[],
+): void => {
+  if (persistedSteps.length !== sourceSteps.length) {
+    throw new Error(`Canonical template ${templateName} has structural drift: expected ${sourceSteps.length} steps, found ${persistedSteps.length}`);
+  }
+  const ordered = [...persistedSteps].sort((left, right) => left.stepIndex - right.stepIndex);
+  if (ordered.some((step, index) => step.stepIndex !== index + 1)) {
+    throw new Error(`Canonical template ${templateName} has structural drift: step indexes are not contiguous`);
+  }
+  for (const [index, step] of ordered.entries()) {
+    const differences = templateStepStructureDifferences(step, sourceSteps[index]!);
+    if (differences.length > 0) {
+      throw new Error(`Canonical template ${templateName} has structural drift: step ${step.stepIndex} differs from the canonical source in ${differences.join(", ")}`);
+    }
+  }
+};
 
 const CANONICAL_STEP_NAMES = [
   "Write a spec",
@@ -266,16 +299,8 @@ const main = async (): Promise<void> => {
         data: { name: legacyName },
       });
     }
-    if (existing && !legacyName
-      && !isHistoricalNineStepTemplate
-      && !isHistoricalTenStepTemplate
-      && !isHistoricalHumanTwelveStepTemplate
-      && existing.steps.length !== templateSteps.length) {
-      throw new Error(`Canonical template ${INTEGRATOR_TEMPLATE_NAME} has structural drift: expected ${templateSteps.length} steps, found ${existing.steps.length}`);
-    }
-    if (existing && !legacyName && existing.steps.length === templateSteps.length
-      && existing.steps.some((step, index) => step.stepIndex !== index + 1)) {
-      throw new Error(`Canonical template ${INTEGRATOR_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
+    if (existing && !legacyName) {
+      assertCurrentCanonicalGraph(INTEGRATOR_TEMPLATE_NAME, existing.steps, templateSteps);
     }
 
     const template = await tx.taskTemplate.upsert({
@@ -331,22 +356,17 @@ const main = async (): Promise<void> => {
       if (collision) throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} cannot rename to ${legacyName}: target already exists`);
       await tx.taskTemplate.update({ where: { id: historicalDirect.id }, data: { name: legacyName } });
     }
-    if (historicalDirect?.steps.length === 6
+    const isHistoricalHumanSixStepDirectTemplate = historicalDirect?.steps.length === 6
       && historicalDirect.steps[5]?.assigneeType === AssigneeType.HUMAN
-      && historicalDirect.steps[5]?.outputKind === "approval") {
+      && historicalDirect.steps[5]?.outputKind === "approval";
+    if (isHistoricalHumanSixStepDirectTemplate) {
       await tx.taskTemplate.update({
         where: { id: historicalDirect.id },
         data: { name: `${DIRECT_TEMPLATE_NAME}-legacy-human-6-${historicalDirect.id}` },
       });
     }
-    if (historicalDirect && !legacyDirect
-      && historicalDirect.steps.length !== directTemplateSteps.length
-      && historicalDirect.steps.length !== 6) {
-      throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: expected ${directTemplateSteps.length} steps, found ${historicalDirect.steps.length}`);
-    }
-    if (historicalDirect && !legacyDirect && historicalDirect.steps.length === directTemplateSteps.length
-      && historicalDirect.steps.some((step, index) => step.stepIndex !== index + 1)) {
-      throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
+    if (historicalDirect && !legacyDirect && !isHistoricalHumanSixStepDirectTemplate) {
+      assertCurrentCanonicalGraph(DIRECT_TEMPLATE_NAME, historicalDirect.steps, directTemplateSteps);
     }
     const directTemplate = await tx.taskTemplate.upsert({
       where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
