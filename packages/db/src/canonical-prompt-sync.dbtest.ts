@@ -9,7 +9,7 @@
  *     npm run test:db -w @agentos/db
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
@@ -46,6 +46,19 @@ const command = (args: string[]) => {
   });
   return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 };
+
+const commandAsync = (args: string[]): Promise<{ status: number | null; output: string }> => new Promise((resolve, reject) => {
+  const child = spawn("npx", args, {
+    cwd: packageRoot,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+  child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+  child.once("error", reject);
+  child.once("close", (status) => resolve({ status, output }));
+});
 
 let prisma: PrismaClient;
 
@@ -86,6 +99,50 @@ const ADJUDICATION_STEPS = {
   "direct-engineer-workflow": { stepIndex: 4, layer: 3, baseFromStepIndex: 1 },
   "compound-engineer-workflow": { stepIndex: 8, layer: 7, baseFromStepIndex: 5 },
 } as const;
+
+/** Reopen the exact pre-adjudication graph on a fresh canonical row. */
+const restoreAdjudicationGraph = async (templateName: keyof typeof ADJUDICATION_STEPS) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const template = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: templateName } },
+    include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
+  });
+  const adjudicator = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "review-adjudicator-opus" } },
+  });
+  const adjudication = ADJUDICATION_STEPS[templateName];
+  for (const step of [...template.steps].reverse()) {
+    if (step.stepIndex < adjudication.stepIndex) continue;
+    await prisma.taskTemplateStep.update({
+      where: { id: step.id },
+      data: { stepIndex: step.stepIndex + 1, layer: step.layer + 1 },
+    });
+  }
+  await prisma.taskTemplateStep.create({ data: {
+    taskTemplateId: template.id,
+    stepIndex: adjudication.stepIndex,
+    layer: adjudication.layer,
+    name: "Opus adjudication",
+    assigneeAgentId: adjudicator.id,
+    assigneeType: "AGENT",
+    approvalGate: false,
+    outputKind: "must-fix",
+    attachmentsFromPrevious: true,
+    opensPullRequest: false,
+    baseFromStepIndex: adjudication.baseFromStepIndex,
+    prompt: `Adjudicate the two review reports for ${templateName}.`,
+  } });
+  if (templateName === "compound-engineer-workflow") {
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id, stepIndex: { in: [1, 4] } },
+      data: { approvalGate: true },
+    });
+  }
+  return prisma.taskTemplate.findUniqueOrThrow({
+    where: { id: template.id },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+};
 
 test("sync rolls the exact adjudication-era graphs forward without touching instantiated evidence", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
@@ -285,6 +342,98 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
     select: { id: true },
   });
   assert.equal(directAfter.id, directBefore.id);
+});
+
+test("sync refuses rollover when an archived unfinished task remains on the old row", async () => {
+  const template = await restoreAdjudicationGraph("direct-engineer-workflow");
+  const step = template.steps.find(({ outputKind }) => outputKind === "must-fix")!;
+  const task = await prisma.task.create({ data: {
+    projectId: template.projectId,
+    templateId: template.id,
+    templateStepId: step.id,
+    name: "Archived unfinished canonical task",
+    description: "This task must continue to block rollover while archived.",
+    assigneeType: step.assigneeType,
+    assigneeAgentId: step.assigneeAgentId,
+    status: TaskStatus.TODO,
+    archivedAt: new Date(),
+    chainId: `archived-rollover-${template.id}`,
+    chainIndex: step.stepIndex,
+    chainLayer: step.layer,
+  } });
+
+  const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.notEqual(refused.status, 0, refused.output);
+  assert.match(refused.output, /canonical-rollover-refused:unfinished-tasks/u);
+  assert.match(refused.output, /still has 1 unfinished tasks/u);
+  assert.equal((await prisma.taskTemplate.findUniqueOrThrow({ where: { id: template.id } })).name, "direct-engineer-workflow");
+
+  await prisma.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE } });
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+});
+
+test("sync locks the old row before counting a concurrent task insert", async () => {
+  const template = await restoreAdjudicationGraph("compound-engineer-workflow");
+  const step = template.steps.find(({ outputKind }) => outputKind === "must-fix")!;
+  let releaseTransaction!: () => void;
+  const transactionReleased = new Promise<void>((resolve) => { releaseTransaction = resolve; });
+  let taskInserted!: () => void;
+  const taskInsertedPromise = new Promise<void>((resolve) => { taskInserted = resolve; });
+  const heldTransaction = prisma.$transaction(async (tx) => {
+    const task = await tx.task.create({ data: {
+      projectId: template.projectId,
+      templateId: template.id,
+      templateStepId: step.id,
+      name: "Concurrent rollover task",
+      description: "The insert holds the template foreign-key key-share lock.",
+      assigneeType: step.assigneeType,
+      assigneeAgentId: step.assigneeAgentId,
+      status: TaskStatus.TODO,
+      chainId: `concurrent-rollover-${template.id}`,
+      chainIndex: step.stepIndex,
+      chainLayer: step.layer,
+    } });
+    taskInserted();
+    await transactionReleased;
+    return task.id;
+  }, { timeout: 30_000 });
+
+  await taskInsertedPromise;
+  const syncing = commandAsync(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  try {
+    // The sync's FOR UPDATE should now be waiting on the key-share lock held
+    // by the uncommitted task insert.  Poll the server instead of relying on a
+    // fixed sleep so this assertion distinguishes lock-before-count from the
+    // old count-before-lock ordering.
+    let observed = false;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const waiters = await prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT count(*)::bigint AS "count"
+        FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock'
+          AND query ILIKE '%TaskTemplate%'
+          AND query ILIKE '%FOR UPDATE%'
+      `;
+      if (Number(waiters[0]?.count ?? 0) > 0) {
+        observed = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(observed, true, "sync must reach the template row lock while the task insert is uncommitted");
+  } finally {
+    releaseTransaction();
+  }
+
+  const taskId = await heldTransaction;
+  const refused = await syncing;
+  assert.notEqual(refused.status, 0, refused.output);
+  assert.match(refused.output, /canonical-rollover-refused:unfinished-tasks/u);
+  assert.equal((await prisma.taskTemplate.findUniqueOrThrow({ where: { id: template.id } })).name, "compound-engineer-workflow");
+  await prisma.task.update({ where: { id: taskId }, data: { status: TaskStatus.DONE } });
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
 });
 
 test("sync upgrades only the exact frozen-base review agent defaults", async () => {
