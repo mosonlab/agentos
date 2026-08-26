@@ -7,9 +7,9 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
-  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, failureReasonFromEvidence,
+  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, CODEX_STARTER_MODEL, failureReasonFromEvidence,
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
-  runtimeDescriptor, type ExitEvidence,
+  PREFLIGHT_REASONS, runtimeDescriptor, type ExitEvidence,
 } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -1246,4 +1246,36 @@ test("a local CLI preflight timeout stays a deterministic failure, not a provide
   const classified = adapters.CLAUDE.classifyError(evidence);
   assert.notEqual(classified.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(classified.retryable, false);
+});
+
+/** `/bin/echo` exits 0 and echoes its argv, so it answers `--version` and every
+ *  probe below it without a chmod'd stub CLI on disk. What each preflight then
+ *  refuses is the per-runner check this test is about. */
+const echoConfig = {
+  binaries: { CLAUDE: "/bin/echo", CODEX: "/bin/echo", PI: "/bin/echo" },
+  runAsPrefix: [],
+} as unknown as RunnerConfig;
+
+test("Claude preflight refuses a CLI whose auth status does not report a logged-in session", async () => {
+  const result = await adapters.CLAUDE.preflight({ config: echoConfig, runner: "CLAUDE", model: "claude", env: {} });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, `${PREFLIGHT_REASONS.notAuthenticated} (exit 0)`);
+  // Exit 0 alone is not the verdict for Claude: the login check is the JSON body.
+  assert.equal(result.authMode, null);
+});
+
+test("Codex preflight refuses a CLI that answers --version but not the exec protocol", async () => {
+  const result = await adapters.CODEX.preflight({ config: echoConfig, runner: "CODEX", model: CODEX_STARTER_MODEL, env: {} });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, PREFLIGHT_REASONS.cliIncompatible);
+  assert.equal(result.capabilities.cliProtocol, undefined, "an incompatible CLI must not be recorded as verified");
+});
+
+test("an adapter is substituted by injection, never by writing over the exported record", () => {
+  // executeClaim takes `adapter`; the record itself is frozen so the old
+  // mutation path cannot silently come back.
+  assert.equal(Object.isFrozen(adapters), true);
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    assert.equal(Object.isFrozen(adapters[runner]), true, `${runner} adapter must be frozen`);
+  }
 });

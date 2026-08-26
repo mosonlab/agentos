@@ -1085,20 +1085,22 @@ const heartbeat = async (handle: RuntimeHandle): Promise<HeartbeatSnapshot> => {
   };
 };
 
-const makeAdapter = (runner: RunnerKind): CliAdapter => ({
-  preflight: (spec) => preflight({ ...spec, runner }),
-  start: async (spec, sink) => spawnRuntime(runner, spec, sink),
-  resume: async (spec, sink) => spawnRuntime(runner, spec, sink, spec),
+const makeAdapter = (runner: RunnerKind): CliAdapter => Object.freeze({
+  preflight: (spec: PreflightSpec) => preflight({ ...spec, runner }),
+  start: async (spec: RunSpec, sink: SessionEventSink) => spawnRuntime(runner, spec, sink),
+  resume: async (spec: ResumeSpec, sink: SessionEventSink) => spawnRuntime(runner, spec, sink, spec),
   kill,
   heartbeat,
   classifyError,
 });
 
-export const adapters: Record<RunnerKind, CliAdapter> = {
+/** Frozen: a caller substitutes an adapter by passing one to `executeClaim`,
+ *  not by writing over this record. */
+export const adapters: Readonly<Record<RunnerKind, CliAdapter>> = Object.freeze({
   CLAUDE: makeAdapter("CLAUDE"),
   CODEX: makeAdapter("CODEX"),
   PI: makeAdapter("PI"),
-};
+});
 
 export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   adapterVersion: ADAPTER_VERSION,

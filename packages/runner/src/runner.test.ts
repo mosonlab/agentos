@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { adapters } from "./adapters.js";
+import { adapters, type CliAdapter } from "./adapters.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
@@ -111,16 +111,12 @@ test("a mechanical claim is refused before any adapter, workspace or child envir
 
   // Any adapter entry point reached at all is the failure this test exists to
   // catch: a merge credential must never be in a process that spawns a CLI.
-  const started = adapters.CLAUDE.start;
-  const preflighted = adapters.CLAUDE.preflight;
-  adapters.CLAUDE.start = (() => { throw new Error("adapter.start must not be reached for a mechanical claim"); }) as typeof started;
-  adapters.CLAUDE.preflight = (() => { throw new Error("adapter.preflight must not be reached for a mechanical claim"); }) as typeof preflighted;
-  try {
-    await executeClaim(config(workspaceRoot), mechanicalClaim);
-  } finally {
-    adapters.CLAUDE.start = started;
-    adapters.CLAUDE.preflight = preflighted;
-  }
+  const adapter: CliAdapter = {
+    ...adapters.CLAUDE,
+    start: () => { throw new Error("adapter.start must not be reached for a mechanical claim"); },
+    preflight: () => { throw new Error("adapter.preflight must not be reached for a mechanical claim"); },
+  };
+  await executeClaim(config(workspaceRoot), mechanicalClaim, { adapter });
 
   assert.deepEqual(calls.map((call) => call.path), ["http://api.invalid/runner/runs/run-10/complete"]);
   assert.equal(calls[0]!.body.terminationReason, "mechanical run claimed by a model runner");
@@ -284,26 +280,22 @@ test("Codex provision auth failure is PROVISION, retains its root, and never spa
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
-    const originalPreflight = adapters.CODEX.preflight;
-    const originalStart = adapters.CODEX.start;
     let preflightCalls = 0;
     let startCalls = 0;
-    adapters.CODEX.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
-    adapters.CODEX.start = (async () => { startCalls += 1; throw new Error("CLI must not spawn"); }) as typeof originalStart;
-    try {
-      await executeClaim(configured, {
-        ...mechanicalClaim,
-        executionMode: "agent",
-        runner: "CODEX",
-        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
-        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-        session: { id: "session-codex-provision-failure" },
-      });
-    } finally {
-      adapters.CODEX.preflight = originalPreflight;
-      adapters.CODEX.start = originalStart;
-    }
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+      start: async () => { startCalls += 1; throw new Error("CLI must not spawn"); },
+    };
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: { id: "session-codex-provision-failure" },
+    }, { adapter });
     assert.equal(preflightCalls, 0);
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
@@ -333,26 +325,22 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
-    const originalPreflight = adapters.CODEX.preflight;
-    const originalStart = adapters.CODEX.start;
     let preflightCalls = 0;
     let startCalls = 0;
-    adapters.CODEX.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
-    adapters.CODEX.start = (async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); }) as typeof originalStart;
-    try {
-      await executeClaim(configured, {
-        ...mechanicalClaim,
-        executionMode: "agent",
-        runner: "CODEX",
-        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
-        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-        session: { id: "session-codex-baseline-failure" },
-      });
-    } finally {
-      adapters.CODEX.preflight = originalPreflight;
-      adapters.CODEX.start = originalStart;
-    }
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+      start: async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); },
+    };
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: { id: "session-codex-baseline-failure" },
+    }, { adapter });
     assert.equal(preflightCalls, 0);
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
@@ -398,26 +386,22 @@ test("Codex rejects a run-as config-root symlink in PROVISION without copying ho
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
-    const originalPreflight = adapters.CODEX.preflight;
-    const originalStart = adapters.CODEX.start;
     let preflightCalls = 0;
     let startCalls = 0;
-    adapters.CODEX.preflight = (async () => { preflightCalls += 1; return { ok: true } as never; }) as typeof originalPreflight;
-    adapters.CODEX.start = (async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); }) as typeof originalStart;
-    try {
-      await executeClaim(configured, {
-        ...mechanicalClaim,
-        executionMode: "agent",
-        runner: "CODEX",
-        repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
-        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
-        session: { id: sessionId },
-      });
-    } finally {
-      adapters.CODEX.preflight = originalPreflight;
-      adapters.CODEX.start = originalStart;
-    }
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => { preflightCalls += 1; return { ok: true } as never; },
+      start: async () => { startCalls += 1; throw new Error("host ~/.codex must never be used"); },
+    };
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: { id: sessionId },
+    }, { adapter });
     assert.equal(preflightCalls, 0);
     assert.equal(startCalls, 0);
     const completion = posts.find((post) => post.path.endsWith("/complete"));
@@ -444,10 +428,6 @@ const codexOnly = (workspaceRoot: string, root: string, codexBinary: string): Ru
 
 test("event delivery failures do not starve heartbeats and recover in seq order", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-event-heartbeat-isolation-"));
-  const originalPreflight = adapters.CLAUDE.preflight;
-  const originalStart = adapters.CLAUDE.start;
-  const originalHeartbeat = adapters.CLAUDE.heartbeat;
-  const originalKill = adapters.CLAUDE.kill;
   try {
     const remote = await seedRemote(root);
     const configured = {
@@ -500,40 +480,43 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
 
-    adapters.CLAUDE.preflight = (async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} })) as typeof originalPreflight;
-    adapters.CLAUDE.start = (async (_spec, sink) => {
-      const now = new Date();
-      sink({ source: "CLAUDE", type: "EVENT_A", payload: { text: "first" } });
-      sink({ source: "CLAUDE", type: "EVENT_B", providerEventId: "provider-b", toolCallId: "tool-b", payload: { text: "second" } });
-      sink({ source: "CLAUDE", type: "EVENT_C", payload: { text: "third" } });
-      return {
-        runner: "CLAUDE",
-        child: { exitCode: null, signalCode: null } as never,
-        pid: null,
-        startedAt: now,
-        lastProcessAliveAt: now,
-        lastProgressEventAt: now,
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async (_spec, sink) => {
+        const now = new Date();
+        sink({ source: "CLAUDE", type: "EVENT_A", payload: { text: "first" } });
+        sink({ source: "CLAUDE", type: "EVENT_B", providerEventId: "provider-b", toolCallId: "tool-b", payload: { text: "second" } });
+        sink({ source: "CLAUDE", type: "EVENT_C", payload: { text: "third" } });
+        return {
+          runner: "CLAUDE",
+          child: { exitCode: null, signalCode: null } as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          piTurnCompleted: false,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit,
+        } as never;
+      },
+      heartbeat: async (handle) => ({
+        processAlive: true,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
         inFlightTool: null,
-        providerConversationId: null,
-        terminalEventSeen: true,
-        terminalSuccess: true,
-        terminationReason: null,
-        sawError: false,
-        providerError: null,
-        piTurnCompleted: false,
-        finalOutput: null,
-        stdout: "",
-        stderr: "",
-        exit,
-      } as never;
-    }) as typeof originalStart;
-    adapters.CLAUDE.heartbeat = (async (handle) => ({
-      processAlive: true,
-      lastProcessAliveAt: handle.lastProcessAliveAt,
-      lastProgressEventAt: handle.lastProgressEventAt,
-      inFlightTool: null,
-    })) as typeof originalHeartbeat;
-    adapters.CLAUDE.kill = (async () => ({ signal: null, processAlive: false })) as typeof originalKill;
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
 
     const execution = executeClaim(configured, {
       ...mechanicalClaim,
@@ -543,7 +526,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
       agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
-    });
+    }, { adapter });
 
     await activeFailures;
     processExited = true;
@@ -574,10 +557,6 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     const eventAfterHeartbeat = posts.findIndex((post, index) => index > firstActiveHeartbeat && post.path.endsWith("/events"));
     assert.ok(firstActiveHeartbeat >= 0 && eventAfterHeartbeat > firstActiveHeartbeat, "heartbeat must be attempted before the interval event flush");
   } finally {
-    adapters.CLAUDE.preflight = originalPreflight;
-    adapters.CLAUDE.start = originalStart;
-    adapters.CLAUDE.heartbeat = originalHeartbeat;
-    adapters.CLAUDE.kill = originalKill;
     await rm(root, { recursive: true, force: true });
   }
 });
