@@ -3564,12 +3564,22 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING],
     };
     const started = await db.$transaction(async (tx) => {
-      await lockRunRow(tx, runId);
+      const locked = await lockRunRow(tx, runId);
+      // Inbox resume reuses the same Run and Session. Keep the original
+      // lifecycle anchor when the resumed provider calls /start again; only a
+      // run that has never started gets this request's timestamp. The Session
+      // fallback repairs the rare legacy row whose Run anchor is still null
+      // without making a resume look like a fresh execution.
+      const existing = locked === null ? null : await tx.run.findUnique({
+        where: { id: runId },
+        select: { startedAt: true, session: { select: { startedAt: true } } },
+      });
+      const startedAt = existing?.startedAt ?? existing?.session?.startedAt ?? now;
       const updated = await tx.run.updateMany({
         where: fencedRunWhere(fence),
         data: {
           status: RunStatus.RUNNING,
-          startedAt: now,
+          startedAt,
           adapterVersion: body.adapterVersion,
           cliVersion: body.cliVersion,
           authMode: body.authMode ?? null,
@@ -3587,7 +3597,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runtimeHandle: body.runtimeHandle ?? null,
           resumeInput: null,
           provisionedAt: now,
-          startedAt: now,
+          startedAt,
         },
       });
       if (session.count !== 1) throw new Error(`Run ${runId} has no startable Session`);
