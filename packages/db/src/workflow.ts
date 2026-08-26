@@ -48,15 +48,11 @@ type Tx = Prisma.TransactionClient;
 
 const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
 
-export const runnerFor = (preference: RunnerPreference, model: string): RunnerKind => {
-  if (preference === RunnerPreference.CLAUDE) return RunnerKind.CLAUDE;
-  if (preference === RunnerPreference.CODEX) return RunnerKind.CODEX;
-  if (preference === RunnerPreference.PI) return RunnerKind.PI;
-  const normalized = model.toLowerCase();
-  if (normalized.includes("codex")) return RunnerKind.CODEX;
-  if (normalized.includes("deepseek") || normalized.split(/[\/:_-]+/u).includes("pi")) return RunnerKind.PI;
-  return RunnerKind.CLAUDE;
-};
+// The runner rule moved to the pure `@agentos/db/model-routing` subpath, which
+// the browser can import without pulling in Prisma. Imported here beside its
+// re-export so this module's own callers and its importers read the same rule.
+import { runnerFor } from "./model-routing.js";
+export { runnerFor };
 
 export const deriveRunConfig = (
   agent: {

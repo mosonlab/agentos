@@ -9,7 +9,7 @@ import { Link, navigate } from "../lib/router";
 import type { Agent, CodexServiceTier, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
-import { resolveRunner, runnerForModel, supportsCodexServiceTier, validateModelPair } from "../lib/models";
+import { runnerFor, runnerForModel, supportsCodexServiceTier, validateModelPair } from "../lib/models";
 import { isEnforced, TOOL_KEYS, TOOL_LABEL_KEYS, type ToolKey } from "../lib/tools";
 import { cn } from "../lib/utils";
 import {
@@ -296,7 +296,7 @@ export const AgentToolsCard = ({ agent, onSaved }: { agent: Agent; onSaved: () =
   const [pendingWrites, setPendingWrites] = useState(0);
   const [writeError, setWriteError] = useState<string | null>(null);
   const t = useT();
-  const runner = resolveRunner(agent.runnerPreference, agent.model);
+  const runner = runnerFor(agent.runnerPreference, agent.model);
   const heuristic = agent.runnerPreference === "INHERIT" || agent.runnerPreference === "AUTO";
 
   useEffect(() => {
