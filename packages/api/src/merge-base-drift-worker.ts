@@ -1,19 +1,6 @@
 import {
   ACTIVE_RUN_STATUSES,
-  DIRECT_INTEGRATOR_STEP_INDEX,
-  DIRECT_INTEGRATOR_TEMPLATE_NAME,
   INTEGRATOR_OUTPUT_KIND,
-  INTEGRATOR_STEP_INDEX,
-  INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_DIRECT_INTEGRATOR_STEP_INDEX,
-  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_INTEGRATOR_STEP_INDEX,
-  LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX,
-  LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
-  LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX,
-  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
-  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
-  LEGACY_INTEGRATOR_TEMPLATE_NAME,
   MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
   MergeRecoveryStatus,
@@ -509,15 +496,7 @@ export const baseDriftRecoveryTick = async (
   const result: BaseDriftRecoveryTickResult = { examined: 0, recovered: 0, exhausted: 0, ineligible: 0 };
   const where: Prisma.TaskWhereInput = {
     status: TaskStatus.REVIEW,
-    OR: [
-      { templateStep: { stepIndex: DIRECT_INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
-      { templateStep: { stepIndex: INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } } },
-      { templateStep: { stepIndex: LEGACY_DIRECT_INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
-      { templateStep: { stepIndex: LEGACY_INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: LEGACY_INTEGRATOR_TEMPLATE_NAME } } },
-      { templateStep: { stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: { startsWith: LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX } } } },
-      { templateStep: { stepIndex: LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: { startsWith: LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX } } } },
-      { templateStep: { stepIndex: INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: { startsWith: LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX } } } },
-    ],
+    templateStep: { outputKind: INTEGRATOR_OUTPUT_KIND },
   };
   const pageSize = Math.max(limit * 10, 50);
   let cursor: string | null = null;

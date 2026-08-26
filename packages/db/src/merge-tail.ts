@@ -1,16 +1,6 @@
 import { MergeRecoveryStatus, type Prisma } from "@prisma/client";
 
-import {
-  DIRECT_INTEGRATOR_TEMPLATE_NAME,
-  INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
-  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
-  LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX,
-  LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX,
-  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
-} from "./merge-integrator.js";
+import { stepRole } from "./step-role.js";
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const REGRESSION_VERIFICATION_SCHEMA_VERSION = 2;
@@ -259,24 +249,8 @@ export type MergeReadinessStepShape = {
   taskTemplateName?: string | null;
 } | null | undefined;
 
-export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean => {
-  if (!step || step.outputKind !== MERGE_READINESS_OUTPUT_KIND) return false;
-  const name = step.taskTemplate?.name ?? step.taskTemplateName ?? null;
-  return (name === DIRECT_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === DIRECT_MERGE_READINESS_STEP_INDEX)
-    || (name === INTEGRATOR_TEMPLATE_NAME && step.stepIndex === MERGE_READINESS_STEP_INDEX)
-    || (name === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX)
-    || (name === LEGACY_INTEGRATOR_TEMPLATE_NAME && step.stepIndex === LEGACY_MERGE_READINESS_STEP_INDEX)
-    || (name?.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX) === true
-      && step.stepIndex === LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX)
-    || (name?.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX) === true
-      && step.stepIndex === LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX)
-    || (name?.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX) === true
-      && step.stepIndex === MERGE_READINESS_STEP_INDEX)
-    || (name?.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX) === true
-      && step.stepIndex === DIRECT_MERGE_READINESS_STEP_INDEX)
-    || (name?.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX) === true
-      && step.stepIndex === MERGE_READINESS_STEP_INDEX);
-};
+export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean =>
+  step !== null && step !== undefined && stepRole(step) === "readiness";
 
 const DEFENSE_EXACT = new Set([
   "scripts/merge-gate.sh",

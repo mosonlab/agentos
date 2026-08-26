@@ -60,14 +60,14 @@ const INTEGRATOR_INCLUDE = { templateStep: { include: { taskTemplate: { select: 
 
 export type IntegratorTask = Prisma.TaskGetPayload<{ include: typeof INTEGRATOR_INCLUDE }>;
 
-/** True when this task row *is* the chain's step-12 task. */
+/** True when this task row owns the Chain's integrator role. */
 export const taskIsIntegratorStep = (task: IntegratorTask | null | undefined): boolean =>
   isIntegratorStep(task?.templateStep ?? null);
 
 export const loadIntegratorTask = async (tx: Tx, taskId: string): Promise<IntegratorTask | null> =>
   tx.task.findUnique({ where: { id: taskId }, include: INTEGRATOR_INCLUDE });
 
-/** The chain's step-12 task, or null when the chain has no mechanical continuation. */
+/** The Chain's integrator task, or null when the Chain has no mechanical continuation. */
 export const findChainIntegratorTask = async (
   tx: Tx,
   projectId: string,

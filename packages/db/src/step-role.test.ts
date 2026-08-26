@@ -1,0 +1,95 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import {
+  LEGACY_TEMPLATE_GENERATIONS,
+  legacyTemplateName,
+} from "./canonical-template-transition.js";
+import {
+  gateFeedsIntegratorStep,
+  taskIsIntegratorStep,
+  type IntegratorTask,
+} from "./merge-integrator-db.js";
+import { isIntegratorStep } from "./merge-integrator.js";
+import { isMergeReadinessStep, REGRESSION_VERIFICATION_OUTPUT_KIND } from "./merge-tail.js";
+import { stepGeneration, stepRole, type StepRole } from "./step-role.js";
+import { loadTemplateStepSources, type CanonicalTemplateName } from "./template-sources.js";
+import { isCompoundImplementationStep, isDirectImplementationStep } from "./workflow.js";
+
+const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
+  spec: "spec",
+  plan: "plan",
+  "plan-review": "plan-review",
+  "revised-plan": "revised-plan",
+  "must-fix": "must-fix",
+  implementation: "implementation",
+  "sol-findings": "sol-findings",
+  "blind-findings": "blind-findings",
+  "fixed-implementation": "fixed-implementation",
+  documentation: "documentation",
+  "regression-verification": "regression",
+  [REGRESSION_VERIFICATION_OUTPUT_KIND]: "regression",
+  "merge-authorization": "readiness",
+  "merge-result": "integrator",
+};
+
+for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
+  for (const generation of generations) {
+    test(`${templateName} ${generation.marker} exposes every registered Step role`, () => {
+      const persistedName = legacyTemplateName(templateName, generation.marker, "template-row");
+      for (const tuple of generation.shape) {
+        const outputKind = tuple[3];
+        assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
+        assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), generation.marker);
+      }
+    });
+  }
+}
+
+for (const templateName of ["compound-engineer-workflow", "direct-engineer-workflow"] as const) {
+  test(`${templateName} source exposes every current Step role`, async () => {
+    const steps = await loadTemplateStepSources(templateName as CanonicalTemplateName);
+    for (const step of steps) {
+      assert.equal(stepRole(step), EXPECTED_ROLES[step.outputKind]);
+      assert.equal(stepGeneration(step), step.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND ? "v2" : "v1");
+    }
+  });
+}
+
+test("role normalization is generation-independent and unknown output kinds have no role", () => {
+  assert.equal(stepRole({ outputKind: "regression-verification-v3" }), "regression");
+  assert.equal(stepGeneration({ outputKind: "regression-verification-v3" }), "v3");
+  assert.equal(stepRole({ outputKind: "unregistered-v2" }), null);
+  assert.equal(stepGeneration({ outputKind: "unregistered-v2" }), "v2");
+});
+
+test("role predicates ignore ordinals and template generations", () => {
+  const integrator = { stepIndex: 1, outputKind: "merge-result", taskTemplate: { name: "retired-or-current" } };
+  const readiness = { stepIndex: 99, outputKind: "merge-authorization", taskTemplateName: "retired-or-current" };
+  assert.equal(isIntegratorStep(integrator), true);
+  assert.equal(isMergeReadinessStep(readiness), true);
+  assert.equal(isIntegratorStep({ ...integrator, outputKind: "implementation" }), false);
+  assert.equal(isMergeReadinessStep({ ...readiness, outputKind: "implementation" }), false);
+});
+
+test("implementation predicates retain the template seam without depending on ordinals", () => {
+  const compound = { stepIndex: 99, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } };
+  const direct = { stepIndex: 99, outputKind: "implementation", taskTemplate: { name: "direct-engineer-workflow" } };
+  assert.equal(isCompoundImplementationStep(compound), true);
+  assert.equal(isDirectImplementationStep(direct), true);
+  assert.equal(isCompoundImplementationStep(direct), false);
+  assert.equal(isDirectImplementationStep(compound), false);
+});
+
+test("task and successor integrator predicates delegate to Step role", async () => {
+  const integratorTask = {
+    templateStep: { stepIndex: 1, outputKind: "merge-result", taskTemplate: { name: "any-generation" } },
+  } as unknown as IntegratorTask;
+  assert.equal(taskIsIntegratorStep(integratorTask), true);
+
+  const tx = {
+    task: { findFirst: async () => integratorTask },
+  } as unknown as Parameters<typeof gateFeedsIntegratorStep>[0];
+  assert.equal(await gateFeedsIntegratorStep(tx, { projectId: "project", chainId: "chain", chainIndex: 3 }), integratorTask);
+  assert.equal(await gateFeedsIntegratorStep(tx, { projectId: "project", chainId: null, chainIndex: 3 }), null);
+});

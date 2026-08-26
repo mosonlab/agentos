@@ -161,6 +161,11 @@ export const loadTemplateStepSources = async (
       prompt: document.body,
     });
   }
+  const outputKinds = steps.map((step) => step.outputKind);
+  if (new Set(outputKinds).size !== outputKinds.length) {
+    const duplicate = outputKinds.find((outputKind, index) => outputKinds.indexOf(outputKind) !== index)!;
+    throw new Error(`${templateRoot} contains duplicate outputKind ${duplicate}`);
+  }
   if (steps.length !== sourceSpec.stepCount) {
     throw new Error(`${templateRoot} must contain exactly ${sourceSpec.stepCount} step prompts; found ${steps.length}`);
   }

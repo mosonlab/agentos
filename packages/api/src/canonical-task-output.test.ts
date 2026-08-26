@@ -18,23 +18,19 @@ const step = (template: string, stepIndex: number, outputKind: string) => ({
   outputKind,
 });
 
-test("canonical agent ranges stop before the new readiness and merge nodes", () => {
-  for (const index of [1, 2, 3, 4, 5]) {
-    assert.equal(isCanonicalAgentStep(step("direct-engineer-workflow", index, "implementation")), true);
-  }
-  for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
-    assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow", index, "implementation")), true);
+test("agent-authored roles stop before readiness and integrator roles", () => {
+  for (const outputKind of ["implementation", "blind-findings", "fixed-implementation", "regression-verification-v2"]) {
+    assert.equal(isCanonicalAgentStep(step("any-template-generation", 99, outputKind)), true);
   }
   assert.equal(isCanonicalAgentStep(step("direct-engineer-workflow", 6, "merge-authorization")), false);
   assert.equal(isCanonicalAgentStep(step("direct-engineer-workflow", 7, "merge-result")), false);
-  assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow", 11, "merge-authorization")), false);
-  assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow", 12, "merge-result")), false);
+  assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow", 5, "unregistered")), false);
 });
 
-test("legacy-v1 agent ranges remain authoritative at their old positions", () => {
+test("legacy agent roles remain authoritative without ordinal matching", () => {
   assert.equal(isCanonicalAgentStep(step("direct-engineer-workflow-legacy-v1", 5, "must-fix")), true);
   assert.equal(isCanonicalAgentStep(step("direct-engineer-workflow-legacy-v1", 6, "merge-authorization")), false);
-  assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow-legacy-v1", 10, "documentation")), true);
+  assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow-legacy-v1", 100, "documentation")), true);
   assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow-legacy-v1", 11, "merge-authorization")), false);
 });
 
@@ -70,18 +66,15 @@ test("the canonical graphs carry blind findings and no adjudication node", () =>
   assert.equal(isCanonicalBlindFindingsStep(step("direct-engineer-workflow", 3, "blind-findings")), true);
   assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow", 3, "blind-findings")), true);
   assert.equal(isCanonicalBlindFindingsStep(step("compound-engineer-workflow", 7, "blind-findings")), true);
-  assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow", 3, "must-fix")), false);
-  // The fix step owns the dispositions now, so no canonical node authors must-fix.
-  assert.equal(isCanonicalBlindReviewStep(step("compound-engineer-workflow", 8, "must-fix")), false);
-  assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow", 4, "must-fix")), false);
+  assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow", 4, "fixed-implementation")), false);
 });
 
-test("the old combined review identity is recognized only under legacy-v1 names", () => {
+test("the retired combined review role is recognized by output kind", () => {
   assert.equal(isLegacyCombinedBlindReviewStep(step("direct-engineer-workflow-legacy-v1", 3, "must-fix")), true);
   assert.equal(isLegacyCombinedBlindReviewStep(step("compound-engineer-workflow-legacy-v1", 7, "must-fix")), true);
   assert.equal(isCanonicalBlindReviewStep(step("direct-engineer-workflow-legacy-v1", 3, "must-fix")), true);
-  assert.equal(isLegacyCombinedBlindReviewStep(step("direct-engineer-workflow", 3, "must-fix")), false);
-  assert.equal(isLegacyCombinedBlindReviewStep(step("compound-engineer-workflow", 7, "must-fix")), false);
+  assert.equal(isLegacyCombinedBlindReviewStep(step("any-template-generation", 99, "must-fix")), true);
+  assert.equal(isLegacyCombinedBlindReviewStep(step("direct-engineer-workflow-legacy-v1", 3, "blind-findings")), false);
 });
 
 test("blind-findings is a versioned immutable review output and cannot be authored by another step", () => {
@@ -116,7 +109,8 @@ test("a fixed-implementation output must close exactly the findings it adopted",
   const sourceHead = "b".repeat(40);
   const fixStep = step("compound-engineer-workflow", 8, "fixed-implementation");
   assert.equal(isCanonicalFixStep(fixStep), true);
-  assert.equal(isCanonicalFixStep(step("compound-engineer-workflow", 9, "fixed-implementation")), false);
+  assert.equal(isCanonicalFixStep(step("compound-engineer-workflow", 99, "fixed-implementation")), true);
+  assert.equal(isCanonicalFixStep(step("compound-engineer-workflow", 8, "documentation")), false);
   assert.equal(isCanonicalFixStep(step("direct-engineer-workflow", 4, "fixed-implementation")), true);
   const artifact = (overrides: Record<string, unknown>) => JSON.stringify({
     schemaVersion: 1,

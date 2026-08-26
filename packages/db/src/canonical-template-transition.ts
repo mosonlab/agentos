@@ -1,6 +1,6 @@
 import { AssigneeType, Prisma, RunStatus, TaskStatus } from "@prisma/client";
 
-type LegacyStepTuple = readonly [
+export type LegacyStepTuple = readonly [
   string,
   AssigneeType,
   boolean,
@@ -25,10 +25,12 @@ type LegacyStepTuple = readonly [
  * spec and revise-plan approval gates were removed (2026-08-26 ruling); the
  * direct graph did not change in that transition.
  */
-const LEGACY_TEMPLATE_GENERATIONS: Record<string, ReadonlyArray<{
+export type LegacyTemplateGeneration = Readonly<{
   marker: string;
   shape: readonly LegacyStepTuple[];
-}>> = {
+}>;
+
+export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly LegacyTemplateGeneration[]>> = {
   "direct-engineer-workflow": [
     {
       marker: "pre-narrow-regression-lease",
@@ -110,6 +112,15 @@ const LEGACY_TEMPLATE_GENERATIONS: Record<string, ReadonlyArray<{
       ],
     },
   ],
+};
+
+export const legacyGenerationMarkerForTemplateName = (templateName: string): string | null => {
+  for (const [canonicalName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
+    for (const generation of generations) {
+      if (templateName.startsWith(`${canonicalName}-legacy-${generation.marker}-`)) return generation.marker;
+    }
+  }
+  return null;
 };
 
 /**

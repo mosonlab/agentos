@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -82,6 +82,22 @@ test("missing layer frontmatter is refused by the source loader", async () => {
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*layer/u,
+    ),
+  );
+});
+
+test("inserting a duplicate outputKind into a canonical template is refused", async () => {
+  await withTemplateCopy(
+    INTEGRATOR_TEMPLATE_NAME,
+    async (root) => {
+      const templateRoot = join(root, INTEGRATOR_TEMPLATE_NAME);
+      const inserted = join(templateRoot, "13-second-merge-execution.md");
+      await copyFile(join(templateRoot, "12-merge-execution.md"), inserted);
+      await writeFile(inserted, (await readFile(inserted, "utf8")).replace("stepIndex: 12\n", "stepIndex: 13\n"));
+    },
+    (root) => assert.rejects(
+      loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root),
+      /duplicate outputKind merge-result/u,
     ),
   );
 });

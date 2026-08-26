@@ -10,6 +10,10 @@
  * them is a second thing to get wrong.
  */
 
+import { stepRole } from "./step-role.js";
+
+export { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
+
 /** Discriminator namespace. Disjoint from Goal 5a0's `goal5a0.*` (plan §13). */
 export const MERGE_INTEGRATOR_KIND = {
   evidenceRequest: "mergeIntegrator.evidenceRequest",
@@ -28,10 +32,9 @@ export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
 /**
- * The canonical templates are versioned by their persisted name.  The node
- * ordinal remains part of the binding, so keep the old ordinals available for
- * the exact legacy-v1 identities below rather than accepting an index by
- * itself.
+ * These ordinals describe persisted graph topology. Step role recognition no
+ * longer depends on them because outputKind is unique within every canonical
+ * template generation.
  */
 export const INTEGRATOR_STEP_INDEX = 12;
 export const DIRECT_INTEGRATOR_STEP_INDEX = 7;
@@ -89,63 +92,10 @@ export type IntegratorStepShape = {
   taskTemplateName?: string | null;
 } | null | undefined;
 
-const templateNameOf = (step: NonNullable<IntegratorStepShape>): string | null =>
-  step.taskTemplate?.name ?? step.taskTemplateName ?? null;
+export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean =>
+  step !== null && step !== undefined && stepRole(step) === "integrator";
 
-/**
- * The canonical integrator shape. All three facts are required: an outputKind alone
- * is client-influenceable through a doctored template, and a stepIndex alone
- * collides with any other template that happens to use the same step index.
- */
-export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean => {
-  if (!step) return false;
-  if (step.outputKind !== INTEGRATOR_OUTPUT_KIND) return false;
-  const templateName = templateNameOf(step);
-  return (step.stepIndex === INTEGRATOR_STEP_INDEX && templateName === INTEGRATOR_TEMPLATE_NAME)
-    || (step.stepIndex === DIRECT_INTEGRATOR_STEP_INDEX && templateName === DIRECT_INTEGRATOR_TEMPLATE_NAME);
-};
-
-/**
- * Runtime recognition includes the exact legacy-v1 identities produced when
- * canonical sync preserves the old seven-/twelve-step templates, as well as
- * the older seed-marked rollover identities. It is deliberately narrower than
- * "step 12" or "merge-result": only a known template identity qualifies.
- */
-export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
-  if (!step) return false;
-  const templateName = templateNameOf(step);
-  return isCanonicalIntegratorStep(step)
-    || (step.stepIndex === LEGACY_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName === LEGACY_INTEGRATOR_TEMPLATE_NAME)
-    || (step.stepIndex === LEGACY_DIRECT_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME)
-    || (step.stepIndex === LEGACY_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === DIRECT_INTEGRATOR_STEP_INDEX
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX) === true)
-    || (step.stepIndex === 10
-      && step.outputKind === INTEGRATOR_OUTPUT_KIND
-      && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);
-};
+export const isIntegratorStep = isCanonicalIntegratorStep;
 
 /**
  * Bidirectional: the sentinel Agent may bind only the integrator step, and the

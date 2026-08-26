@@ -44,6 +44,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { AUTHORITY_RESIGN_OPEN_PREFIX, INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -101,8 +102,8 @@ export type CompoundImplementationStepShape = {
 
 export const isCompoundImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
   templateStep?.taskTemplate?.name === INTEGRATOR_TEMPLATE_NAME
-  && templateStep.stepIndex === 5
-  && templateStep.outputKind === "implementation";
+  && templateStep.outputKind !== undefined
+  && stepRole({ outputKind: templateStep.outputKind }) === "implementation";
 
 type CompoundImplementationAgent = {
   name: string;
@@ -140,8 +141,8 @@ export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
 
 export const isDirectImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
   templateStep?.taskTemplate?.name === DIRECT_TEMPLATE_NAME
-  && templateStep.stepIndex === 1
-  && templateStep.outputKind === "implementation";
+  && templateStep.outputKind !== undefined
+  && stepRole({ outputKind: templateStep.outputKind }) === "implementation";
 
 export const nativeImplementationSubagentRunConfig = (
   runner: RunnerKind,

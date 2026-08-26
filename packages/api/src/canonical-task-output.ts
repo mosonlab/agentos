@@ -1,18 +1,10 @@
 import {
-  DIRECT_TEMPLATE_NAME,
-  INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
-  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
-  LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX,
-  LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX,
-  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
   isRegressionVerificationOutputKind,
   Prisma,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
   RunStatus,
+  stepRole,
   type TaskStepOutput,
 } from "@agentos/db";
 import { z } from "zod";
@@ -41,11 +33,6 @@ type TemplateStepIdentity = {
   taskTemplate?: { name: string };
 };
 
-type CanonicalTemplateStepIdentity = TemplateStepIdentity & {
-  stepIndex: number;
-  taskTemplate: { name: string };
-};
-
 type OutputTask = {
   id: string;
 };
@@ -64,83 +51,25 @@ export type PreviousRunHandoff = {
   } | null;
 };
 
-/**
- * Agent-authored node ranges are intentionally bounded before the
- * server-owned readiness and mechanical merge nodes. Legacy-v1 template
- * names retain the old ranges so output authority for already-instantiated
- * chains does not move when canonical sync installs the new graph.
- */
-export const DIRECT_CANONICAL_AGENT_STEP_LAST = 5;
-export const FULL_CANONICAL_AGENT_STEP_LAST = 10;
-export const DIRECT_LEGACY_AGENT_STEP_LAST = 5;
-export const FULL_LEGACY_AGENT_STEP_LAST = 10;
-/** The adjudication-era graphs carried one more agent node before readiness. */
-export const DIRECT_PRE_ADJUDICATION_AGENT_STEP_LAST = 6;
-export const FULL_PRE_ADJUDICATION_AGENT_STEP_LAST = 11;
-
-export const DIRECT_BLIND_REVIEW_STEP_INDEX = 3;
-export const FULL_BLIND_REVIEW_STEP_INDEX = 7;
-export const DIRECT_SOL_REVIEW_STEP_INDEX = 2;
-export const FULL_SOL_REVIEW_STEP_INDEX = 6;
-export const DIRECT_FIX_STEP_INDEX = 4;
-export const FULL_FIX_STEP_INDEX = 8;
-
-const isNamedStep = (
-  step: TemplateStepIdentity | null | undefined,
-  templateName: string,
-  stepIndex: number,
-  outputKind: string,
-): boolean => step?.taskTemplate?.name === templateName
-  && step.stepIndex === stepIndex
-  && step.outputKind === outputKind;
-
-export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): step is CanonicalTemplateStepIdentity => {
-  if (!step?.taskTemplate || step.stepIndex === undefined) return false;
-  if (step.taskTemplate.name === DIRECT_TEMPLATE_NAME) {
-    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_CANONICAL_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME) {
-    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name === LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME) {
-    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_LEGACY_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name === LEGACY_INTEGRATOR_TEMPLATE_NAME) {
-    return step.stepIndex >= 1 && step.stepIndex <= FULL_LEGACY_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX)) {
-    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_PRE_ADJUDICATION_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)) {
-    return step.stepIndex >= 1 && step.stepIndex <= FULL_PRE_ADJUDICATION_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX)) {
-    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX)) {
-    return step.stepIndex >= 1 && step.stepIndex <= DIRECT_CANONICAL_AGENT_STEP_LAST;
-  }
-  if (step.taskTemplate.name.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX)) {
-    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
-  }
-  return false;
+export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefined): boolean => {
+  if (!step) return false;
+  const role = stepRole(step);
+  return role !== null && role !== "readiness" && role !== "integrator";
 };
 
-/** The old combined review node, recognized only on a renamed legacy graph. */
+/** The retired combined review role remains valid for already-instantiated Chains. */
 export const isLegacyCombinedBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isNamedStep(step, LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "must-fix")
-  || isNamedStep(step, LEGACY_INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "must-fix")
+  step !== null && step !== undefined && stepRole(step) === "must-fix"
 );
 
-export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
-  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
-  || isLegacyCombinedBlindReviewStep(step)
-);
+export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | undefined): boolean => {
+  if (!step) return false;
+  const role = stepRole(step);
+  return role === "blind-findings" || role === "must-fix";
+};
 
 export const isCanonicalBlindFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
-  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+  step !== null && step !== undefined && stepRole(step) === "blind-findings"
 );
 
 /**
@@ -150,13 +79,11 @@ export const isCanonicalBlindFindingsStep = (step: TemplateStepIdentity | null |
  * adjudication-era row still routes that obligation through its own node.
  */
 export const isCanonicalFixStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_FIX_STEP_INDEX, "fixed-implementation")
-  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_FIX_STEP_INDEX, "fixed-implementation")
+  step !== null && step !== undefined && stepRole(step) === "fixed-implementation"
 );
 
 export const isCanonicalSolFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_SOL_REVIEW_STEP_INDEX, "sol-findings")
-  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_SOL_REVIEW_STEP_INDEX, "sol-findings")
+  step !== null && step !== undefined && stepRole(step) === "sol-findings"
 );
 
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
@@ -545,7 +472,7 @@ export const canonicalOutputRefusal = (
   runId: string,
   completionHeadSha: string | null,
 ): string | null => {
-  if (!isCanonicalAgentStep(step)) return null;
+  if (!step || !isCanonicalAgentStep(step)) return null;
   if (!output) return `missing ${step.outputKind} task output for current Run ${runId}`;
   if (output.runId !== runId) return `${step.outputKind} task output belongs to prior Run ${output.runId ?? "none"}, not current Run ${runId}`;
   if (output.kind !== step.outputKind) return `task output kind ${output.kind} does not match canonical kind ${step.outputKind}`;
@@ -624,7 +551,7 @@ export const persistSessionTaskOutput = async (
   if (!authorized.task || authorized.task.id !== input.task.id) return fenceRefusalResponse("stale-fence");
   const task = authorized.task;
   const step = task.templateStep;
-  if (isCanonicalAgentStep(step) && input.kind !== step.outputKind) {
+  if (step && isCanonicalAgentStep(step) && input.kind !== step.outputKind) {
     return { ok: false, reason: `task_output kind must be ${step.outputKind} for this canonical step` };
   }
 
@@ -643,9 +570,8 @@ export const persistSessionTaskOutput = async (
     const refusal = await fixedImplementationPersistenceRefusal(tx, task, input.body);
     if (refusal) return { ok: false, reason: refusal };
   }
-  // The old combined node is retained only for already-instantiated
-  // -legacy-v1 chains. New canonical blind nodes never enter this phased
-  // predecessor-evidence path.
+  // The retired must-fix role remains only on already-instantiated Chains.
+  // Current blind-findings roles never enter this phased predecessor-evidence path.
   if (legacyBlind) {
     if (phase !== BLIND_REVIEW_PHASE.independent
       && phase !== BLIND_REVIEW_PHASE.evidenceUnlocked

@@ -10,15 +10,6 @@ import {
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
-  DIRECT_INTEGRATOR_STEP_INDEX,
-  DIRECT_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_DIRECT_INTEGRATOR_STEP_INDEX,
-  LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_INTEGRATOR_STEP_INDEX,
-  LEGACY_INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX,
-  LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX,
-  LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX,
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   STOP_CHOICES,
@@ -35,10 +26,6 @@ import {
   integratorBindingValid,
   isIncidentCondition,
   isIntegratorStep,
-  legacyNineStepTemplateName,
-  legacyRegressionFirstThirteenStepTemplateName,
-  legacyTenStepTemplateName,
-  legacyHumanTwelveStepTemplateName,
   isTerminalDisposition,
   parseEvidence,
   parseMergeResult,
@@ -49,7 +36,6 @@ import {
   serializeEvidence,
   serializeMergeResult,
 } from "./merge-integrator.js";
-import { legacyAdjudicationTemplateName } from "./canonical-template-transition.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -295,103 +281,26 @@ test("the binding predicate holds in both directions", () => {
   assert.ok(!integratorBindingValid("senior-dev", integratorStep));
 });
 
-test("canonical integrator bindings use the new graph and exact legacy-v1 names retain old positions", () => {
-  const shapes = [
-    { stepIndex: INTEGRATOR_STEP_INDEX, template: INTEGRATOR_TEMPLATE_NAME },
-    { stepIndex: DIRECT_INTEGRATOR_STEP_INDEX, template: DIRECT_INTEGRATOR_TEMPLATE_NAME },
-    { stepIndex: LEGACY_INTEGRATOR_STEP_INDEX, template: LEGACY_INTEGRATOR_TEMPLATE_NAME },
-    { stepIndex: LEGACY_DIRECT_INTEGRATOR_STEP_INDEX, template: LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME },
-  ];
-  for (const shape of shapes) {
-    const step = { ...shape, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: shape.template } };
-    assert.equal(isIntegratorStep(step), true, `${shape.template} step ${shape.stepIndex}`);
-    assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step), true);
-  }
-  assert.equal(isIntegratorStep({
-    stepIndex: LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME },
-  }), false);
-  assert.equal(isIntegratorStep({
-    stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME },
-  }), false);
-  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, {
-    stepIndex: LEGACY_INTEGRATOR_STEP_INDEX,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: LEGACY_INTEGRATOR_TEMPLATE_NAME },
-  }), false);
-});
-
-test("seed-marked legacy step 10 stays mechanical without widening new-template binding", () => {
-  const legacy = {
-    stepIndex: 10,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: legacyTenStepTemplateName("template-old") },
-  };
-  assert.equal(isIntegratorStep(legacy), true);
-  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
-  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
-
-  assert.equal(isIntegratorStep({
-    stepIndex: 10,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME },
-  }), false);
-  assert.equal(isIntegratorStep({
-    stepIndex: 10,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: `${INTEGRATOR_TEMPLATE_NAME}-legacy-lookalike` },
-  }), false);
-  assert.equal(isIntegratorStep({
-    stepIndex: 10,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: legacyNineStepTemplateName("template-old") },
-  }), false);
-});
-
-test("historical human-gate rollover remains bound to its old step 12", () => {
-  assert.equal(isIntegratorStep({
-    stepIndex: LEGACY_INTEGRATOR_STEP_INDEX,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
-  }), true);
-  assert.equal(isIntegratorStep({
-    stepIndex: LEGACY_INTEGRATOR_STEP_INDEX + 1,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: legacyHumanTwelveStepTemplateName("template-old") },
-  }), false);
-});
-
-test("an adjudication-era rollover keeps merge execution mechanical at its own ordinal", () => {
-  for (const shape of [
-    { stepIndex: LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX, name: legacyAdjudicationTemplateName(INTEGRATOR_TEMPLATE_NAME, "template-old") },
-    { stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX, name: legacyAdjudicationTemplateName(DIRECT_INTEGRATOR_TEMPLATE_NAME, "template-old") },
+test("integrator binding follows Step role across template names and ordinals", () => {
+  for (const candidate of [
+    integratorStep,
+    { stepIndex: 1, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: "some-other-template" } },
+    { stepIndex: 99, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplateName: "retired-generation" },
   ]) {
-    const legacy = { stepIndex: shape.stepIndex, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: shape.name } };
-    assert.equal(isIntegratorStep(legacy), true, shape.name);
-    assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
-    assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
-    assert.equal(isIntegratorStep({ ...legacy, stepIndex: shape.stepIndex - 1 }), false);
+    assert.equal(isIntegratorStep(candidate), true);
+    assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, candidate), true);
+    assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, candidate), true);
   }
 });
 
-test("a regression-first thirteen-step rollover keeps its merge execution mechanical", () => {
-  const legacy = {
-    stepIndex: LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX,
-    outputKind: INTEGRATOR_OUTPUT_KIND,
-    taskTemplate: { name: legacyRegressionFirstThirteenStepTemplateName("template-old") },
+test("a non-integrator role never binds the sentinel", () => {
+  const implementation = {
+    stepIndex: INTEGRATOR_STEP_INDEX,
+    outputKind: "implementation",
+    taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME },
   };
-  assert.equal(isIntegratorStep(legacy), true);
-  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), true);
-  assert.equal(canonicalIntegratorBindingValid(INTEGRATOR_AGENT_NAME, legacy), false);
-});
-
-test("a lookalike step in another template or with another output kind is not the integrator step", () => {
-  assert.ok(!isIntegratorStep({ stepIndex: INTEGRATOR_STEP_INDEX, outputKind: "merge-result", taskTemplate: { name: "some-other-template" } }));
-  assert.ok(!isIntegratorStep({ stepIndex: INTEGRATOR_STEP_INDEX, outputKind: "result", taskTemplate: { name: "compound-engineer-workflow" } }));
-  assert.ok(!isIntegratorStep({ stepIndex: INTEGRATOR_STEP_INDEX - 1, outputKind: "merge-result", taskTemplate: { name: "compound-engineer-workflow" } }));
+  assert.equal(isIntegratorStep(implementation), false);
+  assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, implementation), false);
 });
 
 // --- §D-P7 the disposition machine ---------------------------------------
