@@ -188,6 +188,14 @@ const implementationOutput = (summary: string, headSha = SHA) => JSON.stringify(
   summary,
   testsRun: ["npm test -- focused"],
 });
+const regressionOutput = (summary: string, headSha = SHA) => JSON.stringify({
+  schemaVersion: 1,
+  outcome: "gate-fail",
+  headSha,
+  baseHeadSha: "b".repeat(40),
+  gateVerdict: "FAIL",
+  summary,
+});
 const specOutput = (spec: string, headSha = SHA) => JSON.stringify({ schemaVersion: 1, headSha, spec });
 
 const failedCompletion = (runnerId: string, fencingToken: string, branch: string) => ({
@@ -333,6 +341,9 @@ test("ordinary chained steps retain completion-time output synthesis", async () 
 test("regression completion keeps final prose as Run.output but requires this run's explicit task_output", async () => {
   const { task } = await seedTask({ chained: true, outputKind: "regression-verification" });
   const runId = await enqueue(task.id);
+  // The budget is spent, so the missing deliverable is not re-queued and this
+  // terminal stop is what completion reaches.
+  await db.run.update({ where: { id: runId }, data: { maxRunsPerTask: 1 } });
   const { run, sessionToken, fencingToken } = await claimRun(runId, "runner-regression");
   const nonVerdict = "GATE NOT RUN: the exact candidate was not transported";
   const activity = await call("POST", `/session/runs/${runId}/activity`, sessionToken, {
@@ -391,14 +402,80 @@ test("every authored Regression stop verdict releases its chain lease", async ()
   }
 });
 
-test("a canonical Regression output refusal releases its chain lease", async () => {
-  const { task } = await seedTask({
-    chained: true,
-    outputKind: "regression-verification",
-    templateName: DIRECT_TEMPLATE_NAME,
-    stepIndex: 5,
-  });
+/**
+ * A step whose deliverable only its agent can author used to settle SUCCEEDED
+ * when the session ended without persisting one — the Claude adapter reads the
+ * end of a turn as the end of the session, so a step that parked on a
+ * background wait (a merge lease, a gate verdict) had its wait killed and its
+ * run recorded as a success. The chain then stopped at the fail-loud below,
+ * which only an operator could clear. The miss is a retryable failure of the
+ * run instead, and the fail-loud is what is left when the budget is spent.
+ */
+const REGRESSION_STEP = {
+  chained: true,
+  outputKind: "regression-verification",
+  templateName: DIRECT_TEMPLATE_NAME,
+  stepIndex: 5,
+} as const;
+
+test("a required deliverable the run never persisted is a retryable failure, not a success", async () => {
+  const { task } = await seedTask(REGRESSION_STEP);
   const runId = await enqueue(task.id);
+  const { run, fencingToken } = await claimRun(runId, "runner-missing-output");
+  const completed = await call(
+    "POST",
+    `/runner/runs/${runId}/complete`,
+    RUNNER,
+    succeededCompletion("runner-missing-output", fencingToken, run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.succeeded, false);
+  assert.equal(completed.body.retryCreated, true);
+
+  const settled = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(settled.status, "FAILED");
+  assert.equal(settled.retryable, true);
+  assert.equal(settled.failureClass, "PROTOCOL_ERROR");
+  assert.match(settled.failureReason ?? "", /missing regression-verification task output for current Run/u);
+
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: task.id, runNumber: 2 } });
+  assert.equal(retry.status, "QUEUED");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status, TaskStatus.DOING);
+  // The chain still owns the delivery it is retrying, exactly as for any other
+  // retried Regression failure.
+  assert.deepEqual(releasedChainLeases, []);
+});
+
+test("a required deliverable that is present still settles SUCCEEDED", async () => {
+  const { task } = await seedTask(REGRESSION_STEP);
+  const runId = await enqueue(task.id);
+  const { run, fencingToken, sessionToken } = await claimRun(runId, "runner-present-output");
+  const written = await call("PUT", `/session/runs/${runId}/output`, sessionToken, {
+    fencingToken,
+    kind: "regression-verification",
+    body: regressionOutput("gate failed"),
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  const completed = await call(
+    "POST",
+    `/runner/runs/${runId}/complete`,
+    RUNNER,
+    succeededCompletion("runner-present-output", fencingToken, run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.succeeded, true);
+  assert.equal(completed.body.retryCreated, false);
+  const settled = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(settled.status, "SUCCEEDED");
+  assert.equal(settled.failureReason, null);
+  assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
+});
+
+test("a canonical Regression output refusal is the backstop once the run budget is spent", async () => {
+  const { task } = await seedTask(REGRESSION_STEP);
+  const runId = await enqueue(task.id);
+  await db.run.update({ where: { id: runId }, data: { maxRunsPerTask: 1 } });
   const { run, fencingToken } = await claimRun(runId, "runner-canonical-refusal");
   const completed = await call(
     "POST",
@@ -407,6 +484,7 @@ test("a canonical Regression output refusal releases its chain lease", async () 
     succeededCompletion("runner-canonical-refusal", fencingToken, run.branch ?? "master"),
   );
   assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(await db.run.count({ where: { taskId: task.id } }), 1, "a spent budget queues nothing");
   assert.match((await db.task.findUniqueOrThrow({ where: { id: task.id } })).failureReason ?? "", /missing regression-verification task output/u);
   const refusal = await db.taskActivity.findFirst({
     where: { taskId: task.id, metadata: { path: ["kind"], equals: "canonicalTaskOutput.refusal" } },
@@ -577,6 +655,10 @@ test("canonical JSON contracts reject malformed bodies and never activate a succ
     });
     const successor = await addSuccessor(seed);
     const runId = await enqueue(seed.task.id);
+    // A refused output leaves the run with nothing to deliver, which is
+    // retryable until the budget is spent; this fixture is about the stop it
+    // ends at, so it starts with the last attempt.
+    await db.run.update({ where: { id: runId }, data: { maxRunsPerTask: 1 } });
     const claimed = await claimRun(runId, `contract-${fixture.name}`);
     const refused = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
       fencingToken: claimed.fencingToken,
