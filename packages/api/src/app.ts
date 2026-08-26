@@ -5,7 +5,6 @@ import {
   AssigneeType,
   agentArchiveBlocker,
   applyInboxDecision,
-  asJsonObject,
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
@@ -56,7 +55,6 @@ import {
   runOwnsMergeOutcome,
   INTEGRATOR_AGENT_NAME,
   MERGE_INTEGRATOR_KIND,
-  MERGE_TAIL_KIND,
   latestTargetCorrection,
   loadIntegratorTask,
   observedChainPullRequests,
@@ -80,7 +78,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, chainDisplayByTask, etagFor, etagMatches, repairBinding, serializeUsageCost, type RepairBinding } from "./board.js";
+import { etagFor, etagMatches, readBoard, readTaskList, serializeUsageCost, type TaskReadScope } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
@@ -107,7 +105,6 @@ import {
   chainKey,
   chainProgress,
   chainStartDecisions,
-  type ChainProgress,
   chainProgressByChain,
   positions,
   blockingPredecessor,
@@ -714,22 +711,6 @@ const inboxCloseInput = z.object({
 
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
-
-/** The `chainProgress` shape as `GET /tasks` serialises it — the chain module's
- *  progress plus the position spec §5.2 requires the list response to carry. */
-type ChainProgressWire = ChainProgress & { position: number | null };
-/** The columns `chainProgressLookup` reads, which both `GET /tasks` response
- *  shapes select. Structural, so neither Prisma payload type leaks into it. */
-type ChainSubject = {
-  id: string;
-  projectId: string;
-  chainId: string | null;
-  chainIndex: number | null;
-  chainLayer: number | null;
-  status: TaskStatus;
-  name: string;
-  templateStep: { name: string } | null;
-};
 
 /**
  * A JSON response carrying a validator, so a poll that changed nothing costs a
@@ -2181,248 +2162,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (archived !== "false" && archived !== "true" && archived !== "all") {
       return context.json({ error: "archived must be false, true, or all" }, 400);
     }
-    // `view=board` is the Tasks board saying which fields it will actually
-    // render (packages/api/src/board.ts). It is a projection of this same list,
-    // not a second endpoint, so the two shapes cannot drift apart.
     const view = context.req.query("view") ?? "full";
     if (view !== "full" && view !== "board") {
       return context.json({ error: "view must be full or board" }, 400);
     }
-    const board = view === "board";
-    // Archived tasks are finished work; a board and a per-project count that
-    // keep growing after Archive All are the bug, not the fix. `all` is the
-    // escape hatch for anyone who needs the old, archived-inclusive numbers.
-    const archivedFilter = archived === "false" ? { archivedAt: null }
-      : archived === "true" ? { archivedAt: { not: null } }
-      : {};
-    const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
-    const orderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
-
-    // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
-    // queries over the whole task table, and `Projects.tsx` polls this endpoint
-    // globally every 2.5 s purely to count tasks per project — it renders none
-    // of them. `?enrich=false` lets that caller stop paying for it.
-    //
-    // Opt-out rather than "only when projectId is present": the global call is
-    // still *correct* (grouping is keyed by `(projectId, chainId)`, so two
-    // projects sharing a chainId never read each other's progress), and silently
-    // dropping the fields from every global response would delete that
-    // guarantee's only coverage along with the cost.
-    //
-    // `view=board` is not subject to it: the board card renders `chainProgress`,
-    // so a board response without it would be a projection that dropped a field
-    // its only caller reads.
-    const enrich = board || (context.req.query("enrich") ?? "true") !== "false";
-
-    /**
-     * A `task -> chainProgress` lookup for one page of rows.
-     *
-     * Progress must count *all* the chain's rows, including archived ones, so it
-     * cannot be computed from the rows handed in. One extra scoped query,
-     * grouped in memory — two queries per request regardless of how many tasks
-     * come back. Shared by both response shapes, so the board card and the full
-     * row can never report different numbers for the same task.
-     *
-     * `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
-     * null-index row as its own one-row chain. Without it a single broken row
-     * inflates `total` and shifts `position` for every real sibling on the board
-     * while its own detail page still reads `1/1` — the same rows, two answers.
-     */
-    const chainProgressLookup = async (rows: ChainSubject[]): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
-      const chainIds = !enrich ? [] : [...new Set(rows
-        .filter((task) => task.chainIndex !== null)
-        .map((task) => task.chainId)
-        .filter((value): value is string => value !== null))];
-      const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
-        where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
-        select: {
-          id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-          chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
-        },
-        orderBy: { chainIndex: "asc" },
-      });
-      const progressByChain = chainProgressByChain(chainRows);
-      const positionsByChain = new Map<string, Map<string, number>>();
-      for (const row of chainRows) {
-        if (!row.chainId) continue;
-        const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
-        if (positionsByChain.has(key)) continue;
-        positionsByChain.set(key, positions(chainRows.filter((candidate) => (
-          candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
-        ))));
-      }
-      return (task) => {
-        if (!enrich || !task.chainId) return null;
-        // The same one-row-chain rule the detail route applies (E1), so a broken
-        // row reports `n/1` in both places instead of `null` here and `1/1` there.
-        if (task.chainIndex === null) {
-          return {
-            chainId: task.chainId,
-            done: task.status === TaskStatus.DONE ? 1 : 0,
-            total: 1,
-            activeStepName: task.templateStep?.name ?? task.name,
-            activeStatus: task.status.toLowerCase(),
-            currentLayer: 1,
-            layerCount: 1,
-            position: 1,
-          };
-        }
-        const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
-        const progress = progressByChain.get(key) ?? null;
-        return progress ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null } : null;
-      };
-    };
-
-    if (board) {
-      // The projection narrows the *query* too, not only the response: the full
-      // shape drags every Run and Session column out of the database only to
-      // throw 95% of them away in the serializer.
-      const rows = await db.task.findMany({
-        where,
-        orderBy,
-        select: {
-          id: true, projectId: true, name: true, status: true, failureReason: true,
-          scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
-          templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
-          dispatchAfterTaskId: true,
-          assigneeAgent: { select: { id: true, title: true, model: true } },
-          templateStep: { select: { name: true } },
-          runs: {
-            orderBy: { runNumber: "desc" },
-            select: {
-              id: true, runNumber: true, status: true, model: true, subagentModel: true,
-              session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true, startedAt: true, endedAt: true } },
-            },
-          },
-          // §SF-1: the card's run line reads the merge outcome, not only the
-          // protocol status, so a stopped mechanical merge is not shown as Done.
-          stepOutput: { select: { kind: true, body: true, runId: true } },
-        },
-      });
-      const progressFor = await chainProgressLookup(rows);
-      const displayByTask = chainDisplayByTask(rows);
-      // A bound first task is the only board row that can carry this marker.
-      // Resolve all page bindings in one batch, and skip the query entirely for
-      // the overwhelmingly common unbound page. The projection remains pure:
-      // it receives the resolved predecessor rather than reaching into Prisma.
-      const predecessorIds = [...new Set(rows
-        .map((row) => row.dispatchAfterTaskId)
-        .filter((value): value is string => typeof value === "string" && value.length > 0))];
-      const predecessorById = new Map<string, { id: string; name: string; status: TaskStatus }>();
-      if (predecessorIds.length > 0) {
-        const predecessors = await db.task.findMany({
-          where: { id: { in: predecessorIds } },
-          select: { id: true, name: true, status: true },
-        });
-        for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
-      }
-      // A merge-tail repair task is chain-detached by design, so nothing on its
-      // own row says which chain it repairs — the board drew it as a loose card
-      // beside the work that produced it. Its `repairAttempt` marker names the
-      // regression task, and that task's chain is where the card belongs. One
-      // extra query over the page's chain-less rows, skipped entirely when a
-      // page has none, and a second only when a repair card is actually on it.
-      const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
-      const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
-        where: {
-          taskId: { in: detachedIds },
-          actorType: "control-plane",
-          metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
-        },
-        select: { taskId: true, metadata: true },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      });
-      const repairByTask = new Map<string, RepairBinding>();
-      if (repairMarkers.length > 0) {
-        const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
-          const value = asJsonObject(marker.metadata)?.regressionTaskId;
-          return typeof value === "string" ? [value] : [];
-        }))];
-        const regressionTasks = await db.task.findMany({
-          where: { id: { in: regressionIds }, ...(projectId ? { projectId } : {}) },
-          select: { id: true, projectId: true, chainId: true },
-        });
-        const chainOfTask = new Map<string, { key: string; chainId: string }>();
-        for (const task of regressionTasks) {
-          if (task.chainId === null) continue;
-          chainOfTask.set(task.id, { key: chainKey({ projectId: task.projectId, chainId: task.chainId }), chainId: task.chainId });
-        }
-        // The chain's display name is already derived once for this page. Keyed
-        // by `chainKey` rather than `chainId` for the same reason the page's own
-        // grouping is: a global board carries several projects, and two of them
-        // may hold the same chain id. A chain with no step of its own on the
-        // page has no name here, and the card falls back to naming it by id
-        // exactly as a chain step's card does.
-        const chainNameByKey = new Map<string, string | null>();
-        for (const row of rows) {
-          if (row.chainId === null) continue;
-          const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
-          if (chainNameByKey.has(key)) continue;
-          chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
-        }
-        const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
-          const chain = chainOfTask.get(taskId);
-          return chain === undefined ? null : { chainId: chain.chainId, chainName: chainNameByKey.get(chain.key) ?? null };
-        };
-        for (const marker of repairMarkers) {
-          if (repairByTask.has(marker.taskId)) continue;
-          const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
-          if (binding !== null) repairByTask.set(marker.taskId, binding);
-        }
-      }
-      return validated(context, rows.map((row) => boardCard(
-        row,
-        progressFor(row),
-        displayByTask.get(row.id),
-        row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
-        repairByTask.get(row.id) ?? null,
-      )));
-    }
-
-    const tasks = await db.task.findMany({
-      where,
-      orderBy,
-      include: {
-        assigneeAgent: true,
-        repo: true,
-        templateStep: {
-          select: {
-            name: true,
-            stepIndex: true,
-            outputKind: true,
-            taskTemplate: { select: { name: true } },
-          },
-        },
-        // `Run.output` is forensic bulk — up to 500k per run — and no client of
-        // this list reads it. Omitted here and on the task detail below so that
-        // recording a run's tail cannot inflate the responses the board polls.
-        runs: {
-          orderBy: { runNumber: "desc" }, take: 1, omit: { output: true },
-          include: { session: true },
-        },
-      },
-    });
-    const progressFor = await chainProgressLookup(tasks);
-
-    // The Automations page needs `Last run` on a *collapsed* row, and a poll
-    // that only mounts while a row is expanded can never supply it. Skipped
-    // entirely on a board with no automations.
-    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
-    const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
-      by: ["recurringSourceTaskId"],
-      where: { recurringSourceTaskId: { in: cronIds } },
-      _max: { createdAt: true },
-      _count: { _all: true },
-    });
-    const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
-
-    return validated(context, tasks.map((task) => ({
-      ...task,
-      executionOwner: chainExecutionOwner(task),
-      chainProgress: progressFor(task),
-      recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
-      recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
-    })));
+    const scope: TaskReadScope = { ...(projectId ? { projectId } : {}), archived };
+    const payload = view === "board"
+      ? await readBoard(db, scope)
+      : await readTaskList(db, scope, { enrich: (context.req.query("enrich") ?? "true") !== "false" });
+    return validated(context, payload);
   });
   app.post("/projects/:projectId/tasks", async (context) => {
     const body = await readJson(context.req.raw, taskInput);
