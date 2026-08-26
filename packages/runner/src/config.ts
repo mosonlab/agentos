@@ -34,7 +34,7 @@ export type RunnerConfig = {
   workspaceRoot: string;
   /** Runner-owned, write-once dependency snapshots. Defaults beside workspaceRoot. */
   dependencyCacheRoot?: string;
-  /** Runner-owned persistent bare mirrors. Defaults beside workspaceRoot. */
+  /** Persistent bare mirrors, in the home of the account that runs tasks. */
   repoMirrorRoot?: string;
   failedWorkspaceRetention: number;
   workspaceReclaimIntervalMs: number;
@@ -85,6 +85,7 @@ export const loadRunnerConfig = (): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
   const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
   const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
+  const home = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty";
   const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
   // First, and before this function returns anything a caller could dial: the
   // runner's own index.ts builds the client, the preflight and the poll loop out
@@ -100,16 +101,17 @@ export const loadRunnerConfig = (): RunnerConfig => {
     leaseSeconds,
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
     path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-    home: process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
+    home,
     ...(gateServer ? { gateServer } : {}),
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,
     dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
-    // One bare mirror per remote, per machine. Provisioning clones every
-    // workspace out of it and only ever fetches incrementally from GitHub; see
-    // repo-mirror.ts for why a full clone per run had to go.
-    repoMirrorRoot: process.env.RUNNER_REPO_MIRROR_ROOT ?? join(dirname(workspaceRoot), "repo-mirrors"),
+    // One bare mirror per remote. Provisioning clones every workspace out of it
+    // and only ever fetches incrementally from GitHub; see repo-mirror.ts for
+    // why a full clone per run had to go, and why the mirror lives in the home
+    // of the account that runs the tasks rather than beside the workspaces.
+    repoMirrorRoot: process.env.RUNNER_REPO_MIRROR_ROOT ?? join(home, ".agentos", "repo-mirrors"),
     failedWorkspaceRetention: Number.parseInt(process.env.RUNNER_FAILED_WORKSPACE_RETENTION ?? "2", 10),
     // How often this runner asks the control plane which of its directories may
     // be reclaimed (issue #115). Workspace disposal is not urgent — the runner

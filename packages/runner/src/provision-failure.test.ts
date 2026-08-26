@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { type FailureEnvelope, RUNNER_EXCEPTION_REASON, runnerExceptionEnvelope } from "./envelope.js";
+import { runCommand } from "./exec.js";
 import { executeClaim } from "./runner.js";
 import { provisionWorkspace } from "./workspace.js";
 
@@ -25,7 +26,9 @@ import { provisionWorkspace } from "./workspace.js";
  * the exact objects they produce; keep the two in step.
  */
 
-const config = (workspaceRoot: string): RunnerConfig => ({
+// Separate roots on purpose: the runner refuses a mirror root that overlaps the
+// workspace root, because workspace reclamation sweeps what it finds there.
+const config = (root: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
   runnerToken: "runner-token",
   runnerId: "runner-1",
@@ -34,8 +37,8 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   leaseSeconds: 60,
   heartbeatIntervalMs: 5_000,
   path: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-  home: workspaceRoot,
-  workspaceRoot,
+  home: join(root, "home"),
+  workspaceRoot: join(root, "runs"),
   failedWorkspaceRetention: 2,
   workspaceReclaimIntervalMs: 300_000,
   toolDeadlineMs: 60_000,
@@ -103,14 +106,14 @@ const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 test("a clone that cannot succeed reaches the API as a PROVISION envelope stamped 'runner exception'", async () => {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-provision-"));
+  const root = await mkdtemp(join(tmpdir(), "runner-provision-"));
   const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
 
-  await executeClaim(config(workspaceRoot), claim(UNREACHABLE_REMOTE));
+  await executeClaim(config(root), claim(UNREACHABLE_REMOTE));
 
   const completion = posts.find((post) => post.path.endsWith("/complete"));
   assert.ok(completion, "provisioning failure must still complete the run");
@@ -130,7 +133,7 @@ test("a clone that cannot succeed reaches the API as a PROVISION envelope stampe
 });
 
 test("a transient mirror fetch failure escapes provisioning as a transient error, and the envelope says so", async () => {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-provision-transient-"));
+  const root = await mkdtemp(join(tmpdir(), "runner-provision-transient-"));
   // The 2026-08-17 error, thrown by the real call site that still reaches the
   // network: the mirror's own fetch. `attempts: 1` collapses the real retry
   // ladder rather than replacing it — the loop, its transient predicate and its
@@ -138,11 +141,14 @@ test("a transient mirror fetch failure escapes provisioning as a transient error
   const message = "git failed (128): fatal: unable to access 'https://example.test/repo.git/': "
     + "LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to example.test:443";
   const escaped = await provisionWorkspace(
-    config(workspaceRoot),
+    config(root),
     claim("https://example.test/repo.git"),
-    (_config, _executable, args) => {
+    async (executorConfig, executable, args, cwd, env) => {
+      // Only git is faked: the mirror's own filesystem bookkeeping is real work
+      // in a temporary directory, and the retry under test rides on the fetch.
+      if (executable === "/bin/sh") return runCommand(executorConfig.runAsPrefix, executable, args, cwd, env, {});
       if (args[0] === "fetch") throw new Error(message);
-      return Promise.resolve("");
+      return "";
     },
     { attempts: 1 },
   ).then(() => null, (error: unknown) => error);

@@ -343,19 +343,18 @@ export const provisionWorkspace = async (
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
     const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
     const pinnedBaseSha = claim.run.pinnedBaseSha;
-    // The mirror is daemon-owned and shared by every account on the machine, so
-    // its own git commands never run through the run-as prefix; only the
-    // workspace this function creates belongs to the launched account.
-    const mirrorConfig: RunnerConfig = { ...config, runAsPrefix: [] };
-    const mirrorEnv = workspaceEnvironment(mirrorConfig);
     // Dependencies are materialised after the mirror lock is released: `npm ci`
     // is bounded in half-hours, and holding a machine-wide lock across it would
     // serialise every other run on the host behind an install that never
     // touches the mirror.
+    //
+    // The mirror belongs to the account that runs the task, and `root` is what
+    // the daemon can chdir into before the run-as prefix takes over.
     const provisioned = await withRepoMirror(
-      mirrorConfig,
+      config,
       claim.repo.remoteUrl,
-      mirrorEnv,
+      root,
+      env,
       execute,
       { fetchRetryOptions: retryOptions, ...mirrorOptions },
       async (mirror): Promise<Workspace> => {
@@ -374,7 +373,7 @@ export const provisionWorkspace = async (
           // transfers only what the requested objects reach, never the mirror's
           // other refs.
           await ensureMirrorRevisions(
-            mirrorConfig, mirror, [implementationBaseSha, pinnedBaseSha], mirrorEnv, execute, retryOptions,
+            config, mirror, [implementationBaseSha, pinnedBaseSha], root, env, execute, retryOptions,
           );
           await execute(config, "git", ["init"], workspace, env);
           await execute(config, "git", ["remote", "add", "origin", claim.repo.remoteUrl], workspace, env);
@@ -399,10 +398,10 @@ export const provisionWorkspace = async (
         // the same answer `git ls-remote` used to make a round trip for.
         let cloneTarget = target;
         if (branch !== target && !claim.run.targetBranchPublished
-          && await mirrorHasBranch(mirrorConfig, mirror, branch, mirrorEnv, execute)) {
+          && await mirrorHasBranch(config, mirror, branch, root, env, execute)) {
           cloneTarget = branch;
         }
-        if (!await mirrorHasBranch(mirrorConfig, mirror, cloneTarget, mirrorEnv, execute)) {
+        if (!await mirrorHasBranch(config, mirror, cloneTarget, root, env, execute)) {
           // The mirror was pruned against the remote moments ago, so this is the
           // remote's answer, not a mirror fault: the branch the run was told to
           // start from does not exist.

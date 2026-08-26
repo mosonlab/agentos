@@ -37,10 +37,11 @@ const fixture = async (label: string): Promise<Fixture> => {
   const config = {
     workspaceRoot: join(root, "workspaces"),
     repoMirrorRoot: mirrorRoot,
+    // The mirror lives in the task account's home; here the fixture is it.
+    home: root,
     runnerId: "runner-under-test",
     runAsPrefix: [],
     path: process.env.PATH ?? "/usr/bin:/bin",
-    home: process.env.HOME ?? root,
   } as unknown as RunnerConfig;
   return { root, remote, seed, config, mirrorRoot, mirror: repoMirrorPath(mirrorRoot, remote) };
 };
@@ -60,6 +61,7 @@ const recorded = (calls: { args: string[]; cwd: string }[]): WorkspaceCommandExe
 
 const passthrough: MirrorCommandExecutor = (config, executable, args, cwd, env, options = {}) =>
   runCommand(config.runAsPrefix, executable, args, cwd, env, options);
+
 
 const silent = (): ((progress: RepoMirrorProgress) => void) => (): void => undefined;
 
@@ -150,7 +152,7 @@ test("a mirror that is not a readable git repository is refused, not rebuilt", a
   }
 });
 
-test("a held lock is waited for, and one left behind by a dead holder is taken over", async () => {
+test("a held lock is waited for, and one left behind by a dead holder is stolen", async () => {
   const { root, remote, config, mirror } = await fixture("lock");
   const env = workspaceEnvironment(config);
   try {
@@ -159,28 +161,28 @@ test("a held lock is waited for, and one left behind by a dead holder is taken o
     await mkdir(lock);
 
     const refused = await withRepoMirror(
-      config, remote, env, passthrough,
+      config, remote, root, env, passthrough,
       { lockWaitMs: 10, lockPollMs: 1, report: silent() },
       async () => "unreachable",
     ).then(() => null, (error: unknown) => error);
     assert.match((refused as Error).message, /waiting for the runner repository mirror lock/u);
 
-    // Backdated past the staleness threshold: no live holder can be that old,
-    // because every operation under the lock is bounded far below it.
+    // Backdated past the staleness threshold. A live holder touches its own
+    // lock every heartbeat, so only a dead one can get this old.
     const stale = new Date(Date.now() - 3_600_000);
     await utimes(lock, stale, stale);
-    let takeovers = 0;
+    let steals = 0;
     const taken = await withRepoMirror(
-      config, remote, env, passthrough,
+      config, remote, root, env, passthrough,
       {
         lockWaitMs: 10,
         lockPollMs: 1,
-        report: (progress) => { if (progress.event === "lock-takeover") takeovers += 1; },
+        report: (progress) => { if (progress.event === "lock-steal") steals += 1; },
       },
       async (path) => path,
     );
     assert.equal(taken, mirror);
-    assert.equal(takeovers, 1);
+    assert.equal(steals, 1);
     // Released on the way out, or the next run on this machine would wait ten
     // minutes for a mirror nobody is holding.
     await assert.rejects(stat(lock));
@@ -194,7 +196,7 @@ test("a holder that was taken over does not delete its successor's lock", async 
   const env = workspaceEnvironment(config);
   const lock = `${mirror}.lock`;
   try {
-    await withRepoMirror(config, remote, env, passthrough, { report: silent() }, async () => {
+    await withRepoMirror(config, remote, root, env, passthrough, { report: silent() }, async () => {
       // What a stale takeover looks like from inside the declared-dead holder:
       // its lock is gone and someone else's is at the path.
       await rm(lock, { recursive: true, force: true });
@@ -208,19 +210,46 @@ test("a holder that was taken over does not delete its successor's lock", async 
   }
 });
 
-test("the mirror stays readable to another account whatever umask the daemon runs under", async () => {
-  const { root, remote, config, mirror } = await fixture("umask");
-  const previous = process.umask(0o077);
+test("the mirror is private to the account that runs the tasks", async () => {
+  const { root, remote, config, mirror, mirrorRoot } = await fixture("private");
+  const previous = process.umask(0o022);
   try {
-    await provisionWorkspace(config, claimFor(remote, "umask"), undefined, {}, {}, { report: silent() });
-    // A RUNNER_RUN_AS_PREFIX deployment clones as an account that owns nothing
-    // here, so every directory git created must stay world-traversable and
-    // listable — including the ones `git init` made before any config existed.
-    for (const path of [mirror, join(mirror, "objects"), join(mirror, "refs")]) {
-      assert.equal((await stat(path)).mode & 0o055, 0o055, path);
-    }
+    await provisionWorkspace(config, claimFor(remote, "private"), undefined, {}, {}, { report: silent() });
+    // The mirror carries the same history as the run workspace and lives in the
+    // task account's own home. Nothing outside that account has business
+    // reading it, and a permissive umask must not decide otherwise.
+    assert.equal((await stat(mirrorRoot)).mode & 0o777, 0o700);
+    assert.equal((await stat(mirror)).isDirectory(), true);
   } finally {
     process.umask(previous);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("every mirror command runs through the run-as prefix, so the account with the credentials fetches", async () => {
+  const { root, remote, config, mirrorRoot } = await fixture("run-as");
+  try {
+    const log = join(root, "prefix.log");
+    const launcher = join(root, "run-as.sh");
+    // Stands in for `sudo -u agentrunner`: same uid, but it records the argv it
+    // was handed. The mirror lives in a launched account's 0700 home, which the
+    // daemon's own uid cannot even enter — so anything the daemon did directly
+    // would fail in a real OS-isolated deployment.
+    await writeFile(launcher, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec "$@"\n`, { mode: 0o755 });
+    const isolated = { ...config, runAsPrefix: [launcher] } as RunnerConfig;
+    await mkdir(config.workspaceRoot, { recursive: true });
+
+    await provisionWorkspace(isolated, claimFor(remote, "run-as"), undefined, {}, {}, { report: silent() });
+
+    const argv = await readFile(log, "utf8");
+    assert.match(argv, /git init --bare/u);
+    assert.match(argv, /git fetch --prune/u);
+    assert.match(argv, /git clone --branch/u);
+    // The mirror root, the lock and the staging directory are created by the
+    // same account, not by node's fs as the daemon.
+    assert.equal(argv.includes(`/bin/sh -c`), true);
+    assert.equal(argv.includes(mirrorRoot), true);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -232,8 +261,8 @@ test("object presence is read from cat-file's own answer, never from an exit cod
     const present = git(seed, "rev-parse", "HEAD");
     const absent = "0".repeat(40);
     const answers = await withRepoMirror(
-      config, remote, env, passthrough, { report: silent() },
-      (mirror) => mirrorRevisionsPresent(config, mirror, [present, absent], env, passthrough),
+      config, remote, root, env, passthrough, { report: silent() },
+      (mirror) => mirrorRevisionsPresent(config, mirror, [present, absent], root, env, passthrough),
     );
     assert.equal(answers.get(present), true);
     assert.equal(answers.get(absent), false);

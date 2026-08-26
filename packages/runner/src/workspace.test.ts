@@ -8,6 +8,7 @@ import test from "node:test";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
+import { runCommand } from "./exec.js";
 import {
   cleanupAgentScratch, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
@@ -15,6 +16,18 @@ import {
 } from "./workspace.js";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+
+/**
+ * Faking git means faking a repository, but the mirror's bookkeeping — its
+ * root, its lock, its staging directory — is real filesystem work in a
+ * temporary directory. These executors run that for real and answer only for
+ * `git`, so the lock protocol under test is the production one.
+ */
+const realShell = async (
+  config: RunnerConfig, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv,
+): Promise<string | null> => (executable === "/bin/sh"
+  ? runCommand(config.runAsPrefix, executable, args, cwd, env, {})
+  : null);
 
 test("provisioning trusts an already-published intended head after its database ACK was lost", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-publication-"));
@@ -40,7 +53,8 @@ test("provisioning trusts an already-published intended head after its database 
       workspaceRoot: join(root, "workspaces"),
       runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin",
-      home: process.env.HOME ?? root,
+      // Never the real home: provisioning keeps its mirror there.
+      home: root,
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-1" },
@@ -90,7 +104,7 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
     const salvageSha = git(seed, "rev-parse", "HEAD");
     const config = {
       workspaceRoot: join(root, "workspaces"), runAsPrefix: [],
-      path: process.env.PATH ?? "/usr/bin:/bin", home: process.env.HOME ?? root,
+      path: process.env.PATH ?? "/usr/bin:/bin", home: root,
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-1" },
@@ -140,7 +154,8 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
       workspaceRoot: join(root, "workspaces"),
       runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin",
-      home: process.env.HOME ?? root,
+      // Never the real home: provisioning keeps its mirror there.
+      home: root,
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-blind" },
@@ -182,14 +197,17 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       workspaceRoot: join(root, "workspaces"),
       runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin",
-      home: process.env.HOME ?? root,
+      // Never the real home: provisioning keeps its mirror there.
+      home: root,
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-retry" },
       repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     } as ClaimedTask;
-    const fake = async (_config: RunnerConfig, executable: string, args: string[]): Promise<string> => {
+    const fake = async (config: RunnerConfig, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> => {
+      const shell = await realShell(config, executable, args, cwd, env);
+      if (shell !== null) return shell;
       if (executable === "git" && args[0] === "fetch") {
         fetchCalls += 1;
         if (fetchCalls < 3) throw new Error("fatal: unable to access remote: ECONNRESET");
@@ -216,9 +234,10 @@ type RecordedCommand = { args: string[]; cwd: string; timeoutMs: number | undefi
 const recordingExecutor = (
   calls: RecordedCommand[],
   answer: (args: string[]) => string,
-): WorkspaceCommandExecutor => async (_config, _executable, args, cwd, _env, options) => {
+): WorkspaceCommandExecutor => async (config, executable, args, cwd, env, options) => {
   calls.push({ args, cwd, timeoutMs: options?.timeoutMs });
-  return answer(args);
+  const shell = await realShell(config, executable, args, cwd, env);
+  return shell ?? answer(args);
 };
 
 test("the mirror's remote fetch carries a per-command ceiling while local git commands stay uncapped", async () => {
@@ -228,7 +247,8 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       workspaceRoot: join(root, "workspaces"),
       runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin",
-      home: process.env.HOME ?? root,
+      // Never the real home: provisioning keeps its mirror there.
+      home: root,
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-timeout" },
@@ -255,9 +275,7 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
     assert.equal(ceiling("rev-parse"), undefined);
     assert.equal(ceiling("switch"), undefined);
     const clone = calls.find(({ args }) => args[0] === "clone");
-    // macOS resolves the temp root through /var -> /private/var; the mirror
-    // root is realpath'd before anything is created under it.
-    const mirrors = join(await realpath(root), "repo-mirrors");
+    const mirrors = join(root, ".agentos", "repo-mirrors");
     assert.equal(clone?.args.at(-2)?.startsWith(mirrors), true, "the clone source must be the mirror");
     // Delivery pushes to origin: the mirror must not survive as the run's
     // publication target.
@@ -277,7 +295,8 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       workspaceRoot: join(root, "workspaces"),
       runAsPrefix: [],
       path: process.env.PATH ?? "/usr/bin:/bin",
-      home: process.env.HOME ?? root,
+      // Never the real home: provisioning keeps its mirror there.
+      home: root,
     } as unknown as RunnerConfig;
     const claim = {
       task: { id: "task-pinned-timeout" },
@@ -305,7 +324,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
     // Both endpoints were already in the mirror, so the range is assembled from
     // local disk: slow on a long history, but it cannot hang.
     assert.equal(rangeFetch?.timeoutMs, undefined);
-    assert.equal(rangeFetch?.args[2]?.startsWith(join(await realpath(root), "repo-mirrors")), true);
+    assert.equal(rangeFetch?.args[2]?.startsWith(join(root, ".agentos", "repo-mirrors")), true);
     assert.equal(calls.some(({ args }) => args[0] === "clone"), false);
     assert.equal(calls.find(({ args }) => args[0] === "init" && args.length === 1)?.timeoutMs, undefined);
     assert.equal(calls.find(({ args }) => args[0] === "checkout")?.timeoutMs, undefined);
