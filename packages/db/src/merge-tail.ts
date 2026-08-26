@@ -25,6 +25,7 @@ export const MERGE_TAIL_KIND = {
   repairResult: "mergeTail.repairResult",
   reviewObligation: "mergeTail.reviewObligation",
   readiness: "mergeTail.readiness",
+  authorityResign: "mergeTail.authorityResign",
 } as const;
 
 /**
@@ -33,6 +34,30 @@ export const MERGE_TAIL_KIND = {
  * generic recovery has to be able to recognise it.
  */
 export const INDEPENDENT_REVIEW_OPEN_PREFIX = "independent-review-open:";
+
+/**
+ * The failure reason a regression-verification step carries while it waits for
+ * the operator to re-sign `release-authority.json`. Like the review park it is
+ * owned and resolved by a specific mechanism — here the resign worker — so
+ * generic recovery must leave it alone rather than re-queue the step under it.
+ */
+export const AUTHORITY_RESIGN_OPEN_PREFIX = "authority-resign-open:";
+
+/**
+ * The dedupe key prefix of the inbox message that carries a re-signature
+ * request: `authority-resign:<taskId>:<headSha>`. Only the control plane can
+ * write a dedupe key, so counting these keys is how many rounds a task has
+ * actually been sent back — a number no run can inflate.
+ */
+export const AUTHORITY_RESIGN_DEDUPE_PREFIX = "authority-resign:";
+
+/**
+ * How many times one chain may be sent back for a re-signature before the tail
+ * stops instead. Re-signing is an operator action, so a repeat means the last
+ * signature did not in fact cover this tree; a third one is a loop, not
+ * progress.
+ */
+export const MAX_AUTHORITY_RESIGN_ROUNDS = 3;
 
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
 export const MAX_BASE_DRIFT_CLASSIFICATION_RETRIES = 30;
@@ -81,12 +106,19 @@ export type RegressionVerdict =
   | { schemaVersion: 1; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
   | { schemaVersion: 1; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
   | { schemaVersion: 1; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
-  | { schemaVersion: 1; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
+  | { schemaVersion: 1; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string }
+  /**
+   * The tree moved attested release-path files without re-signing
+   * `release-authority.json`, so the migration preflight refuses it and the
+   * gate cannot pass. Reported instead of a gate run: no agent can close it,
+   * because the signing key is the operator's and never enters a run.
+   */
+  | { schemaVersion: 1; outcome: "authority-resign"; headSha: string; baseHeadSha: string; summary: string };
 
 export type RegressionRepairHandoff = {
   schemaVersion: 1;
   trigger:
-    | { kind: "regression-verdict"; verdict: Exclude<RegressionVerdict, { outcome: "pass" }> }
+    | { kind: "regression-verdict"; verdict: Exclude<RegressionVerdict, { outcome: "pass" | "authority-resign" }> }
     | {
       kind: "independent-review-rejection";
       verdict: Extract<RegressionVerdict, { outcome: "pass" }>;
@@ -143,6 +175,9 @@ export const parseRegressionVerdict = (body: string | null | undefined): Regress
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   if (value.outcome === "refresh-conflict" && typeof value.summary === "string" && value.summary.length > 0) {
+    return { status: "ok", verdict: value as RegressionVerdict };
+  }
+  if (value.outcome === "authority-resign" && typeof value.summary === "string" && value.summary.trim().length > 0) {
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   return { status: "invalid", reason: "regression outcome and gateVerdict disagree or required summary is absent" };

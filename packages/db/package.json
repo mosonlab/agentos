@@ -14,6 +14,10 @@
       "types": "./src/merge-integrator.ts",
       "import": "./dist/merge-integrator.js"
     },
+    "./model-routing": {
+      "types": "./src/model-routing.ts",
+      "import": "./dist/model-routing.js"
+    },
     "./service-lock": {
       "types": "./src/service-maintenance-lock.ts",
       "import": "./dist/service-maintenance-lock.js"
@@ -31,6 +35,7 @@
     "db:migrate:release": "tsx prisma/release-migrate.ts",
     "db:migrate-status": "dotenv -e ../../.env -- prisma migrate status",
     "db:drift-check": "node scripts/check-drift.mjs",
+    "db:authority-check": "node --import tsx prisma/check-release-authority.ts",
     "db:preflight-goal-execution": "dotenv -e ../../.env -- tsx prisma/preflight-goal-execution.ts",
     "db:migrate-goal-execution": "npm run db:preflight-goal-execution && dotenv -e ../../.env -- prisma migrate deploy",
     "db:verify-starter-onboarding": "dotenv -e ../../.env -- tsx prisma/verify-starter-onboarding.ts",

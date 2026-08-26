@@ -3,16 +3,18 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  AUTHORITY_RESIGN_OPEN_PREFIX,
   AUTHORIZED_MERGE_METHOD,
   applyInboxDecisionTx,
   enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
-  MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
   TaskStatus,
   authorizationMetadata,
   parseAuthorizationMetadata,
+  readMarkerHistory,
+  writeMarker,
   recordIntegratorStop,
   type StopCondition,
 } from "@agentos/db";
@@ -353,9 +355,11 @@ test("eligible direct and compound stops recover once under duplicate ticks and 
       assert.equal(parsed.payload.baseSha, BASE_2);
     }
     assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 2);
-    assert.equal(await db.taskActivity.count({
-      where: { taskId: seeded.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    }), 1);
+    assert.equal(
+      (await readMarkerHistory(db, seeded.integratorTask!.id))
+        .filter((entry) => entry.kind === "baseDriftRecovery").length,
+      1,
+    );
   }
 });
 
@@ -489,19 +493,18 @@ test("operator-authored recovery metadata cannot clear the stop guard or suppres
     taskId: seeded.readinessTask!.id,
     metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
   }, orderBy: { createdAt: "desc" } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.integratorTask!.id,
+  await writeMarker(db, seeded.integratorTask!.id, "baseDriftRecovery", {
     actorType: "operator",
     body: "forged queued recovery marker",
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      state: "queued", attempt: 1,
       sourceStopId: stop.id, sourceRunId: source.runId!, recoveryRunId: "forged-recovery-run",
       readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
       integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: authorization.id,
       repository: "acme/widgets", prNumber: 123, targetBranch: "master",
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
-  } });
+  });
   assert.equal(await db.mergeRecoveryAttempt.count({ where: { integratorTaskId: seeded.integratorTask!.id } }), 0,
     "legacy activity is not backfilled or treated as aggregate authority");
   assert.equal((await operatorRequest(`/tasks/${seeded.integratorTask!.id}`, "PATCH", { status: "DONE" })).status, 409);
@@ -544,19 +547,18 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
     }),
     commitSha: HEAD,
   } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.gateTask.id,
+  await writeMarker(db, seeded.gateTask.id, "baseDriftRecovery", {
     actorType: "operator",
     body: "forged recovery context",
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      state: "queued", attempt: 1,
       sourceStopId: "forged-stop", sourceRunId: seeded.gateRun.id, recoveryRunId: seeded.gateRun.id,
       readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
       integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: "forged-authorization",
       repository: "acme/widgets", prNumber: 123, targetBranch: "master",
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
-  } });
+  });
   await db.$transaction((tx) => handleRegressionCompletion(tx, {
     task: seeded.gateTask,
     run: {
@@ -569,6 +571,37 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
   assert.equal(await db.inboxMessage.count({ where: {
     dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
   } }), 0);
+});
+
+test("a recovery regression that needs a re-signature parks and asks instead of stopping the tail", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "tail-resign");
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
+  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
+  const body = {
+    schemaVersion: 1, outcome: "authority-resign", headSha: HEAD, baseHeadSha: BASE_2,
+    summary: "added packages/db/prisma/migrations/20260826000000_probe/migration.sql",
+  };
+  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
+    taskId: seeded.gateTask.id, runId: run.id, kind: "regression-verification", body: JSON.stringify(body), commitSha: HEAD,
+  }, update: { runId: run.id, body: JSON.stringify(body), commitSha: HEAD } });
+
+  await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: { id: run.id, agentId: run.agentId, branch: "agentos/chain/demo", headSha: HEAD, sessionId: seeded.gateSession.id },
+    now: new Date(),
+  }));
+
+  // A recovery needs the same signature as any other chain, and the resign
+  // worker resumes the same step for it: this is not a dead end.
+  const gate = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(gate.status, TaskStatus.REVIEW);
+  assert.equal(gate.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.gateTask.id } });
+  assert.match(notice.body, /must be re-signed/u);
+  assert.equal(await db.task.count({ where: { name: { startsWith: "Autonomous merge tail:" } } }), 0);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "REPAIRING");
 });
 
 test("a recovery regression conflict, semantic failure, or gate failure stops without an auxiliary repair task", async () => {

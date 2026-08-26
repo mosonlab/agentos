@@ -43,21 +43,17 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import { AUTHORITY_RESIGN_OPEN_PREFIX, INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
 const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
 
-export const runnerFor = (preference: RunnerPreference, model: string): RunnerKind => {
-  if (preference === RunnerPreference.CLAUDE) return RunnerKind.CLAUDE;
-  if (preference === RunnerPreference.CODEX) return RunnerKind.CODEX;
-  if (preference === RunnerPreference.PI) return RunnerKind.PI;
-  const normalized = model.toLowerCase();
-  if (normalized.includes("codex")) return RunnerKind.CODEX;
-  if (normalized.includes("deepseek") || normalized.split(/[\/:_-]+/u).includes("pi")) return RunnerKind.PI;
-  return RunnerKind.CLAUDE;
-};
+// The runner rule moved to the pure `@agentos/db/model-routing` subpath, which
+// the browser can import without pulling in Prisma. Imported here beside its
+// re-export so this module's own callers and its importers read the same rule.
+import { runnerFor } from "./model-routing.js";
+export { runnerFor };
 
 export const deriveRunConfig = (
   agent: {
@@ -1478,6 +1474,20 @@ const activateChainSuccessorInternal = async (
         taskId: successor.id,
         actorType: "control-plane",
         body: "Predecessor layer completed; successor is held by an open independent review",
+      } });
+      continue;
+    }
+    // The same reasoning for the other owned park: the resign worker returns a
+    // regression step to the queue once the re-signed attestation is on the
+    // branch, and resuming it before then only buys a gate the migration
+    // preflight will refuse.
+    const resignOwnedPark = successor.status === TaskStatus.REVIEW
+      && (successor.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX) ?? false);
+    if (resignOwnedPark) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: "Predecessor layer completed; successor is held by an open release authority re-signature",
       } });
       continue;
     }

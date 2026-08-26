@@ -15,7 +15,6 @@ import {
   LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   MERGE_READINESS_STEP_INDEX,
-  MERGE_TAIL_KIND,
   MergeRecoveryStatus,
   Prisma,
   RunnerPreference,
@@ -30,11 +29,15 @@ import {
   lockChainRows,
   lockTaskRow,
   parseRegressionVerdict,
+  readMarkerHistory,
+  recoveryContext,
   resolveChainTarget,
   resolutionTestTriggers,
   runnerFor,
+  writeMarker,
   type PrismaClient,
-  type MergeRecoveryAttempt,
+  type Marker,
+  type RecoveryContext,
 } from "@agentos/db";
 
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
@@ -54,25 +57,6 @@ const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 export const READINESS_READ_BUDGET_MS = 20_000;
 export const READINESS_CLAIM_LEASE_MS = 30_000;
 
-type RecoveryContext = {
-  aggregateId: string;
-  attempt: number;
-  sourceStopId: string;
-  sourceRunId: string;
-  authorizationActivityId: string;
-  repository: string;
-  prNumber: number;
-  targetBranch: string;
-  authorizedHeadSha: string;
-  authorizedBaseSha: string;
-  observedBaseSha: string;
-  currentBaseSha: string;
-  readinessTaskId: string;
-  regressionTaskId: string;
-  integratorTaskId: string;
-  recoveryRunId: string;
-};
-
 const lockTaskMutationRows = async (
   tx: Prisma.TransactionClient,
   taskId: string,
@@ -87,31 +71,6 @@ const lockTaskMutationRows = async (
   } else {
     await lockTaskRow(tx, taskId);
   }
-};
-
-const recoveryContext = (row: MergeRecoveryAttempt | null): RecoveryContext | null => {
-  if (!row?.boundSourceRunId || !row.authorizationActivityId || !row.recoveryRunId
-    || !row.readinessTaskId || !row.regressionTaskId || !row.repository
-    || row.prNumber === null || !row.targetBranch || !row.authorizedHeadSha
-    || !row.authorizedBaseSha || !row.observedBaseSha || !row.currentBaseSha) return null;
-  return {
-    aggregateId: row.id,
-    attempt: row.attempt,
-    sourceStopId: row.sourceStopId,
-    sourceRunId: row.boundSourceRunId,
-    authorizationActivityId: row.authorizationActivityId,
-    repository: row.repository,
-    prNumber: row.prNumber,
-    targetBranch: row.targetBranch,
-    authorizedHeadSha: row.authorizedHeadSha,
-    authorizedBaseSha: row.authorizedBaseSha,
-    observedBaseSha: row.observedBaseSha,
-    currentBaseSha: row.currentBaseSha,
-    readinessTaskId: row.readinessTaskId,
-    regressionTaskId: row.regressionTaskId,
-    integratorTaskId: row.integratorTaskId,
-    recoveryRunId: row.recoveryRunId,
-  };
 };
 
 const recoveryContextFor = async (
@@ -186,12 +145,11 @@ const stopReadiness = async (
         { taskId: input.regressionTaskId, actorType: "control-plane", body: recoveryBody!, metadata },
       ] });
     }
-    await tx.taskActivity.create({ data: {
-      taskId: input.regressionTaskId,
+    await writeMarker(tx, input.regressionTaskId, "readiness", {
       actorType: "control-plane",
       body: `Merge readiness stopped at regression: ${input.reason}`,
-      metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "stopped", reason: input.reason },
-    } });
+      metadata: { state: "stopped", reason: input.reason },
+    });
     await tx.inboxMessage.upsert({
       where: { dedupeKey },
       create: {
@@ -208,21 +166,21 @@ const stopReadiness = async (
   await releaseMergeLeaseSafely(releaseChainLease, chainId);
 };
 
+// The whole history, newest first: a review obligation for this exact head can
+// sit arbitrarily far back once the readiness task has accumulated activity,
+// and missing it would reopen a review that is already answered.
 const latestReviewState = async (
   db: PrismaClient | Prisma.TransactionClient,
   readinessTaskId: string,
   headSha: string,
   recoveryBaseSha: string | null,
-) => {
-  const rows = await db.taskActivity.findMany({ where: { taskId: readinessTaskId }, orderBy: { createdAt: "desc" }, select: { metadata: true } });
-  for (const row of rows) {
-    const metadata = row.metadata as Record<string, unknown> | null;
-    if (metadata?.kind === MERGE_TAIL_KIND.reviewObligation
-      && metadata.headSha === headSha
-      && (recoveryBaseSha === null || metadata.baseSha === recoveryBaseSha)) return metadata;
-  }
-  return null;
-};
+): Promise<Marker | null> => (
+  (await readMarkerHistory(db, readinessTaskId)).find((marker) => (
+    marker.kind === "reviewObligation"
+    && marker.headSha === headSha
+    && (recoveryBaseSha === null || marker.baseSha === recoveryBaseSha)
+  )) ?? null
+);
 
 const createReviewObligation = async (
   db: PrismaClient,
@@ -285,38 +243,33 @@ const createReviewObligation = async (
     model: "gpt-5.6-sol:medium",
     runner: runnerFor(RunnerPreference.CODEX, "gpt-5.6-sol:medium"),
   } });
-  await tx.taskActivity.createMany({ data: [
-    {
-      taskId: input.readinessTask.id,
-      actorType: "control-plane",
-      body: `Independent review obligation opened for ${input.headSha}`,
-      metadata: {
-        kind: MERGE_TAIL_KIND.reviewObligation,
-        schemaVersion: 1,
-        state: "open",
-        headSha: input.headSha,
-        baseSha: input.baseSha,
-        reviewTaskId: task.id,
-        triggers: input.triggers,
-        recoverySourceStopId: input.recovery?.sourceStopId ?? null,
-      },
+  // Two rows, deliberately not the same one. The readiness task's copy names
+  // the review task it is waiting on; the review task's copy names the tail it
+  // answers for, which is what the completion path reads back from it.
+  await writeMarker(tx, input.readinessTask.id, "reviewObligation", {
+    actorType: "control-plane",
+    body: `Independent review obligation opened for ${input.headSha}`,
+    metadata: {
+      state: "open",
+      headSha: input.headSha,
+      baseSha: input.baseSha,
+      reviewTaskId: task.id,
+      triggers: input.triggers,
+      recoverySourceStopId: input.recovery?.sourceStopId ?? null,
     },
-    {
-      taskId: task.id,
-      actorType: "control-plane",
-      body: `Blind review obligation for readiness task ${input.readinessTask.id}`,
-      metadata: {
-        kind: MERGE_TAIL_KIND.reviewObligation,
-        schemaVersion: 1,
-        state: "open",
-        readinessTaskId: input.readinessTask.id,
-        regressionTaskId: input.regressionTaskId,
-        headSha: input.headSha,
-        baseSha: input.baseSha,
-        recoverySourceStopId: input.recovery?.sourceStopId ?? null,
-      },
+  });
+  await writeMarker(tx, task.id, "reviewObligation", {
+    actorType: "control-plane",
+    body: `Blind review obligation for readiness task ${input.readinessTask.id}`,
+    metadata: {
+      state: "open",
+      readinessTaskId: input.readinessTask.id,
+      regressionTaskId: input.regressionTaskId,
+      headSha: input.headSha,
+      baseSha: input.baseSha,
+      recoverySourceStopId: input.recovery?.sourceStopId ?? null,
     },
-  ] });
+  });
   await tx.task.update({ where: { id: input.readinessTask.id }, data: {
     status: TaskStatus.REVIEW,
     failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${task.id}:${input.headSha}`,
@@ -372,19 +325,16 @@ const requeueRegression = async (
         },
       ] });
     }
-    await tx.taskActivity.create({ data: {
-      taskId: input.regressionTaskId,
+    await writeMarker(tx, input.regressionTaskId, "readiness", {
       actorType: "control-plane",
       body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
       metadata: {
-        kind: MERGE_TAIL_KIND.readiness,
-        schemaVersion: 1,
         state: "requeued-regression",
         reason: input.reason,
         staleBaseSha: input.staleBaseSha,
         currentBaseSha: input.currentBaseSha,
       },
-    } });
+    });
   });
 };
 
@@ -532,15 +482,16 @@ export const readinessTick = async (
         continue;
       }
       const triggers = defenseTriggers(diff.files);
-      const resolutionRows = await db.taskActivity.findMany({ where: { taskId: regression.id }, select: { metadata: true } });
-      for (const row of resolutionRows) {
-        const metadata = row.metadata as Record<string, unknown> | null;
-        if (metadata?.kind !== MERGE_TAIL_KIND.repairResult || metadata.repairKind !== "refresh-conflict") continue;
-        if (typeof metadata.startHeadSha !== "string" || typeof metadata.resolvedHeadSha !== "string") {
+      // Every refresh-conflict resolution this Regression ever recorded has to
+      // be re-proved, however far back it sits.
+      const resolutions = await readMarkerHistory(db, regression.id);
+      for (const marker of resolutions) {
+        if (marker.kind !== "repairResult" || marker.repairKind !== "refresh-conflict") continue;
+        if (!marker.startHeadSha || !marker.resolvedHeadSha) {
           triggers.push({ path: "<resolution-range>", reason: "existing-test-lines-unverifiable" });
           continue;
         }
-        const resolution = await reader.compareCommits(target.repository, metadata.startHeadSha, metadata.resolvedHeadSha, controller.signal);
+        const resolution = await reader.compareCommits(target.repository, marker.startHeadSha, marker.resolvedHeadSha, controller.signal);
         if (!resolution.filesComplete) {
           triggers.push({ path: "<resolution-range>", reason: "existing-test-lines-unverifiable" });
           continue;
@@ -635,12 +586,16 @@ export const readinessTick = async (
         });
         await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.DONE, failureReason: null } });
         await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
-        await tx.taskActivity.create({ data: {
-          taskId: readiness.id,
+        await writeMarker(tx, readiness.id, "readiness", {
           actorType: "control-plane",
           body: `Merge readiness authorized exact head ${evidence.headSha}; merge execution queued`,
-          metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "authorized", headSha: evidence.headSha, authorizationActivityId: activity.id, recoverySourceStopId: recovery?.sourceStopId ?? null },
-        } });
+          metadata: {
+            state: "authorized",
+            headSha: evidence.headSha,
+            authorizationActivityId: activity.id,
+            recoverySourceStopId: recovery?.sourceStopId ?? null,
+          },
+        });
         if (recovery) {
           await activateRecoveryIntegratorSuccessor(tx, {
             readinessTaskId: readiness.id,

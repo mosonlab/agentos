@@ -1,5 +1,7 @@
 import { RunnerKind, RunnerPreference } from "@prisma/client";
 
+import { catalogRunnerForModel } from "./model-routing.js";
+
 export const CANONICAL_AGENT_DEFAULTS = [
   { name: "default", model: "gpt-5.6-sol:medium", runner: RunnerPreference.CODEX },
   { name: "frontend-dev", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
@@ -71,13 +73,7 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
 export const DIRECT_TEMPLATE_NAME = "direct-engineer-workflow";
 export const IMPLEMENTATION_PLAN_OUTPUT_KINDS = ["plan", "revised-plan"] as const;
 
-export const catalogRunnerForModel = (raw: string): RunnerPreference | null => {
-  const model = raw.slice(0, raw.lastIndexOf(":") > 0 ? raw.lastIndexOf(":") : raw.length);
-  if (model.startsWith("claude-")) return RunnerPreference.CLAUDE;
-  if (model.startsWith("openai-codex/")) return RunnerPreference.PI;
-  if (model.startsWith("gpt-")) return RunnerPreference.CODEX;
-  return null;
-};
+export { catalogRunnerForModel } from "./model-routing.js";
 
 export const assertCanonicalAgentSources = (
   roles: Array<{ name: string; model: string; runnerPreference: RunnerPreference }>,

@@ -5,10 +5,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  findModel, joinModel, MODELS, resolveRunner, runnerForModel, splitModel, validateModelPair,
-} from "../lib/models";
-import { ENFORCED_BY, TOOL_KEYS } from "../lib/tools";
-import type { RunnerKind, RunnerPreference } from "../lib/types";
+  ENFORCED_BY, findModel, joinModel, MODELS, runnerForModel, splitModel, TOOL_KEYS, validateModelPair,
+} from "@agentos/db/model-routing";
 
 /** The `mechanical/` provider is not a model provider. `merge-integrator` is a
  *  sentinel role whose "model" names a program, and the picker must *not* offer
@@ -56,23 +54,6 @@ test("pi-hosted entries override the substring heuristic in the catalog", () => 
 test("tool keys and enforcement cover exactly the three concrete runners", () => {
   assert.deepEqual(TOOL_KEYS, ["BASH", "READ", "WRITE", "EDIT", "GLOB", "GREP", "WEB_FETCH", "WEB_SEARCH"]);
   assert.deepEqual(Object.keys(ENFORCED_BY).sort(), ["CLAUDE", "CODEX", "PI"]);
-});
-
-test("resolveRunner stays byte-faithful to the runtime heuristic", () => {
-  const cases: Array<[RunnerPreference, string, RunnerKind]> = [
-    ["CLAUDE", "gpt-5.6-luna", "CLAUDE"],
-    ["INHERIT", "gpt-5.6-luna", "CLAUDE"],
-    ["INHERIT", "openai-codex/gpt-5.6-luna", "CODEX"],
-    ["AUTO", "some-pi-model", "PI"],
-    ["AUTO", "deepseek-v3", "PI"],
-    ["AUTO", "anything-else", "CLAUDE"],
-    ["PI", "openai-codex/gpt-5.6-luna", "PI"],
-  ];
-  for (const [preference, model, expected] of cases) {
-    const actual = resolveRunner(preference, model);
-    assert.equal(actual, expected);
-    assert.ok(Object.hasOwn(ENFORCED_BY, actual));
-  }
 });
 
 test("validateModelPair names mismatches and permits the Custom escape hatch", () => {

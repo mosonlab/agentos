@@ -1,25 +1,9 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { asJsonObject, executionModeFor, MERGE_TAIL_KIND, type Prisma } from "@agentos/db";
+import { executionModeFor, latestMarker, openReviewObligation, readMarkers, type Prisma } from "@agentos/db";
 
 const mergeLeaseScript = fileURLToPath(new URL("../../../scripts/merge-lease.sh", import.meta.url));
-
-/** How far back the merge-tail markers are read, matching the completion path. */
-const mergeTailMarkerScan = 20;
-
-const markerRegressionTaskId = (
-  markers: Array<Record<string, unknown> | null>,
-  kind: string,
-  state?: string,
-): string | null => {
-  for (const metadata of markers) {
-    if (metadata?.kind !== kind) continue;
-    if (state !== undefined && metadata.state !== state) continue;
-    if (typeof metadata.regressionTaskId === "string") return metadata.regressionTaskId;
-  }
-  return null;
-};
 
 export type MergeLeaseReleaser = (chainId: string) => Promise<void>;
 
@@ -58,7 +42,9 @@ export const releaseMergeLeaseSafely = async (
  * only the mechanical merge step, the Regression step, and the merge-tail
  * auxiliary tasks (automatic repair attempts and independent reviews) ever run
  * under the lease, and an auxiliary task answers for the lease of the Regression
- * chain it serves rather than for a chain of its own.
+ * chain it serves rather than for a chain of its own. It reads the same marker
+ * window the completion path reads because it is the same question, which is
+ * why the window no longer needs restating here.
  */
 export const mergeTailLeaseChainId = async (
   tx: Prisma.TransactionClient,
@@ -77,14 +63,10 @@ export const mergeTailLeaseChainId = async (
     },
   });
   if (!task) return null;
-  const markers = (await tx.taskActivity.findMany({
-    where: { taskId },
-    select: { metadata: true },
-    orderBy: { createdAt: "desc" },
-    take: mergeTailMarkerScan,
-  })).map((row) => asJsonObject(row.metadata));
-  const auxiliaryRegressionTaskId = markerRegressionTaskId(markers, MERGE_TAIL_KIND.repairAttempt)
-    ?? markerRegressionTaskId(markers, MERGE_TAIL_KIND.reviewObligation, "open");
+  const markers = await readMarkers(tx, taskId);
+  const auxiliaryRegressionTaskId = latestMarker(markers, "repairAttempt")?.regressionTaskId
+    ?? openReviewObligation(markers)?.regressionTaskId
+    ?? null;
   const tail = executionModeFor(task.templateStep) === "mechanical"
     || task.templateStep?.outputKind === "regression-verification"
     || auxiliaryRegressionTaskId !== null;
