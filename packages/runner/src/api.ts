@@ -368,6 +368,8 @@ export const completeRun = async (config: RunnerConfig, claim: ClaimedTask, comp
 export type ReclaimOffer = {
   runId: string;
   workspacePath: string | null;
+  /** Required wire evidence: null is ordinary, a SHA forbids publication. */
+  pinnedBaseSha: string | null;
   taskId?: string | null;
   runNumber?: number;
   baseSha?: string | null;

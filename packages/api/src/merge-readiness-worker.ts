@@ -58,7 +58,43 @@ export const readinessPollIntervalMs = (): number => {
 
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 export const READINESS_READ_BUDGET_MS = 20_000;
-export const READINESS_CLAIM_LEASE_MS = 30_000;
+export const READINESS_CLAIM_LEASE_MS = 60_000;
+const READINESS_CANDIDATE_INCLUDE = {
+  templateStep: { include: { taskTemplate: { select: { name: true } } } },
+  repo: true,
+} as const;
+type ReadinessCandidate = Prisma.TaskGetPayload<{ include: typeof READINESS_CANDIDATE_INCLUDE }>;
+
+const readinessCandidates = async function* (
+  db: PrismaClient,
+  pageSize: number,
+): AsyncGenerator<ReadinessCandidate> {
+  let cursor: string | null = null;
+  while (true) {
+    const page: ReadinessCandidate[] = await db.task.findMany({
+      where: {
+        status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+        OR: [
+          { templateStep: { stepIndex: DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
+          { templateStep: { stepIndex: MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } } },
+          { templateStep: { stepIndex: LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
+          { templateStep: { stepIndex: LEGACY_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: LEGACY_INTEGRATOR_TEMPLATE_NAME } } },
+          { templateStep: { stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: { startsWith: LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX } } } },
+          { templateStep: { stepIndex: LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: { startsWith: LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX } } } },
+          { templateStep: { stepIndex: MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: { startsWith: LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX } } } },
+        ],
+      },
+      include: READINESS_CANDIDATE_INCLUDE,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: pageSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    if (page.length === 0) return;
+    for (const candidate of page) yield candidate;
+    if (page.length < pageSize) return;
+    cursor = page.at(-1)!.id;
+  }
+};
 
 const recoveryContextFor = async (
   db: PrismaClient,
@@ -86,6 +122,22 @@ const expiredReadinessClaim = (reason: string | null, now: Date): boolean => {
   return Number.isFinite(expiry) && expiry <= now.getTime();
 };
 
+const renewReadinessClaim = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+  claimReason: string,
+): Promise<string | null> => {
+  const renewed = readinessClaim(new Date());
+  const held = await db.$transaction(async (tx) => {
+    await lockTaskMutationRows(tx, readinessTaskId);
+    return tx.task.updateMany({
+      where: { id: readinessTaskId, status: TaskStatus.DOING, failureReason: claimReason },
+      data: { failureReason: renewed },
+    });
+  });
+  return held.count === 1 ? renewed : null;
+};
+
 const stopReadiness = async (
   db: PrismaClient,
   input: {
@@ -93,22 +145,27 @@ const stopReadiness = async (
     regressionTaskId: string;
     reason: string;
     recovery: RecoveryContext | null;
+    claimReason: string;
   },
   releaseChainLease: MergeLeaseReleaser,
-): Promise<void> => {
+): Promise<boolean> => {
   const recoveryBody = input.recovery
     ? `Automatic base-drift recovery ${input.recovery.attempt} stopped at readiness: ${input.reason}`
     : null;
   const dedupeKey = input.recovery
     ? `merge-base-drift-recovery-tail-stop:${input.recovery.sourceStopId}:readiness`
     : `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
-  const chainId = await db.$transaction(async (tx) => {
+  const transition = await db.$transaction(async (tx) => {
     await lockTaskMutationRows(tx, input.readinessTaskId);
     const readiness = await tx.task.findUnique({
       where: { id: input.readinessTaskId },
       select: { chainId: true },
     });
-    await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
+    const held = await tx.task.updateMany({
+      where: { id: input.readinessTaskId, status: TaskStatus.DOING, failureReason: input.claimReason },
+      data: { status: TaskStatus.REVIEW, failureReason: input.reason },
+    });
+    if (held.count !== 1) return { applied: false as const, chainId: readiness?.chainId ?? null };
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: input.reason } });
     if (input.recovery) {
       await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
@@ -148,9 +205,14 @@ const stopReadiness = async (
       },
       update: {},
     });
-    return readiness?.chainId ?? null;
+    return { applied: true as const, chainId: readiness?.chainId ?? null };
   });
-  reportMergeLeaseAnomaly(chainId, await releaseMergeLeaseSafely(releaseChainLease, chainId));
+  if (!transition.applied) return false;
+  reportMergeLeaseAnomaly(
+    transition.chainId,
+    await releaseMergeLeaseSafely(releaseChainLease, transition.chainId),
+  );
+  return true;
 };
 
 // The whole history, newest first: a review obligation for this exact head can
@@ -296,13 +358,30 @@ const requeueRegression = async (
     reason: string;
     now: Date;
     recovery: RecoveryContext | null;
+    claimReason: string;
   },
-): Promise<void> => {
-  await db.$transaction(async (tx) => {
+): Promise<boolean> => db.$transaction(async (tx) => {
     await lockTaskMutationRows(tx, input.readinessTaskId);
-    await tx.task.update({ where: { id: input.readinessTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
+    const held = await tx.task.updateMany({
+      where: { id: input.readinessTaskId, status: TaskStatus.DOING, failureReason: input.claimReason },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    if (held.count !== 1) return false;
     await tx.task.update({ where: { id: input.regressionTaskId }, data: { status: TaskStatus.TODO, failureReason: null } });
-    const run = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    const queued = await enqueueTaskRun(tx, input.regressionTaskId, input.now);
+    // The prior Regression run succeeded; the control plane invalidated its
+    // exact-base evidence after a remote read. This retry is therefore external
+    // compensation, not another attempt charged to the agent. Without the
+    // grant, a requeue at the configured ceiling creates run N+1 with ceiling N
+    // and the runner rejects it before launch -- exactly the stuck state the
+    // readiness transition was supposed to recover.
+    const run = await tx.run.update({
+      where: { id: queued.id },
+      data: {
+        maxRunsPerTask: { increment: 1 },
+        budgetGrants: { increment: 1 },
+      },
+    });
     if (input.recovery) {
       await tx.mergeRecoveryAttempt.update({ where: { id: input.recovery.aggregateId }, data: {
         status: MergeRecoveryStatus.REPAIRING,
@@ -342,8 +421,8 @@ const requeueRegression = async (
         currentBaseSha: input.currentBaseSha,
       },
     });
-  });
-};
+    return true;
+});
 
 export const readinessTick = async (
   db: PrismaClient,
@@ -354,24 +433,8 @@ export const readinessTick = async (
   acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" }),
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
-  const candidates = await db.task.findMany({
-    where: {
-      status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
-      OR: [
-        { templateStep: { stepIndex: DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
-        { templateStep: { stepIndex: MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } } },
-        { templateStep: { stepIndex: LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME } } },
-        { templateStep: { stepIndex: LEGACY_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: LEGACY_INTEGRATOR_TEMPLATE_NAME } } },
-        { templateStep: { stepIndex: LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: { startsWith: LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX } } } },
-        { templateStep: { stepIndex: LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: { startsWith: LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX } } } },
-        { templateStep: { stepIndex: MERGE_READINESS_STEP_INDEX, outputKind: "merge-authorization", taskTemplate: { name: { startsWith: LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX } } } },
-      ],
-    },
-    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true },
-    orderBy: { createdAt: "asc" },
-    take: Math.max(limit * 20, 100),
-  });
-  for (const readiness of candidates) {
+  const pageSize = Math.max(limit * 20, 100);
+  for await (const readiness of readinessCandidates(db, pageSize)) {
     if (result.claimed >= limit) break;
     if (!isMergeReadinessStep(readiness.templateStep)) continue;
     const regression = await db.task.findFirst({
@@ -387,7 +450,7 @@ export const readinessTick = async (
       },
     });
     if (!regression || regression.status !== TaskStatus.DONE) continue;
-    const claimReason = readinessClaim(now);
+    let claimReason = readinessClaim(now);
     const claimWhere = readiness.status === TaskStatus.TODO
       ? { id: readiness.id, status: TaskStatus.TODO }
       : expiredReadinessClaim(readiness.failureReason, now)
@@ -402,6 +465,33 @@ export const readinessTick = async (
     result.claimed += 1;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let recovery: RecoveryContext | null = null;
+    const stop = async (reason: string): Promise<boolean> => {
+      const stopped = await stopReadiness(db, {
+        readinessTaskId: readiness.id,
+        regressionTaskId: regression.id,
+        reason,
+        recovery,
+        claimReason,
+      }, releaseChainLease);
+      if (stopped) result.stopped += 1;
+      return stopped;
+    };
+    const requeue = async (input: {
+      staleBaseSha: string;
+      currentBaseSha: string;
+      reason: string;
+    }): Promise<boolean> => {
+      const requeued = await requeueRegression(db, {
+        readinessTaskId: readiness.id,
+        regressionTaskId: regression.id,
+        ...input,
+        now,
+        recovery,
+        claimReason,
+      });
+      if (requeued) result.requeued += 1;
+      return requeued;
+    };
     try {
       recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
       if (recovery) {
@@ -410,84 +500,58 @@ export const readinessTick = async (
           failureReason: null,
         } });
       }
-    if (!regression?.stepOutput) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression?.id ?? readiness.id, reason: "missing head-bound regression PASS evidence", recovery }, releaseChainLease);
-      result.stopped += 1;
-      continue;
-    }
-    const verdict = parseRegressionVerdict(regression.stepOutput.body);
-    if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass" || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "missing or stale head-bound regression PASS evidence", recovery }, releaseChainLease);
-      result.stopped += 1;
-      continue;
-    }
-    if (!reader?.compareCommits) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "server-side GitHub comparison reader is unavailable", recovery }, releaseChainLease);
-      result.stopped += 1;
-      continue;
-    }
-    const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
-    if (!target.resolved) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `pull-request target is ${target.unresolvable}`, recovery }, releaseChainLease);
-      result.stopped += 1;
-      continue;
-    }
+      if (!regression.stepOutput) {
+        await stop("missing head-bound regression PASS evidence");
+        continue;
+      }
+      const verdict = parseRegressionVerdict(regression.stepOutput.body);
+      if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass" || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
+        await stop("missing or stale head-bound regression PASS evidence");
+        continue;
+      }
+      if (!reader?.compareCommits) {
+        await stop("server-side GitHub comparison reader is unavailable");
+        continue;
+      }
+      const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
+      if (!target.resolved) {
+        await stop(`pull-request target is ${target.unresolvable}`);
+        continue;
+      }
       const controller = new AbortController();
       timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
       const snapshot = await reader.readPullRequest(target.repository, target.prNumber, readiness.repo?.defaultBranch ?? "main", controller.signal);
       if (snapshot.headRefOid !== verdict.verdict.headSha) {
-        await requeueRegression(db, {
-          readinessTaskId: readiness.id,
-          regressionTaskId: regression.id,
+        await requeue({
           staleBaseSha: verdict.verdict.baseHeadSha,
           currentBaseSha: snapshot.baseSha ?? "missing",
           reason: `stale PASS head ${verdict.verdict.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
-          now,
-          recovery,
         });
-        result.requeued += 1;
         continue;
       }
       if (!snapshot.baseSha || !snapshot.baseRefName) {
-        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "pull request base identity is unavailable", recovery }, releaseChainLease);
-        result.stopped += 1;
+        await stop("pull request base identity is unavailable");
         continue;
       }
       if (snapshot.baseSha !== verdict.verdict.baseHeadSha) {
-        await requeueRegression(db, {
-          readinessTaskId: readiness.id,
-          regressionTaskId: regression.id,
+        await requeue({
           staleBaseSha: verdict.verdict.baseHeadSha,
           currentBaseSha: snapshot.baseSha,
           reason: "target base advanced after regression PASS",
-          now,
-          recovery,
         });
-        result.requeued += 1;
         continue;
       }
       const diff = await reader.compareCommits(target.repository, snapshot.baseSha, verdict.verdict.headSha, controller.signal);
       if (!diff.filesComplete) {
-        await stopReadiness(db, {
-          readinessTaskId: readiness.id,
-          regressionTaskId: regression.id,
-          reason: "GitHub comparison file list is truncated or completeness is unproven",
-          recovery,
-        }, releaseChainLease);
-        result.stopped += 1;
+        await stop("GitHub comparison file list is truncated or completeness is unproven");
         continue;
       }
       if ((diff.status !== "ahead" && diff.status !== "identical") || diff.behindBy !== 0) {
-        await requeueRegression(db, {
-          readinessTaskId: readiness.id,
-          regressionTaskId: regression.id,
+        await requeue({
           staleBaseSha: verdict.verdict.baseHeadSha,
           currentBaseSha: snapshot.baseSha,
           reason: `server-side ancestry check refused ${diff.status} comparison with behind_by=${diff.behindBy}`,
-          now,
-          recovery,
         });
-        result.requeued += 1;
         continue;
       }
       const triggers = defenseTriggers(diff.files);
@@ -540,8 +604,7 @@ export const readinessTick = async (
           orderBy: { createdAt: "desc" },
         });
         if (!branchRun?.branch) {
-          await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: "chain branch is unavailable for independent review", recovery }, releaseChainLease);
-          result.stopped += 1;
+          await stop("chain branch is unavailable for independent review");
           continue;
         }
         const opened = await createReviewObligation(db, {
@@ -562,28 +625,36 @@ export const readinessTick = async (
           // alone is the whole point of noticing.
           result.reviewing += 1;
         } else {
-          await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: opened.reason, recovery }, releaseChainLease);
-          result.stopped += 1;
+          await stop(opened.reason);
         }
         continue;
       }
       const evidence = evidenceFromSnapshot(snapshot, randomUUID());
       if ("error" in evidence) {
-        await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: evidence.error, recovery }, releaseChainLease);
-        result.stopped += 1;
+        await stop(evidence.error);
         continue;
       }
+      // Renew immediately before the only network call outside the GitHub read
+      // budget. The original claim covered the reads; this one covers the
+      // acquire and the authorization transaction. CAS still decides every
+      // transition, so an overrun remains safe rather than merely unlikely.
+      const renewedClaim = await renewReadinessClaim(db, readiness.id, claimReason);
+      if (!renewedClaim) continue;
+      claimReason = renewedClaim;
+
       // The lock belongs here and only here. From the base this authorization
       // pins to the merge that consumes it, `main` must not move; everything
       // earlier in the tail -- the refresh, the semantic verification, the
-      // review -- can be redone if it does. An acquire that loses leaves the
-      // step claimed, so its claim expires and a later tick tries again, rather
-      // than authorizing a merge whose window nobody is holding open.
+      // review -- can be redone if it does.
       if (readiness.chainId) {
         const acquisition = await acquireChainLease(readiness.chainId);
-        if (acquisition.outcome !== "acquired") continue;
+        if (acquisition.outcome === "contended") continue;
+        if (acquisition.outcome === "unreachable") {
+          await stop(`merge lease acquire is unreachable: ${acquisition.detail}`);
+          continue;
+        }
       }
-      const authorized = await db.$transaction(async (tx) => {
+      const authorization = await db.$transaction(async (tx) => {
         await lockTaskMutationRows(tx, readiness.id);
         // The claim is evidence until it is re-read under the mutex, and the
         // acquire above is a network round trip spent inside the claim's lease.
@@ -593,7 +664,16 @@ export const readinessTick = async (
           where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
           data: { status: TaskStatus.DONE, failureReason: null },
         });
-        if (held.count !== 1) return false;
+        if (held.count !== 1) {
+          const current = await tx.task.findUnique({
+            where: { id: readiness.id },
+            select: { status: true, failureReason: true },
+          });
+          const activeSuccessor = current?.status === TaskStatus.DONE
+            || (current?.status === TaskStatus.DOING
+              && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
+          return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+        }
         // Every exact-head/current-base cycle gets a distinct binding. The
         // obsolete authorization remains append-only evidence and cannot make a
         // refreshed authorization ambiguous or be reused by the executor.
@@ -637,12 +717,18 @@ export const readinessTick = async (
         } else {
           await activateChainSuccessor(tx, readiness, {}, now);
         }
-        return true;
+        return "authorized" as const;
       });
-      if (authorized) result.authorized += 1;
+      if (authorization === "authorized") {
+        result.authorized += 1;
+      } else if (authorization === "claim-lost-inactive") {
+        reportMergeLeaseAnomaly(
+          readiness.chainId,
+          await releaseMergeLeaseSafely(releaseChainLease, readiness.chainId),
+        );
+      }
     } catch (error: unknown) {
-      await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`, recovery }, releaseChainLease);
-      result.stopped += 1;
+      await stop(`readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -654,9 +740,15 @@ export const startReadinessWorker = (
   db: PrismaClient,
   reader: GitHubReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> => {
+  let inFlight = false;
   const timer = setInterval(() => {
+    if (inFlight) return;
+    inFlight = true;
     void readinessTick(db, reader, new Date(), 5, releaseMergeLease, acquireMergeLease)
-      .catch((error: unknown) => console.error("Merge readiness tick failed", error));
+      .catch((error: unknown) => console.error("Merge readiness tick failed", error))
+      .finally(() => {
+        inFlight = false;
+      });
   }, readinessPollIntervalMs());
   timer.unref?.();
   return timer;

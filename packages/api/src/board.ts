@@ -1,8 +1,29 @@
 import { createHash } from "node:crypto";
 
-import { projectMergeOutcome, runOwnsMergeOutcome, sessionUsageCost, sumUsageCosts, TaskStatus, type MergeOutcomeProjection, type ScheduleKind, type TaskSource, type TaskStatus as TaskStatusType, type UsageCost } from "@agentos/db";
+import {
+  asJsonObject,
+  MERGE_TAIL_KIND,
+  projectMergeOutcome,
+  runOwnsMergeOutcome,
+  sessionUsageCost,
+  sumUsageCosts,
+  TaskStatus,
+  type Agent,
+  type MergeOutcomeProjection,
+  type Prisma,
+  type PrismaClient,
+  type Repo,
+  type Run,
+  type ScheduleKind,
+  type Session,
+  type Task,
+  type TaskSource,
+  type TaskStatus as TaskStatusType,
+  type UsageCost,
+} from "@agentos/db";
 
-import type { ChainProgress } from "./chain.js";
+import { chainExecutionOwner, type ChainExecutionOwner } from "./chain-execution-owner.js";
+import { chainKey, chainProgressByChain, positions, type ChainProgress } from "./chain.js";
 
 /**
  * The Tasks board's own wire shape.
@@ -74,8 +95,8 @@ export type BoardCard = {
  *  which kind of repair it is. */
 export type RepairBinding = { chainId: string; chainName: string | null; repairKind: string };
 
-/** The Prisma row shape `boardCard` needs — declared structurally so the route
- *  can `select` exactly these columns and nothing else. */
+/** The Prisma row shape `boardCard` needs — declared structurally so `readBoard`
+ *  can select exactly these columns and nothing else. */
 export type BoardRow = {
   id: string;
   projectId: string;
@@ -253,6 +274,265 @@ export const repairBinding = (
   if (regressionTaskId === null || repairKind === null) return null;
   const chain = chainOfRegressionTask(regressionTaskId);
   return chain === null ? null : { chainId: chain.chainId, chainName: chain.chainName, repairKind };
+};
+
+export type TaskReadScope = {
+  projectId?: string;
+  archived: "false" | "true" | "all";
+};
+
+type ChainProgressWire = ChainProgress & { position: number | null };
+
+type ChainSubject = {
+  id: string;
+  projectId: string;
+  chainId: string | null;
+  chainIndex: number | null;
+  chainLayer: number | null;
+  status: TaskStatusType;
+  name: string;
+  templateStep: { name: string } | null;
+};
+
+const taskWhere = (scope: TaskReadScope): Prisma.TaskWhereInput => ({
+  ...(scope.projectId ? { projectId: scope.projectId } : {}),
+  ...(scope.archived === "false" ? { archivedAt: null }
+    : scope.archived === "true" ? { archivedAt: { not: null } }
+    : {}),
+});
+
+const taskOrderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
+
+/**
+ * Resolve progress for every chain represented by one task-list page.
+ *
+ * Progress counts archived siblings even when the page does not show them, and
+ * the project participates in every in-memory key because `chainId` alone is
+ * not globally unique. An unenriched full list and a page with no indexed chain
+ * rows both skip the lookup entirely.
+ */
+const chainProgressLookup = async (
+  db: PrismaClient,
+  rows: readonly ChainSubject[],
+  scope: TaskReadScope,
+  enrich: boolean,
+): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
+  const chainIds = !enrich ? [] : [...new Set(rows
+    .filter((task) => task.chainIndex !== null)
+    .map((task) => task.chainId)
+    .filter((value): value is string => value !== null))];
+  const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
+    where: {
+      chainId: { in: chainIds },
+      chainIndex: { not: null },
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+    },
+    select: {
+      id: true, projectId: true, chainId: true, chainIndex: true, status: true,
+      chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
+    },
+    orderBy: { chainIndex: "asc" },
+  });
+  const progressByChain = chainProgressByChain(chainRows);
+  const positionsByChain = new Map<string, Map<string, number>>();
+  for (const row of chainRows) {
+    if (row.chainId === null) continue;
+    const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+    if (positionsByChain.has(key)) continue;
+    positionsByChain.set(key, positions(chainRows.filter((candidate) => (
+      candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
+    ))));
+  }
+  return (task) => {
+    if (!enrich || task.chainId === null) return null;
+    // Match the chain-detail read model for a malformed one-row chain whose
+    // identity survived but whose index did not.
+    if (task.chainIndex === null) {
+      return {
+        chainId: task.chainId,
+        done: task.status === TaskStatus.DONE ? 1 : 0,
+        total: 1,
+        activeStepName: task.templateStep?.name ?? task.name,
+        activeStatus: task.status.toLowerCase(),
+        currentLayer: 1,
+        layerCount: 1,
+        position: 1,
+      };
+    }
+    const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
+    const progress = progressByChain.get(key) ?? null;
+    return progress ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null } : null;
+  };
+};
+
+/** Read the complete board card model, including every lookup needed to project it. */
+export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise<BoardCard[]> => {
+  const rows: BoardRow[] = await db.task.findMany({
+    where: taskWhere(scope),
+    orderBy: taskOrderBy,
+    select: {
+      id: true, projectId: true, name: true, status: true, failureReason: true,
+      scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
+      templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
+      dispatchAfterTaskId: true,
+      assigneeAgent: { select: { id: true, title: true, model: true } },
+      templateStep: { select: { name: true } },
+      runs: {
+        orderBy: { runNumber: "desc" },
+        select: {
+          id: true, runNumber: true, status: true, model: true, subagentModel: true,
+          session: {
+            select: {
+              costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true,
+              startedAt: true, endedAt: true,
+            },
+          },
+        },
+      },
+      // §SF-1: a stopped mechanical merge is not a successful board outcome
+      // merely because its protocol Run completed successfully.
+      stepOutput: { select: { kind: true, body: true, runId: true } },
+    },
+  });
+  const progressFor = await chainProgressLookup(db, rows, scope, true);
+  const displayByTask = chainDisplayByTask(rows);
+
+  const predecessorIds = [...new Set(rows
+    .map((row) => row.dispatchAfterTaskId)
+    .filter((value): value is string => typeof value === "string" && value.length > 0))];
+  const predecessorById = new Map<string, BoardBlockedOnTask>();
+  if (predecessorIds.length > 0) {
+    const predecessors = await db.task.findMany({
+      where: { id: { in: predecessorIds } },
+      select: { id: true, name: true, status: true },
+    });
+    for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
+  }
+
+  const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
+  const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
+    where: {
+      taskId: { in: detachedIds },
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
+    },
+    select: { taskId: true, metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const repairByTask = new Map<string, RepairBinding>();
+  if (repairMarkers.length > 0) {
+    const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
+      const value = asJsonObject(marker.metadata)?.regressionTaskId;
+      return typeof value === "string" ? [value] : [];
+    }))];
+    const regressionTasks = await db.task.findMany({
+      where: { id: { in: regressionIds }, ...(scope.projectId ? { projectId: scope.projectId } : {}) },
+      select: { id: true, projectId: true, chainId: true },
+    });
+    const chainOfTask = new Map<string, { key: string; chainId: string }>();
+    for (const task of regressionTasks) {
+      if (task.chainId === null) continue;
+      chainOfTask.set(task.id, {
+        key: chainKey({ projectId: task.projectId, chainId: task.chainId }),
+        chainId: task.chainId,
+      });
+    }
+    const chainNameByKey = new Map<string, string | null>();
+    for (const row of rows) {
+      if (row.chainId === null) continue;
+      const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+      if (chainNameByKey.has(key)) continue;
+      chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
+    }
+    const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
+      const chain = chainOfTask.get(taskId);
+      return chain === undefined ? null : {
+        chainId: chain.chainId,
+        chainName: chainNameByKey.get(chain.key) ?? null,
+      };
+    };
+    for (const marker of repairMarkers) {
+      if (repairByTask.has(marker.taskId)) continue;
+      const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
+      if (binding !== null) repairByTask.set(marker.taskId, binding);
+    }
+  }
+
+  return rows.map((row) => boardCard(
+    row,
+    progressFor(row),
+    displayByTask.get(row.id),
+    row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+    repairByTask.get(row.id) ?? null,
+  ));
+};
+
+const taskListInclude = {
+  assigneeAgent: true,
+  repo: true,
+  templateStep: {
+    select: {
+      name: true,
+      stepIndex: true,
+      outputKind: true,
+      taskTemplate: { select: { name: true } },
+    },
+  },
+  // Run.output is forensic bulk and no list caller reads it.
+  runs: {
+    orderBy: { runNumber: "desc" },
+    take: 1,
+    omit: { output: true },
+    include: { session: true },
+  },
+} as const satisfies Prisma.TaskInclude;
+
+export type TaskListRow = Task & {
+  assigneeAgent: Agent | null;
+  repo: Repo | null;
+  templateStep: {
+    name: string;
+    stepIndex: number;
+    outputKind: string;
+    taskTemplate: { name: string };
+  } | null;
+  runs: Array<Omit<Run, "output"> & { session: Session | null }>;
+  executionOwner: ChainExecutionOwner;
+  chainProgress: ChainProgressWire | null;
+  recurringLastFiredAt: Date | null;
+  recurringFireCount: number;
+};
+
+/** Read the full task list and optionally attach its expensive enrichment. */
+export const readTaskList = async (
+  db: PrismaClient,
+  scope: TaskReadScope,
+  options: { enrich: boolean },
+): Promise<TaskListRow[]> => {
+  const tasks = await db.task.findMany({
+    where: taskWhere(scope),
+    orderBy: taskOrderBy,
+    include: taskListInclude,
+  });
+  const progressFor = await chainProgressLookup(db, tasks, scope, options.enrich);
+  const cronIds = !options.enrich ? [] : tasks
+    .filter((task) => task.scheduleKind === "CRON")
+    .map((task) => task.id);
+  const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
+    by: ["recurringSourceTaskId"],
+    where: { recurringSourceTaskId: { in: cronIds } },
+    _max: { createdAt: true },
+    _count: { _all: true },
+  });
+  const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
+
+  return tasks.map((task) => ({
+    ...task,
+    executionOwner: chainExecutionOwner(task),
+    chainProgress: progressFor(task),
+    recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
+    recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
+  }));
 };
 
 /**
