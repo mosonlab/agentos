@@ -11,6 +11,9 @@ import {
   isMergeReadinessStep,
   mergeRecoveryPhase,
   mergeRecoveryTransitionAllowed,
+  MAX_REVIEW_FINDINGS,
+  MAX_REVIEW_FINDING_TEXT,
+  parseIndependentReviewDecision,
   parseResolverResult,
   parseRegressionVerdict,
   resolutionTestTriggers,
@@ -51,13 +54,19 @@ test("regression verdicts are exact-head, versioned, and fail closed", () => {
 });
 
 test("both canonical readiness steps are mechanical server-owned shapes", () => {
-  assert.equal(isMergeReadinessStep({ stepIndex: 7, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow" }), true);
-  assert.equal(isMergeReadinessStep({ stepIndex: 12, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow" }), true);
+  assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow" }), true);
+  assert.equal(isMergeReadinessStep({ stepIndex: 11, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow" }), true);
   assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow-legacy-v1" }), true);
   assert.equal(isMergeReadinessStep({ stepIndex: 11, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow-legacy-v1" }), true);
-  assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow" }), false);
-  assert.equal(isMergeReadinessStep({ stepIndex: 11, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow" }), false);
-  assert.equal(isMergeReadinessStep({ stepIndex: 7, outputKind: "approval", taskTemplateName: "direct-engineer-workflow" }), false);
+  assert.equal(isMergeReadinessStep({ stepIndex: 7, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow-legacy-pre-adjudication-ckt1" }), true);
+  assert.equal(isMergeReadinessStep({ stepIndex: 12, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow-legacy-pre-adjudication-ckt1" }), true);
+  // The renamed rows keep only their own ordinal; the current one is not theirs.
+  assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow-legacy-pre-adjudication-ckt1" }), false);
+  assert.equal(isMergeReadinessStep({ stepIndex: 11, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow-legacy-pre-adjudication-ckt1" }), false);
+  // The adjudication-era ordinals belong to the renamed rows, never to the canonical names.
+  assert.equal(isMergeReadinessStep({ stepIndex: 7, outputKind: "merge-authorization", taskTemplateName: "direct-engineer-workflow" }), false);
+  assert.equal(isMergeReadinessStep({ stepIndex: 12, outputKind: "merge-authorization", taskTemplateName: "compound-engineer-workflow" }), false);
+  assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "approval", taskTemplateName: "direct-engineer-workflow" }), false);
 });
 
 test("merge-resolver results are versioned and head-bound", () => {
@@ -116,4 +125,81 @@ test("renames preserve guarded source identities", () => {
     previousFilename: "packages/api/src/merge-readiness-worker.ts",
     patch: null,
   }]), [{ path: "packages/api/src/merge-readiness-worker.ts", reason: "merge-tail-machinery" }]);
+});
+
+const reviewBody = (findings: unknown[], headSha = A) => JSON.stringify({ schemaVersion: 1, headSha, findings });
+
+const blocking = {
+  severity: "blocking",
+  title: "rollback loses the predecessor row",
+  detail: "the compensating write runs outside the transaction",
+  reachability: "reached whenever the second write fails after the first commits",
+};
+const followUp = { severity: "follow-up", title: "spec drift", detail: "the comment names a field that no caller reads" };
+
+test("an empty findings array is the approval", () => {
+  const parsed = parseIndependentReviewDecision(reviewBody([]), A);
+  assert.equal(parsed.status, "ok");
+  assert.equal(parsed.status === "ok" && parsed.decision.outcome, "approved");
+  assert.equal(parsed.status === "ok" && parsed.decision.blockingSummary, "");
+});
+
+test("only follow-up findings accept the head with follow-ups instead of rejecting it", () => {
+  const parsed = parseIndependentReviewDecision(reviewBody([followUp, followUp]), A);
+  assert.equal(parsed.status === "ok" && parsed.decision.outcome, "accepted-with-followups");
+  assert.equal(parsed.status === "ok" && parsed.decision.findings.length, 2);
+});
+
+test("one blocking finding rejects the head and its summary carries every blocking finding", () => {
+  const parsed = parseIndependentReviewDecision(reviewBody([followUp, blocking]), A);
+  assert.equal(parsed.status === "ok" && parsed.decision.outcome, "rejected");
+  assert.equal(
+    parsed.status === "ok" && parsed.decision.blockingSummary,
+    `${blocking.title}: ${blocking.detail}`,
+  );
+});
+
+test("a blocking finding without a reachability argument voids the decision", () => {
+  const { reachability, ...unproven } = blocking;
+  assert.equal(reachability.length > 0, true);
+  const parsed = parseIndependentReviewDecision(reviewBody([unproven]), A);
+  assert.equal(parsed.status, "invalid");
+  assert.match(parsed.status === "invalid" ? parsed.reason : "", /reachability/u);
+});
+
+test("a decision bound to another head, or with no findings array, is invalid", () => {
+  assert.equal(parseIndependentReviewDecision(reviewBody([], B), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(JSON.stringify({ schemaVersion: 1, headSha: A }), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(JSON.stringify({ schemaVersion: 2, headSha: A, findings: [] }), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision("not json", A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(null, A).status, "invalid");
+});
+
+test("a finding with an unknown severity or an empty title is invalid", () => {
+  assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, severity: "must-fix" }]), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, title: "  " }]), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, detail: "" }]), A).status, "invalid");
+});
+
+test("a decision with more findings than one range can carry, or an over-long field, is invalid", () => {
+  const many = Array.from({ length: MAX_REVIEW_FINDINGS + 1 }, () => followUp);
+  assert.equal(parseIndependentReviewDecision(reviewBody(many), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(reviewBody(Array.from({ length: MAX_REVIEW_FINDINGS }, () => followUp)), A).status, "ok");
+  const long = { ...followUp, detail: "d".repeat(MAX_REVIEW_FINDING_TEXT + 1) };
+  assert.equal(parseIndependentReviewDecision(reviewBody([long]), A).status, "invalid");
+});
+
+test("an authority-resign verdict is a first-class outcome and still needs its summary", () => {
+  const parsed = parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B,
+    summary: "added packages/db/prisma/migrations/20260826000000_x/migration.sql",
+  }));
+  assert.equal(parsed.status, "ok");
+  assert.equal(parsed.status === "ok" ? parsed.verdict.outcome : null, "authority-resign");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B, summary: "   ",
+  })).status, "invalid");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B,
+  })).status, "invalid");
 });

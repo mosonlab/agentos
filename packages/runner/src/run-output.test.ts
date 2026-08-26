@@ -77,6 +77,9 @@ const seedRemote = async (root: string): Promise<string> => {
   return remote;
 };
 
+// `home` is deliberately not the workspace root: the runner keeps its
+// repository mirror under the former and refuses one that overlaps the latter,
+// which workspace reclamation sweeps.
 const config = (workspaceRoot: string, agentBinary: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
   runnerToken: "runner-token",
@@ -86,7 +89,7 @@ const config = (workspaceRoot: string, agentBinary: string): RunnerConfig => ({
   leaseSeconds: 60,
   heartbeatIntervalMs: 60_000,
   path: process.env.PATH ?? "/usr/bin:/bin",
-  home: workspaceRoot,
+  home: join(workspaceRoot, "..", "home"),
   workspaceRoot,
   failedWorkspaceRetention: 0,
   workspaceReclaimIntervalMs: 300_000,

@@ -106,7 +106,7 @@ const stageBeforeChainLayerExpand = (): ChainLayerMigrationFixture => {
   };
 };
 
-const migrationQuery = async <T>(fixture: ChainLayerMigrationFixture, sql: string): Promise<T[]> => {
+const migrationQuery = async <T>(fixture: { url: string }, sql: string): Promise<T[]> => {
   const client = new PrismaClient({ datasources: { db: { url: fixture.url } } });
   try {
     return await client.$queryRawUnsafe<T[]>(sql);
@@ -150,6 +150,81 @@ const migrationHarnessEnabled = (
   && Boolean(process.env.TEST_DATABASE_URL)
   && Boolean(process.env.TEST_DATABASE_MAINTENANCE_URL)
 );
+
+const taskDispatchBindingMigration = "20260825120000_task_dispatch_binding";
+
+interface TaskDispatchBindingMigrationFixture {
+  schema: string;
+  url: string;
+  quotedSchema: string;
+  execute(sql: string): void;
+  applyMigration(): void;
+  cleanup(): void;
+}
+
+/**
+ * Stage the real migration history immediately before the dispatch-binding
+ * migration. The fixture deliberately creates a task before the migration so
+ * the additive-only proof can compare its row content and count after deploy.
+ */
+const stageBeforeTaskDispatchBinding = (): TaskDispatchBindingMigrationFixture => {
+  const base = new URL(testDatabaseUrl);
+  const sourceSchema = base.searchParams.get("schema");
+  if (!sourceSchema || sourceSchema === "public") throw new Error("dispatch-binding migration fixture refuses public schema");
+  const schema = `agentos_dispatch_binding_${process.pid}_${Date.now().toString(36)}`;
+  base.searchParams.set("schema", schema);
+  const url = base.toString();
+  const quotedSchema = `"${schema.replaceAll('"', '""')}"`;
+  const execute = (sql: string): void => {
+    execFileSync("npx", ["prisma", "db", "execute", "--url", url, "--stdin"], {
+      cwd: dbDirectory,
+      input: sql,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  };
+
+  execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE; CREATE SCHEMA ${quotedSchema};`);
+  const staging = mkdtempSync(join(tmpdir(), "task-dispatch-binding-fixture."));
+  cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
+  for (const entry of readdirSync(join(staging, "prisma", "migrations"), { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name >= taskDispatchBindingMigration) {
+      rmSync(join(staging, "prisma", "migrations", entry.name), { recursive: true, force: true });
+    }
+  }
+
+  const deploy = (): void => {
+    execFileSync("npx", ["prisma", "migrate", "deploy", "--schema", join(staging, "prisma", "schema.prisma")], {
+      cwd: dbDirectory,
+      env: { ...process.env, DATABASE_URL: url },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  };
+  deploy();
+
+  return {
+    schema,
+    url,
+    quotedSchema,
+    execute,
+    applyMigration: () => {
+      cpSync(
+        join(dbDirectory, "prisma", "migrations", taskDispatchBindingMigration),
+        join(staging, "prisma", "migrations", taskDispatchBindingMigration),
+        { recursive: true },
+      );
+      deploy();
+    },
+    cleanup: () => {
+      rmSync(staging, { recursive: true, force: true });
+      try {
+        execute(`DROP SCHEMA IF EXISTS ${quotedSchema} CASCADE;`);
+      } catch {
+        // A failed fixture must not leave its private schema behind if the
+        // server has already terminated the connection.
+      }
+    },
+  };
+};
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -725,6 +800,53 @@ test("inconsistent follow-up relationship aborts expand before changing rows", {
   }
 });
 
+test("dispatch binding migration is additive and preserves existing task rows", {
+  skip: !migrationHarnessEnabled,
+}, async () => {
+  const fixture = stageBeforeTaskDispatchBinding();
+  try {
+    fixture.execute(`
+      INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
+      VALUES ('dispatch-migration-project', 'dispatch-migration-project', 'dispatch-migration-project', NOW());
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "updatedAt")
+      VALUES ('dispatch-migration-task', 'dispatch-migration-project', 'existing task', 'existing task',
+              'dispatch-migration-chain', 1, 1, NOW());
+    `);
+
+    const before = await migrationQuery<{ count: bigint; checksum: string }>(fixture, `
+      SELECT count(*)::bigint AS count,
+             md5(to_jsonb(task)::text) AS checksum
+      FROM "Task" AS task
+      WHERE task."id" = 'dispatch-migration-task'
+      GROUP BY task."id"
+    `);
+    assert.equal(before.length, 1);
+    assert.equal(before[0]!.count, 1n);
+
+    fixture.applyMigration();
+
+    const after = await migrationQuery<{ count: bigint; checksum: string; binding: string | null }>(fixture, `
+      SELECT count(*)::bigint AS count,
+             md5((to_jsonb(task) - 'dispatchAfterTaskId')::text) AS checksum,
+             task."dispatchAfterTaskId" AS binding
+      FROM "Task" AS task
+      WHERE task."id" = 'dispatch-migration-task'
+      GROUP BY task."id", task."dispatchAfterTaskId"
+    `);
+    assert.deepEqual(after, [{ count: 1n, checksum: before[0]!.checksum, binding: null }]);
+
+    const columns = await migrationQuery<{ column_name: string; is_nullable: string; column_default: string | null }>(fixture, `
+      SELECT column_name, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_schema = '${fixture.schema.replaceAll("'", "''")}'
+        AND table_name = 'Task' AND column_name = 'dispatchAfterTaskId'
+    `);
+    assert.deepEqual(columns, [{ column_name: "dispatchAfterTaskId", is_nullable: "YES", column_default: null }]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Goal 5a0, plan Step 2.8 — catalog assertions for the idempotent execution
 // kernel migration, plus the raw negative inserts Step 2's verification names.
@@ -807,6 +929,140 @@ const rejects = async (client: PrismaClient, sql: string, expected: string): Pro
     `expected the database to refuse with ${JSON.stringify(expected)} but got:\n${message}\nfor:\n${sql}`,
   );
 };
+
+test("dispatch binding migration installs the storage contract and rejects unsafe shapes", async () => {
+  const suffix = `${Date.now()}-${process.pid}`;
+  const project = await db.project.create({ data: {
+    id: `dispatch-project-${suffix}`,
+    name: "Dispatch binding",
+    slug: `dispatch-binding-${suffix}`,
+  } });
+  const foreignProject = await db.project.create({ data: {
+    id: `dispatch-foreign-project-${suffix}`,
+    name: "Foreign dispatch binding",
+    slug: `dispatch-foreign-binding-${suffix}`,
+  } });
+  const predecessor = await db.task.create({ data: {
+    id: `dispatch-predecessor-${suffix}`,
+    projectId: project.id,
+    name: "predecessor",
+    description: "predecessor",
+    chainId: `dispatch-chain-a-${suffix}`,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+  const crossProjectPredecessor = await db.task.create({ data: {
+    id: `dispatch-cross-predecessor-${suffix}`,
+    projectId: project.id,
+    name: "cross-project predecessor",
+    description: "cross-project predecessor",
+    chainId: `dispatch-chain-cross-${suffix}`,
+    chainIndex: 1,
+    chainLayer: 1,
+  } });
+
+  const columns = await db.$queryRaw<Array<{ column_name: string; is_nullable: string; column_default: string | null }>>`
+    SELECT column_name, is_nullable, column_default
+    FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema}
+      AND table_name = 'Task' AND column_name = 'dispatchAfterTaskId'
+  `;
+  assert.deepEqual(columns, [{ column_name: "dispatchAfterTaskId", is_nullable: "YES", column_default: null }]);
+
+  const checks = await db.$queryRaw<Array<{ conname: string; definition: string; validated: boolean }>>`
+    SELECT c.conname, pg_get_constraintdef(c.oid) AS definition, c.convalidated AS validated
+    FROM pg_constraint AS c
+    JOIN pg_class AS relation ON relation.oid = c.conrelid
+    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname = ${testDatabaseSchema}
+      AND relation.relname = 'Task'
+      AND c.conname = 'Task_dispatch_binding_shape_check'
+  `;
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]!.conname, "Task_dispatch_binding_shape_check");
+  assert.equal(checks[0]!.validated, true);
+  assert.match(checks[0]!.definition, /dispatchAfterTaskId/u);
+  assert.match(checks[0]!.definition, /chainId/u);
+  assert.match(checks[0]!.definition, /goalId/u);
+  assert.match(checks[0]!.definition, /<> id/u);
+
+  const indexes = await db.$queryRaw<Array<{ indexname: string; indexdef: string }>>`
+    SELECT indexname, indexdef FROM pg_indexes
+    WHERE schemaname = ${testDatabaseSchema}
+      AND indexname = 'Task_dispatchAfterTaskId_key'
+  `;
+  assert.equal(indexes.length, 1);
+  assert.match(indexes[0]!.indexdef, /CREATE UNIQUE INDEX/u);
+  assert.match(indexes[0]!.indexdef, /\("dispatchAfterTaskId"\)/u);
+
+  const foreignKeys = await db.$queryRaw<Array<{ conname: string; confdeltype: string; columns: string[] }>>`
+    SELECT c.conname, c.confdeltype,
+           ARRAY(
+             SELECT a.attname
+             FROM unnest(c.conkey) WITH ORDINALITY AS key(attnum, ordinal)
+             JOIN pg_attribute AS a ON a.attrelid = c.conrelid AND a.attnum = key.attnum
+             ORDER BY key.ordinal
+           ) AS columns
+    FROM pg_constraint AS c
+    JOIN pg_namespace AS namespace ON namespace.oid = c.connamespace
+    WHERE namespace.nspname = ${testDatabaseSchema}
+      AND c.conname = 'Task_dispatchAfterTaskId_projectId_fkey'
+  `;
+  assert.deepEqual(foreignKeys, [{
+    conname: "Task_dispatchAfterTaskId_projectId_fkey",
+    confdeltype: "r",
+    columns: ["dispatchAfterTaskId", "projectId"],
+  }]);
+
+  await rejects(db, `
+    INSERT INTO "Task" ("id", "projectId", "name", "description", "dispatchAfterTaskId", "updatedAt")
+    VALUES ('dispatch-unshaped-${suffix}', '${project.id}', 'unshaped', 'unshaped', '${predecessor.id}', NOW())
+  `, "Task_dispatch_binding_shape_check");
+
+  const goal = await db.goal.create({ data: {
+    id: `dispatch-goal-${suffix}`,
+    projectId: project.id,
+    title: "Dispatch goal",
+    spec: "Dispatch goal",
+  } });
+  await rejects(db, `
+    INSERT INTO "Task" ("id", "projectId", "name", "description", "goalId", "goalGeneration", "goalIteration",
+                         "goalDispatchKey", "goalDispatchRequestHash", "goalDispatchState", "dispatchAfterTaskId", "updatedAt")
+    VALUES ('dispatch-goal-bound-${suffix}', '${project.id}', 'goal bound', 'goal bound', '${goal.id}', 1, 1,
+            'dispatch:${suffix}', 'hash:${suffix}', 'executing', '${predecessor.id}', NOW())
+  `, "Task_dispatch_binding_shape_check");
+
+  await rejects(db, `
+    INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+    VALUES ('dispatch-self-${suffix}', '${project.id}', 'self', 'self', 'dispatch-self-chain-${suffix}', 1, 1,
+            'dispatch-self-${suffix}', NOW())
+  `, "Task_dispatch_binding_shape_check");
+
+  const firstSuccessor = await db.task.create({ data: {
+    id: `dispatch-successor-one-${suffix}`,
+    projectId: project.id,
+    name: "successor one",
+    description: "successor one",
+    chainId: `dispatch-chain-b-${suffix}`,
+    chainIndex: 1,
+    chainLayer: 1,
+    dispatchAfterTaskId: predecessor.id,
+  } });
+  assert.equal(firstSuccessor.dispatchAfterTaskId, predecessor.id);
+  await rejects(db, `
+    INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+    VALUES ('dispatch-successor-two-${suffix}', '${project.id}', 'successor two', 'successor two', 'dispatch-chain-c-${suffix}', 1, 1,
+            '${predecessor.id}', NOW())
+  `, 'Key ("dispatchAfterTaskId")=');
+
+  await rejects(db, `
+    INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+    VALUES ('dispatch-cross-project-${suffix}', '${foreignProject.id}', 'cross project', 'cross project', 'dispatch-chain-d-${suffix}', 1, 1,
+            '${crossProjectPredecessor.id}', NOW())
+  `, "Task_dispatchAfterTaskId_projectId_fkey");
+
+  await rejects(db, `DELETE FROM "Task" WHERE "id" = '${predecessor.id}'`, "Task_dispatchAfterTaskId_projectId_fkey");
+});
 
 test("goal 5a0 migration installs the exact enum labels, columns, checks, FKs, and indexes", async () => {
   const dispatchStates = await db.$queryRaw<Array<{ enumlabel: string }>>`

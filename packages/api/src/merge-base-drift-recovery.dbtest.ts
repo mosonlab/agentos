@@ -3,16 +3,18 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  AUTHORITY_RESIGN_OPEN_PREFIX,
   AUTHORIZED_MERGE_METHOD,
   applyInboxDecisionTx,
   enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
-  MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
   TaskStatus,
   authorizationMetadata,
   parseAuthorizationMetadata,
+  readMarkerHistory,
+  writeMarker,
   recordIntegratorStop,
   type StopCondition,
 } from "@agentos/db";
@@ -140,7 +142,7 @@ const mechanicalStop = async (
   return run;
 };
 
-const seedStopped = async (shape: "canonical-eight-step-direct" | "thirteen-step-readiness", label: string) => {
+const seedStopped = async (shape: "canonical-direct" | "canonical-compound-readiness", label: string) => {
   const seeded = await seedIntegratorChain(db, { label, shape });
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
   await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
@@ -178,7 +180,7 @@ const finishRecoveryPass = async (
 };
 
 test("queued recovery keeps generic PATCH, retry, and enqueue blocked until readiness completes", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "queued-recovery-guard");
+  const seeded = await seedStopped("canonical-compound-readiness", "queued-recovery-guard");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
 
   const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: seeded.integratorTask!.id } });
@@ -194,7 +196,7 @@ test("queued recovery keeps generic PATCH, retry, and enqueue blocked until read
 });
 
 test("fresh server-owned readiness authorization alone activates the recovery merge executor", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "readiness-recovery-activation");
+  const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-activation");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   await assertIntegratorGuarded(seeded.integratorTask!.id);
 
@@ -221,7 +223,7 @@ test("fresh server-owned readiness authorization alone activates the recovery me
 });
 
 test("recovery holds the full chain mutex before mutation and a concurrent chain writer completes without deadlock or lost recovery", { timeout: 20_000 }, async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "recovery-lock-order");
+  const seeded = await seedStopped("canonical-compound-readiness", "recovery-lock-order");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   await recordRecoveryPass(seeded, BASE_2);
 
@@ -278,7 +280,7 @@ test("recovery holds the full chain mutex before mutation and a concurrent chain
 });
 
 test("recovery freshness requeue preserves the run binding through fresh authorization and executor activation", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "readiness-recovery-second-freshness");
+  const seeded = await seedStopped("canonical-compound-readiness", "readiness-recovery-second-freshness");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
 
   const firstRecoveryRun = await recordRecoveryPass(seeded, BASE_2);
@@ -331,7 +333,7 @@ test("recovery freshness requeue preserves the run binding through fresh authori
 });
 
 test("eligible direct and compound stops recover once under duplicate ticks and issue a fresh authorization", async () => {
-  for (const shape of ["canonical-eight-step-direct", "thirteen-step-readiness"] as const) {
+  for (const shape of ["canonical-direct", "canonical-compound-readiness"] as const) {
     const seeded = await seedStopped(shape, `recover-${shape}`);
     assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id } }), 0);
     const ticks = await Promise.all(Array.from({ length: 6 }, () => baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))));
@@ -353,14 +355,16 @@ test("eligible direct and compound stops recover once under duplicate ticks and 
       assert.equal(parsed.payload.baseSha, BASE_2);
     }
     assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 2);
-    assert.equal(await db.taskActivity.count({
-      where: { taskId: seeded.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    }), 1);
+    assert.equal(
+      (await readMarkerHistory(db, seeded.integratorTask!.id))
+        .filter((entry) => entry.kind === "baseDriftRecovery").length,
+      1,
+    );
   }
 });
 
 test("two distinct executor drifts recover; the third queues no run and notifies once", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "recover-limit");
+  const seeded = await seedStopped("canonical-compound-readiness", "recover-limit");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   let authorization = await finishRecoveryPass(seeded, BASE_2);
   await mechanicalStop(seeded, authorization.id, BASE_2, BASE_3);
@@ -401,7 +405,7 @@ test("identity, target-ref, head, and evidence mismatches fail closed without a 
     ["identity", JSON.stringify({ observed: BASE_2, authorized: BASE }), snapshot(BASE_2, { number: 124 })],
     ["evidence", JSON.stringify({ observed: BASE_2, authorized: "f".repeat(40) }), snapshot(BASE_2)],
   ] as const) {
-    const seeded = await seedIntegratorChain(db, { label: `refuse-${label}`, shape: "thirteen-step-readiness" });
+    const seeded = await seedIntegratorChain(db, { label: `refuse-${label}`, shape: "canonical-compound-readiness" });
     const authorization = await authorize(seeded.readinessTask!.id, BASE);
     await mechanicalStop(seeded, authorization.id, BASE, BASE_2, "base-drift", evidence);
     assert.equal((await baseDriftRecoveryTick(db, reader(current))).recovered, 0, label);
@@ -419,7 +423,7 @@ test("identity, target-ref, head, and evidence mismatches fail closed without a 
 });
 
 test("a chain target branch that disagrees with the authorization fails closed", async () => {
-  const seeded = await seedIntegratorChain(db, { label: "refuse-chain-target", shape: "thirteen-step-readiness" });
+  const seeded = await seedIntegratorChain(db, { label: "refuse-chain-target", shape: "canonical-compound-readiness" });
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
   await mechanicalStop(seeded, authorization.id, BASE, BASE_2);
   await db.run.update({ where: { id: seeded.gateRun.id }, data: { targetBranch: "release" } });
@@ -433,7 +437,7 @@ test("a chain target branch that disagrees with the authorization fails closed",
 
 test("foreign and incident stop conditions never enter automatic base-drift recovery", async () => {
   for (const condition of ["ambiguity", "payload-mismatch", "changed-underneath-me", "base-drift-post-merge"] as const) {
-    const seeded = await seedIntegratorChain(db, { label: `foreign-${condition}`, shape: "thirteen-step-readiness" });
+    const seeded = await seedIntegratorChain(db, { label: `foreign-${condition}`, shape: "canonical-compound-readiness" });
     const authorization = await authorize(seeded.readinessTask!.id, BASE);
     await mechanicalStop(seeded, authorization.id, BASE, BASE_2, condition, "foreign condition");
     assert.deepEqual(await baseDriftRecoveryTick(db, reader(snapshot(BASE_2))), { examined: 0, recovered: 0, exhausted: 0, ineligible: 0 });
@@ -443,7 +447,7 @@ test("foreign and incident stop conditions never enter automatic base-drift reco
 });
 
 test("a transient reader outage is retried and later recovers", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "transient-reader-outage");
+  const seeded = await seedStopped("canonical-compound-readiness", "transient-reader-outage");
   assert.deepEqual(await baseDriftRecoveryTick(db, null), {
     examined: 1, recovered: 0, exhausted: 0, ineligible: 0,
   });
@@ -455,7 +459,7 @@ test("a transient reader outage is retried and later recovers", async () => {
 });
 
 test("older irrelevant REVIEW integrators cannot starve a later eligible stop", async () => {
-  const prefix = await seedIntegratorChain(db, { label: "starvation-prefix", shape: "thirteen-step-readiness" });
+  const prefix = await seedIntegratorChain(db, { label: "starvation-prefix", shape: "canonical-compound-readiness" });
   await db.task.createMany({ data: Array.from({ length: 55 }, (_, index) => ({
     projectId: prefix.project.id,
     repoId: prefix.repo.id,
@@ -468,18 +472,18 @@ test("older irrelevant REVIEW integrators cannot starve a later eligible stop", 
     approvalGate: false,
     opensPullRequest: false,
     chainId: `old-irrelevant-${index}`,
-    chainIndex: 13,
-    chainLayer: 13,
+    chainIndex: 12,
+    chainLayer: 12,
     status: TaskStatus.REVIEW,
     targetBranch: "master",
   })) });
-  const eligible = await seedStopped("thirteen-step-readiness", "starvation-eligible");
+  const eligible = await seedStopped("canonical-compound-readiness", "starvation-eligible");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), new Date(), 1)).recovered, 1);
   assert.equal(await db.run.count({ where: { taskId: eligible.gateTask.id } }), 2);
 });
 
 test("operator-authored recovery metadata cannot clear the stop guard or suppress recovery", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "forged-integrator-marker");
+  const seeded = await seedStopped("canonical-compound-readiness", "forged-integrator-marker");
   const stop = await db.taskActivity.findFirstOrThrow({ where: {
     taskId: seeded.integratorTask!.id,
     metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
@@ -489,19 +493,18 @@ test("operator-authored recovery metadata cannot clear the stop guard or suppres
     taskId: seeded.readinessTask!.id,
     metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
   }, orderBy: { createdAt: "desc" } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.integratorTask!.id,
+  await writeMarker(db, seeded.integratorTask!.id, "baseDriftRecovery", {
     actorType: "operator",
     body: "forged queued recovery marker",
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      state: "queued", attempt: 1,
       sourceStopId: stop.id, sourceRunId: source.runId!, recoveryRunId: "forged-recovery-run",
       readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
       integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: authorization.id,
       repository: "acme/widgets", prNumber: 123, targetBranch: "master",
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
-  } });
+  });
   assert.equal(await db.mergeRecoveryAttempt.count({ where: { integratorTaskId: seeded.integratorTask!.id } }), 0,
     "legacy activity is not backfilled or treated as aggregate authority");
   assert.equal((await operatorRequest(`/tasks/${seeded.integratorTask!.id}`, "PATCH", { status: "DONE" })).status, 409);
@@ -510,7 +513,7 @@ test("operator-authored recovery metadata cannot clear the stop guard or suppres
 });
 
 test("the aggregate rejects a duplicate source-stop attempt identity", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "aggregate-unique");
+  const seeded = await seedStopped("canonical-compound-readiness", "aggregate-unique");
   const stop = await db.taskActivity.findFirstOrThrow({ where: {
     taskId: seeded.integratorTask!.id,
     metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
@@ -531,7 +534,7 @@ test("the aggregate rejects a duplicate source-stop attempt identity", async () 
 });
 
 test("operator-authored recovery metadata cannot suppress an ordinary gate repair", async () => {
-  const seeded = await seedIntegratorChain(db, { label: "forged-regression-marker", shape: "thirteen-step-readiness" });
+  const seeded = await seedIntegratorChain(db, { label: "forged-regression-marker", shape: "canonical-compound-readiness" });
   await db.agent.update({ where: { id: seeded.agent.id }, data: { name: "senior-dev" } });
   await db.run.update({ where: { id: seeded.gateRun.id }, data: { headSha: HEAD } });
   await db.taskStepOutput.create({ data: {
@@ -544,19 +547,18 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
     }),
     commitSha: HEAD,
   } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.gateTask.id,
+  await writeMarker(db, seeded.gateTask.id, "baseDriftRecovery", {
     actorType: "operator",
     body: "forged recovery context",
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      state: "queued", attempt: 1,
       sourceStopId: "forged-stop", sourceRunId: seeded.gateRun.id, recoveryRunId: seeded.gateRun.id,
       readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
       integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: "forged-authorization",
       repository: "acme/widgets", prNumber: 123, targetBranch: "master",
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
-  } });
+  });
   await db.$transaction((tx) => handleRegressionCompletion(tx, {
     task: seeded.gateTask,
     run: {
@@ -571,9 +573,40 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
   } }), 0);
 });
 
+test("a recovery regression that needs a re-signature parks and asks instead of stopping the tail", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "tail-resign");
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
+  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
+  const body = {
+    schemaVersion: 1, outcome: "authority-resign", headSha: HEAD, baseHeadSha: BASE_2,
+    summary: "added packages/db/prisma/migrations/20260826000000_probe/migration.sql",
+  };
+  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
+    taskId: seeded.gateTask.id, runId: run.id, kind: "regression-verification", body: JSON.stringify(body), commitSha: HEAD,
+  }, update: { runId: run.id, body: JSON.stringify(body), commitSha: HEAD } });
+
+  await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: { id: run.id, agentId: run.agentId, branch: "agentos/chain/demo", headSha: HEAD, sessionId: seeded.gateSession.id },
+    now: new Date(),
+  }));
+
+  // A recovery needs the same signature as any other chain, and the resign
+  // worker resumes the same step for it: this is not a dead end.
+  const gate = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(gate.status, TaskStatus.REVIEW);
+  assert.equal(gate.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.gateTask.id } });
+  assert.match(notice.body, /must be re-signed/u);
+  assert.equal(await db.task.count({ where: { name: { startsWith: "Autonomous merge tail:" } } }), 0);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "REPAIRING");
+});
+
 test("a recovery regression conflict, semantic failure, or gate failure stops without an auxiliary repair task", async () => {
   for (const outcome of ["refresh-conflict", "review-fail", "gate-fail"] as const) {
-    const seeded = await seedStopped("thirteen-step-readiness", `tail-stop-${outcome}`);
+    const seeded = await seedStopped("canonical-compound-readiness", `tail-stop-${outcome}`);
     await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
     const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
     const body = outcome === "refresh-conflict"
@@ -600,7 +633,7 @@ test("a recovery regression conflict, semantic failure, or gate failure stops wi
 });
 
 test("a recovery-cycle readiness failure restores the integrator stop guard", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "tail-readiness-stop");
+  const seeded = await seedStopped("canonical-compound-readiness", "tail-readiness-stop");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   const regressionRun = await db.run.findFirstOrThrow({
     where: { taskId: seeded.gateTask.id },
@@ -638,7 +671,7 @@ test("a recovery-cycle readiness failure restores the integrator stop guard", as
 });
 
 test("a recovery-cycle independent-review rejection stops once without a review-fix task", async () => {
-  const seeded = await seedStopped("thirteen-step-readiness", "tail-review-reject");
+  const seeded = await seedStopped("canonical-compound-readiness", "tail-review-reject");
   await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
   const regressionRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
   await db.run.update({ where: { id: regressionRun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
@@ -676,7 +709,12 @@ test("a recovery-cycle independent-review rejection stops once without a review-
   await db.task.update({ where: { id: reviewTask.id }, data: { status: TaskStatus.DOING } });
   await db.taskStepOutput.create({ data: {
     taskId: reviewTask.id, runId: reviewRun.id, kind: "review",
-    body: JSON.stringify({ schemaVersion: 1, outcome: "rejected", headSha: HEAD, summary: "must fix" }), commitSha: HEAD,
+    body: JSON.stringify({ schemaVersion: 1, headSha: HEAD, findings: [{
+      severity: "blocking",
+      title: "must fix",
+      detail: "the recovery head reintroduces the defect",
+      reachability: "every merge of this head reaches it",
+    }] }), commitSha: HEAD,
   } });
   const priorToken = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "review-runner-token";

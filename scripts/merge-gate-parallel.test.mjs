@@ -24,6 +24,11 @@ import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
 
 const gatePath = fileURLToPath(new URL("./merge-gate.sh", import.meta.url));
+// Sourced by the harnesses below rather than restated in them. The verdict's
+// exit codes and the four lines that carry them live in one file, and a fixture
+// that re-typed them would keep passing while the gate's real output changed
+// underneath it — which is the whole reason the module exists.
+const libPath = fileURLToPath(new URL("./gate-worker/lib.sh", import.meta.url));
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
@@ -59,11 +64,11 @@ const HARNESS = `
 set -uo pipefail
 say() { printf '\\n== %s\\n' "$1"; }
 note() { printf '   %s\\n' "$1"; }
+. ${JSON.stringify(libPath)}
 STEP_REPORT=()
 FAILED_STEP=""
-EXIT_NO_VERDICT=76
 NO_VERDICT_REASON=""
-NO_VERDICT_EXIT=76
+NO_VERDICT_EXIT="$GATE_EXIT_NO_VERDICT"
 GATE_REAL_FAILURE=""
 GATE_TMP="$1"
 REPO_ROOT="$2"
@@ -233,11 +238,9 @@ CONTAINER=stub
 STEP_REPORT=()
 FAILED_STEP=""
 GATED_HEAD=abc123
-EXIT_FAIL=1
-EXIT_NOT_AUTHORITATIVE=3
-EXIT_NO_VERDICT=76
+. ${JSON.stringify(libPath)}
 NO_VERDICT_REASON=""
-NO_VERDICT_EXIT=76
+NO_VERDICT_EXIT="$GATE_EXIT_NO_VERDICT"
 GATE_REAL_FAILURE=""
 ${extractVerdict()}
 `;
@@ -307,11 +310,9 @@ CONTAINER=stub
 STEP_REPORT=()
 FAILED_STEP=""
 GATED_HEAD=abc123
-EXIT_FAIL=1
-EXIT_NOT_AUTHORITATIVE=3
-EXIT_NO_VERDICT=76
+. ${JSON.stringify(libPath)}
 NO_VERDICT_REASON=""
-NO_VERDICT_EXIT=76
+NO_VERDICT_EXIT="$GATE_EXIT_NO_VERDICT"
 GATE_REAL_FAILURE=""
 GATE_GROUP_PIDS=()
 GATE_TMP="$1"

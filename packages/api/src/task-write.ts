@@ -16,6 +16,8 @@ export type LockedTask = {
   archivedAt: Date | null;
   projectId: string;
   chainId: string | null;
+  dispatchAfterTaskId: string | null;
+  dispatchAfter: { name: string; status: TaskStatus } | null;
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   templateStep: {
@@ -31,6 +33,8 @@ export const lockedTaskSelect = {
   archivedAt: true,
   projectId: true,
   chainId: true,
+  dispatchAfterTaskId: true,
+  dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,
   assigneeAgentId: true,
   templateStep: {
@@ -96,7 +100,7 @@ export const lockTaskMutationRows = async (
  * and the write straddle a concurrent archive, and the task — or the run
  * created with it — belongs to an agent the runner will never claim for.
  */
-export const assignmentBlocked = async (
+const assignmentBlocked = async (
   tx: Prisma.TransactionClient,
   assignee: { id: string; name: string } | null,
 ): Promise<string | null> => {

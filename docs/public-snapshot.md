@@ -101,6 +101,16 @@ else. `mintedArtifacts` is the manifest's mechanism for a snapshot input that is
 generated rather than tracked, and it is empty: nothing this repository
 publishes is minted-and-untracked today.
 
+**When a chain moves the migration set.** Any branch that adds a migration or
+edits a file `RELEASE_EVIDENCE_FILES` names invalidates the attestation, so the
+merge gate fails on the preflight's own dbtest. That is expected and the
+autonomous merge tail is built for it: regression verification runs
+`npm run db:authority-check -w @agentos/db` before the gate, and on a
+re-signature it parks itself and opens one inbox message carrying the exact
+commands above for that branch and head. Re-sign on the machine that holds the
+key, push, and the server re-queues regression verification on its own. Nothing
+in a chain ever signs, and no other chain waits on this one.
+
 **Then commit the attestation.** It is tracked, so it is reviewed and gated like
 the key that verifies it, and re-signing it is a commit like any other:
 
