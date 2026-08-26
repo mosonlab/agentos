@@ -5,10 +5,10 @@ canonical workflow. Its harness and evidence schema expect the former
 twelve-node Full Assurance shape: agent steps 1-10, server-side mechanical
 readiness at step 11, and the mechanical `merge-integrator` at step 12.
 
-Current canonical workflows are an eight-node/seven-layer Direct chain and a
-thirteen-node/twelve-layer Full Assurance chain. Full Assurance has parallel
-Sol and blind Opus review siblings, followed by a fresh Opus adjudication node;
-its readiness and integrator are nodes 12 and 13. Do not use the OSS-C harness
+Current canonical workflows are a seven-node/six-layer Direct chain and a
+twelve-node/eleven-layer Full Assurance chain. Full Assurance has parallel Sol
+and blind Opus review siblings whose findings the fix node adjudicates itself;
+its readiness and integrator are nodes 11 and 12. Do not use the OSS-C harness
 as current-template acceptance evidence until its implementation is migrated to
 that graph. The canonical source of the current workflow is
 [`agents/README.md`](../../agents/README.md).

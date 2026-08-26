@@ -1,6 +1,12 @@
 # Canonical agent review package
 
-Status: current as of 2026-08-25.
+Status: current as of 2026-08-26.
+
+The adjudication node was removed from both canonical templates on 2026-08-26.
+The `review-adjudicator-opus` sections below describe the node as it ran until
+then and as it still runs for chains created under it; no canonical template
+step binds that role now. The fix step reads both immutable reports and records
+a disposition for every finding id in its own output.
 
 The canonical roster contains fifteen LLM roles and one mechanical sentinel:
 

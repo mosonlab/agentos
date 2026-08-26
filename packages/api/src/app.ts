@@ -113,13 +113,11 @@ import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText, truncateFailureReason } from "./failure-reason.js";
 import {
   canonicalOutputRefusal,
-  isCanonicalAdjudicationStep,
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
   isCanonicalSolFindingsStep,
   persistSessionTaskOutput,
   previousRunHandoffForClaim,
-  reviewAdjudicationClaimRefusal,
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import {
@@ -4308,8 +4306,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
       const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
-        || isCanonicalBlindFindingsStep(task.templateStep)
-        || isCanonicalAdjudicationStep(task.templateStep);
+        || isCanonicalBlindFindingsStep(task.templateStep);
       if (immutableReview && existing) {
         return { error: `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`, code: 409 as const };
       }
@@ -4757,7 +4754,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         take: 20,
       });
       const executorRunnerIds = mergeExecutorRunnerIds();
-      let adjudicationRefusal: string | null = null;
       for (const candidate of candidates) {
         if (!candidate.task || !candidate.repo) continue;
         if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
@@ -4907,23 +4903,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           if (grantedEnvironmentVariables.has(envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
           grantedEnvironmentVariables.add(envVar);
         }
-        const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
-        if (adjudicationTask) {
-          // Adjudication consumes evidence owned by sibling Tasks. Hold the
-          // candidate Run first, then the sole complete-chain mutex, and only
-          // validate the pinned range and reports after both locks are held.
-          // Every sibling status/output writer takes that same chain mutex, so
-          // the evidence cannot change between validation and the claim CAS.
-          await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${candidate.id} FOR UPDATE`;
-          const lockedRun = await tx.run.findUnique({
-            where: { id: candidate.id },
-            select: { status: true, leaseGeneration: true, taskId: true },
-          });
-          if (lockedRun?.status !== RunStatus.QUEUED
-            || lockedRun.leaseGeneration !== candidate.leaseGeneration
-            || lockedRun.taskId !== candidate.task.id) continue;
-          if (!await lockTaskMutationRows(tx, candidate.task.id)) continue;
-        }
         let implementationRange: Awaited<ReturnType<typeof pinnedImplementationRange>>;
         try {
           implementationRange = await pinnedImplementationRange(tx, candidate.task);
@@ -4983,15 +4962,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           continue;
         }
-        const reviewClaimRefusal = await reviewAdjudicationClaimRefusal(tx, {
-          task: candidate.task,
-          implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
-          implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
-        });
-        if (reviewClaimRefusal) {
-          adjudicationRefusal = reviewClaimRefusal;
-          continue;
-        }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
         const sessionCredential = issueSessionToken();
@@ -5013,8 +4983,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
         if (won.count !== 1) continue;
-        if (!adjudicationTask) await lockTaskMutationRows(tx, candidate.task.id);
-        const priorResume = !adjudicationTask && candidate.session?.resumeInput && candidate.session.providerConversationId ? {
+        await lockTaskMutationRows(tx, candidate.task.id);
+        const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
           providerConversationId: candidate.session.providerConversationId,
           input: candidate.session.resumeInput,
         } : null;
@@ -5026,13 +4996,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             requestedAt: now,
             endedAt: null,
             failureReason: null,
-            ...(adjudicationTask ? {
-              providerConversationId: null,
-              resumeInput: null,
-              resumableUntil: null,
-              waitingOnMessageId: null,
-              resumeAttempt: 0,
-            } : {}),
           },
         }) : await tx.session.create({ data: {
             runId: candidate.id,
@@ -5147,7 +5110,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };
       }
-      return adjudicationRefusal ? { error: adjudicationRefusal } : null;
+      return null;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
     // Two runners claiming independent chains still touch the same Task pages

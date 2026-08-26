@@ -141,7 +141,7 @@ after(async () => {
   delete process.env.OPERATOR_TOKEN;
 });
 
-test("afterTaskId binds only the first of thirteen tasks and writes both audit rows", async () => {
+test("afterTaskId binds only the first of the chain's tasks and writes both audit rows", async () => {
   const seed = await fixture("valid-binding");
   const predecessorTasks = await instantiate(seed);
   const predecessor = predecessorTasks.at(-1)!;

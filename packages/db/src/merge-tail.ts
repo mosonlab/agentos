@@ -9,8 +9,8 @@ import {
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
-export const DIRECT_MERGE_READINESS_STEP_INDEX = 7;
-export const MERGE_READINESS_STEP_INDEX = 12;
+export const DIRECT_MERGE_READINESS_STEP_INDEX = 6;
+export const MERGE_READINESS_STEP_INDEX = 11;
 export const LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX = 6;
 export const LEGACY_MERGE_READINESS_STEP_INDEX = 11;
 export const MERGE_TAIL_KIND = {
