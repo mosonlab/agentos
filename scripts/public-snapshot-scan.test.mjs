@@ -385,6 +385,7 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/release/v0.1.0-security.md",
     "docs/release/v0.1.0-support-matrix.md",
     "docs/release/v0.2.0-release-notes.md",
+    "docs/runbooks/chain-template-changes.md",
     "docs/runbooks/gate-worker.md",
     "docs/runbooks/merge-delivery.md",
     "docs/runbooks/merge-executor.md",
