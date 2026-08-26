@@ -47,10 +47,18 @@ test("Regression v2 is canonical while the rolled v1 contract remains readable",
     5,
     "regression-verification",
   );
-  const output = (kind: string, schemaVersion: number) => ({
+  const output = (kind: string, schemaVersion: number, bodyOverrides: Record<string, unknown> = {}) => ({
     runId: "run-1",
     kind,
-    body: JSON.stringify({ schemaVersion, outcome: "pass", headSha, baseHeadSha, gateVerdict: "PASS" }),
+    body: JSON.stringify({
+      schemaVersion,
+      outcome: "pass",
+      headSha,
+      baseHeadSha,
+      gateVerdict: "PASS",
+      ...(schemaVersion === 2 ? { gateProof: `MERGE GATE: PASS ${headSha}` } : {}),
+      ...bodyOverrides,
+    }),
     commitSha: headSha,
     metadata: null,
   });
@@ -60,6 +68,18 @@ test("Regression v2 is canonical while the rolled v1 contract remains readable",
   assert.match(
     canonicalOutputRefusal(current, output("regression-verification-v2", 1), "run-1", headSha) ?? "",
     /schemaVersion 2/u,
+  );
+  assert.match(
+    canonicalOutputRefusal(current, output("regression-verification-v2", 2, {
+      gateProof: `MERGE GATE: PASS ${baseHeadSha}`,
+    }), "run-1", headSha) ?? "",
+    /gate proof oid must match headSha/u,
+  );
+  assert.match(
+    canonicalOutputRefusal(current, output("regression-verification-v2", 2, {
+      gateProof: undefined,
+    }), "run-1", headSha) ?? "",
+    /gateProof/u,
   );
   assert.equal(isCanonicalAgentStep(legacy), true);
   assert.equal(requiredOutputKind(legacy), "regression-verification");

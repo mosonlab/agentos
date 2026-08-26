@@ -121,13 +121,17 @@ export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPh
 );
 
 const SHA = /^[0-9a-f]{40}$/u;
+const PASS_GATE_PROOF = /^MERGE GATE: PASS ([0-9a-f]{40})$/u;
+const FAIL_GATE_PROOF = /^MERGE GATE: FAIL \(.+\)$/u;
 
 type RegressionVerdictSchemaVersion = typeof MERGE_TAIL_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_SCHEMA_VERSION;
 
 export type RegressionVerdict =
-  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
+  | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
+  | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string }
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
-  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
+  | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
+  | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string }
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string }
   /**
    * The tree moved attested release-path files without re-signing
@@ -202,12 +206,23 @@ export const parseRegressionVerdict = (
   if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return { status: "invalid", reason: "invalid regression headSha" };
   if (typeof value.baseHeadSha !== "string" || !SHA.test(value.baseHeadSha)) return { status: "invalid", reason: "invalid regression baseHeadSha" };
   if (value.outcome === "pass" && value.gateVerdict === "PASS") {
+    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION) {
+      const proof = typeof value.gateProof === "string" ? PASS_GATE_PROOF.exec(value.gateProof) : null;
+      if (!proof) return { status: "invalid", reason: "invalid regression gateProof for PASS" };
+      if (proof[1] !== value.headSha) {
+        return { status: "invalid", reason: "regression gateProof oid does not match headSha" };
+      }
+    }
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   if (value.outcome === "review-fail" && typeof value.summary === "string" && value.summary.trim().length > 0) {
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   if (value.outcome === "gate-fail" && value.gateVerdict === "FAIL" && typeof value.summary === "string" && value.summary.length > 0) {
+    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
+      && (typeof value.gateProof !== "string" || !FAIL_GATE_PROOF.test(value.gateProof))) {
+      return { status: "invalid", reason: "invalid regression gateProof for FAIL" };
+    }
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   if (value.outcome === "refresh-conflict" && typeof value.summary === "string" && value.summary.length > 0) {

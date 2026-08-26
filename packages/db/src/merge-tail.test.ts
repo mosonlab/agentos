@@ -55,12 +55,55 @@ test("regression verdicts are exact-head, versioned, and fail closed", () => {
 });
 
 test("the narrowed Regression contract requires v2 while legacy output remains readable", () => {
-  const v2 = JSON.stringify({ schemaVersion: 2, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "PASS" });
+  const v2 = JSON.stringify({
+    schemaVersion: 2,
+    outcome: "pass",
+    headSha: A,
+    baseHeadSha: B,
+    gateVerdict: "PASS",
+    gateProof: `MERGE GATE: PASS ${A}`,
+  });
   const v1 = JSON.stringify({ schemaVersion: 1, outcome: "pass", headSha: A, baseHeadSha: B, gateVerdict: "PASS" });
   assert.equal(parseRegressionVerdict(v2, "regression-verification-v2").status, "ok");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 2,
+    outcome: "pass",
+    headSha: A,
+    baseHeadSha: B,
+    gateVerdict: "PASS",
+    gateProof: `MERGE GATE: PASS ${B}`,
+  }), "regression-verification-v2").status, "invalid");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 2,
+    outcome: "pass",
+    headSha: A,
+    baseHeadSha: B,
+    gateVerdict: "PASS",
+  }), "regression-verification-v2").status, "invalid");
   assert.equal(parseRegressionVerdict(v1, "regression-verification").status, "ok");
   assert.equal(parseRegressionVerdict(v1, "regression-verification-v2").status, "invalid");
   assert.equal(parseRegressionVerdict(v2, "regression-verification").status, "invalid");
+});
+
+test("Regression v2 gate failures carry the complete Merge gate verdict", () => {
+  const verdict = {
+    schemaVersion: 2,
+    outcome: "gate-fail",
+    headSha: A,
+    baseHeadSha: B,
+    gateVerdict: "FAIL",
+    gateProof: "MERGE GATE: FAIL (unit tests)",
+    summary: "unit tests",
+  };
+  assert.equal(parseRegressionVerdict(JSON.stringify(verdict), "regression-verification-v2").status, "ok");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 2,
+    outcome: "gate-fail",
+    headSha: A,
+    baseHeadSha: B,
+    gateVerdict: "FAIL",
+    summary: "unit tests",
+  }), "regression-verification-v2").status, "invalid");
 });
 
 test("both canonical readiness steps are mechanical server-owned shapes", () => {
