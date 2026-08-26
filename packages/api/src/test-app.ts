@@ -94,7 +94,7 @@ export const createApp = (db: PrismaClient, options: {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
     onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
     releaseMergeLease: options.releaseMergeLease ?? (async () => ({ outcome: "not-held" })),
-    ...(options.specificationReader === undefined ? {} : { specificationReader: options.specificationReader }),
+    specificationReader: options.specificationReader ?? null,
   });
 };
 

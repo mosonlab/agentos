@@ -118,6 +118,36 @@ const interpolate = (source: string, variables: Record<string, string>): string 
   (_match, name: string) => variables[name] ?? `{{${name}}}`,
 );
 
+const FEATURE_BRIEF_PREFIX = "\nFeature brief:\n";
+const PRIOR_OUTPUTS_REMINDER = "\nRead the prior template steps' persisted outputs before working.";
+const PERSIST_OUTPUT_PREFIX = "\nPersist the final ";
+const PERSIST_OUTPUT_SUFFIX = " output for this step through the AgentOS task output endpoint.";
+
+export const composeTemplateTaskDescription = (input: {
+  prompt: string;
+  featureBrief?: string | undefined;
+  attachmentsFromPrevious: boolean;
+  outputKind: string;
+}): string => [
+  input.prompt,
+  input.featureBrief ? `${FEATURE_BRIEF_PREFIX}${input.featureBrief}` : "",
+  input.attachmentsFromPrevious ? PRIOR_OUTPUTS_REMINDER : "",
+  `${PERSIST_OUTPUT_PREFIX}${input.outputKind}${PERSIST_OUTPUT_SUFFIX}`,
+].join("");
+
+/** Recover exactly the user-authored brief from a platform-composed task description. */
+export const featureBriefFromTaskDescription = (description: string): string | null => {
+  const startMarker = description.indexOf(FEATURE_BRIEF_PREFIX);
+  const endMarker = description.lastIndexOf(PERSIST_OUTPUT_PREFIX);
+  if (startMarker < 0 || endMarker < startMarker) return null;
+  const start = startMarker + FEATURE_BRIEF_PREFIX.length;
+  const reminderStart = endMarker - PRIOR_OUTPUTS_REMINDER.length;
+  const end = reminderStart >= start && description.slice(reminderStart, endMarker) === PRIOR_OUTPUTS_REMINDER
+    ? reminderStart
+    : endMarker;
+  return description.slice(start, end);
+};
+
 export const isUsableTemplateVariable = (value: string | undefined): value is string => (
   value !== undefined && value.trim().length > 0
 );
@@ -465,12 +495,12 @@ export const instantiateTemplate = async (
         const promptVariables = { ...input.variables, chainId };
         for (const [index, effective] of effectiveSteps.entries()) {
           const { step } = effective;
-          const context = [
-            interpolate(step.prompt, promptVariables),
-            input.description ? `\nFeature brief:\n${input.description}` : "",
-            step.attachmentsFromPrevious ? "\nRead the prior template steps' persisted outputs before working." : "",
-            `\nPersist the final ${step.outputKind} output for this step through the AgentOS task output endpoint.`,
-          ].join("");
+          const context = composeTemplateTaskDescription({
+            prompt: interpolate(step.prompt, promptVariables),
+            featureBrief: input.description,
+            attachmentsFromPrevious: step.attachmentsFromPrevious,
+            outputKind: step.outputKind,
+          });
           tasks.push(await tx.task.create({ data: {
             projectId,
             repoId: repo.id,

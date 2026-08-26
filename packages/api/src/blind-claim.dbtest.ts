@@ -18,6 +18,7 @@ const RUNNER_TOKEN = "blind-claim-runner-token";
 const OPERATOR_TOKEN = "blind-claim-operator-token";
 /** The head both reviews were bound to, and the head the fix starts from. */
 const REVIEWED_HEAD = "e".repeat(40);
+const SPECIFICATION_BRIEF = "Canonical specification-fidelity fixture brief.";
 const UNIQUE_PREDECESSOR_FINDING = {
   id: "SOL-UNIQUE-1",
   severity: "P1",
@@ -95,6 +96,7 @@ const queueCanonicalStep = async (
     repoId,
     variables: { branchName: `blind-claim-step-${stepIndex}` },
     autoStart: true,
+    description: SPECIFICATION_BRIEF,
   });
   await db.run.deleteMany({ where: { taskId: { in: chain.tasks.map((task) => task.id) } } });
   const priorTasks = chain.tasks.filter((task) => task.chainIndex !== null && task.chainIndex < stepIndex);
@@ -129,10 +131,11 @@ const queueCanonicalStep = async (
   await db.taskStepOutput.createMany({ data: priorTasks.map((task) => {
     const headSha = String(task.chainIndex).padStart(40, "0");
     const implementationSource = task.id === sourceTask?.id && sourceRun;
+    const specificationSource = template.name === INTEGRATOR_TEMPLATE_NAME && task.chainIndex === 1;
     return {
       taskId: task.id,
       ...(implementationSource ? { runId: sourceRun.id } : {}),
-      kind: implementationSource ? "implementation" : `step-${task.chainIndex}`,
+      kind: implementationSource ? "implementation" : specificationSource ? "spec" : `step-${task.chainIndex}`,
       body: implementationSource
         ? JSON.stringify({
           schemaVersion: 1,
@@ -141,6 +144,8 @@ const queueCanonicalStep = async (
           summary: "implemented before exact-head recovery",
           testsRun: ["focused"],
         })
+        : specificationSource
+          ? JSON.stringify({ schemaVersion: 1, headSha, spec: SPECIFICATION_BRIEF })
         : `persisted output from step ${task.chainIndex}`,
       commitSha: headSha,
     };
@@ -150,7 +155,9 @@ const queueCanonicalStep = async (
 };
 
 const claim = async () => {
-  const response = await createApp(db).request("/runner/tasks/claim", {
+  const response = await createApp(db, {
+    specificationReader: { readFileAtCommit: async () => new TextEncoder().encode(SPECIFICATION_BRIEF) },
+  }).request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ runnerId: "blind-claim-runner", leaseSeconds: 60 }),
@@ -169,6 +176,60 @@ const claim = async () => {
     fencingToken: string;
   }>;
 };
+
+test("tampered direct and compound materializations are durably refused at review claim", async () => {
+  for (const fixture of [
+    { templateName: DIRECT_TEMPLATE_NAME, reviewStep: 2 },
+    { templateName: INTEGRATOR_TEMPLATE_NAME, reviewStep: 6 },
+  ] as const) {
+    await resetTestDb(db);
+    const { template, repo } = await seedCanonicalTemplate(fixture.templateName);
+    const { run } = await queueCanonicalStep(template, repo.id, fixture.reviewStep);
+    const response = await createApp(db, {
+      specificationReader: { readFileAtCommit: async () => new TextEncoder().encode("tampered") },
+    }).request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: "tampered-review-runner", leaseSeconds: 60 }),
+    });
+
+    assert.equal(response.status, 409);
+    const body = await response.json() as { error: string; reason: string };
+    assert.equal(body.reason, "spec-transcription-mismatch");
+    assert.match(body.error, /spec-transcription-mismatch/u);
+    const stopped = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    assert.equal(stopped.status, "FAILED");
+    assert.equal(stopped.retryable, false);
+    assert.ok(stopped.taskId);
+    const task = await db.task.findUniqueOrThrow({ where: { id: stopped.taskId } });
+    assert.equal(task.status, "BACKLOG");
+    assert.match(task.failureReason ?? "", /spec-transcription-mismatch/u);
+    assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `spec-transcription-mismatch:${run.id}` } }), 1);
+  }
+});
+
+test("faithful direct and compound materializations claim review runs normally", async () => {
+  for (const fixture of [
+    { templateName: DIRECT_TEMPLATE_NAME, reviewStep: 2 },
+    { templateName: INTEGRATOR_TEMPLATE_NAME, reviewStep: 6 },
+  ] as const) {
+    await resetTestDb(db);
+    const { template, repo } = await seedCanonicalTemplate(fixture.templateName);
+    const { run } = await queueCanonicalStep(template, repo.id, fixture.reviewStep);
+    const response = await createApp(db, {
+      specificationReader: { readFileAtCommit: async () => new TextEncoder().encode(SPECIFICATION_BRIEF) },
+    }).request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: "faithful-review-runner", leaseSeconds: 60 }),
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json() as { run: { id: string; implementationHeadSha: string } };
+    assert.equal(body.run.id, run.id);
+    assert.equal(body.run.implementationHeadSha, run.targetBranch);
+  }
+});
 
 const reviewReport = (kind: "sol-findings" | "blind-findings", headSha: string, baseSha = "b".repeat(40)) => JSON.stringify({
   schemaVersion: 1,

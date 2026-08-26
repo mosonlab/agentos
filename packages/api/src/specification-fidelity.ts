@@ -1,5 +1,4 @@
 import {
-  DIRECT_TEMPLATE_NAME,
   githubRepositoryFromRemote,
   INTEGRATOR_TEMPLATE_NAME,
   Prisma,
@@ -7,9 +6,22 @@ import {
 
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
 import { isValidBranchName } from "./branch-name.js";
+import { featureBriefFromTaskDescription } from "./templates.js";
 
-/** Stable, machine-readable reason included in every claim refusal from this check. */
+/** Stable, machine-readable reasons for the distinct fail-closed outcomes. */
 export const SPEC_TRANSCRIPTION_REFUSAL_REASON = "spec-transcription-mismatch";
+export const SPEC_TRANSCRIPTION_UNREADABLE_REASON = "spec-transcription-unreadable";
+export const SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON = "spec-transcription-authority-missing";
+
+export type SpecificationRefusalReason =
+  | typeof SPEC_TRANSCRIPTION_REFUSAL_REASON
+  | typeof SPEC_TRANSCRIPTION_UNREADABLE_REASON
+  | typeof SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON;
+
+export type SpecificationRefusal = {
+  reason: SpecificationRefusalReason;
+  message: string;
+};
 
 /** The repository path the implementation step promises to materialize. */
 export const specificationPathForBranch = (branch: string): string => `.chain/${branch}/spec.md`;
@@ -25,7 +37,7 @@ export type SpecificationReader = {
     path: string,
     commitSha: string,
     signal: AbortSignal,
-  ) => Promise<Uint8Array | null>;
+  ) => Promise<Uint8Array>;
 };
 
 type ReviewTask = {
@@ -51,9 +63,6 @@ export type SpecificationReviewCandidate = {
   branch: string | null;
 };
 
-const FEATURE_BRIEF_MARKER = /Feature brief:\r?\n/u;
-const PERSIST_OUTPUT_MARKER = /\r?\nPersist the final /u;
-
 const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean => (
   left.length === right.length && left.every((byte, index) => byte === right[index])
 );
@@ -73,25 +82,14 @@ export const normalizeLineEndings = (bytes: Uint8Array): Uint8Array => {
   return Uint8Array.from(normalized);
 };
 
-/** Extract the original direct-chain brief from the composed implementation prompt. */
-export const directTaskBriefFromDescription = (description: string): string | null => {
-  const marker = FEATURE_BRIEF_MARKER.exec(description);
-  if (!marker || marker.index < 0) return null;
-  const start = marker.index + marker[0].length;
-  let suffix = -1;
-  let offset = start;
-  while (offset < description.length) {
-    const match = PERSIST_OUTPUT_MARKER.exec(description.slice(offset));
-    if (!match || match.index === undefined) break;
-    suffix = offset + match.index;
-    offset = suffix + match[0].length;
-  }
-  if (suffix < start) return null;
-  return description.slice(start, suffix);
-};
+const refusal = (reason: SpecificationRefusalReason, detail: string): SpecificationRefusal => ({
+  reason,
+  message: `Spec transcription claim refused: ${reason}: ${detail}`,
+});
 
-const refusal = (detail: string): string =>
-  `Spec transcription claim refused: ${SPEC_TRANSCRIPTION_REFUSAL_REASON}: ${detail}`;
+export const specificationUnreadableRefusal = (detail: string): SpecificationRefusal => (
+  refusal(SPEC_TRANSCRIPTION_UNREADABLE_REASON, detail)
+);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -100,9 +98,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 const compoundAuthority = async (
   tx: Prisma.TransactionClient,
   candidate: SpecificationReviewCandidate,
-): Promise<{ text: string } | { error: string }> => {
+): Promise<AuthorityResult> => {
   if (!candidate.task.templateId || !candidate.task.chainId) {
-    return { error: refusal("compound chain identity is unavailable") };
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "compound chain identity is unavailable") };
   }
   const source = await tx.taskStepOutput.findFirst({
     where: {
@@ -115,16 +113,16 @@ const compoundAuthority = async (
     },
     select: { kind: true, body: true },
   });
-  if (!source) return { error: refusal("approved specification output is missing") };
-  if (source.kind !== "spec") return { error: refusal("approved specification output has an unexpected kind") };
+  if (!source) return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output is missing") };
+  if (source.kind !== "spec") return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output has an unexpected kind") };
   let parsed: unknown;
   try {
     parsed = JSON.parse(source.body);
   } catch {
-    return { error: refusal("approved specification output is not valid JSON") };
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output is not valid JSON") };
   }
   if (!isRecord(parsed) || parsed.schemaVersion !== 1 || typeof parsed.spec !== "string") {
-    return { error: refusal("approved specification output has no canonical spec field") };
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "approved specification output has no canonical spec field") };
   }
   return { text: parsed.spec };
 };
@@ -132,9 +130,9 @@ const compoundAuthority = async (
 const directAuthority = async (
   tx: Prisma.TransactionClient,
   candidate: SpecificationReviewCandidate,
-): Promise<{ text: string } | { error: string }> => {
+): Promise<AuthorityResult> => {
   if (!candidate.task.templateId || !candidate.task.chainId) {
-    return { error: refusal("direct chain identity is unavailable") };
+    return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct chain identity is unavailable") };
   }
   // Every instantiated step carries the brief in its composed prompt, but the
   // implementation step is the direct chain's source of authority. Reading it
@@ -149,54 +147,110 @@ const directAuthority = async (
     },
     select: { description: true },
   });
-  if (!source) return { error: refusal("direct-chain implementation task is missing") };
-  const text = directTaskBriefFromDescription(source.description);
-  return text === null ? { error: refusal("direct-chain task brief is unavailable") } : { text };
+  if (!source) return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain implementation task is missing") };
+  const text = featureBriefFromTaskDescription(source.description);
+  return text === null
+    ? { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain task brief is unavailable") }
+    : { text };
 };
+
+type AuthorityResult = { text: string } | { error: SpecificationRefusal };
 
 const authorityFor = async (
   tx: Prisma.TransactionClient,
   candidate: SpecificationReviewCandidate,
-): Promise<{ text: string } | { error: string }> => {
+): Promise<AuthorityResult> => {
   const templateName = candidate.task.templateStep?.taskTemplate?.name;
-  if (templateName === INTEGRATOR_TEMPLATE_NAME) return compoundAuthority(tx, candidate);
-  if (templateName === DIRECT_TEMPLATE_NAME) return directAuthority(tx, candidate);
-  return { error: refusal(`unsupported review template ${templateName ?? "missing"}`) };
+  return templateName === INTEGRATOR_TEMPLATE_NAME
+    ? compoundAuthority(tx, candidate)
+    : directAuthority(tx, candidate);
 };
 
-/**
- * Verify the immutable implementation head contains exactly the specification
- * its chain was authorized to review. A non-null error is a claim refusal; the
- * caller must leave the queued run untouched and surface it to the runner.
- */
-export const specificationTranscriptionRefusal = async (
+export type SpecificationVerification = {
+  key: string;
+  repository: string;
+  path: string;
+  implementationHeadSha: string;
+  authoritativeBytes: Uint8Array;
+};
+
+export type SpecificationVerificationPreparation =
+  | { status: "not-required" }
+  | { status: "refused"; refusal: SpecificationRefusal }
+  | { status: "ready"; verification: SpecificationVerification };
+
+/** Snapshot all database-backed authority while the claim transaction is open. */
+export const prepareSpecificationVerification = async (
   tx: Prisma.TransactionClient,
   candidate: SpecificationReviewCandidate,
   implementationHeadSha: string | null,
-  reader: SpecificationReader | null,
-  signal: AbortSignal,
-): Promise<string | null> => {
+): Promise<SpecificationVerificationPreparation> => {
   const step = candidate.task.templateStep;
-  if (!step || (!isCanonicalSolFindingsStep(step) && !isCanonicalBlindFindingsStep(step))) return null;
-  if (!reader) return refusal("server-side repository content reader is unavailable");
-  if (!implementationHeadSha) return refusal("pinned implementation head is unavailable");
-  if (!candidate.branch || !isValidBranchName(candidate.branch)) return refusal("materialized specification branch is unavailable");
+  if (!step || (!isCanonicalSolFindingsStep(step) && !isCanonicalBlindFindingsStep(step))) {
+    return { status: "not-required" };
+  }
+  if (!implementationHeadSha) {
+    return { status: "refused", refusal: refusal(
+      SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
+      "pinned implementation head is unavailable",
+    ) };
+  }
+  if (!candidate.branch || !isValidBranchName(candidate.branch)) {
+    return { status: "refused", refusal: refusal(
+      SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
+      "materialized specification branch is unavailable",
+    ) };
+  }
 
   const authority = await authorityFor(tx, candidate);
-  if ("error" in authority) return authority.error;
+  if ("error" in authority) return { status: "refused", refusal: authority.error };
 
   const repository = githubRepositoryFromRemote(candidate.repo.remoteUrl) ?? candidate.repo.remoteUrl;
   const path = specificationPathForBranch(candidate.branch);
-  let materialized: Uint8Array | null;
-  try {
-    materialized = await reader.readFileAtCommit(repository, path, implementationHeadSha, signal);
-  } catch (error: unknown) {
-    const detail = error instanceof Error ? error.message : "repository content read failed";
-    return refusal(detail);
-  }
-  if (!materialized) return refusal(`materialized ${path} is missing from the implementation head`);
   const authoritativeBytes = new TextEncoder().encode(authority.text);
-  return bytesEqual(normalizeLineEndings(materialized), normalizeLineEndings(authoritativeBytes))
+  return {
+    status: "ready",
+    verification: {
+      key: [candidate.task.id, implementationHeadSha, candidate.branch, authority.text].join("\0"),
+      repository,
+      path,
+      implementationHeadSha,
+      authoritativeBytes,
+    },
+  };
+};
+
+const isAbortError = (error: unknown): boolean => (
+  error instanceof Error && error.name === "AbortError"
+);
+
+/** Perform only the bounded repository I/O; callers must invoke this outside transactions. */
+export const verifyPreparedSpecification = async (
+  verification: SpecificationVerification,
+  reader: SpecificationReader | null,
+  signal: AbortSignal,
+): Promise<SpecificationRefusal | null> => {
+  if (!reader) return refusal(SPEC_TRANSCRIPTION_UNREADABLE_REASON, "server-side repository content reader is unavailable");
+  let materialized: Uint8Array;
+  try {
+    materialized = await reader.readFileAtCommit(
+      verification.repository,
+      verification.path,
+      verification.implementationHeadSha,
+      signal,
+    );
+  } catch (error: unknown) {
+    if (signal.aborted || isAbortError(error)) throw error;
+    const detail = error instanceof Error ? error.message : "repository content read failed";
+    return refusal(SPEC_TRANSCRIPTION_UNREADABLE_REASON, detail);
+  }
+  return bytesEqual(
+    normalizeLineEndings(materialized),
+    normalizeLineEndings(verification.authoritativeBytes),
+  )
     ? null
-    : refusal(`materialized ${path} does not match the authoritative specification`);
+    : refusal(
+      SPEC_TRANSCRIPTION_REFUSAL_REASON,
+      `materialized ${verification.path} does not match the authoritative specification`,
+    );
 };

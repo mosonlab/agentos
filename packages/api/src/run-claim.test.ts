@@ -39,6 +39,7 @@ const input = {
   body: { runnerId: "runner-1", leaseSeconds: 60 },
   claimantClass: "runner" as const,
   now: new Date("2026-08-26T00:00:00.000Z"),
+  specificationReader: null,
 };
 
 test("a lost serialization conflict is retried rather than surfaced", async () => {
@@ -118,9 +119,17 @@ test("a tampered direct review specification is refused before the claim CAS", a
     },
   };
   const calls: Array<{ repository: string; path: string; commitSha: string }> = [];
+  let transactionActive = false;
+  const stoppedStatuses: string[] = [];
   const tx = {
     $queryRaw: async () => [{ granted: true }],
-    run: { findMany: async () => [candidate] },
+    run: {
+      findMany: async () => [candidate],
+      updateMany: async ({ data }: { data: { status: string } }) => {
+        stoppedStatuses.push(data.status);
+        return { count: 0 };
+      },
+    },
     runnerBackendState: { findUnique: async () => null },
     taskStepOutput: {
       findFirst: async () => ({
@@ -132,12 +141,20 @@ test("a tampered direct review specification is refused before the claim CAS", a
     task: { findFirst: async () => ({ description: "implementation prompt\nFeature brief:\nauthoritative brief\nPersist the final implementation output for this step through the AgentOS task output endpoint." }) },
   };
   const db = {
-    $transaction: async (operation: (transaction: typeof tx) => Promise<unknown>) => operation(tx),
+    $transaction: async (operation: (transaction: typeof tx) => Promise<unknown>) => {
+      transactionActive = true;
+      try {
+        return await operation(tx);
+      } finally {
+        transactionActive = false;
+      }
+    },
   } as unknown as PrismaClient;
   const result = await claimRun(db, {
     ...input,
     specificationReader: {
       readFileAtCommit: async (repository, path, commitSha) => {
+        assert.equal(transactionActive, false, "repository I/O must run outside the claim transaction");
         calls.push({ repository, path, commitSha });
         return new TextEncoder().encode("tampered brief");
       },
@@ -150,4 +167,5 @@ test("a tampered direct review specification is refused before the claim CAS", a
     path: ".chain/feature/spec-check/spec.md",
     commitSha: implementationHeadSha,
   }]);
+  assert.deepEqual(stoppedStatuses, ["FAILED"]);
 });

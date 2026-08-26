@@ -6,4 +6,3 @@ Acceptance:
 - A fixture chain whose materialized specification is tampered with after materialization is refused at review step claim, and the refusal carries the named reason.
 - Normal chains with a faithful copy claim and review exactly as before.
 - Both chain shapes are covered: compound (authority is the approved spec output) and direct (authority is the task brief).
-Persist the final implementation output for this step through the AgentOS task output endpoint.

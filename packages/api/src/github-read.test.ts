@@ -97,6 +97,23 @@ test("readFileAtCommit reads exact bytes from a commit-pinned Contents request",
   });
 });
 
+test("readFileAtCommit preserves a zero-byte repository file", async () => {
+  const reader = createGitHubReader("read-token", async () => new Response(JSON.stringify({
+    type: "file",
+    encoding: "base64",
+    content: "",
+  }), { status: 200 }))!;
+
+  const bytes = await reader.readFileAtCommit!(
+    "owner/repo",
+    "spec.md",
+    "commit",
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(bytes, Buffer.alloc(0));
+});
+
 test("readFileAtCommit refuses malformed JSON, file metadata, and base64", async () => {
   const responses = [
     new Response("{", { status: 200 }),

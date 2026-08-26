@@ -156,9 +156,8 @@ export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   releaseMergeLease?: MergeLeaseReleaser;
-  /** Production's immutable repository-content authority for review claims;
-   * omitted only by the test-only app factory's transport-free fixtures. */
-  specificationReader?: SpecificationReader | null;
+  /** Production's immutable repository-content authority for review claims. */
+  specificationReader: SpecificationReader | null;
 }
 
 
@@ -3553,10 +3552,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       body,
       claimantClass,
       now,
-      ...(options.specificationReader === undefined ? {} : { specificationReader: options.specificationReader }),
+      specificationReader: options.specificationReader,
       signal: context.req.raw.signal,
     });
-    if (claimed && "error" in claimed) return context.json({ error: claimed.error }, 409);
+    if (claimed && "error" in claimed) return context.json({ error: claimed.error, reason: claimed.reason }, 409);
     return claimed ? context.json(claimed) : context.body(null, 204);
   });
 

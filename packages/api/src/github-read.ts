@@ -132,6 +132,7 @@ const decodeBase64 = (content: string): Buffer => {
   // and truncated input, which could turn a malformed authority file into a
   // different, apparently valid byte sequence.
   const compact = content.replace(/[ \t\r\n]/gu, "");
+  if (compact === "") return Buffer.alloc(0);
   const bytes = decodeStrictBase64(compact);
   if (!bytes) {
     throw new GitHubReadError("repository file response has malformed base64 content", "response");

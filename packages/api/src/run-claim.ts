@@ -31,7 +31,14 @@ import { activeRunStatuses } from "./run-fence.js";
 import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
 import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
-import { specificationTranscriptionRefusal, type SpecificationReader } from "./specification-fidelity.js";
+import {
+  prepareSpecificationVerification,
+  type SpecificationReader,
+  type SpecificationRefusal,
+  SPEC_TRANSCRIPTION_REFUSAL_REASON,
+  specificationUnreadableRefusal,
+  verifyPreparedSpecification,
+} from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
 
 class PinnedRunTargetError extends Error {
@@ -54,11 +61,12 @@ export type ClaimRunInput = {
   /** The instant the whole claim is decided at, including the caller's
    *  pre-claim reconciliation. */
   now: Date;
-  /** Production supplies the server-side repository reader. Omitted by the
-   *  test-only app factory so existing unit fixtures remain transport-free. */
-  specificationReader?: SpecificationReader | null;
+  /** Explicit capability: null refuses review claims rather than bypassing verification. */
+  specificationReader: SpecificationReader | null;
   signal?: AbortSignal;
 };
+
+const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
 
 /**
  * Claim one queued run, or answer that nothing was claimable.
@@ -70,8 +78,8 @@ export type ClaimRunInput = {
  */
 export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
   const { body, claimantClass, now } = input;
+  const verificationResults = new Map<string, SpecificationRefusal | null>();
   const claimOnce = () => db.$transaction(async (tx) => {
-    let specificationRefusal: string | null = null;
     // This is the shared half of the production deploy barrier. It is the
     // first statement in the claim transaction: an in-flight claim finishes
     // before a deploy can acquire the exclusive half, and claims arriving
@@ -313,17 +321,61 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         }
         continue;
       }
-      if (input.specificationReader !== undefined) {
-        const refusal = await specificationTranscriptionRefusal(
-          tx,
-          { task: candidate.task, repo: candidate.repo, branch: candidate.branch },
-          implementationRange?.implementationHeadSha ?? null,
-          input.specificationReader,
-          input.signal ?? new AbortController().signal,
-        );
+      const prepared = await prepareSpecificationVerification(
+        tx,
+        { task: candidate.task, repo: candidate.repo, branch: candidate.branch },
+        implementationRange?.implementationHeadSha ?? null,
+      );
+      if (prepared.status === "refused") {
+        return { error: prepared.refusal.message, reason: prepared.refusal.reason };
+      }
+      if (prepared.status === "ready") {
+        if (!verificationResults.has(prepared.verification.key)) {
+          return { verification: prepared.verification };
+        }
+        const refusal = verificationResults.get(prepared.verification.key) ?? null;
         if (refusal) {
-          specificationRefusal ??= refusal;
-          continue;
+          if (refusal.reason === SPEC_TRANSCRIPTION_REFUSAL_REASON) {
+            const stopped = await tx.run.updateMany({
+              where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+              data: {
+                status: RunStatus.FAILED,
+                failureClass: FailureClass.TASK_FAILED,
+                failureReason: refusal.message,
+                retryable: false,
+                endedAt: now,
+              },
+            });
+            if (stopped.count === 1) {
+              await writeTask(tx, candidate.task.id, async () => ({
+                update: { status: TaskStatus.BACKLOG, failureReason: refusal.message },
+                activity: {
+                  actorType: "control-plane",
+                  body: `Review claim stopped: ${refusal.message}`,
+                  metadata: {
+                    runId: candidate.id,
+                    condition: refusal.reason,
+                    implementationHeadSha: prepared.verification.implementationHeadSha,
+                  },
+                },
+                value: null,
+              }));
+              const dedupeKey = `${refusal.reason}:${candidate.id}`;
+              await tx.inboxMessage.upsert({
+                where: { dedupeKey },
+                create: {
+                  from: "AGENT",
+                  agentId: candidate.agentId,
+                  taskId: candidate.task.id,
+                  kind: "TEXT",
+                  body: `Review claim failed and the task was parked in Backlog: ${refusal.message}`,
+                  dedupeKey,
+                },
+                update: {},
+              });
+            }
+          }
+          return { error: refusal.message, reason: refusal.reason };
         }
       }
       const generation = candidate.leaseGeneration + 1;
@@ -474,25 +526,55 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
       };
     }
-    return specificationRefusal ? { error: specificationRefusal } : null;
+    return null;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
-  // Two runners claiming independent chains still touch the same Task pages
-  // through the `FOR UPDATE` chain mutex, and Serializable can abort either
-  // one on a read/write dependency it cannot order. Losing that race is not a
-  // claim failure -- the work is still queued -- so retry the whole
-  // transaction. Matching only P2034 missed the raw-statement half, which
-  // arrives as P2010 carrying SQLSTATE 40001, and that escaped as a 500.
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
-    try {
-      claimed = await claimOnce();
-      break;
-    } catch (error: unknown) {
-      if (!isSerializationConflict(error) || attempt === 6) throw error;
-      await serializationRetryDelay(attempt);
+  const transactionalAttempt = async (): Promise<Awaited<ReturnType<typeof claimOnce>>> => {
+    // Two runners claiming independent chains still touch the same Task pages
+    // through the `FOR UPDATE` chain mutex, and Serializable can abort either
+    // one on a read/write dependency it cannot order. Losing that race is not a
+    // claim failure -- the work is still queued -- so retry the whole
+    // transaction. Matching only P2034 missed the raw-statement half, which
+    // arrives as P2010 carrying SQLSTATE 40001, and that escaped as a 500.
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      try {
+        return await claimOnce();
+      } catch (error: unknown) {
+        if (!isSerializationConflict(error) || attempt === 6) throw error;
+        await serializationRetryDelay(attempt);
+      }
     }
+    throw new Error("claim transaction retry loop exhausted unexpectedly");
+  };
+
+  for (;;) {
+    const attempted = await transactionalAttempt();
+    if (!attempted || !("verification" in attempted)) return attempted;
+
+    const deadline = new AbortController();
+    const requestSignal = input.signal;
+    const abortFromRequest = () => deadline.abort(requestSignal?.reason);
+    if (requestSignal?.aborted) abortFromRequest();
+    else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
+    const timer = setTimeout(() => deadline.abort(), SPECIFICATION_READ_TIMEOUT_MS);
+    let verdict: SpecificationRefusal | null;
+    try {
+      verdict = await verifyPreparedSpecification(
+        attempted.verification,
+        input.specificationReader,
+        deadline.signal,
+      );
+    } catch (error: unknown) {
+      if (requestSignal?.aborted) throw error;
+      if (!deadline.signal.aborted) throw error;
+      verdict = specificationUnreadableRefusal(
+        `repository content read exceeded the ${SPECIFICATION_READ_TIMEOUT_MS}ms server deadline`,
+      );
+    } finally {
+      clearTimeout(timer);
+      requestSignal?.removeEventListener("abort", abortFromRequest);
+    }
+    verificationResults.set(attempted.verification.key, verdict);
   }
-  return claimed;
 };
 
 export type ClaimedRun = NonNullable<Awaited<ReturnType<typeof claimRun>>>;

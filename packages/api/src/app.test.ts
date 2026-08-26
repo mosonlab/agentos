@@ -158,6 +158,7 @@ test("live claim reconciliation asserts root ownership before touching database 
     } as unknown as PrismaClient;
     const app = createLiveApp(database, {
       ownership: { assertHeld: () => { throw new Error("ownership-poisoned-for-test"); } },
+      specificationReader: null,
     });
     const response = await app.request("/runner/tasks/claim", {
       method: "POST",
