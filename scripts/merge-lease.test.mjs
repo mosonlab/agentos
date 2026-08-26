@@ -1,0 +1,372 @@
+// Fixtures for the global merge lease in scripts/merge-lease.sh.
+//
+// The lease is the origin-backed lock that serialises the merge window on main:
+// mutual exclusion, release, status, the machine and human steal boundaries, and
+// compare-and-swap under concurrent steal attempts. These cases use a local bare
+// origin so they test Git's real ref-update behavior without reaching a hosted
+// repository.
+//
+// This file is the lease's whole specification. It lived inside the gate
+// dispatcher's fixtures until 2026-08-26, where the lease had no name of its own
+// and the dispatcher — which does not call it — appeared to own it.
+//
+// The lines these cases match are a contract, not incidental text: the operator
+// reads the prose and packages/api/src/merge-lease.ts reads the `MERGE LEASE:`
+// line beside it. Both come out of one function in the script so they cannot
+// disagree; a case that asserts one asserts the other.
+import assert from "node:assert/strict";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import nodeTest from "node:test";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const mergeLeasePath = join(here, "merge-lease.sh");
+
+const test = (name, body) => nodeTest(name, { concurrency: true }, body);
+
+// The script reads its poll interval, its timeout and its holder out of the
+// environment, so a session that exports any of them would run these cases
+// against the host's settings instead of the ones each case declares. The
+// host's Git identity is neutralised for the same reason.
+const hostNeutralEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !key.startsWith("MERGE_LEASE_")),
+);
+
+const FIXTURE_ENV = {
+  ...hostNeutralEnv,
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "merge-lease-fixture",
+  GIT_AUTHOR_EMAIL: "merge-lease-fixture",
+  GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+  GIT_COMMITTER_NAME: "merge-lease-fixture",
+  GIT_COMMITTER_EMAIL: "merge-lease-fixture",
+  GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
+};
+
+const scratch = (t) => {
+  const root = mkdtempSync(join(tmpdir(), "merge-lease-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+};
+
+
+const leaseFixture = (t) => {
+  const parent = scratch(t);
+  const origin = join(parent, "origin.git");
+  const root = join(parent, "source");
+  execFileSync("git", ["init", "-q", "--bare", origin], { env: FIXTURE_ENV });
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  cpSync(mergeLeasePath, join(root, "scripts", "merge-lease.sh"));
+  chmodSync(join(root, "scripts", "merge-lease.sh"), 0o755);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root, env: FIXTURE_ENV });
+  execFileSync("git", ["remote", "add", "origin", origin], { cwd: root, env: FIXTURE_ENV });
+  return { root, origin };
+};
+
+const runLease = (fixture, args, holder = "machine@fixture") =>
+  spawnSync("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
+    cwd: fixture.root,
+    encoding: "utf8",
+    timeout: 15_000,
+    env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
+  });
+
+const installLease = (fixture, lease) => {
+  const body = `${JSON.stringify(lease)}\n`;
+  const sha = execFileSync("git", ["-C", fixture.root, "hash-object", "-w", "--stdin"], {
+    env: FIXTURE_ENV,
+    encoding: "utf8",
+    input: body,
+  }).trim();
+  execFileSync("git", ["-C", fixture.root, "push", "-q", "origin", `+${sha}:refs/merge-lease/holder`], {
+    env: FIXTURE_ENV,
+  });
+  return { ...lease, sha };
+};
+
+const readLease = (fixture) => {
+  const sha = execFileSync("git", ["--git-dir", fixture.origin, "rev-parse", "refs/merge-lease/holder"], {
+    env: FIXTURE_ENV,
+    encoding: "utf8",
+  }).trim();
+  const body = execFileSync("git", ["--git-dir", fixture.origin, "cat-file", "blob", sha], {
+    env: FIXTURE_ENV,
+    encoding: "utf8",
+  });
+  return { sha, lease: JSON.parse(body) };
+};
+
+const runLeaseAsync = (fixture, args, holder) =>
+  new Promise((resolve) => {
+    const child = spawn("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
+      cwd: fixture.root,
+      env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+
+test("merge lease acquire is mutually exclusive and release removes the lease", (t) => {
+  const fixture = leaseFixture(t);
+  const first = runLease(
+    fixture,
+    ["acquire", "--reason", "First merge", "--task", "chain-1"],
+    "first@fixture",
+  );
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+
+  const second = runLease(
+    fixture,
+    ["acquire", "--reason", "Second merge", "--task", "chain-2", "--timeout-minutes", "0"],
+    "second@fixture",
+  );
+  assert.equal(second.status, 75, second.stdout + second.stderr);
+  assert.equal(readLease(fixture).lease.holder, "first@fixture");
+
+  const released = runLease(fixture, ["release", "--force"], "first@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  const status = runLease(fixture, ["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /no lease held/u);
+});
+
+test("merge lease acquire is reentrant only for the same task", (t) => {
+  const fixture = leaseFixture(t);
+  const first = runLease(
+    fixture,
+    ["acquire", "--reason", "First chain tail", "--task", "chain-42"],
+    "first@fixture",
+  );
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  const original = readLease(fixture);
+
+  const reentrant = runLease(
+    fixture,
+    ["acquire", "--reason", "Retried chain tail", "--task", "chain-42", "--timeout-minutes", "0"],
+    "second@fixture",
+  );
+  assert.equal(reentrant.status, 0, reentrant.stdout + reentrant.stderr);
+  assert.match(reentrant.stdout, /already held for task chain-42/u);
+  assert.deepEqual(readLease(fixture), original, "reentry must not rewrite the lease object");
+
+  const other = runLease(
+    fixture,
+    ["acquire", "--reason", "Other chain tail", "--task", "chain-43", "--timeout-minutes", "0"],
+    "second@fixture",
+  );
+  assert.equal(other.status, 75, other.stdout + other.stderr);
+  assert.deepEqual(readLease(fixture), original);
+});
+
+test("merge lease task release ignores holder identity and skips a different task", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Chain tail", "--task", "chain-42"],
+    "runner@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const original = readLease(fixture);
+
+  const skipped = runLease(fixture, ["release", "--task", "chain-43"], "api@fixture");
+  assert.equal(skipped.status, 0, skipped.stdout + skipped.stderr);
+  assert.match(skipped.stdout, /release skipped/u);
+  assert.deepEqual(readLease(fixture), original);
+
+  const released = runLease(fixture, ["release", "--task", "chain-42"], "api@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  assert.match(runLease(fixture, ["status"]).stdout, /no lease held/u);
+});
+
+test("merge lease release refuses a caller that does not hold the lease", (t) => {
+  const fixture = leaseFixture(t);
+  const held = {
+    holder: "holder@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Active merge",
+    token: "holder-token",
+  };
+  installLease(fixture, held);
+
+  const refused = runLease(fixture, ["release", "--force"], "stranger@fixture");
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /held by holder@fixture, not stranger@fixture/u);
+  assert.deepEqual(readLease(fixture).lease, held);
+
+  const released = runLease(fixture, ["release", "--force"], "holder@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  const status = runLease(fixture, ["status"]);
+  assert.match(status.stdout, /no lease held/u);
+});
+
+test("merge lease acquire without --task is refused so every lease records its task", (t) => {
+  const fixture = leaseFixture(t);
+  const refused = runLease(fixture, ["acquire", "--reason", "Missing task"], "agent@mac");
+  assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /acquire requires --task/u);
+  assert.match(runLease(fixture, ["status"]).stdout, /no lease held/u);
+});
+
+test("merge lease release without --task is refused rather than freeing a sibling window", (t) => {
+  const fixture = leaseFixture(t);
+  // Both windows are the same user on the same machine, so the holder string is
+  // identical and cannot tell them apart. Only the task id can.
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Window A merge", "--task", "chain-42"],
+    "agent@mac",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const original = readLease(fixture);
+
+  const refused = runLease(fixture, ["release"], "agent@mac");
+  assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /release requires --task/u);
+  assert.deepEqual(readLease(fixture), original);
+});
+
+test("merge lease acquire restamps acquiredAt on every attempt while it queues", async (t) => {
+  const fixture = leaseFixture(t);
+  const blocking = {
+    holder: "blocker@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Long merge",
+    token: "blocker-token",
+  };
+  installLease(fixture, blocking);
+
+  const waiter = runLeaseAsync(
+    fixture,
+    ["acquire", "--reason", "Queued merge", "--task", "chain-99", "--poll-seconds", "1"],
+    "waiter@fixture",
+  );
+  // Let the first attempt lose and the poll loop turn over at least once, so the
+  // blob the winner installs is not the one it built at the head of the queue.
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  const queuedFor = Date.now();
+  execFileSync("git", ["--git-dir", fixture.origin, "update-ref", "-d", "refs/merge-lease/holder"], {
+    env: FIXTURE_ENV,
+  });
+
+  const result = await waiter;
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const acquiredAt = Date.parse(readLease(fixture).lease.acquiredAt);
+  assert.ok(
+    acquiredAt >= queuedFor - 1000,
+    `acquiredAt ${new Date(acquiredAt).toISOString()} must be stamped when the lease was won, not when queueing began`,
+  );
+});
+
+test("merge lease status prints every field of the current holder", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Inspect status", "--task", "task-42"],
+    "status@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const secondRoot = join(dirname(fixture.root), "second-source");
+  mkdirSync(join(secondRoot, "scripts"), { recursive: true });
+  cpSync(mergeLeasePath, join(secondRoot, "scripts", "merge-lease.sh"));
+  chmodSync(join(secondRoot, "scripts", "merge-lease.sh"), 0o755);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: secondRoot, env: FIXTURE_ENV });
+  execFileSync("git", ["remote", "add", "origin", fixture.origin], { cwd: secondRoot, env: FIXTURE_ENV });
+  const status = runLease({ root: secondRoot, origin: fixture.origin }, ["status"]);
+  assert.equal(status.status, 0, status.stderr);
+  const lease = JSON.parse(status.stdout);
+  assert.equal(lease.holder, "status@fixture");
+  assert.equal(lease.task, "task-42");
+  assert.equal(lease.reason, "Inspect status");
+  assert.match(lease.acquiredAt, /^\d{4}-\d{2}-\d{2}T/u);
+  assert.match(lease.token, /^[0-9a-f-]{36}$/u);
+});
+
+test("machine steal is refused through 45 minutes and allowed only after it", (t) => {
+  const fixture = leaseFixture(t);
+  const recent = {
+    holder: "recent@fixture",
+    acquiredAt: new Date(Date.now() - 44 * 60 * 1000).toISOString(),
+    reason: "Recent merge",
+    token: "recent-token",
+  };
+  installLease(fixture, recent);
+  const refused = runLease(fixture, ["steal", "--reason", "Machine recovery"], "machine@fixture");
+  assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /has not exceeded 2700s/u);
+  assert.equal(readLease(fixture).lease.holder, "recent@fixture");
+
+  const stale = {
+    ...recent,
+    acquiredAt: new Date(Date.now() - 46 * 60 * 1000).toISOString(),
+    token: "stale-token",
+  };
+  installLease(fixture, stale);
+  const stolen = runLease(fixture, ["steal", "--reason", "Machine recovery"], "machine@fixture");
+  assert.equal(stolen.status, 0, stolen.stdout + stolen.stderr);
+  assert.match(stolen.stderr, /stealing lease from/u);
+  const current = readLease(fixture).lease;
+  assert.equal(current.holder, "machine@fixture");
+  assert.deepEqual(current.stolenFrom, stale);
+});
+
+test("an explicit human steal replaces a fresh lease immediately", (t) => {
+  const fixture = leaseFixture(t);
+  const original = {
+    holder: "active@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Active merge",
+    token: "active-token",
+  };
+  installLease(fixture, original);
+  const stolen = runLease(
+    fixture,
+    ["steal", "--human", "--reason", "Human override", "--task", "incident-7"],
+    "leo@fixture",
+  );
+  assert.equal(stolen.status, 0, stolen.stdout + stolen.stderr);
+  const current = readLease(fixture).lease;
+  assert.equal(current.holder, "leo@fixture");
+  assert.equal(current.task, "incident-7");
+  assert.deepEqual(current.stolenFrom, original);
+});
+
+test("two concurrent steals compare-and-swap the observed holder so exactly one wins", async (t) => {
+  const fixture = leaseFixture(t);
+  const original = {
+    holder: "abandoned@fixture",
+    acquiredAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    reason: "Abandoned merge",
+    token: "abandoned-token",
+  };
+  installLease(fixture, original);
+  const hook = join(fixture.origin, "hooks", "pre-receive");
+  writeFileSync(hook, "#!/usr/bin/env bash\nsleep 0.4\n");
+  chmodSync(hook, 0o755);
+
+  const results = await Promise.all([
+    runLeaseAsync(fixture, ["steal", "--reason", "First recovery"], "first@fixture"),
+    runLeaseAsync(fixture, ["steal", "--reason", "Second recovery"], "second@fixture"),
+  ]);
+  assert.equal(results.filter((result) => result.status === 0).length, 1, JSON.stringify(results));
+  assert.equal(results.filter((result) => result.status === 1).length, 1, JSON.stringify(results));
+  assert.match(results.find((result) => result.status === 1).stderr, /compare-and-swap refused/u);
+  const current = readLease(fixture).lease;
+  assert.ok(["first@fixture", "second@fixture"].includes(current.holder));
+  assert.deepEqual(current.stolenFrom, original);
+});
