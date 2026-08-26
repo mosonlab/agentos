@@ -370,3 +370,75 @@ test("two concurrent steals compare-and-swap the observed holder so exactly one 
   assert.ok(["first@fixture", "second@fixture"].includes(current.holder));
   assert.deepEqual(current.stolenFrom, original);
 });
+
+// --- the release outcome, as the merge tail reads it -------------------------
+//
+// Four outcomes, three of which exit 0. packages/api/src/merge-lease.ts tells
+// them apart by the MERGE LEASE line; an operator reads the prose above it.
+// One case per shape, and each asserts both lines, because the point of
+// printing them from one function is that they agree.
+
+test("a release that frees the lease says released in both lines", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Machine line", "--task", "chain-7"],
+    "api@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const { sha } = readLease(fixture);
+
+  const released = runLease(fixture, ["release", "--task", "chain-7"], "api@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  assert.match(released.stdout, new RegExp(`^merge-lease: released refs/merge-lease/holder \\(${sha}\\)$`, "mu"));
+  assert.match(released.stdout, new RegExp(`^MERGE LEASE: released refs/merge-lease/holder ${sha}$`, "mu"));
+});
+
+test("a release with nothing to free says not-held in both lines", (t) => {
+  const fixture = leaseFixture(t);
+  const released = runLease(fixture, ["release", "--task", "chain-7"], "api@fixture");
+  assert.equal(released.status, 0, released.stdout + released.stderr);
+  assert.match(released.stdout, /^merge-lease: no lease held$/mu);
+  assert.match(released.stdout, /^MERGE LEASE: not-held$/mu);
+});
+
+test("a release that leaves another task's lease standing says skipped in both lines", (t) => {
+  const fixture = leaseFixture(t);
+  const acquired = runLease(
+    fixture,
+    ["acquire", "--reason", "Someone else's merge", "--task", "chain-42"],
+    "runner@fixture",
+  );
+  assert.equal(acquired.status, 0, acquired.stdout + acquired.stderr);
+  const original = readLease(fixture);
+
+  // The defect this line exists for: exit 0 and a lease still held.
+  const skipped = runLease(fixture, ["release", "--task", "chain-43"], "api@fixture");
+  assert.equal(skipped.status, 0, skipped.stdout + skipped.stderr);
+  assert.match(
+    skipped.stdout,
+    /^merge-lease: release skipped; refs\/merge-lease\/holder is held for task chain-42, not chain-43$/mu,
+  );
+  assert.match(skipped.stdout, /^MERGE LEASE: skipped chain-42$/mu);
+  assert.deepEqual(readLease(fixture), original);
+});
+
+test("a release refused on another machine's lease says refused in both lines", (t) => {
+  const fixture = leaseFixture(t);
+  const held = {
+    holder: "holder@fixture",
+    acquiredAt: new Date().toISOString(),
+    reason: "Active merge",
+    token: "holder-token",
+  };
+  installLease(fixture, held);
+
+  const refused = runLease(fixture, ["release", "--force"], "stranger@fixture");
+  assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+  assert.match(
+    refused.stderr,
+    /^merge-lease: release refused: refs\/merge-lease\/holder is held by holder@fixture, not stranger@fixture; use steal to break it$/mu,
+  );
+  assert.match(refused.stderr, /^MERGE LEASE: refused holder@fixture$/mu);
+  assert.deepEqual(readLease(fixture).lease, held);
+});
