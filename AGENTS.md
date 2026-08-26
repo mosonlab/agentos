@@ -20,13 +20,19 @@ When the user requests a chain:
   window or decomposes into independently demonstrable slices worth executing
   in parallel. Its specification and plan stages own that decomposition.
 - Keep the direct template's implementation assignee when the brief enumerates
-  its change points. Assign `senior-dev` before the chain starts when the
-  work touches persisted data, a defense-list path, or a surface too large or
-  cross-cutting for the brief to enumerate. Defense-list paths are the merge
-  gate, gate worker, migrations, release authority, and merge automation. When
-  classification is uncertain, use `senior-dev`. Keep the review-fix
-  step's template assignee, raising it to `senior-dev` under the same
-  criteria.
+  its change points. Assign `senior-dev` before the chain starts only when the
+  work touches persisted data or a defense-list path. Defense-list paths are
+  the merge gate, gate worker, migrations, release authority, and merge
+  automation. A surface too large or cross-cutting for the brief to enumerate
+  is not an escalation reason: that work belongs to the full assurance chain.
+  When classification against these two criteria is uncertain, use
+  `senior-dev`. Keep the review-fix step's template assignee, raising it to
+  `senior-dev` under the same criteria.
+- A backlog card that needs a non-default implementation assignee states it as
+  one machine-readable line in its description — `Route: implementation=senior-dev`
+  — never as prose. The dispatcher copies that line into `stepOverrides` at
+  instantiation. Only the implementation step is routable this way; every other
+  step keeps its template assignee.
 - Archive a backlog card in the same action that dispatches its work or records
   the decisions that settle it. Leave only genuinely open questions on the
   board.
