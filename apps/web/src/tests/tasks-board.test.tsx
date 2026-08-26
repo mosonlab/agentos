@@ -396,6 +396,11 @@ test("template-instantiated cards do not render a template pill", () => {
   assert.doesNotMatch(markup, /tasks\.pill\.template/);
 });
 
+test("approval-gated cards are badged and ungated cards are not", () => {
+  assert.match(card({ approvalGate: true }), />Approval</);
+  assert.doesNotMatch(card(), />Approval</);
+});
+
 test("the title is a real link to the task", () => {
   // 112 cards were unfocusable, had no role and no accessible name: a keyboard
   // could reach each card's menu button and nothing else.
