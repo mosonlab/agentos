@@ -8,6 +8,7 @@ import {
   lockAgentRepoGrant,
   lockAgentRow,
   MAX_AUTHORITY_RESIGN_ROUNDS,
+  MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MergeRecoveryStatus,
   parseRegressionVerdict,
   Prisma,
@@ -240,7 +241,7 @@ export const openAuthorityResignNotice = async (
 export const createMergeTailRepairTask = async (
   tx: DbTx,
   input: {
-    regressionTask: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; targetBranch: string | null };
+    regressionTask: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null };
     sourceRun: { id: string; branch: string | null };
     agentName: string;
     repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
@@ -251,8 +252,11 @@ export const createMergeTailRepairTask = async (
   },
 ): Promise<{ taskId: string } | { refusal: string }> => {
   const { regressionTask } = input;
-  if (!regressionTask.repoId || !regressionTask.chainId || !regressionTask.templateId || !input.sourceRun.branch) {
-    return { refusal: "repair task cannot resolve its chain repository and shared branch" };
+  if (
+    !regressionTask.repoId || !regressionTask.chainId || regressionTask.chainIndex === null
+    || !regressionTask.templateId || !input.sourceRun.branch
+  ) {
+    return { refusal: "repair task cannot resolve its chain position, repository, and shared branch" };
   }
   const agent = await tx.agent.findFirst({
     where: { projectId: regressionTask.projectId, name: input.agentName, archivedAt: null },
@@ -263,17 +267,42 @@ export const createMergeTailRepairTask = async (
   });
   if (!grant) return { refusal: `required repair agent ${input.agentName} has no repository grant` };
 
-  const prompt = input.repairKind === "refresh-conflict"
+  // A repair task is deliberately chain-detached, so the claim path's own
+  // prior-output lookup (which keys off chainId and chainIndex) never fires for
+  // it. Without this the repair agent sees only the verdict summary and no
+  // Feature brief, acceptance criteria, or review reports, and the narrowest
+  // reading of that summary is the whole job it can do. Same query, ordering,
+  // and rendering as a chain step's: what the chain steps could see, the repair
+  // for those steps sees too.
+  const priorOutputs = await tx.taskStepOutput.findMany({
+    where: { task: {
+      projectId: regressionTask.projectId,
+      chainId: regressionTask.chainId,
+      chainIndex: { lt: regressionTask.chainIndex },
+    } },
+    select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
+    orderBy: { task: { chainIndex: "asc" } },
+  });
+  const chainContext = priorOutputs.length > 0
     ? [
-      `Resolve the refresh conflict between chain head ${input.headSha} and target head ${input.baseHeadSha}.`,
-      input.summary,
-      `Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
+      "Persisted outputs from prior template steps:",
+      ...priorOutputs.map((output) => `## ${output.task.name} (${output.kind})\n${output.body}`),
     ].join("\n\n")
-    : [
-      `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
-      input.summary,
-      "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output.",
-    ].join("\n\n");
+    : null;
+  const prompt = [
+    ...(input.repairKind === "refresh-conflict"
+      ? [
+        `Resolve the refresh conflict between chain head ${input.headSha} and target head ${input.baseHeadSha}.`,
+        input.summary,
+        `Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
+      ]
+      : [
+        `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
+        input.summary,
+        "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+      ]),
+    ...(chainContext ? [chainContext] : []),
+  ].join("\n\n");
   const task = await tx.task.create({ data: {
     projectId: regressionTask.projectId,
     repoId: regressionTask.repoId,
@@ -322,7 +351,7 @@ export const createMergeTailRepairTask = async (
 export const handleRegressionCompletion = async (
   tx: DbTx,
   input: {
-    task: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; targetBranch: string | null };
+    task: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null };
     run: { id: string; agentId: string; branch: string | null; headSha: string | null; sessionId: string };
     now: Date;
   },
@@ -454,24 +483,29 @@ export const handleRegressionCompletion = async (
     return "handled";
   }
 
-  // The whole history, not the recent-state window: one automatic attempt per
-  // repair kind is the rule, and an attempt pushed past the window by later
-  // activity would license a second one.
+  // The whole history, not the recent-state window: the automatic attempt
+  // budget per repair kind is the rule, and an attempt pushed past the window
+  // by later activity would license an extra one.
   const attempts = await readMarkerHistory(tx, input.task.id);
   const repairKind = verdict.outcome === "refresh-conflict"
     ? "refresh-conflict"
     : verdict.outcome === "review-fail" ? "review-fix" : "gate-fix";
-  const alreadyAttempted = attempts.some((marker) => (
+  const priorAttempts = attempts.filter((marker) => (
     marker.kind === "repairAttempt"
     && marker.repairKind === repairKind
     && (repairKind !== "refresh-conflict" || marker.headSha === verdict.headSha)
-  ));
-  if (alreadyAttempted) {
+  )).length;
+  // A refresh conflict is a merge of two fixed trees: a second resolver run on
+  // the same head has nothing new to work with. A semantic or gate FAIL does —
+  // the first repair moved the tree, and the verdict it now fails on is a
+  // different one — so those get a second attempt before the tail stops.
+  const attemptLimit = repairKind === "refresh-conflict" ? 1 : MAX_MERGE_TAIL_REPAIR_ATTEMPTS;
+  if (priorAttempts >= attemptLimit) {
     return stop(repairKind === "refresh-conflict"
       ? `second refresh conflict on chain head ${verdict.headSha}`
       : repairKind === "review-fix"
-        ? `second semantic regression FAIL on chain head ${verdict.headSha}`
-        : `second merge gate FAIL on chain head ${verdict.headSha}`);
+        ? `semantic regression FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`
+        : `merge gate FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`);
   }
   let agentName = "merge-resolver";
   if (repairKind === "gate-fix" || repairKind === "review-fix") {

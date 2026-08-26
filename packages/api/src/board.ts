@@ -58,7 +58,21 @@ export type BoardCard = {
    * post-merge incident as a green Done. This is what the card renders instead.
    */
   mergeOutcome: MergeOutcomeProjection | null;
+  /**
+   * The chain a merge-tail repair task repairs.
+   *
+   * A repair task is deliberately chain-detached — no `chainId`, `chainIndex` or
+   * `templateId` — so its own columns say nothing about where it came from, and
+   * the board drew it as a loose card beside the chain that produced it. The
+   * `repairAttempt` marker it carries names the regression task, and that task's
+   * chain is what this reports. Null for every card that is not a repair task.
+   */
+  repairOf: RepairBinding | null;
 };
+
+/** What a repair card needs to sit with its chain: the chain it belongs to and
+ *  which kind of repair it is. */
+export type RepairBinding = { chainId: string; chainName: string | null; repairKind: string };
 
 /** The Prisma row shape `boardCard` needs — declared structurally so the route
  *  can `select` exactly these columns and nothing else. */
@@ -171,6 +185,7 @@ export const boardCard = (
   chainProgress: (ChainProgress & { position: number | null }) | null,
   display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
   predecessor: BoardBlockedOnTask | null = null,
+  repairOf: RepairBinding | null = null,
 ): BoardCard => {
   const run = row.runs[0];
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
@@ -216,7 +231,28 @@ export const boardCard = (
     mergeOutcome: run !== undefined && runOwnsMergeOutcome(row.stepOutput, run.id, run.id)
       ? projectMergeOutcome(row.stepOutput)
       : null,
+    repairOf,
   };
+};
+
+/**
+ * The chain binding a `repairAttempt` marker carries, or null when the marker is
+ * not the repair task's own side of one.
+ *
+ * The same kind is written on both sides of a repair: the regression task names
+ * the repair task, and the repair task names the regression task. Only the
+ * second names a chain this card can be put under, so a marker without a
+ * `regressionTaskId` is not this card's binding rather than a broken one.
+ */
+export const repairBinding = (
+  metadata: Record<string, unknown> | null,
+  chainOfRegressionTask: (regressionTaskId: string) => { chainId: string; chainName: string | null } | null,
+): RepairBinding | null => {
+  const regressionTaskId = typeof metadata?.regressionTaskId === "string" ? metadata.regressionTaskId : null;
+  const repairKind = typeof metadata?.repairKind === "string" ? metadata.repairKind : null;
+  if (regressionTaskId === null || repairKind === null) return null;
+  const chain = chainOfRegressionTask(regressionTaskId);
+  return chain === null ? null : { chainId: chain.chainId, chainName: chain.chainName, repairKind };
 };
 
 /**

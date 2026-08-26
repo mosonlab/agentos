@@ -1968,7 +1968,13 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
 
 /** A stub with just enough of `task` for `GET /tasks` to answer: the board row
  *  page, the chain-progress page, and the recurring groupBy the full shape adds. */
-const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
+/** `related` answers the by-id lookups the board makes for rows that are not on
+ *  the page — a bound task's predecessor and a repair task's regression task —
+ *  and `activity` the merge-tail markers that name the latter. */
+const boardDatabase = (
+  rows: Array<Record<string, unknown>>,
+  extras: { related?: Array<Record<string, unknown>>; activity?: Array<Record<string, unknown>> } = {},
+): PrismaClient => {
   let call = 0;
   const taskRows = [...rows].sort((left, right) => (
     (right.createdAt as Date).getTime() - (left.createdAt as Date).getTime()
@@ -1977,12 +1983,14 @@ const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
   return {
     task: {
       findMany: async (args: Record<string, unknown> | undefined) => {
+        if ((args?.where as Record<string, unknown> | undefined)?.id !== undefined) return extras.related ?? [];
         if (call++ !== 0) return [];
         assert.deepEqual(args?.orderBy, [{ createdAt: "desc" }, { id: "asc" }]);
         return taskRows;
       },
       groupBy: async () => [],
     },
+    taskActivity: { findMany: async () => extras.activity ?? [] },
   } as unknown as PrismaClient;
 };
 
@@ -2037,6 +2045,31 @@ test("the board derives a shared title and badge for API-created chains", async 
       { id: "build", name: "Release: Build", displayName: "Build", chainName: "Release" },
       { id: "review", name: "Release: Review", displayName: "Review", chainName: "Release" },
     ]);
+  });
+});
+
+test("the board binds a chain-detached repair task to the chain its marker names", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase(
+      [
+        taskRow({ id: "regression", chainId: "c1", chainIndex: 1, name: "Release: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair", name: "Autonomous merge tail: gate-fix", templateStep: null }),
+      ],
+      {
+        related: [{ id: "regression", chainId: "c1" }],
+        activity: [{ taskId: "repair", metadata: {
+          schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression",
+        } }],
+      },
+    ), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; chainId: string | null; repairOf: unknown }>;
+    const repair = body.find((card) => card.id === "repair")!;
+    // The repair task stays chain-detached on the wire — the binding is the
+    // read side's answer to where the card belongs, not a chain column.
+    assert.equal(repair.chainId, null);
+    assert.deepEqual(repair.repairOf, { chainId: "c1", chainName: "Release", repairKind: "gate-fix" });
+    assert.equal(body.find((card) => card.id === "regression")!.repairOf, null);
   });
 });
 

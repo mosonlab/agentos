@@ -5,6 +5,7 @@ import {
   AssigneeType,
   agentArchiveBlocker,
   applyInboxDecision,
+  asJsonObject,
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
@@ -55,6 +56,7 @@ import {
   runOwnsMergeOutcome,
   INTEGRATOR_AGENT_NAME,
   MERGE_INTEGRATOR_KIND,
+  MERGE_TAIL_KIND,
   latestTargetCorrection,
   loadIntegratorTask,
   observedChainPullRequests,
@@ -78,7 +80,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
+import { boardCard, chainDisplayByTask, etagFor, etagMatches, repairBinding, serializeUsageCost, type RepairBinding } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
@@ -2313,11 +2315,56 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
         for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
       }
+      // A merge-tail repair task is chain-detached by design, so nothing on its
+      // own row says which chain it repairs — the board drew it as a loose card
+      // beside the work that produced it. Its `repairAttempt` marker names the
+      // regression task, and that task's chain is where the card belongs. One
+      // extra query over the page's chain-less rows, skipped entirely when a
+      // page has none, and a second only when a repair card is actually on it.
+      const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
+      const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
+        where: {
+          taskId: { in: detachedIds },
+          actorType: "control-plane",
+          metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
+        },
+        select: { taskId: true, metadata: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      });
+      const repairByTask = new Map<string, RepairBinding>();
+      if (repairMarkers.length > 0) {
+        const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
+          const value = asJsonObject(marker.metadata)?.regressionTaskId;
+          return typeof value === "string" ? [value] : [];
+        }))];
+        const regressionTasks = await db.task.findMany({
+          where: { id: { in: regressionIds }, ...(projectId ? { projectId } : {}) },
+          select: { id: true, chainId: true },
+        });
+        // The chain's display name is already derived once for this page. A
+        // chain with no step of its own on the page has none, and the card falls
+        // back to naming it by id exactly as a chain step's card does.
+        const chainNameById = new Map<string, string | null>();
+        for (const row of rows) {
+          if (row.chainId === null || chainNameById.has(row.chainId)) continue;
+          chainNameById.set(row.chainId, displayByTask.get(row.id)?.chainName ?? null);
+        }
+        const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
+          const chainId = regressionTasks.find((task) => task.id === taskId)?.chainId ?? null;
+          return chainId === null ? null : { chainId, chainName: chainNameById.get(chainId) ?? null };
+        };
+        for (const marker of repairMarkers) {
+          if (repairByTask.has(marker.taskId)) continue;
+          const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
+          if (binding !== null) repairByTask.set(marker.taskId, binding);
+        }
+      }
       return validated(context, rows.map((row) => boardCard(
         row,
         progressFor(row),
         displayByTask.get(row.id),
         row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+        repairByTask.get(row.id) ?? null,
       )));
     }
 

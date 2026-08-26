@@ -39,6 +39,13 @@ const exec = promisify(execFile);
 
 let seedCounter = 0;
 
+// A real chain reaches Regression with the brief, the acceptance criteria, and
+// both review reports already persisted. The repair task is chain-detached, so
+// these are the bodies it can only see if the repair prompt carries them.
+const IMPLEMENTATION_BODY = "Feature brief: reject unregistered graphs at every entry point. Acceptance: the webhook and manual fire paths refuse them too.";
+const SOL_FINDINGS_BODY = "sol-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
+const BLIND_FINDINGS_BODY = "blind-findings: the manual fire path repeats the same bypass and the board reads the retired field.";
+
 const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
   // A test may seed several chains in one millisecond, and both the slug and the
   // chain id have to stay distinct across them.
@@ -98,6 +105,37 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
     name: "Fix", description: "fix", assigneeType: AssigneeType.AGENT, assigneeAgentId: fixAgent.id,
     status: TaskStatus.DONE, chainId, chainIndex: fixIndex, chainLayer: fixLayer, targetBranch: "main",
   } });
+  for (const prior of options.withLibrarian
+    ? [
+      { index: 4, name: "Implementation", kind: "implementation", body: IMPLEMENTATION_BODY },
+      { index: 5, name: "Sol review", kind: "sol-findings", body: SOL_FINDINGS_BODY },
+      { index: 6, name: "Blind review", kind: "blind-findings", body: BLIND_FINDINGS_BODY },
+    ]
+    : [
+      { index: 0, name: "Implementation", kind: "implementation", body: IMPLEMENTATION_BODY },
+      { index: 1, name: "Sol review", kind: "sol-findings", body: SOL_FINDINGS_BODY },
+      { index: 2, name: "Blind review", kind: "blind-findings", body: BLIND_FINDINGS_BODY },
+    ]) {
+    const step = await db.taskTemplateStep.create({ data: {
+      taskTemplateId: template.id, stepIndex: prior.index, layer: prior.index, name: prior.name,
+      assigneeType: AssigneeType.AGENT, assigneeAgentId: fixAgent.id, prompt: prior.name.toLowerCase(),
+      approvalGate: false, outputKind: prior.kind,
+    } });
+    const priorTask = await db.task.create({ data: {
+      projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: step.id,
+      name: prior.name, description: prior.name, assigneeType: AssigneeType.AGENT, assigneeAgentId: fixAgent.id,
+      status: TaskStatus.DONE, chainId, chainIndex: prior.index, chainLayer: prior.index, targetBranch: "main",
+    } });
+    const priorRun = await db.run.create({ data: {
+      projectId: project.id, taskId: priorTask.id, agentId: fixAgent.id, repoId: repo.id,
+      runNumber: 1, dedupeKey: `task:${priorTask.id}:run:1`, runner: "CODEX", model: fixAgent.model,
+      promptHash: "hash", status: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+      targetBranch: "main", headSha: HEAD,
+    } });
+    await db.taskStepOutput.create({ data: {
+      taskId: priorTask.id, runId: priorRun.id, kind: prior.kind, body: prior.body, commitSha: HEAD,
+    } });
+  }
   const librarian = librarianStep ? await db.task.create({ data: {
     projectId: project.id, repoId: repo.id, templateId: template.id, templateStepId: librarianStep.id,
     name: "Librarian", description: "document", assigneeType: AssigneeType.AGENT, assigneeAgentId: librarianAgent.id,
@@ -434,20 +472,26 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 
-test("a gate FAIL creates one fix-agent task and a second FAIL escalates with both heads in activity", async () => {
+test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
   const repair = await repairFor(seeded, "gate-fix");
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
   await completeRepair(seeded, repair.id, "Fixed the failing regression and reran the affected suite.");
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+  // The first repair moved the tree, so the second FAIL is a verdict on a
+  // different tree and buys one more automatic attempt rather than a stop.
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
-  assert.equal(await repairCount(seeded), 1);
-  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(await repairCount(seeded), 2);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  assert.equal(await repairCount(seeded), 2);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.match(notice.body, /after 2 automatic repair attempts/u);
   const trail = await db.taskActivity.findMany({ where: { taskId: seeded.regression.id }, select: { body: true } });
   assert.match(trail.map(({ body }) => body).join("\n"), new RegExp(`${HEAD}.*${BASE}`, "s"));
 });
 
-test("a semantic FAIL skips the gate path and creates one review-fix task", async () => {
+test("a semantic FAIL skips the gate path and is repaired twice before it escalates", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "senior-dev");
@@ -455,8 +499,43 @@ test("a semantic FAIL skips the gate path and creates one review-fix task", asyn
   await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
-  assert.equal(await repairCount(seeded), 1);
-  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(await repairCount(seeded), 2);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
+  assert.equal(await repairCount(seeded), 2);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.match(notice.body, /after 2 automatic repair attempts/u);
+});
+
+test("a repair task carries the chain's persisted outputs its own detached row cannot reach", async () => {
+  for (const outcome of ["review-fail", "gate-fail", "refresh-conflict"] as const) {
+    await resetTestDb(db);
+    const seeded = await exercise(outcome);
+    const repair = await repairFor(seeded, outcome === "review-fail" ? "review-fix" : outcome === "gate-fail" ? "gate-fix" : "refresh-conflict");
+    // Chain-detached by design: the claim path's prior-output lookup cannot
+    // fire for this row, so the prompt is the only carrier.
+    assert.equal(repair.chainId, null, outcome);
+    assert.equal(repair.chainIndex, null, outcome);
+    assert.match(repair.description, /Persisted outputs from prior template steps:/u, outcome);
+    assert.ok(repair.description.includes(IMPLEMENTATION_BODY), outcome);
+    assert.ok(repair.description.includes(SOL_FINDINGS_BODY), outcome);
+    assert.ok(repair.description.includes(BLIND_FINDINGS_BODY), outcome);
+    // Chain order, and nothing from the Regression step that opened the repair.
+    assert.ok(
+      repair.description.indexOf(IMPLEMENTATION_BODY) < repair.description.indexOf(SOL_FINDINGS_BODY),
+      outcome,
+    );
+    assert.ok(!repair.description.includes("regression-verification"), outcome);
+  }
+});
+
+test("a review-fix prompt names the blast radius a summary-literal repair would miss", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  assert.match(repair.description, /enumerate its callers across every workspace, including apps\/web/u);
+  const conflict = await exercise("refresh-conflict");
+  const resolver = await repairFor(conflict, "refresh-conflict");
+  assert.doesNotMatch(resolver.description, /enumerate its callers/u);
 });
 
 test("a Full Assurance repair revalidates documentation before Regression", async () => {
