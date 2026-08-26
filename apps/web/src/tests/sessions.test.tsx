@@ -123,6 +123,24 @@ test("a WAITING_INBOX session always says why, with or without a message id", ()
   }
 });
 
+test("session durations identify wall-clock spans that include Inbox wait", () => {
+  const waiting = renderToStaticMarkup(<table><tbody><SessionRow session={session({ executionStatus: "WAITING_INBOX" })} /></tbody></table>);
+  assert.match(waiting, /wall-clock \(includes Inbox wait\)/);
+
+  const resumed = renderToStaticMarkup(<table><tbody><SessionRow session={session({
+    executionStatus: "SUCCEEDED",
+    resumeAttempt: 1,
+    endedAt: "2026-08-16T00:05:01.000Z",
+  })} /></tbody></table>);
+  assert.match(resumed, /5m 0s wall-clock \(includes Inbox wait\)/);
+
+  const uninterrupted = renderToStaticMarkup(<table><tbody><SessionRow session={session({
+    executionStatus: "SUCCEEDED",
+    endedAt: "2026-08-16T00:05:01.000Z",
+  })} /></tbody></table>);
+  assert.doesNotMatch(uninterrupted, /wall-clock|Inbox wait/);
+});
+
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {
   const source = readFileSync(fileURLToPath(new URL("../pages/Sessions.tsx", import.meta.url)), "utf8");
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(source), false);
