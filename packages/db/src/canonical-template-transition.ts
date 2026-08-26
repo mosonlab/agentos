@@ -1,4 +1,4 @@
-import { AssigneeType, Prisma } from "@prisma/client";
+import { AssigneeType, Prisma, TaskStatus } from "@prisma/client";
 
 type LegacyStepTuple = readonly [
   string,
@@ -92,6 +92,75 @@ export const legacyTemplateName = (templateName: string, marker: string, templat
 /** The adjudication-era rename, kept for the rows and fixtures already carrying it. */
 export const legacyAdjudicationTemplateName = (templateName: string, templateId: string): string =>
   legacyTemplateName(templateName, "pre-adjudication", templateId);
+
+export type CanonicalRolloverRefusalReason =
+  | "template-row-missing"
+  | "template-row-renamed"
+  | "unfinished-tasks"
+  | "webhook-configuration";
+
+/** Stable CLI-visible reasons shared by every canonical rollover path. */
+export const canonicalRolloverRefusal = (
+  reason: CanonicalRolloverRefusalReason,
+  detail: string,
+): Error => new Error(`canonical-rollover-refused:${reason}: ${detail}`);
+
+/**
+ * Serialize rollover against task creation. A task insert takes a key-share
+ * lock through its template foreign key, so neither side can pass the other
+ * between this lock and the unfinished-task count.
+ */
+export const lockCanonicalTemplateForRollover = async (
+  tx: Prisma.TransactionClient,
+  templateName: string,
+  templateId: string,
+): Promise<void> => {
+  const locked = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "TaskTemplate" WHERE "id" = ${templateId} FOR UPDATE
+  `;
+  if (locked.length === 0) {
+    throw canonicalRolloverRefusal(
+      "template-row-missing",
+      `${templateName} ${templateId} disappeared while locking for rollover`,
+    );
+  }
+};
+
+type CanonicalRolloverGuardRow = {
+  id: string;
+  webhookSecretId: string | null;
+  webhookRepoId: string | null;
+  webhookPayloadMapping: Prisma.JsonValue | null;
+  webhookPausedAt: Date | null;
+  webhookReplayWindowSec: number | null;
+};
+
+/** Refuse rollover while any chain or operator-owned trigger state remains. */
+export const assertCanonicalRolloverAllowed = async (
+  tx: Prisma.TransactionClient,
+  templateName: string,
+  row: CanonicalRolloverGuardRow,
+): Promise<void> => {
+  const unfinishedTasks = await tx.task.count({
+    // Archived tasks still retain the old template contract and must block an
+    // archive -> rollover -> unarchive escape from the canonical guard.
+    where: { templateId: row.id, status: { not: TaskStatus.DONE } },
+  });
+  if (unfinishedTasks > 0) {
+    throw canonicalRolloverRefusal(
+      "unfinished-tasks",
+      `${templateName} ${row.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`,
+    );
+  }
+  if (row.webhookSecretId !== null || row.webhookRepoId !== null
+    || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
+    || row.webhookReplayWindowSec !== null) {
+    throw canonicalRolloverRefusal(
+      "webhook-configuration",
+      `${templateName} ${row.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`,
+    );
+  }
+};
 
 export type PersistedTransitionStep = {
   id: string;

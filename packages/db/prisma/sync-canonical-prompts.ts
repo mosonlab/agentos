@@ -3,7 +3,10 @@ import { PrismaClient, Prisma, RunnerPreference, TaskStatus } from "@prisma/clie
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
+  assertCanonicalRolloverAllowed,
+  canonicalRolloverRefusal,
   legacyTemplateName,
+  lockCanonicalTemplateForRollover,
   matchedLegacyGeneration,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
@@ -56,17 +59,6 @@ const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPr
 
 type CanonicalTransaction = Prisma.TransactionClient;
 type CanonicalSources = Map<CanonicalTemplateName, TemplateStepSource[]>;
-
-/**
- * Stable reasons for a canonical rollover refusal.  The sync runs as a CLI,
- * so the reason is part of its only caller-visible contract: a failed
- * transition must say why it stopped rather than leaving an operator to infer
- * it from a partial-looking database state.
- */
-const canonicalRolloverRefusal = (
-  reason: "unfinished-tasks" | "webhook-configuration",
-  detail: string,
-): Error => new Error(`canonical-rollover-refused:${reason}: ${detail}`);
 
 const transitionStepInclude = {
   assigneeAgent: { select: { name: true } },
@@ -186,12 +178,7 @@ const transitionCanonicalTemplateRows = async (
       .map((row) => row.id)
       .sort();
     for (const rowId of legacyRowIds) {
-      const locked = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "TaskTemplate" WHERE "id" = ${rowId} FOR UPDATE
-      `;
-      if (locked.length === 0) {
-        throw new Error(`canonical-rollover-refused:template-row-missing: ${templateName} ${rowId} disappeared while locking for rollover`);
-      }
+      await lockCanonicalTemplateForRollover(tx, templateName, rowId);
 
       // Re-read after acquiring the row lock.  A concurrent sync may have
       // already renamed this row while this transaction was waiting; using the
@@ -201,31 +188,26 @@ const transitionCanonicalTemplateRows = async (
         where: { id: rowId },
         include: { steps: { orderBy: { stepIndex: "asc" }, include: transitionStepInclude } },
       });
-      if (!row || row.name !== templateName) continue;
+      if (!row) {
+        throw canonicalRolloverRefusal(
+          "template-row-missing",
+          `${templateName} ${rowId} disappeared after its rollover lock was acquired`,
+        );
+      }
+      if (row.name !== templateName) {
+        console.log(JSON.stringify({
+          event: "canonical-rollover-skipped",
+          templateId: rowId,
+          expectedName: templateName,
+          actualName: row.name,
+          reason: "already-transitioned",
+        }));
+        continue;
+      }
       const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
       const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
       if (legacyMarker === null) continue;
-      const unfinishedTasks = await tx.task.count({
-        // Archived tasks still retain the old template contract.  They must
-        // block rollover just like visible unfinished tasks do; otherwise an
-        // archive -> rollover -> unarchive sequence revives work under a
-        // legacy template name.
-        where: { templateId: row.id, status: { not: TaskStatus.DONE } },
-      });
-      if (unfinishedTasks > 0) {
-        throw canonicalRolloverRefusal(
-          "unfinished-tasks",
-          `${templateName} ${row.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`,
-        );
-      }
-      if (row.webhookSecretId !== null || row.webhookRepoId !== null
-        || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null
-        || row.webhookReplayWindowSec !== null) {
-        throw canonicalRolloverRefusal(
-          "webhook-configuration",
-          `${templateName} ${row.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`,
-        );
-      }
+      await assertCanonicalRolloverAllowed(tx, templateName, row);
       const legacyName = legacyTemplateName(templateName, legacyMarker, row.id);
       await tx.taskTemplate.update({ where: { id: row.id }, data: { name: legacyName } });
       await createCanonicalTemplate(tx, row.projectId, templateName, steps);

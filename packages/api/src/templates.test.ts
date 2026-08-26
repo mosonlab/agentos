@@ -229,7 +229,59 @@ test("template instantiation retries against the canonical row after rollover", 
   assert.equal(result.tasks[0]!.templateStepId, step.id);
 });
 
-test("a stale legacy template ID resolves to the current canonical row", async () => {
+test("rollover retry refuses an override for a step absent from the replacement", async () => {
+  const agent = { id: "agent-1", name: "Agent", projectId: "project-1", archivedAt: null };
+  const step = (stepIndex: number) => ({
+    id: `step-${stepIndex}`,
+    stepIndex,
+    name: `Step ${stepIndex}`,
+    prompt: "work",
+    outputKind: "result",
+    attachmentsFromPrevious: false,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: agent.id,
+    assigneeAgent: agent,
+    approvalGate: false,
+    opensPullRequest: true,
+    layer: stepIndex,
+    baseFromStepIndex: null,
+    runner: null,
+  });
+  const oldTemplate = { id: "template-old", name: "Template", variables: [], steps: [step(1), step(2)] };
+  const canonicalTemplate = { id: "template-canonical", name: "Template", variables: [], steps: [step(1)] };
+  let transactionCount = 0;
+  const db = {
+    taskTemplate: {
+      findFirst: async ({ where }: { where: { id?: string; name?: string } }) => where.id
+        ? oldTemplate
+        : canonicalTemplate,
+    },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agent: { findMany: async () => [agent] },
+    agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => {
+      transactionCount += 1;
+      return operation({
+        $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('FROM "TaskTemplate"')
+          ? [{ id: oldTemplate.id, name: "Template-legacy-pre-adjudication-old" }]
+          : [{ id: agent.id, name: agent.name, projectId: agent.projectId, archivedAt: agent.archivedAt }],
+        agentRepoAccess: { count: async () => 1 },
+      });
+    },
+  } as unknown as PrismaClient;
+
+  await assert.rejects(
+    () => instantiateTemplate(db, "project-1", oldTemplate.id, {
+      repoId: "repo-1",
+      variables: {},
+      stepOverrides: { "2": { assigneeAgentId: agent.id } },
+    }),
+    (error: unknown) => isTemplateInstantiationRefusal(error) && error.code === "step_override_unknown_step",
+  );
+  assert.equal(transactionCount, 1);
+});
+
+test("a stale legacy template ID is not silently redirected", async () => {
   const agent = { id: "agent-1", name: "Agent", projectId: "project-1", archivedAt: null };
   const step = {
     id: "step-canonical",
@@ -253,12 +305,6 @@ test("a stale legacy template ID resolves to the current canonical row", async (
     variables: [],
     steps: [{ ...step, id: "step-old" }],
   };
-  const canonicalTemplate = {
-    id: "template-canonical",
-    name: "direct-engineer-workflow",
-    variables: [],
-    steps: [step],
-  };
   const created: Array<Record<string, unknown>> = [];
   let canonicalLookup = 0;
   const db = {
@@ -266,14 +312,14 @@ test("a stale legacy template ID resolves to the current canonical row", async (
       findFirst: async ({ where }: { where: { id?: string; name?: string } }) => {
         if (where.id) return oldTemplate;
         canonicalLookup += 1;
-        return canonicalTemplate;
+        return null;
       },
     },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('FROM "TaskTemplate"')
-        ? [{ id: canonicalTemplate.id, name: canonicalTemplate.name }]
+        ? [{ id: oldTemplate.id, name: oldTemplate.name }]
         : [{ id: agent.id, name: agent.name, projectId: agent.projectId, archivedAt: agent.archivedAt }],
       agentRepoAccess: { count: async () => 1 },
       task: {
@@ -288,9 +334,9 @@ test("a stale legacy template ID resolves to the current canonical row", async (
   } as unknown as PrismaClient;
 
   const result = await instantiateTemplate(db, "project-1", oldTemplate.id, { repoId: "repo-1", variables: {} });
-  assert.equal(canonicalLookup, 1);
-  assert.equal(result.tasks[0]!.templateId, canonicalTemplate.id);
-  assert.equal(result.tasks[0]!.templateStepId, step.id);
+  assert.equal(canonicalLookup, 0);
+  assert.equal(result.tasks[0]!.templateId, oldTemplate.id);
+  assert.equal(result.tasks[0]!.templateStepId, oldTemplate.steps[0]!.id);
 });
 
 test("the lower-level materializer rejects blank variables and invalid branches before a transaction", async () => {

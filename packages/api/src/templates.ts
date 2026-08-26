@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import {
   AssigneeType,
-  CANONICAL_TEMPLATE_SOURCE_SPECS,
   canonicalIntegratorBindingRefusal,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
@@ -144,25 +143,7 @@ const loadTemplateByName = async (
   include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
 });
 
-const canonicalTemplateNameForLegacyRow = (templateName: string): string | null => (
-  CANONICAL_TEMPLATE_SOURCE_SPECS.find(({ name }) => templateName.startsWith(`${name}-legacy-`))?.name ?? null
-);
-
 type LoadedTemplate = NonNullable<Awaited<ReturnType<typeof loadTemplate>>>;
-
-const resolveTemplate = async (
-  db: PrismaClient,
-  projectId: string,
-  loaded: LoadedTemplate,
-): Promise<LoadedTemplate> => {
-  const canonicalName = canonicalTemplateNameForLegacyRow(loaded.name);
-  if (!canonicalName) return loaded;
-  const replacement = await loadTemplateByName(db, projectId, canonicalName);
-  if (!replacement) {
-    throw new Error(`Template ${loaded.name} is a legacy canonical row, but its replacement ${canonicalName} was not found`);
-  }
-  return replacement;
-};
 
 export const isUsableTemplateVariable = (value: string | undefined): value is string => (
   value !== undefined && value.trim().length > 0
@@ -225,26 +206,28 @@ export const instantiateTemplate = async (
   ]);
   if (!loadedTemplate) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
-  let template = await resolveTemplate(db, projectId, loadedTemplate);
-  if (template.steps.length === 0) throw new Error("Template has no steps");
-  const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
-  const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
-  if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
-  if (unknown.length > 0) throw new Error(`Unknown template variables: ${unknown.join(", ")}`);
+  let template: LoadedTemplate = loadedTemplate;
   if (input.variables.branchName !== undefined && !isValidBranchName(input.variables.branchName)) {
     throw new Error("Invalid template branch name");
   }
-  assertValidBaseReferences(template.steps);
-
-  const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
-  for (const [stepIndex] of overrideEntries) {
-    if (!templateStepsByIndex.has(stepIndex)) {
-      throw overrideRefusal(
-        "step_override_unknown_step",
-        `Step override names unknown template step ${stepIndex}`,
-      );
+  const assertTemplateDependentInput = (currentTemplate: LoadedTemplate): void => {
+    if (currentTemplate.steps.length === 0) throw new Error("Template has no steps");
+    const missing = currentTemplate.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
+    const unknown = Object.keys(input.variables).filter((variable) => !currentTemplate.variables.includes(variable));
+    if (missing.length > 0) throw new Error(`Missing template variables: ${missing.join(", ")}`);
+    if (unknown.length > 0) throw new Error(`Unknown template variables: ${unknown.join(", ")}`);
+    assertValidBaseReferences(currentTemplate.steps);
+    const templateStepsByIndex = new Set(currentTemplate.steps.map((step) => String(step.stepIndex)));
+    for (const [stepIndex] of overrideEntries) {
+      if (!templateStepsByIndex.has(stepIndex)) {
+        throw overrideRefusal(
+          "step_override_unknown_step",
+          `Step override names unknown template step ${stepIndex}`,
+        );
+      }
     }
-  }
+  };
+  assertTemplateDependentInput(template);
   const overrideAgentIds = [...new Set(overrideEntries.map(([, override]) => override.assigneeAgentId))].sort();
   const overrideAgents = new Map<string, OverrideAgent>();
   if (overrideAgentIds.length > 0) {
@@ -619,8 +602,7 @@ export const instantiateTemplate = async (
           throw new Error(`Template ${rolledOverName} was rolled over, but its canonical replacement was not found`);
         }
         template = replacement;
-        if (template.steps.length === 0) throw new Error("Template has no steps");
-        assertValidBaseReferences(template.steps);
+        assertTemplateDependentInput(template);
         effectiveSteps = effectiveStepsFor(template);
         await serializationRetryDelay(attempt);
         continue;

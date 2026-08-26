@@ -1,9 +1,12 @@
-import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, TaskStatus } from "@prisma/client";
+import { AssigneeType, CodexServiceTier, Prisma, PrismaClient } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
+  assertCanonicalRolloverAllowed,
+  canonicalRolloverRefusal,
   legacyTemplateName,
+  lockCanonicalTemplateForRollover,
   matchedLegacyGeneration,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
@@ -176,7 +179,7 @@ const main = async (): Promise<void> => {
     }
   }
   await prisma.$transaction(async (tx) => {
-    const existing = await tx.taskTemplate.findUnique({
+    let existing = await tx.taskTemplate.findUnique({
       where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
       include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
     });
@@ -213,17 +216,25 @@ const main = async (): Promise<void> => {
       && existing.steps[12]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
       && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
     if (existing && (isRegressionFirstThirteenStepTemplate || legacyCanonical)) {
-      const unfinishedTasks = await tx.task.count({
-        where: { templateId: existing.id, status: { not: TaskStatus.DONE } },
+      await lockCanonicalTemplateForRollover(tx, INTEGRATOR_TEMPLATE_NAME, existing.id);
+      const lockedExisting = await tx.taskTemplate.findUnique({
+        where: { id: existing.id },
+        include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
       });
-      if (unfinishedTasks > 0) {
-        throw new Error(`canonical-rollover-refused:unfinished-tasks: ${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      if (!lockedExisting) {
+        throw canonicalRolloverRefusal(
+          "template-row-missing",
+          `${INTEGRATOR_TEMPLATE_NAME} ${existing.id} disappeared after its rollover lock was acquired`,
+        );
       }
-      if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
-        || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
-        || existing.webhookReplayWindowSec !== null) {
-        throw new Error(`canonical-rollover-refused:webhook-configuration: ${INTEGRATOR_TEMPLATE_NAME} ${existing.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+      if (lockedExisting.name !== INTEGRATOR_TEMPLATE_NAME) {
+        throw canonicalRolloverRefusal(
+          "template-row-renamed",
+          `${INTEGRATOR_TEMPLATE_NAME} ${existing.id} was renamed to ${lockedExisting.name} before seed acquired its rollover lock`,
+        );
       }
+      existing = lockedExisting;
+      await assertCanonicalRolloverAllowed(tx, INTEGRATOR_TEMPLATE_NAME, existing);
     }
 
     // A historical 9- or 10-row template cannot be rewritten in place: its
@@ -282,67 +293,75 @@ const main = async (): Promise<void> => {
     });
     await upsertTemplateSteps(tx, template.id, templateSteps, CANONICAL_STEP_NAMES, "canonical", agentByName);
 
-  const historicalDirect = await tx.taskTemplate.findUnique({
-    where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
-    include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
-  });
-  const legacyDirectMarker = historicalDirect
-    ? matchedLegacyGeneration(DIRECT_TEMPLATE_NAME, historicalDirect.steps as unknown as PersistedTransitionStep[])
-    : null;
-  const legacyDirect = historicalDirect && legacyDirectMarker !== null;
-  if (legacyDirect) {
-    const unfinishedTasks = await tx.task.count({
-      where: { templateId: historicalDirect.id, status: { not: TaskStatus.DONE } },
+    let historicalDirect = await tx.taskTemplate.findUnique({
+      where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
+      include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
     });
-    if (unfinishedTasks > 0) {
-      throw new Error(`canonical-rollover-refused:unfinished-tasks: ${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+    const legacyDirectMarker = historicalDirect
+      ? matchedLegacyGeneration(DIRECT_TEMPLATE_NAME, historicalDirect.steps as unknown as PersistedTransitionStep[])
+      : null;
+    const legacyDirect = historicalDirect && legacyDirectMarker !== null;
+    if (legacyDirect) {
+      await lockCanonicalTemplateForRollover(tx, DIRECT_TEMPLATE_NAME, historicalDirect.id);
+      const lockedHistoricalDirect = await tx.taskTemplate.findUnique({
+        where: { id: historicalDirect.id },
+        include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
+      });
+      if (!lockedHistoricalDirect) {
+        throw canonicalRolloverRefusal(
+          "template-row-missing",
+          `${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} disappeared after its rollover lock was acquired`,
+        );
+      }
+      if (lockedHistoricalDirect.name !== DIRECT_TEMPLATE_NAME) {
+        throw canonicalRolloverRefusal(
+          "template-row-renamed",
+          `${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} was renamed to ${lockedHistoricalDirect.name} before seed acquired its rollover lock`,
+        );
+      }
+      historicalDirect = lockedHistoricalDirect;
+      await assertCanonicalRolloverAllowed(tx, DIRECT_TEMPLATE_NAME, historicalDirect);
     }
-    if (historicalDirect.webhookSecretId !== null || historicalDirect.webhookRepoId !== null
-      || historicalDirect.webhookPayloadMapping !== null || historicalDirect.webhookPausedAt !== null
-      || historicalDirect.webhookReplayWindowSec !== null) {
-      throw new Error(`canonical-rollover-refused:webhook-configuration: ${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+    if (legacyDirect) {
+      const legacyName = legacyTemplateName(DIRECT_TEMPLATE_NAME, legacyDirectMarker!, historicalDirect.id);
+      const collision = await tx.taskTemplate.findUnique({
+        where: { projectId_name: { projectId: project.id, name: legacyName } },
+        select: { id: true },
+      });
+      if (collision) throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} cannot rename to ${legacyName}: target already exists`);
+      await tx.taskTemplate.update({ where: { id: historicalDirect.id }, data: { name: legacyName } });
     }
-  }
-  if (legacyDirect) {
-    const legacyName = legacyTemplateName(DIRECT_TEMPLATE_NAME, legacyDirectMarker!, historicalDirect.id);
-    const collision = await tx.taskTemplate.findUnique({
-      where: { projectId_name: { projectId: project.id, name: legacyName } },
-      select: { id: true },
+    if (historicalDirect?.steps.length === 6
+      && historicalDirect.steps[5]?.assigneeType === AssigneeType.HUMAN
+      && historicalDirect.steps[5]?.outputKind === "approval") {
+      await tx.taskTemplate.update({
+        where: { id: historicalDirect.id },
+        data: { name: `${DIRECT_TEMPLATE_NAME}-legacy-human-6-${historicalDirect.id}` },
+      });
+    }
+    if (historicalDirect && !legacyDirect
+      && historicalDirect.steps.length !== directTemplateSteps.length
+      && historicalDirect.steps.length !== 6) {
+      throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: expected ${directTemplateSteps.length} steps, found ${historicalDirect.steps.length}`);
+    }
+    if (historicalDirect && !legacyDirect && historicalDirect.steps.length === directTemplateSteps.length
+      && historicalDirect.steps.some((step, index) => step.stepIndex !== index + 1)) {
+      throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
+    }
+    const directTemplate = await tx.taskTemplate.upsert({
+      where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
+      update: {
+        description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
+        variables: ["branchName"],
+      },
+      create: {
+        projectId: project.id,
+        name: DIRECT_TEMPLATE_NAME,
+        description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
+        variables: ["branchName"],
+      },
     });
-    if (collision) throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} cannot rename to ${legacyName}: target already exists`);
-    await tx.taskTemplate.update({ where: { id: historicalDirect.id }, data: { name: legacyName } });
-  }
-  if (historicalDirect?.steps.length === 6
-    && historicalDirect.steps[5]?.assigneeType === AssigneeType.HUMAN
-    && historicalDirect.steps[5]?.outputKind === "approval") {
-    await tx.taskTemplate.update({
-      where: { id: historicalDirect.id },
-      data: { name: `${DIRECT_TEMPLATE_NAME}-legacy-human-6-${historicalDirect.id}` },
-    });
-  }
-  if (historicalDirect && !legacyDirect
-    && historicalDirect.steps.length !== directTemplateSteps.length
-    && historicalDirect.steps.length !== 6) {
-    throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: expected ${directTemplateSteps.length} steps, found ${historicalDirect.steps.length}`);
-  }
-  if (historicalDirect && !legacyDirect && historicalDirect.steps.length === directTemplateSteps.length
-    && historicalDirect.steps.some((step, index) => step.stepIndex !== index + 1)) {
-    throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
-  }
-  const directTemplate = await tx.taskTemplate.upsert({
-    where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
-    update: {
-      description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
-      variables: ["branchName"],
-    },
-    create: {
-      projectId: project.id,
-      name: DIRECT_TEMPLATE_NAME,
-      description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
-      variables: ["branchName"],
-    },
-  });
-  await upsertTemplateSteps(tx, directTemplate.id, directTemplateSteps, DIRECT_STEP_NAMES, "direct", agentByName);
+    await upsertTemplateSteps(tx, directTemplate.id, directTemplateSteps, DIRECT_STEP_NAMES, "direct", agentByName);
   });
 
   console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the seven-step direct template.`);
