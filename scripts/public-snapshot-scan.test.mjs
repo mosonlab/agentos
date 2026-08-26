@@ -370,6 +370,7 @@ test("the docs surface is closed and named one file at a time", () => {
   // unrelated plans, reviews, specifications, or unlisted runbooks alongside it.
   assert.deepEqual(docs.sort(), [
     "docs/BRIEF-TEMPLATE.md",
+    "docs/adr/0001-merge-lease-hold-window.md",
     "docs/adr/README.md",
     "docs/demos/templates-release-demo.md",
     "docs/demos/templates-release-evidence.schema.json",
