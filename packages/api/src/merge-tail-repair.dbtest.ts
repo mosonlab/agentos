@@ -8,11 +8,17 @@ import { promisify } from "node:util";
 
 import {
   AssigneeType,
+  AUTHORITY_RESIGN_OPEN_PREFIX,
+  InboxStatus,
+  MAX_AUTHORITY_RESIGN_ROUNDS,
+  MERGE_TAIL_KIND,
   PrismaClient,
   TaskStatus,
 } from "@agentos/db";
 
 import { handleRegressionCompletion } from "./app.js";
+import { authorityResignTick } from "./authority-resign-worker.js";
+import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -106,17 +112,34 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
   return { project, template, repo, regressionAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
 };
 
-const verdict = (outcome: "refresh-conflict" | "review-fail" | "gate-fail") => JSON.stringify(outcome === "refresh-conflict"
+const RESIGN_SUMMARY = "added packages/db/prisma/migrations/20260826000000_probe/migration.sql";
+
+const verdict = (outcome: RegressionOutcome) => JSON.stringify(outcome === "refresh-conflict"
   ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: "merge conflict" }
   : outcome === "review-fail"
     ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: "MF-2 remains open" }
-    : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
+    : outcome === "authority-resign"
+      ? { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, summary: RESIGN_SUMMARY }
+      : { schemaVersion: 1, outcome, headSha: HEAD, baseHeadSha: BASE, gateVerdict: "FAIL", summary: "suite failed" });
+
+type RegressionOutcome = "refresh-conflict" | "review-fail" | "gate-fail" | "authority-resign";
 
 const exercise = async (
-  outcome: "refresh-conflict" | "review-fail" | "gate-fail",
-  options: { withLibrarian?: boolean } = {},
+  outcome: RegressionOutcome,
+  options: { withLibrarian?: boolean; priorResignRounds?: number } = {},
 ) => {
   const seeded = await seedRegression(options);
+  for (let round = 1; round <= (options.priorResignRounds ?? 0); round += 1) {
+    await db.taskActivity.create({ data: {
+      taskId: seeded.regression.id,
+      actorType: "control-plane",
+      body: `Release authority re-signature requested (round ${round})`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.authorityResign, schemaVersion: 1, state: "open",
+        headSha: HEAD, baseHeadSha: BASE, branch: BRANCH, round,
+      },
+    } });
+  }
   await db.taskStepOutput.create({ data: {
     taskId: seeded.regression.id, runId: seeded.run.id, kind: "regression-verification",
     body: verdict(outcome), commitSha: HEAD,
@@ -830,4 +853,171 @@ test("a stale branch is mechanically refreshed before exact-head PASS advances",
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("an authority re-signature request parks the step and opens one runnable inbox message", async () => {
+  const seeded = await exercise("authority-resign");
+
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(regression.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
+  // No agent can close this, so no agent is asked to.
+  assert.equal(await repairCount(seeded), 0);
+
+  const messages = await db.inboxMessage.findMany({ where: { taskId: seeded.regression.id } });
+  assert.equal(messages.length, 1);
+  const message = messages[0]!;
+  assert.equal(message.kind, "TEXT");
+  assert.equal(message.status, InboxStatus.OPEN);
+  assert.equal(message.dedupeKey, `authority-resign:${seeded.regression.id}:${HEAD}`);
+  for (const fragment of [
+    RESIGN_SUMMARY,
+    `git switch --detach ${HEAD}`,
+    "npm run snapshot:authority",
+    "npm run db:authority-check -w @agentos/db",
+    `git push origin HEAD:${BRANCH}`,
+    "release-authority.json",
+  ]) assert.ok(message.body.includes(fragment), `${fragment} is missing from the inbox message`);
+  // The one-liner must be runnable, so nothing in it may be a placeholder.
+  assert.equal(/<[a-z-]+>/u.test(message.body), false, message.body);
+
+  const opened = await db.taskActivity.findMany({ where: { taskId: seeded.regression.id } });
+  const request = opened.map((row) => row.metadata as Record<string, unknown> | null)
+    .filter((metadata) => metadata?.kind === MERGE_TAIL_KIND.authorityResign && metadata.state === "open");
+  assert.equal(request.length, 1);
+  assert.deepEqual(
+    { headSha: request[0]!.headSha, branch: request[0]!.branch, round: request[0]!.round },
+    { headSha: HEAD, branch: BRANCH, round: 1 },
+  );
+});
+
+test("a re-signature request past the round ceiling stops the tail instead of asking again", async () => {
+  const seeded = await exercise("authority-resign", { priorResignRounds: MAX_AUTHORITY_RESIGN_ROUNDS });
+
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(regression.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX), false);
+  assert.match(regression.failureReason ?? "", /re-signature round 4 exceeds 3/u);
+  const notices = await db.inboxMessage.findMany({ where: { taskId: seeded.regression.id } });
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!.body, /Autonomous merge tail stopped/u);
+});
+
+test("a repair completion does not restart a step parked for a re-signature", async () => {
+  const seeded = await exercise("gate-fail");
+  const repair = await repairFor(seeded, "gate-fix");
+  await db.task.update({ where: { id: seeded.regression.id }, data: {
+    status: TaskStatus.REVIEW, failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`,
+  } });
+
+  await completeRepair(seeded, repair.id, "repair completed", HEAD);
+
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(regression.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, status: "QUEUED" } }), 0);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: seeded.regression.id, body: { contains: "held by an open release authority re-signature" } },
+  }), 1);
+});
+
+const PR_NUMBER = 41;
+const RESIGNED = "d".repeat(40);
+
+const resignReader = (headRefOid: string, filenames: string[]): GitHubReader => {
+  const pullRequest: PullRequestSnapshot = {
+    repository: "acme/widgets",
+    number: PR_NUMBER,
+    state: "OPEN",
+    isDraft: false,
+    merged: false,
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    baseRefName: "main",
+    headRefOid,
+    baseSha: BASE,
+    autoMergeRequest: null,
+    mergeQueueEntry: null,
+    repositoryMergeQueue: null,
+    mergedBy: null,
+    mergeCommit: null,
+    requiredCheckNames: [],
+    checkContexts: [],
+    headCommitOid: headRefOid,
+    readAt: new Date().toISOString(),
+  };
+  return {
+    readPullRequest: async () => pullRequest,
+    compareCommits: async () => ({
+      status: "ahead",
+      behindBy: 0,
+      filesComplete: true,
+      files: filenames.map((filename) => ({ filename, previousFilename: null, patch: null })),
+    }),
+  };
+};
+
+const parkedForResign = async () => {
+  const seeded = await exercise("authority-resign");
+  await db.run.update({
+    where: { id: seeded.run.id },
+    data: {
+      pullRequestNumber: PR_NUMBER,
+      pullRequestUrl: `https://github.com/acme/widgets/pull/${PR_NUMBER}`,
+    },
+  });
+  return seeded;
+};
+
+test("the resign worker returns the step once the re-signed attestation is on the branch", async () => {
+  const seeded = await parkedForResign();
+
+  const result = await authorityResignTick(db, resignReader(RESIGNED, ["release-authority.json", "packages/db/prisma/migrations/20260826000000_probe/migration.sql"]));
+
+  assert.deepEqual(result, { resumed: 1, waiting: 0, unwatchable: 0 });
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.TODO);
+  assert.equal(regression.failureReason, null);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, status: "QUEUED" } }), 1);
+  const resumedActivity = (await db.taskActivity.findMany({ where: { taskId: seeded.regression.id } }))
+    .map((row) => row.metadata as Record<string, unknown> | null)
+    .filter((metadata) => metadata?.kind === MERGE_TAIL_KIND.authorityResign && metadata.state === "resumed");
+  assert.equal(resumedActivity.length, 1);
+  assert.equal(resumedActivity[0]!.headSha, RESIGNED);
+  const message = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(message.status, InboxStatus.CLOSED);
+});
+
+test("a push that does not carry the attestation leaves the park exactly as it was", async () => {
+  const seeded = await parkedForResign();
+
+  const result = await authorityResignTick(db, resignReader(RESIGNED, ["packages/api/src/app.ts"]));
+
+  assert.deepEqual(result, { resumed: 0, waiting: 1, unwatchable: 0 });
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(regression.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id, status: "QUEUED" } }), 0);
+  const message = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(message.status, InboxStatus.OPEN);
+});
+
+test("the head that was parked is never mistaken for the re-signed one", async () => {
+  await parkedForResign();
+
+  // The attestation is in the range because the branch has always carried one;
+  // only a head that actually moved can be the operator's signature.
+  const result = await authorityResignTick(db, resignReader(HEAD, ["release-authority.json"]));
+
+  assert.deepEqual(result, { resumed: 0, waiting: 1, unwatchable: 0 });
+});
+
+test("a park whose pull request cannot be resolved is reported, not resumed and not lost", async () => {
+  const seeded = await exercise("authority-resign");
+
+  const result = await authorityResignTick(db, resignReader(RESIGNED, ["release-authority.json"]));
+
+  assert.deepEqual(result, { resumed: 0, waiting: 0, unwatchable: 1 });
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
 });

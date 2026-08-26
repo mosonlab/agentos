@@ -88,8 +88,10 @@ import {
   type CardRow,
   type DecisionRow,
   asJsonObject,
+  AUTHORITY_RESIGN_OPEN_PREFIX,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
+  MAX_AUTHORITY_RESIGN_ROUNDS,
   MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   MergeRecoveryStatus,
@@ -97,6 +99,7 @@ import {
   parseIndependentReviewDecision,
   parseRegressionVerdict,
   parseResolverResult,
+  RELEASE_AUTHORITY_FILE,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   type IndependentReviewFinding,
   type MergeRecoveryAttempt,
@@ -407,6 +410,64 @@ const openMergeTailStopNotice = async (
   } });
 };
 
+/**
+ * The one operator action the autonomous merge tail asks for, and the reason it
+ * cannot ask an agent instead: `release-authority.json` is signed with a key
+ * that lives outside every checkout, so a chain that moves an attested
+ * release-path file can only be unblocked by whoever holds it.
+ *
+ * The message is written to be run, not interpreted: the two recorded SHAs come
+ * out of the attestation already in the checkout, so nothing here has to be
+ * filled in by hand. Nothing else in the chain is blocked while it waits, and
+ * the resign worker resumes this step on its own once the signature is pushed.
+ */
+const openAuthorityResignNotice = async (
+  tx: DbTx,
+  input: {
+    taskId: string;
+    agentId: string;
+    sessionId?: string;
+    branch: string;
+    headSha: string;
+    summary: string;
+    round: number;
+  },
+): Promise<void> => {
+  const body = [
+    `Autonomous merge tail: ${RELEASE_AUTHORITY_FILE} must be re-signed before this chain can merge.`,
+    `Branch ${input.branch} moved attested release-path files at head ${input.headSha}, so the migration preflight refuses this tree and the merge gate cannot pass. The signing key never enters a chain, so this is yours to run (request ${input.round} of ${MAX_AUTHORITY_RESIGN_ROUNDS}).`,
+    `What moved:\n${input.summary}`,
+    [
+      "Run this in the checkout that holds the private revalidation document, with the signing key at hand:",
+      "",
+      `  git fetch origin ${input.branch}`,
+      `  git switch --detach ${input.headSha}`,
+      "  RELEASE_AUTHORITY_KEY=~/.agentos-keys/release-authority.ed25519 \\",
+      `  GOAL5A0_MASTER_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').masterSha")" \\`,
+      `  GOAL5A0_CONTROL_PLANE_A_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').controlPlaneASha")" \\`,
+      "    npm run snapshot:authority",
+      `  npm run db:authority-check -w @agentos/db`,
+      `  git add ${RELEASE_AUTHORITY_FILE}`,
+      `  git commit -m "chore(release): re-sign the release authority for ${input.branch}"`,
+      `  git push origin HEAD:${input.branch}`,
+    ].join("\n"),
+    `Nothing else is needed. The server watches the pull request and re-runs regression verification as soon as the re-signed ${RELEASE_AUTHORITY_FILE} is on ${input.branch}.`,
+  ].join("\n\n");
+  await tx.inboxMessage.upsert({
+    where: { dedupeKey: `authority-resign:${input.taskId}:${input.headSha}` },
+    create: {
+      from: "AGENT",
+      agentId: input.agentId,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      taskId: input.taskId,
+      kind: "TEXT",
+      body,
+      dedupeKey: `authority-resign:${input.taskId}:${input.headSha}`,
+    },
+    update: {},
+  });
+};
+
 const createMergeTailRepairTask = async (
   tx: DbTx,
   input: {
@@ -558,8 +619,63 @@ export const handleRegressionCompletion = async (
         ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
         : verdict.outcome === "review-fail"
           ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-          : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+          : verdict.outcome === "authority-resign"
+            ? `release authority re-signature required at ${verdict.headSha}: ${verdict.summary}`
+            : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
     );
+    return "handled";
+  }
+
+  if (verdict.outcome === "authority-resign") {
+    // The park is owned by the resign worker, which returns this step to TODO
+    // once the re-signed attestation is on the branch. Counting only `open`
+    // rounds is the anti-thrash bound: a repeat means the last signature did
+    // not cover this tree, and a chain that keeps asking is not progressing.
+    const priorRounds = (await tx.taskActivity.findMany({
+      where: { taskId: input.task.id }, select: { metadata: true },
+    })).filter((row) => {
+      const metadata = asJsonObject(row.metadata);
+      return metadata?.kind === MERGE_TAIL_KIND.authorityResign && metadata.state === "open";
+    }).length;
+    const round = priorRounds + 1;
+    if (round > MAX_AUTHORITY_RESIGN_ROUNDS) {
+      return stop(truncateFailureReason(
+        `release authority re-signature round ${round} exceeds ${MAX_AUTHORITY_RESIGN_ROUNDS} at ${verdict.headSha}: ${verdict.summary}`,
+        FAILURE_REASON_LIMIT,
+      ));
+    }
+    if (!input.run.branch) {
+      return stop(`release authority re-signature is required at ${verdict.headSha} but this run names no chain branch`);
+    }
+    const branch = input.run.branch;
+    await tx.task.update({ where: { id: input.task.id }, data: {
+      status: TaskStatus.REVIEW,
+      failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${verdict.headSha}`,
+    } });
+    await tx.taskActivity.create({ data: {
+      taskId: input.task.id,
+      actorType: "control-plane",
+      body: `Release authority re-signature requested at ${verdict.headSha}: ${verdict.summary}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.authorityResign,
+        schemaVersion: 1,
+        state: "open",
+        headSha: verdict.headSha,
+        baseHeadSha: verdict.baseHeadSha,
+        branch,
+        round,
+        summary: verdict.summary,
+      },
+    } });
+    await openAuthorityResignNotice(tx, {
+      taskId: input.task.id,
+      agentId: input.run.agentId,
+      sessionId: input.run.sessionId,
+      branch,
+      headSha: verdict.headSha,
+      summary: verdict.summary,
+      round,
+    });
     return "handled";
   }
 
@@ -1565,6 +1681,18 @@ const activateMergeTailTarget = async (
         ? "Independent review resolved; readiness target returned to the server worker"
         : "Merge-tail readiness target queued for server worker",
       metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
+    } });
+    return;
+  }
+  if (target.status === TaskStatus.REVIEW && target.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX)) {
+    // A park the resign worker owns. Re-queueing this step now would spend a
+    // gate on a tree the migration preflight still refuses, and would lose the
+    // park the operator's inbox message points at.
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: "Merge-tail target is held by an open release authority re-signature",
+      metadata: { kind: MERGE_TAIL_KIND.authorityResign, schemaVersion: 1, state: "held" },
     } });
     return;
   }
