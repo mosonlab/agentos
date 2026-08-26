@@ -87,13 +87,13 @@ export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string
 
 export type IntegratorStepShape = {
   stepIndex: number;
-  outputKind: string;
+  outputKind?: string;
   taskTemplate?: { name: string } | null;
   taskTemplateName?: string | null;
 } | null | undefined;
 
 export const isCanonicalIntegratorStep = (step: IntegratorStepShape): boolean =>
-  step !== null && step !== undefined && stepRole(step) === "integrator";
+  typeof step?.outputKind === "string" && stepRole({ outputKind: step.outputKind }) === "integrator";
 
 export const isIntegratorStep = isCanonicalIntegratorStep;
 

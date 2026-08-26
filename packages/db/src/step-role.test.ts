@@ -69,6 +69,7 @@ test("role predicates ignore ordinals and template generations", () => {
   assert.equal(isIntegratorStep(integrator), true);
   assert.equal(isMergeReadinessStep(readiness), true);
   assert.equal(isIntegratorStep({ ...integrator, outputKind: "implementation" }), false);
+  assert.equal(isIntegratorStep({ stepIndex: 1 }), false);
   assert.equal(isMergeReadinessStep({ ...readiness, outputKind: "implementation" }), false);
 });
 
