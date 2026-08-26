@@ -228,6 +228,29 @@ export const instantiateTemplate = async (
     }
   };
   assertTemplateDependentInput(template);
+  const originalOverrideTargets = new Map(overrideEntries.map(([stepIndex]) => {
+    const step = template.steps.find((candidate) => String(candidate.stepIndex) === stepIndex)!;
+    return [stepIndex, {
+      name: step.name,
+      outputKind: step.outputKind,
+      assigneeType: step.assigneeType,
+    }] as const;
+  }));
+  const assertOverrideTargetsUnchanged = (currentTemplate: LoadedTemplate): void => {
+    for (const [stepIndex, original] of originalOverrideTargets) {
+      const current = currentTemplate.steps.find((step) => String(step.stepIndex) === stepIndex)!;
+      if (
+        current.name !== original.name
+        || current.outputKind !== original.outputKind
+        || current.assigneeType !== original.assigneeType
+      ) {
+        throw overrideRefusal(
+          "step_override_unknown_step",
+          `Step override ${stepIndex} originally targeted ${original.name} (${original.outputKind}), but the replacement template targets ${current.name} (${current.outputKind}) at that index`,
+        );
+      }
+    }
+  };
   const overrideAgentIds = [...new Set(overrideEntries.map(([, override]) => override.assigneeAgentId))].sort();
   const overrideAgents = new Map<string, OverrideAgent>();
   if (overrideAgentIds.length > 0) {
@@ -601,8 +624,9 @@ export const instantiateTemplate = async (
         if (!replacement) {
           throw new Error(`Template ${rolledOverName} was rolled over, but its canonical replacement was not found`);
         }
+        assertTemplateDependentInput(replacement);
+        assertOverrideTargetsUnchanged(replacement);
         template = replacement;
-        assertTemplateDependentInput(template);
         effectiveSteps = effectiveStepsFor(template);
         await serializationRetryDelay(attempt);
         continue;

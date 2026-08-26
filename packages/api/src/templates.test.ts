@@ -281,6 +281,85 @@ test("rollover retry refuses an override for a step absent from the replacement"
   assert.equal(transactionCount, 1);
 });
 
+test("rollover retry refuses an override whose index now names a different step", async () => {
+  const canonicalAgent = { id: "agent-canonical", name: "Canonical Agent", projectId: "project-1", archivedAt: null };
+  const overrideAgent = { id: "agent-override", name: "Override Agent", projectId: "project-1", archivedAt: null };
+  const step = (name: string, outputKind: string, assigneeAgent = canonicalAgent) => ({
+    id: `step-${outputKind}`,
+    stepIndex: 5,
+    name,
+    prompt: "work",
+    outputKind,
+    attachmentsFromPrevious: true,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: assigneeAgent.id,
+    assigneeAgent,
+    approvalGate: false,
+    opensPullRequest: false,
+    layer: 4,
+    baseFromStepIndex: null,
+    runner: null,
+  });
+  const oldTemplate = {
+    id: "template-old",
+    name: "direct-engineer-workflow",
+    variables: [],
+    steps: [step("Apply review fixes", "fixed-implementation")],
+  };
+  const canonicalTemplate = {
+    id: "template-canonical",
+    name: oldTemplate.name,
+    variables: [],
+    steps: [step("Regression verification", "regression-verification")],
+  };
+  let transactionCount = 0;
+  const db = {
+    taskTemplate: {
+      findFirst: async ({ where }: { where: { id?: string; name?: string } }) => where.id
+        ? oldTemplate
+        : canonicalTemplate,
+    },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agent: { findMany: async () => [overrideAgent] },
+    agentRepoAccess: { findFirst: async () => ({ agentId: overrideAgent.id }) },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => {
+      transactionCount += 1;
+      return operation({
+        $queryRaw: async (query: TemplateStringsArray) => {
+          if (query.join(" ").includes('FROM "TaskTemplate"')) {
+            return [{
+              id: transactionCount === 1 ? oldTemplate.id : canonicalTemplate.id,
+              name: transactionCount === 1
+                ? `${oldTemplate.name}-legacy-pre-adjudication-old`
+                : canonicalTemplate.name,
+            }];
+          }
+          return [
+            canonicalAgent,
+            overrideAgent,
+            { agentId: overrideAgent.id, repoId: "repo-1" },
+          ];
+        },
+        agentRepoAccess: { count: async () => 1 },
+        task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
+        taskActivity: { createMany: async () => ({ count: 1 }) },
+      });
+    },
+  } as unknown as PrismaClient;
+
+  await assert.rejects(
+    () => instantiateTemplate(db, "project-1", oldTemplate.id, {
+      repoId: "repo-1",
+      variables: {},
+      stepOverrides: { "5": { assigneeAgentId: overrideAgent.id } },
+    }),
+    (error: unknown) => isTemplateInstantiationRefusal(error)
+      && error.code === "step_override_unknown_step"
+      && /Apply review fixes[\s\S]*Regression verification/u.test(error.message),
+  );
+  assert.equal(transactionCount, 1, "the changed override target is refused before retrying task creation");
+});
+
 test("a stale legacy template ID is not silently redirected", async () => {
   const agent = { id: "agent-1", name: "Agent", projectId: "project-1", archivedAt: null };
   const step = {
