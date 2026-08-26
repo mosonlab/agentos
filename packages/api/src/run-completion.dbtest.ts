@@ -75,8 +75,8 @@ test("the merge-executor principal on an ordinary run is refused before anything
     claimantClass: "merge-executor",
   });
   assert.deepEqual(refused, {
-    kind: "principal",
-    error: "The merge-executor principal may only act on mechanical runs",
+    reason: "forbidden",
+    message: "The merge-executor principal may only act on mechanical runs",
   });
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, RunStatus.RUNNING);
 });
@@ -93,7 +93,11 @@ test("a suspended run refuses as waiting-inbox, not as a stale fence", async () 
     body: completion("fence-from-a-previous-generation"),
     claimantClass: "runner",
   });
-  assert.deepEqual(refused, { kind: "waiting-inbox" });
+  assert.deepEqual(refused, {
+    reason: "conflict",
+    message: "Run suspended for Inbox",
+    detail: { code: "WAITING_INBOX" },
+  });
 });
 
 test("a superseded fencing token refuses as a fence, carrying the reason", async () => {
@@ -103,7 +107,11 @@ test("a superseded fencing token refuses as a fence, carrying the reason", async
     body: completion("fence-from-a-previous-generation"),
     claimantClass: "runner",
   });
-  assert.deepEqual(refused, { kind: "fence", reason: "stale-fence" });
+  assert.deepEqual(refused, {
+    reason: "conflict",
+    message: "Stale fencing token",
+    detail: { reason: "stale-fence" },
+  });
 });
 
 test("an accepted completion returns what it did rather than a response", async () => {
