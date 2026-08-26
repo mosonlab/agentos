@@ -966,9 +966,7 @@ const reclaimReportInput = z.object({
   results: z.array(z.object({
     runId: id,
     outcome: z.enum(["REMOVED", "REFUSED", "FAILED"]),
-    // Half the usual limit: a reclaim report carries up to 5000 of these in one
-    // request, so its per-entry bound is a bound on the body as well.
-    failureReason: failureReasonText(FAILURE_REASON_LIMIT / 2).nullable().optional(),
+    failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
   })).max(5000),
 });
 const reclaimSalvageInput = z.object({
@@ -987,7 +985,7 @@ const heartbeatInput = z.object({
 });
 const cancelRunInput = z.object({
   requestId: z.string().trim().min(1).max(160),
-  reason: z.string().trim().min(1).max(2000),
+  reason: z.string().trim().min(1).pipe(failureReasonText(FAILURE_REASON_LIMIT)),
   parkTask: z.boolean().default(false),
 });
 const cancelAcknowledgeInput = z.object({
@@ -1121,7 +1119,10 @@ const preflightInput = z.object({
   cliVersion: z.string().nullable().optional(),
   authMode: z.string().nullable().optional(),
   capabilities: z.record(z.string(), z.unknown()),
-  error: z.string().nullable().optional(),
+  // Written straight onto every blocked task as its `failureReason` (and kept
+  // as the circuit reason those rows are later matched by), so it is bounded
+  // here, where both writes read the same already-truncated string.
+  error: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
 });
 const runnerAvailabilityInput = z.object({
   // Optional only for the API-first half of a rolling deployment. A runner

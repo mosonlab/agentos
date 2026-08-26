@@ -30,3 +30,18 @@ test("the schema truncates rather than rejecting", () => {
   assert.equal(parsed.success, true);
   assert.equal(parsed.data!.length, FAILURE_REASON_LIMIT);
 });
+
+// PostgreSQL rejects a lone surrogate outright, so a cut that lands between the
+// halves of an astral character must drop the orphan rather than store it.
+test("truncation never cuts a surrogate pair in half", () => {
+  // The sweep is the point: where the cut lands inside the emoji run depends on
+  // the marker's own length, so a single fixture proves only its own offset.
+  for (let head = 3900; head <= 3960; head += 1) {
+    const truncated = truncateFailureReason(`${"a".repeat(head)}${"\u{1f600}".repeat(50)}`, FAILURE_REASON_LIMIT);
+    assert.ok(truncated.length <= FAILURE_REASON_LIMIT, `head ${head}`);
+    for (const character of truncated) {
+      const code = character.codePointAt(0)!;
+      assert.ok(code < 0xd800 || code > 0xdfff, `lone surrogate at head ${head}`);
+    }
+  }
+});

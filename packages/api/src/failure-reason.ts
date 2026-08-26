@@ -12,14 +12,24 @@
 
 import { z } from "zod";
 
-/** What a single reason may occupy once stored. */
+/** What one stored reason may occupy, wherever it entered from. */
 export const FAILURE_REASON_LIMIT = 4000;
+
+/** A high surrogate is only half a character. Cutting between the halves would
+ *  store a lone surrogate, which is not text PostgreSQL will accept, so the
+ *  orphan goes with the tail it belonged to. */
+const withoutOrphanSurrogate = (text: string): string => {
+  const last = text.charCodeAt(text.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? text.slice(0, -1) : text;
+};
 
 export const truncateFailureReason = (reason: string, limit: number): string => {
   if (reason.length <= limit) return reason;
   const marker = `\n[truncated by the API: ${reason.length} characters exceeded the ${limit}-character limit]`;
   const kept = limit - marker.length;
-  return kept > 0 ? `${reason.slice(0, kept)}${marker}` : reason.slice(0, limit);
+  return kept > 0
+    ? `${withoutOrphanSurrogate(reason.slice(0, kept))}${marker}`
+    : withoutOrphanSurrogate(reason.slice(0, limit));
 };
 
 /** The failure-reason field every client-facing schema uses, so that no entry

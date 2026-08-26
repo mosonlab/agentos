@@ -74,8 +74,11 @@ const seedTask = async () => {
   return { project, agent, repo, task };
 };
 
+const queueRun = async (taskId: string) =>
+  await db.$transaction((tx) => enqueueTaskRun(tx as never, taskId)) as { id: string };
+
 const claimRun = async (taskId: string) => {
-  const queued = await db.$transaction((tx) => enqueueTaskRun(tx as never, taskId)) as { id: string };
+  const queued = await queueRun(taskId);
   const now = new Date();
   const fencingToken = `fence-${queued.id}`;
   const run = await db.run.update({ where: { id: queued.id }, data: {
@@ -162,4 +165,36 @@ test("a failure reason clears on the same request that moves the status", async 
   const after = await db.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(after.status, TaskStatus.TODO);
   assert.equal(after.failureReason, null);
+});
+
+// The `opensPullRequest` branch is a third write path through the same route,
+// and it is the one an operator uses while re-aiming a failed task.
+test("a failure reason clears alongside an opensPullRequest edit", async () => {
+  const { task } = await seedTask();
+  await db.task.update({ where: { id: task.id }, data: { failureReason: "gate formed no verdict" } });
+
+  const patched = await call("PATCH", `/tasks/${task.id}`, OPERATOR, {
+    opensPullRequest: false, failureReason: null,
+  });
+  assert.equal(patched.status, 200, JSON.stringify(patched.body));
+
+  const edited = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(edited.opensPullRequest, false);
+  assert.equal(edited.failureReason, null);
+});
+
+// A cancellation reason lands on the Run, the Task and the Session as a failure
+// reason, so it goes through the same door rather than a rejecting `.max()`.
+test("an over-long cancellation reason is truncated instead of refused", async () => {
+  const { task } = await seedTask();
+  const run = await queueRun(task.id);
+
+  const cancelled = await call("POST", `/runs/${run.id}/cancel`, OPERATOR, {
+    requestId: "cancel-long-reason", reason: DIAGNOSIS,
+  });
+  assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
+
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(stopped.failureReason?.length, FAILURE_REASON_LIMIT);
+  assert.match(stopped.failureReason!, /\[truncated by the API: \d+ characters exceeded the 4000-character limit\]$/u);
 });
