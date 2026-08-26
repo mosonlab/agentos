@@ -34,12 +34,10 @@ import {
   type ReadinessInput,
 } from "./readiness-decision.js";
 import {
-  acquireMergeLease,
   releaseMergeLease,
-  releaseMergeLeaseSafely,
-  reportMergeLeaseAnomaly,
-  type MergeLeaseAcquirer,
-  type MergeLeaseReleaser,
+  withMergeLease,
+  type ReleaseMergeLease,
+  type WithMergeLease,
 } from "./merge-lease.js";
 
 export const readinessPollIntervalMs = (): number => {
@@ -135,7 +133,7 @@ const stopReadiness = async (
     recovery: RecoveryContext | null;
     claimReason: string;
   },
-  releaseChainLease: MergeLeaseReleaser,
+  releaseChainLease: ReleaseMergeLease,
 ): Promise<boolean> => {
   const recoveryBody = input.recovery
     ? `Automatic base-drift recovery ${input.recovery.attempt} stopped at readiness: ${input.reason}`
@@ -196,10 +194,7 @@ const stopReadiness = async (
     return { applied: true as const, chainId: readiness?.chainId ?? null };
   });
   if (!transition.applied) return false;
-  reportMergeLeaseAnomaly(
-    transition.chainId,
-    await releaseMergeLeaseSafely(releaseChainLease, transition.chainId),
-  );
+  await releaseChainLease(transition.chainId);
   return true;
 };
 
@@ -321,19 +316,14 @@ export type ReadinessTickResult = { claimed: number; authorized: number; reviewi
  * neither produces nor consumes the exact-head gate proof -- it reads a diff on
  * GitHub -- so holding the lease across it charges an agent session, and
  * however many runner losses and retries that session takes, to every other
- * delivery line's queue. `not-held` and `skipped` are ordinary answers here:
- * this path has to leave the lock free, not prove it was the one holding it.
- * Only "nobody knows" is worth saying out loud.
+ * delivery line's queue. The merge Lease module owns reporting when the
+ * adapter cannot carry out that handback.
  */
 const releaseForReview = async (
-  releaseChainLease: MergeLeaseReleaser,
+  releaseChainLease: ReleaseMergeLease,
   chainId: string | null,
 ): Promise<void> => {
-  const release = await releaseMergeLeaseSafely(releaseChainLease, chainId);
-  if (release?.outcome !== "unreachable") return;
-  console.error(
-    `Merge lease anomaly: the release for chain ${chainId ?? "unknown"} before its independent review could not be carried out: ${release.detail}. The merge window on main may stay locked for the length of that review.`,
-  );
+  await releaseChainLease(chainId);
 };
 
 const requeueRegression = async (
@@ -619,8 +609,8 @@ const applyReadinessDecision = async (
   read: ClaimedReadiness,
   decision: ReadinessDecision,
   result: ReadinessTickResult,
-  releaseChainLease: MergeLeaseReleaser,
-  acquireChainLease: MergeLeaseAcquirer,
+  releaseChainLease: ReleaseMergeLease,
+  runWithMergeLease: WithMergeLease,
 ): Promise<void> => {
   const { readiness, regression, recovery } = read;
   let claimReason = read.claimReason;
@@ -648,7 +638,10 @@ const applyReadinessDecision = async (
       recovery,
       claimReason,
     });
-    if (requeued) result.requeued += 1;
+    if (requeued) {
+      result.requeued += 1;
+      await releaseChainLease(readiness.chainId);
+    }
     return requeued;
   };
 
@@ -717,121 +710,130 @@ const applyReadinessDecision = async (
       break;
   }
 
-  // Renew immediately before the only network call outside the GitHub read
-  // budget. The original claim covered the reads; this one covers the acquire
-  // and authorization transaction.
-  const renewedClaim = await renewReadinessClaim(db, readiness.id, claimReason);
-  if (!renewedClaim) return;
-  claimReason = renewedClaim;
-  read.claimReason = renewedClaim;
-
   // From the base this authorization pins to the merge that consumes it,
-  // `main` must not move. Earlier reads and Blind review can be repeated.
-  if (readiness.chainId) {
-    const acquisition = await acquireChainLease(readiness.chainId);
-    if (acquisition.outcome === "contended") return;
-    if (acquisition.outcome === "unreachable") {
-      await stop(`merge lease acquire is unreachable: ${acquisition.detail}`);
-      return;
-    }
-  }
-  const authorization = await db.$transaction(async (tx) => {
-    await lockTaskMutationRows(tx, readiness.id);
-    const held = await tx.task.updateMany({
-      where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
-      data: { status: TaskStatus.DONE, failureReason: null },
-    });
-    if (held.count !== 1) {
-      const current = await tx.task.findUnique({
+  // `main` must not move. The callback makes the sole lawful handoff explicit:
+  // only an authorized mechanical merge retains the Lease.
+  const leased = await runWithMergeLease(readiness.chainId, async () => {
+    // The acquire is the only network call outside the GitHub read budget. A
+    // stale worker that lost its claim while taking the Lease must classify the
+    // new owner before choosing release or retain.
+    const renewedClaim = await renewReadinessClaim(db, readiness.id, claimReason);
+    if (!renewedClaim) {
+      const current = await db.task.findUnique({
         where: { id: readiness.id },
         select: { status: true, failureReason: true },
       });
       const activeSuccessor = current?.status === TaskStatus.DONE
         || (current?.status === TaskStatus.DOING
           && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
-      return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+      return {
+        disposition: activeSuccessor ? "retain" as const : "release" as const,
+        value: activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const,
+      };
     }
-    const binding = `mechanical:${readiness.id}:${randomUUID()}`;
-    const payload = {
-      ...decision.evidence,
-      mergeMethod: AUTHORIZED_MERGE_METHOD,
-      issuedAt: decision.issuedAt,
-      decision: {
-        channel: "mechanical" as const,
-        inboxDecisionId: binding,
-        inboxMessageId: binding,
-      },
-    };
-    const activity = await tx.taskActivity.create({ data: {
-      taskId: readiness.id,
-      actorType: "control-plane",
-      body: `Mechanical merge authorized for PR #${decision.prNumber} at ${decision.evidence.headSha}`,
-      metadata: {
-        ...authorizationMetadata(payload),
-        recoverySourceStopId: recovery?.sourceStopId ?? null,
-      } as Prisma.InputJsonObject,
-    } });
-    await tx.taskStepOutput.upsert({
-      where: { taskId: readiness.id },
-      create: {
+    claimReason = renewedClaim;
+    read.claimReason = renewedClaim;
+
+    const authorization = await db.$transaction(async (tx) => {
+      await lockTaskMutationRows(tx, readiness.id);
+      const held = await tx.task.updateMany({
+        where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
+        data: { status: TaskStatus.DONE, failureReason: null },
+      });
+      if (held.count !== 1) {
+        const current = await tx.task.findUnique({
+          where: { id: readiness.id },
+          select: { status: true, failureReason: true },
+        });
+        const activeSuccessor = current?.status === TaskStatus.DONE
+          || (current?.status === TaskStatus.DOING
+            && current.failureReason?.startsWith(READINESS_CLAIM_PREFIX));
+        return activeSuccessor ? "claim-lost-active" as const : "claim-lost-inactive" as const;
+      }
+      const binding = `mechanical:${readiness.id}:${randomUUID()}`;
+      const payload = {
+        ...decision.evidence,
+        mergeMethod: AUTHORIZED_MERGE_METHOD,
+        issuedAt: decision.issuedAt,
+        decision: {
+          channel: "mechanical" as const,
+          inboxDecisionId: binding,
+          inboxMessageId: binding,
+        },
+      };
+      const activity = await tx.taskActivity.create({ data: {
         taskId: readiness.id,
-        kind: "merge-authorization",
-        body: JSON.stringify({
-          authorizationActivityId: activity.id,
+        actorType: "control-plane",
+        body: `Mechanical merge authorized for PR #${decision.prNumber} at ${decision.evidence.headSha}`,
+        metadata: {
+          ...authorizationMetadata(payload),
+          recoverySourceStopId: recovery?.sourceStopId ?? null,
+        } as Prisma.InputJsonObject,
+      } });
+      await tx.taskStepOutput.upsert({
+        where: { taskId: readiness.id },
+        create: {
+          taskId: readiness.id,
+          kind: "merge-authorization",
+          body: JSON.stringify({
+            authorizationActivityId: activity.id,
+            headSha: decision.evidence.headSha,
+          }),
+          commitSha: decision.evidence.headSha,
+        },
+        update: {
+          kind: "merge-authorization",
+          body: JSON.stringify({
+            authorizationActivityId: activity.id,
+            headSha: decision.evidence.headSha,
+          }),
+          commitSha: decision.evidence.headSha,
+        },
+      });
+      await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
+      await writeMarker(tx, readiness.id, "readiness", {
+        actorType: "control-plane",
+        body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
+        metadata: {
+          state: "authorized",
           headSha: decision.evidence.headSha,
-        }),
-        commitSha: decision.evidence.headSha,
-      },
-      update: {
-        kind: "merge-authorization",
-        body: JSON.stringify({
           authorizationActivityId: activity.id,
-          headSha: decision.evidence.headSha,
-        }),
-        commitSha: decision.evidence.headSha,
-      },
+          recoverySourceStopId: recovery?.sourceStopId ?? null,
+        },
+      });
+      if (recovery) {
+        await activateRecoveryIntegratorSuccessor(tx, {
+          readinessTaskId: readiness.id,
+          integratorTaskId: recovery.integratorTaskId,
+          sourceStopId: recovery.sourceStopId,
+          recoveryRunId: recovery.recoveryRunId,
+          authorizationActivityId: activity.id,
+        }, read.input.now);
+      } else {
+        await activateChainSuccessor(tx, readiness, {}, read.input.now);
+      }
+      return "authorized" as const;
     });
-    await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
-    await writeMarker(tx, readiness.id, "readiness", {
-      actorType: "control-plane",
-      body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
-      metadata: {
-        state: "authorized",
-        headSha: decision.evidence.headSha,
-        authorizationActivityId: activity.id,
-        recoverySourceStopId: recovery?.sourceStopId ?? null,
-      },
-    });
-    if (recovery) {
-      await activateRecoveryIntegratorSuccessor(tx, {
-        readinessTaskId: readiness.id,
-        integratorTaskId: recovery.integratorTaskId,
-        sourceStopId: recovery.sourceStopId,
-        recoveryRunId: recovery.recoveryRunId,
-        authorizationActivityId: activity.id,
-      }, read.input.now);
-    } else {
-      await activateChainSuccessor(tx, readiness, {}, read.input.now);
-    }
-    return "authorized" as const;
+    return {
+      disposition: authorization === "authorized" || authorization === "claim-lost-active"
+        ? "retain" as const
+        : "release" as const,
+      value: authorization,
+    };
   });
-  if (authorization === "authorized") {
+  if (leased.outcome === "contended") return;
+  if (leased.value === "authorized") {
     result.authorized += 1;
-  } else if (authorization === "claim-lost-inactive") {
-    reportMergeLeaseAnomaly(
-      readiness.chainId,
-      await releaseMergeLeaseSafely(releaseChainLease, readiness.chainId),
-    );
   }
 };
 
 export const readinessTick = async (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
-  now = new Date(),
-  limit = 5,
-  releaseChainLease: MergeLeaseReleaser = async () => ({ outcome: "not-held" }),
-  acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" }),
+  reader: GitHubReader | null,
+  now: Date,
+  limit: number,
+  releaseChainLease: ReleaseMergeLease,
+  runWithMergeLease: WithMergeLease,
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
   const pageSize = Math.max(limit * 20, 100);
@@ -850,7 +852,7 @@ export const readinessTick = async (
         decision,
         result,
         releaseChainLease,
-        acquireChainLease,
+        runWithMergeLease,
       );
     } catch (error: unknown) {
       const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -875,7 +877,7 @@ export const startReadinessWorker = (
   const timer = setInterval(() => {
     if (inFlight) return;
     inFlight = true;
-    void readinessTick(db, reader, new Date(), 5, releaseMergeLease, acquireMergeLease)
+    void readinessTick(db, reader, new Date(), 5, releaseMergeLease, withMergeLease)
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {
         inFlight = false;

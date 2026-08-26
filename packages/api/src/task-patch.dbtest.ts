@@ -47,8 +47,8 @@ test("a dispatched chain task refuses an approval-gate patch", async () => {
   const { task } = await seed({ chainId: `chain-${process.pid}` });
   const result = await patchTask(db, task.id, { approvalGate: true });
   assert.deepEqual(result, {
-    error: "Approval gates on dispatched chain tasks are controlled by the chain",
-    code: 409,
+    reason: "conflict",
+    message: "Approval gates on dispatched chain tasks are controlled by the chain",
   });
 });
 
@@ -56,15 +56,15 @@ test("an assignee from another project is refused with 400", async () => {
   const { task } = await seed();
   const other = await seed();
   const result = await patchTask(db, task.id, { assigneeAgentId: other.agent.id });
-  assert.deepEqual(result, { error: "Assignee does not belong to this project", code: 400 });
+  assert.deepEqual(result, { reason: "invalid-request", message: "Assignee does not belong to this project" });
 });
 
 test("an archived task refuses a status write from inside the transaction", async () => {
   const { task } = await seed({ archivedAt: new Date() });
   const result = await patchTask(db, task.id, { status: TaskStatus.DONE });
   assert.deepEqual(result, {
-    error: "Cannot change the status of an archived task; unarchive it first",
-    code: 409,
+    reason: "conflict",
+    message: "Cannot change the status of an archived task; unarchive it first",
   });
 });
 

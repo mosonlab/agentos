@@ -10,7 +10,13 @@ import {
 } from "@agentos/db";
 
 import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
-import type { MergeLeaseAcquirer, MergeLeaseReleaser } from "./merge-lease.js";
+import {
+  withMergeLease,
+  type MergeLeaseAcquirer,
+  type MergeLeaseReleaser,
+  type ReleaseMergeLease,
+  type WithMergeLease,
+} from "./merge-lease.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -18,10 +24,19 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
-const releaseChainLease: MergeLeaseReleaser = async (chainId) => {
+const releaseLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
   releasedChainLeases.push(chainId);
   return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
 };
+const releaseChainLease: ReleaseMergeLease = async (chainId) => {
+  if (chainId) releasedChainLeases.push(chainId);
+};
+const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
+const leaseRunner = (acquire: MergeLeaseAcquirer): WithMergeLease => (
+  chainId,
+  fn,
+) => withMergeLease(chainId, fn, { acquire, release: releaseLeaseAdapter });
+const runWithMergeLease = leaseRunner(acquireChainLease);
 beforeEach(async () => {
   releasedChainLeases.length = 0;
   await resetTestDb(db);
@@ -161,7 +176,7 @@ test("clean exact-head readiness authorizes and queues mechanical merge", async 
     where: { id: seeded.regression.id },
     data: { failureReason: "readiness evaluation failed: GitHub read failed: fetch failed" },
   });
-  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).failureReason, null);
   const output = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: seeded.readiness.id } });
@@ -172,7 +187,7 @@ test("clean exact-head readiness authorizes and queues mechanical merge", async 
 test("a defense-list diff opens one blind review and blocks authorization until exact-head approval", async () => {
   const seeded = await seedReadiness();
   const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
-  assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.readiness.id } }), 0);
   const review = await db.task.findFirstOrThrow({ where: { projectId: seeded.project.id, name: "Autonomous merge tail: independent review" } });
   const reviewRun = await db.run.findFirstOrThrow({ where: { taskId: review.id } });
@@ -184,7 +199,7 @@ test("a defense-list diff opens one blind review and blocks authorization until 
     metadata: { kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "approved", reviewTaskId: review.id, headSha: HEAD, baseSha: BASE },
   } });
   await db.task.update({ where: { id: seeded.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-  assert.deepEqual(await readinessTick(db, guarded), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
 });
 
 test("a conflict resolution that edits existing test lines opens the same review obligation", async () => {
@@ -205,7 +220,7 @@ test("a conflict resolution that edits existing test lines opens the same review
       ? []
       : [{ filename: "packages/api/src/example.test.ts", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }] }),
   };
-  assert.deepEqual(await readinessTick(db, testEditReader), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, testEditReader, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   const obligation = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.readiness.id, body: { startsWith: "Independent review obligation opened" } } });
   assert.match(JSON.stringify(obligation.metadata), /existing-test-lines-modified/u);
 });
@@ -213,7 +228,7 @@ test("a conflict resolution that edits existing test lines opens the same review
 test("base drift invalidates a head-bound PASS and returns the chain to regression", async () => {
   const seeded = await seedReadiness();
   const driftedBase = "d".repeat(40);
-  assert.deepEqual(await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
   const [readiness, regression] = await Promise.all([
     db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
     db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
@@ -228,7 +243,7 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.equal(compensated.runNumber, 2);
   assert.equal(compensated.maxRunsPerTask, 6);
   assert.equal(compensated.budgetGrants, 1);
-  assert.deepEqual(releasedChainLeases, [], "base drift requeue keeps the chain lease");
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId], "base drift requeue releases before the next v2 Regression run");
 });
 
 test("ordinary base requeue reuses an approved exact-head review", async () => {
@@ -243,7 +258,7 @@ test("ordinary base requeue reuses an approved exact-head review", async () => {
       reviewTaskId: "prior-review", headSha: HEAD, baseSha: BASE,
     },
   } });
-  assert.equal((await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })))).requeued, 1);
+  assert.equal((await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued, 1);
   const freshRun = await db.run.findFirstOrThrow({
     where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
   });
@@ -260,7 +275,7 @@ test("ordinary base requeue reuses an approved exact-head review", async () => {
     [{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }],
     snapshot({ baseSha: driftedBase }),
   );
-  assert.deepEqual(await readinessTick(db, guarded), {
+  assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease), {
     claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0,
   });
   assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
@@ -269,12 +284,12 @@ test("ordinary base requeue reuses an approved exact-head review", async () => {
 test("future and wrong-index readiness steps are never claimed", async () => {
   const future = await seedReadiness();
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.TODO } });
-  assert.deepEqual(await readinessTick(db, reader()), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
   assert.equal(await db.inboxMessage.count(), 0);
 
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.DONE } });
   await db.taskTemplateStep.update({ where: { id: future.readiness.templateStepId! }, data: { stepIndex: 9 } });
-  assert.deepEqual(await readinessTick(db, reader()), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
 });
 
 test("an expired orphaned DOING readiness claim is reclaimed after restart", async () => {
@@ -283,7 +298,7 @@ test("an expired orphaned DOING readiness claim is reclaimed after restart", asy
     status: TaskStatus.DOING,
     failureReason: "merge-readiness-claim:dead-worker|2000-01-01T00:00:00.000Z",
   } });
-  assert.deepEqual(await readinessTick(db, reader()), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
 });
 
 test("an incomplete compare response and a behind head fail closed", async () => {
@@ -295,7 +310,7 @@ test("an incomplete compare response and a behind head fail closed", async () =>
     readPullRequest: async () => snapshot(),
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: false, files: maxFiles }),
   };
-  assert.deepEqual(await readinessTick(db, incompleteReader, new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
+  assert.deepEqual(await readinessTick(db, incompleteReader, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
   assert.match((await db.task.findUniqueOrThrow({ where: { id: incomplete.readiness.id } })).failureReason ?? "", /completeness/u);
   assert.deepEqual(releasedChainLeases, [incomplete.readiness.chainId]);
 
@@ -306,9 +321,9 @@ test("an incomplete compare response and a behind head fail closed", async () =>
     readPullRequest: async () => snapshot(),
     compareCommits: async () => ({ status: "behind", behindBy: 1, filesComplete: true, files: [] }),
   };
-  assert.deepEqual(await readinessTick(db, behindReader), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, behindReader, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 1, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: behind.regression.id } })).status, TaskStatus.TODO);
-  assert.deepEqual(releasedChainLeases, []);
+  assert.deepEqual(releasedChainLeases, [behind.readiness.chainId]);
 });
 
 test("an absent runner-created PR identity stops loudly before authorization", async () => {
@@ -316,7 +331,7 @@ test("an absent runner-created PR identity stops loudly before authorization", a
   await db.run.updateMany({ where: { taskId: seeded.regression.id }, data: {
     pullRequestNumber: null, pullRequestUrl: null,
   } });
-  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 });
   assert.match((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).failureReason ?? "", /pull-request target/u);
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
 });
@@ -342,7 +357,7 @@ test("manual start cannot turn server-owned readiness into a model run", async (
 test("the merge lease is handed back for the length of an independent review", async () => {
   const seeded = await seedReadiness();
   const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
-  assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
 });
 
@@ -355,7 +370,7 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   };
   const started = new Date();
   assert.deepEqual(
-    await readinessTick(db, reader(), started, 5, releaseChainLease, contended),
+    await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(contended)),
     { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 },
   );
   assert.deepEqual(asked, [seeded.readiness.chainId]);
@@ -374,7 +389,7 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
       new Date(started.getTime() + (READINESS_CLAIM_LEASE_MS * 2)),
       5,
       releaseChainLease,
-      acquired,
+      leaseRunner(acquired),
     ),
     { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 },
   );
@@ -396,7 +411,7 @@ test("a stale worker cannot stop readiness after a newer worker owns the claim",
     },
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
   };
-  const tick = readinessTick(db, delayed, new Date(), 5, releaseChainLease);
+  const tick = readinessTick(db, delayed, new Date(), 5, releaseChainLease, runWithMergeLease);
   await readStarted;
   await db.task.update({
     where: { id: seeded.readiness.id },
@@ -429,7 +444,7 @@ test("a stale worker cannot requeue regression after a newer worker owns the cla
     },
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
   };
-  const tick = readinessTick(db, delayed);
+  const tick = readinessTick(db, delayed, new Date(), 5, releaseChainLease, runWithMergeLease);
   await readStarted;
   await db.task.update({
     where: { id: seeded.readiness.id },
@@ -446,7 +461,7 @@ test("an unreachable merge lease acquire stops with a durable reason", async () 
   const seeded = await seedReadiness();
   const unreachable: MergeLeaseAcquirer = async () => ({ outcome: "unreachable", detail: "spawn bash ENOENT" });
   assert.deepEqual(
-    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, unreachable),
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, leaseRunner(unreachable)),
     { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 },
   );
   const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
@@ -465,7 +480,7 @@ test("a worker that acquired then lost its claim releases unless a successor own
     return { outcome: "acquired" };
   };
   assert.deepEqual(
-    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, loseToOperator),
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, leaseRunner(loseToOperator)),
     { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 },
   );
   assert.deepEqual(releasedChainLeases, [abandoned.readiness.chainId]);
@@ -481,7 +496,7 @@ test("a worker that acquired then lost its claim releases unless a successor own
     return { outcome: "acquired" };
   };
   assert.deepEqual(
-    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, loseToWorker),
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, leaseRunner(loseToWorker)),
     { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 },
   );
   assert.deepEqual(releasedChainLeases, []);
@@ -508,7 +523,7 @@ test("eligible readiness is not hidden behind the first hundred ineligible candi
   })) });
 
   assert.deepEqual(
-    await readinessTick(db, reader(), new Date(), 1),
+    await readinessTick(db, reader(), new Date(), 1, releaseChainLease, runWithMergeLease),
     { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 },
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);

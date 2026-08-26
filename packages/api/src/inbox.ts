@@ -17,6 +17,7 @@ import {
   type RunFence,
   withFencedRun,
 } from "./run-fence.js";
+import type { Refusal } from "./refusal.js";
 
 export const defaultInboxResumeWindowMs = 7 * 24 * 60 * 60 * 1_000;
 
@@ -33,7 +34,7 @@ export type SuspendQuestion = {
 export type SupersedeInboxMessageResult =
   | { closed: true; duplicate: false; requestId: string }
   | { closed: false; duplicate: true; requestId: string }
-  | { error: string; code: 404 | 409 };
+  | Refusal;
 
 export class InboxRunFenceRefusal extends Error {
   readonly refusal: FenceRefusalResponse;
@@ -61,15 +62,15 @@ export const supersedeTaskInboxMessage = async (
     where: { id: messageId },
     select: { status: true, from: true, taskId: true, gateTaskId: true, replyToMessageId: true },
   });
-  if (!initial) return { error: "Inbox message not found", code: 404 };
+  if (!initial) return { reason: "not-found", message: "Inbox message not found" };
   if (initial.taskId === null) {
-    return { error: "Only a task-linked Inbox message can be superseded", code: 409 };
+    return { reason: "conflict", message: "Only a task-linked Inbox message can be superseded" };
   }
   if (initial.from !== InboxSender.AGENT || initial.replyToMessageId !== null) {
-    return { error: "Only a top-level agent Inbox message can be superseded", code: 409 };
+    return { reason: "conflict", message: "Only a top-level agent Inbox message can be superseded" };
   }
   if (initial.gateTaskId !== null) {
-    return { error: "Only a non-gate Inbox message can be superseded", code: 409 };
+    return { reason: "conflict", message: "Only a non-gate Inbox message can be superseded" };
   }
   // A prior successful supersession is safe to acknowledge without touching
   // the Task row again. This keeps retries idempotent even if the operator
@@ -82,9 +83,9 @@ export const supersedeTaskInboxMessage = async (
   // archivedAt. Do not replace this with an unlocked task read: that would
   // allow an unarchive to commit between the check and the Inbox update.
   const task = await lockTaskMutationRows(tx, initial.taskId);
-  if (!task) return { error: "Inbox message task not found", code: 404 };
+  if (!task) return { reason: "not-found", message: "Inbox message task not found" };
   if (task.archivedAt === null) {
-    return { error: "Only an Inbox message for an archived task can be superseded", code: 409 };
+    return { reason: "conflict", message: "Only an Inbox message for an archived task can be superseded" };
   }
 
   // Re-read the mutable status after the Task lock. The conditional update
@@ -94,12 +95,12 @@ export const supersedeTaskInboxMessage = async (
     where: { id: messageId },
     select: { status: true },
   });
-  if (!message) return { error: "Inbox message not found", code: 404 };
+  if (!message) return { reason: "not-found", message: "Inbox message not found" };
   if (message.status === InboxStatus.CLOSED) {
     return { closed: false, duplicate: true, requestId };
   }
   if (message.status !== InboxStatus.OPEN) {
-    return { error: "Only an open Inbox message can be superseded", code: 409 };
+    return { reason: "conflict", message: "Only an open Inbox message can be superseded" };
   }
 
   const closed = await tx.inboxMessage.updateMany({
@@ -125,7 +126,7 @@ export const supersedeTaskInboxMessage = async (
 
   const current = await tx.inboxMessage.findUnique({ where: { id: messageId }, select: { status: true } });
   if (current?.status === InboxStatus.CLOSED) return { closed: false, duplicate: true, requestId };
-  return { error: "Inbox message changed before it could be superseded", code: 409 };
+  return { reason: "conflict", message: "Inbox message changed before it could be superseded" };
 }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 
 /** Creates the durable outbox item and releases the Run lease in one commit. */

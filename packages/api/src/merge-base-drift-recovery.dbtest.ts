@@ -22,6 +22,13 @@ import {
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import {
+  withMergeLease,
+  type MergeLeaseAcquirer,
+  type MergeLeaseReleaser,
+  type ReleaseMergeLease,
+  type WithMergeLease,
+} from "./merge-lease.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
@@ -34,6 +41,13 @@ const BASE_2 = "c".repeat(40);
 const BASE_3 = "d".repeat(40);
 const BASE_4 = "e".repeat(40);
 const OPERATOR = "base-drift-recovery-operator";
+const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
+const releaseLeaseAdapter: MergeLeaseReleaser = async () => ({ outcome: "not-held" });
+const releaseChainLease: ReleaseMergeLease = async () => {};
+const runWithMergeLease: WithMergeLease = (chainId, fn) => withMergeLease(chainId, fn, {
+  acquire: acquireChainLease,
+  release: releaseLeaseAdapter,
+});
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -171,7 +185,7 @@ const finishRecoveryPass = async (
   baseSha: string,
 ) => {
   await recordRecoveryPass(seeded, baseSha);
-  const tick = await readinessTick(db, reader(snapshot(baseSha)));
+  const tick = await readinessTick(db, reader(snapshot(baseSha)), new Date(), 5, releaseChainLease, runWithMergeLease);
   assert.equal(tick.authorized, 1);
   return db.taskActivity.findFirstOrThrow({
     where: { taskId: seeded.readinessTask!.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } },
@@ -256,7 +270,7 @@ test("recovery holds the full chain mutex before mutation and a concurrent chain
   const writerDb = new PrismaClient({ datasources: { db: { url: process.env.TEST_DATABASE_URL! } } });
   const priorToken = process.env.OPERATOR_TOKEN;
   try {
-    const recovery = readinessTick(recoveryDb, reader(snapshot(BASE_2)));
+    const recovery = readinessTick(recoveryDb, reader(snapshot(BASE_2)), new Date(), 5, releaseChainLease, runWithMergeLease);
     await recoveryHasChain;
     process.env.OPERATOR_TOKEN = OPERATOR;
     const writer = createApp(writerDb).request(`/tasks/${seeded.integratorTask!.id}`, {
@@ -285,7 +299,7 @@ test("recovery freshness requeue preserves the run binding through fresh authori
 
   const firstRecoveryRun = await recordRecoveryPass(seeded, BASE_2);
 
-  assert.equal((await readinessTick(db, reader(snapshot(BASE_3)))).requeued, 1);
+  assert.equal((await readinessTick(db, reader(snapshot(BASE_3)), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued, 1);
   const secondRecoveryRun = await db.run.findFirstOrThrow({
     where: { taskId: seeded.gateTask.id },
     orderBy: { runNumber: "desc" },
@@ -660,7 +674,7 @@ test("a recovery-cycle readiness failure restores the integrator stop guard", as
   });
   await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.DONE } });
 
-  const readiness = await readinessTick(db, reader(snapshot(BASE_2), [], false));
+  const readiness = await readinessTick(db, reader(snapshot(BASE_2), [], false), new Date(), 5, releaseChainLease, runWithMergeLease);
   assert.equal(readiness.stopped, 1);
   assert.equal(await db.taskActivity.count({ where: {
     taskId: seeded.integratorTask!.id,
@@ -693,7 +707,7 @@ test("a recovery-cycle independent-review rejection stops once without a review-
   } });
   const readiness = await readinessTick(db, reader(snapshot(BASE_2), [{
     filename: "packages/api/src/app.ts", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new",
-  }]));
+  }]), new Date(), 5, releaseChainLease, runWithMergeLease);
   assert.equal(readiness.reviewing, 1);
   const reviewTask = await db.task.findFirstOrThrow({ where: { name: "Autonomous merge tail: independent review" } });
   const reviewRun = await db.run.findFirstOrThrow({ where: { taskId: reviewTask.id } });
