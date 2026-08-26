@@ -11,7 +11,7 @@ import {
 
 import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
 import type { MergeLeaseAcquirer, MergeLeaseReleaser } from "./merge-lease.js";
-import { readinessTick } from "./merge-readiness-worker.js";
+import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -31,6 +31,7 @@ after(async () => { await db.$disconnect(); });
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const BRANCH = "agentos/merge-tail-test";
+const NEWER_CLAIM = "merge-readiness-claim:new-worker|2099-01-01T00:00:00.000Z";
 
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
   repository: "acme/widgets",
@@ -220,6 +221,13 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.equal(readiness.status, TaskStatus.TODO);
   assert.equal(regression.status, TaskStatus.TODO);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+  const compensated = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id },
+    orderBy: { runNumber: "desc" },
+  });
+  assert.equal(compensated.runNumber, 2);
+  assert.equal(compensated.maxRunsPerTask, 6);
+  assert.equal(compensated.budgetGrants, 1);
   assert.deepEqual(releasedChainLeases, [], "base drift requeue keeps the chain lease");
 });
 
@@ -360,9 +368,148 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   // expires the next tick re-evaluates and takes the lease it could not get.
   const acquired: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
   assert.deepEqual(
-    await readinessTick(db, reader(), new Date(started.getTime() + 60_000), 5, releaseChainLease, acquired),
+    await readinessTick(
+      db,
+      reader(),
+      new Date(started.getTime() + (READINESS_CLAIM_LEASE_MS * 2)),
+      5,
+      releaseChainLease,
+      acquired,
+    ),
     { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 },
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
+});
+
+test("a stale worker cannot stop readiness after a newer worker owns the claim", async () => {
+  const seeded = await seedReadiness();
+  let startRead!: () => void;
+  let finishRead!: () => void;
+  const readStarted = new Promise<void>((resolve) => { startRead = resolve; });
+  const readMayFinish = new Promise<void>((resolve) => { finishRead = resolve; });
+  const delayed: GitHubReader = {
+    readPullRequest: async () => {
+      startRead();
+      await readMayFinish;
+      return snapshot({ baseSha: null });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  const tick = readinessTick(db, delayed, new Date(), 5, releaseChainLease);
+  await readStarted;
+  await db.task.update({
+    where: { id: seeded.readiness.id },
+    data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+  });
+  finishRead();
+
+  assert.deepEqual(await tick, { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+  const [readiness, regression] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  ]);
+  assert.equal(readiness.status, TaskStatus.DOING);
+  assert.equal(readiness.failureReason, NEWER_CLAIM);
+  assert.equal(regression.status, TaskStatus.DONE);
+  assert.deepEqual(releasedChainLeases, []);
+});
+
+test("a stale worker cannot requeue regression after a newer worker owns the claim", async () => {
+  const seeded = await seedReadiness();
+  let startRead!: () => void;
+  let finishRead!: () => void;
+  const readStarted = new Promise<void>((resolve) => { startRead = resolve; });
+  const readMayFinish = new Promise<void>((resolve) => { finishRead = resolve; });
+  const delayed: GitHubReader = {
+    readPullRequest: async () => {
+      startRead();
+      await readMayFinish;
+      return snapshot({ headRefOid: "c".repeat(40) });
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  const tick = readinessTick(db, delayed);
+  await readStarted;
+  await db.task.update({
+    where: { id: seeded.readiness.id },
+    data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+  });
+  finishRead();
+
+  assert.deepEqual(await tick, { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+});
+
+test("an unreachable merge lease acquire stops with a durable reason", async () => {
+  const seeded = await seedReadiness();
+  const unreachable: MergeLeaseAcquirer = async () => ({ outcome: "unreachable", detail: "spawn bash ENOENT" });
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, unreachable),
+    { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 1 },
+  );
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.match(readiness.failureReason ?? "", /merge lease acquire is unreachable.*ENOENT/u);
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+});
+
+test("a worker that acquired then lost its claim releases unless a successor owns the lease window", async () => {
+  const abandoned = await seedReadiness();
+  const loseToOperator: MergeLeaseAcquirer = async () => {
+    await db.task.update({
+      where: { id: abandoned.readiness.id },
+      data: { status: TaskStatus.REVIEW, failureReason: "operator parked readiness" },
+    });
+    return { outcome: "acquired" };
+  };
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, loseToOperator),
+    { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 },
+  );
+  assert.deepEqual(releasedChainLeases, [abandoned.readiness.chainId]);
+
+  await resetTestDb(db);
+  releasedChainLeases.length = 0;
+  const succeeded = await seedReadiness();
+  const loseToWorker: MergeLeaseAcquirer = async () => {
+    await db.task.update({
+      where: { id: succeeded.readiness.id },
+      data: { status: TaskStatus.DOING, failureReason: NEWER_CLAIM },
+    });
+    return { outcome: "acquired" };
+  };
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, loseToWorker),
+    { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 },
+  );
+  assert.deepEqual(releasedChainLeases, []);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: succeeded.readiness.id } })).failureReason, NEWER_CLAIM);
+});
+
+test("eligible readiness is not hidden behind the first hundred ineligible candidates", async () => {
+  const seeded = await seedReadiness();
+  await db.task.createMany({ data: Array.from({ length: 100 }, (_, index) => ({
+    projectId: seeded.readiness.projectId,
+    repoId: seeded.readiness.repoId,
+    templateId: seeded.readiness.templateId,
+    templateStepId: seeded.readiness.templateStepId,
+    name: `Blocked readiness ${index}`,
+    description: "regression is not done",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seeded.readiness.assigneeAgentId,
+    status: TaskStatus.TODO,
+    chainId: `blocked-tail-${index}`,
+    chainIndex: seeded.readiness.chainIndex,
+    chainLayer: seeded.readiness.chainLayer,
+    targetBranch: "main",
+    createdAt: new Date(0),
+  })) });
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 1),
+    { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
 });
