@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compact, compactTokens, duration, formatDateTime, formatT, money, repoWebUrl } from "../lib/format";
+import { compact, compactTokens, durationWithInboxWait, formatDateTime, formatT, money, repoWebUrl } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -127,7 +127,11 @@ export const SessionRow = ({ session }: { session: Session }): ReactNode => {
       <TableCell><AgentChip agent={null} name={session.agent?.title ?? session.agentId} /></TableCell>
       <TableCell>{target}</TableCell>
       <TableCell><Pill tone="grey">{session.runner}</Pill></TableCell>
-      <TableCell>{duration(session.startedAt, session.endedAt)}</TableCell>
+      <TableCell>{durationWithInboxWait(
+        session.startedAt,
+        session.endedAt,
+        session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
+      )}</TableCell>
       <TableCell><SessionStatusPill status={session.executionStatus} mergeOutcome={session.mergeOutcome} /></TableCell>
       <TableCell {...(session.failureReason === null ? {} : { title: compact(session.failureReason, 200) })}>
         {resultWord(session)}
@@ -464,7 +468,11 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
             { k: t("sessions.detail.run"), v: session.run ? (session.task ? <Link to={`/tasks/${session.task.id}`}>#{session.run.runNumber}</Link> : `#${session.run.runNumber}`) : "—" },
             { k: t("sessions.detail.model"), v: session.run?.model ?? "—" },
             { k: t("sessions.detail.started"), v: formatDateTime(session.startedAt ?? session.requestedAt) },
-            { k: t("sessions.detail.duration"), v: duration(session.startedAt, session.endedAt) },
+            { k: t("sessions.detail.duration"), v: durationWithInboxWait(
+              session.startedAt,
+              session.endedAt,
+              session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
+            ) },
             {
               k: t("sessions.detail.branch"),
               v: branch === null ? "—" : repoUrl === null

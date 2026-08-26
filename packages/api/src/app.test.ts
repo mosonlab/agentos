@@ -507,6 +507,91 @@ test("fencing rejects an expired generation token", async () => {
   });
 });
 
+test("resuming a run preserves its original Run and Session start timestamps", async () => {
+  await withTokens(async () => {
+    const originalStartedAt = new Date("2026-08-21T00:00:00.000Z");
+    const runWrites: Array<Record<string, unknown>> = [];
+    const sessionWrites: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: async () => [{ id: "run-1" }],
+      run: {
+        findUnique: async () => ({ startedAt: originalStartedAt, session: { startedAt: originalStartedAt } }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          runWrites.push(data);
+          return { count: 1 };
+        },
+      },
+      session: {
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          sessionWrites.push(data);
+          return { count: 1 };
+        },
+      },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/runner/runs/run-1/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "test",
+        cliVersion: "test",
+        manifest: {},
+        workspacePath: "/scratch/resumed",
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(runWrites[0]?.startedAt, originalStartedAt);
+    assert.equal(sessionWrites[0]?.startedAt, originalStartedAt);
+  });
+});
+
+test("starting a fresh run stamps the same new timestamp on its Run and Session", async () => {
+  await withTokens(async () => {
+    const runWrites: Array<Record<string, unknown>> = [];
+    const sessionWrites: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: async () => [{ id: "run-1" }],
+      run: {
+        findUnique: async () => ({ startedAt: null, session: { startedAt: null } }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          runWrites.push(data);
+          return { count: 1 };
+        },
+      },
+      session: {
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          sessionWrites.push(data);
+          return { count: 1 };
+        },
+      },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const before = Date.now();
+    const response = await createApp(database).request("/runner/runs/run-1/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "test",
+        cliVersion: "test",
+        manifest: {},
+        workspacePath: "/scratch/fresh",
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.ok(runWrites[0]?.startedAt instanceof Date);
+    assert.equal(sessionWrites[0]?.startedAt, runWrites[0]?.startedAt);
+    assert.ok((runWrites[0]?.startedAt as Date).getTime() >= before);
+  });
+});
+
 test("completion requires both exit zero and a successful terminal event", () => {
   assert.equal(completionSucceeded({
     exitCode: 0,

@@ -3,9 +3,11 @@ import test from "node:test";
 
 import { JSDOM } from "jsdom";
 import { act } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { ApiError } from "../lib/api";
 import type { Chain, Run, Task, TaskStepOutput } from "../lib/types";
+import { RunRow } from "../pages/TaskDetail";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 
 const now = "2026-08-17T00:00:00.000Z";
@@ -48,6 +50,15 @@ const chainFor = (taskId: string): Chain => ({
     failureReason: null, latestRun: null, startable: true, startAction: "start",
     currentExecution: false,
   }],
+});
+
+test("a resumed run identifies Duration as wall-clock time that includes Inbox wait", () => {
+  const run = sourceRun("task-1");
+  run.startedAt = "2026-08-17T00:00:00.000Z";
+  run.endedAt = "2026-08-17T00:05:00.000Z";
+  run.session = { executionStatus: "SUCCEEDED", resumeAttempt: 1 } as NonNullable<Run["session"]>;
+  const markup = renderToStaticMarkup(<table><tbody><RunRow run={run} remoteUrl={null} expanded={false} onToggle={() => undefined} /></tbody></table>);
+  assert.match(markup, /5m 0s wall-clock \(includes Inbox wait\)/);
 });
 
 const settle = async (): Promise<void> => {
