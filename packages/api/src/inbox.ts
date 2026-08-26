@@ -10,7 +10,13 @@ import {
 } from "@agentos/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
-import { fencedRunWhere, type RunFence, withFencedRun } from "./run-fence.js";
+import {
+  type FenceRefusalResponse,
+  fencedRunWhere,
+  isFenceRefusalResponse,
+  type RunFence,
+  withFencedRun,
+} from "./run-fence.js";
 
 export const defaultInboxResumeWindowMs = 7 * 24 * 60 * 60 * 1_000;
 
@@ -28,6 +34,16 @@ export type SupersedeInboxMessageResult =
   | { closed: true; duplicate: false; requestId: string }
   | { closed: false; duplicate: true; requestId: string }
   | { error: string; code: 404 | 409 };
+
+export class InboxRunFenceRefusal extends Error {
+  readonly refusal: FenceRefusalResponse;
+
+  constructor(refusal: FenceRefusalResponse) {
+    super(`Run is not resumable: ${refusal.reason}`);
+    this.name = "InboxRunFenceRefusal";
+    this.refusal = refusal;
+  }
+}
 
 /**
  * Closes one historical task-linked Inbox message after the operator has
@@ -120,7 +136,7 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
     at: now,
     statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING],
   };
-  return db.$transaction((tx) => withFencedRun(tx, fence, {
+  const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
     id: true,
     agentId: true,
     taskId: true,
@@ -175,4 +191,6 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
     } });
     return question;
   }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  if (isFenceRefusalResponse(result)) throw new InboxRunFenceRefusal(result);
+  return result;
 };

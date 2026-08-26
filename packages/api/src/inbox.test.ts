@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Prisma, RunStatus, type PrismaClient } from "@agentos/db";
 
-import { defaultInboxResumeWindowMs, suspendForInbox } from "./inbox.js";
+import { defaultInboxResumeWindowMs, InboxRunFenceRefusal, suspendForInbox } from "./inbox.js";
 
 test("question persistence and WAITING_INBOX transition share one transaction", async () => {
   const calls: string[] = [];
@@ -60,4 +60,39 @@ test("question persistence and WAITING_INBOX transition share one transaction", 
     assert.deepEqual(where.status, { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] });
   }
   assert.deepEqual(sessionUpdate?.resumableUntil, new Date(now.getTime() + defaultInboxResumeWindowMs));
+});
+
+test("a fenced Inbox miss still rejects with its canonical refusal", async () => {
+  const now = new Date("2026-08-16T07:00:00.000Z");
+  const tx = {
+    $queryRaw: async () => [{ id: "run-1" }],
+    run: {
+      findFirst: async () => null,
+      findUnique: async () => ({
+        runnerId: "runner-1",
+        fencingToken: "fence-1",
+        cancelRequestedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + 60_000),
+        status: RunStatus.RUNNING,
+      }),
+    },
+  };
+  const db = { $transaction: async (operation: (value: typeof tx) => Promise<unknown>) => operation(tx) } as unknown as PrismaClient;
+
+  await assert.rejects(
+    suspendForInbox(db, {
+      runId: "run-1",
+      fencingToken: "fence-1",
+      requestId: "request-1",
+      body: "Ship it?",
+      chatId: "chat-1",
+      choices: [],
+    }, now),
+    (error: unknown) => {
+      assert.ok(error instanceof InboxRunFenceRefusal);
+      assert.deepEqual(error.refusal, { error: "Stale fencing token", reason: "cancel-requested" });
+      assert.match(error.message, /Run is not resumable/u);
+      return true;
+    },
+  );
 });

@@ -133,7 +133,7 @@ import {
   type RunFence,
   withFencedRun,
 } from "./run-fence.js";
-import { supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
+import { InboxRunFenceRefusal, supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
@@ -3893,9 +3893,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         choices: body.choices,
         ...(body.resumableUntil !== undefined ? { resumableUntil: body.resumableUntil } : {}),
       });
-      if (isFenceRefusalResponse(question)) return context.json(question, 409);
       return context.json(question, 201);
     } catch (error: unknown) {
+      if (error instanceof InboxRunFenceRefusal) return context.json(error.refusal, 409);
       if (error instanceof Error && error.message.startsWith("Run is not resumable")) return context.json({ error: error.message }, 409);
       throw error;
     }
