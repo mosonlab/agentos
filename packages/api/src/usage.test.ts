@@ -180,6 +180,23 @@ const CODEX_TURN_COMPLETED = {
 
 const PI_AGENT_SETTLED = { type: "agent_settled" };
 
+// What the runner's PI parser attaches to that same terminal event once it has
+// summed the session's per-message usage. Numbers are the real ones from the
+// 2026-08-25 pi 0.84.2 capture the runner test carries: two assistant messages
+// of 4620/19 and 1068/5 tokens, the second reading 3584 tokens from cache.
+const PI_AGENT_SETTLED_WITH_USAGE = {
+  type: "agent_settled",
+  agentosPiUsage: {
+    messages: 2,
+    reported: 2,
+    input: 5688,
+    output: 24,
+    cacheRead: 3584,
+    cacheWrite: 0,
+    costUsd: 0.00123808,
+  },
+};
+
 type SessionColumns = {
   inputTokens: number | null;
   outputTokens: number | null;
@@ -273,6 +290,61 @@ test("extractUsage reads the real CODEX turn.completed payload and finds no cost
 
 test("extractUsage finds nothing in PI's empty terminal event", () => {
   assert.deepEqual(extractUsage(PI_AGENT_SETTLED), {});
+});
+
+test("extractUsage reads the runner's PI aggregate, cache disjoint from input", () => {
+  const usage: SessionUsage = extractUsage(PI_AGENT_SETTLED_WITH_USAGE);
+  assert.deepEqual(usage, {
+    inputTokens: 5688,
+    outputTokens: 24,
+    // cacheRead + cacheWrite, the same fold CLAUDE's read/creation pair gets.
+    cachedInputTokens: 3584,
+    costUsd: new Prisma.Decimal("0.00123808"),
+  });
+  // The caliber, asserted rather than left to the comment: PI's `input` excludes
+  // cache reads, so totalTokens is uncached input + output and 3584 cached
+  // tokens are NOT in it. CODEX's totalTokens, whose input_tokens already
+  // contains its cached figure, does include them — the two are not comparable.
+  const derived = deriveUsageColumns(usage);
+  assert.equal(derived.totalTokens, 5712);
+  assert.equal(derived.cachedInputTokens, 3584);
+  assert.equal(derived.costUsd?.toString(), "0.0012");
+  const codex = deriveUsageColumns(extractUsage(CODEX_TURN_COMPLETED));
+  assert.equal(codex.totalTokens, 41017);
+  assert.ok(codex.totalTokens! > codex.cachedInputTokens!, "CODEX totals already contain the cached tokens");
+});
+
+test("the PI aggregate is exclusive of the provider vocabularies it replaces", () => {
+  // A payload carrying both must not be summed twice. PI's terminal event never
+  // carries `usage` today; this is the guard that keeps that assumption honest
+  // if the shape ever changes.
+  const usage = extractUsage({ ...PI_AGENT_SETTLED_WITH_USAGE, usage: { input_tokens: 99 }, total_cost_usd: 7 });
+  assert.equal(usage.inputTokens, 5688);
+  assert.equal(usage.costUsd?.toString(), "0.00123808");
+});
+
+test("a PI aggregate that reports nothing usable leaves every column null", async () => {
+  // The runner omits `agentosPiUsage` entirely when no message reported usage,
+  // and diagnoses that separately. Whatever else arrives here, no field may be
+  // invented: absent stays absent, never zero.
+  for (const totals of [undefined, null, 42, {}, { messages: 3, reported: 0 }]) {
+    assert.deepEqual(extractUsage({ type: "agent_settled", agentosPiUsage: totals }), {}, JSON.stringify(totals ?? null));
+  }
+  const { result: usage, warnings } = await withCapturedWarnings(
+    () => extractUsage({ agentosPiUsage: { input: -1, output: 8, cacheRead: 1.5, costUsd: "free" } }),
+  );
+  assert.deepEqual(usage, { outputTokens: 8 });
+  assert.equal(warnings.length, 3);
+  assert.match(warnings.join("\n"), /agentosPiUsage\.input/u);
+  assert.match(warnings.join("\n"), /agentosPiUsage\.costUsd/u);
+});
+
+test("PI sessions accumulate across attempts the way every other runner does", () => {
+  // A resumed PI session spawns a fresh process with a fresh accumulator, so
+  // each attempt contributes its own FINAL_OUTPUT row.
+  const total = sumUsage([PI_AGENT_SETTLED_WITH_USAGE, PI_AGENT_SETTLED_WITH_USAGE].map(extractUsage));
+  assert.equal(total.inputTokens, 11376);
+  assert.equal(total.costUsd?.toString(), "0.00247616");
 });
 
 test("extractUsage is total over unknown input", () => {

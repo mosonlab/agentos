@@ -341,6 +341,25 @@ export type HeartbeatSnapshot = {
   inFlightTool: InFlightTool | null;
 };
 
+/**
+ * A PI session's harvested token and cost totals. Every field is `null` until a
+ * message actually reports it — absent is never zero, matching the
+ * `SessionUsage` contract these totals are ingested through.
+ *
+ * `messages` and `reported` are diagnostics carried into the payload: they are
+ * what lets an operator tell "the session sent nothing" apart from "the session
+ * sent messages and PI reported no usage for them".
+ */
+export type PiUsageTotals = {
+  messages: number;
+  reported: number;
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  costUsd: number | null;
+};
+
 export type RuntimeHandle = {
   runId: string;
   runner: RunnerKind;
@@ -358,6 +377,7 @@ export type RuntimeHandle = {
   providerError: string | null;
   piTurnCompleted: boolean;
   piFinalAttemptFailed: boolean;
+  piUsage: PiUsageTotals;
   finalOutput: string | null;
   stdout: string;
   stderr: string;
@@ -515,6 +535,97 @@ const parseCodex = (handle: RuntimeHandle, event: Record<string, unknown>, sink:
   } else emit(handle, sink, "PROVIDER_STATUS", event);
 };
 
+const emptyPiUsage = (): PiUsageTotals =>
+  ({ messages: 0, reported: 0, input: null, output: null, cacheRead: null, cacheWrite: null, costUsd: null });
+
+/**
+ * One number out of a PI usage object, or null when PI said nothing usable.
+ * Rejection is per field and never throws: one absurd value must not discard
+ * the siblings that were fine, and a usage object must not be able to kill the
+ * session that carried it.
+ */
+const piNumber = (value: unknown, field: string, integral: boolean): number | null => {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integral || Number.isInteger(value))) return value;
+  console.warn(JSON.stringify({ audit: "pi-usage", event: "field-dropped", field, value: String(value) }));
+  return null;
+};
+
+/**
+ * Fold one PI message's usage into the session totals.
+ *
+ * Source, verified against a real `pi --mode json` capture (0.84.2,
+ * openai-codex/gpt-5.6-luna): the usage object on a `message_end` event whose
+ * message role is `assistant`. Shape:
+ *
+ *   {"input":1068,"output":5,"cacheRead":3584,"cacheWrite":0,"reasoning":0,
+ *    "totalTokens":4657,"cost":{"input":…,"output":…,"cacheRead":…,"cacheWrite":…,"total":…}}
+ *
+ * Three properties of that capture drive this function, and none of them are
+ * guesses:
+ *
+ * - `message_end` is the ONLY event harvested. `message_start` and every
+ *   `message_update` carry a usage object too, and `turn_end` repeats the last
+ *   message's object verbatim — summing any of them double counts.
+ * - `input` EXCLUDES `cacheRead`: the captured message reconciles as
+ *   1068 + 5 + 3584 = 4657, PI's own `totalTokens`. So `input` maps straight
+ *   onto `inputTokens` with nothing to subtract.
+ * - `output` INCLUDES `reasoning` (a second capture reported output 29 with
+ *   reasoning 22 and totalTokens = input + output). `reasoning` is therefore
+ *   read as a breakdown of output, never added to it — the same rule CODEX's
+ *   `reasoning_output_tokens` already gets.
+ *
+ * PI reports cost directly, per message, in `cost.total` USD, so no pricing
+ * lookup is involved. Summing those doubles in JS is exact enough: the single
+ * rounding that matters happens once, at the Decimal(12, 4) column boundary.
+ */
+const harvestPiUsage = (totals: PiUsageTotals, message: Record<string, unknown>): void => {
+  totals.messages += 1;
+  const usage = asRecord(message.usage);
+  if (!usage) return;
+  totals.reported += 1;
+  const input = piNumber(usage.input, "input", true);
+  if (input !== null) totals.input = (totals.input ?? 0) + input;
+  const output = piNumber(usage.output, "output", true);
+  if (output !== null) totals.output = (totals.output ?? 0) + output;
+  const cacheRead = piNumber(usage.cacheRead, "cacheRead", true);
+  if (cacheRead !== null) totals.cacheRead = (totals.cacheRead ?? 0) + cacheRead;
+  const cacheWrite = piNumber(usage.cacheWrite, "cacheWrite", true);
+  if (cacheWrite !== null) totals.cacheWrite = (totals.cacheWrite ?? 0) + cacheWrite;
+  const cost = piNumber(asRecord(usage.cost)?.total, "cost.total", false);
+  if (cost !== null) totals.costUsd = (totals.costUsd ?? 0) + cost;
+};
+
+/** The totals as the FINAL_OUTPUT payload carries them: only fields PI actually
+ * reported, so an absent field stays absent all the way to the column. */
+const piUsagePayload = (totals: PiUsageTotals): Record<string, unknown> => ({
+  messages: totals.messages,
+  reported: totals.reported,
+  ...(totals.input === null ? {} : { input: totals.input }),
+  ...(totals.output === null ? {} : { output: totals.output }),
+  ...(totals.cacheRead === null ? {} : { cacheRead: totals.cacheRead }),
+  ...(totals.cacheWrite === null ? {} : { cacheWrite: totals.cacheWrite }),
+  ...(totals.costUsd === null ? {} : { costUsd: totals.costUsd }),
+});
+
+/**
+ * Why a PI session's cost would be invisible, or null when it is not.
+ *
+ * A session that reports nothing must not settle quietly: the columns stay NULL
+ * either way, and NULL that nobody was told about reads exactly like a session
+ * that cost nothing. A zero total counts as reporting nothing for the same
+ * reason — PI emitted usage objects, but they say the session was free, which
+ * for a session that ran a model is not a fact, it is a gap.
+ */
+const piUsageGap = (totals: PiUsageTotals): string | null => {
+  if (totals.messages === 0) return "PI settled without ending a single assistant message";
+  if (totals.reported === 0) return `PI reported no usage on any of ${totals.messages} assistant message(s)`;
+  if ((totals.input ?? 0) + (totals.output ?? 0) === 0) {
+    return `PI reported usage on ${totals.reported} of ${totals.messages} assistant message(s) but no tokens`;
+  }
+  return null;
+};
+
 const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: SessionEventSink): void => {
   const type = stringField(event, "type");
   if (type === "session") {
@@ -535,6 +646,11 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
   } else if (type === "turn_end" || type === "message_end") {
     handle.piTurnCompleted = true;
     const message = asRecord(event.message);
+    // Usage is harvested from message_end alone; see harvestPiUsage for why
+    // turn_end, which repeats the same message, must not contribute.
+    if (type === "message_end" && message && stringField(message, "role") === "assistant") {
+      harvestPiUsage(handle.piUsage, message);
+    }
     if (message && stringField(message, "role") === "assistant" && Array.isArray(message.content)) {
       const text = message.content
         .map((part) => stringField(asRecord(part) ?? {}, "text"))
@@ -556,7 +672,19 @@ const parsePi = (handle: RuntimeHandle, event: Record<string, unknown>, sink: Se
   } else if (type === "agent_settled") {
     handle.terminalEventSeen = true;
     handle.terminalSuccess = handle.piTurnCompleted && !handle.piFinalAttemptFailed && !handle.sawError;
-    emit(handle, sink, "FINAL_OUTPUT", event);
+    // PI's terminal event is literally {"type":"agent_settled"} — it carries no
+    // usage and no cost. The per-message totals this parser accumulated are
+    // attached here, under a name that says who computed them, because
+    // FINAL_OUTPUT is the one event the usage ingest reads. The provider's own
+    // untouched event is still on record: PROVIDER_RAW emitted it first.
+    const gap = piUsageGap(handle.piUsage);
+    if (gap) {
+      console.warn(JSON.stringify({ audit: "pi-usage", event: "unavailable", runId: handle.runId, reason: gap }));
+      emit(handle, sink, "ADAPTER_ERROR", { error: `Session cost will be unavailable: ${gap}`, ...piUsagePayload(handle.piUsage) });
+    }
+    emit(handle, sink, "FINAL_OUTPUT", handle.piUsage.reported === 0
+      ? event
+      : { ...event, agentosPiUsage: piUsagePayload(handle.piUsage) });
   } else {
     if (type?.includes("error")) handle.sawError = true;
     emit(handle, sink, type?.includes("message") ? "MODEL_DELTA" : "PROVIDER_STATUS", event);
@@ -730,6 +858,7 @@ const spawnRuntime = (runner: RunnerKind, spec: RunSpec, sink: SessionEventSink,
     providerError: null,
     piTurnCompleted: false,
     piFinalAttemptFailed: false,
+    piUsage: emptyPiUsage(),
     finalOutput: null,
     stdout: "",
     stderr: "",
