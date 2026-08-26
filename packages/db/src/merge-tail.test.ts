@@ -188,3 +188,18 @@ test("a decision with more findings than one range can carry, or an over-long fi
   const long = { ...followUp, detail: "d".repeat(MAX_REVIEW_FINDING_TEXT + 1) };
   assert.equal(parseIndependentReviewDecision(reviewBody([long]), A).status, "invalid");
 });
+
+test("an authority-resign verdict is a first-class outcome and still needs its summary", () => {
+  const parsed = parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B,
+    summary: "added packages/db/prisma/migrations/20260826000000_x/migration.sql",
+  }));
+  assert.equal(parsed.status, "ok");
+  assert.equal(parsed.status === "ok" ? parsed.verdict.outcome : null, "authority-resign");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B, summary: "   ",
+  })).status, "invalid");
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    schemaVersion: 1, outcome: "authority-resign", headSha: A, baseHeadSha: B,
+  })).status, "invalid");
+});

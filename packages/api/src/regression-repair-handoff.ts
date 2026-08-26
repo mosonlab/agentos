@@ -52,6 +52,10 @@ export const regressionRepairHandoffForClaim = async (
     reason: `regression repair handoff is invalid: ${reason}`,
   });
 
+  // A re-signature request creates no repair task, so there is no repair run to
+  // hand the prior verdict to. The re-run reads the tree itself.
+  if (parsed.verdict.outcome === "authority-resign") return { status: "none" };
+
   let trigger: RegressionRepairHandoff["trigger"];
   let repairKind: RegressionRepairKind;
   let evidenceAt = priorOutput.updatedAt;

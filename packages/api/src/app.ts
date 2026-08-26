@@ -88,8 +88,11 @@ import {
   type CardRow,
   type DecisionRow,
   asJsonObject,
+  AUTHORITY_RESIGN_DEDUPE_PREFIX,
+  AUTHORITY_RESIGN_OPEN_PREFIX,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
+  MAX_AUTHORITY_RESIGN_ROUNDS,
   MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   MergeRecoveryStatus,
@@ -97,6 +100,7 @@ import {
   parseIndependentReviewDecision,
   parseRegressionVerdict,
   parseResolverResult,
+  RELEASE_AUTHORITY_FILE,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   type IndependentReviewFinding,
   type MergeRecoveryAttempt,
@@ -407,6 +411,72 @@ const openMergeTailStopNotice = async (
   } });
 };
 
+/**
+ * The one operator action the autonomous merge tail asks for, and the reason it
+ * cannot ask an agent instead: `release-authority.json` is signed with a key
+ * that lives outside every checkout, so a chain that moves an attested
+ * release-path file can only be unblocked by whoever holds it.
+ *
+ * The message is written to be run, not interpreted: the two recorded SHAs come
+ * out of the attestation already in the checkout, so nothing here has to be
+ * filled in by hand. Nothing else in the chain is blocked while it waits, and
+ * the resign worker resumes this step on its own once the signature is pushed.
+ */
+/**
+ * A branch name may legally contain `$`, a backtick or a semicolon, and this
+ * message is written to be pasted into a shell that will be holding the release
+ * signing key. Every interpolated value is quoted, including the embedded single
+ * quote a refname may also carry.
+ */
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
+const openAuthorityResignNotice = async (
+  tx: DbTx,
+  input: {
+    taskId: string;
+    agentId: string;
+    sessionId?: string;
+    branch: string;
+    headSha: string;
+    summary: string;
+    round: number;
+  },
+): Promise<void> => {
+  const body = [
+    `Autonomous merge tail: ${RELEASE_AUTHORITY_FILE} must be re-signed before this chain can merge.`,
+    `Branch ${input.branch} moved attested release-path files at head ${input.headSha}, so the migration preflight refuses this tree and the merge gate cannot pass. The signing key never enters a chain, so this is yours to run (request ${input.round} of ${MAX_AUTHORITY_RESIGN_ROUNDS}).`,
+    `What moved:\n${input.summary}`,
+    [
+      "Run this in the checkout that holds the private revalidation document, with the signing key at hand:",
+      "",
+      `  git fetch origin ${shellQuote(input.branch)}`,
+      `  git switch --detach ${shellQuote(input.headSha)}`,
+      "  RELEASE_AUTHORITY_KEY=~/.agentos-keys/release-authority.ed25519 \\",
+      `  GOAL5A0_MASTER_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').masterSha")" \\`,
+      `  GOAL5A0_CONTROL_PLANE_A_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').controlPlaneASha")" \\`,
+      "    npm run snapshot:authority",
+      `  npm run db:authority-check -w @agentos/db`,
+      `  git add ${RELEASE_AUTHORITY_FILE}`,
+      `  git commit -m ${shellQuote(`chore(release): re-sign the release authority for ${input.branch}`)}`,
+      `  git push origin ${shellQuote(`HEAD:${input.branch}`)}`,
+    ].join("\n"),
+    `Nothing else is needed. The server watches the pull request and re-runs regression verification as soon as the re-signed ${RELEASE_AUTHORITY_FILE} is on ${input.branch}.`,
+  ].join("\n\n");
+  await tx.inboxMessage.upsert({
+    where: { dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.taskId}:${input.headSha}` },
+    create: {
+      from: "AGENT",
+      agentId: input.agentId,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      taskId: input.taskId,
+      kind: "TEXT",
+      body,
+      dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.taskId}:${input.headSha}`,
+    },
+    update: {},
+  });
+};
+
 const createMergeTailRepairTask = async (
   tx: DbTx,
   input: {
@@ -549,16 +619,93 @@ export const handleRegressionCompletion = async (
     return "advance";
   }
 
+  if (verdict.outcome === "authority-resign") {
+    // Rounds are counted from the notices this function itself wrote, not from
+    // the activity log: `actorType` and `metadata` are caller-supplied on the
+    // activity route, and an inbox `dedupeKey` is written nowhere else. The
+    // bound is anti-thrash — a repeat means the last signature did not cover
+    // this tree, and a chain that keeps asking is not progressing.
+    const round = await tx.inboxMessage.count({
+      where: { taskId: input.task.id, dedupeKey: { startsWith: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.task.id}:` } },
+    }) + 1;
+    const exhausted = round > MAX_AUTHORITY_RESIGN_ROUNDS;
+    const branch = input.run.branch;
+    if (exhausted || !branch) {
+      const reason = exhausted
+        ? `release authority re-signature round ${round} exceeds ${MAX_AUTHORITY_RESIGN_ROUNDS} at ${verdict.headSha}: ${verdict.summary}`
+        : `release authority re-signature is required at ${verdict.headSha} but this run names no chain branch`;
+      const bounded = truncateFailureReason(reason, FAILURE_REASON_LIMIT);
+      if (recovery) {
+        await stopBaseDriftRecoveryTail(tx, recovery, "regression", bounded);
+        return "handled";
+      }
+      return stop(bounded);
+    }
+    // A step an operator has already taken over is not re-parked under it: the
+    // completion holds the chain mutex only from here, so the row is claimed
+    // rather than overwritten.
+    const parked = await tx.task.updateMany({
+      where: { id: input.task.id, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
+      data: { status: TaskStatus.REVIEW, failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${verdict.headSha}` },
+    });
+    if (parked.count !== 1) {
+      await tx.taskActivity.create({ data: {
+        taskId: input.task.id,
+        actorType: "control-plane",
+        body: `Release authority re-signature is required at ${verdict.headSha} but this step is no longer the tail's to park`,
+        metadata: {
+          kind: MERGE_TAIL_KIND.authorityResign,
+          schemaVersion: 1,
+          state: "park-skipped",
+          headSha: verdict.headSha,
+          summary: verdict.summary,
+        },
+      } });
+      return "handled";
+    }
+    await tx.taskActivity.create({ data: {
+      taskId: input.task.id,
+      actorType: "control-plane",
+      body: `Release authority re-signature requested at ${verdict.headSha}: ${verdict.summary}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.authorityResign,
+        schemaVersion: 1,
+        state: "open",
+        headSha: verdict.headSha,
+        baseHeadSha: verdict.baseHeadSha,
+        branch,
+        round,
+        summary: verdict.summary,
+      },
+    } });
+    await openAuthorityResignNotice(tx, {
+      taskId: input.task.id,
+      agentId: input.run.agentId,
+      sessionId: input.run.sessionId,
+      branch,
+      headSha: verdict.headSha,
+      summary: verdict.summary,
+      round,
+    });
+    // A base-drift recovery that reaches this needs the same signature as any
+    // other chain, and the resign worker resumes the same step for it. The
+    // recovery aggregate keeps its own state; nothing about it is decided here.
+    return "handled";
+  }
+
   if (recovery) {
     await stopBaseDriftRecoveryTail(
       tx,
       recovery,
       "regression",
-      verdict.outcome === "refresh-conflict"
-        ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-        : verdict.outcome === "review-fail"
-          ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-          : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+      truncateFailureReason(
+        verdict.outcome === "refresh-conflict"
+          ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+          : verdict.outcome === "review-fail"
+            ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+            : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+        FAILURE_REASON_LIMIT,
+      ),
     );
     return "handled";
   }
@@ -1547,6 +1694,18 @@ const activateMergeTailTarget = async (
         ? "Independent review resolved; readiness target returned to the server worker"
         : "Merge-tail readiness target queued for server worker",
       metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
+    } });
+    return;
+  }
+  if (target.status === TaskStatus.REVIEW && target.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX)) {
+    // A park the resign worker owns. Re-queueing this step now would spend a
+    // gate on a tree the migration preflight still refuses, and would lose the
+    // park the operator's inbox message points at.
+    await tx.taskActivity.create({ data: {
+      taskId,
+      actorType: "control-plane",
+      body: "Merge-tail target is held by an open release authority re-signature",
+      metadata: { kind: MERGE_TAIL_KIND.authorityResign, schemaVersion: 1, state: "held" },
     } });
     return;
   }

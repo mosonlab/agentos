@@ -43,7 +43,7 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import { AUTHORITY_RESIGN_OPEN_PREFIX, INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -1474,6 +1474,20 @@ const activateChainSuccessorInternal = async (
         taskId: successor.id,
         actorType: "control-plane",
         body: "Predecessor layer completed; successor is held by an open independent review",
+      } });
+      continue;
+    }
+    // The same reasoning for the other owned park: the resign worker returns a
+    // regression step to the queue once the re-signed attestation is on the
+    // branch, and resuming it before then only buys a gate the migration
+    // preflight will refuse.
+    const resignOwnedPark = successor.status === TaskStatus.REVIEW
+      && (successor.failureReason?.startsWith(AUTHORITY_RESIGN_OPEN_PREFIX) ?? false);
+    if (resignOwnedPark) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: "Predecessor layer completed; successor is held by an open release authority re-signature",
       } });
       continue;
     }

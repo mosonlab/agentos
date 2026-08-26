@@ -424,6 +424,11 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
       baseHeadSha: commitSha,
       summary: nonEmptyString,
     }),
+    canonicalEnvelope.extend({
+      outcome: z.literal("authority-resign"),
+      baseHeadSha: commitSha,
+      summary: nonEmptyString,
+    }),
   ]),
   documentation: canonicalEnvelope.extend({
     summary: nonEmptyString,
