@@ -370,6 +370,7 @@ test("the docs surface is closed and named one file at a time", () => {
   // unrelated plans, reviews, specifications, or unlisted runbooks alongside it.
   assert.deepEqual(docs.sort(), [
     "docs/BRIEF-TEMPLATE.md",
+    "docs/adr/README.md",
     "docs/demos/templates-release-demo.md",
     "docs/demos/templates-release-evidence.schema.json",
     "docs/governance/review-role-convergence-v1.md",
@@ -385,6 +386,7 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/release/v0.1.0-security.md",
     "docs/release/v0.1.0-support-matrix.md",
     "docs/release/v0.2.0-release-notes.md",
+    "docs/runbooks/card-intake.md",
     "docs/runbooks/chain-template-changes.md",
     "docs/runbooks/gate-worker.md",
     "docs/runbooks/merge-delivery.md",
