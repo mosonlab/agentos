@@ -44,6 +44,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
+import { fixtureEnv } from "./gate-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const libPath = join(here, "lib.sh");
@@ -52,42 +53,11 @@ const mergeLeasePath = join(here, "..", "merge-lease.sh");
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
-// The dispatcher and the gate read their topology and their sizing out of the
-// environment: `AGENTOS_GATE_SERVER` alone collapses the dispatcher to a single
-// server with an empty fallback (gate-dispatch.sh), which turns a case that
-// pre-fills the desktop slots into a wait for a slot that cannot open. A
-// session configured to reach a real gate worker exports that variable, so a
-// fixture that inherits the host environment tests the host's topology instead
-// of the one it declares. The host's Git identity was already neutralised here
-// for the same reason; behaviour belongs on the same list. The dispatcher's own
-// namespace is stripped by prefix so a variable added to it later cannot
-// reintroduce the leak.
-const HOST_GATE_PREFIXES = ["AGENTOS_GATE_", "GATE_DISPATCH_"];
-// run-gate.sh's two are not prefixed but are read the same way: GATE_HOME
-// relocates the whole gate directory a fixture built for itself — at the real
-// worker's mirror, worktrees and logs — and STALE_WORKTREE_MINUTES decides what
-// its sweep reclaims. XDG_CACHE_HOME is deliberately NOT on this list: every
-// case that needs it sets it, and removing it would point a dispatcher at the
-// real slot locks under $HOME/.cache instead.
-const HOST_GATE_NAMES = ["GATE_HOME", "STALE_WORKTREE_MINUTES"];
-const isHostGateConfig = (key) =>
-  HOST_GATE_PREFIXES.some((prefix) => key.startsWith(prefix)) || HOST_GATE_NAMES.includes(key);
-
-const hostNeutralEnv = Object.fromEntries(
-  Object.entries(process.env).filter(([key]) => !isHostGateConfig(key)),
-);
-
-const FIXTURE_ENV = {
-  ...hostNeutralEnv,
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_SYSTEM: "/dev/null",
-  GIT_AUTHOR_NAME: "gate-dispatch-fixture",
-  GIT_AUTHOR_EMAIL: "gate-dispatch-fixture",
-  GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
-  GIT_COMMITTER_NAME: "gate-dispatch-fixture",
-  GIT_COMMITTER_EMAIL: "gate-dispatch-fixture",
-  GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
-};
+// What the gate reads out of the environment, and which of it a fixture may
+// inherit, is one question with one answer; it used to be 26 identical lines
+// here and 26 more in the sibling fixture file, and one of the three commits
+// that edited them landed in only one of the two.
+const FIXTURE_ENV = fixtureEnv("gate-dispatch-fixture");
 
 const scratch = (t) => {
   const root = mkdtempSync(join(tmpdir(), "gate-dispatch-test-"));
@@ -397,16 +367,6 @@ const busyCache = (t, busySlots = []) => {
 
 const dispatch = (t, repo, args, env = {}, busySlots = []) =>
   runDispatch(repo, busyCache(t, busySlots), args, env);
-
-test("the fixture environment carries no host gate configuration", () => {
-  // The guard for the leak itself. Nothing below states which servers exist or
-  // how long to wait unless it says so, so a host that is configured to reach a
-  // real gate worker cannot silently rewrite the topology these cases assert
-  // on — which is how this suite once blocked for the dispatcher's full hour
-  // instead of failing.
-  const leaked = Object.keys(FIXTURE_ENV).filter(isHostGateConfig);
-  assert.deepEqual(leaked, [], `host gate configuration reached the fixtures: ${leaked.join(", ")}`);
-});
 
 test("an explicitly enabled local PASS comes back as 0 with the gate's own verdict line", (t) => {
   const repo = fixtureRepo(t, {});

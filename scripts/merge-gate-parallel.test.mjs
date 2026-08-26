@@ -12,9 +12,12 @@
 // was in, so a reviewer reading that line recorded a judgement about the commit
 // that nothing had formed. Nothing about it is visible on a green run either.
 //
-// The function is extracted from merge-gate.sh and run for real. Re-typing it
-// into a fixture would test a copy, and the copy is the one thing that cannot
-// drift into disagreeing with the gate while still passing.
+// The engine is sourced from scripts/gate-worker/step-engine.sh and run for
+// real. Re-typing it into a fixture would test a copy, and the copy is the one
+// thing that cannot drift into disagreeing with the gate while still passing.
+// It used to be sliced out of merge-gate.sh by string offsets, which needed
+// four guard assertions to notice when the slicing stopped matching; a file
+// the gate itself sources needs none of them.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -29,50 +32,28 @@ const gatePath = fileURLToPath(new URL("./merge-gate.sh", import.meta.url));
 // that re-typed them would keep passing while the gate's real output changed
 // underneath it — which is the whole reason the module exists.
 const libPath = fileURLToPath(new URL("./gate-worker/lib.sh", import.meta.url));
+// The engine itself. What a step is, what a group of them is, and what the run
+// learned are all behind this one interface, so a fixture declares its inputs
+// and nothing else.
+const enginePath = fileURLToPath(new URL("./gate-worker/step-engine.sh", import.meta.url));
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
-// The extraction is bounded by two literals that exist in merge-gate.sh for
-// this purpose. If either stops matching, the tests fail loudly here instead of
-// silently exercising nothing.
-const extractParallelSteps = () => {
-  const source = readFileSync(gatePath, "utf8");
-  // From the stop classifier rather than from the separator: what a member's
-  // exit status means is part of what this group reports, so the fixture must
-  // run the gate's own classification and not a copy of it.
-  const start = source.indexOf("\nstopped_from_outside() {");
-  assert.notEqual(start, -1, "merge-gate.sh no longer defines stopped_from_outside");
-  assert.notEqual(
-    source.indexOf('GATE_STEP_SEPARATOR="::"', start),
-    -1,
-    "merge-gate.sh no longer defines GATE_STEP_SEPARATOR after the stop classifier",
-  );
-  const bodyStart = source.indexOf("\nparallel_steps() {", start);
-  assert.notEqual(bodyStart, -1, "merge-gate.sh no longer defines parallel_steps");
-  const end = source.indexOf("\n}\n", bodyStart);
-  assert.notEqual(end, -1, "parallel_steps has no terminating brace");
-  return source.slice(start, end + 3);
-};
-
-const PARALLEL_STEPS = extractParallelSteps();
-
-// Enough of the gate for the function under test to run: the two output helpers,
-// the report array it appends to, the temp root it writes member logs into, and
-// the working directory it runs members in. Nothing here stands in for the
-// behaviour being tested.
-const HARNESS = `
+// Enough of the gate for the engine to run: the two output helpers it owes the
+// engine, the temp root it writes member logs into, and the working directory
+// it runs members in. Nothing here stands in for the behaviour being tested.
+const ENGINE = `
 set -uo pipefail
 say() { printf '\\n== %s\\n' "$1"; }
 note() { printf '   %s\\n' "$1"; }
 . ${JSON.stringify(libPath)}
-STEP_REPORT=()
-FAILED_STEP=""
-NO_VERDICT_REASON=""
-NO_VERDICT_EXIT="$GATE_EXIT_NO_VERDICT"
-GATE_REAL_FAILURE=""
+. ${JSON.stringify(enginePath)}
+gate_steps_begin
+`;
+
+const HARNESS = `${ENGINE}
 GATE_TMP="$1"
 REPO_ROOT="$2"
-${PARALLEL_STEPS}
 `;
 
 // Runs one group and reports what the gate would have: the exit status, the
@@ -209,6 +190,58 @@ test("PARALLEL-USAGE refuses a member with no command", () => {
   assert.match(run.stderr, /names no command/);
 });
 
+// --- what the run learned ---------------------------------------------------
+
+// gate_steps_outcome is the one place the engine's precedence rule is written:
+// a failure the run observed outranks a signal that arrived afterwards, and
+// only a run that learned nothing reports the absence of a verdict. Until it
+// existed the rule could only be observed through the line cleanup printed,
+// which is why the same `if` had to be repeated in cleanup and in the signal
+// handler and why one of the two was wrong.
+const runOutcome = (scenario) => {
+  const root = mkdtempSync(join(tmpdir(), "merge-gate-outcome."));
+  try {
+    const script = join(root, "outcome.sh");
+    writeFileSync(script, `${HARNESS}\n${scenario}\ngate_steps_outcome\n`);
+    const result = spawnSync("bash", [script, root, root], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return (result.stdout ?? "").trim().split("\n").at(-1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
+
+test("OUTCOME a run in which nothing failed is a pass", () => {
+  assert.equal(runOutcome(`step "fine" true`), "pass");
+});
+
+test("OUTCOME a step that failed on its own names itself", () => {
+  assert.equal(runOutcome(`step "bad" false || :`), "fail bad");
+});
+
+test("OUTCOME a step stopped from outside is no verdict, with the code that says so", () => {
+  assert.equal(
+    runOutcome(`step "killed" sh -c 'kill -TERM $$; sleep 30' || :`),
+    "no-verdict 76 killed was stopped before it could be judged",
+  );
+});
+
+test("OUTCOME a signal after a real failure does not unmake the failure", () => {
+  // The rule, asked directly rather than through the printed line. The signal
+  // is recorded either way; which one outranks is answered here and only here.
+  assert.equal(
+    runOutcome(`step "bad" false || :\ngate_steps_note_signal TERM 143`),
+    "fail bad",
+  );
+});
+
+test("OUTCOME a signal with nothing learned is no verdict under the signal's own code", () => {
+  assert.equal(
+    runOutcome(`FAILED_STEP="the suites"\ngate_steps_note_signal TERM 143`),
+    "no-verdict 143 the gate was stopped by SIGTERM during the suites",
+  );
+});
+
 // --- the verdict cleanup prints ---------------------------------------------
 
 // cleanup() and the signal handlers, run for real against stubbed teardown. The
@@ -225,23 +258,13 @@ const extractVerdict = () => {
   return source.slice(start, end + endMarker.length);
 };
 
-const VERDICT_HARNESS = `
-set -uo pipefail
-say() { printf '\\n== %s\\n' "$1"; }
-note() { printf '   %s\\n' "$1"; }
-terminate_group_steps() { :; }
+const VERDICT_HARNESS = `${ENGINE}
 discard_gate_tmp() { :; }
 release_lock() { :; }
 KEEP_POSTGRES=0
 POSTGRES_STARTED=0
 CONTAINER=stub
-STEP_REPORT=()
-FAILED_STEP=""
 GATED_HEAD=abc123
-. ${JSON.stringify(libPath)}
-NO_VERDICT_REASON=""
-NO_VERDICT_EXIT="$GATE_EXIT_NO_VERDICT"
-GATE_REAL_FAILURE=""
 ${extractVerdict()}
 `;
 
@@ -296,29 +319,17 @@ test("VERDICT a clean run still passes and still names its commit", () => {
 });
 
 // A group and the verdict together, which is the only way to observe what a
-// signal arriving mid-group actually prints. Both extractions are the gate's
-// own source; cleanup's teardown is stubbed for the same reason as above.
-const COMBINED_HARNESS = `
-set -uo pipefail
-say() { printf '\\n== %s\\n' "$1"; }
-note() { printf '   %s\\n' "$1"; }
+// signal arriving mid-group actually prints. The engine is the gate's own file
+// and cleanup is the gate's own source; cleanup's teardown is stubbed for the
+// same reason as above.
+const COMBINED_HARNESS = `${HARNESS}
 discard_gate_tmp() { :; }
 release_lock() { :; }
 KEEP_POSTGRES=0
 POSTGRES_STARTED=0
 CONTAINER=stub
-STEP_REPORT=()
-FAILED_STEP=""
 GATED_HEAD=abc123
-. ${JSON.stringify(libPath)}
-NO_VERDICT_REASON=""
-NO_VERDICT_EXIT="$GATE_EXIT_NO_VERDICT"
-GATE_REAL_FAILURE=""
-GATE_GROUP_PIDS=()
-GATE_TMP="$1"
-REPO_ROOT="$2"
 ${extractVerdict()}
-${PARALLEL_STEPS}
 `;
 
 // Runs a group, waits until the member that is meant to block has reported its
@@ -394,7 +405,7 @@ test("PARALLEL-INTERRUPT stops members still running before the gate tears down"
     writeFileSync(
       script,
       `${HARNESS}\n` +
-        `trap 'terminate_group_steps; exit 143' TERM\n` +
+        `trap 'gate_steps_stop_running; exit 143' TERM\n` +
         `parallel_steps "a group" "long" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${JSON.stringify(memberPidFile)}\n`,
     );
     const harness = spawn("bash", [script, root, root], { stdio: "ignore" });
@@ -437,7 +448,7 @@ test("PARALLEL-INTERRUPT stops the members before cleanup removes what they use"
   // and the lock is released closes nothing.
   const source = readFileSync(gatePath, "utf8");
   const cleanup = source.slice(source.indexOf("\ncleanup() {"));
-  const stop = cleanup.indexOf("terminate_group_steps");
+  const stop = cleanup.indexOf("gate_steps_stop_running");
   const discard = cleanup.indexOf("discard_gate_tmp");
   const release = cleanup.indexOf("release_lock");
   assert.ok(stop !== -1, "cleanup no longer stops in-flight members");
