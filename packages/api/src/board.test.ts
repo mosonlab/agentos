@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Prisma } from "@agentos/db";
 
-import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, taskChainName } from "./board.js";
+import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, repairBinding, taskChainName } from "./board.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
   costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
@@ -40,9 +40,31 @@ test("the board card carries every field the board renders and nothing else", ()
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null)).sort(), [
     "approvalGate", "assigneeAgent", "blockedOn", "chainId", "chainIndex", "chainName", "chainProgress", "cron", "displayName",
-    "failureReason", "id", "latestRun", "mergeOutcome", "name", "runAt", "scheduleKind", "source", "status", "taskCost",
-    "templateId", "timezone", "updatedAt",
+    "failureReason", "id", "latestRun", "mergeOutcome", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
+    "taskCost", "templateId", "timezone", "updatedAt",
   ]);
+});
+
+test("a repair task is bound to the chain of the regression task its marker names", () => {
+  const chain = (): { chainId: string; chainName: string | null } => ({ chainId: "c1", chainName: "Release" });
+  assert.deepEqual(
+    repairBinding({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "reg-1" }, chain),
+    { chainId: "c1", chainName: "Release", repairKind: "gate-fix" },
+  );
+  // The regression side of the same marker names the repair task, not a chain
+  // this card could be put under, so it is not this card's binding.
+  assert.equal(
+    repairBinding({ schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", repairTaskId: "fix-1" }, chain),
+    null,
+  );
+  // A regression task that is itself chain-detached binds nothing.
+  assert.equal(repairBinding({ repairKind: "review-fix", regressionTaskId: "reg-1" }, () => null), null);
+  assert.equal(repairBinding(null, chain), null);
+  assert.equal(boardCard(row(), null).repairOf, null);
+  assert.deepEqual(
+    boardCard(row(), null, undefined, null, { chainId: "c1", chainName: "Release", repairKind: "review-fix" }).repairOf,
+    { chainId: "c1", chainName: "Release", repairKind: "review-fix" },
+  );
 });
 
 test("blockedOn is projected from the resolved predecessor without storing its status", () => {
@@ -80,6 +102,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     latestRun: null,
     taskCost: null,
     mergeOutcome: null,
+    repairOf: null,
   });
 });
 

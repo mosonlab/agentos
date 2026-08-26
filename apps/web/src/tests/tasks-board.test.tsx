@@ -274,6 +274,38 @@ test("chain badges filter to one chain, can be cleared, and titles drop the shar
   assert.match(control, />Clear filter<\/button>/);
 });
 
+test("a merge-tail repair task renders under the chain it repairs, with its kind", () => {
+  // The repair task is created chain-detached — no chainId, chainIndex or
+  // templateId — so before the API resolved its `repairAttempt` marker the board
+  // drew it as a loose card with nothing saying which chain it belonged to.
+  const step = task({ id: "s", name: "Release: Regression", displayName: "Regression", chainId: "c1", chainName: "Release", chainProgress: progress() });
+  const repair = task({
+    id: "r", name: "Autonomous merge tail: gate-fix", displayName: "Autonomous merge tail: gate-fix",
+    status: "DOING",
+    repairOf: { chainId: "c1", chainName: "Release", repairKind: "gate-fix" },
+  });
+  const other = task({ id: "o", name: "Unrelated", displayName: "Unrelated" });
+  assert.deepEqual(tasksForChain([step, repair, other], "c1").map(({ id }) => id), ["s", "r"]);
+
+  const markup = card(repair);
+  assert.match(markup, /aria-label="Show only chain Release"/);
+  assert.match(markup, new RegExp(en("tasks.pill.repair", { kind: "gate-fix" })));
+  // It carries no step ordinal of its own, and must not borrow one.
+  assert.doesNotMatch(markup, /step \d+\//);
+  // A chain step is not a repair.
+  assert.doesNotMatch(card(step), new RegExp(en("tasks.pill.repair", { kind: "gate-fix" })));
+  assert.doesNotMatch(card(other), /Show only chain/);
+});
+
+test("a repair card names the chain by a short id when the API derived no name", () => {
+  const markup = card({
+    id: "r", name: "Autonomous merge tail: review-fix", displayName: "Autonomous merge tail: review-fix",
+    repairOf: { chainId: "cmt38t30u000fmpru2uc4emc9", chainName: null, repairKind: "review-fix" },
+  });
+  assert.match(markup, /aria-label="Show only chain cmt38t30"/);
+  assert.match(markup, new RegExp(en("tasks.pill.repair", { kind: "review-fix" })));
+});
+
 test("a non-template chain uses the API-derived badge and short card title", () => {
   const direct = task({
     name: "Release: Build", displayName: "Build", chainId: "direct-chain", chainName: "Release",
