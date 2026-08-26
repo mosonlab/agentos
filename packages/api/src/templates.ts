@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   AssigneeType,
+  CANONICAL_TEMPLATE_SOURCE_SPECS,
   canonicalIntegratorBindingRefusal,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
@@ -143,6 +144,26 @@ const loadTemplateByName = async (
   include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
 });
 
+const canonicalTemplateNameForLegacyRow = (templateName: string): string | null => (
+  CANONICAL_TEMPLATE_SOURCE_SPECS.find(({ name }) => templateName.startsWith(`${name}-legacy-`))?.name ?? null
+);
+
+type LoadedTemplate = NonNullable<Awaited<ReturnType<typeof loadTemplate>>>;
+
+const resolveTemplate = async (
+  db: PrismaClient,
+  projectId: string,
+  loaded: LoadedTemplate,
+): Promise<LoadedTemplate> => {
+  const canonicalName = canonicalTemplateNameForLegacyRow(loaded.name);
+  if (!canonicalName) return loaded;
+  const replacement = await loadTemplateByName(db, projectId, canonicalName);
+  if (!replacement) {
+    throw new Error(`Template ${loaded.name} is a legacy canonical row, but its replacement ${canonicalName} was not found`);
+  }
+  return replacement;
+};
+
 export const isUsableTemplateVariable = (value: string | undefined): value is string => (
   value !== undefined && value.trim().length > 0
 );
@@ -204,7 +225,7 @@ export const instantiateTemplate = async (
   ]);
   if (!loadedTemplate) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
-  let template = loadedTemplate;
+  let template = await resolveTemplate(db, projectId, loadedTemplate);
   if (template.steps.length === 0) throw new Error("Template has no steps");
   const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
