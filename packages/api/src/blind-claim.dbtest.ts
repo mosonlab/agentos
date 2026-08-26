@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, lockChainRows, PrismaClient } from "@agentos/db";
+import { DIRECT_TEMPLATE_NAME, enqueueTaskRun, INTEGRATOR_TEMPLATE_NAME, PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
@@ -267,59 +267,19 @@ test("blind session cannot read Sol evidence before or after its immutable repor
   assert.equal(status.status, 200, await status.text());
 });
 
-test("adjudication claim refuses incomplete review evidence by name", async () => {
-  const { template, repo } = await seedCanonicalTemplate();
-  const adjudication = await queueCanonicalStep(template, repo.id, 8);
-  const response = await createApp(db).request("/runner/tasks/claim", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId: "adjudication-claim-runner", leaseSeconds: 60 }),
-  });
-  assert.equal(response.status, 409);
-  assert.match(await response.text(), /Adjudication claim refused/u);
-  assert.equal((await db.run.findUniqueOrThrow({ where: { id: adjudication.run.id } })).status, "QUEUED");
-});
 
-test("adjudication claim refuses a non-DONE sibling and a mismatched report head", async () => {
-  const { template, repo } = await seedCanonicalTemplate();
-  const adjudication = await queueCanonicalStep(template, repo.id, 8);
-  const headSha = adjudication.run.targetBranch!;
-  const sol = await prepareReviewReport(adjudication.chain, 6, "sol-findings", headSha);
-  const blind = await prepareReviewReport(adjudication.chain, 7, "blind-findings", headSha);
-  await db.task.update({ where: { id: blind.task.id }, data: { status: "REVIEW" } });
-  let response = await createApp(db).request("/runner/tasks/claim", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId: "adjudication-claim-runner", leaseSeconds: 60 }),
-  });
-  assert.equal(response.status, 409);
-  assert.match(await response.text(), /blind-findings task .* not DONE/u);
 
-  await db.task.update({ where: { id: blind.task.id }, data: { status: "DONE" } });
-  await db.taskStepOutput.update({ where: { taskId: sol.task.id }, data: {
-    commitSha: "d".repeat(40),
-    body: reviewReport("sol-findings", "d".repeat(40)),
-  } });
-  response = await createApp(db).request("/runner/tasks/claim", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId: "adjudication-claim-runner", leaseSeconds: 60 }),
-  });
-  assert.equal(response.status, 409);
-  assert.match(await response.text(), /sol-findings output .* expected/u);
-});
-
-test("adjudication claim succeeds only after both immutable reports match the pinned range", async () => {
+test("the fix step claims both immutable reports and cannot rewrite either", async () => {
   const { template, repo } = await seedCanonicalTemplate();
-  const adjudication = await queueCanonicalStep(template, repo.id, 8);
-  const headSha = adjudication.run.targetBranch!;
-  await prepareReviewReport(adjudication.chain, 6, "sol-findings", headSha);
-  await prepareReviewReport(adjudication.chain, 7, "blind-findings", headSha);
+  const fix = await queueCanonicalStep(template, repo.id, 8);
+  const headSha = fix.run.targetBranch!;
+  await prepareReviewReport(fix.chain, 6, "sol-findings", headSha);
+  await prepareReviewReport(fix.chain, 7, "blind-findings", headSha);
 
   const response = await createApp(db).request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId: "adjudication-claim-runner", leaseSeconds: 60 }),
+    body: JSON.stringify({ runnerId: "fix-claim-runner", leaseSeconds: 60 }),
   });
   const responseText = await response.text();
   assert.equal(response.status, 200, responseText);
@@ -327,13 +287,13 @@ test("adjudication claim succeeds only after both immutable reports match the pi
     run: { id: string; implementationBaseSha: string | null; implementationHeadSha: string | null };
     priorOutputs: Array<{ kind: string; body: string }>;
   };
-  assert.equal(claimBody.run.id, adjudication.run.id);
+  assert.equal(claimBody.run.id, fix.run.id);
   assert.equal(claimBody.run.implementationBaseSha, "b".repeat(40));
   assert.equal(claimBody.run.implementationHeadSha, headSha);
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "sol-findings"));
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "blind-findings"));
 
-  const solTask = adjudication.chain.tasks.find((task) => task.chainIndex === 6)!;
+  const solTask = fix.chain.tasks.find((task) => task.chainIndex === 6)!;
   const originalSol = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } });
   const operatorRewrite = await createApp(db).request(`/tasks/${solTask.id}/output`, {
     method: "PUT",
@@ -344,140 +304,100 @@ test("adjudication claim succeeds only after both immutable reports match the pi
   assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } })).body, originalSol.body);
 });
 
-test("adjudication claim holds the full-chain mutex from evidence validation through claim", { timeout: 20_000 }, async () => {
-  const { template, repo } = await seedCanonicalTemplate();
-  const adjudication = await queueCanonicalStep(template, repo.id, 8);
-  const headSha = adjudication.run.targetBranch!;
-  const sol = await prepareReviewReport(adjudication.chain, 6, "sol-findings", headSha);
-  await prepareReviewReport(adjudication.chain, 7, "blind-findings", headSha);
-  assert.ok(sol.task.chainId);
 
-  const claimClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  const mutationClient = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  let evidenceRead!: () => void;
-  let releaseClaim!: () => void;
-  const evidenceWasRead = new Promise<void>((resolve) => { evidenceRead = resolve; });
-  const claimMayProceed = new Promise<void>((resolve) => { releaseClaim = resolve; });
-  let intercepted = false;
-  const instrumentedClaimClient = new Proxy(claimClient, { get(target, property, receiver) {
-    if (property !== "$transaction") {
-      const value = Reflect.get(target, property, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
-    }
-    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
-      const taskStepOutput = new Proxy(tx.taskStepOutput, { get(outputTarget, outputProperty, outputReceiver) {
-        if (outputProperty !== "findMany") return Reflect.get(outputTarget, outputProperty, outputReceiver);
-        return async (...args: any[]) => {
-          const rows = await Reflect.apply(outputTarget.findMany, outputTarget, args);
-          const query = args[0] as { select?: { body?: boolean } } | undefined;
-          if (!intercepted && query?.select?.body === true) {
-            intercepted = true;
-            evidenceRead();
-            await claimMayProceed;
-          }
-          return rows;
-        };
-      } });
-      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
-        return txProperty === "taskStepOutput" ? taskStepOutput : Reflect.get(txTarget, txProperty, txReceiver);
-      } });
-      return operation(instrumentedTx);
-    }, options as any);
-  } }) as PrismaClient;
-
-  const claimResponse = createApp(instrumentedClaimClient).request("/runner/tasks/claim", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ runnerId: "adjudication-race-runner", leaseSeconds: 60 }),
-  });
-  try {
-    await evidenceWasRead;
-    await assert.rejects(
-      mutationClient.$transaction(async (tx) => {
-        await tx.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
-        await lockChainRows(tx, { projectId: sol.task.projectId, chainId: sol.task.chainId! });
-        await tx.task.update({ where: { id: sol.task.id }, data: { status: "REVIEW" } });
-      }),
-      /lock timeout|55P03|Raw query failed/iu,
-    );
-    assert.equal((await db.task.findUniqueOrThrow({ where: { id: sol.task.id } })).status, "DONE");
-    releaseClaim();
-    const response = await claimResponse;
-    assert.equal(response.status, 200, await response.text());
-    assert.equal((await db.run.findUniqueOrThrow({ where: { id: adjudication.run.id } })).status, "CLAIMED");
-  } finally {
-    releaseClaim();
-    await Promise.resolve(claimResponse).catch(() => undefined);
-    await Promise.all([claimClient.$disconnect(), mutationClient.$disconnect()]);
-  }
-});
-
-test("Direct and Full adjudication persistence requires exact union dispositions and must-fix ids", async () => {
+test("Direct and Full fix-step persistence requires exact union dispositions bound to the reviewed head", async () => {
+  const FIXED_HEAD = "a".repeat(40);
   for (const shape of [
-    { name: DIRECT_TEMPLATE_NAME, adjudication: 4, sol: 2, blind: 3 },
-    { name: INTEGRATOR_TEMPLATE_NAME, adjudication: 8, sol: 6, blind: 7 },
+    { name: DIRECT_TEMPLATE_NAME, fix: 4, sol: 2, blind: 3 },
+    { name: INTEGRATOR_TEMPLATE_NAME, fix: 8, sol: 6, blind: 7 },
   ] as const) {
     await resetTestDb(db);
     const { template, repo } = await seedCanonicalTemplate(shape.name);
-    const adjudication = await queueCanonicalStep(template, repo.id, shape.adjudication);
-    const headSha = adjudication.run.targetBranch!;
-    await prepareReviewReport(adjudication.chain, shape.sol, "sol-findings", headSha);
-    await prepareReviewReport(adjudication.chain, shape.blind, "blind-findings", headSha);
+    const fix = await queueCanonicalStep(template, repo.id, shape.fix);
+    const headSha = fix.run.targetBranch!;
+    await prepareReviewReport(fix.chain, shape.sol, "sol-findings", headSha);
+    await prepareReviewReport(fix.chain, shape.blind, "blind-findings", headSha);
     const claimed = await claim();
-    assert.equal(claimed.run.id, adjudication.run.id);
+    assert.equal(claimed.run.id, fix.run.id);
 
-    const write = (artifact: Record<string, unknown>) => createApp(db).request(`/session/runs/${adjudication.run.id}/output`, {
+    const write = (artifact: Record<string, unknown>) => createApp(db).request(`/session/runs/${fix.run.id}/output`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         fencingToken: claimed.fencingToken,
-        kind: "must-fix",
+        kind: "fixed-implementation",
         body: JSON.stringify(artifact),
-        commitSha: headSha,
+        commitSha: FIXED_HEAD,
       }),
     });
+    const closed = (id: string) => ({ id, status: "CLOSED", codeEvidence: `fixed ${id}`, testEvidence: `covered ${id}` });
     const base = {
       schemaVersion: 1,
-      headSha,
-      reviewedBase: "b".repeat(40),
-      reviewedHead: headSha,
-      mustFixIds: [UNIQUE_PREDECESSOR_FINDING.id],
+      headSha: FIXED_HEAD,
+      sourceHead: headSha,
+      testsRun: ["focused"],
+      residualRisks: [],
     };
-    let response = await write({ ...base, dispositions: [] });
+
+    let response = await write({ ...base, dispositions: [], closedFindings: [] });
     assert.equal(response.status, 409, `${shape.name}: omitted`);
     assert.match(await response.text(), /missing:/u);
 
-    response = await write({ ...base, dispositions: [
-      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
-      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "MERGED", reason: "duplicate" },
-      { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
-    ] });
+    response = await write({
+      ...base,
+      dispositions: [
+        { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+        { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "MERGED", reason: "duplicate" },
+        { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
+      ],
+      closedFindings: [closed(UNIQUE_PREDECESSOR_FINDING.id), closed(UNIQUE_BLIND_FINDING.id)],
+    });
     assert.equal(response.status, 409, `${shape.name}: duplicate`);
     assert.match(await response.text(), /duplicate ids/u);
 
-    response = await write({ ...base, dispositions: [
-      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
-      { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
-      { id: "UNKNOWN-1", disposition: "REJECTED", reason: "not sourced" },
-    ] });
+    response = await write({
+      ...base,
+      dispositions: [
+        { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+        { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
+        { id: "UNKNOWN-1", disposition: "REJECTED", reason: "not sourced" },
+      ],
+      closedFindings: [closed(UNIQUE_PREDECESSOR_FINDING.id), closed(UNIQUE_BLIND_FINDING.id)],
+    });
     assert.equal(response.status, 409, `${shape.name}: unknown`);
     assert.match(await response.text(), /unknown: UNKNOWN-1/u);
 
     response = await write({
       ...base,
-      reviewedBase: "c".repeat(40),
+      dispositions: [
+        { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+        { id: UNIQUE_BLIND_FINDING.id, disposition: "REJECTED", reason: "cosmetic" },
+      ],
+      closedFindings: [closed(UNIQUE_PREDECESSOR_FINDING.id), closed(UNIQUE_BLIND_FINDING.id)],
+    });
+    assert.equal(response.status, 409, `${shape.name}: closed without adoption`);
+    assert.match(await response.text(), /must exactly cover the ADOPTED dispositions/u);
+
+    response = await write({
+      ...base,
+      sourceHead: "c".repeat(40),
       dispositions: [
         { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
         { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
       ],
+      closedFindings: [closed(UNIQUE_PREDECESSOR_FINDING.id), closed(UNIQUE_BLIND_FINDING.id)],
     });
     assert.equal(response.status, 409, `${shape.name}: stale range`);
-    assert.match(await response.text(), /range does not match/u);
+    assert.match(await response.text(), /sourceHead does not match/u);
 
-    response = await write({ ...base, dispositions: [
-      { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
-      { id: UNIQUE_BLIND_FINDING.id, disposition: "ADOPTED", reason: "recorded" },
-    ] });
+    response = await write({
+      ...base,
+      dispositions: [
+        { id: UNIQUE_PREDECESSOR_FINDING.id, disposition: "ADOPTED", reason: "confirmed" },
+        { id: UNIQUE_BLIND_FINDING.id, disposition: "REJECTED", reason: "P2, follow-up only" },
+      ],
+      closedFindings: [closed(UNIQUE_PREDECESSOR_FINDING.id)],
+    });
     assert.equal(response.status, 200, `${shape.name}: exact coverage ${await response.text()}`);
   }
 });

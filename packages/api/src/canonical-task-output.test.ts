@@ -7,6 +7,7 @@ import {
   isCanonicalBlindReviewStep,
   isLegacyCombinedBlindReviewStep,
   isCanonicalSolFindingsStep,
+  isCanonicalFixStep,
   canonicalOutputRefusal,
 } from "./canonical-task-output.js";
 
@@ -79,4 +80,54 @@ test("blind-findings is a versioned immutable review output and cannot be author
     commitSha: headSha,
     metadata: null,
   }, "run-1", headSha) ?? "", /does not match canonical kind/u);
+});
+
+test("a fixed-implementation output must close exactly the findings it adopted", () => {
+  const headSha = "a".repeat(40);
+  const sourceHead = "b".repeat(40);
+  const fixStep = step("compound-engineer-workflow", 8, "fixed-implementation");
+  assert.equal(isCanonicalFixStep(fixStep), true);
+  assert.equal(isCanonicalFixStep(step("compound-engineer-workflow", 9, "fixed-implementation")), false);
+  assert.equal(isCanonicalFixStep(step("direct-engineer-workflow", 4, "fixed-implementation")), true);
+  const artifact = (overrides: Record<string, unknown>) => JSON.stringify({
+    schemaVersion: 1,
+    headSha,
+    sourceHead,
+    dispositions: [],
+    closedFindings: [],
+    testsRun: ["focused"],
+    residualRisks: [],
+    ...overrides,
+  });
+  const refusalFor = (body: string) => canonicalOutputRefusal(fixStep, {
+    runId: "run-1",
+    kind: "fixed-implementation",
+    body,
+    commitSha: headSha,
+    metadata: null,
+  }, "run-1", headSha) ?? "";
+
+  assert.equal(refusalFor(artifact({})), "");
+  assert.match(refusalFor(artifact({
+    dispositions: [
+      { id: "SOL-1", disposition: "ADOPTED", reason: "real" },
+      { id: "SOL-1", disposition: "REJECTED", reason: "second opinion" },
+    ],
+    closedFindings: [{ id: "SOL-1", status: "CLOSED", codeEvidence: "patch", testEvidence: "test" }],
+  })), /dispositions contain duplicate ids: SOL-1/u);
+  assert.match(refusalFor(artifact({
+    dispositions: [{ id: "SOL-1", disposition: "ADOPTED", reason: "real" }],
+    closedFindings: [],
+  })), /must exactly cover the ADOPTED dispositions/u);
+  assert.match(refusalFor(artifact({
+    dispositions: [{ id: "SOL-1", disposition: "REJECTED", reason: "unreachable" }],
+    closedFindings: [{ id: "SOL-1", status: "CLOSED", codeEvidence: "patch", testEvidence: "test" }],
+  })), /must exactly cover the ADOPTED dispositions/u);
+  assert.equal(refusalFor(artifact({
+    dispositions: [
+      { id: "SOL-1", disposition: "ADOPTED", reason: "real" },
+      { id: "BLIND-1", disposition: "REJECTED", reason: "unreachable" },
+    ],
+    closedFindings: [{ id: "SOL-1", status: "CLOSED", codeEvidence: "patch", testEvidence: "test" }],
+  })), "");
 });

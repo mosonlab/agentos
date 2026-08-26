@@ -432,19 +432,19 @@ test("sync upgrades only unstarted blind-review tasks with the exact legacy prom
   }), 1);
 });
 
-test("sync refuses an eight-step canonical shape with structural drift before mutation", async () => {
+test("sync refuses a seven-step canonical shape with structural drift before mutation", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const template = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
   });
   const step = await prisma.taskTemplateStep.findUniqueOrThrow({
-    where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: 8 } },
+    where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: 7 } },
   });
   await prisma.taskTemplateStep.update({ where: { id: step.id }, data: { outputKind: "drifted-output" } });
   const beforeLegacyCount = await prisma.taskTemplate.count({ where: { projectId: project.id, name: "direct-engineer-workflow-legacy-v1" } });
   const refused = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refused.status, 0, refused.output);
-  assert.match(refused.output, /direct-engineer-workflow step 8 .* differs from canonical Markdown structure/u);
+  assert.match(refused.output, /direct-engineer-workflow step 7 .* differs from canonical Markdown structure/u);
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: project.id, name: "direct-engineer-workflow-legacy-v1" } }), beforeLegacyCount);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } })).outputKind, "drifted-output");
 });

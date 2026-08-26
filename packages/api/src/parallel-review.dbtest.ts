@@ -60,7 +60,7 @@ type DirectFixture = CanonicalInstallation & {
   implementationTaskId: string;
   solTaskId: string;
   blindTaskId: string;
-  adjudicationTaskId: string;
+  fixTaskId: string;
 };
 
 type FullFixture = CanonicalInstallation & {
@@ -196,7 +196,7 @@ const instantiateDirect = async (): Promise<DirectFixture> => {
     implementationTaskId: byIndex.get(1)!.id,
     solTaskId: byIndex.get(2)!.id,
     blindTaskId: byIndex.get(3)!.id,
-    adjudicationTaskId: byIndex.get(4)!.id,
+    fixTaskId: byIndex.get(4)!.id,
   };
 };
 
@@ -369,7 +369,7 @@ test("Direct sync instantiates a parallel review frontier claimable by distinct 
   assert.deepEqual(new Set([first.task.chainIndex, second.task.chainIndex]), new Set([2, 3]));
 });
 
-test("the HTTP join stays closed after the first review and creates one adjudication run after the second", async () => {
+test("the HTTP join stays closed after the first review and creates one fix-step run after the second", async () => {
   const fixture = await instantiateDirect();
   await completeImplementation(fixture);
   const { first, second } = await reviewClaims(fixture);
@@ -377,13 +377,13 @@ test("the HTTP join stays closed after the first review and creates one adjudica
   const secondKind = second.run.taskId === fixture.solTaskId ? "sol-findings" : "blind-findings";
 
   await completeReview(first, first.run.taskId === fixture.solTaskId ? "sol-runner" : "blind-runner", firstKind);
-  assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 0);
   await completeReview(second, second.run.taskId === fixture.solTaskId ? "sol-runner" : "blind-runner", secondKind);
-  assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId } }), 1);
-  assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId, status: RunStatus.QUEUED } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId, status: RunStatus.QUEUED } }), 1);
 });
 
-test("simultaneous review completions serialize the join to exactly one adjudication run", { timeout: 20_000 }, async () => {
+test("simultaneous review completions serialize the join to exactly one fix-step run", { timeout: 20_000 }, async () => {
   const fixture = await instantiateDirect();
   await completeImplementation(fixture);
   const { first, second } = await reviewClaims(fixture, "simultaneous-sol", "simultaneous-blind");
@@ -392,7 +392,7 @@ test("simultaneous review completions serialize the join to exactly one adjudica
     completeReview(first, firstIsSol ? "simultaneous-sol" : "simultaneous-blind", firstIsSol ? "sol-findings" : "blind-findings"),
     completeReview(second, firstIsSol ? "simultaneous-blind" : "simultaneous-sol", firstIsSol ? "blind-findings" : "sol-findings"),
   ]);
-  assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 1);
 });
 
 test("failed, parked, and archived-Agent review siblings fail-stop the join until repaired", async () => {
@@ -426,7 +426,7 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
     const solClaim = await claim(`${mode}-sol`);
     assert.equal(solClaim.run.taskId, fixture.solTaskId);
     await completeReview(solClaim, `${mode}-sol`, "sol-findings");
-    assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId } }), 0, mode);
+    assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 0, mode);
 
     let repairedClaim: Claim;
     if (mode === "failed") {
@@ -461,8 +461,8 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
 
     assert.equal(repairedClaim.run.taskId, fixture.blindTaskId);
     await completeReview(repairedClaim, `${mode}-blind-repair`, "blind-findings");
-    assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId } }), 1, mode);
-    assert.equal(await db.run.count({ where: { taskId: fixture.adjudicationTaskId, status: RunStatus.QUEUED } }), 1, mode);
+    assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 1, mode);
+    assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId, status: RunStatus.QUEUED } }), 1, mode);
   }
 });
 

@@ -63,6 +63,8 @@ export const DIRECT_BLIND_REVIEW_STEP_INDEX = 3;
 export const FULL_BLIND_REVIEW_STEP_INDEX = 7;
 export const DIRECT_SOL_REVIEW_STEP_INDEX = 2;
 export const FULL_SOL_REVIEW_STEP_INDEX = 6;
+export const DIRECT_FIX_STEP_INDEX = 4;
+export const FULL_FIX_STEP_INDEX = 8;
 
 const isNamedStep = (
   step: TemplateStepIdentity | null | undefined,
@@ -105,6 +107,17 @@ export const isCanonicalBlindReviewStep = (step: TemplateStepIdentity | null | u
 export const isCanonicalBlindFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
   isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
   || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+);
+
+/**
+ * The fix step inherited the adjudicator's authority over the two review
+ * reports, so it inherits the adjudicator's obligation to account for every
+ * finding in them. Recognized on the current graphs only: a renamed
+ * adjudication-era row still routes that obligation through its own node.
+ */
+export const isCanonicalFixStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_FIX_STEP_INDEX, "fixed-implementation")
+  || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_FIX_STEP_INDEX, "fixed-implementation")
 );
 
 export const isCanonicalSolFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
@@ -258,6 +271,95 @@ const fixedImplementationSelfRefusal = (artifact: FixedImplementationArtifact): 
   const closed = artifact.closedFindings.map(({ id }) => id).sort();
   if (JSON.stringify(adopted) !== JSON.stringify(closed)) {
     return `fixed-implementation closedFindings must exactly cover the ADOPTED dispositions; adopted: ${adopted.join(", ") || "none"}; closed: ${closed.join(", ") || "none"}`;
+  }
+  return null;
+};
+
+type FixStepTask = {
+  projectId: string;
+  chainId: string | null;
+  chainLayer: number | null;
+};
+
+/**
+ * The fix step's self-consistency is not enough: nothing inside its own body
+ * proves it looked at both reviews. This is the adjudicator's old cross-check,
+ * re-pointed at the step that took over its authority — the two immutable
+ * sibling reports must exist, must be bound to the same range the fix started
+ * from, and every finding id in them must carry exactly one disposition.
+ */
+const fixedImplementationPersistenceRefusal = async (
+  tx: DbTx,
+  task: FixStepTask,
+  body: string,
+): Promise<string | null> => {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return "fixed-implementation body is not valid JSON";
+  }
+  const parsed = fixedImplementationArtifact.safeParse(value);
+  if (!parsed.success) return "fixed-implementation body does not satisfy its canonical schema";
+  const fix = parsed.data;
+  if (!task.chainId || task.chainLayer === null) {
+    return "fixed-implementation task has no chainId/chainLayer review boundary";
+  }
+  const predecessor = await tx.task.findFirst({
+    where: { projectId: task.projectId, chainId: task.chainId, chainLayer: { lt: task.chainLayer } },
+    select: { chainLayer: true },
+    orderBy: { chainLayer: "desc" },
+  });
+  if (!predecessor || predecessor.chainLayer === null) {
+    return "fixed-implementation task has no predecessor review layer";
+  }
+  const reviewTasks = await tx.task.findMany({
+    where: { projectId: task.projectId, chainId: task.chainId, chainLayer: predecessor.chainLayer },
+    select: {
+      id: true,
+      templateStep: { select: {
+        stepIndex: true,
+        outputKind: true,
+        taskTemplate: { select: { name: true } },
+      } },
+      stepOutput: { select: { kind: true, body: true, commitSha: true } },
+    },
+  });
+  const reports: ReviewArtifact[] = [];
+  for (const kind of ["sol-findings", "blind-findings"] as const) {
+    const matches = reviewTasks.filter((candidate) => (
+      kind === "sol-findings"
+        ? isCanonicalSolFindingsStep(candidate.templateStep)
+        : isCanonicalBlindFindingsStep(candidate.templateStep)
+    ));
+    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
+      return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
+    }
+    const output = matches[0]!.stepOutput!;
+    let reportValue: unknown;
+    try {
+      reportValue = JSON.parse(output.body);
+    } catch {
+      return `fixed-implementation ${kind} sibling body is not valid JSON`;
+    }
+    const report = reviewArtifact.safeParse(reportValue);
+    if (!report.success) return `fixed-implementation ${kind} sibling violates its review contract`;
+    if (output.commitSha !== fix.sourceHead
+      || report.data.headSha !== fix.sourceHead
+      || report.data.reviewedHead !== fix.sourceHead) {
+      return `fixed-implementation sourceHead does not match immutable ${kind} sibling`;
+    }
+    reports.push(report.data);
+  }
+  if (reports[0]!.reviewedBase !== reports[1]!.reviewedBase) {
+    return "fixed-implementation sibling reviews disagree on the reviewed base";
+  }
+  const sourceIds = new Set(reports.flatMap((report) => report.findings).map((finding) => finding.id));
+  const dispositionIds = new Set(fix.dispositions.map(({ id }) => id));
+  const missing = [...sourceIds].filter((id) => !dispositionIds.has(id)).sort();
+  const unknown = [...dispositionIds].filter((id) => !sourceIds.has(id)).sort();
+  if (missing.length > 0 || unknown.length > 0) {
+    return `fixed-implementation dispositions must exactly cover sibling findings; missing: ${missing.join(", ") || "none"}; unknown: ${unknown.join(", ") || "none"}`;
   }
   return null;
 };
@@ -449,6 +551,10 @@ export const persistSessionTaskOutput = async (
   if (isCanonicalAgentStep(step)) {
     const bodyRefusal = canonicalBodyRefusal(input.kind, input.body, input.commitSha, phase);
     if (bodyRefusal) return { ok: false, reason: bodyRefusal };
+  }
+  if (isCanonicalFixStep(step)) {
+    const refusal = await fixedImplementationPersistenceRefusal(tx, task, input.body);
+    if (refusal) return { ok: false, reason: refusal };
   }
   // The old combined node is retained only for already-instantiated
   // -legacy-v1 chains. New canonical blind nodes never enter this phased
