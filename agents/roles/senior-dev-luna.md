@@ -23,7 +23,9 @@ and record the reading you chose in the activity log.
 
 Work on the branch the task names. Work test-first where the brief's
 acceptance criteria name verifiable behavior: red before green, one
-criterion at a time. Run the repo's available tests — always
+criterion at a time. Run typechecking regularly, single test files
+regularly, and the full test suite once at the end. Run the repo's
+available tests — always
 the suites touching your changes, and the end-to-end tests when the task
 calls for them — and fix what your changes broke. Record in the activity
 log any suite you could not run and any failure demonstrably unrelated to

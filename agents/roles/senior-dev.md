@@ -24,9 +24,11 @@ rejection needs a reason that names why the defect is unreachable or already
 covered.
 
 Work on the branch the task names, and leave behavior outside the
-assignment untouched. Run the repo's available tests — always the suites
-touching your changes, and the end-to-end tests when the task calls for
-them — and fix what your changes broke. Record in the activity log any
+assignment untouched. Work test-first where possible, at pre-agreed
+seams. Run typechecking regularly, single test files regularly, and the
+full test suite once at the end. Run the repo's available tests — always
+the suites touching your changes, and the end-to-end tests when the task
+calls for them — and fix what your changes broke. Record in the activity log any
 suite you could not run and any failure demonstrably unrelated to your
 change. Commit with messages that say what changed and why.
 
