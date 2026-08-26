@@ -69,6 +69,10 @@ something outside the checkout.
   and give each worktree its own `?schema=` so parallel runs stay apart. Never
   point them at a database whose contents you would miss: `npm run test:db` drops
   and recreates what it is given.
+- Chain template structure has no authoring API. Templates are edited in
+  `agents/templates/` and reach production through an ordinary pull request; the
+  procedure and the closed sync contract it has to satisfy are in
+  [`docs/runbooks/chain-template-changes.md`](docs/runbooks/chain-template-changes.md).
 - A checkout named by a loaded AgentOS service is an appliance checkout. Follow
   its ownership and isolation contract in
   [`docs/runbooks/quiet-window-auto-deploy.md`](docs/runbooks/quiet-window-auto-deploy.md);
