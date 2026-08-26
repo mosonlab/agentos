@@ -1,4 +1,4 @@
-import { AssigneeType, Prisma } from "@prisma/client";
+import { AssigneeType, Prisma, RunStatus, TaskStatus } from "@prisma/client";
 
 type LegacyStepTuple = readonly [
   string,
@@ -119,6 +119,39 @@ const LEGACY_TEMPLATE_GENERATIONS: Record<string, ReadonlyArray<{
  */
 export const legacyTemplateName = (templateName: string, marker: string, templateId: string): string =>
   `${templateName}-legacy-${marker}-${templateId}`;
+
+export const TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES = [
+  RunStatus.QUEUED,
+  RunStatus.CLAIMED,
+  RunStatus.PROVISIONING,
+  RunStatus.RUNNING,
+  RunStatus.WAITING_INBOX,
+] as const;
+
+/**
+ * A parked chain may move under a legacy template name without changing any
+ * task or step identity. The BACKLOG row is its explicit stop and later TODO
+ * rows are dormant. Active Runs, standalone unfinished work, and chains with
+ * no parking point remain blockers.
+ */
+export const templateRolloverBlockerCount = (
+  tasks: readonly {
+    chainId: string | null;
+    status: TaskStatus;
+    activeRunCount: number;
+  }[],
+): number => {
+  const parkedChainIds = new Set(
+    tasks
+      .filter((task) => task.status === TaskStatus.BACKLOG && task.chainId !== null)
+      .map((task) => task.chainId!),
+  );
+  return tasks.filter((task) => (
+    task.activeRunCount > 0
+    || (task.status !== TaskStatus.BACKLOG
+      && (task.chainId === null || !parkedChainIds.has(task.chainId)))
+  )).length;
+};
 
 /** The adjudication-era rename, kept for the rows and fixtures already carrying it. */
 export const legacyAdjudicationTemplateName = (templateName: string, templateId: string): string =>

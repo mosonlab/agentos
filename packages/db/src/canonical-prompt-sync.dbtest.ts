@@ -185,6 +185,7 @@ test("sync rolls the v1 Regression contract forward and preserves its template r
   const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(second.status, 0, second.output);
   assert.match(second.output, /"createdCanonicalTemplates":0/u);
+  await prisma.task.deleteMany({ where: { id: { in: parkedTaskIds } } });
 });
 
 test("sync rolls the exact adjudication-era graphs forward without touching instantiated evidence", async () => {
