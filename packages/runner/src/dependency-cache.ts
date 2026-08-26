@@ -76,10 +76,21 @@ export type DependencyCacheResult = {
   condition?: string;
 };
 
+// A required input is missing, so the workspace has no cache identity. The
+// targets ride along because the caller's only remaining move is to install
+// them uncached.
 export class DependencyCacheInputMissError extends Error {
-  constructor(readonly condition: string) {
+  constructor(readonly condition: string, readonly targets: string[]) {
     super(`Dependency cache miss: ${condition}`);
     this.name = "DependencyCacheInputMissError";
+  }
+}
+
+// Raised while reading one input, before the target list exists.
+class DependencyInputMissSignal extends Error {
+  constructor(readonly condition: string) {
+    super(`Dependency cache miss: ${condition}`);
+    this.name = "DependencyInputMissSignal";
   }
 }
 
@@ -119,7 +130,7 @@ const readInput = async (workspace: string, path: string, required: boolean): Pr
   if (!insideOrEqual(workspace, absolute)) throw new Error(`Ambiguous dependency input: ${path}`);
   const kind = await pathKind(absolute);
   if (kind === "missing") {
-    if (required) throw new DependencyCacheInputMissError(`required-input-missing:${path}`);
+    if (required) throw new DependencyInputMissSignal(`required-input-missing:${path}`);
     return { path, absent: true };
   }
   if (kind !== "file") throw new Error(`Ambiguous dependency input: ${path} is ${kind}`);
@@ -354,7 +365,7 @@ const inspectDependencyProject = async (workspacePath: string): Promise<Dependen
     try {
       inputs.push(await readInput(workspace, path, required));
     } catch (error: unknown) {
-      if (!(error instanceof DependencyCacheInputMissError)) throw error;
+      if (!(error instanceof DependencyInputMissSignal)) throw error;
       inputMissCondition ??= error.condition;
     }
   }
@@ -442,15 +453,35 @@ const effectiveNpmConfigInput = async (
   return { path: "<effective-npm-config>", sha256: sha256(`${JSON.stringify(filtered)}\n`) };
 };
 
+export type DependencyCacheIdentity = {
+  key: string;
+  toolchain: DependencyCacheToolchain;
+  inputs: CacheInput[];
+  targets: string[];
+  nativeWorkspaces: string[];
+};
+
+// The single definition of dependency cache identity. Every input the key
+// covers is gathered here: the workspace files, the effective npm
+// configuration, and the toolchain. No caller can key a run on a smaller input
+// set than the one this module tests.
 export const deriveDependencyCacheKey = async (
-  workspace: string,
-  toolchain: DependencyCacheToolchain,
-): Promise<{ key: string; inputs: CacheInput[]; targets: string[] } | null> => {
-  const project = await inspectDependencyProject(workspace);
+  config: RunnerConfig,
+  workspacePath: string,
+  env: NodeJS.ProcessEnv,
+  execute: DependencyCommandExecutor,
+  options: { toolchain?: DependencyCacheToolchain } = {},
+): Promise<DependencyCacheIdentity | null> => {
+  const project = await inspectDependencyProject(workspacePath);
   if (project === null) return null;
-  if (project.inputMissCondition) throw new DependencyCacheInputMissError(project.inputMissCondition);
-  const key = sha256(`${JSON.stringify({ format: CACHE_FORMAT, toolchain: validatedToolchain(toolchain), inputs: project.inputs })}\n`);
-  return { key, ...project };
+  if (project.inputMissCondition) throw new DependencyCacheInputMissError(project.inputMissCondition, project.targets);
+  const workspace = await realpath(resolve(workspacePath));
+  const { inputs, targets, nativeWorkspaces } = project;
+  inputs.push(await effectiveNpmConfigInput(config, workspace, env, execute));
+  inputs.sort((left, right) => left.path.localeCompare(right.path, "en"));
+  const toolchain = options.toolchain ?? await currentToolchain(config, workspace, env, execute);
+  const key = sha256(`${JSON.stringify({ format: CACHE_FORMAT, toolchain: validatedToolchain(toolchain), inputs })}\n`);
+  return { key, toolchain, inputs, targets, nativeWorkspaces };
 };
 
 const assertTarget = (workspace: string, target: string): string => {
@@ -838,33 +869,33 @@ export const materializeWorkspaceDependencies = async (
   }
   const workspace = await realpath(requestedWorkspace);
   try {
-    const project = await inspectDependencyProject(workspace);
-    if (project === null) {
+    let identity: DependencyCacheIdentity | null;
+    try {
+      identity = await deriveDependencyCacheKey(config, workspace, env, execute, options);
+    } catch (error: unknown) {
+      if (!(error instanceof DependencyCacheInputMissError)) throw error;
+      report({ event: "miss", condition: error.condition });
+      await installDependencies(config, workspace, error.targets, env, execute, options.installRetryOptions);
+      return { status: "installed", condition: error.condition };
+    }
+    if (identity === null) {
       report({ event: "miss", condition: "root-package-manifest-missing" });
       return { status: "not-applicable", condition: "root-package-manifest-missing" };
     }
-    if (project.inputMissCondition) {
-      report({ event: "miss", condition: project.inputMissCondition });
-      await installDependencies(config, workspace, project.targets, env, execute, options.installRetryOptions);
-      return { status: "installed", condition: project.inputMissCondition };
-    }
-    project.inputs.push(await effectiveNpmConfigInput(config, workspace, env, execute));
-    project.inputs.sort((left, right) => left.path.localeCompare(right.path, "en"));
-    const toolchain = options.toolchain ?? await currentToolchain(config, workspace, env, execute);
-    const key = sha256(`${JSON.stringify({ format: CACHE_FORMAT, toolchain: validatedToolchain(toolchain), inputs: project.inputs })}\n`);
+    const { key, toolchain, inputs, targets: targetPaths, nativeWorkspaces } = identity;
     const cacheRoot = await ensureCacheRoot(
       options.cacheRoot ?? config.dependencyCacheRoot ?? join(dirname(resolve(config.workspaceRoot)), "dependency-cache"),
       workspace,
     );
     const entry = resolve(cacheRoot, "entries", key);
     if (!insideOrEqual(cacheRoot, entry)) throw new Error("Dependency cache entry escaped its root");
-    const expected = { format: CACHE_FORMAT, key, toolchain, inputs: project.inputs, targetPaths: project.targets } as const;
+    const expected = { format: CACHE_FORMAT, key, toolchain, inputs, targetPaths } as const;
     let integrityCondition: string | undefined;
     if (await pathKind(entry) !== "missing") {
       try {
         const metadata = await validateEntry(entry, expected, workspace);
         await restoreEntry(config, metadata, entry, workspace, env, execute);
-        await rebuildNativeWorkspaces(config, workspace, project.nativeWorkspaces, env, execute);
+        await rebuildNativeWorkspaces(config, workspace, nativeWorkspaces, env, execute);
         report({ event: "hit", key: key.slice(0, 16) });
         return { status: "restored", key };
       } catch (error: unknown) {
@@ -876,8 +907,8 @@ export const materializeWorkspaceDependencies = async (
       report({ event: "miss", key: key.slice(0, 16), condition: "entry-missing" });
     }
 
-    const targets = await installDependencies(config, workspace, project.targets, env, execute, options.installRetryOptions);
-    const metadata: CacheMetadata = { format: CACHE_FORMAT, key, toolchain, inputs: project.inputs, targets };
+    const targets = await installDependencies(config, workspace, targetPaths, env, execute, options.installRetryOptions);
+    const metadata: CacheMetadata = { format: CACHE_FORMAT, key, toolchain, inputs, targets };
     if (integrityCondition === undefined) {
       const publication = await publishEntry(cacheRoot, entry, metadata, workspace, expected);
       if (publication === "refused") {
