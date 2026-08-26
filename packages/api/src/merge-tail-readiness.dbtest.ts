@@ -281,7 +281,7 @@ test("ordinary base requeue reuses an approved exact-head review", async () => {
   assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
 });
 
-test("future and wrong-index readiness steps are never claimed", async () => {
+test("future readiness waits but the readiness role is claimed regardless of ordinal", async () => {
   const future = await seedReadiness();
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.TODO } });
   assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
@@ -289,7 +289,8 @@ test("future and wrong-index readiness steps are never claimed", async () => {
 
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.DONE } });
   await db.taskTemplateStep.update({ where: { id: future.readiness.templateStepId! }, data: { stepIndex: 9 } });
-  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease), { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: future.readiness.id } })).status, TaskStatus.DONE);
 });
 
 test("an expired orphaned DOING readiness claim is reclaimed after restart", async () => {

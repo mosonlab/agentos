@@ -361,10 +361,10 @@ test("regression completion keeps final prose as Run.output but requires this ru
   assert.equal(await db.taskStepOutput.count({ where: { taskId: task.id } }), 0, "completion prose became structured output");
   const stopped = await db.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(stopped.status, TaskStatus.REVIEW);
-  assert.equal(stopped.failureReason, "missing regression output");
+  assert.match(stopped.failureReason ?? "", /missing regression-verification task output for current Run/u);
   const activities = await db.taskActivity.findMany({ where: { taskId: task.id }, orderBy: { createdAt: "asc" } });
   assert.ok(activities.some(({ body }) => body === nonVerdict), "the agent's original non-verdict activity was lost");
-  assert.ok(activities.some(({ body }) => body === "Regression did not advance: missing regression output"));
+  assert.ok(activities.some(({ metadata }) => (metadata as Record<string, unknown> | null)?.kind === "canonicalTaskOutput.refusal"));
   assert.deepEqual(releasedChainLeases, [task.chainId]);
 });
 

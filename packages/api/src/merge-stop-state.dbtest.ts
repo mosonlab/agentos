@@ -145,7 +145,7 @@ test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, ques
   assert.deepEqual(releasedChainLeases, [chain.integratorTask!.chainId]);
 });
 
-test("a legacy integrator base-drift stop retains an abandon-only manual exit", async () => {
+test("a legacy integrator role enters automatic base-drift recovery regardless of ordinal", async () => {
   const chain = await seedIntegratorChain(db, { label: "legacy-base-drift-exit", shape: "twelve-step" });
   const run = await liveIntegratorRun(chain);
   await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
@@ -155,8 +155,7 @@ test("a legacy integrator base-drift stop retains an abandon-only manual exit", 
   }));
   assert.equal((await completeRun(run)).status, 200);
   const question = await stopQuestionFor(chain.integratorTask!.id);
-  assert.ok(question, "legacy base-drift stop keeps a manual exit because it is not an automatic-recovery candidate");
-  assert.deepEqual((question!.choices as Array<{ id: string }>).map((choice) => choice.id), ["abandon"]);
+  assert.equal(question, null, "the merge-result role is an automatic-recovery candidate in every template generation");
 });
 
 test("a fresh regression completion preserves success and parks a legacy-stopped integrator", async () => {
