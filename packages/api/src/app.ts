@@ -126,7 +126,7 @@ import {
 } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
 import { activeRunStatuses, explainFenceRefusal, fencedRunWhere, type RunFence } from "./run-fence.js";
-import { suspendForInbox } from "./inbox.js";
+import { supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
@@ -3354,6 +3354,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       return context.json({ error: "Inbox message changed before it could be closed" }, 409);
     }
     return context.json({ closed: true, duplicate: false, requestId: body.requestId });
+  });
+  app.post("/inbox/messages/:messageId/supersede", async (context) => {
+    // principalMayAccess already restricts this operator action, but keep the
+    // check at the handler boundary so the lifecycle operation stays explicit
+    // if route middleware is ever rearranged.
+    if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
+    const body = await readJson(context.req.raw, inboxCloseInput);
+    const result = await supersedeTaskInboxMessage(
+      db,
+      id.parse(context.req.param("messageId")),
+      body.requestId,
+    );
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result);
   });
 
   app.post("/runner/availability", async (context) => {
