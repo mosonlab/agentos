@@ -10,6 +10,12 @@ import {
 
 type Row = {
   id: string;
+  taskId: string | null;
+  runNumber: number;
+  baseSha: string | null;
+  pushedBranch: string | null;
+  targetBranch: string | null;
+  task: { templateStep: { baseFromStepIndex: number | null } | null } | null;
   runnerId: string | null;
   workspacePath: string | null;
   status: RunStatus;
@@ -21,6 +27,12 @@ type Row = {
 
 const row = (id: string, overrides: Partial<Row> = {}): Row => ({
   id,
+  taskId: null,
+  runNumber: 1,
+  baseSha: null,
+  pushedBranch: null,
+  targetBranch: null,
+  task: null,
   runnerId: "runner-1",
   workspacePath: null,
   status: RunStatus.SUCCEEDED,
@@ -64,11 +76,31 @@ test("the control plane offers a finished run's directory and publishes the inte
   const { db, runUpdates } = fakeDb([row("done")]);
   const plan = await publishReclaimIntents(db, inventory(["done"]), 2);
   assert.deepEqual(plan.reclaim, [{
-    runId: "done", workspacePath: null,
-    taskId: undefined, runNumber: undefined, baseSha: undefined, pushedBranch: undefined,
+    runId: "done", workspacePath: null, pinnedBaseSha: null,
+    taskId: null, runNumber: 1, baseSha: null, pushedBranch: null,
   }]);
   assert.deepEqual(runUpdates.map(({ ids }) => ids), [["done"]]);
   assert.ok(runUpdates[0]!.data.workspaceReclaimAt instanceof Date);
+});
+
+test("the control plane derives required pinned checkout evidence from the template step", async () => {
+  const pinned = "a".repeat(40);
+  const cases: Array<{ label: string; candidate: Row; expected: string | null }> = [
+    { label: "ordinary", candidate: row("ordinary", { targetBranch: pinned }), expected: null },
+    {
+      label: "pinned",
+      candidate: row("pinned", {
+        targetBranch: pinned,
+        task: { templateStep: { baseFromStepIndex: 1 } },
+      }),
+      expected: pinned,
+    },
+  ];
+  for (const { label, candidate, expected } of cases) {
+    const { db } = fakeDb([candidate]);
+    const plan = await publishReclaimIntents(db, inventory([candidate.id]), 0);
+    assert.equal(plan.reclaim[0]?.pinnedBaseSha, expected, label);
+  }
 });
 
 test("reclaim salvage ACK accepts only the owner's deterministic ref while the intent is open", async () => {
@@ -196,14 +228,14 @@ test("still-open intents whose directories are absent come back for settlement",
     [row("vanished", { workspaceReclaimAt: new Date(), workspacePath: join(root, "vanished") })],
   );
   const plan = await publishReclaimIntents(db, inventory(["present"]), 2);
-  assert.deepEqual(plan.verify, [{ runId: "vanished", workspacePath: join(root, "vanished") }]);
+  assert.deepEqual(plan.verify, [{ runId: "vanished", workspacePath: join(root, "vanished"), pinnedBaseSha: null }]);
 });
 
 test("an empty inventory still returns the open intents that need settling", async () => {
   const { db } = fakeDb([], [row("vanished", { workspaceReclaimAt: new Date(), workspacePath: null })]);
   const plan = await publishReclaimIntents(db, inventory([]), 2);
   assert.deepEqual(plan.reclaim, []);
-  assert.deepEqual(plan.verify, [{ runId: "vanished", workspacePath: null }]);
+  assert.deepEqual(plan.verify, [{ runId: "vanished", workspacePath: null, pinnedBaseSha: null }]);
 });
 
 test("another runner's open intents are not offered for settlement either", async () => {

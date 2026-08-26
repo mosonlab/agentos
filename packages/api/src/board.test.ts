@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma } from "@agentos/db";
+import { Prisma, type PrismaClient } from "@agentos/db";
 
-import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, repairBinding, taskChainName } from "./board.js";
+import { type BoardRow, boardCard, chainDisplayByTask, etagFor, etagMatches, readBoard, repairBinding, taskChainName } from "./board.js";
 
 const session = (overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> = {}): NonNullable<BoardRow["runs"][number]["session"]> => ({
   costUsd: null, inputTokens: null, cachedInputTokens: null, outputTokens: null, startedAt: null, endedAt: null, ...overrides,
@@ -31,6 +31,73 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   assigneeAgent: null,
   runs: [],
   ...overrides,
+});
+
+const boardReadDatabase = ({
+  rows,
+  chainRows = [],
+  related = [],
+}: {
+  rows: BoardRow[];
+  chainRows?: Array<Record<string, unknown>>;
+  related?: Array<{ id: string; name: string; status: BoardRow["status"] }>;
+}): { db: PrismaClient; predecessorLookups: string[][] } => {
+  const predecessorLookups: string[][] = [];
+  const db = {
+    task: {
+      findMany: async (args: { where?: Record<string, unknown> }) => {
+        const where = args.where ?? {};
+        if (where.id !== undefined) {
+          const ids = (where.id as { in: string[] }).in;
+          predecessorLookups.push(ids);
+          return related.filter((candidate) => ids.includes(candidate.id));
+        }
+        if (where.chainId !== undefined) return chainRows;
+        return rows;
+      },
+    },
+    taskActivity: { findMany: async () => [] },
+  } as unknown as PrismaClient;
+  return { db, predecessorLookups };
+};
+
+/* ------------------------------------------------------------ the read model */
+
+test("readBoard performs no predecessor lookup for an unbound page", async () => {
+  const { db, predecessorLookups } = boardReadDatabase({ rows: [row()] });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+
+  assert.equal(cards[0]?.blockedOn, null);
+  assert.deepEqual(predecessorLookups, []);
+});
+
+test("readBoard resolves every bound row in one deduplicated predecessor lookup", async () => {
+  const predecessorOne = { id: "predecessor-1", name: "Build predecessor", status: "DOING" as BoardRow["status"] };
+  const predecessorTwo = { id: "predecessor-2", name: "Review predecessor", status: "REVIEW" as BoardRow["status"] };
+  const { db, predecessorLookups } = boardReadDatabase({
+    rows: [
+      row({ id: "first", chainId: "successor-1", chainIndex: 0, dispatchAfterTaskId: predecessorOne.id }),
+      row({ id: "same-binding", chainId: "successor-2", chainIndex: 0, dispatchAfterTaskId: predecessorOne.id }),
+      row({ id: "second", chainId: "successor-3", chainIndex: 0, dispatchAfterTaskId: predecessorTwo.id }),
+      row({ id: "unbound", chainId: "successor-4", chainIndex: 0 }),
+    ],
+    related: [predecessorOne, predecessorTwo],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+
+  assert.deepEqual(predecessorLookups, [[predecessorOne.id, predecessorTwo.id]]);
+  assert.deepEqual(cards.find((card) => card.id === "first")?.blockedOn, {
+    taskId: predecessorOne.id, taskName: predecessorOne.name,
+  });
+  assert.deepEqual(cards.find((card) => card.id === "same-binding")?.blockedOn, {
+    taskId: predecessorOne.id, taskName: predecessorOne.name,
+  });
+  assert.deepEqual(cards.find((card) => card.id === "second")?.blockedOn, {
+    taskId: predecessorTwo.id, taskName: predecessorTwo.name,
+  });
+  assert.equal(cards.find((card) => card.id === "unbound")?.blockedOn, null);
 });
 
 /* ------------------------------------------------------------ the projection */
@@ -214,14 +281,32 @@ test("a direct chain prefix is not guessed from one row or a partial match", () 
   assert.deepEqual(displays.get("a"), { chainName: null, displayName: "Release: Build" });
 });
 
-test("chainProgress is passed through, not recomputed", () => {
-  // The arithmetic belongs to the chain module; a second implementation here
-  // could disagree with the numbers the detail page renders.
-  const progress = {
-    chainId: "c1", done: 3, total: 9, activeStepName: "Implementation",
-    activeStatus: "doing", currentLayer: 2, layerCount: 7, position: 4,
-  };
-  assert.equal(boardCard(row({ chainId: "c1", chainIndex: 4 }), progress).chainProgress, progress);
+test("readBoard computes chainProgress from the complete chain lookup", async () => {
+  const current = row({
+    id: "current", chainId: "c1", chainIndex: 0, chainLayer: 0,
+    name: "Release: Implementation", templateStep: { name: "Implementation" },
+  });
+  const { db } = boardReadDatabase({
+    rows: [current],
+    chainRows: [
+      {
+        id: current.id, projectId: current.projectId, chainId: "c1", chainIndex: 0, chainLayer: 0,
+        status: current.status, name: current.name, archivedAt: null, templateStep: current.templateStep,
+      },
+      {
+        id: "archived-review", projectId: current.projectId, chainId: "c1", chainIndex: 1, chainLayer: 1,
+        status: "DONE", name: "Release: Review", archivedAt: new Date("2026-08-15T00:00:00Z"),
+        templateStep: { name: "Review" },
+      },
+    ],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+
+  assert.deepEqual(cards[0]?.chainProgress, {
+    chainId: "c1", done: 1, total: 2, activeStepName: "Implementation",
+    activeStatus: "todo", currentLayer: 1, layerCount: 2, position: 1,
+  });
 });
 
 test("the failure reason is carried in full, because Copy error hands it over", () => {
