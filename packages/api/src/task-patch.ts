@@ -16,6 +16,7 @@ import {
 
 import type { TaskPatchInput } from "./app.js";
 import { blockingPredecessor } from "./chain.js";
+import { type Refusal, refusalFor } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
 import {
   hasActiveRun,
@@ -26,23 +27,14 @@ import {
 } from "./task-write.js";
 import { withoutUndefined } from "./without-undefined.js";
 
-/**
- * Why a patch was refused, in the terms the HTTP route needs and nothing more.
- * `code` is the status; `errorCode` is the machine-readable code the compound
- * implementation refusal has always carried in its body beside the message.
- */
-export type TaskPatchRefusal = {
-  error: string;
-  code: 400 | 404 | 409;
-  errorCode?: string;
-};
+export type TaskPatchRefusal = Refusal;
 
 export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
 
 /** What the status write plans under the lock: a refusal this action owns, a
  *  replay of an already-decided gate, or the write itself. */
 type StatusWritePlan =
-  | { error: string; code: 409 }
+  | Refusal
   | { replay: true }
   | { gate: GateWinner; previousStatus: TaskStatus };
 
@@ -53,10 +45,10 @@ type GateWinner = {
 
 /** A refusal from `writeTask` in this action's terms: the task is gone, or the
  *  assignee the request named may not be written onto it. */
-const taskWriteRefusal = (refusal: TaskWriteRefusal): { error: string; code: 404 | 400 } => (
+const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => (
   refusal.kind === "absent"
-    ? { error: "Task not found", code: 404 }
-    : { error: refusal.reason, code: 400 }
+    ? { reason: "not-found", message: "Task not found" }
+    : { reason: "invalid-request", message: refusal.reason }
 );
 
 /**
@@ -75,7 +67,7 @@ export const patchTask = async (
 ): Promise<TaskPatchResult> => {
   const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
   if (before.chainId !== null && body.approvalGate !== undefined && body.approvalGate !== before.approvalGate) {
-    return { error: "Approval gates on dispatched chain tasks are controlled by the chain", code: 409 };
+    return { reason: "conflict", message: "Approval gates on dispatched chain tasks are controlled by the chain" };
   }
   // Held for the whole route: whichever of the three write paths below runs
   // re-reads this assignee under the Agent-row mutex before it commits.
@@ -104,23 +96,25 @@ export const patchTask = async (
       templateStep,
     )) {
       const error = new CompoundImplementationAssigneeError();
-      return { error: error.message, errorCode: error.code, code: 409 };
+      const refusal = refusalFor(error);
+      if (!refusal) throw error;
+      return refusal;
     }
   }
   if (body.assigneeAgentId) {
-    if (!assignee) return { error: "Assignee does not belong to this project", code: 400 };
-    if (assignee.archivedAt) return { error: `Assignee ${assignee.name} is archived`, code: 400 };
+    if (!assignee) return { reason: "invalid-request", message: "Assignee does not belong to this project" };
+    if (assignee.archivedAt) return { reason: "invalid-request", message: `Assignee ${assignee.name} is archived` };
   }
   if (body.repoId) {
     const repo = await db.repo.findFirst({ where: { id: body.repoId, projectId: before.projectId } });
-    if (!repo) return { error: "Repo does not belong to this project", code: 400 };
+    if (!repo) return { reason: "invalid-request", message: "Repo does not belong to this project" };
   }
   const effectiveRepoId = body.repoId === undefined ? before.repoId : body.repoId;
   if (effectiveAgentId && effectiveRepoId) {
     const access = await db.agentRepoAccess.findFirst({
       where: { agentId: effectiveAgentId, repoId: effectiveRepoId, projectId: before.projectId },
     });
-    if (!access) return { error: "Assignee has no grant for this Repo", code: 400 };
+    if (!access) return { reason: "invalid-request", message: "Assignee has no grant for this Repo" };
   }
   // §D-P4 on reassignment. `templateStepId` is not a patchable field, so the
   // step half of the pair cannot move under this check; the assignee half is
@@ -132,7 +126,7 @@ export const patchTask = async (
       : null,
     templateStepId: before.templateStepId,
   });
-  if (reassignmentRefusal) return { error: reassignmentRefusal, code: 400 };
+  if (reassignmentRefusal) return { reason: "invalid-request", message: reassignmentRefusal };
   const scheduleTouched = body.scheduleKind !== undefined || body.runAt !== undefined || body.cron !== undefined || body.timezone !== undefined;
   const atExecutorTouched = before.scheduleKind === ScheduleKind.AT
     && (body.assigneeType !== undefined || body.assigneeAgentId !== undefined || body.repoId !== undefined);
@@ -149,7 +143,7 @@ export const patchTask = async (
         repoId: effectiveRepoId,
       });
     } catch (error: unknown) {
-      return { error: error instanceof Error ? error.message : "Invalid schedule", code: 400 };
+      return { reason: "invalid-request", message: error instanceof Error ? error.message : "Invalid schedule" };
     }
   }
   const updateData = {
@@ -182,7 +176,11 @@ export const patchTask = async (
   if (body.status !== undefined) {
     const written = await db.$transaction(async (tx) => {
       const result = await writeTask<StatusWritePlan>(tx, taskId, async (locked) => {
-        const refuse = (error: string) => ({ update: null, activity: null, value: { error, code: 409 as const } });
+        const refuse = (message: string) => ({
+          update: null,
+          activity: null,
+          value: { reason: "conflict" as const, message },
+        });
         if (locked.archivedAt !== null) {
           return refuse("Cannot change the status of an archived task; unarchive it first");
         }
@@ -302,7 +300,7 @@ export const patchTask = async (
       });
       if (!result.ok) return taskWriteRefusal(result.refusal);
       const plan = result.value;
-      if ("error" in plan) return plan;
+      if ("message" in plan) return plan;
       // The replay branch wrote nothing, so what the caller gets back is the
       // row the gate was already decided on.
       if ("replay" in plan) return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
@@ -345,7 +343,7 @@ export const patchTask = async (
       }
       return { task: updated };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-    if ("error" in written) return written;
+    if ("message" in written) return written;
     return { task: written.task };
   }
   if (body.opensPullRequest !== undefined) {

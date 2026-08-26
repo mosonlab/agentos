@@ -8,16 +8,11 @@ import {
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
-  COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   deriveRunConfig,
   FailureClass,
   GoalStatus,
   enqueueTaskRun,
   InboxStatus,
-  isArchivedAssigneeError,
-  isArchivedTaskError,
-  isCompoundImplementationAssigneeError,
-  isIntegratorStoppedError,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
@@ -48,7 +43,6 @@ import {
   isMergeExecutorRunnerId,
   mechanicalPrincipalRefusal,
   executionModeFor,
-  isMergeConfirmationError,
   integratorBindingRefusal,
   integratorBindingRefusalFor,
   projectMergeOutcome,
@@ -119,6 +113,13 @@ import {
 } from "./execution.js";
 import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
 import {
+  type Refusal,
+  type RefusalDetail,
+  type RefusalReason,
+  refusalFor,
+  refusalResponse,
+} from "./refusal.js";
+import {
   acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
 } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
@@ -128,6 +129,7 @@ import {
   fenceRefusalResponse,
   fencedRunWhere,
   isFenceRefusalResponse,
+  type FenceRefusalResponse,
   type RunFence,
   withFencedRun,
 } from "./run-fence.js";
@@ -160,6 +162,19 @@ import { withoutUndefined } from "./without-undefined.js";
 import { versionPayload } from "./version.js";
 
 type AppEnvironment = { Variables: { principal: Principal } };
+
+const refusal = (reason: RefusalReason, message: string, detail?: RefusalDetail): Refusal => (
+  detail === undefined ? { reason, message } : { reason, message, detail }
+);
+
+const refusalJson = (context: Context, refused: Refusal): Response => {
+  const response = refusalResponse(refused);
+  return context.json(response.body, response.status);
+};
+
+const runFenceRefusal = (refused: FenceRefusalResponse): Refusal => (
+  refusal("conflict", refused.error, { reason: refused.reason })
+);
 
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
@@ -668,7 +683,7 @@ const isTemplateInputError = (error: unknown): error is Error => (
   error instanceof Error
   && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
 );
-const templateSchemaRefusal = (error: unknown): { error: string; code: string } | null => {
+const templateSchemaRefusal = (error: unknown): Refusal | null => {
   if (!(error instanceof z.ZodError)) return null;
   const issue = error.issues.find((candidate) => {
     const params = (candidate as unknown as { params?: Record<string, unknown> }).params;
@@ -677,7 +692,7 @@ const templateSchemaRefusal = (error: unknown): { error: string; code: string } 
   if (!issue) return null;
   const params = (issue as unknown as { params?: Record<string, unknown> }).params;
   return typeof params?.templateRefusalCode === "string"
-    ? { error: issue.message, code: params.templateRefusalCode }
+    ? refusal("invalid-request", issue.message, { code: params.templateRefusalCode })
     : null;
 };
 // `Fire now` merges over the template's own defaults, so an all-defaulted
@@ -807,7 +822,7 @@ const isPublic = (path: string, method: string): boolean =>
   || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
 
 type CancellationSettlement =
-  | { error: string; code: 404 | 409 }
+  | Refusal
   | {
       runId: string; taskId: string | null; status: RunStatus; cancellationState: "acknowledged";
       requestId: string; releaseMergeLeaseTask: string | null;
@@ -840,10 +855,10 @@ const settleCancellation = async (
       session: { select: { id: true, waitingOnMessageId: true } },
     },
   });
-  if (!run) return { error: "Run not found", code: 404 };
-  if (run.cancelRequestId !== input.requestId) return { error: "Cancellation request does not match this Run", code: 409 };
+  if (!run) return refusal("not-found", "Run not found");
+  if (run.cancelRequestId !== input.requestId) return refusal("conflict", "Cancellation request does not match this Run");
   if (input.runnerId !== undefined && (run.runnerId !== input.runnerId || run.fencingToken !== input.fencingToken)) {
-    return { error: "Cancellation acknowledgement is not owned by this runner", code: 409 };
+    return refusal("conflict", "Cancellation acknowledgement is not owned by this runner");
   }
   if (run.status === RunStatus.CANCELLED) {
     // Reconciliation can settle an expired cancellation before the runner's
@@ -872,7 +887,7 @@ const settleCancellation = async (
         metadata: { runId: run.id, requestId: input.requestId, status: RunStatus.CANCELLED },
       } });
     } else if (!run.cancelAcknowledgedAt) {
-      return { error: "Cancellation cleanup has not been acknowledged by the runner", code: 409 };
+      return refusal("conflict", "Cancellation cleanup has not been acknowledged by the runner");
     }
     // The terminal writer that got here first already released the lease; a
     // later acknowledgement of the same cancellation has nothing left to free.
@@ -906,7 +921,7 @@ const settleCancellation = async (
       ...(input.baseSha === undefined ? {} : { baseSha: input.baseSha }),
     },
   });
-  if (settled.count !== 1) return { error: `Run is already ${run.status}`, code: 409 };
+  if (settled.count !== 1) return refusal("conflict", `Run is already ${run.status}`);
   await tx.session.updateMany({
     where: { runId: run.id },
     data: {
@@ -1258,7 +1273,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // the target is what refuses it, and the caller recovers by reading GET
     // /onboarding rather than by editing anything. A committed-but-lost response
     // lands here too, which is why the code is stable and the rows are untouched.
-    if (!result.ok) return context.json({ error: "An installation already exists", code: result.code }, 409);
+    if (!result.ok) {
+      return refusalJson(context, refusal("conflict", "An installation already exists", { code: result.code }));
+    }
     return context.json(result.installation, 201);
   });
 
@@ -1400,21 +1417,21 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, agentPatch);
     const result = await db.$transaction(async (tx) => {
       const before = await lockAgentRow(tx, agentId);
-      if (!before) return { error: "Agent not found", code: 404 as const };
+      if (!before) return refusal("not-found", "Agent not found");
       const patch = withoutUndefined(body);
       const merged = { ...before, ...patch };
       if (before.name === "implementation-plan-executioner" && merged.name !== before.name) {
-        return { error: "implementation-plan-executioner is a canonical Agent name and cannot be changed", code: 400 as const };
+        return refusal("invalid-request", "implementation-plan-executioner is a canonical Agent name and cannot be changed");
       }
       const modelRefusal = runnerModelRefusal(merged);
-      if (modelRefusal) return { error: modelRefusal, code: 400 as const };
+      if (modelRefusal) return refusal("invalid-request", modelRefusal);
       const executionerRefusal = executionerRuntimeRefusal(merged);
-      if (executionerRefusal) return { error: executionerRefusal, code: 400 as const };
+      if (executionerRefusal) return refusal("invalid-request", executionerRefusal);
       const tierRefusal = codexServiceTierRefusal(merged);
-      if (tierRefusal) return { error: tierRefusal, code: 400 as const };
+      if (tierRefusal) return refusal("invalid-request", tierRefusal);
       if (body.environmentId) {
         const environment = await tx.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
-        if (!environment) return { error: "Environment does not belong to this project", code: 400 as const };
+        if (!environment) return refusal("invalid-request", "Environment does not belong to this project");
       }
       return { agent: await tx.agent.update({
         where: { id: agentId },
@@ -1427,7 +1444,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         } as Prisma.AgentUncheckedUpdateInput,
       }) };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.agent);
   });
   app.delete("/agents/:agentId", async (context) => {
@@ -1451,14 +1468,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const now = new Date();
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockAgentRow(tx, agentId);
-      if (!locked) return { error: "Agent not found", code: 404 as const };
+      if (!locked) return refusal("not-found", "Agent not found");
       const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
       if (agent.archivedAt) return { agent };
       const blocker = await agentArchiveBlocker(tx, agentId);
-      if (blocker) return { error: blocker, code: 409 as const };
+      if (blocker) return refusal("conflict", blocker);
       return { agent: await tx.agent.update({ where: { id: agentId }, data: { archivedAt: now } }) };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
     await noteArchivedQueuedRuns(db, { agentId });
@@ -1708,10 +1725,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (!grant) return context.json({ error: "Repo access not found" }, 404);
     const result = await db.$transaction(async (tx) => {
       if (!await lockAgentRepoGrantForRevocation(tx, { projectId: grant.projectId, agentId, repoId })) {
-        return { error: "Repo access not found", code: 404 as const };
+        return refusal("not-found", "Repo access not found");
       }
       const active = await tx.run.count({ where: { agentId, repoId, status: { in: ACTIVE_RUN_STATUSES } } });
-      if (active > 0) return { error: "Cannot revoke repo access while the agent has an active run on this Repo", code: 409 as const };
+      if (active > 0) return refusal("conflict", "Cannot revoke repo access while the agent has an active run on this Repo");
       const dependentSteps = await tx.task.count({ where: {
         projectId: grant.projectId,
         repoId,
@@ -1721,15 +1738,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         status: { in: [TaskStatus.BACKLOG, TaskStatus.TODO, TaskStatus.DOING, TaskStatus.REVIEW] },
       } });
       if (dependentSteps > 0) {
-        return {
-          error: "Cannot revoke repo access while a nonterminal chain step depends on this grant",
-          code: 409 as const,
-        };
+        return refusal("conflict", "Cannot revoke repo access while a nonterminal chain step depends on this grant");
       }
       await tx.agentRepoAccess.delete({ where: { agentId_repoId: { agentId, repoId } } });
       return { ok: true as const };
     });
-    return "error" in result ? context.json({ error: result.error }, result.code) : context.body(null, 204);
+    return "message" in result ? refusalJson(context, result) : context.body(null, 204);
   });
 
   app.get("/projects/:projectId/goals", async (context) => context.json(await db.goal.findMany({
@@ -1941,10 +1955,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ), 201);
     } catch (error: unknown) {
       if (isTemplateInstantiationRefusal(error)) {
-        return context.json({ error: error.message, code: error.code }, 400);
+        return refusalJson(context, refusal("invalid-request", error.message, { code: error.code }));
       }
       const schemaRefusal = templateSchemaRefusal(error);
-      if (schemaRefusal) return context.json(schemaRefusal, 400);
+      if (schemaRefusal) return refusalJson(context, schemaRefusal);
       if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }
@@ -2207,8 +2221,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // Agent-row mutex through the task — and the inline run below — so a
       // concurrent archive either loses the race or is refused for this run.
       const currentAgent = agent ? await lockAgentRow(tx, agent.id) : null;
-      if (agent && !currentAgent) return { error: "Assignee does not belong to this project", code: 400 as const };
-      if (currentAgent?.archivedAt) return { error: `Assignee ${currentAgent.name} is archived`, code: 400 as const };
+      if (agent && !currentAgent) return refusal("invalid-request", "Assignee does not belong to this project");
+      if (currentAgent?.archivedAt) return refusal("invalid-request", `Assignee ${currentAgent.name} is archived`);
       // §D-P4, inside the transaction and before `tx.task.create` and the inline
       // `tx.run.create` below. This route cannot set `templateStepId` at all, so
       // in practice it refuses the sentinel Agent outright — which is the point:
@@ -2218,7 +2232,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         assigneeAgentName: currentAgent?.name ?? null,
         templateStep: null,
       });
-      if (bindingRefusal) return { error: bindingRefusal, code: 400 as const };
+      if (bindingRefusal) return refusal("invalid-request", bindingRefusal);
       const created = await tx.task.create({
         data: {
           ...withoutUndefined(body),
@@ -2264,7 +2278,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       }
       return { created };
     });
-    if ("error" in task) return context.json({ error: task.error }, task.code);
+    if ("message" in task) return refusalJson(context, task);
     return context.json(task.created, 201);
   });
   app.get("/tasks/:taskId", async (context) => {
@@ -2499,14 +2513,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.patch("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await patchTask(db, taskId, await readJson(context.req.raw, taskPatch));
-    if ("error" in result) {
-      return context.json(
-        result.errorCode === undefined
-          ? { error: result.error }
-          : { error: result.error, code: result.errorCode },
-        result.code,
-      );
-    }
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });
   app.delete("/tasks/:taskId", async (context) => {
@@ -2525,10 +2532,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const now = new Date();
     const result = await db.$transaction(async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (!locked) return refusal("not-found", "Task not found");
       // Retry joins the exclusion protocol: a guard set in which one writer
       // ignores archivedAt excludes nothing.
-      if (locked.archivedAt !== null) return { error: "Cannot retry an archived task", code: 409 as const };
+      if (locked.archivedAt !== null) return refusal("conflict", "Cannot retry an archived task");
       const task = await tx.task.findUnique({
         where: { id: taskId },
         include: {
@@ -2541,7 +2548,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runs: { orderBy: { runNumber: "desc" }, take: 1 },
         },
       });
-      if (!task) return { error: "Task not found", code: 404 as const };
+      if (!task) return refusal("not-found", "Task not found");
       if (task.chainId && task.chainIndex !== null) {
         const chainRows = await tx.task.findMany({
           where: { projectId: task.projectId, chainId: task.chainId },
@@ -2556,15 +2563,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           templateStep: null,
         })), taskId);
         if (blocker) {
-          return {
-            error: `Cannot retry ${task.name}; predecessor ${blocker.name} is not done`,
-            code: 409 as const,
-          };
+          return refusal("conflict", `Cannot retry ${task.name}; predecessor ${blocker.name} is not done`);
         }
       }
       const integratorStepShape = task.templateStep;
       const last = task.runs[0];
-      if (!last) return { error: "Task has no run to retry", code: 409 as const };
+      if (!last) return refusal("conflict", "Task has no run to retry");
       // Checked across ALL of the task's runs with the shared active set, not
       // the latest run's status alone: the old latest-only enum check missed
       // PROVISIONING and WAITING_INBOX, so a retry during a clone or a
@@ -2572,28 +2576,28 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // same task and chain branch.
       const activeRuns = await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } });
       if (activeRuns > 0) {
-        return { error: "Task already has an active run", code: 409 as const };
+        return refusal("conflict", "Task already has an active run");
       }
       const stoppedForRetry = await stopStateFor(tx, taskId);
-      if (stoppedForRetry) return { error: stopStateRefusal(stoppedForRetry), code: 409 as const };
+      if (stoppedForRetry) return refusal("conflict", stopStateRefusal(stoppedForRetry));
       // The same ceiling the Start gate uses, for the same reason: the budget an
       // operator configured now, plus what has been granted on top of it. The
       // old `last.maxRunsPerTask` could not tell a refund from a budget that had
       // since been lowered.
       if (last.runNumber >= runBudgetCeiling(task.maxSessionsPerTask, last.budgetGrants)) {
-        return { error: "Run budget exhausted", code: 409 as const };
+        return refusal("conflict", "Run budget exhausted");
       }
       if (!task.assigneeAgent) {
-        return { error: "Task assignee no longer exists; assign an agent before retrying", code: 409 as const };
+        return refusal("conflict", "Task assignee no longer exists; assign an agent before retrying");
       }
       // Retry builds its Run inline rather than through enqueueTaskRun, so it
       // takes the Agent-row mutex itself — Task row first, Agent row second.
       const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
       if (!lockedAgent || lockedAgent.archivedAt) {
-        return { error: `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`, code: 409 as const };
+        return refusal("conflict", `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`);
       }
       const currentBinding = integratorBindingRefusal(lockedAgent.name, integratorStepShape);
-      if (currentBinding) return { error: currentBinding, code: 400 as const };
+      if (currentBinding) return refusal("invalid-request", currentBinding);
       const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
       const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
       // A task with no repo cannot be a chain step with a branch, and this route
@@ -2629,7 +2633,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Run ${run.runNumber} queued by operator retry` } });
       return { run };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.run, 201);
   });
   app.post("/tasks/:taskId/start", async (context) => {
@@ -2641,7 +2645,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     try {
       const result = await readCommitted(db, async (tx) => {
         if (!await lockTaskMutationRows(tx, taskId)) {
-          return { error: "Task not found", code: 404 as const };
+          return refusal("not-found", "Task not found");
         }
         const task = await tx.task.findUniqueOrThrow({
           where: { id: taskId },
@@ -2668,29 +2672,23 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             templateStep: null,
           })), taskId);
           if (blocker) {
-            return {
-              error: `Cannot start ${task.name}; predecessor ${blocker.name} is not done`,
-              code: 409 as const,
-            };
+            return refusal("conflict", `Cannot start ${task.name}; predecessor ${blocker.name} is not done`);
           }
         }
         if (task.dispatchAfterTaskId !== null && task.dispatchAfter?.status !== TaskStatus.DONE) {
           const predecessorName = task.dispatchAfter?.name ?? task.dispatchAfterTaskId;
-          return {
-            error: `Cannot start ${task.name}; bound predecessor ${predecessorName} is not done`,
-            code: 409 as const,
-          };
+          return refusal("conflict", `Cannot start ${task.name}; bound predecessor ${predecessorName} is not done`);
         }
-        if (task.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
-        if (task.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
+        if (task.archivedAt !== null) return refusal("conflict", "Cannot start an archived task");
+        if (task.status === TaskStatus.DONE) return refusal("conflict", "Task is already done");
         if (task.assigneeType !== AssigneeType.AGENT) {
-          return { error: "Human steps cannot be started", code: 409 as const };
+          return refusal("conflict", "Human steps cannot be started");
         }
         if (isMergeReadinessStep(task.templateStep)) {
-          return { error: "Merge readiness is server-owned and cannot be started as a model run", code: 409 as const };
+          return refusal("conflict", "Merge readiness is server-owned and cannot be started as a model run");
         }
         if (await hasActiveRun(tx, taskId)) {
-          return { error: "Task already has an active run", code: 409 as const };
+          return refusal("conflict", "Task already has an active run");
         }
         // A count, not the latest run number: Run is one-to-many and a task at
         // its ceiling whose last run failed must not look startable.
@@ -2710,7 +2708,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
         const facts = { total: budget._count._all, active: false, budgetGrants: budget._max.budgetGrants };
         if (facts.total >= runBudgetCeiling(task.maxSessionsPerTask, facts.budgetGrants)) {
-          return { error: "Run budget exhausted", code: 409 as const };
+          return refusal("conflict", "Run budget exhausted");
         }
         // The specific messages above and below are a reason ladder in front of
         // the shared predicate, so the operator gets the sentence that names
@@ -2719,13 +2717,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         // re-deriving them by hand was how it came to accept gated REVIEW steps
         // and DOING steps and to answer 500 on a task with no repo.
         if (task.status !== TaskStatus.TODO && task.status !== TaskStatus.BACKLOG) {
-          return { error: "Only Todo and Backlog steps can be started", code: 409 as const };
+          return refusal("conflict", "Only Todo and Backlog steps can be started");
         }
         if (!task.repoId) {
-          return { error: "This task has no repository", code: 400 as const };
+          return refusal("invalid-request", "This task has no repository");
         }
         if (!task.assigneeAgentId) {
-          return { error: "This task has no assignee", code: 400 as const };
+          return refusal("invalid-request", "This task has no assignee");
         }
         const hasRepoGrant = await lockAgentRepoGrant(tx, {
           projectId: task.projectId,
@@ -2733,7 +2731,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           repoId: task.repoId,
         });
         if (!hasRepoGrant) {
-          return { error: "Assignee has no grant for this Repo", code: 400 as const };
+          return refusal("invalid-request", "Assignee has no grant for this Repo");
         }
         if (!taskStartability({ ...task, hasRepoGrant }, facts, task.maxSessionsPerTask).startable) {
           // The one remaining `startable` condition with no message of its own
@@ -2741,7 +2739,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           // error that names the agent — a better sentence than anything this
           // branch could write. Fall through to it; the catch maps it to 409.
           if (!task.assigneeAgent?.archivedAt) {
-            return { error: "This step cannot be started", code: 409 as const };
+            return refusal("conflict", "This step cannot be started");
           }
         }
         const run = await enqueueTaskRun(tx, taskId);
@@ -2758,10 +2756,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         } });
         return { run };
       });
-      if ("error" in result) return context.json({ error: result.error }, result.code);
+      if ("message" in result) return refusalJson(context, result);
       return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)) return context.json({ error: error.message }, 409);
       // Unreachable under the lock, because the loser sees the winner's run and
       // returns the 409 above. Mapped anyway: a 500 on a double-click is exactly
       // the failure the guard exists to prevent.
@@ -2775,13 +2772,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const taskId = id.parse(context.req.param("taskId"));
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (!locked) return refusal("not-found", "Task not found");
       if (await hasActiveRun(tx, taskId)) {
-        return { error: "Cannot archive a task with an active run", code: 409 as const };
+        return refusal("conflict", "Cannot archive a task with an active run");
       }
       if (locked.status === TaskStatus.REVIEW) {
         const open = await tx.inboxMessage.count({ where: { gateTaskId: taskId, status: InboxStatus.OPEN } });
-        if (open > 0) return { error: "Decide the approval gate in the Inbox first", code: 409 as const };
+        if (open > 0) return refusal("conflict", "Decide the approval gate in the Inbox first");
       }
       if (locked.archivedAt !== null) {
         return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
@@ -2790,7 +2787,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task archived" } });
       return { task };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });
   app.post("/tasks/:taskId/unarchive", async (context) => {
@@ -2807,19 +2804,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // operator's ability to read their own history back onto the board.
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (!locked) return refusal("not-found", "Task not found");
       if (locked.archivedAt === null) {
         return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
       }
       if (isLiveStatus(locked.status)) {
         const blocked = await reactivationBlocked(tx, locked);
-        if (blocked) return { error: blocked, code: 409 as const };
+        if (blocked) return refusal("conflict", blocked);
       }
       const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
       return { task };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });
   app.post("/projects/:projectId/tasks/archive-done", async (context) => {
@@ -2865,40 +2862,40 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/schedule/pause", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await db.$transaction(async (tx) => {
-      if (!await lockTaskMutationRows(tx, taskId)) return { error: "Task not found", code: 404 as const };
+      if (!await lockTaskMutationRows(tx, taskId)) return refusal("not-found", "Task not found");
       const task = await tx.task.findUniqueOrThrow({ where: { id: taskId }, select: { scheduleKind: true } });
-      if (task.scheduleKind !== ScheduleKind.CRON) return { error: "Only CRON tasks can be paused", code: 400 as const };
+      if (task.scheduleKind !== ScheduleKind.CRON) return refusal("invalid-request", "Only CRON tasks can be paused");
       // In-flight copies are left alone: pausing stops future occurrences, it does
       // not reach into work that already started.
       const paused = await tx.task.update({ where: { id: taskId }, data: { schedulePausedAt: new Date() } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule paused" } });
       return { task: paused };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });
   app.post("/tasks/:taskId/schedule/resume", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await db.$transaction(async (tx) => {
-      if (!await lockTaskMutationRows(tx, taskId)) return { error: "Task not found", code: 404 as const };
+      if (!await lockTaskMutationRows(tx, taskId)) return refusal("not-found", "Task not found");
       const task = await tx.task.findUniqueOrThrow({
         where: { id: taskId },
         select: { scheduleKind: true, cron: true, timezone: true },
       });
-      if (task.scheduleKind !== ScheduleKind.CRON) return { error: "Only CRON tasks can be resumed", code: 400 as const };
+      if (task.scheduleKind !== ScheduleKind.CRON) return refusal("invalid-request", "Only CRON tasks can be resumed");
       let runAt: Date;
       try {
         if (!task.cron) throw new Error("CRON tasks require cron");
         // Recomputed from *now*, so a long pause produces no catch-up burst.
         runAt = computeNextOccurrence(task.cron, task.timezone, new Date());
       } catch (error: unknown) {
-        return { error: error instanceof Error ? error.message : "Invalid schedule", code: 400 as const };
+        return refusal("invalid-request", error instanceof Error ? error.message : "Invalid schedule");
       }
       const resumed = await tx.task.update({ where: { id: taskId }, data: { schedulePausedAt: null, runAt } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Schedule resumed" } });
       return { task: resumed };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });
   app.get("/tasks/:taskId/recurring-fires", async (context) => {
@@ -2943,7 +2940,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, taskOutputInput);
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (!locked) return refusal("not-found", "Task not found");
       const task = await tx.task.findUniqueOrThrow({
         where: { id: taskId },
         select: { templateStep: { select: {
@@ -2956,7 +2953,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
         || isCanonicalBlindFindingsStep(task.templateStep);
       if (immutableReview && existing) {
-        return { error: `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`, code: 409 as const };
+        return refusal("conflict", `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`);
       }
       const output = await tx.taskStepOutput.upsert({
         where: { taskId },
@@ -2965,7 +2962,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return { output };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.output);
   });
   /**
@@ -2983,29 +2980,29 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, mergeTargetInput);
     const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return { error: "Task not found", code: 404 as const };
+      if (!locked) return refusal("not-found", "Task not found");
       const task = await loadIntegratorTask(tx, taskId);
       if (!task || !taskIsIntegratorStep(task)) {
-        return { error: "Task is not a mechanical merge step", code: 409 as const };
+        return refusal("conflict", "Task is not a mechanical merge step");
       }
       const stopped = await stopStateFor(tx, taskId);
-      if (!stopped) return { error: "Task is not in a merge stop state", code: 409 as const };
+      if (!stopped) return refusal("conflict", "Task is not in a merge stop state");
       if (stopped.stop.condition !== "target-unresolvable") {
-        return { error: `Merge target correction applies to target-unresolvable only, not ${stopped.stop.condition}`, code: 409 as const };
+        return refusal("conflict", `Merge target correction applies to target-unresolvable only, not ${stopped.stop.condition}`);
       }
-      if (!task.chainId) return { error: "Task is not part of a chain", code: 409 as const };
+      if (!task.chainId) return refusal("conflict", "Task is not part of a chain");
       const observed = await observedChainPullRequests(tx, task.projectId, task.chainId);
       if (observed.length === 0) {
-        return {
-          error: "This chain delivered no pull request; abandon it, or deliver the pull request by re-running the delivering step, after which resolution succeeds with no correction",
-          code: 409 as const,
-        };
+        return refusal(
+          "conflict",
+          "This chain delivered no pull request; abandon it, or deliver the pull request by re-running the delivering step, after which resolution succeeds with no correction",
+        );
       }
       if (!observed.includes(body.prNumber)) {
-        return {
-          error: `Pull request #${body.prNumber} is not among this chain's own delivered pull requests (${observed.join(", ")})`,
-          code: 409 as const,
-        };
+        return refusal(
+          "conflict",
+          `Pull request #${body.prNumber} is not among this chain's own delivered pull requests (${observed.join(", ")})`,
+        );
       }
       const priorCorrection = await latestTargetCorrection(tx, taskId);
       const activity = await tx.taskActivity.create({ data: {
@@ -3027,14 +3024,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       try {
         cardId = await requestConfirmationCard(tx, task, stopped.stop.stopId, new Date());
       } catch (error: unknown) {
-        if (isMergeConfirmationError(error)) {
-          return { error: error.message, code: 409 as const };
-        }
+        const rejected = refusalFor(error);
+        if (rejected) return rejected;
         throw error;
       }
       return { correction: { id: activity.id, prNumber: body.prNumber, observed, confirmationCardId: cardId } };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result.correction, 201);
   });
 
@@ -3091,11 +3087,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)
-        || isMergeConfirmationError(error)) return context.json({ error: error.message }, 409);
-      if (error instanceof Error && /(No matching|must be approve|must match|no executable)/i.test(error.message)) {
-        return context.json({ error: error.message }, 409);
-      }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return context.json({ duplicate: true, resumed: false });
       }
@@ -3114,11 +3105,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
-      if (isArchivedAssigneeError(error) || isArchivedTaskError(error) || isIntegratorStoppedError(error)
-        || isMergeConfirmationError(error)) return context.json({ error: error.message }, 409);
-      if (error instanceof Error && /(No matching|must be approve|no executable)/i.test(error.message)) {
-        return context.json({ error: error.message }, 409);
-      }
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         return context.json({ duplicate: true, resumed: false });
       }
@@ -3179,7 +3165,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       id.parse(context.req.param("messageId")),
       body.requestId,
     );
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     return context.json(result);
   });
 
@@ -3375,7 +3361,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     await reconcileDatabaseRuns(db, now, releaseChainLease);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
     const claimed = await claimRun(db, { body, claimantClass, now });
-    if (claimed && "error" in claimed) return context.json({ error: claimed.error }, 409);
+    if (claimed && "error" in claimed) {
+      if (typeof claimed.error !== "string") throw new TypeError("Run claim refusal has no message");
+      return refusalJson(context, refusal("conflict", claimed.error));
+    }
     return claimed ? context.json(claimed) : context.body(null, 204);
   });
 
@@ -3432,7 +3421,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     return started === null
       ? context.json({ ok: true })
-      : context.json(fenceRefusalResponse(started), 409);
+      : refusalJson(context, runFenceRefusal(fenceRefusalResponse(started)));
   });
 
   app.post("/runner/runs/:runId/heartbeat", async (context) => {
@@ -3481,8 +3470,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
     return waiting
-      ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-      : context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
+      ? refusalJson(context, refusal("conflict", "Run suspended for Inbox", { code: "WAITING_INBOX" }))
+      : refusalJson(context, runFenceRefusal(fenceRefusalResponse(await explainFenceRefusal(db, fence))));
   });
 
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
@@ -3499,7 +3488,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ...(body.branch === undefined ? {} : { branch: body.branch }),
       ...(body.baseSha === undefined ? {} : { baseSha: body.baseSha }),
     }));
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...settlement } = result;
     await releaseChainLease(releaseMergeLeaseTask);
     return context.json(settlement);
@@ -3537,7 +3526,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       && body.pushedBranch === salvageBranch
       && (run?.pushedBranch === null || run?.pushedBranch === body.pushedBranch);
     if (!live && !salvage) {
-      return context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
+      return refusalJson(context, runFenceRefusal(fenceRefusalResponse(await explainFenceRefusal(db, fence))));
     }
     const updated = await db.$transaction(async (tx) => {
       const ack = await tx.run.updateMany({
@@ -3562,8 +3551,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     return updated.count === 1 && updated.repair !== "already-started"
       ? context.json({ ok: true, replacementRepair: updated.repair })
       : updated.count === 1
-        ? context.json({ error: "Salvage is durable, but the replacement already started from its prior base" }, 409)
-      : context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
+        ? refusalJson(context, refusal("conflict", "Salvage is durable, but the replacement already started from its prior base"))
+        : refusalJson(context, runFenceRefusal(fenceRefusalResponse(await explainFenceRefusal(db, fence))));
   });
 
   // Cleanup is still runner-owned after the live lease is gone. This endpoint
@@ -3636,8 +3625,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (isFenceRefusalResponse(result)) {
       const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
       return waiting
-        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-        : context.json(result, 409);
+        ? refusalJson(context, refusal("conflict", "Run suspended for Inbox", { code: "WAITING_INBOX" }))
+        : refusalJson(context, runFenceRefusal(result));
     }
     // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
     // whose event was already stored still recomputes, which is what self-heals a
@@ -3701,7 +3690,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
     }));
     return isFenceRefusalResponse(result)
-      ? context.json(result, 409)
+      ? refusalJson(context, runFenceRefusal(result))
       : context.json(result, 201);
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
@@ -3870,11 +3859,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
       }) };
     }));
-    if (isFenceRefusalResponse(result)) return context.json(result, 409);
+    if (isFenceRefusalResponse(result)) return refusalJson(context, runFenceRefusal(result));
     if ("requestError" in result) return context.json({ error: result.requestError }, result.status);
     const { persisted } = result;
-    if (isFenceRefusalResponse(persisted)) return context.json(persisted, 409);
-    if (!persisted.ok) return context.json({ error: persisted.reason }, 409);
+    if (isFenceRefusalResponse(persisted)) return refusalJson(context, runFenceRefusal(persisted));
+    if (!persisted.ok) return refusalJson(context, refusal("conflict", persisted.reason));
     return context.json({ ...persisted.output, predecessorOutputs: persisted.predecessorOutputs });
   });
 
@@ -3996,12 +3985,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       body,
       claimantClass: principal.kind === "merge-executor" ? "merge-executor" : "runner",
     });
-    if ("kind" in result) {
-      if (result.kind === "principal") return context.json({ error: result.error }, 403);
-      return result.kind === "waiting-inbox"
-        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-        : context.json(fenceRefusalResponse(result.reason), 409);
-    }
+    if ("message" in result) return refusalJson(context, result);
     await releaseChainLease(result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
     // Nothing is deleted here, or anywhere else in this process. The runner
@@ -4106,14 +4090,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           } } } },
         },
       });
-      if (!run) return { error: "Run not found", code: 404 as const };
-      if (body.parkTask && !run.taskId) return { error: "Run has no Task to park", code: 409 as const };
+      if (!run) return refusal("not-found", "Run not found");
+      if (body.parkTask && !run.taskId) return refusal("conflict", "Run has no Task to park");
       const parkTarget = body.parkTask && run.taskId ? await lockTaskMutationRows(tx, run.taskId) : null;
-      if (body.parkTask && run.taskId && !parkTarget) return { error: "Task not found", code: 404 as const };
+      if (body.parkTask && run.taskId && !parkTarget) return refusal("not-found", "Task not found");
       if (parkTarget && parkTarget.archivedAt !== null) {
-        return { error: "Cannot park an archived task", code: 409 as const };
+        return refusal("conflict", "Cannot park an archived task");
       }
-      if (parkTarget?.status === TaskStatus.DONE) return { error: "Cannot park a completed task", code: 409 as const };
+      if (parkTarget?.status === TaskStatus.DONE) return refusal("conflict", "Cannot park a completed task");
       const parkTask = async () => {
         const task = parkTarget;
         if (!task) return;
@@ -4132,7 +4116,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       };
       if (run.cancelRequestId) {
         if (run.cancelRequestId !== body.requestId) {
-          return { error: `Run already has cancellation request ${run.cancelRequestId}`, code: 409 as const };
+          return refusal("conflict", `Run already has cancellation request ${run.cancelRequestId}`);
         }
         await parkTask();
         return {
@@ -4148,7 +4132,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         };
       }
       if (executionModeFor(run.task?.templateStep ?? null) === "mechanical") {
-        return { error: "Mechanical merge Runs cannot be cancelled after authorization", code: 409 as const };
+        return refusal("conflict", "Mechanical merge Runs cannot be cancelled after authorization");
       }
       if (!([RunStatus.QUEUED, ...activeRunStatuses] as RunStatus[]).includes(run.status)) {
         return {
@@ -4171,7 +4155,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           sessionTokenRevokedAt: now,
         },
       });
-      if (requested.count !== 1) return { error: "Run changed while cancellation was being requested", code: 409 as const };
+      if (requested.count !== 1) return refusal("conflict", "Run changed while cancellation was being requested");
       await parkTask();
       if (run.taskId) await tx.taskActivity.create({ data: {
         taskId: run.taskId,
@@ -4197,7 +4181,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         releaseMergeLeaseTask: null,
       };
     });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
+    if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...cancellation } = result;
     await releaseChainLease(releaseMergeLeaseTask);
     return context.json(cancellation);
@@ -4223,17 +4207,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (error instanceof SerializableTransactionExhaustedError) {
       return context.json({ error: "Transaction is busy; retry later" }, 503);
     }
-    if (isCompoundImplementationAssigneeError(error)) {
-      return context.json({ error: error.message, code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE }, 409);
-    }
-    if (isArchivedAssigneeError(error)) return context.json({ error: error.message }, 409);
+    const rejected = refusalFor(error);
+    if (rejected) return refusalJson(context, rejected);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      if (error.code === "P2025") return context.json({ error: "Resource not found" }, 404);
-      if (error.code === "P2002") return context.json({ error: "Unique constraint violated" }, 409);
+      if (error.code === "P2025") return refusalJson(context, refusal("not-found", "Resource not found"));
+      if (error.code === "P2002") return refusalJson(context, refusal("conflict", "Unique constraint violated"));
     }
     console.error(error);
     return context.json({ error: "Internal server error" }, 500);
   });
-  app.notFound((context) => context.json({ error: "Not found" }, 404));
+  app.notFound((context) => refusalJson(context, refusal("not-found", "Not found")));
   return app;
 };
