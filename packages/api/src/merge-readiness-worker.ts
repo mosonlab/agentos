@@ -22,8 +22,6 @@ import {
   defenseTriggers,
   enqueueTaskRun,
   isMergeReadinessStep,
-  lockChainRows,
-  lockTaskRow,
   parseRegressionVerdict,
   resolveChainTarget,
   resolutionTestTriggers,
@@ -32,6 +30,7 @@ import {
   type MergeRecoveryAttempt,
 } from "@agentos/db";
 
+import { lockTaskMutationRows } from "./task-write.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
 import { createGitHubReader, type GitHubReader } from "./github-read.js";
 import {
@@ -66,22 +65,6 @@ type RecoveryContext = {
   regressionTaskId: string;
   integratorTaskId: string;
   recoveryRunId: string;
-};
-
-const lockTaskMutationRows = async (
-  tx: Prisma.TransactionClient,
-  taskId: string,
-): Promise<void> => {
-  const identity = await tx.task.findUnique({
-    where: { id: taskId },
-    select: { projectId: true, chainId: true },
-  });
-  if (!identity) throw new Error(`Task ${taskId} no longer exists`);
-  if (identity.chainId) {
-    await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-  } else {
-    await lockTaskRow(tx, taskId);
-  }
 };
 
 const recoveryContext = (row: MergeRecoveryAttempt | null): RecoveryContext | null => {
