@@ -13,7 +13,6 @@ import {
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
-  Prisma,
   type PrismaClient,
   RunStatus,
   SessionExecutionStatus,
@@ -30,8 +29,8 @@ import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js"
 import { activeRunStatuses } from "./run-fence.js";
 import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
-import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
+import { isSerializationConflict, serializable } from "./transaction.js";
 
 class PinnedRunTargetError extends Error {
   constructor(readonly runId: string, targetBranch: string | null, implementationHeadSha: string) {
@@ -68,7 +67,7 @@ export type ClaimRunInput = {
  */
 export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
   const { body, claimantClass, now } = input;
-  const claimOnce = () => db.$transaction(async (tx) => {
+  return serializable(db, async (tx) => {
     // This is the shared half of the production deploy barrier. It is the
     // first statement in the claim transaction: an in-flight claim finishes
     // before a deploy can acquire the exclusive half, and claims arriving
@@ -501,24 +500,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     // answer this poll gives.
     if (isolated !== null) throw isolated;
     return null;
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
-  // Two runners claiming independent chains still touch the same Task pages
-  // through the `FOR UPDATE` chain mutex, and Serializable can abort either
-  // one on a read/write dependency it cannot order. Losing that race is not a
-  // claim failure -- the work is still queued -- so retry the whole
-  // transaction. Matching only P2034 missed the raw-statement half, which
-  // arrives as P2010 carrying SQLSTATE 40001, and that escaped as a 500.
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
-    try {
-      claimed = await claimOnce();
-      break;
-    } catch (error: unknown) {
-      if (!isSerializationConflict(error) || attempt === 6) throw error;
-      await serializationRetryDelay(attempt);
-    }
-  }
-  return claimed;
+  }, { attempts: 6 });
 };
 
 export type ClaimedRun = NonNullable<Awaited<ReturnType<typeof claimRun>>>;

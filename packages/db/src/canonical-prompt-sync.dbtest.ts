@@ -94,16 +94,61 @@ test("sync rolls the v1 Regression contract forward and preserves its template r
     include: { steps: { orderBy: { stepIndex: "asc" } } },
   });
   const oldPrompt = "Acquire before fetch and emit the v1 Regression contract.";
+  const parkedTaskIds: string[] = [];
   for (const template of templates) {
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
       data: { outputKind: "regression-verification", prompt: oldPrompt },
     });
+    const regressionIndex = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!.stepIndex;
+    const chainId = `parked-v1-${template.id}`;
+    for (const step of template.steps) {
+      const task = await prisma.task.create({ data: {
+        projectId: project.id,
+        templateId: template.id,
+        templateStepId: step.id,
+        name: `parked-v1-${template.name}-${step.stepIndex}`,
+        description: "parked v1 rollover compatibility fixture",
+        assigneeAgentId: step.assigneeAgentId,
+        assigneeType: step.assigneeType,
+        status: step.stepIndex < regressionIndex
+          ? TaskStatus.DONE
+          : step.stepIndex === regressionIndex
+            ? TaskStatus.BACKLOG
+            : TaskStatus.TODO,
+        chainId,
+        chainIndex: step.stepIndex,
+        chainLayer: step.layer,
+      } });
+      parkedTaskIds.push(task.id);
+    }
   }
+
+  const parkedBefore = await snapshotInstantiatedTasks(parkedTaskIds);
+  const activeTarget = await prisma.task.findFirstOrThrow({
+    where: { id: { in: parkedTaskIds }, status: TaskStatus.BACKLOG },
+    include: { assigneeAgent: { select: { model: true } } },
+  });
+  const activeRun = await prisma.run.create({ data: {
+    projectId: activeTarget.projectId,
+    taskId: activeTarget.id,
+    agentId: activeTarget.assigneeAgentId!,
+    runNumber: 1,
+    dedupeKey: `parked-v1-active:${activeTarget.id}`,
+    runner: "CODEX",
+    model: activeTarget.assigneeAgent!.model,
+    promptHash: "parked-v1-active",
+  } });
+
+  const refusedWhileActive = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.notEqual(refusedWhileActive.status, 0, refusedWhileActive.output);
+  assert.match(refusedWhileActive.output, /active or unparked unfinished tasks/u);
+  await prisma.run.delete({ where: { id: activeRun.id } });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.match(synced.output, /"createdCanonicalTemplates":2/u);
+  assert.equal(await snapshotInstantiatedTasks(parkedTaskIds), parkedBefore);
 
   for (const template of templates) {
     const legacyName = `${template.name}-legacy-pre-narrow-regression-lease-${template.id}`;

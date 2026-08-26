@@ -2,6 +2,8 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import type { PrismaClient } from "@agentos/db";
 
+import { activeRunStatuses } from "./run-fence.js";
+
 export type Principal =
   | { kind: "public" }
   | { kind: "operator" }
@@ -61,7 +63,7 @@ export const authenticate = async (
       sessionTokenRevokedAt: null,
       sessionTokenExpiresAt: { gt: now },
       leaseExpiresAt: { gt: now },
-        status: { in: ["CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX"] },
+      status: { in: activeRunStatuses },
     },
     select: { id: true, leaseGeneration: true },
   });

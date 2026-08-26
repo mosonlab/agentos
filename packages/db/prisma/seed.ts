@@ -1,4 +1,4 @@
-import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, TaskStatus } from "@prisma/client";
+import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, RunStatus, TaskStatus } from "@prisma/client";
 
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
@@ -67,6 +67,48 @@ const assertCurrentCanonicalGraph = (
       throw new Error(`Canonical template ${templateName} has structural drift: step ${step.stepIndex} differs from the canonical source in ${differences.join(", ")}`);
     }
   }
+};
+
+const ACTIVE_ROLLOVER_RUN_STATUSES = [
+  RunStatus.QUEUED,
+  RunStatus.CLAIMED,
+  RunStatus.PROVISIONING,
+  RunStatus.RUNNING,
+  RunStatus.WAITING_INBOX,
+] as const;
+
+/**
+ * A parked chain is safe to preserve under a legacy template name: the
+ * operator-owned BACKLOG task is its explicit stop, later TODO tasks remain
+ * dormant, and every task keeps the same template-step foreign key. An active
+ * Run or unfinished work outside such a chain still blocks the rollover.
+ */
+const templateRolloverBlockerCount = async (
+  db: Pick<PrismaClient, "task">,
+  templateId: string,
+): Promise<number> => {
+  const unfinished = await db.task.findMany({
+    where: { templateId, archivedAt: null, status: { not: TaskStatus.DONE } },
+    select: {
+      chainId: true,
+      status: true,
+      _count: {
+        select: {
+          runs: { where: { status: { in: [...ACTIVE_ROLLOVER_RUN_STATUSES] } } },
+        },
+      },
+    },
+  });
+  const parkedChainIds = new Set(
+    unfinished
+      .filter((task) => task.status === TaskStatus.BACKLOG && task.chainId !== null)
+      .map((task) => task.chainId!),
+  );
+  return unfinished.filter((task) => (
+    task._count.runs > 0
+    || (task.status !== TaskStatus.BACKLOG
+      && (task.chainId === null || !parkedChainIds.has(task.chainId)))
+  )).length;
 };
 
 const main = async (): Promise<void> => {
@@ -198,11 +240,9 @@ const main = async (): Promise<void> => {
       && existing.steps[12]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
       && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
     if (existing && (isRegressionFirstThirteenStepTemplate || legacyCanonical)) {
-      const unfinishedTasks = await tx.task.count({
-        where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
-      });
-      if (unfinishedTasks > 0) {
-        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      const blockers = await templateRolloverBlockerCount(tx, existing.id);
+      if (blockers > 0) {
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
       }
       if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
         || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
@@ -295,11 +335,9 @@ const main = async (): Promise<void> => {
     : null;
   const legacyDirect = historicalDirect && legacyDirectMarker !== null;
   if (legacyDirect) {
-    const unfinishedTasks = await prisma.task.count({
-      where: { templateId: historicalDirect.id, archivedAt: null, status: { not: TaskStatus.DONE } },
-    });
-    if (unfinishedTasks > 0) {
-      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+    const blockers = await templateRolloverBlockerCount(prisma, historicalDirect.id);
+    if (blockers > 0) {
+      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
     }
     if (historicalDirect.webhookSecretId !== null || historicalDirect.webhookRepoId !== null
       || historicalDirect.webhookPayloadMapping !== null || historicalDirect.webhookPausedAt !== null

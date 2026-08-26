@@ -1,16 +1,21 @@
-import { appendFile, chmod, copyFile, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
 import type { ClaimedTask } from "./api.js";
-import { defaultSessionConfigBaselineRoot, runnerProxyEnvironment, type RunnerConfig, type RunnerKind } from "./config.js";
+import { RUNNER_DEFINITIONS } from "./adapters.js";
+import { workspaceEnvironment } from "./adapters/environment.js";
+import type { SessionConfigOptions } from "./adapters/session-config.js";
+import { defaultSessionConfigBaselineRoot, type RunnerConfig, type RunnerKind } from "./config.js";
 import { materializeWorkspaceDependencies, type DependencyCacheOptions } from "./dependency-cache.js";
 import { runCommand, type CommandOptions } from "./exec.js";
 import { type RetryOptions } from "./network-retry.js";
 import {
   ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
 } from "./repo-mirror.js";
+
+export { workspaceEnvironment } from "./adapters/environment.js";
 
 export type Workspace = {
   path: string;
@@ -61,27 +66,6 @@ const command: WorkspaceCommandExecutor = (
   env: NodeJS.ProcessEnv,
   options: CommandOptions = {},
 ): Promise<string> => runCommand(config.runAsPrefix, executable, args, cwd, env, options);
-
-export const workspaceEnvironment = (
-  config: Pick<RunnerConfig, "path" | "home" | "runAsPrefix">
-    & Partial<Pick<RunnerConfig, "gateServer">>
-    & Partial<Pick<RunnerConfig, "proxyEnvironment">>,
-): NodeJS.ProcessEnv => ({
-  PATH: config.path,
-  HOME: config.home,
-  LANG: "C.UTF-8",
-  GIT_TERMINAL_PROMPT: "0",
-  ...(config.gateServer ? { AGENTOS_GATE_SERVER: config.gateServer } : {}),
-  ...(config.proxyEnvironment ?? runnerProxyEnvironment()),
-  // macOS Keychain lookups (claude CLI auth) fail without the login identity.
-  // Only the daemon's own identity is meant here: under a run-as prefix the
-  // child is a different account, and telling it USER=<daemon owner> while
-  // HOME is the launched account's home makes the CLI look up a Keychain and a
-  // git identity for a user it is not running as. Leave the launcher to set it.
-  ...(config.runAsPrefix.length === 0 && process.env.USER
-    ? { USER: process.env.USER, LOGNAME: process.env.LOGNAME ?? process.env.USER }
-    : {}),
-});
 
 export type AgentScratch = {
   /** The disposable directory both runner roots live in; removed when the run ends. */
@@ -193,117 +177,12 @@ export const cleanupAgentScratch = async (
   await rm(scratch.base, { recursive: true, force: true });
 };
 
-const codexBaselineFile = (config: RunnerConfig): string =>
-  join(config.sessionConfigBaselineRoot ?? sessionConfigBaselineRoot(), "codex", "config.toml");
-
-const sessionConfigOwnerUid = async (config: RunnerConfig, cwd: string): Promise<number> => {
-  if (config.runAsPrefix.length > 0) {
-    const uidText = await command(config, "/usr/bin/id", ["-u"], cwd, workspaceEnvironment(config));
-    const uid = Number(uidText);
-    if (!Number.isSafeInteger(uid) || uid < 0) throw new Error(`run-as launcher returned an invalid uid: ${uidText}`);
-    return uid;
-  }
-
-  const uid = process.getuid?.();
-  if (uid === undefined) throw new Error("runner process uid is unavailable");
-  return uid;
-};
-
-const validateSessionConfigRoot = async (configRoot: string, expectedOwnerUid: number): Promise<void> => {
-  const info = await lstat(configRoot);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new Error(`created path is not a real directory: ${configRoot}`);
-  }
-  if (info.uid !== expectedOwnerUid) {
-    throw new Error(`created directory ${configRoot} has uid ${info.uid}, expected ${expectedOwnerUid}`);
-  }
-};
-
-/**
- * Provision only the configuration a CLI is allowed to see. Codex receives the
- * repository baseline plus host auth; PI receives host auth only, deliberately
- * excluding host settings and every other discovery surface. Claude has no
- * config-home provisioner because its authentication remains in Keychain.
- */
 export const provisionSessionConfig = async (
   config: RunnerConfig,
   runner: RunnerKind,
   scratch: AgentScratch,
-  options: { reuse?: boolean } = {},
-): Promise<void> => {
-  if (runner === "CLAUDE") return;
-  const runnerLabel = runner === "CODEX" ? "Codex" : "PI";
-  if (options.reuse) {
-    try {
-      const info = await lstat(scratch.configRoot);
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("existing session config root is not a real directory");
-      return;
-    } catch (error: unknown) {
-      throw new Error(`Unable to reuse ${runnerLabel} session CLI config root ${scratch.configRoot}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-    }
-  }
-
-  const baseline = codexBaselineFile(config);
-  const configParent = dirname(scratch.configRoot);
-  try {
-    await mkdir(configParent, { mode: 0o711 });
-    await chmod(configParent, 0o711);
-    const expectedOwnerUid = await sessionConfigOwnerUid(config, configParent);
-    if (config.runAsPrefix.length > 0) {
-      // Open the daemon-owned parent only for the one operation that needs it:
-      // creation by the target uid. A failed mkdir must stop provisioning, and
-      // the parent is made non-writable again before any baseline or auth copy.
-      await chmod(configParent, 0o733);
-      try {
-        await command(config, "/bin/mkdir", ["-m", "700", scratch.configRoot], configParent, workspaceEnvironment(config));
-      } finally {
-        await chmod(configParent, 0o711);
-      }
-    } else {
-      await mkdir(scratch.configRoot, { mode: 0o700 });
-      await chmod(scratch.configRoot, 0o700);
-    }
-
-    await validateSessionConfigRoot(scratch.configRoot, expectedOwnerUid);
-    if (runner === "CODEX") {
-      if (config.runAsPrefix.length > 0) {
-        await command(config, "/bin/cp", [baseline, join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
-        await command(config, "/bin/chmod", ["600", join(scratch.configRoot, "config.toml")], configParent, workspaceEnvironment(config));
-      } else {
-        await copyFile(baseline, join(scratch.configRoot, "config.toml"));
-        await chmod(join(scratch.configRoot, "config.toml"), 0o600);
-      }
-    }
-  } catch (error: unknown) {
-    await chmod(configParent, 0o711).catch(() => undefined);
-    const sourceDescription = runner === "CODEX" ? ` from baseline ${baseline}` : "";
-    const createFailure = runner === "CODEX"
-      ? "Unable to create session CLI config root"
-      : "Unable to create PI session CLI config root";
-    throw new Error(`${createFailure} ${scratch.configRoot}${sourceDescription}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  }
-
-  const source = runner === "CODEX"
-    ? join(config.home, ".codex", "auth.json")
-    : join(config.home, ".pi", "agent", "auth.json");
-  const destination = join(scratch.configRoot, "auth.json");
-  try {
-    if (config.runAsPrefix.length > 0) {
-      await command(config, "/bin/cp", [source, destination], configParent, workspaceEnvironment(config));
-      await command(config, "/bin/chmod", ["600", destination], configParent, workspaceEnvironment(config));
-    } else {
-      await copyFile(source, destination);
-      await chmod(destination, 0o600);
-    }
-  } catch (error: unknown) {
-    throw new Error(`Unable to establish ${runnerLabel} authentication in ${scratch.configRoot} from ${source}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  } finally {
-    // The target account needed write access only long enough to create its
-    // own 0700 root. Afterwards other runner accounts may traverse the
-    // session-specific parent but cannot add, replace, or enumerate entries.
-    await chmod(configParent, 0o711);
-  }
-};
+  options: SessionConfigOptions = {},
+): Promise<void> => RUNNER_DEFINITIONS[runner].provisionSessionConfig(config, scratch, options);
 
 export const provisionWorkspace = async (
   config: RunnerConfig,

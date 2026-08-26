@@ -10,6 +10,13 @@ import {
 } from "@agentos/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
+import {
+  type FenceRefusalResponse,
+  fencedRunWhere,
+  isFenceRefusalResponse,
+  type RunFence,
+  withFencedRun,
+} from "./run-fence.js";
 
 export const defaultInboxResumeWindowMs = 7 * 24 * 60 * 60 * 1_000;
 
@@ -27,6 +34,16 @@ export type SupersedeInboxMessageResult =
   | { closed: true; duplicate: false; requestId: string }
   | { closed: false; duplicate: true; requestId: string }
   | { error: string; code: 404 | 409 };
+
+export class InboxRunFenceRefusal extends Error {
+  readonly refusal: FenceRefusalResponse;
+
+  constructor(refusal: FenceRefusalResponse) {
+    super(`Run is not resumable: ${refusal.reason}`);
+    this.name = "InboxRunFenceRefusal";
+    this.refusal = refusal;
+  }
+}
 
 /**
  * Closes one historical task-linked Inbox message after the operator has
@@ -112,21 +129,23 @@ export const supersedeTaskInboxMessage = async (
 }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 
 /** Creates the durable outbox item and releases the Run lease in one commit. */
-export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, now = new Date()) =>
-  db.$transaction(async (tx) => {
+export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, now = new Date()) => {
+  const fence: RunFence = {
+    runId: input.runId,
+    fencingToken: input.fencingToken,
+    at: now,
+    statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING],
+  };
+  const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+    id: true,
+    agentId: true,
+    taskId: true,
+    goalId: true,
+    session: { select: { id: true, providerConversationId: true } },
+  }, async (run) => {
     const resumableUntil = input.resumableUntil === undefined
       ? new Date(now.getTime() + defaultInboxResumeWindowMs)
       : input.resumableUntil;
-    const run = await tx.run.findFirst({
-      where: {
-        id: input.runId,
-        fencingToken: input.fencingToken,
-        cancelRequestedAt: null,
-        leaseExpiresAt: { gt: now },
-        status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
-      },
-      include: { session: true },
-    });
     if (!run?.session?.providerConversationId) throw new Error("Run is not resumable: provider conversation ID is unavailable");
     const thread = await tx.inboxThread.upsert({
       where: { channel_externalChatId_sessionId: { channel: "FEISHU", externalChatId: input.chatId, sessionId: run.session.id } },
@@ -147,12 +166,7 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
       deliveryStatus: InboxDeliveryStatus.PENDING,
     } });
     const suspended = await tx.run.updateMany({
-      where: {
-        id: run.id,
-        fencingToken: input.fencingToken,
-        cancelRequestedAt: null,
-        status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING] },
-      },
+      where: fencedRunWhere(fence),
       data: {
         status: RunStatus.WAITING_INBOX,
         leaseExpiresAt: null,
@@ -176,4 +190,7 @@ export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, 
       metadata: { inboxMessageId: question.id },
     } });
     return question;
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  if (isFenceRefusalResponse(result)) throw new InboxRunFenceRefusal(result);
+  return result;
+};

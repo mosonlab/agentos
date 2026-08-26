@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { Prisma, PrismaClient } from "@agentos/db";
+
 import { authenticate, mergeExecutorTokenIsDistinct, principalMayAccess } from "./auth.js";
+import { activeRunStatuses } from "./run-fence.js";
 
 const withEnv = async (env: Record<string, string | undefined>, body: () => Promise<void> | void): Promise<void> => {
   const prior = Object.keys(env).map((key) => [key, process.env[key]] as const);
@@ -56,4 +59,20 @@ test("the executor speaks the runner protocol and nothing else", () => {
   assert.equal(principalMayAccess(executor, "/runner/runs/abc/complete"), true);
   assert.equal(principalMayAccess(executor, "/tasks"), false);
   assert.equal(principalMayAccess(executor, "/session/runs/abc/output"), false);
+});
+
+test("session authentication uses the run-fence live status set", async () => {
+  await withEnv({ OPERATOR_TOKEN: "op", RUNNER_TOKEN: "run", MERGE_EXECUTOR_TOKEN: "exec" }, async () => {
+    let where: Prisma.RunWhereInput | undefined;
+    const sessionDb = { run: { findFirst: async (input: { where: Prisma.RunWhereInput }) => {
+      where = input.where;
+      return { id: "run-1", leaseGeneration: 3 };
+    } } } as unknown as PrismaClient;
+
+    assert.deepEqual(
+      await authenticate(sessionDb, "Bearer agos_session_current", new Date("2026-08-26T12:00:00.000Z")),
+      { kind: "session", runId: "run-1", leaseGeneration: 3 },
+    );
+    assert.equal((where?.status as { in: unknown }).in, activeRunStatuses);
+  });
 });

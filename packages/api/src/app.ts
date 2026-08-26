@@ -5,7 +5,6 @@ import {
   AssigneeType,
   agentArchiveBlocker,
   applyInboxDecision,
-  asJsonObject,
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
@@ -56,7 +55,6 @@ import {
   runOwnsMergeOutcome,
   INTEGRATOR_AGENT_NAME,
   MERGE_INTEGRATOR_KIND,
-  MERGE_TAIL_KIND,
   latestTargetCorrection,
   loadIntegratorTask,
   observedChainPullRequests,
@@ -80,7 +78,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, chainDisplayByTask, etagFor, etagMatches, repairBinding, serializeUsageCost, type RepairBinding } from "./board.js";
+import { etagFor, etagMatches, readBoard, readTaskList, serializeUsageCost, type TaskReadScope } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
@@ -103,12 +101,10 @@ import {
   readStoredCliAvailability,
   storeCliAvailability,
 } from "./runner-cli-availability.js";
-import { runRunnerAvailabilityTransaction } from "./runner-availability-transaction.js";
 import {
   chainKey,
   chainProgress,
   chainStartDecisions,
-  type ChainProgress,
   chainProgressByChain,
   positions,
   blockingPredecessor,
@@ -127,12 +123,25 @@ import {
   acknowledgeReclaimSalvage, publishReclaimIntents, recordReclaimOutcomes, repairReplacementAfterSalvage,
 } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
-import { activeRunStatuses, explainFenceRefusal, fencedRunWhere, type RunFence } from "./run-fence.js";
-import { supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
+import {
+  activeRunStatuses,
+  explainFenceRefusal,
+  fenceRefusalResponse,
+  fencedRunWhere,
+  isFenceRefusalResponse,
+  type RunFence,
+  withFencedRun,
+} from "./run-fence.js";
+import { InboxRunFenceRefusal, supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
+import {
+  readCommitted,
+  serializable,
+  SerializableTransactionExhaustedError,
+} from "./transaction.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
@@ -711,22 +720,6 @@ const inboxCloseInput = z.object({
 const readJson = async <T>(request: Request, schema: z.ZodType<T>): Promise<T> =>
   schema.parse(await request.json());
 
-/** The `chainProgress` shape as `GET /tasks` serialises it — the chain module's
- *  progress plus the position spec §5.2 requires the list response to carry. */
-type ChainProgressWire = ChainProgress & { position: number | null };
-/** The columns `chainProgressLookup` reads, which both `GET /tasks` response
- *  shapes select. Structural, so neither Prisma payload type leaks into it. */
-type ChainSubject = {
-  id: string;
-  projectId: string;
-  chainId: string | null;
-  chainIndex: number | null;
-  chainLayer: number | null;
-  status: TaskStatus;
-  name: string;
-  templateStep: { name: string } | null;
-};
-
 /**
  * A JSON response carrying a validator, so a poll that changed nothing costs a
  * header exchange instead of a payload.
@@ -1167,9 +1160,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
     } catch (error: unknown) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
-        return context.json({ error: "Webhook instantiation is busy; retry later" }, 503);
-      }
       if (isTemplateInputError(error)) return context.json({ error: error.message }, 400);
       throw error;
     }
@@ -1460,7 +1450,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/agents/:agentId/archive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const now = new Date();
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockAgentRow(tx, agentId);
       if (!locked) return { error: "Agent not found", code: 404 as const };
       const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -1468,7 +1458,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const blocker = await agentArchiveBlocker(tx, agentId);
       if (blocker) return { error: blocker, code: 409 as const };
       return { agent: await tx.agent.update({ where: { id: agentId }, data: { archivedAt: now } }) };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
@@ -1823,7 +1813,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/goals/:goalId/definition-of-done", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const body = await readJson(context.req.raw, definitionItemText);
-    const result = await db.$transaction(async (tx) => {
+    const result = await serializable(db, async (tx) => {
       const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
       const last = await tx.goalDefinitionItem.findFirst({ where: { goalId }, orderBy: { itemIndex: "desc" } });
       const item = await tx.goalDefinitionItem.create({ data: { goalId, itemIndex: (last?.itemIndex ?? -1) + 1, text: body.text } });
@@ -1831,14 +1821,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await tx.goal.update({ where: { id: goalId }, data: { status: GoalStatus.ACTIVE, endedAt: null } });
       }
       return item;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return context.json(result, 201);
   });
   app.patch("/goals/:goalId/definition-of-done/:itemId", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const itemId = id.parse(context.req.param("itemId"));
     const body = await readJson(context.req.raw, definitionItemPatch);
-    const result = await db.$transaction(async (tx) => {
+    const result = await serializable(db, async (tx) => {
       const existing = await tx.goalDefinitionItem.findFirst({ where: { id: itemId, goalId } });
       if (!existing) return null;
       const item = await tx.goalDefinitionItem.update({ where: { id: itemId }, data: withoutUndefined(body) });
@@ -1858,13 +1848,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
       }
       return item;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return result ? context.json(result) : context.json({ error: "Definition of Done item not found" }, 404);
   });
   app.delete("/goals/:goalId/definition-of-done/:itemId", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const itemId = id.parse(context.req.param("itemId"));
-    const deleted = await db.$transaction(async (tx) => {
+    const deleted = await serializable(db, async (tx) => {
       const result = await tx.goalDefinitionItem.deleteMany({ where: { id: itemId, goalId } });
       if (result.count !== 1) return false;
       const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
@@ -1879,7 +1869,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
       }
       return true;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return deleted ? context.body(null, 204) : context.json({ error: "Definition of Done item not found" }, 404);
   });
 
@@ -2180,248 +2170,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (archived !== "false" && archived !== "true" && archived !== "all") {
       return context.json({ error: "archived must be false, true, or all" }, 400);
     }
-    // `view=board` is the Tasks board saying which fields it will actually
-    // render (packages/api/src/board.ts). It is a projection of this same list,
-    // not a second endpoint, so the two shapes cannot drift apart.
     const view = context.req.query("view") ?? "full";
     if (view !== "full" && view !== "board") {
       return context.json({ error: "view must be full or board" }, 400);
     }
-    const board = view === "board";
-    // Archived tasks are finished work; a board and a per-project count that
-    // keep growing after Archive All are the bug, not the fix. `all` is the
-    // escape hatch for anyone who needs the old, archived-inclusive numbers.
-    const archivedFilter = archived === "false" ? { archivedAt: null }
-      : archived === "true" ? { archivedAt: { not: null } }
-      : {};
-    const where = { ...(projectId ? { projectId } : {}), ...archivedFilter };
-    const orderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
-
-    // `chainProgress` / `recurringLastFiredAt` / `position` cost two extra
-    // queries over the whole task table, and `Projects.tsx` polls this endpoint
-    // globally every 2.5 s purely to count tasks per project — it renders none
-    // of them. `?enrich=false` lets that caller stop paying for it.
-    //
-    // Opt-out rather than "only when projectId is present": the global call is
-    // still *correct* (grouping is keyed by `(projectId, chainId)`, so two
-    // projects sharing a chainId never read each other's progress), and silently
-    // dropping the fields from every global response would delete that
-    // guarantee's only coverage along with the cost.
-    //
-    // `view=board` is not subject to it: the board card renders `chainProgress`,
-    // so a board response without it would be a projection that dropped a field
-    // its only caller reads.
-    const enrich = board || (context.req.query("enrich") ?? "true") !== "false";
-
-    /**
-     * A `task -> chainProgress` lookup for one page of rows.
-     *
-     * Progress must count *all* the chain's rows, including archived ones, so it
-     * cannot be computed from the rows handed in. One extra scoped query,
-     * grouped in memory — two queries per request regardless of how many tasks
-     * come back. Shared by both response shapes, so the board card and the full
-     * row can never report different numbers for the same task.
-     *
-     * `chainIndex: { not: null }` matches `GET /tasks/:id/chain`, which treats a
-     * null-index row as its own one-row chain. Without it a single broken row
-     * inflates `total` and shifts `position` for every real sibling on the board
-     * while its own detail page still reads `1/1` — the same rows, two answers.
-     */
-    const chainProgressLookup = async (rows: ChainSubject[]): Promise<(task: ChainSubject) => ChainProgressWire | null> => {
-      const chainIds = !enrich ? [] : [...new Set(rows
-        .filter((task) => task.chainIndex !== null)
-        .map((task) => task.chainId)
-        .filter((value): value is string => value !== null))];
-      const chainRows = chainIds.length === 0 ? [] : await db.task.findMany({
-        where: { chainId: { in: chainIds }, chainIndex: { not: null }, ...(projectId ? { projectId } : {}) },
-        select: {
-          id: true, projectId: true, chainId: true, chainIndex: true, status: true,
-          chainLayer: true, name: true, archivedAt: true, templateStep: { select: { name: true } },
-        },
-        orderBy: { chainIndex: "asc" },
-      });
-      const progressByChain = chainProgressByChain(chainRows);
-      const positionsByChain = new Map<string, Map<string, number>>();
-      for (const row of chainRows) {
-        if (!row.chainId) continue;
-        const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
-        if (positionsByChain.has(key)) continue;
-        positionsByChain.set(key, positions(chainRows.filter((candidate) => (
-          candidate.chainId !== null && chainKey({ projectId: candidate.projectId, chainId: candidate.chainId }) === key
-        ))));
-      }
-      return (task) => {
-        if (!enrich || !task.chainId) return null;
-        // The same one-row-chain rule the detail route applies (E1), so a broken
-        // row reports `n/1` in both places instead of `null` here and `1/1` there.
-        if (task.chainIndex === null) {
-          return {
-            chainId: task.chainId,
-            done: task.status === TaskStatus.DONE ? 1 : 0,
-            total: 1,
-            activeStepName: task.templateStep?.name ?? task.name,
-            activeStatus: task.status.toLowerCase(),
-            currentLayer: 1,
-            layerCount: 1,
-            position: 1,
-          };
-        }
-        const key = chainKey({ projectId: task.projectId, chainId: task.chainId });
-        const progress = progressByChain.get(key) ?? null;
-        return progress ? { ...progress, position: positionsByChain.get(key)?.get(task.id) ?? null } : null;
-      };
-    };
-
-    if (board) {
-      // The projection narrows the *query* too, not only the response: the full
-      // shape drags every Run and Session column out of the database only to
-      // throw 95% of them away in the serializer.
-      const rows = await db.task.findMany({
-        where,
-        orderBy,
-        select: {
-          id: true, projectId: true, name: true, status: true, failureReason: true,
-          scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
-          templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
-          dispatchAfterTaskId: true,
-          assigneeAgent: { select: { id: true, title: true, model: true } },
-          templateStep: { select: { name: true } },
-          runs: {
-            orderBy: { runNumber: "desc" },
-            select: {
-              id: true, runNumber: true, status: true, model: true, subagentModel: true,
-              session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true, startedAt: true, endedAt: true } },
-            },
-          },
-          // §SF-1: the card's run line reads the merge outcome, not only the
-          // protocol status, so a stopped mechanical merge is not shown as Done.
-          stepOutput: { select: { kind: true, body: true, runId: true } },
-        },
-      });
-      const progressFor = await chainProgressLookup(rows);
-      const displayByTask = chainDisplayByTask(rows);
-      // A bound first task is the only board row that can carry this marker.
-      // Resolve all page bindings in one batch, and skip the query entirely for
-      // the overwhelmingly common unbound page. The projection remains pure:
-      // it receives the resolved predecessor rather than reaching into Prisma.
-      const predecessorIds = [...new Set(rows
-        .map((row) => row.dispatchAfterTaskId)
-        .filter((value): value is string => typeof value === "string" && value.length > 0))];
-      const predecessorById = new Map<string, { id: string; name: string; status: TaskStatus }>();
-      if (predecessorIds.length > 0) {
-        const predecessors = await db.task.findMany({
-          where: { id: { in: predecessorIds } },
-          select: { id: true, name: true, status: true },
-        });
-        for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
-      }
-      // A merge-tail repair task is chain-detached by design, so nothing on its
-      // own row says which chain it repairs — the board drew it as a loose card
-      // beside the work that produced it. Its `repairAttempt` marker names the
-      // regression task, and that task's chain is where the card belongs. One
-      // extra query over the page's chain-less rows, skipped entirely when a
-      // page has none, and a second only when a repair card is actually on it.
-      const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
-      const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
-        where: {
-          taskId: { in: detachedIds },
-          actorType: "control-plane",
-          metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
-        },
-        select: { taskId: true, metadata: true },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      });
-      const repairByTask = new Map<string, RepairBinding>();
-      if (repairMarkers.length > 0) {
-        const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
-          const value = asJsonObject(marker.metadata)?.regressionTaskId;
-          return typeof value === "string" ? [value] : [];
-        }))];
-        const regressionTasks = await db.task.findMany({
-          where: { id: { in: regressionIds }, ...(projectId ? { projectId } : {}) },
-          select: { id: true, projectId: true, chainId: true },
-        });
-        const chainOfTask = new Map<string, { key: string; chainId: string }>();
-        for (const task of regressionTasks) {
-          if (task.chainId === null) continue;
-          chainOfTask.set(task.id, { key: chainKey({ projectId: task.projectId, chainId: task.chainId }), chainId: task.chainId });
-        }
-        // The chain's display name is already derived once for this page. Keyed
-        // by `chainKey` rather than `chainId` for the same reason the page's own
-        // grouping is: a global board carries several projects, and two of them
-        // may hold the same chain id. A chain with no step of its own on the
-        // page has no name here, and the card falls back to naming it by id
-        // exactly as a chain step's card does.
-        const chainNameByKey = new Map<string, string | null>();
-        for (const row of rows) {
-          if (row.chainId === null) continue;
-          const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
-          if (chainNameByKey.has(key)) continue;
-          chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
-        }
-        const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
-          const chain = chainOfTask.get(taskId);
-          return chain === undefined ? null : { chainId: chain.chainId, chainName: chainNameByKey.get(chain.key) ?? null };
-        };
-        for (const marker of repairMarkers) {
-          if (repairByTask.has(marker.taskId)) continue;
-          const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
-          if (binding !== null) repairByTask.set(marker.taskId, binding);
-        }
-      }
-      return validated(context, rows.map((row) => boardCard(
-        row,
-        progressFor(row),
-        displayByTask.get(row.id),
-        row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
-        repairByTask.get(row.id) ?? null,
-      )));
-    }
-
-    const tasks = await db.task.findMany({
-      where,
-      orderBy,
-      include: {
-        assigneeAgent: true,
-        repo: true,
-        templateStep: {
-          select: {
-            name: true,
-            stepIndex: true,
-            outputKind: true,
-            taskTemplate: { select: { name: true } },
-          },
-        },
-        // `Run.output` is forensic bulk — up to 500k per run — and no client of
-        // this list reads it. Omitted here and on the task detail below so that
-        // recording a run's tail cannot inflate the responses the board polls.
-        runs: {
-          orderBy: { runNumber: "desc" }, take: 1, omit: { output: true },
-          include: { session: true },
-        },
-      },
-    });
-    const progressFor = await chainProgressLookup(tasks);
-
-    // The Automations page needs `Last run` on a *collapsed* row, and a poll
-    // that only mounts while a row is expanded can never supply it. Skipped
-    // entirely on a board with no automations.
-    const cronIds = !enrich ? [] : tasks.filter((task) => task.scheduleKind === ScheduleKind.CRON).map((task) => task.id);
-    const firedGroups = cronIds.length === 0 ? [] : await db.task.groupBy({
-      by: ["recurringSourceTaskId"],
-      where: { recurringSourceTaskId: { in: cronIds } },
-      _max: { createdAt: true },
-      _count: { _all: true },
-    });
-    const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
-
-    return validated(context, tasks.map((task) => ({
-      ...task,
-      executionOwner: chainExecutionOwner(task),
-      chainProgress: progressFor(task),
-      recurringLastFiredAt: firedByDefinition.get(task.id)?._max.createdAt ?? null,
-      recurringFireCount: firedByDefinition.get(task.id)?._count._all ?? 0,
-    })));
+    const scope: TaskReadScope = { ...(projectId ? { projectId } : {}), archived };
+    const payload = view === "board"
+      ? await readBoard(db, scope)
+      : await readTaskList(db, scope, { enrich: (context.req.query("enrich") ?? "true") !== "false" });
+    return validated(context, payload);
   });
   app.post("/projects/:projectId/tasks", async (context) => {
     const body = await readJson(context.req.raw, taskInput);
@@ -2755,12 +2512,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.delete("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const deleted = await db.$transaction(async (tx) => {
+    const deleted = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return false;
       await tx.task.delete({ where: { id: taskId } });
       return true;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if (!deleted) return context.json({ error: "Task not found" }, 404);
     return context.body(null, 204);
   });
@@ -2883,7 +2640,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     if (!identity) return context.json({ error: "Task not found" }, 404);
     try {
-      const result = await db.$transaction(async (tx) => {
+      const result = await readCommitted(db, async (tx) => {
         if (!await lockTaskMutationRows(tx, taskId)) {
           return { error: "Task not found", code: 404 as const };
         }
@@ -3001,7 +2758,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             : "Started task manually",
         } });
         return { run };
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      });
       if ("error" in result) return context.json({ error: result.error }, result.code);
       return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
     } catch (error: unknown) {
@@ -3017,7 +2774,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/archive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (await hasActiveRun(tx, taskId)) {
@@ -3033,7 +2790,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: new Date() } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task archived" } });
       return { task };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.task);
   });
@@ -3049,7 +2806,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // by a runner or shown as work in progress, so an archived assignee cannot
     // strand them — and refusing them would make an agent's archival delete the
     // operator's ability to read their own history back onto the board.
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (locked.archivedAt === null) {
@@ -3062,13 +2819,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
       return { task };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.task);
   });
   app.post("/projects/:projectId/tasks/archive-done", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const candidates = await tx.task.findMany({
         where: { projectId, status: TaskStatus.DONE, archivedAt: null },
         select: { id: true, chainId: true },
@@ -3103,7 +2860,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         })) });
       }
       return { archived: archive.length, skipped };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     return context.json(result);
   });
   app.post("/tasks/:taskId/schedule/pause", async (context) => {
@@ -3185,7 +2942,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.put("/tasks/:taskId/output", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskOutputInput);
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       const task = await tx.task.findUniqueOrThrow({
@@ -3208,7 +2965,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
       });
       return { output };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.output);
   });
@@ -3225,7 +2982,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/merge-target", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, mergeTargetInput);
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       const task = await loadIntegratorTask(tx, taskId);
@@ -3277,7 +3034,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         throw error;
       }
       return { correction: { id: activity.id, prNumber: body.prNumber, observed, confirmationCardId: cardId } };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.correction, 201);
   });
@@ -3430,7 +3187,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
     const now = new Date();
-    const state = await runRunnerAvailabilityTransaction(db, async (tx) => {
+    // Runner availability is global backend state written by every daemon.
+    // Keep its Serializable guarantee and absorb two short write conflicts.
+    const state = await serializable(db, async (tx) => {
       const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
       const previousAvailability = readStoredCliAvailability(previous?.capabilities);
       const availability = nextStoredCliAvailability(body, previousAvailability, now);
@@ -3493,7 +3252,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
       }
       return available;
-    });
+    }, { attempts: 3 });
     const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
     const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
     const revalidatePreflight = body.available
@@ -3674,7 +3433,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     return started === null
       ? context.json({ ok: true })
-      : context.json({ error: "Stale fencing token", reason: started }, 409);
+      : context.json(fenceRefusalResponse(started), 409);
   });
 
   app.post("/runner/runs/:runId/heartbeat", async (context) => {
@@ -3724,7 +3483,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
     return waiting
       ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-      : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+      : context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
   });
 
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
@@ -3765,7 +3524,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const owned = run?.runnerId === body.runnerId && run.fencingToken === body.fencingToken;
     const live = owned && run.cancelRequestedAt === null && run.leaseExpiresAt !== null && run.leaseExpiresAt > now
-      && activeRunStatuses.includes(run.status as typeof activeRunStatuses[number]);
+      && activeRunStatuses.includes(run.status);
     // Salvage is the one publication allowed after lease loss. It is confined
     // to this run's deterministic per-run ref, requires the same runner and
     // fencing token that owned the workspace, and cannot replace a different
@@ -3779,7 +3538,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       && body.pushedBranch === salvageBranch
       && (run?.pushedBranch === null || run?.pushedBranch === body.pushedBranch);
     if (!live && !salvage) {
-      return context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+      return context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
     }
     const updated = await db.$transaction(async (tx) => {
       const ack = await tx.run.updateMany({
@@ -3805,7 +3564,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ? context.json({ ok: true, replacementRepair: updated.repair })
       : updated.count === 1
         ? context.json({ error: "Salvage is durable, but the replacement already started from its prior base" }, 409)
-      : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+      : context.json(fenceRefusalResponse(await explainFenceRefusal(db, fence)), 409);
   });
 
   // Cleanup is still runner-owned after the live lease is gone. This endpoint
@@ -3822,7 +3581,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     const expiredOrTerminal = run && (
       run.leaseExpiresAt === null || run.leaseExpiresAt <= now
-      || !activeRunStatuses.includes(run.status as typeof activeRunStatuses[number])
+      || !activeRunStatuses.includes(run.status)
     );
     if (!run || run.runnerId !== body.runnerId || run.fencingToken !== body.fencingToken || !expiredOrTerminal) {
       return context.json({ error: "Cleanup outcome is not authorized for a live or foreign run" }, 409);
@@ -3848,18 +3607,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, eventsInput);
     const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: new Date() };
-    const result = await db.$transaction(async (tx) => {
-      await lockRunRow(tx, runId);
-      const run = await tx.run.findFirst({
-        where: fencedRunWhere(fence),
-        include: { session: true },
-      });
-      if (!run?.session) {
-        const waiting = await tx.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
-        return waiting
-          ? { error: "Run suspended for Inbox", code: "WAITING_INBOX" as const }
-          : { error: "Stale fencing token", code: "STALE" as const, reason: await explainFenceRefusal(tx, fence) };
-      }
+    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+      session: { select: { id: true, providerConversationId: true } },
+    }, async (run) => {
+      if (!run.session) return fenceRefusalResponse("stale-fence");
       await tx.sessionEvent.createMany({
         data: body.events.map((event) => ({
           sessionId: run.session!.id,
@@ -3882,11 +3633,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await tx.session.update({ where: { id: run.session.id }, data: { providerConversationId: body.providerConversationId } });
       }
       return { sessionId: run.session.id };
-    });
-    if ("error" in result) {
-      return result.code === "WAITING_INBOX"
-        ? context.json({ error: result.error, code: result.code }, 409)
-        : context.json({ error: result.error, reason: result.reason }, 409);
+    }));
+    if (isFenceRefusalResponse(result)) {
+      const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
+      return waiting
+        ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
+        : context.json(result, 409);
     }
     // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
     // whose event was already stored still recomputes, which is what self-heals a
@@ -3915,24 +3667,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, fencedActivityInput);
     const principal = context.get("principal");
     const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
-    const result = await db.$transaction(async (tx) => {
-      await lockRunRow(tx, runId);
-      const run = await tx.run.findFirst({
-        where: {
-          ...fencedRunWhere(fence),
-          // A session principal carries its own generation of the same fence.
-          ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
-        },
-        select: {
-          taskId: true,
-          task: { select: { templateStep: { select: {
-            stepIndex: true,
-            outputKind: true,
-            taskTemplate: { select: { name: true } },
-          } } } },
-        },
-      });
-      if (!run?.taskId) return { refusal: await explainFenceRefusal(tx, fence) };
+    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+      taskId: true,
+      leaseGeneration: true,
+      task: { select: { templateStep: { select: {
+        stepIndex: true,
+        outputKind: true,
+        taskTemplate: { select: { name: true } },
+      } } } },
+    }, async (run) => {
+      // A session principal carries its own generation of the same fence.
+      const leaseGeneration = principal.kind === "session" ? principal.leaseGeneration : null;
+      if (!run.taskId || leaseGeneration !== null && run.leaseGeneration !== leaseGeneration) {
+        return fenceRefusalResponse("stale-fence");
+      }
       const metadata = body.metadata
         ? {
             ...body.metadata,
@@ -3952,9 +3700,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           ...(metadata ? { metadata: jsonValue(metadata) } : {}),
         },
       });
-    });
-    return "refusal" in result
-      ? context.json({ error: "Stale fencing token", reason: result.refusal }, 409)
+    }));
+    return isFenceRefusalResponse(result)
+      ? context.json(result, 409)
       : context.json(result, 201);
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
@@ -4082,52 +3830,51 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, taskOutputInput);
     if (!body.fencingToken) return context.json({ error: "fencingToken is required" }, 400);
     const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
-    const run = await db.run.findFirst({
-      where: fencedRunWhere(fence),
-      select: {
-        taskId: true,
-        runnerId: true,
-        // §4.0. The step-12 output is the only evidence the chain has that a
-        // merge happened, so writing one is bound to the executor identity as
-        // well as to the session token: a session issued to anything but an
-        // allowlisted merge executor cannot author a `merge-result`, and the
-        // executor's session cannot author an ordinary step's output.
-        task: { select: {
-          id: true,
-          projectId: true,
-          chainId: true,
-          chainIndex: true,
-          templateStep: { select: {
-            stepIndex: true,
-            outputKind: true,
-            baseFromStepIndex: true,
-            taskTemplate: { select: { name: true } },
-          } },
+    const result = await db.$transaction((tx) => withFencedRun(tx, fence, {
+      taskId: true,
+      runnerId: true,
+      // §4.0. The step-12 output is the only evidence the chain has that a
+      // merge happened, so writing one is bound to the executor identity as
+      // well as to the session token: a session issued to anything but an
+      // allowlisted merge executor cannot author a `merge-result`, and the
+      // executor's session cannot author an ordinary step's output.
+      task: { select: {
+        id: true,
+        projectId: true,
+        chainId: true,
+        chainIndex: true,
+        templateStep: { select: {
+          stepIndex: true,
+          outputKind: true,
+          baseFromStepIndex: true,
+          taskTemplate: { select: { name: true } },
         } },
-      },
-    });
-    if (!run?.taskId) {
-      return context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
-    }
-    const executionMode = executionModeFor(run.task?.templateStep ?? null);
-    if (executionMode !== "mechanical" && !body.commitSha) {
-      return context.json({ error: "commitSha is required" }, 400);
-    }
-    const outputRefusal = mechanicalPrincipalRefusal(
-      executionMode,
-      isMergeExecutorRunnerId(run.runnerId ?? "") ? "merge-executor" : "runner",
-      run.runnerId ?? "",
-    );
-    if (outputRefusal) return context.json({ error: outputRefusal }, 403);
-    const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
-      task: run.task!,
-      runId,
-      fencingToken: body.fencingToken!,
-      kind: body.kind,
-      body: body.body,
-      commitSha: body.commitSha ?? null,
-      ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+      } },
+    }, async (run) => {
+      if (!run.taskId || !run.task) return fenceRefusalResponse("stale-fence");
+      const executionMode = executionModeFor(run.task.templateStep);
+      if (executionMode !== "mechanical" && !body.commitSha) {
+        return { requestError: "commitSha is required", status: 400 as const };
+      }
+      const outputRefusal = mechanicalPrincipalRefusal(
+        executionMode,
+        isMergeExecutorRunnerId(run.runnerId ?? "") ? "merge-executor" : "runner",
+        run.runnerId ?? "",
+      );
+      if (outputRefusal) return { requestError: outputRefusal, status: 403 as const };
+      return { persisted: await persistSessionTaskOutput(tx, {
+        task: run.task,
+        fence,
+        kind: body.kind,
+        body: body.body,
+        commitSha: body.commitSha ?? null,
+        ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}),
+      }) };
     }));
+    if (isFenceRefusalResponse(result)) return context.json(result, 409);
+    if ("requestError" in result) return context.json({ error: result.requestError }, result.status);
+    const { persisted } = result;
+    if (isFenceRefusalResponse(persisted)) return context.json(persisted, 409);
     if (!persisted.ok) return context.json({ error: persisted.reason }, 409);
     return context.json({ ...persisted.output, predecessorOutputs: persisted.predecessorOutputs });
   });
@@ -4151,6 +3898,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json(question, 201);
     } catch (error: unknown) {
+      if (error instanceof InboxRunFenceRefusal) return context.json(error.refusal, 409);
       if (error instanceof Error && error.message.startsWith("Run is not resumable")) return context.json({ error: error.message }, 409);
       throw error;
     }
@@ -4253,7 +4001,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (result.kind === "principal") return context.json({ error: result.error }, 403);
       return result.kind === "waiting-inbox"
         ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-        : context.json({ error: "Stale fencing token", reason: result.reason }, 409);
+        : context.json(fenceRefusalResponse(result.reason), 409);
     }
     await releaseMergeLeaseSafely(releaseChainLease, result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
@@ -4473,6 +4221,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.onError((error, context) => {
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
+    if (error instanceof SerializableTransactionExhaustedError) {
+      return context.json({ error: "Transaction is busy; retry later" }, 503);
+    }
     if (isCompoundImplementationAssigneeError(error)) {
       return context.json({ error: error.message, code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE }, 409);
     }

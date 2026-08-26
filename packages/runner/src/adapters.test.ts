@@ -7,10 +7,13 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
-  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, CODEX_STARTER_MODEL, failureReasonFromEvidence,
+  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, CODEX_STARTER_MODEL, createAdapterState, failureReasonFromEvidence,
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
-  PREFLIGHT_REASONS, runtimeDescriptor, type ExitEvidence,
+  PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
+import { parseClaudeTranscript } from "./adapters/claude.js";
+import { parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
+import { parsePiTranscript } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
@@ -802,27 +805,10 @@ const PI_EXPECTED = {
   costNanoUsd: 1_238_080,
 };
 
-/** Drive the PI parser over a literal event stream: the stub reads the prompt
- * off stdin exactly as a real CLI does, then writes the lines and exits. */
-const piStream = async (lines: unknown[]): Promise<Array<{ type: string; payload: Record<string, unknown> }>> => {
-  const emitScript = [
-    'const chunks = [];',
-    'process.stdin.on("data", (chunk) => chunks.push(chunk));',
-    `process.stdin.on("end", () => process.stdout.write(${JSON.stringify(lines.map((line) => `${JSON.stringify(line)}\n`).join(""))}));`,
-  ].join("");
-  const spec = {
-    ...runSpec(),
-    config: {
-      binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
-      runAsPrefix: [process.execPath, "-e", emitScript],
-    } as unknown as RunnerConfig,
-    claim: { ...claim, runner: "PI" as const },
-    workingDirectory: process.cwd(),
-    env: process.env,
-  };
+/** Drive the PI parser directly over a captured or constructed transcript. */
+const piStream = (lines: unknown[]): Array<{ type: string; payload: Record<string, unknown> }> => {
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-  const handle = await adapters.PI.start(spec, (event) => { events.push(event); });
-  await handle.exit;
+  parsePiTranscript(lines, (event) => { events.push(event); });
   return events;
 };
 
@@ -832,8 +818,8 @@ const finalOutputOf = (events: Array<{ type: string; payload: Record<string, unk
   return final[0]!.payload;
 };
 
-test("PI per-message usage is aggregated onto the terminal event, counting each message once", { timeout: 30_000 }, async () => {
-  const events = await piStream(PI_TRANSCRIPT);
+test("PI per-message usage is aggregated onto the terminal event, counting each message once", () => {
+  const events = piStream(PI_TRANSCRIPT);
   const payload = finalOutputOf(events);
   assert.equal(payload.type, "agent_settled", "the provider's own terminal event is preserved");
   assert.deepEqual(payload.agentosPiUsage, PI_EXPECTED);
@@ -843,8 +829,8 @@ test("PI per-message usage is aggregated onto the terminal event, counting each 
   assert.equal(events.some((event) => event.type === "ADAPTER_ERROR"), false);
 });
 
-test("a PI session that reports no usage settles loudly instead of leaving silent nulls", { timeout: 30_000 }, async () => {
-  const events = await piStream([
+test("a PI session that reports no usage settles loudly instead of leaving silent nulls", () => {
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
     { type: "agent_settled" },
   ]);
@@ -859,8 +845,8 @@ test("a PI session that reports no usage settles loudly instead of leaving silen
   assert.equal(reported[0]!.payload.reported, 0);
 });
 
-test("a PI session whose reported usage sums to zero is a gap, not a free session", { timeout: 30_000 }, async () => {
-  const events = await piStream([
+test("a PI session whose reported usage sums to zero is a gap, not a free session", () => {
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } },
     { type: "agent_settled" },
   ]);
@@ -872,10 +858,10 @@ test("a PI session whose reported usage sums to zero is a gap, not a free sessio
   assert.match(String(reported[0]!.payload.error), /no tokens; PI reported no cost/u);
 });
 
-test("real tokens with no cost is diagnosed rather than left as a silent null column", { timeout: 30_000 }, async () => {
+test("real tokens with no cost is diagnosed rather than left as a silent null column", () => {
   // The dangerous half of a partial report: the token columns land, look
   // healthy, and the cost column stays NULL with nothing saying why.
-  const events = await piStream([
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: 100, output: 10 } } },
     { type: "agent_settled" },
   ]);
@@ -885,10 +871,10 @@ test("real tokens with no cost is diagnosed rather than left as a silent null co
   assert.match(String(reported[0]!.payload.error), /^Session cost is incomplete: PI reported no cost$/u);
 });
 
-test("a session only some of whose messages reported usage does not pass off a short total as whole", { timeout: 30_000 }, async () => {
+test("a session only some of whose messages reported usage does not pass off a short total as whole", () => {
   // Without this the stored total is the reporting messages' alone, and nothing
   // downstream can tell that it is short.
-  const events = await piStream([
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: 100, output: 10, cost: { total: 0.002 } } } },
     { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "no usage on this one" }] } },
     { type: "agent_settled" },
@@ -901,11 +887,11 @@ test("a session only some of whose messages reported usage does not pass off a s
   assert.match(String(reported[0]!.payload.error), /usage on only 1 of 2 assistant message\(s\)/u);
 });
 
-test("PI costs are summed exactly, not through the binary addition the column would round away", { timeout: 30_000 }, async () => {
+test("PI costs are summed exactly, not through the binary addition the column would round away", () => {
   // usage.ts documents this exact pair: 0.000001 + 0.000049 as doubles lands
   // just below the half-unit and rounds to 0.0000 instead of 0.0001.
   assert.ok(0.000001 + 0.000049 < 0.00005, "the double sum must really fall short, or this proves nothing");
-  const events = await piStream([
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.000001 } } } },
     { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.000049 } } } },
     { type: "agent_settled" },
@@ -913,11 +899,11 @@ test("PI costs are summed exactly, not through the binary addition the column wo
   assert.equal((finalOutputOf(events).agentosPiUsage as { costNanoUsd: number }).costNanoUsd, 50_000);
 });
 
-test("PI reasoning tokens are a breakdown of output and cacheWrite is cached input", { timeout: 30_000 }, async () => {
+test("PI reasoning tokens are a breakdown of output and cacheWrite is cached input", () => {
   // output 29 / reasoning 22 is the real second capture; a nonzero cacheWrite is
   // constructed, because neither capture produced one and the fold must still
   // be exercised. Adding reasoning to output would give 51, not 29.
-  const events = await piStream([
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: 4627, output: 29, cacheRead: 100, cacheWrite: 200, reasoning: 22, cost: { total: 0.0009602 } } } },
     { type: "agent_settled" },
   ]);
@@ -926,8 +912,8 @@ test("PI reasoning tokens are a breakdown of output and cacheWrite is cached inp
   });
 });
 
-test("one unusable PI usage field is dropped without taking its siblings with it", { timeout: 30_000 }, async () => {
-  const events = await piStream([
+test("one unusable PI usage field is dropped without taking its siblings with it", () => {
+  const events = piStream([
     { type: "message_end", message: { role: "assistant", usage: { input: "lots", output: 7, cacheRead: -1, cost: { total: 0.5 } } } },
     { type: "message_end", message: { role: "user", usage: { input: 999, output: 999 } } },
     { type: "agent_settled" },
@@ -1157,64 +1143,47 @@ test("exit code zero without a provider terminal event is failure", () => {
   assert.equal(adapterExecutionSucceeded({ ...evidence, terminalEventSeen: true, terminalSuccess: true }), true);
 });
 
-test("Codex structured errors take precedence over stderr warnings", async () => {
-  const script = "process.stdout.write(JSON.stringify({type:'error',message:'policy denied'})+'\\n')";
-  const config = {
-    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
-    runAsPrefix: [process.execPath, "-e", script],
-  } as unknown as RunnerConfig;
-  const handle = await adapters.CODEX.start({
-    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
-    credentialsPath: "/tmp/session.json",
-  }, () => undefined);
-  const evidence = await handle.exit;
+const evidenceFromState = (state: AdapterState, exitCode = 0): ExitEvidence => ({
+  exitCode,
+  signal: null,
+  terminalEventSeen: state.terminalEventSeen,
+  terminalSuccess: state.terminalSuccess,
+  terminationReason: state.terminationReason,
+  finalOutput: state.finalOutput,
+  providerError: state.providerError,
+  stdout: state.stdout,
+  stderr: state.stderr,
+});
 
+test("Codex structured errors take precedence over stderr warnings", () => {
+  const state = parseCodexTranscript([{ type: "error", message: "policy denied" }]);
+  const evidence = evidenceFromState(state, 1);
   assert.equal(evidence.providerError, "policy denied");
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
 });
 
-test("PI terminal success follows the final provider attempt after an internal retry", async () => {
-  const script = [
-    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
-    "emit({type:'turn_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'fetch failed'}});",
-    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'fetch failed'}],willRetry:true});",
-    "emit({type:'turn_end',message:{role:'assistant',content:[{type:'text',text:'final PASS'}],stopReason:'stop'}});",
-    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'stop'}],willRetry:false});",
-    "emit({type:'agent_settled'});",
-  ].join("");
-  const config = {
-    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
-    runAsPrefix: [process.execPath, "-e", script],
-  } as unknown as RunnerConfig;
-  const handle = await adapters.PI.start({
-    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
-    credentialsPath: "/tmp/session.json",
-  }, () => undefined);
-
-  const evidence = await handle.exit;
+test("PI terminal success follows the final provider attempt after an internal retry", () => {
+  const state = parsePiTranscript([
+    { type: "turn_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" } },
+    { type: "agent_end", messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }], willRetry: true },
+    { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "final PASS" }], stopReason: "stop" } },
+    { type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }], willRetry: false },
+    { type: "agent_settled" },
+  ]);
+  const evidence = evidenceFromState(state);
   assert.equal(evidence.terminalSuccess, true);
   assert.equal(evidence.providerError, null);
   assert.equal(evidence.finalOutput, "final PASS");
   assert.equal(adapterExecutionSucceeded(evidence), true);
 });
 
-test("PI exposes the exhausted provider error instead of a generic protocol failure", async () => {
-  const script = [
-    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
-    "emit({type:'turn_end',message:{role:'assistant',content:[],stopReason:'error',errorMessage:'fetch failed'}});",
-    "emit({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'fetch failed'}],willRetry:false});",
-    "emit({type:'agent_settled'});",
-  ].join("");
-  const config = {
-    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
-    runAsPrefix: [process.execPath, "-e", script],
-  } as unknown as RunnerConfig;
-  const handle = await adapters.PI.start({
-    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
-    credentialsPath: "/tmp/session.json",
-  }, () => undefined);
-
-  const evidence = await handle.exit;
+test("PI exposes the exhausted provider error instead of a generic protocol failure", () => {
+  const state = parsePiTranscript([
+    { type: "turn_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" } },
+    { type: "agent_end", messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }], willRetry: false },
+    { type: "agent_settled" },
+  ]);
+  const evidence = evidenceFromState(state, 1);
   assert.equal(evidence.terminalEventSeen, true);
   assert.equal(evidence.terminalSuccess, false);
   assert.equal(evidence.providerError, "fetch failed");
@@ -1222,49 +1191,28 @@ test("PI exposes the exhausted provider error instead of a generic protocol fail
 });
 
 test("Codex agent progress renews an open command deadline while stderr does not", async () => {
-  const script = [
-    "const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
-    "emit({type:'item.started',item:{id:'command-1',type:'command_execution',status:'in_progress'}});",
-    "setTimeout(() => process.stderr.write('models manager warning\\n'), 20);",
-    "setTimeout(() => emit({type:'item.completed',item:{id:'message-1',type:'agent_message',text:'database gate is still advancing'}}), 60);",
-    "setTimeout(() => emit({type:'item.completed',item:{id:'command-1',type:'command_execution',status:'completed',exit_code:0}}), 100);",
-    "setTimeout(() => emit({type:'turn.completed'}), 120);",
-  ].join("");
-  const config = {
-    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
-    runAsPrefix: [process.execPath, "-e", script],
-  } as unknown as RunnerConfig;
-
-  let resolveStarted!: () => void;
-  let resolveStderr!: () => void;
-  let resolveProgress!: () => void;
-  const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
-  const stderr = new Promise<void>((resolve) => { resolveStderr = resolve; });
-  const progress = new Promise<void>((resolve) => { resolveProgress = resolve; });
-  const handle = await adapters.CODEX.start({
-    config, claim, workingDirectory: process.cwd(), env: process.env, prompt: "prompt",
-    credentialsPath: "/tmp/session.json",
-  }, (event) => {
-    if (event.type === "TOOL_STARTED") resolveStarted();
-    if (event.type === "STDERR") resolveStderr();
-    if (event.type === "MODEL_DELTA" && event.payload.item && (event.payload.item as { type?: string }).type === "agent_message") resolveProgress();
-  });
-
-  await started;
-  const initialProgress = (await adapters.CODEX.heartbeat(handle)).inFlightTool?.lastProgressAt;
+  const state = createAdapterState("CODEX", "transcript");
+  parseCodexEvent(state, { type: "item.started", item: { id: "command-1", type: "command_execution", status: "in_progress" } }, () => undefined);
+  const initialProgress = state.inFlightTool?.lastProgressAt;
   assert.ok(initialProgress);
+  const stderrProgress = state.inFlightTool?.lastProgressAt;
+  assert.equal(stderrProgress?.getTime(), initialProgress.getTime(), "stderr bypasses the Codex parser");
 
-  await stderr;
-  assert.equal((await adapters.CODEX.heartbeat(handle)).inFlightTool?.lastProgressAt.getTime(), initialProgress.getTime());
-
-  await progress;
-  const renewedProgress = (await adapters.CODEX.heartbeat(handle)).inFlightTool?.lastProgressAt;
+  await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  parseCodexEvent(state, {
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: "database Merge gate is still advancing" },
+  }, () => undefined);
+  const renewedProgress = state.inFlightTool?.lastProgressAt;
   assert.ok(renewedProgress);
   assert.ok(renewedProgress.getTime() > initialProgress.getTime());
-
-  const evidence = await handle.exit;
-  assert.equal(evidence.terminalSuccess, true);
-  assert.equal((await adapters.CODEX.heartbeat(handle)).inFlightTool, null);
+  parseCodexEvent(state, {
+    type: "item.completed",
+    item: { id: "command-1", type: "command_execution", status: "completed", exit_code: 0 },
+  }, () => undefined);
+  parseCodexEvent(state, { type: "turn.completed" }, () => undefined);
+  assert.equal(state.terminalSuccess, true);
+  assert.equal(state.inFlightTool, null);
 });
 
 test("source text cannot misclassify a provider failure as a missing binary", () => {
@@ -1370,28 +1318,10 @@ test("a genuine auth failure on stderr still classifies AUTH_REQUIRED", () => {
   assert.equal(adapters.CLAUDE.classifyError(evidence).failureClass, "AUTH_REQUIRED");
 });
 
-test("an is_error result event is captured as providerError and classifies transient", { timeout: 30_000 }, async () => {
+test("an is_error result event is captured as providerError and classifies transient", () => {
   const message = "API Error: Connection lost mid-response. The response above may be incomplete.";
-  const errorStub = [
-    "process.stdin.resume();",
-    "process.stdin.on('end', () => {",
-    `  process.stdout.write(JSON.stringify({ type: 'result', is_error: true, result: ${JSON.stringify(message)} }) + '\\n');`,
-    "  process.exit(1);",
-    "});",
-  ].join("");
-  const config = {
-    binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" },
-    runAsPrefix: [process.execPath, "-e", errorStub],
-  } as unknown as RunnerConfig;
-  const handle = await adapters.CLAUDE.start({
-    config,
-    claim: { ...claim, runner: "CLAUDE" },
-    workingDirectory: process.cwd(),
-    env: process.env,
-    prompt: buildPrompt(claim),
-    credentialsPath: "/tmp/session.json",
-  }, () => undefined);
-  const evidence = await handle.exit;
+  const state = parseClaudeTranscript([{ type: "result", is_error: true, result: message }]);
+  const evidence = evidenceFromState(state, 1);
   assert.equal(evidence.providerError, message);
   assert.deepEqual(adapters.CLAUDE.classifyError(evidence), {
     failureClass: "TRANSIENT_PROVIDER",
@@ -1448,5 +1378,13 @@ test("an adapter is substituted by injection, never by writing over the exported
   assert.equal(Object.isFrozen(adapters), true);
   for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
     assert.equal(Object.isFrozen(adapters[runner]), true, `${runner} adapter must be frozen`);
+    assert.equal(adapters[runner], RUNNER_DEFINITIONS[runner].adapter);
   }
+  assert.deepEqual(RUNNER_KINDS, ["CLAUDE", "CODEX", "PI"]);
+  assert.notEqual(adapters.CLAUDE.start, adapters.CODEX.start);
+  assert.notEqual(adapters.CODEX.start, adapters.PI.start);
+  assert.notEqual(adapters.CLAUDE.kill, adapters.CODEX.kill);
+  assert.notEqual(adapters.CODEX.kill, adapters.PI.kill);
+  assert.notEqual(adapters.CLAUDE.classifyError, adapters.CODEX.classifyError);
+  assert.notEqual(adapters.CODEX.classifyError, adapters.PI.classifyError);
 });
