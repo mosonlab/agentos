@@ -47,6 +47,9 @@ const isCandidateActivationFailure = (error: unknown): error is CandidateActivat
 
 const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
 
+const SKIP = { outcome: "skip" } as const;
+const HALT = { outcome: "halt" } as const;
+
 export type ClaimRunInput = {
   body: ClaimInput;
   claimantClass: ClaimantClass;
@@ -109,8 +112,11 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       take: 20,
     });
     const executorRunnerIds = mergeExecutorRunnerIds();
-    for (const candidate of candidates) {
-      if (!candidate.task || !candidate.repo) continue;
+    // One candidate's decision, taken as its own unit of work so the loop can
+    // isolate it. `skip` moves to the next candidate, `halt` ends the whole
+    // claim without one, `claimed` carries the run handed to the runner.
+    const activateCandidate = async (candidate: (typeof candidates)[number]) => {
+      if (!candidate.task || !candidate.repo) return SKIP;
       if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
         const reason = "repository-grant-missing: restore the agent Repo grant, then retry this run";
         const stranded = await tx.run.updateMany({
@@ -137,31 +143,31 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           // in the chain. End the transaction here: scanning another
           // candidate could next wait on a sibling Run while its claimant
           // already holds that Run and waits for this chain mutex.
-          if (parked.ok && parked.chainLocked) return null;
+          if (parked.ok && parked.chainLocked) return HALT;
         }
-        continue;
+        return SKIP;
       }
       // §D-P4. A candidate whose (agent, step) binding is invalid is *skipped*,
       // not claimed: a mis-bound step-12 row must never be handed to anything,
       // and the sentinel Agent on an ordinary step must never reach an adapter.
-      if (integratorBindingRefusal(candidate.agent.name, candidate.task.templateStep)) continue;
+      if (integratorBindingRefusal(candidate.agent.name, candidate.task.templateStep)) return SKIP;
       // Readiness is server-owned. Even if an old/manual path materializes a
       // Run row for it, no model runner or merge executor may claim it; the
       // readiness worker consumes the TODO task row directly.
-      if (isMergeReadinessStep(candidate.task.templateStep)) continue;
+      if (isMergeReadinessStep(candidate.task.templateStep)) return SKIP;
       const executionMode = executionModeFor(candidate.task.templateStep);
       // §D-P1 rule 3, symmetric and fail-closed: only the independently
       // authenticated merge-executor principal is offered an integrator run,
       // and it is offered nothing else. With `MERGE_EXECUTOR_RUNNER_IDS`
       // empty — the shipped default — or with `MERGE_EXECUTOR_TOKEN` unset or
       // aliased onto the runner token, no integrator run is claimable at all.
-      if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) continue;
+      if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
       // The backend circuit breaker tracks model-CLI health. A mechanical run
       // spawns no CLI, so an open CLI circuit is not evidence about it; the
       // `runner` on its row is an inert artifact of the sentinel Agent.
       if (executionMode === "agent") {
         const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
-        if (readStoredCliAvailability(backend?.capabilities)?.available === false || backend?.circuitOpen) continue;
+        if (readStoredCliAvailability(backend?.capabilities)?.available === false || backend?.circuitOpen) return SKIP;
       }
       if (executionMode === "mechanical") {
         const targetBranch = candidate.task.targetBranch ?? candidate.repo.defaultBranch;
@@ -173,7 +179,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         const [targetLock] = await tx.$queryRaw<Array<{ locked: boolean }>>`
           SELECT pg_try_advisory_xact_lock(hashtextextended(${lockKey}, 0)) AS "locked"
         `;
-        if (targetLock?.locked !== true) continue;
+        if (targetLock?.locked !== true) return SKIP;
         const activePeers = await tx.run.findMany({
           where: {
             id: { not: candidate.id },
@@ -187,7 +193,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             } },
           },
         });
-        if (activePeers.some((peer) => taskIsIntegratorStep(peer.task))) continue;
+        if (activePeers.some((peer) => taskIsIntegratorStep(peer.task))) return SKIP;
       }
       const regressionRepairHandoff = await regressionRepairHandoffForClaim(tx, {
         taskId: candidate.task.id,
@@ -236,9 +242,9 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             ...(sourceSession ? { sessionId: sourceSession.id } : {}),
             reason: regressionRepairHandoff.reason,
           });
-          if (parked.ok && parked.chainLocked) return null;
+          if (parked.ok && parked.chainLocked) return HALT;
         }
-        continue;
+        return SKIP;
       }
       const grants = [
         ...candidate.agent.environment.secrets,
@@ -303,9 +309,9 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
             },
             update: {},
           });
-          if (parked.ok && parked.chainLocked) return null;
+          if (parked.ok && parked.chainLocked) return HALT;
         }
-        continue;
+        return SKIP;
       }
       const generation = candidate.leaseGeneration + 1;
       const fencingToken = makeFencingToken(candidate.id, generation);
@@ -327,7 +333,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           sessionTokenRevokedAt: null,
         },
       });
-      if (won.count !== 1) continue;
+      if (won.count !== 1) return SKIP;
       await lockTaskMutationRows(tx, candidate.task.id);
       const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
         providerConversationId: candidate.session.providerConversationId,
@@ -423,38 +429,77 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         select: { id: true },
       }) !== null;
       return {
-        task: candidate.task,
-        agent: candidate.agent,
-        repo: candidate.repo,
-        // Server-computed from the template step. Nothing a client sends
-        // participates, and the ordinary runner refuses `mechanical` before it
-        // constructs a workspace, a prompt, or a child environment.
-        executionMode,
-        // A later chain run targets the shared head, so its own targetBranch
-        // cannot tell delivery which integration line the chain started
-        // from. Carry the first run's durable base separately for PR create.
-        run: {
-          ...run,
-          targetBranchPublished,
-          pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch,
-          pinnedBaseSha: candidate.task.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
-          implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
-          implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
+        outcome: "claimed" as const,
+        claim: {
+          task: candidate.task,
+          agent: candidate.agent,
+          repo: candidate.repo,
+          // Server-computed from the template step. Nothing a client sends
+          // participates, and the ordinary runner refuses `mechanical` before it
+          // constructs a workspace, a prompt, or a child environment.
+          executionMode,
+          // A later chain run targets the shared head, so its own targetBranch
+          // cannot tell delivery which integration line the chain started
+          // from. Carry the first run's durable base separately for PR create.
+          run: {
+            ...run,
+            targetBranchPublished,
+            pullRequestBase: chainFirstRun?.targetBranch ?? candidate.repo.defaultBranch,
+            pinnedBaseSha: candidate.task.templateStep?.baseFromStepIndex == null ? null : run.targetBranch,
+            implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
+            implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
+          },
+          session,
+          runner: candidate.runner,
+          fencingToken,
+          sessionToken: sessionCredential.token,
+          secrets,
+          priorOutputs,
+          previousRunHandoff,
+          regressionRepairHandoff: regressionRepairHandoff.status === "ok"
+            ? regressionRepairHandoff.handoff
+            : null,
+          resume: priorResume,
+          nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         },
-        session,
-        runner: candidate.runner,
-        fencingToken,
-        sessionToken: sessionCredential.token,
-        secrets,
-        priorOutputs,
-        previousRunHandoff,
-        regressionRepairHandoff: regressionRepairHandoff.status === "ok"
-          ? regressionRepairHandoff.handoff
-          : null,
-        resume: priorResume,
-        nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
       };
+    };
+
+    // Per-candidate isolation. A candidate that raises inside the shared claim
+    // transaction used to abort it whole: the poisoned head of the queue rolled
+    // back its own settlement *and* starved every other queued run, because the
+    // transaction was already aborted by the time the loop reached them. Each
+    // candidate now runs against its own savepoint, so its partial writes are
+    // undone and the transaction stays usable for the rest of the queue.
+    //
+    // A serialization failure or deadlock is not isolatable: Postgres aborts the
+    // whole transaction, `ROLLBACK TO SAVEPOINT` would fail too, and the outer
+    // six-attempt retry is the correct response. It is re-raised untouched.
+    let isolated: unknown = null;
+    for (const [index, candidate] of candidates.entries()) {
+      const savepoint = `claim_candidate_${index}`;
+      await tx.$executeRawUnsafe(`SAVEPOINT ${savepoint}`);
+      let decided: Awaited<ReturnType<typeof activateCandidate>>;
+      try {
+        decided = await activateCandidate(candidate);
+      } catch (error: unknown) {
+        if (isSerializationConflict(error)) throw error;
+        await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        console.error(`Claim candidate ${candidate.id} failed and was isolated from the claim`, error);
+        isolated ??= error;
+        continue;
+      }
+      await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${savepoint}`);
+      // A chained park that committed ends the claim here on purpose (lock
+      // order), and it outranks an earlier candidate's isolated error.
+      if (decided.outcome === "halt") return null;
+      if (decided.outcome === "claimed") return decided.claim;
     }
+    // Isolation keeps one poisoned candidate from starving the others; it does
+    // not make its failure disappear. With nothing claimed there is no work to
+    // report and no reason to swallow it, so the first isolated error is the
+    // answer this poll gives.
+    if (isolated !== null) throw isolated;
     return null;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
