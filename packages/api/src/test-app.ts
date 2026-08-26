@@ -7,6 +7,7 @@ import { createApp as createLiveApp } from "./app.js";
 import { defaultControlPlaneStateDir } from "./control-plane-state.js";
 import type { MergeLeaseReleaser } from "./merge-lease.js";
 import type { preflightOnboardingRepository } from "./onboarding-preflight.js";
+import type { SpecificationReader } from "./specification-fidelity.js";
 import { defaultWorkspaceRoot } from "./workspace-root.js";
 
 // Symlink aliases (/tmp vs /private/tmp, a symlinked home) must not slip a
@@ -77,6 +78,7 @@ export const createApp = (db: PrismaClient, options: {
   workspaceRoot?: string;
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   releaseMergeLease?: MergeLeaseReleaser;
+  specificationReader?: SpecificationReader | null;
 } = {}) => {
   const configured = options.workspaceRoot ?? process.env.RUNNER_WORKSPACE_ROOT;
   if (!configured) {
@@ -92,6 +94,7 @@ export const createApp = (db: PrismaClient, options: {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
     onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
     releaseMergeLease: options.releaseMergeLease ?? (async () => ({ outcome: "not-held" })),
+    ...(options.specificationReader === undefined ? {} : { specificationReader: options.specificationReader }),
   });
 };
 

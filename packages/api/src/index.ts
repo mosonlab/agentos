@@ -15,6 +15,7 @@ import {
   ControlPlaneOwnershipStartupError,
   type ControlPlaneOwnership,
 } from "./control-plane-ownership.js";
+import { createGitHubReader } from "./github-read.js";
 import { StartupConfigError, loadStartupConfig } from "./startup-config.js";
 import { apiBuildLine } from "./version.js";
 
@@ -198,7 +199,15 @@ const main = async (): Promise<void> => {
   console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.openReclaimIntents} workspace reclaim intents awaiting their runner, ${reconciliation.archivedNotices} archived-run notices`);
   await ensureStartupActive();
 
-  const app = createApp(prisma, { ownership });
+  // Review claims must verify the chain specification against the immutable
+  // implementation head. A missing GitHub read token is deliberately passed
+  // through as `null`; claimRun turns it into a named refusal rather than
+  // silently allowing an unverified review.
+  const githubReader = createGitHubReader();
+  const specificationReader = githubReader?.readFileAtCommit
+    ? { readFileAtCommit: githubReader.readFileAtCommit }
+    : null;
+  const app = createApp(prisma, { ownership, specificationReader });
   const { host: hostname, port } = startup;
   const activeServer = serve({ fetch: app.fetch, hostname, port });
   server = activeServer;

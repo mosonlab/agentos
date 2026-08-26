@@ -31,6 +31,7 @@ import { activeRunStatuses } from "./run-fence.js";
 import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
 import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
+import { specificationTranscriptionRefusal, type SpecificationReader } from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
 
 class PinnedRunTargetError extends Error {
@@ -53,6 +54,10 @@ export type ClaimRunInput = {
   /** The instant the whole claim is decided at, including the caller's
    *  pre-claim reconciliation. */
   now: Date;
+  /** Production supplies the server-side repository reader. Omitted by the
+   *  test-only app factory so existing unit fixtures remain transport-free. */
+  specificationReader?: SpecificationReader | null;
+  signal?: AbortSignal;
 };
 
 /**
@@ -66,6 +71,7 @@ export type ClaimRunInput = {
 export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
   const { body, claimantClass, now } = input;
   const claimOnce = () => db.$transaction(async (tx) => {
+    let specificationRefusal: string | null = null;
     // This is the shared half of the production deploy barrier. It is the
     // first statement in the claim transaction: an in-flight claim finishes
     // before a deploy can acquire the exclusive half, and claims arriving
@@ -307,6 +313,19 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         }
         continue;
       }
+      if (input.specificationReader !== undefined) {
+        const refusal = await specificationTranscriptionRefusal(
+          tx,
+          { task: candidate.task, repo: candidate.repo, branch: candidate.branch },
+          implementationRange?.implementationHeadSha ?? null,
+          input.specificationReader,
+          input.signal ?? new AbortController().signal,
+        );
+        if (refusal) {
+          specificationRefusal ??= refusal;
+          continue;
+        }
+      }
       const generation = candidate.leaseGeneration + 1;
       const fencingToken = makeFencingToken(candidate.id, generation);
       const sessionCredential = issueSessionToken();
@@ -455,7 +474,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
       };
     }
-    return null;
+    return specificationRefusal ? { error: specificationRefusal } : null;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
   // Two runners claiming independent chains still touch the same Task pages
