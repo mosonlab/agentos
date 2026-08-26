@@ -33,7 +33,8 @@
 # and an exit code; anyone debugging scp's the log.
 #
 # Exit codes are merge-gate.sh's, passed through unchanged, plus one this
-# harness adds for everything that stops it before merge-gate.sh forms a verdict:
+# harness adds for everything that stops it before merge-gate.sh forms a verdict.
+# They are defined once, in lib.sh, which is installed beside this script:
 #
 #   0  PASS               2  usage error (this script or merge-gate.sh)
 #   1  FAIL               3  NOT AUTHORITATIVE
@@ -54,12 +55,18 @@
 # not a special case.
 set -uo pipefail
 
-EXIT_FAIL=1
+# The verdict's exit codes and the reader that recovers one from a log. lib.sh
+# is installed beside this script by mirror-push.sh, from the operator's
+# checkout, for the same reason this script is: the harness that decides what a
+# verdict means must be the copy the operator holds. It is sourced from this
+# script's own directory rather than from $GATE_HOME, which an environment may
+# point elsewhere.
+HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/gate-worker/lib.sh
+. "${HARNESS_DIR}/lib.sh"
+
+# 2 is this script's own argument parsing, not the gate's, so it stays here.
 EXIT_USAGE=2
-# Nothing ran, so nothing was judged. Kept distinct from FAIL because
-# remote-gate.sh and gate-dispatch.sh pass this code home unchanged and an
-# automation must not read a missing mirror as a verdict about a commit.
-EXIT_NO_VERDICT=76
 
 # The directory this script was installed into by mirror-push.sh, which is the
 # repository's own directory on the worker. Deriving it from the script's path
@@ -135,7 +142,7 @@ fi
 fail_out() {
   printf 'run-gate: %s\n' "$1" >&2
   printf 'MERGE GATE: FAIL (%s)\n' "$1"
-  exit "$EXIT_FAIL"
+  exit "$GATE_EXIT_FAIL"
 }
 
 # Everything that stops the harness before merge-gate.sh runs. The state of this
@@ -144,7 +151,7 @@ fail_out() {
 no_verdict() {
   printf 'run-gate: %s\n' "$1" >&2
   printf 'GATE NOT RUN: %s\n' "$1"
-  exit "$EXIT_NO_VERDICT"
+  exit "$GATE_EXIT_NO_VERDICT"
 }
 
 [ -d "$MIRROR_DIR" ] || no_verdict "no mirror at ${MIRROR_DIR}; run scripts/gate-worker/mirror-push.sh from the local machine first"
@@ -315,14 +322,14 @@ if ! git -C "$MIRROR_DIR" worktree add --detach --quiet "$WORKTREE" "$OID" >> "$
   printf 'run-gate: could not check %s out of the mirror; see %s\n' "$OID" "$LOG" >&2
   printf 'GATE NOT RUN: could not check out %s on the worker\n' "$OID"
   printf 'run-gate: log %s\n' "$LOG"
-  exit "$EXIT_NO_VERDICT"
+  exit "$GATE_EXIT_NO_VERDICT"
 fi
 WORKTREE_CREATED=1
 
 [ -f "${WORKTREE}/scripts/merge-gate.sh" ] || {
   printf 'MERGE GATE: FAIL (commit %s has no scripts/merge-gate.sh)\n' "$OID"
   printf 'run-gate: log %s\n' "$LOG"
-  exit "$EXIT_FAIL"
+  exit "$GATE_EXIT_FAIL"
 }
 
 # The gate is run from inside the checked-out commit, so the gate that judges a
@@ -342,16 +349,23 @@ fi
 
 # The verdict merge-gate.sh printed, verbatim, rather than one reconstructed from
 # the exit code: the caller should see the gate's own words, including the oid a
-# PASS names. Colour codes are stripped because this line is read over ssh and
-# often pasted into a PR.
-verdict="$(grep -a 'MERGE GATE: ' "$LOG" | tail -1 | sed 's/\x1b\[[0-9;]*m//g')"
+# PASS names and the reason a stopped run gives. gate_verdict_read knows all four
+# shapes and strips the colour, because this line is read over ssh and often
+# pasted into a PR.
+verdict="$(gate_verdict_read "$LOG")"
 if [ -z "$verdict" ]; then
-  # merge-gate.sh ran and printed no verdict, which means it died rather than
-  # decided — killed, out of memory, a crash inside a step. That is not a FAIL:
-  # calling it one would put a judgement about the commit on the record that
-  # nothing actually formed. The log is where the reason is.
+  # merge-gate.sh ran and printed no verdict at all, which means it died rather
+  # than decided — SIGKILL, out of memory, a crash the EXIT trap never survived.
+  # That is not a FAIL: calling it one would put a judgement about the commit on
+  # the record that nothing actually formed. The log is where the reason is.
+  #
+  # Only this branch may rewrite the status. A run that was stopped by a signal
+  # it could trap printed its own GATE NOT RUN line and reaches the caller under
+  # the signal that stopped it, which is what docs/runbooks/gate-worker.md
+  # promises; folding that into 76 here discarded both the gate's reason and its
+  # code.
   verdict="GATE NOT RUN: the gate produced no verdict line (exit ${status}); read the log"
-  status="$EXIT_NO_VERDICT"
+  status="$GATE_EXIT_NO_VERDICT"
 fi
 
 printf '%s\n' "$verdict"

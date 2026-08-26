@@ -69,7 +69,6 @@ set -uo pipefail
 # so the only 1 a caller can ever see from it is one the gate itself produced.
 EXIT_USAGE=2
 EXIT_NO_SLOT=75
-EXIT_NO_VERDICT=76
 
 PRIMARY_SERVER="${AGENTOS_GATE_PRIMARY_SERVER:-ci-desktop-worker}"
 FALLBACK_SERVER="${AGENTOS_GATE_FALLBACK_SERVER:-agentos-gate}"
@@ -168,11 +167,16 @@ case "$ALLOW_LOCAL" in 0|1) ;; *) die "AGENTOS_GATE_ALLOW_LOCAL must be 0 or 1, 
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
-[ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
-  || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch and no verdict exists" "$EXIT_NO_VERDICT"
 
+# Sourced before the first check that reports a code: the slot locks, the values
+# that reach a remote shell and the verdict's codes all live here, and this
+# script transports verdicts rather than forming them, so every failure of its
+# own is GATE_EXIT_NO_VERDICT.
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+
+[ -f "${REPO_ROOT}/scripts/merge-gate.sh" ] \
+  || die "${REPO_ROOT} has no scripts/merge-gate.sh; nothing to dispatch and no verdict exists" "$GATE_EXIT_NO_VERDICT"
 
 # Validated here as well as inside the scripts that send it: this one decides
 # which of them to call, and a destination it cannot vouch for is a dispatch
@@ -199,7 +203,7 @@ if [ -n "$MASTER_OID" ]; then
 fi
 
 git -C "$REPO_ROOT" cat-file -e "${OID}^{commit}" 2>/dev/null \
-  || die "candidate ${OID} is not in ${REPO_ROOT}; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
+  || die "candidate ${OID} is not in ${REPO_ROOT}; nothing ran and no verdict exists" "$GATE_EXIT_NO_VERDICT"
 
 # Freeze the integration baseline before slot selection. Without an explicit
 # --master, origin's HEAD is the authority: fetch its branch without creating a
@@ -208,26 +212,26 @@ git -C "$REPO_ROOT" cat-file -e "${OID}^{commit}" 2>/dev/null \
 # loudly and can be retried; it never substitutes a stale local ref.
 if [ -z "$MASTER_OID" ]; then
   symref="$(read_origin_head)" \
-    || die "could not read HEAD from origin; pass --master <oid> to state the baseline" "$EXIT_NO_VERDICT"
+    || die "could not read HEAD from origin; pass --master <oid> to state the baseline" "$GATE_EXIT_NO_VERDICT"
   DEFAULT_REF="$(printf '%s\n' "$symref" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
   [ -n "$DEFAULT_REF" ] \
-    || die "origin did not name its default branch; pass --master <oid> to state the baseline" "$EXIT_NO_VERDICT"
+    || die "origin did not name its default branch; pass --master <oid> to state the baseline" "$GATE_EXIT_NO_VERDICT"
   gate_valid_ref "$DEFAULT_REF" >/dev/null \
-    || die "origin named a default branch this dispatcher will not fetch: ${DEFAULT_REF}" "$EXIT_NO_VERDICT"
+    || die "origin named a default branch this dispatcher will not fetch: ${DEFAULT_REF}" "$GATE_EXIT_NO_VERDICT"
   fetch_origin_ref "$DEFAULT_REF" \
-    || die "could not refresh ${DEFAULT_REF} from origin; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
+    || die "could not refresh ${DEFAULT_REF} from origin; nothing ran and no verdict exists" "$GATE_EXIT_NO_VERDICT"
   refreshed="$(read_origin_head)" \
-    || die "could not re-read HEAD from origin after refresh; nothing ran and no verdict exists" "$EXIT_NO_VERDICT"
+    || die "could not re-read HEAD from origin after refresh; nothing ran and no verdict exists" "$GATE_EXIT_NO_VERDICT"
   refreshed_ref="$(printf '%s\n' "$refreshed" | awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}')"
   MASTER_OID="$(printf '%s\n' "$refreshed" | awk '$2 == "HEAD" {print $1; exit}')"
   [ "$refreshed_ref" = "$DEFAULT_REF" ] \
-    || die "origin changed its default branch during refresh (${DEFAULT_REF} -> ${refreshed_ref:-unknown}); retry dispatch" "$EXIT_NO_VERDICT"
-  case "$MASTER_OID" in *[!0-9a-f]* | "") die "origin answered with no full baseline oid for ${DEFAULT_REF}" "$EXIT_NO_VERDICT" ;; esac
+    || die "origin changed its default branch during refresh (${DEFAULT_REF} -> ${refreshed_ref:-unknown}); retry dispatch" "$GATE_EXIT_NO_VERDICT"
+  case "$MASTER_OID" in *[!0-9a-f]* | "") die "origin answered with no full baseline oid for ${DEFAULT_REF}" "$GATE_EXIT_NO_VERDICT" ;; esac
   [ "${#MASTER_OID}" -eq 40 ] \
-    || die "origin answered with a short baseline oid for ${DEFAULT_REF}: ${MASTER_OID}" "$EXIT_NO_VERDICT"
+    || die "origin answered with a short baseline oid for ${DEFAULT_REF}: ${MASTER_OID}" "$GATE_EXIT_NO_VERDICT"
 fi
 git -C "$REPO_ROOT" cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null \
-  || die "baseline ${MASTER_OID} is not in ${REPO_ROOT}; refresh the integration branch and retry" "$EXIT_NO_VERDICT"
+  || die "baseline ${MASTER_OID} is not in ${REPO_ROOT}; refresh the integration branch and retry" "$GATE_EXIT_NO_VERDICT"
 
 # --- slots -------------------------------------------------------------------
 
@@ -270,7 +274,7 @@ local_eligible() {
   [ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]
 }
 
-mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$EXIT_NO_VERDICT"
+mkdir -p "$SLOT_ROOT" || die "could not create ${SLOT_ROOT}" "$GATE_EXIT_NO_VERDICT"
 
 printf 'gate-dispatch: %s, primary %s(%s)' "$OID" "$PRIMARY_SERVER" "${#PRIMARY_SLOTS[@]}" >&2
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
@@ -286,7 +290,7 @@ run_local() {
 }
 
 REMOTE_OUTPUT=""
-REMOTE_STATUS="$EXIT_NO_VERDICT"
+REMOTE_STATUS="$GATE_EXIT_NO_VERDICT"
 run_remote() {
   local label="$1" server="$2"
   printf 'gate-dispatch: running on %s (%s)\n' "$label" "$server" >&2
@@ -303,7 +307,7 @@ run_remote() {
     --candidate "$OID" --baseline "$MASTER_OID" >&2 || {
     printf 'gate-dispatch: mirror-push failed; no gate was run and no verdict exists\n' >&2
     REMOTE_OUTPUT=""
-    REMOTE_STATUS="$EXIT_NO_VERDICT"
+    REMOTE_STATUS="$GATE_EXIT_NO_VERDICT"
     return 0
   }
   REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER='' bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
@@ -313,7 +317,7 @@ run_remote() {
 no_verdict() {
   printf 'gate-dispatch: %s\n' "$1" >&2
   printf 'GATE NOT RUN: %s\n' "$2"
-  exit "$EXIT_NO_VERDICT"
+  exit "$GATE_EXIT_NO_VERDICT"
 }
 
 DEADLINE=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
@@ -338,17 +342,16 @@ while :; do
       case "$outcome" in
         0)
           run_remote primary "$PRIMARY_SERVER"
-          case "$REMOTE_STATUS" in
-            0|1|3) [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"; exit "$REMOTE_STATUS" ;;
-            *)
-              printf 'gate-dispatch: primary produced no verdict (exit %s); trying fallback capacity\n' "$REMOTE_STATUS" >&2
-              [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: primary said: %s\n' "$REMOTE_OUTPUT" >&2
-              release_slot
-              PRIMARY_DISABLED=1
-              UNAVAILABLE_EVER="${UNAVAILABLE_EVER} primary"
-              break
-              ;;
-          esac
+          if gate_verdict_is_judgement "$REMOTE_STATUS"; then
+            [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"
+            exit "$REMOTE_STATUS"
+          fi
+          printf 'gate-dispatch: primary produced no verdict (exit %s); trying fallback capacity\n' "$REMOTE_STATUS" >&2
+          [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: primary said: %s\n' "$REMOTE_OUTPUT" >&2
+          release_slot
+          PRIMARY_DISABLED=1
+          UNAVAILABLE_EVER="${UNAVAILABLE_EVER} primary"
+          break
           ;;
         1) round_busy=$(( round_busy + 1 )) ;;
         *) round_broken="${round_broken} ${primary_slot}" ;;
@@ -362,16 +365,15 @@ while :; do
     case "$outcome" in
       0)
         run_remote fallback "$FALLBACK_SERVER"
-        case "$REMOTE_STATUS" in
-          0|1|3) [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"; exit "$REMOTE_STATUS" ;;
-          *)
-            printf 'gate-dispatch: fallback produced no verdict (exit %s)\n' "$REMOTE_STATUS" >&2
-            [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: fallback said: %s\n' "$REMOTE_OUTPUT" >&2
-            release_slot
-            FALLBACK_DISABLED=1
-            UNAVAILABLE_EVER="${UNAVAILABLE_EVER} remote-2"
-            ;;
-        esac
+        if gate_verdict_is_judgement "$REMOTE_STATUS"; then
+          [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"
+          exit "$REMOTE_STATUS"
+        fi
+        printf 'gate-dispatch: fallback produced no verdict (exit %s)\n' "$REMOTE_STATUS" >&2
+        [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: fallback said: %s\n' "$REMOTE_OUTPUT" >&2
+        release_slot
+        FALLBACK_DISABLED=1
+        UNAVAILABLE_EVER="${UNAVAILABLE_EVER} remote-2"
         ;;
       1) round_busy=$(( round_busy + 1 )) ;;
       *) round_broken="${round_broken} remote-2" ;;

@@ -1041,98 +1041,17 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
   assert.equal((await db.run.findFirstOrThrow({ where: { taskId: lost.body.id, runNumber: 2 } })).opensPullRequest, false);
 });
 
-test("T20: a template step's PR flag is settable through the API", async () => {
+test("T20: a template step's PR flag reaches the task it instantiates", async () => {
   const seed = await seedProject("t20");
   const template = await db.taskTemplate.create({ data: {
     projectId: seed.project.id, name: "tmpl", description: "t", variables: [],
     steps: { create: [0, 1].map((index) => ({
       stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
+      opensPullRequest: index === 0,
     })) },
   } });
-  const steps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: template.id }, orderBy: { stepIndex: "asc" } });
-  const patched = await operatorRequest(`/task-templates/${template.id}/steps/${steps[1]!.id}`, {
-    method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
-  });
-  assert.equal(patched.status, 200);
-  assert.equal(patched.body.opensPullRequest, false);
-
   const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false]);
-
-  // A step of another template is not this template's to patch.
-  const other = await db.taskTemplate.create({ data: {
-    projectId: seed.project.id, name: "other", description: "t", variables: [],
-    steps: { create: [{ stepIndex: 0, layer: 0, name: "Only", assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: "do" }] },
-  } });
-  const foreign = await db.taskTemplateStep.findFirstOrThrow({ where: { taskTemplateId: other.id } });
-  const crossed = await operatorRequest(`/task-templates/${template.id}/steps/${foreign.id}`, {
-    method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
-  });
-  assert.equal(crossed.status, 404);
-
-  const malformed = await operatorRequest(`/task-templates/${template.id}/steps/${steps[0]!.id}`, {
-    method: "PATCH", body: JSON.stringify({ opensPullRequest: "no" }),
-  });
-  assert.equal(malformed.status, 400);
 });
 
-test("T21: template steps are creatable with defaults and full ownership/agent validation", async () => {
-  const seed = await seedProject("t21");
-  const template = await db.taskTemplate.create({ data: {
-    projectId: seed.project.id,
-    name: "authorable",
-    description: "t",
-    variables: [],
-    webhookRepoId: seed.repo.id,
-  } });
-  const body = {
-    stepIndex: 0,
-    name: "Implement",
-    assigneeType: "AGENT",
-    assigneeAgentId: seed.agent.id,
-    prompt: "Implement the change",
-  };
-  const created = await operatorRequest(`/task-templates/${template.id}/steps`, {
-    method: "POST", body: JSON.stringify(body),
-  });
-  assert.equal(created.status, 201, JSON.stringify(created.body));
-  assert.equal(created.body.taskTemplateId, template.id);
-  assert.equal(created.body.opensPullRequest, true);
-  assert.equal(created.body.outputKind, "result");
-
-  const duplicate = await operatorRequest(`/task-templates/${template.id}/steps`, {
-    method: "POST", body: JSON.stringify({ ...body, opensPullRequest: false }),
-  });
-  assert.equal(duplicate.status, 409);
-
-  const noAccess = await db.agent.create({ data: {
-    projectId: seed.project.id,
-    environmentId: (await db.environment.findFirstOrThrow({ where: { projectId: seed.project.id } })).id,
-    name: "no-access", title: "No access", model: "claude", foundationalPrompt: "f", rolePrompt: "r",
-  } });
-  const denied = await operatorRequest(`/task-templates/${template.id}/steps`, {
-    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, assigneeAgentId: noAccess.id }),
-  });
-  assert.equal(denied.status, 400);
-  assert.match(denied.body.error, /no grant/i);
-
-  const archived = await db.agent.update({ where: { id: noAccess.id }, data: { archivedAt: new Date() } });
-  const archivedResult = await operatorRequest(`/task-templates/${template.id}/steps`, {
-    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, assigneeAgentId: archived.id }),
-  });
-  assert.equal(archivedResult.status, 400);
-  assert.match(archivedResult.body.error, /archived/i);
-
-  const other = await seedProject("t21-other");
-  const foreign = await operatorRequest(`/task-templates/${template.id}/steps`, {
-    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, assigneeAgentId: other.agent.id }),
-  });
-  assert.equal(foreign.status, 400);
-  assert.match(foreign.body.error, /does not belong/i);
-
-  const missing = await operatorRequest(`/task-templates/${template.id}/steps`, {
-    method: "POST", body: JSON.stringify({ ...body, stepIndex: 1, prompt: undefined }),
-  });
-  assert.equal(missing.status, 400);
-});

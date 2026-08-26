@@ -36,13 +36,14 @@ import {
   assertIntegratorBinding,
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
+  isIntegratorBindingError,
   parseStopQuestionKey,
   recoverRefreshRequestedConfirmationCard,
   requestMergeEvidence,
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import { INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -327,15 +328,19 @@ export const lockAgentRow = async (
 export const lockAgentRows = async (
   tx: Tx,
   agentIds: string[],
-): Promise<Map<string, Date | null>> => {
+): Promise<Map<string, { name: string; projectId: string; archivedAt: Date | null }>> => {
   const unique = [...new Set(agentIds)];
   if (unique.length === 0) return new Map();
-  const rows = await tx.$queryRaw<Array<{ id: string; archivedAt: Date | null }>>`
-    SELECT "id", "archivedAt" FROM "Agent"
+  const rows = await tx.$queryRaw<Array<{ id: string; name: string; projectId: string; archivedAt: Date | null }>>`
+    SELECT "id", "name", "projectId", "archivedAt" FROM "Agent"
     WHERE "id" = ANY(${unique})
     ORDER BY "id" FOR UPDATE
   `;
-  return new Map(rows.map((row) => [row.id, row.archivedAt]));
+  return new Map(rows.map((row) => [row.id, {
+    name: row.name,
+    projectId: row.projectId,
+    archivedAt: row.archivedAt,
+  }]));
 };
 
 /**
@@ -887,20 +892,398 @@ const isUniqueConflict = (error: unknown): boolean => (
   error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
 );
 
+type BoundDispatchMetadata = {
+  predecessorTaskId: string;
+  predecessorChainId: string;
+  successorTaskId: string;
+  successorChainId: string;
+};
+
+const boundDispatchMetadata = (
+  predecessor: ChainTask,
+  successor: ChainTask,
+): BoundDispatchMetadata => ({
+  predecessorTaskId: predecessor.id,
+  predecessorChainId: predecessor.chainId!,
+  successorTaskId: successor.id,
+  successorChainId: successor.chainId!,
+});
+
+/**
+ * Records the two sides of a binding decision together. The pointer remains
+ * on the successor task forever; these rows are the durable audit trail for
+ * both a successful dispatch and a fail-closed refusal.
+ */
+const boundDispatchActivities = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainTask,
+  input: {
+    successorBody: string;
+    predecessorBody: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> => {
+  const metadata = {
+    ...boundDispatchMetadata(predecessor, successor),
+    ...input.metadata,
+  };
+  await tx.taskActivity.create({
+    data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: input.successorBody,
+      metadata,
+    },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId: predecessor.id,
+      actorType: "control-plane",
+      body: input.predecessorBody,
+      metadata,
+    },
+  });
+};
+
+const parkBoundSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  reason: string,
+  metadata: Record<string, unknown> = {},
+): Promise<void> => {
+  await tx.task.update({
+    where: { id: successor.id },
+    data: { status: TaskStatus.REVIEW, failureReason: reason },
+  });
+  await boundDispatchActivities(tx, predecessor, successor, {
+    successorBody: `Bound predecessor completed; successor parked in REVIEW: ${reason}`,
+    predecessorBody: `Bound chain dispatch refused; successor parked in REVIEW: ${reason}`,
+    metadata: { state: "parked", failureReason: reason, ...metadata },
+  });
+};
+
+const boundSuccessorQueuedActivity = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+  state: "queued" | "already-queued",
+  runId: string | null,
+): Promise<void> => {
+  await boundDispatchActivities(tx, predecessor, successor, {
+    successorBody: state === "queued"
+      ? "Bound predecessor completed; first step queued"
+      : "Bound predecessor completed; successor already queued",
+    predecessorBody: state === "queued"
+      ? "Bound chain dispatched"
+      : "Bound chain dispatch observed an already queued successor",
+    metadata: { state, runId },
+  });
+};
+
+type BoundSuccessor = Prisma.TaskGetPayload<{
+  include: { runs: true; assigneeAgent: true; repo: true };
+}>;
+
+/**
+ * Resolves the one successor bound to a completed predecessor. The caller
+ * already owns the predecessor chain mutex; this function acquires the
+ * successor chain mutex second and never the other way around. That order is
+ * total because a binding can only point at a chain that pre-dates its own.
+ */
+const dispatchBoundSuccessor = async (
+  tx: Tx,
+  predecessor: ChainSuccessor,
+  successorId: string,
+  now: Date,
+  predecessorTerminal: boolean,
+): Promise<void> => {
+  const successorIdentity = await tx.task.findUnique({
+    where: { id: successorId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!successorIdentity?.chainId) {
+    // The binding shape check makes this unreachable for persisted rows. Keep
+    // the refusal explicit if a legacy or hand-written fixture violates it.
+    throw new Error(`Bound successor ${successorId} has no chain identity`);
+  }
+  await lockChainRows(tx, {
+    projectId: successorIdentity.projectId,
+    chainId: successorIdentity.chainId,
+  });
+  const successor = await tx.task.findUnique({
+    where: { id: successorId },
+    include: {
+      runs: {
+        where: { status: { in: ACTIVE_RUN_STATUSES } },
+        orderBy: { runNumber: "desc" },
+      },
+      assigneeAgent: true,
+      repo: true,
+    },
+  }) as BoundSuccessor | null;
+  if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
+
+  if (!predecessorTerminal) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      "bound predecessor is no longer terminal; successor was not queued",
+      { predecessorTerminal: false },
+    );
+    return;
+  }
+
+  // A second completion/replay can arrive after the first transaction has
+  // committed its Run. Treat that as an idempotent observation, not as a
+  // refusal that would overwrite the successfully queued task with REVIEW.
+  if (successor.runs.length > 0) {
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", successor.runs[0]!.id);
+    return;
+  }
+  if (successor.archivedAt) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `successor ${successor.name} is archived; unarchive the task and retry dispatch`,
+    );
+    return;
+  }
+  if (successor.status === TaskStatus.DONE) {
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", null);
+    return;
+  }
+  if (successor.status !== TaskStatus.TODO) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `successor ${successor.name} is ${successor.status}; it was not queued`,
+    );
+    return;
+  }
+  if (successor.assigneeType !== AssigneeType.AGENT || !successor.assigneeAgentId || !successor.assigneeAgent || !successor.repoId || !successor.repo) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `successor ${successor.name} cannot be queued without an agent and repo`,
+    );
+    return;
+  }
+  if (successor.assigneeAgent.archivedAt) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry dispatch`,
+    );
+    return;
+  }
+  if (!await lockAgentRepoGrant(tx, {
+    projectId: successor.projectId,
+    agentId: successor.assigneeAgentId,
+    repoId: successor.repoId,
+  })) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `repository-grant-missing: assignee ${successor.assigneeAgent.name} has no grant for Repo ${successor.repo.name}; restore the grant and retry dispatch`,
+    );
+    return;
+  }
+
+  const stopped = await stopStateFor(tx, successor.id);
+  if (stopped) {
+    await parkBoundSuccessor(
+      tx,
+      predecessor,
+      successor,
+      `merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`,
+      { condition: stopped.stop.condition, sourceStopId: stopped.stop.stopId },
+    );
+    return;
+  }
+
+  const rawTx = tx as Tx & { $executeRawUnsafe?: (query: string) => Promise<number> };
+  const hasSavepoint = typeof rawTx.$executeRawUnsafe === "function";
+  const savepoint = "chain_dispatch_enqueue";
+  if (hasSavepoint) await rawTx.$executeRawUnsafe!(`SAVEPOINT ${savepoint}`);
+  try {
+    const run = await enqueueTaskRunInternal(tx, successor.id, now, null);
+    if (hasSavepoint) await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", run.id);
+  } catch (error: unknown) {
+    if (isUniqueConflict(error)) {
+      if (hasSavepoint) {
+        await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+      }
+      await boundSuccessorQueuedActivity(tx, predecessor, successor, "already-queued", null);
+      return;
+    }
+    if (hasSavepoint) {
+      await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+    }
+    if (isArchivedTaskError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `successor ${successor.name} is archived; unarchive the task and retry dispatch`,
+      );
+      return;
+    }
+    if (isArchivedAssigneeError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `assignee ${successor.assigneeAgent.name} is archived; unarchive the agent and retry dispatch`,
+      );
+      return;
+    }
+    if (isIntegratorStoppedError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `merge integrator stopped on ${error.condition}; predecessor success preserved and successor not activated`,
+        { condition: error.condition },
+      );
+      return;
+    }
+    if (isIntegratorBindingError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `successor ${successor.name} violates the merge-integrator binding invariant: ${error.refusal}; restore the canonical assignee binding and retry dispatch`,
+        { refusal: "integrator-binding", detail: error.refusal },
+      );
+      return;
+    }
+    if (isCompoundImplementationAssigneeError(error)) {
+      await parkBoundSuccessor(
+        tx,
+        predecessor,
+        successor,
+        `successor ${successor.name} violates the compound implementation assignee invariant: ${error.message}; restore the canonical assignee binding and retry dispatch`,
+        { refusal: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
+      );
+      return;
+    }
+    throw error;
+  }
+};
+
 /**
  * Why this successor must not be claimed, or null if it may be.
  *
- * The CAS below only matches TODO/DOING/REVIEW. A successor outside that set
- * and not DONE — archived, or parked in BACKLOG — makes `updateMany` match zero
- * rows forever while the re-read keeps returning the same row, so the loop spins
- * inside the caller's transaction and run completion never returns. Returning
- * early is what makes Backlog a place a chain step can sit.
+ * Both answers are an operator's explicit intent: an archived task is retired
+ * and a Backlog task is parked, so a predecessor completing does not get to
+ * drag either back into execution.
+ *
+ * A REVIEW successor is deliberately absent. It used to sit here as a
+ * fall-through, which is how a chain could stop for hours with nothing but an
+ * activity row to say so; `resumeParkedSuccessor` now owns that case.
  */
 const parkedReason = (successor: { status: TaskStatus; archivedAt?: Date | null }): string | null => {
   if (successor.archivedAt) return "successor is archived and was not queued";
   if (successor.status === TaskStatus.BACKLOG) return "successor is parked in Backlog — use Start now";
-  if (successor.status === TaskStatus.REVIEW) return "successor is awaiting operator retry or approval";
   return null;
+};
+
+/** Activity kind recording one automatic recovery of a REVIEW successor. */
+export const CHAIN_AUTO_RESUME_KIND = "chainDispatch.autoResume";
+
+/**
+ * How many times a chain may return the same successor to TODO by itself.
+ *
+ * The recovery exists because a REVIEW successor at dispatch time is a stalled
+ * chain, not a decision anyone made. The ceiling exists because a step that
+ * keeps landing back in REVIEW is failing for a reason no requeue fixes, and
+ * spinning on it is worse than stopping and saying so.
+ *
+ * Five, not three: a merge-readiness step is legitimately parked and re-queued
+ * once per automatic repair round, and the tail allows three of those, so a
+ * lower ceiling would stop a converging chain rather than a thrashing one.
+ */
+export const MAX_AUTOMATIC_SUCCESSOR_RESUMES = 5;
+
+/**
+ * Returns a stalled REVIEW successor to the queue, or stops the chain when it
+ * has already been returned too many times.
+ *
+ * `true` means the caller may go on to dispatch it; `false` means this
+ * successor is parked for a human and the caller must skip it.
+ */
+const resumeParkedSuccessor = async (
+  tx: Tx,
+  predecessor: ChainTask,
+  successor: ChainSuccessor,
+): Promise<boolean> => {
+  const priorResumes = await tx.taskActivity.count({
+    where: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: CHAIN_AUTO_RESUME_KIND },
+    },
+  });
+  const attempt = priorResumes + 1;
+  if (attempt > MAX_AUTOMATIC_SUCCESSOR_RESUMES) {
+    const reason = `successor returned to REVIEW after ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)} automatic resumes; chain stopped for an operator`;
+    await tx.task.update({
+      where: { id: successor.id },
+      data: { status: TaskStatus.REVIEW, failureReason: reason },
+    });
+    await tx.taskActivity.create({ data: {
+      taskId: successor.id,
+      actorType: "control-plane",
+      body: `Predecessor layer completed; ${reason}`,
+      metadata: {
+        kind: CHAIN_AUTO_RESUME_KIND,
+        schemaVersion: 1,
+        state: "exhausted",
+        attempt,
+        predecessorTaskId: predecessor.id,
+      },
+    } });
+    await tx.inboxMessage.upsert({
+      where: { dedupeKey: `chain-successor-auto-resume-exhausted:${successor.id}` },
+      create: {
+        from: "AGENT",
+        taskId: successor.id,
+        kind: "TEXT",
+        body: `Chain step ${successor.name} was automatically resumed ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)} times and is back in REVIEW; the chain is stopped and needs an operator.`,
+        dedupeKey: `chain-successor-auto-resume-exhausted:${successor.id}`,
+      },
+      update: {},
+    });
+    return false;
+  }
+  await tx.task.update({
+    where: { id: successor.id },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  });
+  await tx.taskActivity.create({ data: {
+    taskId: successor.id,
+    actorType: "control-plane",
+    body: `Predecessor layer completed; successor was stalled in REVIEW and was automatically returned to the queue (resume ${String(attempt)} of ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)})`,
+    metadata: {
+      kind: CHAIN_AUTO_RESUME_KIND,
+      schemaVersion: 1,
+      state: "resumed",
+      attempt,
+      predecessorTaskId: predecessor.id,
+    },
+  } });
+  return true;
 };
 
 type ChainSuccessorOptions = {
@@ -998,9 +1381,18 @@ const activateChainSuccessorInternal = async (
   }
 
   const currentRows = chainRows.filter((row) => layerOf(row) === currentLayer);
+  const boundSuccessor = current.status === TaskStatus.DONE
+    ? await tx.task.findUnique({
+      where: { dispatchAfterTaskId: current.id },
+      select: { id: true },
+    })
+    : null;
   if (!currentRows.every((row) => row.status === TaskStatus.DONE)) {
     // The first review completion exits here while its blind sibling is still
     // unfinished; the second completion owns the join.
+    if (boundSuccessor) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
+    }
     return { nextTaskId: null, gated: false };
   }
   // A legacy chain can contain a historical DONE gap (for example an operator
@@ -1013,8 +1405,26 @@ const activateChainSuccessorInternal = async (
     .sort((left, right) => left - right)
     .find((value) => chainRows.some((row) => layerOf(row) === value && row.status !== TaskStatus.DONE));
   if (nextLayer === undefined) {
-    await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
+    const predecessorComplete = chainRows.every((row) => row.status === TaskStatus.DONE);
+    if (!boundSuccessor || predecessorComplete) {
+      await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
+    }
+    // Archiving a predecessor does not resolve its binding. Production routes
+    // cannot complete an archived task, but retaining this check also keeps
+    // legacy/directly-seeded rows inert instead of dispatching from archived
+    // history when an activation replay is attempted.
+    if (boundSuccessor && current.archivedAt === null) {
+      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, predecessorComplete);
+    }
     return { nextTaskId: null, gated: false };
+  }
+
+  // A binding to a non-terminal layer is rejected at instantiation time. If a
+  // legacy row or a direct fixture nevertheless carries one, park it while the
+  // predecessor chain still has work above this layer instead of silently
+  // leaving the successor inert forever.
+  if (boundSuccessor) {
+    await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
   }
 
   const nextRows = chainRows.filter((row) => layerOf(row) === nextLayer).sort(layerOrder);
@@ -1052,6 +1462,22 @@ const activateChainSuccessorInternal = async (
       } });
       continue;
     }
+    // A merge-readiness step parked on an open independent review is not
+    // stalled: the review owns that park and hands the step back when it
+    // resolves. Resuming it here would race the worker into re-parking a step
+    // whose review has already finished, which is the stall this recovery
+    // exists to prevent.
+    const reviewOwnedPark = successor.status === TaskStatus.REVIEW
+      && (successor.failureReason?.startsWith(INDEPENDENT_REVIEW_OPEN_PREFIX) ?? false);
+    if (reviewOwnedPark) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: "Predecessor layer completed; successor is held by an open independent review",
+      } });
+      continue;
+    }
+    if (successor.status === TaskStatus.REVIEW && !await resumeParkedSuccessor(tx, current, successor)) continue;
 
     const successorStep = successor.templateStepId
       ? await tx.taskTemplateStep.findUnique({

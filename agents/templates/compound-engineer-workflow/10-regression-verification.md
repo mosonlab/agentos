@@ -1,6 +1,6 @@
 ---
-stepIndex: 6
-layer: 5
+stepIndex: 10
+layer: 9
 agent: regression-verifier
 approvalGate: false
 outputKind: regression-verification
@@ -22,11 +22,12 @@ If Git reports a conflict, record both pre-refresh head SHAs,
 abort the merge so the workspace is deliverable, and finish with the
 `refresh-conflict` output below; do not resolve a hunk yourself.
 
-After a successful refresh, read the must-fix list and fixed implementation
-from AgentOS step outputs. Review the full fix diff as one unit, account for
-every must-fix ID, and rerun relevant regressions. If a must-fix remains open
-or the fix introduces a defect, do not run the full gate; emit the
-`review-fail` output below. Only after semantic verification passes, run
+After a successful refresh, read both review reports, the fixed implementation
+with its dispositions, and the documentation result from AgentOS step outputs.
+Review the full final diff as one unit, account for every finding id either
+report raised, and rerun relevant regressions. If an adopted finding remains
+open, a rejection is unsupported, or the fix introduces a defect, do not run the
+full gate; emit the `review-fail` output below. Only after semantic verification passes,
 `scripts/gate-worker/gate-dispatch.sh <head-sha> --master <baseHeadSha>`.
 If dispatch exits 75 or 76 without a verdict, retry dispatch in place up to two
 more times. If all three attempts return a non-verdict exit, or dispatch returns
@@ -36,7 +37,7 @@ Persist exactly one JSON object as the AgentOS task output and do not write a
 report file:
 
 - PASS: `{"schemaVersion":1,"outcome":"pass","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"PASS"}`
-- semantic FAIL: `{"schemaVersion":1,"outcome":"review-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<unresolved must-fix IDs or newly discovered defect>"}`
+- semantic FAIL: `{"schemaVersion":1,"outcome":"review-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<unresolved finding IDs or newly discovered defect>"}`
 - gate FAIL: `{"schemaVersion":1,"outcome":"gate-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"FAIL","summary":"<named failing stage>"}`
 - refresh conflict: `{"schemaVersion":1,"outcome":"refresh-conflict","headSha":"<chain head before refresh>","baseHeadSha":"<target head>","summary":"<conflicted paths>"}`
 

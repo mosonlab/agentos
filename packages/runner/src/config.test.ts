@@ -51,6 +51,27 @@ test("the dependency cache defaults beside the workspace root and accepts an exp
   }
 });
 
+// The mirror belongs to the account that runs the tasks, not to the machine's
+// workspace area: it is fetched with that account's credentials and read only
+// by it, and its home is the one directory every deployment already gives that
+// account at 0700.
+test("the repository mirror defaults into the task account's home and accepts an explicit root", () => {
+  const previousHome = process.env.RUNNER_HOME;
+  const previousMirror = process.env.RUNNER_REPO_MIRROR_ROOT;
+  try {
+    process.env.RUNNER_HOME = "/opt/agentos/accounts/runner-1";
+    delete process.env.RUNNER_REPO_MIRROR_ROOT;
+    assert.equal(loadRunnerConfig().repoMirrorRoot, "/opt/agentos/accounts/runner-1/.agentos/repo-mirrors");
+    process.env.RUNNER_REPO_MIRROR_ROOT = "/srv/agentos/mirrors";
+    assert.equal(loadRunnerConfig().repoMirrorRoot, "/srv/agentos/mirrors");
+  } finally {
+    if (previousHome === undefined) delete process.env.RUNNER_HOME;
+    else process.env.RUNNER_HOME = previousHome;
+    if (previousMirror === undefined) delete process.env.RUNNER_REPO_MIRROR_ROOT;
+    else process.env.RUNNER_REPO_MIRROR_ROOT = previousMirror;
+  }
+});
+
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
