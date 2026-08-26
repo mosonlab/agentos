@@ -327,7 +327,7 @@ test("repo-grant revocation and template instantiation serialize across future s
       return app.request(`/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
         method: "POST",
         headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: context.repo.id, variables: {}, autoStart: true }),
+        body: JSON.stringify({ repoId: context.repo.id, variables: {}, autoStart: true, description: "grant race feature brief" }),
       });
     },
     async (release, gate) => {
@@ -903,6 +903,7 @@ test("template instantiation creates an inert chain unless autoStart is true", a
     repoId: context.repo.id,
     variables: {},
     autoStart: false,
+    description: "inert chain feature brief",
   });
   assert.equal(inert.status, 201);
   assert.equal(await db.run.count({ where: { task: { chainId: inert.body.chainId } } }), 0);
@@ -911,6 +912,7 @@ test("template instantiation creates an inert chain unless autoStart is true", a
     repoId: context.repo.id,
     variables: {},
     autoStart: true,
+    description: "started chain feature brief",
   });
   assert.equal(started.status, 201);
   assert.equal(await db.run.count({ where: { task: { chainId: started.body.chainId } } }), 1);
@@ -977,7 +979,7 @@ test("archive and template instantiation released together never strand a queued
       return app.request(`/projects/${context.project.id}/task-templates/${template.id}/instantiate`, {
         method: "POST",
         headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: context.repo.id, variables: {}, autoStart: true }),
+        body: JSON.stringify({ repoId: context.repo.id, variables: {}, autoStart: true, description: "archive race feature brief" }),
       });
     },
   ]));
@@ -1112,7 +1114,7 @@ test("an archive committing under the lock is seen by task creation and by insta
   const instantiated = await archiveUnderHeldLock(chain.agent.id, () => call(
     "POST",
     `/projects/${chain.project.id}/task-templates/${template.id}/instantiate`,
-    { repoId: chain.repo.id, variables: {}, autoStart: true },
+    { repoId: chain.repo.id, variables: {}, autoStart: true, description: "locked archive feature brief" },
   ));
   assert.equal(instantiated.status, 400, JSON.stringify(instantiated.body));
   assert.match(instantiated.body.error, /is archived/);

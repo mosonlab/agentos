@@ -89,7 +89,7 @@ const request = async (
       {
         method: "POST",
         headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ description: "template dispatch feature brief", ...(body as Record<string, unknown>) }),
       },
     );
     return { status: response.status, body: await response.json() };

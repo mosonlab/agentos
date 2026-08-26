@@ -32,7 +32,7 @@ test("test-app refuses the production default root even when set explicitly", as
     assert.throws(() => createApp({} as PrismaClient), /refuses workspace root/u);
   });
   await withWorkspaceRootEnv(undefined, () => {
-    assert.throws(() => createApp({} as PrismaClient, { workspaceRoot: production }), /refuses workspace root/u);
+    assert.throws(() => createApp({} as PrismaClient, { workspaceRoot: production, specificationReader: null }), /refuses workspace root/u);
   });
 });
 
@@ -49,8 +49,8 @@ test("test-app refuses a symlink alias of a forbidden root", async () => {
   process.env.CONTROL_PLANE_STATE_DIR = stateDir;
   try {
     await withWorkspaceRootEnv(undefined, () => {
-      assert.throws(() => createApp({} as PrismaClient, { workspaceRoot: forbidden }), /refuses workspace root/u);
-      assert.throws(() => createApp({} as PrismaClient, { workspaceRoot: alias }), /refuses workspace root/u);
+      assert.throws(() => createApp({} as PrismaClient, { workspaceRoot: forbidden, specificationReader: null }), /refuses workspace root/u);
+      assert.throws(() => createApp({} as PrismaClient, { workspaceRoot: alias, specificationReader: null }), /refuses workspace root/u);
     });
   } finally {
     if (previousStateDir === undefined) delete process.env.CONTROL_PLANE_STATE_DIR;
@@ -61,6 +61,6 @@ test("test-app refuses a symlink alias of a forbidden root", async () => {
 test("test-app accepts an isolated temporary root", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-test-app-ok-"));
   await withWorkspaceRootEnv(undefined, () => {
-    assert.ok(createApp({} as PrismaClient, { workspaceRoot: root }));
+    assert.ok(createApp({} as PrismaClient, { workspaceRoot: root, specificationReader: null }));
   });
 });

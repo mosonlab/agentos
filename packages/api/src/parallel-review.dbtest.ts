@@ -26,6 +26,10 @@ const RUNNER_TOKEN = "parallel-review-runner-token";
 const OPERATOR_TOKEN = "parallel-review-operator-token";
 const IMPLEMENTATION_BASE = "1".repeat(40);
 const IMPLEMENTATION_HEAD = "2".repeat(40);
+const SPECIFICATION_BRIEF = "Parallel review fixture specification.";
+const specificationReader = {
+  readFileAtCommit: async () => new TextEncoder().encode(SPECIFICATION_BRIEF),
+};
 
 type Claim = {
   task: {
@@ -120,7 +124,7 @@ const request = async (
   token: string,
   body?: Record<string, unknown>,
 ): Promise<{ status: number; body: unknown }> => {
-  const response = await createApp(db).request(path, {
+  const response = await createApp(db, { specificationReader }).request(path, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -187,6 +191,7 @@ const instantiateDirect = async (): Promise<DirectFixture> => {
     repoId: installation.repoId,
     variables: { branchName },
     autoStart: true,
+    description: SPECIFICATION_BRIEF,
   });
   const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
   return {
@@ -210,10 +215,17 @@ const instantiateFullAtReviewFrontier = async (): Promise<FullFixture> => {
     repoId: installation.repoId,
     variables: { branchName },
     autoStart: false,
+    description: SPECIFICATION_BRIEF,
   });
   const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
   const priorIds = chain.tasks.filter((task) => (task.chainIndex ?? 0) < 5).map((task) => task.id);
   await db.task.updateMany({ where: { id: { in: priorIds } }, data: { status: TaskStatus.DONE } });
+  await db.taskStepOutput.create({ data: {
+    taskId: byIndex.get(1)!.id,
+    kind: "spec",
+    body: JSON.stringify({ schemaVersion: 1, headSha: "0".repeat(40), spec: SPECIFICATION_BRIEF }),
+    commitSha: "0".repeat(40),
+  } });
   const implementation = byIndex.get(5)!;
   await db.$transaction((tx) => enqueueTaskRun(tx, implementation.id));
   return {
@@ -238,7 +250,7 @@ const persistSessionOutput = async (
   body: Record<string, unknown>,
   commitSha: string,
 ): Promise<void> => {
-  const response = await createApp(db).request(`/session/runs/${claimed.run.id}/output`, {
+  const response = await createApp(db, { specificationReader }).request(`/session/runs/${claimed.run.id}/output`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${claimed.sessionToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({

@@ -231,6 +231,49 @@ test("faithful direct and compound materializations claim review runs normally",
   }
 });
 
+test("a refused review candidate does not block a later ordinary claim", async () => {
+  for (const refusal of ["authority-missing", "unreadable", "mismatch"] as const) {
+    await resetTestDb(db);
+    const { template, repo } = await seedCanonicalTemplate(DIRECT_TEMPLATE_NAME);
+    const review = await queueCanonicalStep(template, repo.id, 2);
+    if (refusal === "authority-missing") {
+      const implementation = review.chain.tasks.find((task) => task.chainIndex === 1)!;
+      await db.task.update({ where: { id: implementation.id }, data: { description: "legacy prompt without a feature brief" } });
+    }
+
+    const assigneeAgentId = template.steps.find((step) => step.assigneeAgentId)?.assigneeAgentId;
+    assert.ok(assigneeAgentId);
+    const ordinaryTask = await db.task.create({ data: {
+      projectId: template.projectId,
+      repoId: repo.id,
+      assigneeAgentId,
+      name: `ordinary task after ${refusal}`,
+      description: "ordinary work",
+    } });
+    const ordinaryRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, ordinaryTask.id));
+    const response = await createApp(db, {
+      specificationReader: {
+        readFileAtCommit: async () => {
+          if (refusal === "unreadable") throw new Error("repository unavailable");
+          return new TextEncoder().encode(refusal === "mismatch" ? "tampered" : SPECIFICATION_BRIEF);
+        },
+      },
+    }).request("/runner/tasks/claim", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ runnerId: `later-${refusal}-runner`, leaseSeconds: 60 }),
+    });
+
+    assert.equal(response.status, 200, `${refusal}: ${await response.clone().text()}`);
+    const body = await response.json() as { run: { id: string } };
+    assert.equal(body.run.id, ordinaryRun.id);
+    assert.equal(
+      (await db.run.findUniqueOrThrow({ where: { id: review.run.id } })).status,
+      refusal === "mismatch" ? "FAILED" : "QUEUED",
+    );
+  }
+});
+
 const reviewReport = (kind: "sol-findings" | "blind-findings", headSha: string, baseSha = "b".repeat(40)) => JSON.stringify({
   schemaVersion: 1,
   headSha,

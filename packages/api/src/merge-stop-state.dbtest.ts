@@ -68,6 +68,7 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
       releasedChainLeases.push(chainId);
       return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
     },
+      specificationReader: null,
     }).request(path, {
       method,
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

@@ -80,7 +80,7 @@ const request = async (projectId: string, templateId: string, body: unknown): Pr
   const response = await createApp(db).request(`/projects/${projectId}/task-templates/${templateId}/instantiate`, {
     method: "POST",
     headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ description: "template override feature brief", ...(body as Record<string, unknown>) }),
   });
   return { status: response.status, body: await response.json() };
 };

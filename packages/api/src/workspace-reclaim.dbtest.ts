@@ -50,7 +50,7 @@ const withRunnerToken = async <T>(root: string, operation: () => T | Promise<T>)
 
 const call = async (root: string, path: string, body: unknown): Promise<{ status: number; body: any }> =>
   withRunnerToken(root, async () => {
-    const response = await createApp(db, { workspaceRoot: root }).request(path, {
+    const response = await createApp(db, { workspaceRoot: root, specificationReader: null }).request(path, {
       method: "POST",
       headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -90,7 +90,7 @@ const routeRunnerToApi = (root: string, failOn: string[] = []): Array<{ path: st
     const url = new URL(String(input));
     calls.push({ path: url.pathname, body: JSON.parse(String(init?.body ?? "{}")) });
     if (failOn.some((path) => url.pathname.endsWith(path))) throw new Error("simulated control-plane loss");
-    return withRunnerToken(root, () => createApp(db, { workspaceRoot: root }).request(url.pathname, {
+    return withRunnerToken(root, () => createApp(db, { workspaceRoot: root, specificationReader: null }).request(url.pathname, {
       method: init?.method ?? "POST",
       headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
       body: init?.body as string,

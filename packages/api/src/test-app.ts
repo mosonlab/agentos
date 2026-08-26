@@ -78,8 +78,8 @@ export const createApp = (db: PrismaClient, options: {
   workspaceRoot?: string;
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   releaseMergeLease?: MergeLeaseReleaser;
-  specificationReader?: SpecificationReader | null;
-} = {}) => {
+  specificationReader: SpecificationReader | null;
+} = { specificationReader: null }) => {
   const configured = options.workspaceRoot ?? process.env.RUNNER_WORKSPACE_ROOT;
   if (!configured) {
     throw new Error(
@@ -94,7 +94,7 @@ export const createApp = (db: PrismaClient, options: {
     ownership: { assertHeld: () => { assertRootIsDisposable(root); } },
     onboardingRepositoryPreflight: options.onboardingRepositoryPreflight ?? (async () => {}),
     releaseMergeLease: options.releaseMergeLease ?? (async () => ({ outcome: "not-held" })),
-    specificationReader: options.specificationReader ?? null,
+    specificationReader: options.specificationReader,
   });
 };
 

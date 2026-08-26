@@ -641,7 +641,7 @@ const instantiateTemplateInput = z.object({
   autoStart: z.boolean().default(false),
   afterTaskId: id.optional(),
   name: z.string().trim().min(1).max(200).optional(),
-  description: z.string().max(50_000).optional(),
+  description: z.string().min(1).max(50_000),
   stepOverrides: stepOverridesInput.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;

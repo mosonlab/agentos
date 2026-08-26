@@ -102,7 +102,7 @@ const instantiateRequest = async (
     {
       method: "POST",
       headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ description: "dispatch lifecycle feature brief", ...(body as Record<string, unknown>) }),
     },
   );
   return { status: response.status, body: await response.json() };

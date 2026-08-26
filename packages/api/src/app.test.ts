@@ -1221,10 +1221,24 @@ test("template instantiate route maps an archived step agent to a named 400", as
     const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ repoId: "repo-1", variables: {}, autoStart: false }),
+      body: JSON.stringify({ repoId: "repo-1", variables: {}, autoStart: false, description: "Feature brief" }),
     });
     assert.equal(response.status, 400);
     assert.match(String((await response.json() as { error: string }).error), /Implementation.*Archived Ada.*archived/);
+  });
+});
+
+test("template instantiate route requires a feature brief before database access", async () => {
+  await withTokens(async () => {
+    const database = new Proxy({}, {
+      get: () => { throw new Error("database must not be read when the feature brief is missing"); },
+    }) as unknown as PrismaClient;
+    const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ repoId: "repo-1", variables: {}, autoStart: false }),
+    });
+    assert.equal(response.status, 400);
   });
 });
 
@@ -2257,6 +2271,7 @@ test("onboarding reports a repository preflight refusal before any database writ
   await withTokens(async () => {
     const response = await createApp(untouchableDatabase(), {
       onboardingRepositoryPreflight: async () => { throw new RepositoryPreflightError("push-not-authorized"); },
+      specificationReader: null,
     }).request("/onboarding", {
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },

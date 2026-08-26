@@ -123,6 +123,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       take: 20,
     });
     const executorRunnerIds = mergeExecutorRunnerIds();
+    let firstSpecificationRefusal: { error: string; reason: SpecificationRefusal["reason"] } | null = null;
     for (const candidate of candidates) {
       if (!candidate.task || !candidate.repo) continue;
       if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
@@ -327,7 +328,8 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         implementationRange?.implementationHeadSha ?? null,
       );
       if (prepared.status === "refused") {
-        return { error: prepared.refusal.message, reason: prepared.refusal.reason };
+        firstSpecificationRefusal ??= { error: prepared.refusal.message, reason: prepared.refusal.reason };
+        continue;
       }
       if (prepared.status === "ready") {
         if (!verificationResults.has(prepared.verification.key)) {
@@ -375,7 +377,8 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
               });
             }
           }
-          return { error: refusal.message, reason: refusal.reason };
+          firstSpecificationRefusal ??= { error: refusal.message, reason: refusal.reason };
+          continue;
         }
       }
       const generation = candidate.leaseGeneration + 1;
@@ -526,7 +529,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
       };
     }
-    return null;
+    return firstSpecificationRefusal;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   const transactionalAttempt = async (): Promise<Awaited<ReturnType<typeof claimOnce>>> => {
     // Two runners claiming independent chains still touch the same Task pages
