@@ -103,7 +103,6 @@ import {
   readStoredCliAvailability,
   storeCliAvailability,
 } from "./runner-cli-availability.js";
-import { runRunnerAvailabilityTransaction } from "./runner-availability-transaction.js";
 import {
   chainKey,
   chainProgress,
@@ -133,6 +132,11 @@ import { createStarterInstallation, onboardingInput, onboardingStatus } from "./
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
+import {
+  readCommitted,
+  serializable,
+  SerializableTransactionExhaustedError,
+} from "./transaction.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
@@ -1167,9 +1171,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
     } catch (error: unknown) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
-        return context.json({ error: "Webhook instantiation is busy; retry later" }, 503);
-      }
       if (isTemplateInputError(error)) return context.json({ error: error.message }, 400);
       throw error;
     }
@@ -1460,7 +1461,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/agents/:agentId/archive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const now = new Date();
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockAgentRow(tx, agentId);
       if (!locked) return { error: "Agent not found", code: 404 as const };
       const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -1468,7 +1469,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const blocker = await agentArchiveBlocker(tx, agentId);
       if (blocker) return { error: blocker, code: 409 as const };
       return { agent: await tx.agent.update({ where: { id: agentId }, data: { archivedAt: now } }) };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
@@ -1823,7 +1824,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/goals/:goalId/definition-of-done", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const body = await readJson(context.req.raw, definitionItemText);
-    const result = await db.$transaction(async (tx) => {
+    const result = await serializable(db, async (tx) => {
       const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
       const last = await tx.goalDefinitionItem.findFirst({ where: { goalId }, orderBy: { itemIndex: "desc" } });
       const item = await tx.goalDefinitionItem.create({ data: { goalId, itemIndex: (last?.itemIndex ?? -1) + 1, text: body.text } });
@@ -1831,14 +1832,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await tx.goal.update({ where: { id: goalId }, data: { status: GoalStatus.ACTIVE, endedAt: null } });
       }
       return item;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return context.json(result, 201);
   });
   app.patch("/goals/:goalId/definition-of-done/:itemId", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const itemId = id.parse(context.req.param("itemId"));
     const body = await readJson(context.req.raw, definitionItemPatch);
-    const result = await db.$transaction(async (tx) => {
+    const result = await serializable(db, async (tx) => {
       const existing = await tx.goalDefinitionItem.findFirst({ where: { id: itemId, goalId } });
       if (!existing) return null;
       const item = await tx.goalDefinitionItem.update({ where: { id: itemId }, data: withoutUndefined(body) });
@@ -1858,13 +1859,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         }
       }
       return item;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return result ? context.json(result) : context.json({ error: "Definition of Done item not found" }, 404);
   });
   app.delete("/goals/:goalId/definition-of-done/:itemId", async (context) => {
     const goalId = id.parse(context.req.param("goalId"));
     const itemId = id.parse(context.req.param("itemId"));
-    const deleted = await db.$transaction(async (tx) => {
+    const deleted = await serializable(db, async (tx) => {
       const result = await tx.goalDefinitionItem.deleteMany({ where: { id: itemId, goalId } });
       if (result.count !== 1) return false;
       const goal = await tx.goal.findUniqueOrThrow({ where: { id: goalId } });
@@ -1879,7 +1880,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
       }
       return true;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    });
     return deleted ? context.body(null, 204) : context.json({ error: "Definition of Done item not found" }, 404);
   });
 
@@ -2755,12 +2756,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.delete("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const deleted = await db.$transaction(async (tx) => {
+    const deleted = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return false;
       await tx.task.delete({ where: { id: taskId } });
       return true;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if (!deleted) return context.json({ error: "Task not found" }, 404);
     return context.body(null, 204);
   });
@@ -2883,7 +2884,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     if (!identity) return context.json({ error: "Task not found" }, 404);
     try {
-      const result = await db.$transaction(async (tx) => {
+      const result = await readCommitted(db, async (tx) => {
         if (!await lockTaskMutationRows(tx, taskId)) {
           return { error: "Task not found", code: 404 as const };
         }
@@ -3001,7 +3002,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             : "Started task manually",
         } });
         return { run };
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+      });
       if ("error" in result) return context.json({ error: result.error }, result.code);
       return context.json({ runId: result.run.id, runNumber: result.run.runNumber }, 201);
     } catch (error: unknown) {
@@ -3017,7 +3018,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/archive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (await hasActiveRun(tx, taskId)) {
@@ -3033,7 +3034,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: new Date() } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task archived" } });
       return { task };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.task);
   });
@@ -3049,7 +3050,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     // by a runner or shown as work in progress, so an archived assignee cannot
     // strand them — and refusing them would make an agent's archival delete the
     // operator's ability to read their own history back onto the board.
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       if (locked.archivedAt === null) {
@@ -3062,13 +3063,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const task = await tx.task.update({ where: { id: taskId }, data: { archivedAt: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: "Task unarchived" } });
       return { task };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.task);
   });
   app.post("/projects/:projectId/tasks/archive-done", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const candidates = await tx.task.findMany({
         where: { projectId, status: TaskStatus.DONE, archivedAt: null },
         select: { id: true, chainId: true },
@@ -3103,7 +3104,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         })) });
       }
       return { archived: archive.length, skipped };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     return context.json(result);
   });
   app.post("/tasks/:taskId/schedule/pause", async (context) => {
@@ -3185,7 +3186,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.put("/tasks/:taskId/output", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, taskOutputInput);
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       const task = await tx.task.findUniqueOrThrow({
@@ -3208,7 +3209,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         update: { kind: body.kind, body: body.body, ...(body.commitSha ? { commitSha: body.commitSha } : {}), ...(body.metadata ? { metadata: jsonValue(body.metadata) } : {}) },
       });
       return { output };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.output);
   });
@@ -3225,7 +3226,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/tasks/:taskId/merge-target", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const body = await readJson(context.req.raw, mergeTargetInput);
-    const result = await db.$transaction(async (tx) => {
+    const result = await readCommitted(db, async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return { error: "Task not found", code: 404 as const };
       const task = await loadIntegratorTask(tx, taskId);
@@ -3277,7 +3278,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         throw error;
       }
       return { correction: { id: activity.id, prNumber: body.prNumber, observed, confirmationCardId: cardId } };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    });
     if ("error" in result) return context.json({ error: result.error }, result.code);
     return context.json(result.correction, 201);
   });
@@ -3430,7 +3431,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
     const now = new Date();
-    const state = await runRunnerAvailabilityTransaction(db, async (tx) => {
+    // Runner availability is global backend state written by every daemon.
+    // Keep its Serializable guarantee and absorb two short write conflicts.
+    const state = await serializable(db, async (tx) => {
       const previous = await tx.runnerBackendState.findUnique({ where: { runner: body.runner } });
       const previousAvailability = readStoredCliAvailability(previous?.capabilities);
       const availability = nextStoredCliAvailability(body, previousAvailability, now);
@@ -3493,7 +3496,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
       }
       return available;
-    });
+    }, { attempts: 3 });
     const lastPreflightAt = state.lastPreflightAt?.getTime() ?? 0;
     const currentLease = preflightRecoveryLeases.get(body.runner) ?? 0;
     const revalidatePreflight = body.available
@@ -4473,6 +4476,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.onError((error, context) => {
     if (error instanceof z.ZodError) return context.json({ error: "Validation failed", issues: error.issues }, 400);
+    if (error instanceof SerializableTransactionExhaustedError) {
+      return context.json({ error: "Transaction is busy; retry later" }, 503);
+    }
     if (isCompoundImplementationAssigneeError(error)) {
       return context.json({ error: error.message, code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE }, 409);
     }

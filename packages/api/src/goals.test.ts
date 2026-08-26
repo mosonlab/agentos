@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GoalStatus, type PrismaClient } from "@agentos/db";
+import { GoalStatus, Prisma, type PrismaClient } from "@agentos/db";
 
 import { createApp } from "./test-app.js";
 
@@ -109,5 +109,29 @@ test("approved Goals advance ACTIVE → COMPLETED and reopen when a DoD item is 
     assert.equal(missed.status, 200);
     assert.equal(goal.status, GoalStatus.ACTIVE);
     assert.equal(goal.endedAt, null);
+  });
+});
+
+test("a DoD write returns 503 after its Serializable retry budget is exhausted", async () => {
+  await withOperatorToken(async () => {
+    let attempts = 0;
+    database = {
+      $transaction: async () => {
+        attempts += 1;
+        throw new Prisma.PrismaClientKnownRequestError("Raw query failed", {
+          code: "P2010",
+          clientVersion: "test",
+          meta: { code: "40001" },
+        });
+      },
+    } as unknown as PrismaClient;
+
+    const response = await operatorRequest("/goals/goal-1/definition-of-done", {
+      method: "POST",
+      body: JSON.stringify({ text: "Retry the whole transaction" }),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: "Transaction is busy; retry later" });
+    assert.equal(attempts, 6);
   });
 });
