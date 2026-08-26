@@ -10,7 +10,7 @@ import {
 } from "@agentos/db";
 
 import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
-import type { MergeLeaseReleaser } from "./merge-lease.js";
+import type { MergeLeaseAcquirer, MergeLeaseReleaser } from "./merge-lease.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -329,4 +329,40 @@ test("manual start cannot turn server-owned readiness into a model run", async (
     if (prior === undefined) delete process.env.OPERATOR_TOKEN;
     else process.env.OPERATOR_TOKEN = prior;
   }
+});
+
+test("the merge lease is handed back for the length of an independent review", async () => {
+  const seeded = await seedReadiness();
+  const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
+  assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease), { claimed: 1, authorized: 0, reviewing: 1, requeued: 0, stopped: 0 });
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+});
+
+test("a contended lease leaves readiness for a later tick instead of authorizing", async () => {
+  const seeded = await seedReadiness();
+  const asked: string[] = [];
+  const contended: MergeLeaseAcquirer = async (chainId) => {
+    asked.push(chainId);
+    return { outcome: "contended" };
+  };
+  const started = new Date();
+  assert.deepEqual(
+    await readinessTick(db, reader(), started, 5, releaseChainLease, contended),
+    { claimed: 1, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 },
+  );
+  assert.deepEqual(asked, [seeded.readiness.chainId]);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.readiness.id } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DOING);
+  assert.deepEqual(releasedChainLeases, []);
+
+  // The claim, not a retry counter, is what brings it back: once the claim
+  // expires the next tick re-evaluates and takes the lease it could not get.
+  const acquired: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(started.getTime() + 60_000), 5, releaseChainLease, acquired),
+    { claimed: 1, authorized: 1, reviewing: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
 });

@@ -1,6 +1,6 @@
 # 0001 - Narrow the merge lease hold window
 
-Status: proposed
+Status: accepted (2026-08-26)
 
 ## Context
 
@@ -214,29 +214,56 @@ extending the name-plus-ordinal predicates, and moving
 That asymmetry decides the sequencing below: control-plane fixes ship on their
 own, prompt fixes ride the next rollover.
 
-## Decision (proposed - awaiting a ruling)
+## Decision
 
-### R1. Release across the independent review; readiness re-acquires
+The defect the four findings share is an asymmetry: **release is entirely
+code and acquire is entirely a prompt.** Nine control-plane call sites give the
+lease back; one model, following a sentence in a template, takes it. A mutual
+exclusion protocol half-executed by something that does not have to follow the
+protocol produces exactly finding C - a release nobody asked for, issued after
+the push on the same shell line had already failed, with no exit code checked.
 
-When the readiness worker parks on an open review obligation, release the lease
-using the releaser it already holds. When the review clears and readiness is
-handed back, acquire once before validating the pull-request snapshot; on
-failure leave the step parked and retry on a later tick rather than blocking the
-2-second poll loop. `merge-lease.sh acquire --timeout-minutes 0` already gives a
-single-attempt acquire that exits 75 on contention, so no change to
-`scripts/merge-lease.sh` is required. Rate-limit the retry to roughly the
-script's own poll interval so a parked step does not push to `origin` every
-tick.
+Closing the asymmetry completely would mean the control plane acquiring for the
+regression run. That is worse, not better: the control plane cannot see inside a
+run, so a lease taken for the run covers the whole run, including the 39m35s of
+semantic verification. Correct granularity there needs the regression step split
+in two, which is a template shape change. So the asymmetry closes at the one
+point where the lock is actually load-bearing.
 
-This also closes finding C's blast radius: with readiness acquiring before it
-authorizes, a stray agent-side release costs a re-acquire instead of an
-unleased merge.
+### R1. The control plane takes the lease where the lock is load-bearing
 
-Scope: `packages/api/src/merge-readiness-worker.ts` only. This is a merge
-automation path on the defense list, so it needs `senior-dev` and an explicit
-authorization to touch it.
+The segment that has to be serialised is the one `AGENTS.md` describes and no
+larger: from the base an authorization pins to the merge that consumes it. That
+segment is entirely inside the control plane, and it is about twenty seconds
+long. So:
 
-### R2. Rides the next template rollover
+- When readiness parks on an open review obligation, it releases. The review
+  reads a diff on GitHub; it neither produces nor consumes the proof.
+- Before it writes an authorization, readiness acquires - one attempt, never a
+  poll, since a tick cannot block on a lock another line may hold for minutes.
+  `merge-lease.sh acquire --timeout-minutes 0` already exits 75 on contention,
+  so `scripts/merge-lease.sh` is not touched. A tick that cannot take the lease
+  leaves its step claimed; the claim expires after
+  `READINESS_CLAIM_LEASE_MS` and a later tick tries again, which rate-limits the
+  retry to roughly the script's own poll interval for free.
+- Because the acquire is a network round trip spent inside the claim's lease,
+  the authorization transaction re-affirms the claim before it writes anything.
+  Without that, a worker that lost its step while acquiring could queue a second
+  merge execution.
+
+Acquire is idempotent for one task id, so in the ordinary case - no drift, no
+stray release - readiness's acquire finds the lease already held for the same
+chain and changes nothing.
+
+This also closes finding C's blast radius: with readiness taking the lease
+before the only action that consumes the proof, a stray agent-side release costs
+a re-acquire instead of an unleased merge.
+
+Scope: `packages/api/src/merge-lease.ts` and
+`packages/api/src/merge-readiness-worker.ts`. This is a merge automation path on
+the defense list; it was authorized explicitly on 2026-08-26.
+
+### R2. Not a project of its own; rides the next template rollover
 
 1. State the release contract in both regression prompts: the control plane owns
    release; the run never calls `release` or `steal`. (Fixes C at the source.)
@@ -270,6 +297,10 @@ would only paper over findings A and E.
   Worth reconsidering after R1.
 - **Fix C with a prompt-only edit.** Blocked by the frozen-prompt rule above.
   R1 defuses it instead, and R2 fixes it properly at the next rollover.
+- **Give the control plane the acquire as well, for the regression run.** The
+  symmetric-looking answer, and the wrong one: it widens the lock to the whole
+  run rather than narrowing it, because the control plane cannot see the point
+  inside the run where the base gets pinned.
 
 ## Consequences
 
