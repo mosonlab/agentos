@@ -34,13 +34,6 @@ import {
   type PersistedTemplateStepStructure,
   templateStepStructureDifferences,
 } from "../src/template-sources.js";
-import {
-  isPreChainLeaseTemplate,
-  isPrePlanDecisionsTemplate,
-  preDecisionsPlanPrompt,
-  previousChainLeasePrompt,
-  type PersistedTransitionStep,
-} from "../src/canonical-template-transition.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 const prismaRoot = fileURLToPath(new URL("./", import.meta.url));
@@ -105,11 +98,6 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
       runner: RunnerPreference.CLAUDE,
     });
   }
-  assert.deepEqual(canonical.get("review-adjudicator-opus"), {
-    name: "review-adjudicator-opus",
-    model: "claude-opus-5:high",
-    runner: RunnerPreference.CLAUDE,
-  });
   assert.deepEqual(canonical.get("review-coordinator"), {
     name: "review-coordinator",
     model: "openai-codex/gpt-5.6-sol:xhigh",
@@ -131,6 +119,7 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
     runner: RunnerPreference.PI,
   });
   assert.equal(canonical.has("senior-dev-high"), false);
+  assert.equal(canonical.has("review-adjudicator-opus"), false);
   assert.deepEqual(canonical.get("senior-dev"), {
     name: "senior-dev",
     model: "gpt-5.6-sol:high",
@@ -143,12 +132,11 @@ test("signed AgentOS model routing stays pinned in the canonical contract", () =
   });
 });
 
-test("the split review prompts enforce persisted-range, blindness, adjudication, and regression contracts", async () => {
-  const [planReview, firstReview, blindReview, adjudicatorReview, regressionVerification] = await Promise.all([
+test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
+  const [planReview, firstReview, blindReview, regressionVerification] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
     roleSource("review-coordinator-opus"),
-    roleSource("review-adjudicator-opus"),
     roleSource("regression-verifier"),
   ]);
 
@@ -187,20 +175,6 @@ test("the split review prompts enforce persisted-range, blindness, adjudication,
   assert.doesNotMatch(blindReview, /service[-_ ]tier/iu);
   assert.doesNotMatch(blindReview, /codex exec review/u);
 
-  assert.match(adjudicatorReview, /run no build, test, or merge gate command/u);
-  assert.match(adjudicatorReview, /fresh provider Session/u);
-  assert.match(adjudicatorReview, /Never resume or\s+continue the blind review conversation/u);
-  assert.match(adjudicatorReview, /provider conversation id\s+or continuation proof/u);
-  assert.match(adjudicatorReview, /immutable `implementationBaseSha` and `implementationHeadSha`\s+values/u);
-  assert.match(adjudicatorReview, /one `sol-findings` report and one `blind-findings`/u);
-  assert.match(adjudicatorReview, /canonical merge matrix/u);
-  assert.match(adjudicatorReview, /every finding id from either report/u);
-  assert.match(adjudicatorReview, /ADOPTED.*REJECTED.*MERGED/u);
-  assert.match(adjudicatorReview, /one final immutable `must-fix` task output/u);
-  assert.doesNotMatch(adjudicatorReview, /codex exec review/u);
-  assert.equal(frontmatterValue(adjudicatorReview, "model"), "claude-opus-5:high");
-  assert.equal(frontmatterValue(adjudicatorReview, "runner"), "claude");
-
   assert.equal(frontmatterValue(regressionVerification, "model"), "claude-opus-5:medium");
   assert.equal(frontmatterValue(regressionVerification, "runner"), "claude");
   assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
@@ -222,9 +196,9 @@ test("the executioner delegates only through platform-pinned native Luna childre
   assert.doesNotMatch(executioner, /codex exec/u);
 });
 
-test("the canonical thirteen-step layered template sources split review and preserve mechanical merge", async () => {
+test("the canonical twelve-step layered template sources split review and preserve mechanical merge", async () => {
   const templateSteps = await loadTemplateStepSources();
-  assert.equal(templateSteps.length, 13);
+  assert.equal(templateSteps.length, 12);
   assert.deepEqual(
     templateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
@@ -235,20 +209,24 @@ test("the canonical thirteen-step layered template sources split review and pres
       { stepIndex: 5, layer: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
       { stepIndex: 6, layer: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
-      { stepIndex: 8, layer: 7, agentName: "review-adjudicator-opus", outputKind: "must-fix" },
-      { stepIndex: 9, layer: 8, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 10, layer: 9, agentName: "librarian", outputKind: "documentation" },
-      { stepIndex: 11, layer: 10, agentName: "regression-verifier", outputKind: "regression-verification" },
-      { stepIndex: 12, layer: 11, agentName: "review-coordinator", outputKind: "merge-authorization" },
-      { stepIndex: 13, layer: 12, agentName: "merge-integrator", outputKind: "merge-result" },
+      { stepIndex: 8, layer: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 9, layer: 8, agentName: "librarian", outputKind: "documentation" },
+      { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification" },
+      { stepIndex: 11, layer: 10, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 6)?.baseFromStepIndex, 5);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 8)?.attachmentsFromPrevious, true);
-  assert.equal(templateSteps.find((step) => step.stepIndex === 11)?.attachmentsFromPrevious, true);
-  const compoundRegression = templateSteps.find((step) => step.stepIndex === 11)!.prompt;
+  assert.equal(templateSteps.find((step) => step.stepIndex === 10)?.attachmentsFromPrevious, true);
+  const compoundFix = templateSteps.find((step) => step.stepIndex === 8)!.prompt;
+  assert.match(compoundFix, /Read both immutable review outputs from the preceding layer/u);
+  assert.match(compoundFix, /`sol-findings`[\s\S]*`blind-findings`/u);
+  assert.match(compoundFix, /No adjudication step stands between the reviews and this one/u);
+  assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
+  const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
   assert.match(compoundRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(compoundRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(compoundRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
@@ -263,105 +241,6 @@ test("the canonical thirteen-step layered template sources split review and pres
   assert.match(templateSteps[3]!.prompt, /rewrite its `decisions\.md` entry/u);
   assert.doesNotMatch(templateSteps[3]!.prompt, /sessions\.md|plan_authoring|plan_revision/u);
   assert.match(templateSteps[4]!.prompt, /platform-pinned Implementation proof boundary/u);
-});
-
-test("the pre-decisions compound shape is recognized for rollover and the current shape is not", async () => {
-  const canonical = await loadTemplateStepSources();
-  const asPersisted = (prompt: (step: (typeof canonical)[number]) => string): PersistedTransitionStep[] =>
-    canonical.map((step) => ({
-      id: `step-${step.stepIndex}`,
-      taskTemplateId: "template-1",
-      stepIndex: step.stepIndex,
-      name: `Step ${step.stepIndex}`,
-      assigneeAgent: step.agentName ? { name: step.agentName } : null,
-      assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
-      layer: step.layer,
-      approvalGate: step.approvalGate,
-      outputKind: step.outputKind,
-      attachmentsFromPrevious: step.attachmentsFromPrevious,
-      opensPullRequest: step.opensPullRequest,
-      baseFromStepIndex: step.baseFromStepIndex,
-      spawnPolicy: step.spawnPolicy,
-      prompt: prompt(step),
-    }));
-
-  const preDecisions = asPersisted((step) => preDecisionsPlanPrompt(step.stepIndex, step.prompt));
-  // The reconstruction must actually rewrite steps 2 and 4; a silent no-op
-  // replace would strand every pre-decisions row at the prompt-mutation guard.
-  assert.notEqual(preDecisions[1]!.prompt, canonical[1]!.prompt);
-  assert.match(preDecisions[1]!.prompt, /run's id in `sessions\.md` under the label `plan_authoring`/u);
-  assert.notEqual(preDecisions[3]!.prompt, canonical[3]!.prompt);
-  assert.match(preDecisions[3]!.prompt, /Attempt to resume the planning session/u);
-  assert.match(preDecisions[3]!.prompt, /add this session's id under `plan_revision`/u);
-  assert.equal(isPrePlanDecisionsTemplate("compound-engineer-workflow", preDecisions, canonical), true);
-
-  const current = asPersisted((step) => step.prompt);
-  assert.equal(isPrePlanDecisionsTemplate("compound-engineer-workflow", current, canonical), false);
-
-  const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
-  const directPersisted = direct.map((step) => ({
-    ...asPersisted((s) => s.prompt)[0]!,
-    stepIndex: step.stepIndex,
-    assigneeAgent: step.agentName ? { name: step.agentName } : null,
-    prompt: step.prompt,
-  }));
-  assert.equal(isPrePlanDecisionsTemplate(DIRECT_TEMPLATE_NAME, directPersisted, direct), false);
-});
-
-test("the pre-lease reconstruction rewrites every fragment it names", async () => {
-  for (const templateName of [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]) {
-    const canonical = await loadTemplateStepSources(templateName);
-    const regression = canonical.find((step) => step.outputKind === "regression-verification")!;
-    const old = previousChainLeasePrompt(regression.prompt);
-    // Each of the three replacements is asserted against the literal wording a
-    // real pre-lease row carries, never against this function's own output: a
-    // search string that carries a trailing newline the canonical prompt does
-    // not have makes the replace a silent no-op, and a self-referential
-    // assertion cannot see that. Such a no-op stranded production one template
-    // generation behind, because isPreChainLeaseTemplate then only ever matched
-    // rows this same function had produced.
-    assert.doesNotMatch(old, /merge-lease\.sh acquire/u);
-    assert.match(old, /Refresh `\{\{branchName\}\}` onto it before reviewing: fetch/u);
-    assert.doesNotMatch(old, /If dispatch exits 75 or 76 without a verdict/u);
-    assert.match(old, /PASS nor FAIL: report it through the activity log and fail the run loudly\.$/u);
-    assert.doesNotMatch(old, /PASS nor FAIL\.$/u);
-    assert.doesNotMatch(regression.prompt, /PASS nor FAIL: report it/u);
-  }
-});
-
-test("a compound row two generations behind is recognized as pre-lease", async () => {
-  const canonical = await loadTemplateStepSources();
-  const leaseStepIndex = canonical.find((step) => step.outputKind === "regression-verification")!.stepIndex;
-  const twoBehind: PersistedTransitionStep[] = canonical.map((step) => ({
-    id: `step-${step.stepIndex}`,
-    taskTemplateId: "template-1",
-    stepIndex: step.stepIndex,
-    name: `Step ${step.stepIndex}`,
-    assigneeAgent: step.agentName ? { name: step.agentName } : null,
-    assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
-    layer: step.layer,
-    approvalGate: step.approvalGate,
-    outputKind: step.outputKind,
-    attachmentsFromPrevious: step.attachmentsFromPrevious,
-    opensPullRequest: step.opensPullRequest,
-    baseFromStepIndex: step.baseFromStepIndex,
-    spawnPolicy: step.spawnPolicy,
-    // Pre-merge-lease on the regression step and pre-decisions.md on the plan
-    // steps at the same time: the shape production actually sat in.
-    prompt: step.stepIndex === leaseStepIndex
-      ? previousChainLeasePrompt(step.prompt)
-      : preDecisionsPlanPrompt(step.stepIndex, step.prompt),
-  }));
-  // The reconstructions themselves are pinned to literal pre-lease wording by
-  // "the pre-lease reconstruction rewrites every fragment it names"; this test
-  // owns only the composition, so building the row from them is not circular.
-  assert.notEqual(twoBehind[leaseStepIndex - 1]!.prompt, canonical[leaseStepIndex - 1]!.prompt);
-  assert.notEqual(twoBehind[1]!.prompt, canonical[1]!.prompt);
-  assert.notEqual(twoBehind[3]!.prompt, canonical[3]!.prompt);
-  assert.equal(isPreChainLeaseTemplate(INTEGRATOR_TEMPLATE_NAME, twoBehind, canonical), true);
-  // The lease rollover subsumes it: a two-generations-behind row must not also
-  // present as the single-transition pre-decisions shape.
-  assert.equal(isPrePlanDecisionsTemplate(INTEGRATOR_TEMPLATE_NAME, twoBehind, canonical), false);
 });
 
 test("only implementation opens a pull request, and the integrator is not a model row", async () => {
@@ -389,11 +268,10 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 1, layer: 1, agentName: "senior-dev-luna", outputKind: "implementation" },
       { stepIndex: 2, layer: 2, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 3, layer: 2, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
-      { stepIndex: 4, layer: 3, agentName: "review-adjudicator-opus", outputKind: "must-fix" },
-      { stepIndex: 5, layer: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
-      { stepIndex: 6, layer: 5, agentName: "regression-verifier", outputKind: "regression-verification" },
-      { stepIndex: 7, layer: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
-      { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
+      { stepIndex: 4, layer: 3, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 5, layer: 4, agentName: "regression-verifier", outputKind: "regression-verification" },
+      { stepIndex: 6, layer: 5, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 7, layer: 6, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
   // Only implementation opens the chain's pull request; the blind review
@@ -402,8 +280,11 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 2)?.baseFromStepIndex, 1);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 3)?.attachmentsFromPrevious, false);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 4)?.attachmentsFromPrevious, true);
-  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 6)?.attachmentsFromPrevious, true);
-  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;
+  assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
+  const directFix = directTemplateSteps.find((step) => step.stepIndex === 4)!.prompt;
+  assert.match(directFix, /Read both immutable review outputs from the preceding layer/u);
+  assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
+  const directRegression = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
   assert.match(directRegression, /platform-pinned `run\.pullRequestBase`[\s\S]*integration\s+line authority/u);
   assert.match(directRegression, /`review-fail`[\s\S]*Only after semantic verification passes/u);
   assert.match(directRegression, /gate-dispatch\.sh <head-sha> --master <baseHeadSha>/u);
@@ -413,7 +294,7 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
   assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
   assert.match(directImplementation, /platform-pinned Implementation proof boundary/u);
-  assert.match(directTemplateSteps[6]!.prompt, /server-owned mechanical readiness step/u);
+  assert.match(directTemplateSteps[5]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound
   // mechanical executor, with no human approval gate on either.
   const last = directTemplateSteps.at(-1)!;
@@ -427,11 +308,11 @@ test("the direct template sources expose the layered review spine and mechanical
   }
 });
 
-test("the complete template source inventory contains only the thirteen-step and direct workflows", async () => {
+test("the complete template source inventory contains only the twelve-step and direct workflows", async () => {
   const templates = await loadAllTemplateStepSources();
   assert.deepEqual([...templates.keys()], [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME]);
-  assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 13);
-  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 8);
+  assert.equal(templates.get(INTEGRATOR_TEMPLATE_NAME)?.length, 12);
+  assert.equal(templates.get(DIRECT_TEMPLATE_NAME)?.length, 7);
 });
 
 test("the complete template source inventory rejects an unregistered workflow directory", async () => {

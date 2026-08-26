@@ -48,7 +48,9 @@ acceptance criterion or caller requires it.
 ## Test safely
 
 - Before tests outside the merge gate, set `RUNNER_WORKSPACE_ROOT` to a new
-  temporary directory. Runner tests provision real workspaces.
+  temporary directory. Runner tests provision real workspaces. A test that
+  builds a `RunnerConfig` by hand must also point `home` at a temporary
+  directory: provisioning keeps its repository mirror under it.
 - Run database tests only against a throwaway PostgreSQL server. Set
   `TEST_DATABASE_URL` and `TEST_DATABASE_MAINTENANCE_URL`, and give each
   worktree its own `?schema=`. `npm run test:db` drops and recreates its target.

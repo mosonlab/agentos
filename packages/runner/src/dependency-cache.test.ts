@@ -24,6 +24,11 @@ const TOOLCHAIN: DependencyCacheToolchain = {
   architecture: "arm64",
 };
 
+// Recorded from the shipped derivation. Published cache entries are named by
+// this value, so a diff here means every existing entry misses and every runner
+// reinstalls. Changing it is a cache format change, not a test update.
+const FIXTURE_CACHE_KEY = "4ab6d166bebd1bf6f84eb89cb02ce7cf7b610d54067157f8ecf4d9b9f970aff0";
+
 const config = (root: string, runAsPrefix: string[] = []): RunnerConfig => ({
   workspaceRoot: join(root, "runs"),
   dependencyCacheRoot: join(root, "cache"),
@@ -118,6 +123,19 @@ const fakeInstallExecutor = (
 };
 
 const entryPath = (root: string, key: string): string => join(root, "cache", "entries", key);
+
+// The key is derived through the path a run takes, so a derivation needs the
+// run's configuration, environment, and command executor.
+const deriveFixtureKey = (
+  root: string,
+  workspace: string,
+  toolchain: DependencyCacheToolchain = TOOLCHAIN,
+): ReturnType<typeof deriveDependencyCacheKey> => {
+  const configured = config(root);
+  return deriveDependencyCacheKey(
+    configured, workspace, workspaceEnvironment(configured), fakeInstallExecutor().execute, { toolchain },
+  );
+};
 
 const makeWritable = async (path: string): Promise<void> => {
   const info = await lstat(path);
@@ -267,7 +285,7 @@ test("every dependency input and toolchain coordinate changes the cache key", as
   try {
     const workspace = join(root, "workspace");
     await createFixture(workspace);
-    const baseline = await deriveDependencyCacheKey(workspace, TOOLCHAIN);
+    const baseline = await deriveFixtureKey(root, workspace);
     assert.ok(baseline);
     const cases: Array<{ path: string; content: string }> = [
       { path: "package-lock.json", content: packageLock("1.0.1") },
@@ -280,16 +298,59 @@ test("every dependency input and toolchain coordinate changes the cache key", as
       const absolute = join(workspace, change.path);
       const original = await readFile(absolute, "utf8");
       await writeFile(absolute, change.content);
-      const changed = await deriveDependencyCacheKey(workspace, TOOLCHAIN);
+      const changed = await deriveFixtureKey(root, workspace);
       assert.ok(changed);
       assert.notEqual(changed.key, baseline.key, `${change.path} did not change the key`);
       await writeFile(absolute, original);
     }
     for (const coordinate of Object.keys(TOOLCHAIN) as Array<keyof DependencyCacheToolchain>) {
-      const changed = await deriveDependencyCacheKey(workspace, { ...TOOLCHAIN, [coordinate]: `${TOOLCHAIN[coordinate]}-drift` });
+      const changed = await deriveFixtureKey(root, workspace, { ...TOOLCHAIN, [coordinate]: `${TOOLCHAIN[coordinate]}-drift` });
       assert.ok(changed);
       assert.notEqual(changed.key, baseline.key, `${coordinate} did not change the key`);
     }
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("the shipped cache key stays byte-identical to the recorded fixture key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-pinned-key-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    const shipped = await materializeWorkspaceDependencies(
+      configured, workspace, workspaceEnvironment(configured), fake.execute,
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    assert.equal(shipped.key, FIXTURE_CACHE_KEY, "a changed key misses every published cache entry");
+    const derived = await deriveFixtureKey(root, workspace);
+    assert.equal(derived?.key, FIXTURE_CACHE_KEY);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("the effective npm configuration is one of the derived inputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-config-input-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    let effective = '{"install-links":true}';
+    const execute: DependencyCommandExecutor = (runnerConfig, executable, args, cwd, env, options) =>
+      executable === "npm" && args[0] === "config"
+        ? Promise.resolve(effective)
+        : fake.execute(runnerConfig, executable, args, cwd, env, options);
+    const environment = workspaceEnvironment(configured);
+    const baseline = await deriveDependencyCacheKey(configured, workspace, environment, execute, { toolchain: TOOLCHAIN });
+    assert.ok(baseline);
+    effective = '{"install-links":false}';
+    const drifted = await deriveDependencyCacheKey(configured, workspace, environment, execute, { toolchain: TOOLCHAIN });
+    assert.ok(drifted);
+    assert.notEqual(drifted.key, baseline.key, "effective npm configuration drift must change the key");
   } finally {
     await cleanupRoot(root);
   }
@@ -302,7 +363,7 @@ test("missing required inputs are named misses while unreadable or ambiguous inp
     await createFixture(workspace);
     await rm(join(workspace, "packages/db/prisma/schema.prisma"));
     await assert.rejects(
-      deriveDependencyCacheKey(workspace, TOOLCHAIN),
+      deriveFixtureKey(root, workspace),
       (error: unknown) => error instanceof DependencyCacheInputMissError
         && error.condition === "required-input-missing:packages/db/prisma/schema.prisma",
     );
@@ -321,11 +382,11 @@ test("missing required inputs are named misses while unreadable or ambiguous inp
     await writeFile(join(workspace, "packages/db/prisma/schema.prisma"), "generator client { provider = \"prisma-client-js\" }\n");
     await rm(join(workspace, "package-lock.json"));
     await symlink(join(workspace, "package.json"), join(workspace, "package-lock.json"));
-    await assert.rejects(deriveDependencyCacheKey(workspace, TOOLCHAIN), /package-lock\.json is symlink/u);
+    await assert.rejects(deriveFixtureKey(root, workspace), /package-lock\.json is symlink/u);
     await rm(join(workspace, "package-lock.json"));
     await writeFile(join(workspace, "package-lock.json"), packageLock());
     await chmod(join(workspace, ".npmrc"), 0o000);
-    await assert.rejects(deriveDependencyCacheKey(workspace, TOOLCHAIN), /Unreadable dependency input: \.npmrc/u);
+    await assert.rejects(deriveFixtureKey(root, workspace), /Unreadable dependency input: \.npmrc/u);
     await chmod(join(workspace, ".npmrc"), 0o600);
   } finally {
     await cleanupRoot(root);
@@ -409,10 +470,10 @@ test("non-Prisma and alternate-schema repositories install and key their actual 
     await writeFile(join(alternate, "package.json"), `${JSON.stringify(alternateManifest)}\n`);
     await mkdir(join(alternate, "config"));
     await writeFile(join(alternate, "config/alternate.prisma"), "generator client { provider = \"prisma-client-js\" }\n");
-    const first = await deriveDependencyCacheKey(alternate, TOOLCHAIN);
+    const first = await deriveFixtureKey(root, alternate);
     assert.ok(first);
     await writeFile(join(alternate, "config/alternate.prisma"), "generator client { provider = \"prisma-client-js\" output = \"../generated\" }\n");
-    const drifted = await deriveDependencyCacheKey(alternate, TOOLCHAIN);
+    const drifted = await deriveFixtureKey(root, alternate);
     assert.ok(drifted);
     assert.notEqual(drifted.key, first.key);
   } finally {

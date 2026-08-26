@@ -10,6 +10,7 @@ import {
   PREFLIGHT_CLASS,
   CODEX_STARTER_MODEL,
   type AdapterEvent,
+  type CliAdapter,
   type ExitEvidence,
   type RuntimeHandle,
 } from "./adapters.js";
@@ -169,6 +170,8 @@ export type ExecuteClaimDependencies = {
   provisionSessionConfig?: typeof provisionSessionConfig;
   cleanupAgentScratch?: typeof cleanupAgentScratch;
   writeSessionCredentials?: typeof writeSessionCredentials;
+  /** The CLI the run is executed through. Defaults to the claim's runner kind. */
+  adapter?: CliAdapter;
 };
 
 export const executeClaim = async (
@@ -176,7 +179,7 @@ export const executeClaim = async (
   claim: ClaimedTask,
   dependencies: ExecuteClaimDependencies = {},
 ): Promise<void> => {
-  const adapter = adapters[claim.runner];
+  const adapter = dependencies.adapter ?? adapters[claim.runner];
   let workspace: Workspace | null = null;
   let scratch: AgentScratch | null = null;
   let handle: RuntimeHandle | null = null;

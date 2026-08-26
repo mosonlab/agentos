@@ -2,9 +2,23 @@
 
 Contract ID: ARC-2026-08-17
 
-Version: 1.2
+Version: 1.3
 
 Status: Active
+
+## Amendment 1.3 (2026-08-26)
+
+The separate adjudication node is removed from both canonical templates. Its
+authority moves into the fix step, which reads both immutable reports and
+records a disposition for every finding id in its own `fixed-implementation`
+output. Everything below about the two independent review authorities still
+governs; the clauses that place adjudication in its own node, its own claim
+guard, and its own `must-fix` output describe the graph that ran until this
+amendment and still govern the chains created under it. The
+`review-adjudicator-opus` role is archived with the node: it leaves the
+canonical roster, and its Agent records are retained only as history for the
+chains that ran under the previous graph. The roster clause in acceptance
+criterion 1 reads fourteen LLM roles under this amendment.
 
 ## Objective
 

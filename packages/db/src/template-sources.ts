@@ -13,13 +13,13 @@ const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
   {
     name: INTEGRATOR_TEMPLATE_NAME,
-    stepCount: 13,
-    layers: [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11, 12],
+    stepCount: 12,
+    layers: [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11],
   },
   {
     name: DIRECT_TEMPLATE_NAME,
-    stepCount: 8,
-    layers: [1, 2, 2, 3, 4, 5, 6, 7],
+    stepCount: 7,
+    layers: [1, 2, 2, 3, 4, 5, 6],
   },
 ] as const;
 export type CanonicalTemplateName = (typeof CANONICAL_TEMPLATE_SOURCE_SPECS)[number]["name"];

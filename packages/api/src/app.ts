@@ -88,12 +88,17 @@ import {
   type CardRow,
   type DecisionRow,
   asJsonObject,
+  INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
+  MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   MergeRecoveryStatus,
   mergeRecoveryPhase,
+  parseIndependentReviewDecision,
   parseRegressionVerdict,
   parseResolverResult,
+  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
+  type IndependentReviewFinding,
   type MergeRecoveryAttempt,
 } from "@agentos/db";
 import { Hono, type Context } from "hono";
@@ -106,15 +111,14 @@ import { authenticate, issueSessionToken, principalMayAccess, type Principal } f
 import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
+import { FAILURE_REASON_LIMIT, failureReasonText, truncateFailureReason } from "./failure-reason.js";
 import {
   canonicalOutputRefusal,
-  isCanonicalAdjudicationStep,
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
   isCanonicalSolFindingsStep,
   persistSessionTaskOutput,
   previousRunHandoffForClaim,
-  reviewAdjudicationClaimRefusal,
 } from "./canonical-task-output.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
 import {
@@ -166,6 +170,7 @@ import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
+import { isTemplateInstantiationRefusal } from "./template-errors.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
@@ -190,6 +195,10 @@ class PinnedRunTargetError extends Error {
     this.name = "PinnedRunTargetError";
   }
 }
+
+/** Full Assurance regression and the documentation node a repair must reopen. */
+const FULL_REPAIR_DOCUMENTATION_ORDINALS = { regression: 10, documentation: 9 } as const;
+const LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS = { regression: 11, documentation: 10 } as const;
 
 type CandidateActivationFailure = PinnedBaseCommitError | PinnedRunTargetError;
 
@@ -300,27 +309,87 @@ const stopBaseDriftRecoveryTail = async (
   ] });
 };
 
-const openMergeTailReviewDecisionInbox = async (
+/**
+ * Resolves the agent that repairs what this chain's independent review found:
+ * the chain's own fix step assignee, or `senior-dev` when the chain has none.
+ */
+const mergeTailFixAgentName = async (
   tx: DbTx,
-  input: { taskId: string; agentId: string; sessionId?: string; reason: string },
-): Promise<void> => {
-  await tx.inboxMessage.create({ data: {
-    from: "AGENT",
-    agentId: input.agentId,
-    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-    taskId: input.taskId,
-    kind: "MULTIPLE_CHOICE",
-    body: [
-      `Autonomous merge tail stopped: ${input.reason}`,
-      "Choose one explicit operator action. No repair or merge will start automatically.",
+  regression: { projectId: string; chainId: string | null; templateId: string | null } | null,
+): Promise<string> => {
+  if (!regression) return "senior-dev";
+  const fixTask = await tx.task.findFirst({
+    where: {
+      projectId: regression.projectId,
+      chainId: regression.chainId,
+      templateId: regression.templateId,
+      templateStep: { outputKind: "fixed-implementation" },
+    },
+    select: { assigneeAgent: { select: { name: true } } },
+  });
+  return fixTask?.assigneeAgent?.name ?? "senior-dev";
+};
+
+/**
+ * Parks one follow-up finding as a backlog card.
+ *
+ * A follow-up is by contract not a reachable behavioural defect, so it never
+ * holds the merge; the card is what keeps it from being lost instead.
+ */
+const createReviewFollowUpCard = async (
+  tx: DbTx,
+  input: {
+    projectId: string;
+    repoId: string | null;
+    agentName: string;
+    reviewTaskId: string;
+    headSha: string;
+    finding: IndependentReviewFinding;
+  },
+): Promise<{ taskId: string } | { refusal: string }> => {
+  if (!input.repoId) return { refusal: "independent review task has no repository" };
+  const named = await tx.agent.findFirst({
+    where: { projectId: input.projectId, name: input.agentName },
+    select: { id: true },
+  });
+  if (!named) return { refusal: `follow-up agent ${input.agentName} is absent` };
+  // A card assigned to an agent archived a moment later, or pointing at a
+  // revoked grant, is a card nothing can ever run. Both facts are therefore
+  // taken under the same mutexes the archive and revoke paths take.
+  const agent = await lockAgentRow(tx, named.id);
+  if (!agent || agent.archivedAt) return { refusal: `follow-up agent ${input.agentName} is absent or archived` };
+  const grant = await lockAgentRepoGrant(tx, {
+    projectId: input.projectId, agentId: agent.id, repoId: input.repoId,
+  });
+  if (!grant) return { refusal: `follow-up agent ${input.agentName} has no repository grant` };
+  const task = await tx.task.create({ data: {
+    projectId: input.projectId,
+    repoId: input.repoId,
+    name: `Merge tail follow-up: ${input.finding.title}`,
+    description: [
+      input.finding.detail,
+      `Raised as a follow-up by the autonomous merge tail independent review ${input.reviewTaskId} at exact head ${input.headSha}. It did not block that merge.`,
     ].join("\n\n"),
-    choices: [
-      { id: "create-repair", label: "Create one review-fix task" },
-      { id: "adopt-head", label: "Adopt current exact head and rerun Regression" },
-      { id: "operator-takeover", label: "Park autonomous tail for operator takeover" },
-    ],
-    dedupeKey: `merge-tail-review-rejection:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`,
+    assigneeType: "AGENT",
+    assigneeAgentId: agent.id,
+    approvalGate: false,
+    opensPullRequest: false,
+    status: TaskStatus.BACKLOG,
   } });
+  await tx.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "control-plane",
+    body: `Follow-up finding from independent review ${input.reviewTaskId} at ${input.headSha}`,
+    metadata: {
+      kind: MERGE_TAIL_KIND.reviewObligation,
+      schemaVersion: 1,
+      state: "follow-up",
+      reviewTaskId: input.reviewTaskId,
+      headSha: input.headSha,
+      title: input.finding.title,
+    },
+  } });
+  return { taskId: task.id };
 };
 
 const openMergeTailStopNotice = async (
@@ -426,148 +495,6 @@ const createMergeTailRepairTask = async (
     data: { status: TaskStatus.REVIEW, failureReason: `${input.repairKind}: automatic repair ${task.id} queued at ${input.headSha}` },
   });
   return { taskId: task.id };
-};
-
-const applyMergeTailOperatorDecision = async (
-  tx: DbTx,
-  input: { messageId: string; requestId: string; decision: string; now: Date },
-): Promise<null | { duplicate: boolean; resumed: false; messageId: string; action?: string; error?: string }> => {
-  const card = await tx.inboxMessage.findUnique({
-    where: { id: input.messageId },
-    include: {
-      session: { include: { run: true } },
-      task: { include: { templateStep: true, runs: { orderBy: { runNumber: "desc" }, take: 5 } } },
-    },
-  });
-  if (!card?.dedupeKey?.startsWith("merge-tail-review-rejection:")) return null;
-  if (!card.task || !card.session?.run) return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail decision is missing its Regression task or source Run" };
-  if (!["create-repair", "adopt-head", "operator-takeover"].includes(input.decision)) {
-    return { duplicate: false, resumed: false, messageId: card.id, error: "Unknown merge-tail operator decision" };
-  }
-  if (card.status !== InboxStatus.OPEN) {
-    return {
-      duplicate: true,
-      resumed: false,
-      messageId: card.id,
-      ...(card.selectedChoiceId ? { action: card.selectedChoiceId } : {}),
-    };
-  }
-  const regression = card.task;
-  if (regression.templateStep?.outputKind !== "regression-verification" || !regression.chainId || !regression.templateId) {
-    return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail decision is not bound to a canonical Regression task" };
-  }
-  if (regression.chainId) {
-    await lockChainRows(tx, { projectId: regression.projectId, chainId: regression.chainId });
-  } else {
-    await lockTask(tx, regression.id);
-  }
-  const readiness = await tx.task.findFirst({
-    where: {
-      projectId: regression.projectId,
-      chainId: regression.chainId,
-      templateId: regression.templateId,
-      templateStep: { outputKind: "merge-authorization" },
-    },
-  });
-  if (!readiness) return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail readiness task is missing" };
-  const rows = await tx.taskActivity.findMany({
-    where: {
-      taskId: readiness.id,
-      actorType: "control-plane",
-      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.reviewObligation },
-    },
-    select: { createdAt: true, metadata: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: 50,
-  });
-  const rejection = rows.map((row) => ({ row, metadata: asJsonObject(row.metadata) })).find(({ metadata }) => (
-    metadata?.state === "rejected" && typeof metadata.headSha === "string"
-  ));
-  const headSha = typeof rejection?.metadata?.headSha === "string" ? rejection.metadata.headSha : null;
-  const baseHeadSha = typeof rejection?.metadata?.baseSha === "string" ? rejection.metadata.baseSha : null;
-  const summary = typeof rejection?.metadata?.summary === "string" ? rejection.metadata.summary : null;
-  if (!headSha || !baseHeadSha || !summary || !/^[0-9a-f]{40}$/u.test(headSha) || !/^[0-9a-f]{40}$/u.test(baseHeadSha)) {
-    return { duplicate: false, resumed: false, messageId: card.id, error: "Merge-tail rejection lacks exact head/base evidence" };
-  }
-  const claimed = await tx.inboxMessage.updateMany({
-    where: { id: card.id, status: InboxStatus.OPEN },
-    data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: input.now },
-  });
-  if (claimed.count !== 1) return { duplicate: true, resumed: false, messageId: card.id };
-  const externalEventId = `web:${input.requestId}`;
-  await tx.inboxDecision.create({ data: {
-    inboxMessageId: card.id,
-    runId: card.session.run.id,
-    externalEventId,
-    decision: input.decision,
-    actorOpenId: "web-operator",
-  } });
-  await tx.inboxMessage.create({ data: {
-    from: "HUMAN",
-    agentId: card.agentId,
-    sessionId: card.sessionId,
-    taskId: card.taskId,
-    replyToMessageId: card.id,
-    kind: "TEXT",
-    body: input.decision,
-    selectedChoiceId: input.decision,
-    status: InboxStatus.CLOSED,
-    dedupeKey: `decision:${externalEventId}:reply`,
-    deliveryStatus: "DELIVERED",
-    deliveredAt: input.now,
-  } });
-  await tx.taskActivity.create({ data: {
-    taskId: regression.id,
-    actorType: "operator",
-    body: `Merge-tail operator decision ${input.decision} for exact head ${headSha}`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.operatorDecision,
-      schemaVersion: 1,
-      action: input.decision,
-      headSha,
-      baseHeadSha,
-      reviewTaskId: typeof rejection?.metadata?.reviewTaskId === "string" ? rejection.metadata.reviewTaskId : null,
-      requestId: input.requestId,
-    },
-  } });
-
-  if (input.decision === "create-repair") {
-    const fixTask = await tx.task.findFirst({
-      where: {
-        projectId: regression.projectId,
-        chainId: regression.chainId,
-        templateId: regression.templateId,
-        templateStep: { outputKind: "fixed-implementation" },
-      },
-      select: { assigneeAgent: { select: { name: true } } },
-    });
-    const sourceRun = regression.runs.find((run) => run.branch !== null);
-    const repair = await createMergeTailRepairTask(tx, {
-      regressionTask: regression,
-      sourceRun: { id: card.session.run.id, branch: sourceRun?.branch ?? null },
-      agentName: fixTask?.assigneeAgent?.name ?? "senior-dev",
-      repairKind: "review-fix",
-      headSha,
-      baseHeadSha,
-      summary,
-      now: input.now,
-    });
-    if ("refusal" in repair) throw new Error(repair.refusal);
-  } else if (input.decision === "adopt-head") {
-    await tx.task.update({ where: { id: regression.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-    await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-    await enqueueTaskRun(tx, regression.id, input.now);
-  } else {
-    const integrator = await tx.task.findFirst({
-      where: { projectId: regression.projectId, chainId: regression.chainId, templateId: regression.templateId, templateStep: { outputKind: "merge-result" } },
-      select: { id: true },
-    });
-    await tx.task.updateMany({
-      where: { id: { in: [regression.id, readiness.id, ...(integrator ? [integrator.id] : [])] } },
-      data: { status: TaskStatus.REVIEW, failureReason: `Autonomous merge tail parked by operator at ${headSha}` },
-    });
-  }
-  return { duplicate: false, resumed: false, messageId: card.id, action: input.decision };
 };
 
 export const handleRegressionCompletion = async (
@@ -917,8 +844,13 @@ export const taskInput = z.object({
     context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
   }
 });
-const taskPatch = z.object(taskFields).partial().extend({ status: z.nativeEnum(TaskStatus).optional() })
-  .refine((value) => Object.keys(value).length > 0);
+// `failureReason` is patchable but not creatable: a task is never born with a
+// failure, and an operator whose task carries a stale one needs a way to clear
+// it — an explicit null — without inventing a run.
+const taskPatch = z.object(taskFields).partial().extend({
+  status: z.nativeEnum(TaskStatus).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const activityInput = z.object({
   actorType: z.string().trim().min(1).max(40).default("operator"),
   actorId: z.string().trim().min(1).nullable().optional(),
@@ -959,7 +891,7 @@ const reclaimReportInput = z.object({
   results: z.array(z.object({
     runId: id,
     outcome: z.enum(["REMOVED", "REFUSED", "FAILED"]),
-    failureReason: z.string().max(2000).nullable().optional(),
+    failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
   })).max(5000),
 });
 const reclaimSalvageInput = z.object({
@@ -978,7 +910,7 @@ const heartbeatInput = z.object({
 });
 const cancelRunInput = z.object({
   requestId: z.string().trim().min(1).max(160),
-  reason: z.string().trim().min(1).max(2000),
+  reason: z.string().trim().min(1).pipe(failureReasonText(FAILURE_REASON_LIMIT)),
   parkTask: z.boolean().default(false),
 });
 const cancelAcknowledgeInput = z.object({
@@ -1068,7 +1000,7 @@ const completionInput = z.object({
   terminalSuccess: z.boolean(),
   terminationReason: z.string().nullable().optional(),
   failureClass: z.nativeEnum(FailureClass).optional(),
-  failureReason: z.string().max(4000).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).optional(),
   retryable: z.boolean().optional(),
   externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
@@ -1112,7 +1044,10 @@ const preflightInput = z.object({
   cliVersion: z.string().nullable().optional(),
   authMode: z.string().nullable().optional(),
   capabilities: z.record(z.string(), z.unknown()),
-  error: z.string().nullable().optional(),
+  // Written straight onto every blocked task as its `failureReason` (and kept
+  // as the circuit reason those rows are later matched by), so it is bounded
+  // here, where both writes read the same already-truncated string.
+  error: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
 });
 const runnerAvailabilityInput = z.object({
   // Optional only for the API-first half of a rolling deployment. A runner
@@ -1136,22 +1071,57 @@ const inboxQuestionInput = z.object({
   chatId: z.string().min(1).optional(),
   resumableUntil: z.coerce.date().nullable().optional(),
 });
+const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
+const stepOverridesInput = z.record(z.string(), stepOverrideInput).superRefine((overrides, context) => {
+  for (const stepIndex of Object.keys(overrides)) {
+    if (!/^[1-9]\d*$/u.test(stepIndex)) {
+      context.addIssue({
+        code: "custom",
+        path: [stepIndex],
+        message: `Step override key ${stepIndex} must be a positive decimal step index without leading zeros`,
+        params: { templateRefusalCode: "step_override_invalid_key" },
+      });
+    }
+  }
+});
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
   autoStart: z.boolean().default(false),
+  afterTaskId: id.optional(),
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
+  stepOverrides: stepOverridesInput.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;
   if (branchName !== undefined && !isValidBranchName(branchName)) {
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
+  }
+  if (value.afterTaskId && value.autoStart) {
+    context.addIssue({
+      code: "custom",
+      path: ["afterTaskId"],
+      message: `afterTaskId ${value.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
+      params: { templateRefusalCode: "dispatch_conflicts_with_auto_start" },
+    });
   }
 });
 const isTemplateInputError = (error: unknown): error is Error => (
   error instanceof Error
   && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
 );
+const templateSchemaRefusal = (error: unknown): { error: string; code: string } | null => {
+  if (!(error instanceof z.ZodError)) return null;
+  const issue = error.issues.find((candidate) => {
+    const params = (candidate as unknown as { params?: Record<string, unknown> }).params;
+    return typeof params?.templateRefusalCode === "string";
+  });
+  if (!issue) return null;
+  const params = (issue as unknown as { params?: Record<string, unknown> }).params;
+  return typeof params?.templateRefusalCode === "string"
+    ? { error: issue.message, code: params.templateRefusalCode }
+    : null;
+};
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -1169,24 +1139,6 @@ const webhookConfigPatch = z.object({
   // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
-const templateStepPatch = z.object({
-  opensPullRequest: z.boolean().optional(),
-  baseFromStepIndex: z.number().int().min(0).nullable().optional(),
-}).refine((value) => Object.keys(value).length > 0);
-const templateStepInput = z.object({
-  stepIndex: z.number().int().min(0),
-  name: z.string().trim().min(1).max(200),
-  assigneeType: z.nativeEnum(AssigneeType),
-  assigneeAgentId: id.nullable().default(null),
-  prompt: z.string().min(1).max(100_000),
-  approvalGate: z.boolean().default(false),
-  attachmentsFromPrevious: z.boolean().default(false),
-  spawnPolicy: z.record(z.string(), z.unknown()).nullable().default(null),
-  runner: z.nativeEnum(RunnerKind).nullable().default(null),
-  outputKind: z.string().trim().min(1).max(80).default("result"),
-  opensPullRequest: z.boolean().default(true),
-  baseFromStepIndex: z.number().int().min(0).nullable().default(null),
-}).strict();
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -1465,6 +1417,8 @@ type LockedTask = {
   archivedAt: Date | null;
   projectId: string;
   chainId: string | null;
+  dispatchAfterTaskId: string | null;
+  dispatchAfter: { name: string; status: TaskStatus } | null;
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   templateStep: {
@@ -1487,6 +1441,8 @@ const lockedTaskSelect = {
   archivedAt: true,
   projectId: true,
   chainId: true,
+  dispatchAfterTaskId: true,
+  dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,
   assigneeAgentId: true,
   templateStep: {
@@ -1576,10 +1532,20 @@ const activateMergeTailTarget = async (
     return;
   }
   if (isMergeReadinessStep(target.templateStep)) {
+    // Readiness runs on the server worker, which only claims TODO/DOING. The
+    // obligation parked this step in REVIEW while the review ran, so resolving
+    // the review has to hand it back; anything else in REVIEW is a real stop
+    // and stays stopped.
+    const resumed = await tx.task.updateMany({
+      where: { id: taskId, status: TaskStatus.REVIEW, failureReason: { startsWith: INDEPENDENT_REVIEW_OPEN_PREFIX } },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
     await tx.taskActivity.create({ data: {
       taskId,
       actorType: "control-plane",
-      body: "Merge-tail readiness target queued for server worker",
+      body: resumed.count === 1
+        ? "Independent review resolved; readiness target returned to the server worker"
+        : "Merge-tail readiness target queued for server worker",
       metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
     } });
     return;
@@ -2672,107 +2638,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
   });
-  app.post("/task-templates/:templateId/steps", async (context) => {
-    const templateId = id.parse(context.req.param("templateId"));
-    const body = await readJson(context.req.raw, templateStepInput);
-    const template = await db.taskTemplate.findUnique({
-      where: { id: templateId },
-      select: { id: true, projectId: true, webhookRepoId: true },
-    });
-    if (!template) return context.json({ error: "Template not found" }, 404);
-    if (body.assigneeType === AssigneeType.AGENT && !body.assigneeAgentId) {
-      return context.json({ error: "Agent template steps require an assignee" }, 400);
-    }
-    if (body.assigneeType === AssigneeType.HUMAN && body.assigneeAgentId) {
-      return context.json({ error: "Human template steps cannot have an agent assignee" }, 400);
-    }
-    const agent = body.assigneeAgentId
-      ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: template.projectId } })
-      : null;
-    if (body.assigneeAgentId && !agent) {
-      return context.json({ error: "Assignee does not belong to this template's project" }, 400);
-    }
-    if (agent?.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
-    if (agent && template.webhookRepoId) {
-      const access = await db.agentRepoAccess.findFirst({
-        where: { projectId: template.projectId, agentId: agent.id, repoId: template.webhookRepoId },
-        select: { agentId: true },
-      });
-      if (!access) return context.json({ error: "Assignee has no grant for this template's Repo" }, 400);
-    }
-    // A template step is a standing assignment: every future instantiation and
-    // every webhook fire turns this row into a task and a run for this agent. So
-    // it joins the same Agent-row exclusion protocol as the task writers — the
-    // checks above answered from unlocked reads, and only this re-read under
-    // `lockAgentRow` decides. Duplicate detection and the create move inside the
-    // same transaction, because a step written after the lock was released is
-    // exactly the archived assignment this protocol exists to prevent.
-    const result = await db.$transaction(async (tx) => {
-      const blocked = await assignmentBlocked(tx, agent);
-      if (blocked) return { error: blocked, code: 400 as const };
-      const duplicate = await tx.taskTemplateStep.findFirst({
-        where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
-        select: { id: true },
-      });
-      if (duplicate) return { error: "Template step index already exists", code: 409 as const };
-      if (body.baseFromStepIndex !== null) {
-        if (body.baseFromStepIndex >= body.stepIndex) {
-          return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
-        }
-        const baseStep = await tx.taskTemplateStep.findFirst({
-          where: { taskTemplateId: template.id, stepIndex: body.baseFromStepIndex },
-          select: { id: true },
-        });
-        if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
-      }
-      return { step: await tx.taskTemplateStep.create({ data: {
-        taskTemplateId: template.id,
-        stepIndex: body.stepIndex,
-        name: body.name,
-        assigneeType: body.assigneeType,
-        assigneeAgentId: body.assigneeAgentId,
-        prompt: body.prompt,
-        approvalGate: body.approvalGate,
-        attachmentsFromPrevious: body.attachmentsFromPrevious,
-        spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
-        runner: body.runner,
-        outputKind: body.outputKind,
-        opensPullRequest: body.opensPullRequest,
-        baseFromStepIndex: body.baseFromStepIndex,
-        layer: body.stepIndex,
-      } }) };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
-    return context.json(result.step, 201);
-  });
-  // Bounded on purpose: only delivery and base-pinning fields. A general
-  // template-step editor remains a separate authoring surface.
-  app.patch("/task-templates/:templateId/steps/:stepId", async (context) => {
-    const templateId = id.parse(context.req.param("templateId"));
-    const stepId = id.parse(context.req.param("stepId"));
-    const body = await readJson(context.req.raw, templateStepPatch);
-    // Ownership is checked, not assumed: the step id alone would let a caller
-    // patch another template's step through any templateId that happens to exist.
-    const result = await db.$transaction(async (tx) => {
-      const step = await tx.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
-      if (!step) return { error: "Template step not found", code: 404 as const };
-      if (body.baseFromStepIndex !== undefined && body.baseFromStepIndex !== null) {
-        if (body.baseFromStepIndex >= step.stepIndex) {
-          return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
-        }
-        const baseStep = await tx.taskTemplateStep.findFirst({
-          where: { taskTemplateId: templateId, stepIndex: body.baseFromStepIndex }, select: { id: true },
-        });
-        if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
-      }
-      return { step: await tx.taskTemplateStep.update({
-        where: { id: stepId },
-        data: withoutUndefined(body),
-      }) };
-    });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
-    return context.json(result.step);
-  });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
     const body = await readJson(context.req.raw, webhookConfigPatch);
@@ -2811,6 +2676,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await readJson(context.req.raw, instantiateTemplateInput),
       ), 201);
     } catch (error: unknown) {
+      if (isTemplateInstantiationRefusal(error)) {
+        return context.json({ error: error.message, code: error.code }, 400);
+      }
+      const schemaRefusal = templateSchemaRefusal(error);
+      if (schemaRefusal) return context.json(schemaRefusal, 400);
       if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }
@@ -3138,6 +3008,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
           templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
+          dispatchAfterTaskId: true,
           assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
@@ -3154,7 +3025,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       const progressFor = await chainProgressLookup(rows);
       const displayByTask = chainDisplayByTask(rows);
-      return validated(context, rows.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
+      // A bound first task is the only board row that can carry this marker.
+      // Resolve all page bindings in one batch, and skip the query entirely for
+      // the overwhelmingly common unbound page. The projection remains pure:
+      // it receives the resolved predecessor rather than reaching into Prisma.
+      const predecessorIds = [...new Set(rows
+        .map((row) => row.dispatchAfterTaskId)
+        .filter((value): value is string => typeof value === "string" && value.length > 0))];
+      const predecessorById = new Map<string, { id: string; name: string; status: TaskStatus }>();
+      if (predecessorIds.length > 0) {
+        const predecessors = await db.task.findMany({
+          where: { id: { in: predecessorIds } },
+          select: { id: true, name: true, status: true },
+        });
+        for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
+      }
+      return validated(context, rows.map((row) => boardCard(
+        row,
+        progressFor(row),
+        displayByTask.get(row.id),
+        row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+      )));
     }
 
     const tasks = await db.task.findMany({
@@ -3354,6 +3245,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: {
         assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
         repo: { select: { id: true, name: true, defaultBranch: true } },
+        dispatchAfter: { select: { id: true, name: true, status: true } },
       },
     });
     if (!task) return context.json({ error: "Task not found" }, 404);
@@ -3438,10 +3330,32 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         include: chainInclude,
       });
 
+    // Bindings are stored only on the first task. Keep the common unbound path
+    // at zero predecessor lookups, and resolve the one pointer only when the
+    // chain's first execution row carries it. This is deliberately separate
+    // from the row include above: including the self-relation would make every
+    // historical chain pay for a relation query it cannot use.
+    const firstTask = [...rows].sort((left, right) => (
+      (left.chainLayer ?? left.chainIndex ?? 0) - (right.chainLayer ?? right.chainIndex ?? 0)
+        || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
+        || left.id.localeCompare(right.id)
+    ))[0];
+    const dispatchAfterTaskId = firstTask?.dispatchAfterTaskId ?? null;
+    const dispatchAfter = dispatchAfterTaskId === null
+      ? null
+      : await db.task.findFirst({
+        where: { id: dispatchAfterTaskId, projectId: subject.projectId },
+        select: { id: true, name: true, status: true },
+      });
+    const chainRows = rows.map((row) => ({
+      ...row,
+      dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
+    }));
+
     const [runGroups, recoveryRow] = await Promise.all([
-      rows.length === 0 ? [] : db.run.groupBy({
+      chainRows.length === 0 ? [] : db.run.groupBy({
         by: ["taskId", "status"],
-        where: { taskId: { in: rows.map((row) => row.id) } },
+        where: { taskId: { in: chainRows.map((row) => row.id) } },
         _count: { _all: true },
         // The grants travel with the count, in the same one query: a step whose
         // failures were all provisioning failures has been refunded them, and its
@@ -3455,18 +3369,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     ]);
     const mergeRecovery = mergeRecoveryProjection(recoveryRow);
     const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
-    const ordinals = positions(rows);
-    const progress = chainProgress(rows);
-    const decisions = chainStartDecisions(rows.map((row) => ({
+    const ordinals = positions(chainRows);
+    const progress = chainProgress(chainRows);
+    const decisions = chainStartDecisions(chainRows.map((row) => ({
       ...row,
       hasRepoGrant: Boolean(row.repoId && row.assigneeAgent?.repoAccess.some((grant) => grant.repoId === row.repoId)),
     })), facts);
 
     return context.json({
       chainId: subject.chainId,
-      total: progress?.total ?? rows.length,
+      total: progress?.total ?? chainRows.length,
       done: progress?.done ?? 0,
-      steps: rows.map((row) => ({
+      steps: chainRows.map((row) => ({
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,
         chainIndex: row.chainIndex,
@@ -3486,6 +3400,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         startable: decisions.get(row.id)?.startable ?? false,
         startAction: decisions.get(row.id)?.startAction ?? null,
         currentExecution: decisions.get(row.id)?.currentExecution ?? false,
+        blockedOn: row.id === firstTask?.id
+          && row.dispatchAfterTaskId !== null
+          && dispatchAfter !== null
+          && dispatchAfter.status !== TaskStatus.DONE
+          ? { taskId: dispatchAfter.id, name: dispatchAfter.name, status: dispatchAfter.status }
+          : null,
         mergeRecovery,
       })),
     });
@@ -3605,6 +3525,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
+        }
+        if (typeof locked.dispatchAfterTaskId === "string"
+          && locked.dispatchAfter?.status !== TaskStatus.DONE
+          && body.status !== locked.status
+          && body.status !== TaskStatus.TODO) {
+          const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
+          return {
+            error: `Cannot change bound task status before predecessor ${predecessorName} is done`,
+            code: 409 as const,
+          };
         }
         // Task rows first, then the Agent row — the one global lock order.
         if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
@@ -3955,6 +3885,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           where: { id: taskId },
           include: {
             assigneeAgent: { select: { archivedAt: true } },
+            dispatchAfter: { select: { id: true, name: true, status: true } },
             templateStep: { include: { taskTemplate: { select: { name: true } } } },
           },
         });
@@ -3980,6 +3911,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               code: 409 as const,
             };
           }
+        }
+        if (task.dispatchAfterTaskId !== null && task.dispatchAfter?.status !== TaskStatus.DONE) {
+          const predecessorName = task.dispatchAfter?.name ?? task.dispatchAfterTaskId;
+          return {
+            error: `Cannot start ${task.name}; bound predecessor ${predecessorName} is not done`,
+            code: 409 as const,
+          };
         }
         if (task.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
         if (task.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };
@@ -4254,8 +4192,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
       const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
-        || isCanonicalBlindFindingsStep(task.templateStep)
-        || isCanonicalAdjudicationStep(task.templateStep);
+        || isCanonicalBlindFindingsStep(task.templateStep);
       if (immutableReview && existing) {
         return { error: `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`, code: 409 as const };
       }
@@ -4384,17 +4321,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const body = await readJson(context.req.raw, inboxDecisionInput);
     try {
-      const mergeTail = await db.$transaction((tx) => applyMergeTailOperatorDecision(tx, {
-        messageId: id.parse(context.req.param("messageId")),
-        requestId: body.requestId,
-        decision: body.decision,
-        now: new Date(),
-      }));
-      if (mergeTail) {
-        return mergeTail.error
-          ? context.json({ error: mergeTail.error }, 409)
-          : context.json(mergeTail, mergeTail.duplicate ? 200 : 201);
-      }
       const result = await applyInboxDecision(db, {
         inboxMessageId: id.parse(context.req.param("messageId")),
         externalEventId: `web:${body.requestId}`,
@@ -4714,7 +4640,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         take: 20,
       });
       const executorRunnerIds = mergeExecutorRunnerIds();
-      let adjudicationRefusal: string | null = null;
       for (const candidate of candidates) {
         if (!candidate.task || !candidate.repo) continue;
         if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
@@ -4864,23 +4789,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           if (grantedEnvironmentVariables.has(envVar)) throw new Error(`Duplicate effective secret envVar ${envVar}`);
           grantedEnvironmentVariables.add(envVar);
         }
-        const adjudicationTask = isCanonicalAdjudicationStep(candidate.task.templateStep);
-        if (adjudicationTask) {
-          // Adjudication consumes evidence owned by sibling Tasks. Hold the
-          // candidate Run first, then the sole complete-chain mutex, and only
-          // validate the pinned range and reports after both locks are held.
-          // Every sibling status/output writer takes that same chain mutex, so
-          // the evidence cannot change between validation and the claim CAS.
-          await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${candidate.id} FOR UPDATE`;
-          const lockedRun = await tx.run.findUnique({
-            where: { id: candidate.id },
-            select: { status: true, leaseGeneration: true, taskId: true },
-          });
-          if (lockedRun?.status !== RunStatus.QUEUED
-            || lockedRun.leaseGeneration !== candidate.leaseGeneration
-            || lockedRun.taskId !== candidate.task.id) continue;
-          if (!await lockTaskMutationRows(tx, candidate.task.id)) continue;
-        }
         let implementationRange: Awaited<ReturnType<typeof pinnedImplementationRange>>;
         try {
           implementationRange = await pinnedImplementationRange(tx, candidate.task);
@@ -4940,15 +4848,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           }
           continue;
         }
-        const reviewClaimRefusal = await reviewAdjudicationClaimRefusal(tx, {
-          task: candidate.task,
-          implementationBaseSha: implementationRange?.implementationBaseSha ?? null,
-          implementationHeadSha: implementationRange?.implementationHeadSha ?? null,
-        });
-        if (reviewClaimRefusal) {
-          adjudicationRefusal = reviewClaimRefusal;
-          continue;
-        }
         const generation = candidate.leaseGeneration + 1;
         const fencingToken = makeFencingToken(candidate.id, generation);
         const sessionCredential = issueSessionToken();
@@ -4970,8 +4869,8 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           },
         });
         if (won.count !== 1) continue;
-        if (!adjudicationTask) await lockTaskMutationRows(tx, candidate.task.id);
-        const priorResume = !adjudicationTask && candidate.session?.resumeInput && candidate.session.providerConversationId ? {
+        await lockTaskMutationRows(tx, candidate.task.id);
+        const priorResume = candidate.session?.resumeInput && candidate.session.providerConversationId ? {
           providerConversationId: candidate.session.providerConversationId,
           input: candidate.session.resumeInput,
         } : null;
@@ -4983,13 +4882,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             requestedAt: now,
             endedAt: null,
             failureReason: null,
-            ...(adjudicationTask ? {
-              providerConversationId: null,
-              resumeInput: null,
-              resumableUntil: null,
-              waitingOnMessageId: null,
-              resumeAttempt: 0,
-            } : {}),
           },
         }) : await tx.session.create({ data: {
             runId: candidate.id,
@@ -5104,7 +4996,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
         };
       }
-      return adjudicationRefusal ? { error: adjudicationRefusal } : null;
+      return null;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     let claimed: Awaited<ReturnType<typeof claimOnce>> = null;
     // Two runners claiming independent chains still touch the same Task pages
@@ -5846,21 +5738,30 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const reviewRegression = typeof reviewMarker?.regressionTaskId === "string"
         ? await tx.task.findUnique({
             where: { id: reviewMarker.regressionTaskId },
-            select: { chainId: true },
+            select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
           })
         : null;
+      // The ordinals are the Full Assurance graph's, and the renamed
+      // adjudication-era rows keep the ones they were created under: a repair
+      // that lands on a chain from either graph still has to put its
+      // documentation node back.
+      const repairDocumentationOrdinals = repairRegression?.templateStep?.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
+        ? FULL_REPAIR_DOCUMENTATION_ORDINALS
+        : repairRegression?.templateStep?.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)
+          ? LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS
+          : null;
       const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
-        && repairRegression.chainIndex === 11
-        && repairRegression.templateStep?.stepIndex === 11
-        && repairRegression.templateStep.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
+        && repairDocumentationOrdinals
+        && repairRegression.chainIndex === repairDocumentationOrdinals.regression
+        && repairRegression.templateStep?.stepIndex === repairDocumentationOrdinals.regression
         ? await tx.task.findFirst({
             where: {
               projectId: repairRegression.projectId,
               chainId: repairRegression.chainId,
               templateId: repairRegression.templateId,
-              chainIndex: 10,
+              chainIndex: repairDocumentationOrdinals.documentation,
               archivedAt: null,
-              templateStep: { stepIndex: 10, outputKind: "documentation" },
+              templateStep: { stepIndex: repairDocumentationOrdinals.documentation, outputKind: "documentation" },
             },
             orderBy: { chainIndex: "desc" },
             select: { id: true },
@@ -6204,72 +6105,183 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             && typeof reviewMarker.readinessTaskId === "string"
             && typeof reviewMarker.regressionTaskId === "string"
             && typeof reviewMarker.headSha === "string") {
-            const reviewOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
-            let decision: Record<string, unknown> | null = null;
-            try { decision = JSON.parse(reviewOutput?.body ?? "null") as Record<string, unknown> | null; } catch { decision = null; }
-            const validHead = decision?.schemaVersion === 1 && decision.headSha === reviewMarker.headSha;
-            if (!validHead || (decision?.outcome !== "approved" && decision?.outcome !== "rejected")) {
+            const readinessTaskId = reviewMarker.readinessTaskId;
+            const regressionTaskId = reviewMarker.regressionTaskId;
+            const reviewHeadSha = reviewMarker.headSha;
+            const reviewBaseSha = typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null;
+            // Review evidence is run-scoped even though TaskStepOutput is not.
+            // An earlier attempt's decision is not this attempt's decision, and
+            // a decision not bound to the reviewed head is not evidence about
+            // it: either one would let an unreviewed head through.
+            const persistedReview = await tx.taskStepOutput.findUnique({
+              where: { taskId: run.taskId }, select: { body: true, runId: true, commitSha: true },
+            });
+            const reviewOutput = persistedReview?.runId === run.id && persistedReview.commitSha === reviewHeadSha
+              ? persistedReview
+              : null;
+            const parsedReview = reviewOutput
+              ? parseIndependentReviewDecision(reviewOutput.body, reviewHeadSha)
+              : {
+                status: "invalid" as const,
+                reason: persistedReview
+                  ? `decision is bound to run ${persistedReview.runId ?? "none"} at ${persistedReview.commitSha ?? "no head"}, not this run at ${reviewHeadSha}`
+                  : "missing independent review output",
+              };
+            const reviewSessionId = run.session.id;
+            // A finding's own text reaches these reasons, so every one of them
+            // is bounded exactly where a client-supplied reason would be.
+            const stopTail = async (unbounded: string): Promise<void> => {
+              const reason = truncateFailureReason(unbounded, FAILURE_REASON_LIMIT);
+              await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await tx.task.update({ where: { id: regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: reviewSessionId, reason });
+            };
+            if (parsedReview.status === "invalid") {
               reviewRejected = true;
-              const reason = `independent review returned missing, malformed, or stale decision for ${reviewMarker.headSha}`;
+              const reason = `independent review returned an unusable decision for ${reviewHeadSha}: ${parsedReview.reason}`;
               await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
-              await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-              await openMergeTailStopNotice(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
-            } else if (decision.outcome === "approved") {
-              await tx.taskActivity.create({ data: {
-                taskId: reviewMarker.readinessTaskId,
-                actorType: "control-plane",
-                body: `Independent review approved exact head ${reviewMarker.headSha}`,
-                metadata: jsonValue({
-                  kind: MERGE_TAIL_KIND.reviewObligation,
-                  schemaVersion: 1,
-                  state: "approved",
+              await tx.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+              await openMergeTailStopNotice(tx, { taskId: regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+            } else if (parsedReview.decision.outcome !== "rejected") {
+              // Follow-up findings never hold the merge. Each becomes a backlog
+              // card, so the merge proceeds with the work recorded instead of
+              // with the finding lost.
+              const followUpCardIds: string[] = [];
+              let followUpRefusal: string | null = null;
+              const followUpAgentName = await mergeTailFixAgentName(tx, await tx.task.findUnique({
+                where: { id: regressionTaskId },
+                select: { projectId: true, chainId: true, templateId: true },
+              }));
+              for (const finding of parsedReview.decision.findings) {
+                const card = await createReviewFollowUpCard(tx, {
+                  projectId: run.task.projectId,
+                  repoId: run.task.repoId,
+                  agentName: followUpAgentName,
                   reviewTaskId: run.taskId,
-                  headSha: reviewMarker.headSha,
-                  baseSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null,
-                }),
-              } });
+                  headSha: reviewHeadSha,
+                  finding,
+                });
+                if ("refusal" in card) { followUpRefusal = card.refusal; break; }
+                followUpCardIds.push(card.taskId);
+              }
+              if (followUpRefusal) {
+                reviewRejected = true;
+                const reason = `independent review follow-up card could not be created: ${followUpRefusal}`;
+                await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: reason } });
+                await stopTail(reason);
+              } else {
+                await tx.taskActivity.create({ data: {
+                  taskId: readinessTaskId,
+                  actorType: "control-plane",
+                  body: followUpCardIds.length === 0
+                    ? `Independent review approved exact head ${reviewHeadSha}`
+                    : `Independent review accepted exact head ${reviewHeadSha} with ${followUpCardIds.length} follow-up card(s)`,
+                  metadata: jsonValue({
+                    kind: MERGE_TAIL_KIND.reviewObligation,
+                    schemaVersion: 1,
+                    state: parsedReview.decision.outcome,
+                    reviewTaskId: run.taskId,
+                    headSha: reviewHeadSha,
+                    baseSha: reviewBaseSha,
+                    followUpCardIds,
+                  }),
+                } });
+              }
             } else {
               reviewRejected = true;
+              const summary = parsedReview.decision.blockingSummary;
               const prior = await tx.taskActivity.findMany({
-                where: { taskId: reviewMarker.readinessTaskId }, select: { metadata: true },
+                where: { taskId: readinessTaskId }, select: { metadata: true },
               });
-              const alreadyRejected = prior.some((row) => {
+              const round = prior.filter((row) => {
                 const metadata = asJsonObject(row.metadata);
                 return metadata?.kind === MERGE_TAIL_KIND.reviewObligation && metadata.state === "rejected";
-              });
-              const summary = typeof decision.summary === "string" ? decision.summary : "independent review rejected without a summary";
+              }).length + 1;
               await tx.taskActivity.create({ data: {
-                taskId: reviewMarker.readinessTaskId,
+                taskId: readinessTaskId,
                 actorType: "control-plane",
-                body: `Independent review rejected exact head ${reviewMarker.headSha}`,
+                body: `Independent review rejected exact head ${reviewHeadSha} on blocking round ${round}`,
                 metadata: {
                   kind: MERGE_TAIL_KIND.reviewObligation,
                   schemaVersion: 1,
                   state: "rejected",
                   reviewTaskId: run.taskId,
-                  headSha: reviewMarker.headSha,
-                  baseSha: typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null,
+                  headSha: reviewHeadSha,
+                  baseSha: reviewBaseSha,
                   summary,
+                  blockingRound: round,
                 },
               } });
-              await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DONE, failureReason: `independent review rejected: ${summary}` } });
+              await tx.task.update({ where: { id: run.taskId }, data: {
+                status: TaskStatus.DONE,
+                failureReason: truncateFailureReason(`independent review rejected: ${summary}`, FAILURE_REASON_LIMIT),
+              } });
               const driftRecovery = await baseDriftRecoveryContext(
                 tx,
-                reviewMarker.regressionTaskId,
+                regressionTaskId,
                 undefined,
                 typeof reviewMarker.recoverySourceStopId === "string" ? reviewMarker.recoverySourceStopId : "no-recovery-context",
               );
               if (driftRecovery) {
-                await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewMarker.headSha}: ${summary}`);
-              } else if (alreadyRejected) {
-                const reason = `second independent review rejection at ${reviewMarker.headSha}: ${summary}`;
-                await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await openMergeTailReviewDecisionInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                await stopBaseDriftRecoveryTail(tx, driftRecovery, "independent-review", `rejected ${reviewHeadSha}: ${summary}`);
+              } else if (round >= MAX_BLOCKING_REVIEW_ROUNDS) {
+                // The ceiling is an exception path, not an approval gate: three
+                // blocking rounds mean the repair loop is not converging, so the
+                // tail stops and says so instead of spending a fourth round.
+                await stopTail(`independent review rejected ${reviewHeadSha} on blocking round ${round} of ${MAX_BLOCKING_REVIEW_ROUNDS}; automatic repair is exhausted: ${summary}`);
+              } else if (!reviewBaseSha) {
+                await stopTail(`independent review rejected ${reviewHeadSha} but its base head is unavailable for automatic repair`);
               } else {
-                const reason = `independent review rejected exact head ${reviewMarker.headSha}: ${summary}`;
-                await tx.task.update({ where: { id: reviewMarker.readinessTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await tx.task.update({ where: { id: reviewMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
-                await openMergeTailReviewDecisionInbox(tx, { taskId: reviewMarker.regressionTaskId, agentId: run.agentId, sessionId: run.session.id, reason });
+                // The chain mutex is held now; the Regression row read before it
+                // may already be stale, and a repair bound to a stale repository
+                // or target branch cannot hand off to the fresh Regression run.
+                const lockedRegression = await tx.task.findUnique({
+                  where: { id: regressionTaskId },
+                  select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
+                });
+                // Claiming the park this review owns is what makes the repair
+                // automatic without overruling anyone: an operator who moved
+                // readiness out of it while the review ran keeps that decision,
+                // and no repair run starts behind their back.
+                const claimedPark = await tx.task.updateMany({
+                  where: { id: readinessTaskId, status: TaskStatus.REVIEW, failureReason: { startsWith: INDEPENDENT_REVIEW_OPEN_PREFIX } },
+                  data: { failureReason: `review-fix: automatic repair queued at ${reviewHeadSha}` },
+                });
+                if (!lockedRegression) {
+                  await stopTail(`independent review rejected ${reviewHeadSha} but its Regression task is gone`);
+                } else if (claimedPark.count !== 1) {
+                  await tx.taskActivity.create({ data: {
+                    taskId: readinessTaskId,
+                    actorType: "control-plane",
+                    body: `Independent review rejected ${reviewHeadSha}, but readiness is no longer parked on that review; automatic repair was not started`,
+                    metadata: {
+                      kind: MERGE_TAIL_KIND.reviewObligation,
+                      schemaVersion: 1,
+                      state: "repair-skipped",
+                      reviewTaskId: run.taskId,
+                      headSha: reviewHeadSha,
+                    },
+                  } });
+                } else {
+                  const repair = await createMergeTailRepairTask(tx, {
+                    regressionTask: { id: regressionTaskId, ...lockedRegression },
+                    sourceRun: { id: run.id, branch: run.branch },
+                    agentName: await mergeTailFixAgentName(tx, lockedRegression),
+                    repairKind: "review-fix",
+                    headSha: reviewHeadSha,
+                    baseHeadSha: reviewBaseSha,
+                    summary,
+                    now,
+                  });
+                  if ("refusal" in repair) {
+                    await stopTail(`independent review rejected ${reviewHeadSha} and automatic repair was refused: ${repair.refusal}`);
+                  } else {
+                    await tx.task.update({
+                      where: { id: readinessTaskId },
+                      data: { status: TaskStatus.REVIEW, failureReason: `review-fix: automatic repair ${repair.taskId} queued at ${reviewHeadSha}` },
+                    });
+                  }
+                }
               }
             }
           }
