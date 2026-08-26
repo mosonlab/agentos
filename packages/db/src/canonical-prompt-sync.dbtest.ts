@@ -136,6 +136,16 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       baseFromStepIndex: adjudication.baseFromStepIndex,
       prompt: `Adjudicate the two review reports for ${template.name}.`,
     } });
+    // The adjudication-era compound graph still gated its spec and revise-plan
+    // steps; the zero-gate transition removed those gates from the sources this
+    // fixture derives from, so it restores them to land on the exact
+    // enumerated historical shape.
+    if (template.name === "compound-engineer-workflow") {
+      await prisma.taskTemplateStep.updateMany({
+        where: { taskTemplateId: template.id, stepIndex: { in: [1, 4] } },
+        data: { approvalGate: true },
+      });
+    }
 
     const oldSteps = await prisma.taskTemplateStep.findMany({ where: { taskTemplateId: template.id }, orderBy: { stepIndex: "asc" } });
     for (const [index, step] of oldSteps.entries()) {
@@ -219,6 +229,62 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
   for (const legacyName of legacyNames.values()) {
     assert.equal(await prisma.taskTemplate.count({ where: { projectId: project.id, name: legacyName } }), 1);
   }
+});
+
+test("sync rolls the pre-zero-gate compound graph forward and leaves the direct row in place", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const full = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } },
+    select: { id: true },
+  });
+  const directBefore = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
+    select: { id: true },
+  });
+  // Regate spec and revise-plan: that is exactly the graph that preceded the
+  // zero-gate transition, and nothing else about it moved.
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },
+    data: { approvalGate: true },
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+
+  const legacyName = `compound-engineer-workflow-legacy-pre-zero-gate-${full.id}`;
+  const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: legacyName } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.equal(legacy.id, full.id);
+  const fresh = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "compound-engineer-workflow" } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  assert.notEqual(fresh.id, full.id);
+  assert.deepEqual(fresh.steps.map(({ approvalGate }) => approvalGate), Array.from({ length: 12 }, () => false));
+  // The regated ordinals are frozen with the renamed row, and its merge tail
+  // stays recognized at the ordinals it was created under.
+  assert.deepEqual(legacy.steps.filter(({ approvalGate }) => approvalGate).map(({ stepIndex }) => stepIndex), [1, 4]);
+  const readiness = legacy.steps.find(({ stepIndex }) => stepIndex === 11)!;
+  const integrator = legacy.steps.find(({ stepIndex }) => stepIndex === 12)!;
+  assert.equal(isMergeReadinessStep({
+    stepIndex: readiness.stepIndex,
+    outputKind: readiness.outputKind,
+    taskTemplateName: legacyName,
+  }), true);
+  assert.equal(isIntegratorStep({
+    stepIndex: integrator.stepIndex,
+    outputKind: integrator.outputKind,
+    taskTemplate: { name: legacyName },
+  }), true);
+  // The direct graph did not change in this transition, so its row is updated
+  // in place rather than rolled over.
+  const directAfter = await prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
+    select: { id: true },
+  });
+  assert.equal(directAfter.id, directBefore.id);
 });
 
 test("sync upgrades only the exact frozen-base review agent defaults", async () => {

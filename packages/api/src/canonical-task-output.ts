@@ -6,6 +6,7 @@ import {
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
+  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
   lockTaskRow,
   Prisma,
   RunStatus,
@@ -99,6 +100,9 @@ export const isCanonicalAgentStep = (step: TemplateStepIdentity | null | undefin
   }
   if (step.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)) {
     return step.stepIndex >= 1 && step.stepIndex <= FULL_PRE_ADJUDICATION_AGENT_STEP_LAST;
+  }
+  if (step.taskTemplate.name.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX)) {
+    return step.stepIndex >= 1 && step.stepIndex <= FULL_CANONICAL_AGENT_STEP_LAST;
   }
   return false;
 };

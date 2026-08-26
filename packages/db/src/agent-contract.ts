@@ -15,7 +15,7 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "merge-integrator", model: "mechanical/merge-executor-v1", runner: RunnerPreference.INHERIT },
   { name: "merge-resolver", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "plan", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "plan-reviser", model: "claude-fable-5:medium", runner: RunnerPreference.CLAUDE },
+  { name: "plan-reviser", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "regression-verifier", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
@@ -61,6 +61,13 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
   ["senior-dev", {
     from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },
     to: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+  }],
+  // 2026-08-26 ruling: revision is bounded by the consolidated findings, so it
+  // does not buy frontier-tier depth. Supersedes the 2026-08-24 tier table's
+  // plan-reviser row.
+  ["plan-reviser", {
+    from: { model: "claude-fable-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+    to: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
   }],
 ]);
 

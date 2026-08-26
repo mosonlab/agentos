@@ -19,6 +19,7 @@ import {
   isMergeReadinessStep,
   latestMarker,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
+  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
   lockChainRows,
   lockRunRow,
   MAX_BLOCKING_REVIEW_ROUNDS,
@@ -359,6 +360,7 @@ export const completeRun = async (
     // that lands on a chain from either graph still has to put its
     // documentation node back.
     const repairDocumentationOrdinals = repairRegression?.templateStep?.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
+        || repairRegression?.templateStep?.taskTemplate.name.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX)
       ? FULL_REPAIR_DOCUMENTATION_ORDINALS
       : repairRegression?.templateStep?.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)
         ? LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS

@@ -103,7 +103,7 @@ test("a fresh seed writes the twelve-step and seven-step autonomous merge templa
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 8)?.prompt ?? "", /Read both immutable review outputs from the preceding layer/u);
   assert.match(
     step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
-    /vertical slice[\s\S]*blocked_by[\s\S]*expand-migrate-contract[\s\S]*fail at base/iu,
+    /vertical slice[\s\S]*blocked_by[\s\S]*expand–contract staging[\s\S]*fail at base/iu,
   );
 
   const opening = step.taskTemplate.steps.filter((candidate) => candidate.opensPullRequest).map((candidate) => candidate.stepIndex);
@@ -236,6 +236,16 @@ test("canonical sync rolls the adjudication-era graphs only after their old task
       attachmentsFromPrevious: true,
       baseFromStepIndex: blind.baseFromStepIndex,
     } });
+    // The adjudication-era compound graph still gated its spec and revise-plan
+    // steps; the zero-gate transition removed those gates from the seeded
+    // sources, so the rebuild restores them to land on the exact enumerated
+    // historical shape.
+    if (template.name === INTEGRATOR_TEMPLATE_NAME) {
+      await db.taskTemplateStep.updateMany({
+        where: { taskTemplateId: template.id, stepIndex: { in: [1, 4] } },
+        data: { approvalGate: true },
+      });
+    }
     oldTasks.push(await db.task.create({ data: {
       projectId: template.projectId,
       templateId: template.id,

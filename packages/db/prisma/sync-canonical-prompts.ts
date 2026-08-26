@@ -3,8 +3,8 @@ import { PrismaClient, Prisma, RunnerPreference, TaskStatus } from "@prisma/clie
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-sources.js";
 import {
-  legacyAdjudicationTemplateName,
-  legacyTemplateShapeRefusal,
+  legacyTemplateName,
+  matchedLegacyGeneration,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
 import {
@@ -83,9 +83,9 @@ const preflightCanonicalTemplateRows = async (
     if (rows.length === 0) throw new Error(`Template ${templateName} was not found`);
     for (const row of rows) {
       const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
-      const legacy = legacyTemplateShapeRefusal(templateName, persistedSteps);
-      if (legacy === "legacy") {
-        const legacyName = legacyAdjudicationTemplateName(templateName, row.id);
+      const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
+      if (legacyMarker !== null) {
+        const legacyName = legacyTemplateName(templateName, legacyMarker, row.id);
         const existingLegacy = await tx.taskTemplate.findUnique({
           where: { projectId_name: { projectId: row.projectId, name: legacyName } },
           select: { id: true },
@@ -168,7 +168,8 @@ const transitionCanonicalTemplateRows = async (
     const rows = await readCanonicalTemplateRows(tx, templateName);
     for (const row of rows) {
       const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
-      if (legacyTemplateShapeRefusal(templateName, persistedSteps) !== "legacy") continue;
+      const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
+      if (legacyMarker === null) continue;
       const unfinishedTasks = await tx.task.count({
         where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
       });
@@ -180,7 +181,7 @@ const transitionCanonicalTemplateRows = async (
         || row.webhookReplayWindowSec !== null) {
         throw new Error(`${templateName} ${row.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
       }
-      const legacyName = legacyAdjudicationTemplateName(templateName, row.id);
+      const legacyName = legacyTemplateName(templateName, legacyMarker, row.id);
       await tx.taskTemplate.update({ where: { id: row.id }, data: { name: legacyName } });
       await createCanonicalTemplate(tx, row.projectId, templateName, steps);
       created += 1;
