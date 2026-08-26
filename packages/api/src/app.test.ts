@@ -1378,6 +1378,8 @@ test("claim query filters archived agents before take so active work cannot star
     let claimedId: string | undefined;
     const tx = {
       $queryRaw: async () => [{ granted: true }],
+      // The claim loop brackets every candidate in a savepoint.
+      $executeRawUnsafe: async () => 0,
       run: {
         findMany: async ({ where, take }: { where: Record<string, any>; take: number }) => {
           claimWhere = where;

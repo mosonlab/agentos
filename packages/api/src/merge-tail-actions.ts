@@ -33,19 +33,31 @@ import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js
 
 type DbTx = Prisma.TransactionClient;
 
+/**
+ * The notice the tail writes when it stops, keyed by task and reason.
+ *
+ * Stopping twice for the same reason is a legitimate event: an operator retry
+ * re-queues the run, the claim path judges the same handoff invalid again, and
+ * the stop path runs again. Under `create` that repeat raised P2002 inside the
+ * caller's transaction, which rolled the whole stop back -- and in the claim
+ * path took every other queued run's claim down with it. The notice is a
+ * digest, not a log: one row per (task, reason) is the intended state, so a
+ * repeat leaves the existing row alone.
+ */
 export const openMergeTailStopNotice = async (
   tx: DbTx,
   input: { taskId: string; agentId: string; sessionId?: string; reason: string },
 ): Promise<void> => {
-  await tx.inboxMessage.create({ data: {
+  const dedupeKey = `merge-tail-stop:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
+  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
     from: "AGENT",
     agentId: input.agentId,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     taskId: input.taskId,
     kind: "TEXT",
     body: `Autonomous merge tail stopped: ${input.reason}`,
-    dedupeKey: `merge-tail-stop:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`,
-  } });
+    dedupeKey,
+  }, update: {} });
 };
 
 export const baseDriftRecoveryContext = async (
