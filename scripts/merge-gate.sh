@@ -166,6 +166,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 # needs one writer.
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/gate-worker/lib.sh"
+# What it means to run a step, to run a group of them at once, and what this
+# run's outcome is. It travels with the commit rather than being installed on
+# the worker: run-gate.sh gates a worktree checked out of the mirror, so
+# everything merge-gate.sh sources out of the repository tree is already there.
+# shellcheck source=scripts/gate-worker/step-engine.sh
+. "${SCRIPT_DIR}/gate-worker/step-engine.sh"
 CONTAINER="agentos-merge-gate-$$"
 # The lock lives in the worktree because the worktree is what is being contended:
 # two checkouts of the same repository may gate at the same time, two gates in one
@@ -177,16 +183,7 @@ GATE_TMP=""
 POSTGRES_STARTED=0
 GATED_HEAD=""
 GATE_PROFILE="full"
-FAILED_STEP=""
-STEP_REPORT=()
-# Set only when the run was stopped rather than decided. It is what turns the
-# last line into GATE NOT RUN instead of a FAIL nothing formed.
-NO_VERDICT_REASON=""
-NO_VERDICT_EXIT="${GATE_EXIT_NO_VERDICT}"
-# Named the moment a step is seen to have failed on its own, which is earlier
-# than its group's accounting: a signal arriving while a later member is still
-# stuck must not erase a failure this run already observed.
-GATE_REAL_FAILURE=""
+gate_steps_begin
 
 # --- plumbing ---------------------------------------------------------------
 
@@ -270,7 +267,7 @@ cleanup() {
   local cleanup_error=""
 
   # Before anything below is torn down, not after.
-  terminate_group_steps
+  gate_steps_stop_running
 
   discard_gate_tmp || cleanup_error="the temporary directory could not be removed"
   release_lock || cleanup_error="${cleanup_error:+${cleanup_error}; }the merge gate lock could not be released"
@@ -286,23 +283,32 @@ cleanup() {
   fi
 
   printf '\n'
-  if [ "${#STEP_REPORT[@]}" -gt 0 ]; then
-    for line in "${STEP_REPORT[@]}"; do printf '   %s\n' "${line}"; done
-  fi
+  gate_steps_report
 
-  # Before the FAIL branch, because a run that was stopped reaches it with a
-  # non-zero status and a FAILED_STEP naming wherever it happened to be, and
-  # would otherwise print a judgement about the commit that nothing formed.
-  if [ -n "${NO_VERDICT_REASON}" ]; then
-    printf '\n'
-    gate_verdict_not_run "${NO_VERDICT_REASON}${cleanup_error:+; ${cleanup_error}}"
-    printf 'Nothing judged %s. Re-run the gate; this is not a FAIL.\n' "${GATED_HEAD:-this commit}"
-    exit "${NO_VERDICT_EXIT}"
-  fi
+  # What this run learned, asked once. Which of a failure, a stop and a signal
+  # outranks which is the step engine's rule and is stated there; this reads
+  # the answer and picks the line that carries it.
+  local outcome; outcome="$(gate_steps_outcome)"
+  case "${outcome}" in
+    'no-verdict '*)
+      outcome="${outcome#no-verdict }"
+      printf '\n'
+      gate_verdict_not_run "${outcome#* }${cleanup_error:+; ${cleanup_error}}"
+      printf 'Nothing judged %s. Re-run the gate; this is not a FAIL.\n' "${GATED_HEAD:-this commit}"
+      exit "${outcome%% *}"
+      ;;
+    'fail '*)
+      printf '\n'
+      gate_verdict_fail "${outcome#fail }"
+      exit "${GATE_EXIT_FAIL}"
+      ;;
+  esac
 
-  if [ "${status}" -ne 0 ] || [ -n "${FAILED_STEP}" ]; then
+  # No step failed and none was stopped, and the script still ended non-zero:
+  # something outside the plan did, and the gate has no name for it.
+  if [ "${status}" -ne 0 ]; then
     printf '\n'
-    gate_verdict_fail "${FAILED_STEP:-unknown}"
+    gate_verdict_fail "unknown"
     exit "${GATE_EXIT_FAIL}"
   fi
   if [ -n "${cleanup_error}" ]; then
@@ -339,226 +345,11 @@ trap cleanup EXIT
 # did not fail; it never finished. Naming the signal here is what lets the EXIT
 # trap say so.
 interrupted() {
-  # A failure this run already saw is a judgement about the commit, and a signal
-  # arriving afterwards does not unmake it. Only a run that learned nothing
-  # reports the absence of a verdict.
-  if [ -n "${GATE_REAL_FAILURE}" ]; then
-    FAILED_STEP="${GATE_REAL_FAILURE}"
-  else
-    NO_VERDICT_REASON="the gate was stopped by SIG${1}${FAILED_STEP:+ during ${FAILED_STEP}}"
-    NO_VERDICT_EXIT="$2"
-  fi
+  gate_steps_note_signal "$1" "$2"
   exit "$2"
 }
 trap 'interrupted INT 130' INT
 trap 'interrupted TERM 143' TERM
-
-# A step that was stopped from outside against one that failed on its own. The
-# first set is what an operator, a supervisor or the OOM killer sends: nothing
-# was learned about the commit, so the run has no verdict to give. A crash the
-# step produced itself (SIGSEGV, SIGABRT, SIGBUS, SIGFPE) is the code under test
-# behaving badly and stays a FAIL, which is the direction this is allowed to be
-# wrong in: it never converts a real failure into an errand.
-stopped_from_outside() {
-  case "$1" in
-    129 | 130 | 131 | 137 | 143) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-record_stop() {
-  NO_VERDICT_REASON="${1} was stopped before it could be judged"
-  NO_VERDICT_EXIT="${GATE_EXIT_NO_VERDICT}"
-}
-
-record_real_failure() {
-  GATE_REAL_FAILURE="${GATE_REAL_FAILURE:+${GATE_REAL_FAILURE}, }${1}"
-}
-
-step() {
-  local label="$1"; shift
-  say "${label}"
-  local started; started=$(date +%s)
-  FAILED_STEP="${label}"
-  local status=0
-  ( cd "${REPO_ROOT}" && "$@" ) || status=$?
-  if [ "${status}" -ne 0 ]; then
-    if stopped_from_outside "${status}"; then
-      STEP_REPORT+=("STOP  ${label}")
-      record_stop "${label}"
-    else
-      STEP_REPORT+=("FAIL  ${label}")
-      record_real_failure "${label}"
-    fi
-    return 1
-  fi
-  STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${label}" "$(( $(date +%s) - started ))")")
-  FAILED_STEP=""
-}
-
-# Run independent steps at the same time.
-#
-# Members are separated by `::`: each one is a label followed by the command it
-# runs, exactly as `step` takes them. Nothing about what a step proves changes
-# here — only how many of them are in flight at once. The gate is a chain of
-# eighteen serial steps on a worker with twelve cores, and for most of a run
-# eleven of them have nothing to do.
-#
-# Two properties this has to keep, because a parallel group is where both are
-# normally lost:
-#
-# Output stays readable. Each member writes to its own file and the files are
-# replayed in submission order after the group finishes, so the log reads like
-# the serial steps it replaced instead of interleaved fragments from a dozen
-# processes. `parallel_lint` already worked this way; this is that pattern with
-# more than two members.
-#
-# Every failure is named, not just the first. A group that stopped at the
-# earliest non-zero status would send someone back for a second gate to find
-# the second problem, and running these together is precisely what makes it
-# cheap to learn all of them in one pass. Each member is waited for, each keeps
-# its own duration, and the verdict line lists all of them.
-GATE_STEP_SEPARATOR="::"
-
-# The members a parallel group has in flight. cleanup has to be able to reach
-# them: it deletes GATE_TMP, releases the worktree lock and removes the
-# postgres container, and each of those is a statement that this gate has
-# stopped working. `kill` on this script alone interrupts the parent's `wait`
-# without touching the members, so the teardown would run while a build is
-# still writing dist/ and the next gate would take the lock this one just
-# released. The serial layout this replaced had one child at a time and no log
-# of its own to delete; nine at once is worth the accounting.
-GATE_GROUP_PIDS=()
-
-# Signalling the member alone is not enough, and the shape of the miss is easy
-# to reproduce: the member is a subshell, the work it runs is a process below
-# that, and `npm ci` or `tsc` is a process below *that*. Killing the member
-# leaves the rest orphaned and running. So members are started under `set -m`,
-# which makes each one a process-group leader, and the whole group is signalled
-# at once.
-terminate_group_steps() {
-  [ "${#GATE_GROUP_PIDS[@]}" -gt 0 ] || return 0
-  local group alive attempt
-  printf '\n   interrupted: stopping %s step(s) still running\n' "${#GATE_GROUP_PIDS[@]}"
-  for group in "${GATE_GROUP_PIDS[@]}"; do kill -TERM -"${group}" 2>/dev/null || true; done
-  # Five seconds to end on their own, then stop asking. Waiting without a
-  # deadline hands a member that ignores TERM the power to hang the gate
-  # forever, which is worse than the leak this is closing.
-  for ((attempt=0; attempt<50; attempt++)); do
-    alive=0
-    for group in "${GATE_GROUP_PIDS[@]}"; do kill -0 -"${group}" 2>/dev/null && alive=1; done
-    [ "${alive}" -eq 0 ] && break
-    sleep 0.1
-  done
-  for group in "${GATE_GROUP_PIDS[@]}"; do kill -KILL -"${group}" 2>/dev/null || true; done
-  # Reaped, not just signalled: returning while they are still dying is the
-  # race this exists to close.
-  for group in "${GATE_GROUP_PIDS[@]}"; do wait "${group}" 2>/dev/null || true; done
-  GATE_GROUP_PIDS=()
-}
-
-parallel_steps() {
-  local title="$1"; shift
-  local -a labels=() serialized=() pids=() statuses=() logs=() current=() failures=() stopped=()
-  local token index slot seconds
-
-  for token in "$@" "${GATE_STEP_SEPARATOR}"; do
-    if [ "${token}" = "${GATE_STEP_SEPARATOR}" ]; then
-      if [ "${#current[@]}" -gt 0 ]; then
-        [ "${#current[@]}" -ge 2 ] \
-          || { printf 'parallel_steps: member "%s" names no command\n' "${current[0]}" >&2; return 1; }
-        labels+=("${current[0]}")
-        # %q quoting is produced by bash for bash, so the eval below restores
-        # exactly this argument vector. Every member here is a literal in this
-        # file; none of it comes from the commit being gated.
-        serialized+=("$(printf '%q ' "${current[@]:1}")")
-        current=()
-      fi
-      continue
-    fi
-    current+=("${token}")
-  done
-  [ "${#labels[@]}" -gt 0 ] || { printf 'parallel_steps: %s has no members\n' "${title}" >&2; return 1; }
-
-  # Set before anything is spawned: if this group dies without reaching its own
-  # accounting, the verdict still names where the gate was.
-  FAILED_STEP="${title}"
-  say "${title} (${#labels[@]} steps at once)"
-
-  for ((index=0; index<${#labels[@]}; index++)); do
-    slot="$(printf '%s' "${labels[index]}" | tr -c '[:alnum:]' '-')"
-    logs[index]="${GATE_TMP}/group-${index}-${slot}.log"
-    # The member times itself. Timing it from here would charge each member for
-    # however long the parent happened to wait on the members before it.
-    # Job control, on for the spawn only: it is what puts the member and
-    # everything it starts into one process group terminate_group_steps can
-    # reach. It changes nothing on the normal path -- exit codes still arrive
-    # through `wait`, and a group that ends on its own prints nothing.
-    set -m
-    (
-      cd "${REPO_ROOT}" || exit 1
-      __started=$(date +%s)
-      eval "${serialized[index]}"
-      __status=$?
-      printf '%s\n' "$(( $(date +%s) - __started ))" > "${logs[index]}.seconds"
-      exit "${__status}"
-    ) >"${logs[index]}" 2>&1 &
-    pids[index]=$!
-    GATE_GROUP_PIDS+=("$!")
-    set +m
-    note "started ${labels[index]}"
-  done
-
-  # The member's own status, not a flattened 1: 128+N is how a member that was
-  # killed is told apart from one that ran and failed, and the difference is
-  # whether this group has a verdict at all.
-  for ((index=0; index<${#labels[@]}; index++)); do
-    if wait "${pids[index]}"; then statuses[index]=0; else statuses[index]=$?; fi
-    # Recorded here rather than in the accounting below, which a signal arriving
-    # while a later member is still stuck would never reach.
-    if [ "${statuses[index]}" -ne 0 ] && ! stopped_from_outside "${statuses[index]}"; then
-      record_real_failure "${labels[index]}"
-    fi
-  done
-  GATE_GROUP_PIDS=()
-
-  for ((index=0; index<${#labels[@]}; index++)); do
-    printf '\n--- %s ---\n' "${labels[index]}"
-    cat "${logs[index]}" 2>/dev/null || true
-  done
-
-  for ((index=0; index<${#labels[@]}; index++)); do
-    # A member killed before it could write its own duration reports `?` rather
-    # than a number this run did not measure.
-    seconds="$(cat "${logs[index]}.seconds" 2>/dev/null || printf '?')"
-    [ -n "${seconds}" ] || seconds="?"
-    if [ "${statuses[index]}" -eq 0 ]; then
-      STEP_REPORT+=("$(printf 'ok    %-42s %4ss' "${labels[index]}" "${seconds}")")
-    elif stopped_from_outside "${statuses[index]}"; then
-      STEP_REPORT+=("$(printf 'STOP  %-42s %4ss' "${labels[index]}" "${seconds}")")
-      stopped+=("${labels[index]}")
-    else
-      STEP_REPORT+=("$(printf 'FAIL  %-42s %4ss' "${labels[index]}" "${seconds}")")
-      failures+=("${labels[index]}")
-    fi
-  done
-
-  # A member that ran and failed is a judgement about the commit and outranks a
-  # member that was stopped: the gate did learn something, and burying that
-  # under "no verdict" would let a real FAIL be re-dispatched as an errand.
-  if [ "${#failures[@]}" -gt 0 ]; then
-    FAILED_STEP="$(printf '%s, ' "${failures[@]}")"
-    FAILED_STEP="${FAILED_STEP%, }"
-    return 1
-  fi
-  if [ "${#stopped[@]}" -gt 0 ]; then
-    FAILED_STEP="$(printf '%s, ' "${stopped[@]}")"
-    FAILED_STEP="${FAILED_STEP%, }"
-    record_stop "${FAILED_STEP}"
-    return 1
-  fi
-  FAILED_STEP=""
-}
 
 sha256() { shasum -a 256 | awk '{print $1}'; }
 
@@ -1463,7 +1254,7 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 parallel_steps "dependencies and the install-free suites" \
   "npm ci" install_dependencies :: \
   "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs :: \
-  "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs :: \
+  "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs scripts/merge-lease.test.mjs :: \
   "parallel-group fixtures" node --test scripts/merge-gate-parallel.test.mjs :: \
   "build layer fixtures" node --test scripts/build-layers.test.mjs
 

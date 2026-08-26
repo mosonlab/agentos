@@ -26,8 +26,6 @@ import {
   enqueueTaskRun,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
-  lockChainRows,
-  lockTaskRow,
   parseRegressionVerdict,
   readMarkerHistory,
   recoveryContext,
@@ -40,11 +38,13 @@ import {
   type RecoveryContext,
 } from "@agentos/db";
 
+import { lockTaskMutationRows } from "./task-write.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
 import { createGitHubReader, type GitHubReader } from "./github-read.js";
 import {
   releaseMergeLease,
   releaseMergeLeaseSafely,
+  reportMergeLeaseAnomaly,
   type MergeLeaseReleaser,
 } from "./merge-lease.js";
 
@@ -56,22 +56,6 @@ export const readinessPollIntervalMs = (): number => {
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
 export const READINESS_READ_BUDGET_MS = 20_000;
 export const READINESS_CLAIM_LEASE_MS = 30_000;
-
-const lockTaskMutationRows = async (
-  tx: Prisma.TransactionClient,
-  taskId: string,
-): Promise<void> => {
-  const identity = await tx.task.findUnique({
-    where: { id: taskId },
-    select: { projectId: true, chainId: true },
-  });
-  if (!identity) throw new Error(`Task ${taskId} no longer exists`);
-  if (identity.chainId) {
-    await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
-  } else {
-    await lockTaskRow(tx, taskId);
-  }
-};
 
 const recoveryContextFor = async (
   db: PrismaClient,
@@ -163,7 +147,7 @@ const stopReadiness = async (
     });
     return readiness?.chainId ?? null;
   });
-  await releaseMergeLeaseSafely(releaseChainLease, chainId);
+  reportMergeLeaseAnomaly(chainId, await releaseMergeLeaseSafely(releaseChainLease, chainId));
 };
 
 // The whole history, newest first: a review obligation for this exact head can
@@ -343,7 +327,7 @@ export const readinessTick = async (
   reader: GitHubReader | null = createGitHubReader(),
   now = new Date(),
   limit = 5,
-  releaseChainLease: MergeLeaseReleaser = async () => {},
+  releaseChainLease: MergeLeaseReleaser = async () => ({ outcome: "not-held" }),
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
   const candidates = await db.task.findMany({

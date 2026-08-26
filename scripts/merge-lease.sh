@@ -148,15 +148,42 @@ read_remote_sha() {
 }
 
 LEASE_JSON=""
+LEASE_HOLDER=""
+LEASE_TASK=""
+LEASE_ACQUIRED_AT=""
+LEASE_ACQUIRED_EPOCH=""
+LEASE_REASON=""
+LEASE_TOKEN=""
+LEASE_PRETTY=""
+# The only place that has the lease blob in its hand, and therefore the only
+# place that knows the lease is JSON. It validates and explodes the blob in one
+# parse; every command below reads shell variables. Seven node invocations used
+# to restate the same stdin-collecting preamble to pull out one field each, and
+# the same field read in three of them was one rule stated three times.
 load_lease() {
+  local fields status
+  LEASE_JSON=""
+  LEASE_HOLDER=""
+  LEASE_TASK=""
+  LEASE_ACQUIRED_AT=""
+  LEASE_ACQUIRED_EPOCH=""
+  LEASE_REASON=""
+  LEASE_TOKEN=""
+  LEASE_PRETTY=""
   read_remote_sha || die "could not read ${LEASE_REF} from origin after 3 attempts"
-  [ -n "$REMOTE_SHA" ] || { LEASE_JSON=""; return 0; }
+  [ -n "$REMOTE_SHA" ] || return 0
   if ! git -C "$REPO_ROOT" cat-file -e "${REMOTE_SHA}^{blob}" 2>/dev/null; then
     retry_git "origin lease fetch" git -C "$REPO_ROOT" fetch --no-tags --no-write-fetch-head origin "$LEASE_REF" \
       || die "could not fetch ${LEASE_REF} from origin after 3 attempts"
   fi
   LEASE_JSON="$(git -C "$REPO_ROOT" cat-file blob "$REMOTE_SHA" 2>/dev/null)" \
     || die "origin lease ${REMOTE_SHA} is not a readable blob"
+  fields="$(mktemp "${TMPDIR:-/tmp}/merge-lease.XXXXXX")" \
+    || die "could not create a temporary file for the lease fields"
+  # NUL separates the records because --reason carries whatever the caller gave
+  # it, newlines included, and the pretty form is newline-formatted by
+  # construction. A command substitution would drop the NULs, so this goes
+  # through a file that also keeps node's exit status readable.
   printf '%s' "$LEASE_JSON" | node -e '
     let body = "";
     process.stdin.setEncoding("utf8");
@@ -168,8 +195,33 @@ load_lease() {
           || typeof lease.holder !== "string" || lease.holder.length === 0
           || typeof lease.acquiredAt !== "string" || Number.isNaN(Date.parse(lease.acquiredAt))
           || typeof lease.reason !== "string" || lease.reason.length === 0) process.exit(1);
+      const optional = (value) => (typeof value === "string" ? value : "");
+      process.stdout.write([
+        lease.holder,
+        optional(lease.task),
+        lease.acquiredAt,
+        String(Math.floor(Date.parse(lease.acquiredAt) / 1000)),
+        lease.reason,
+        optional(lease.token),
+        JSON.stringify(lease, null, 2),
+      ].join("\u0000") + "\u0000");
     });
-  ' || die "origin lease ${REMOTE_SHA} contains invalid JSON"
+  ' >"$fields"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    rm -f "$fields"
+    die "origin lease ${REMOTE_SHA} contains invalid JSON"
+  fi
+  {
+    IFS= read -r -d '' LEASE_HOLDER
+    IFS= read -r -d '' LEASE_TASK
+    IFS= read -r -d '' LEASE_ACQUIRED_AT
+    IFS= read -r -d '' LEASE_ACQUIRED_EPOCH
+    IFS= read -r -d '' LEASE_REASON
+    IFS= read -r -d '' LEASE_TOKEN
+    IFS= read -r -d '' LEASE_PRETTY
+  } <"$fields"
+  rm -f "$fields"
 }
 
 NEW_SHA=""
@@ -264,18 +316,37 @@ delete_lease() {
   die "could not release the lease after 3 attempts"
 }
 
+# One release, two readers. The operator reads the prose; the merge tail, in
+# packages/api/src/merge-lease.ts, reads the MERGE LEASE line beside it, because
+# released, not-held, skipped and refused used to be indistinguishable to it --
+# three of them exit 0, and a lease left standing for another task looked exactly
+# like a lease it had freed. Both lines are printed here so neither can drift
+# from the other. The prose is contract: scripts/merge-lease.test.mjs asserts it,
+# and refused still leaves through die, so its exit code is unchanged too.
+release_outcome() {
+  case "$1" in
+    released)
+      printf 'merge-lease: released %s (%s)\nMERGE LEASE: released %s %s\n' \
+        "$LEASE_REF" "$2" "$LEASE_REF" "$2" ;;
+    not-held)
+      printf 'merge-lease: no lease held\nMERGE LEASE: not-held\n' ;;
+    skipped)
+      printf 'merge-lease: release skipped; %s is held for task %s, not %s\nMERGE LEASE: skipped %s\n' \
+        "$LEASE_REF" "$2" "$3" "$2" ;;
+    refused)
+      printf 'MERGE LEASE: refused %s\n' "$2" >&2
+      die "release refused: ${LEASE_REF} is held by ${2}, not ${HOLDER}; use steal to break it" ;;
+    *) die "unknown release outcome: $1" ;;
+  esac
+}
+
 case "$COMMAND" in
   status)
     load_lease
     if [ -z "$REMOTE_SHA" ]; then
       printf 'merge-lease: no lease held\n'
     else
-      printf '%s' "$LEASE_JSON" | node -e '
-        let body = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => { body += chunk; });
-        process.stdin.on("end", () => process.stdout.write(JSON.stringify(JSON.parse(body), null, 2) + "\n"));
-      '
+      printf '%s\n' "$LEASE_PRETTY"
     fi
     ;;
   acquire)
@@ -296,16 +367,7 @@ case "$COMMAND" in
         1)
           load_lease
           if [ -n "$TASK" ] && [ -n "$REMOTE_SHA" ]; then
-            current_task="$(printf '%s' "$LEASE_JSON" | node -e '
-              let body = "";
-              process.stdin.setEncoding("utf8");
-              process.stdin.on("data", (chunk) => { body += chunk; });
-              process.stdin.on("end", () => {
-                const task = JSON.parse(body).task;
-                if (typeof task === "string") process.stdout.write(task);
-              });
-            ')" || die "could not read the current lease task"
-            if [ "$current_task" = "$TASK" ]; then
+            if [ "$LEASE_TASK" = "$TASK" ]; then
               printf 'merge-lease: already held for task %s (%s)\n' "$TASK" "$REMOTE_SHA"
               exit 0
             fi
@@ -323,40 +385,24 @@ case "$COMMAND" in
   release)
     load_lease
     if [ -z "$REMOTE_SHA" ]; then
-      printf 'merge-lease: no lease held\n'
+      release_outcome not-held
       exit 0
     fi
     released_sha="$REMOTE_SHA"
     if [ -n "$TASK" ]; then
-      current_task="$(printf '%s' "$LEASE_JSON" | node -e '
-        let body = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => { body += chunk; });
-        process.stdin.on("end", () => {
-          const task = JSON.parse(body).task;
-          if (typeof task === "string") process.stdout.write(task);
-        });
-      ')" || die "could not read the current lease task"
-      if [ "$current_task" != "$TASK" ]; then
-        printf 'merge-lease: release skipped; %s is held for task %s, not %s\n' \
-          "$LEASE_REF" "${current_task:-<none>}" "$TASK"
+      if [ "$LEASE_TASK" != "$TASK" ]; then
+        release_outcome skipped "${LEASE_TASK:-<none>}" "$TASK"
         exit 0
       fi
     else
       # --force only: the holder is user@host, which does not distinguish two
       # windows on one machine. The check still refuses another machine's lease.
-      current_holder="$(printf '%s' "$LEASE_JSON" | node -e '
-        let body = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => { body += chunk; });
-        process.stdin.on("end", () => process.stdout.write(JSON.parse(body).holder));
-      ')" || die "could not read the current lease holder"
-      if [ "$current_holder" != "$HOLDER" ]; then
-        die "release refused: ${LEASE_REF} is held by ${current_holder}, not ${HOLDER}; use steal to break it"
+      if [ "$LEASE_HOLDER" != "$HOLDER" ]; then
+        release_outcome refused "$LEASE_HOLDER"
       fi
     fi
     delete_lease "$released_sha"
-    printf 'merge-lease: released %s (%s)\n' "$LEASE_REF" "$released_sha"
+    release_outcome released "$released_sha"
     ;;
   steal)
     load_lease
@@ -376,27 +422,12 @@ case "$COMMAND" in
       is_human=1
     fi
     if [ "$is_human" -ne 1 ]; then
-      age_seconds="$(printf '%s' "$observed_json" | node -e '
-        let body = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => { body += chunk; });
-        process.stdin.on("end", () => {
-          const acquired = Date.parse(JSON.parse(body).acquiredAt);
-          if (Number.isNaN(acquired)) process.exit(1);
-          process.stdout.write(String(Math.floor((Date.now() - acquired) / 1000)));
-        });
-      ')" || die "could not calculate the current lease age"
+      age_seconds=$(( $(date +%s) - LEASE_ACQUIRED_EPOCH ))
       if [ "$age_seconds" -le "$STALE_SECONDS" ]; then
         die "machine steal refused: lease age ${age_seconds}s has not exceeded ${STALE_SECONDS}s"
       fi
     fi
-    stolen_summary="$(printf '%s' "$observed_json" | node -e '
-      let body = "";
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (chunk) => { body += chunk; });
-      process.stdin.on("end", () => process.stdout.write(JSON.stringify(JSON.parse(body))));
-    ')" || die "could not format the stolen lease"
-    printf 'merge-lease: stealing lease from %s\n' "$stolen_summary" >&2
+    printf 'merge-lease: stealing lease from %s\n' "$observed_json" >&2
     make_lease_blob "$observed_json"
     replace_lease "$observed_sha"
     printf 'merge-lease: stole %s (%s)\n' "$LEASE_REF" "$NEW_SHA"
