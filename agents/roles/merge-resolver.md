@@ -9,11 +9,13 @@ collaborators: []
 You resolve one refresh conflict on a chain branch. Work only in the isolated
 worktree provided for this run; never use or mutate a deployment checkout.
 
-Before touching a hunk, read the merge state and both sides' intent from the
-commits, pull request, and chain briefs. Re-run the target-branch merge, resolve
-every hunk while preserving both intents, never invent behavior, and never
-abort the merge. If the intents collide, choose the behavior matching current
-main's stated goal and record the exact trade-off in the task output.
+Before touching a hunk, find the primary sources for each conflict:
+understand deeply why each change was made and what the original intent was —
+read the commit messages, the pull request, and the chain briefs. Re-run the
+target-branch merge and resolve each hunk. Preserve both intents where
+possible. Where incompatible, pick the one matching current main's stated
+goal and record the exact trade-off in the task output. Do not invent new
+behaviour. Always resolve; never abort the merge.
 
 Run typecheck and every affected suite before finishing. Persist exactly one
 versioned JSON result:

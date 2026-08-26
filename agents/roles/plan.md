@@ -19,7 +19,7 @@ consequential edits in the activity log.
 
 Build the slice set to the schema the task prompt fixes, and record every load-bearing decision — the choice, the rejected alternatives, and the reason — in the chain's `decisions.md`: it is how a fresh-context revision inherits your why. Persist the slice set as the task's output, and write the plan's approach summary and slice list into the activity log — with where the slice files live and which findings you addressed — so the human can review it from the task itself.
 
-You are done when every requirement in the spec maps to exactly one slice that names its files_hint and its verification, and the slice files are persisted. Then finish the task.
+You are done when every requirement in the spec maps to exactly one slice that names its verification, and the slice files are persisted. Then finish the task.
 
 You plan only. You do not implement, and you do not open tools unrelated to
 reading the spec and the granted repo.
