@@ -129,21 +129,24 @@ test("a clone that cannot succeed reaches the API as a PROVISION envelope stampe
   assert.equal(completion.body.terminationReason, RUNNER_EXCEPTION_REASON);
 });
 
-test("a transient clone failure escapes provisioning as a transient error, and the envelope says so", async () => {
+test("a transient mirror fetch failure escapes provisioning as a transient error, and the envelope says so", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-provision-transient-"));
-  // The 2026-08-17 error, thrown by the real `git clone` call site. `attempts:
-  // 1` collapses the real retry ladder rather than replacing it: the loop, its
-  // transient predicate and its rethrow are the production ones, and the
-  // backoff is the only thing skipped.
+  // The 2026-08-17 error, thrown by the real call site that still reaches the
+  // network: the mirror's own fetch. `attempts: 1` collapses the real retry
+  // ladder rather than replacing it — the loop, its transient predicate and its
+  // rethrow are the production ones, and the backoff is the only thing skipped.
   const message = "git failed (128): fatal: unable to access 'https://example.test/repo.git/': "
     + "LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to example.test:443";
   const escaped = await provisionWorkspace(
     config(workspaceRoot),
     claim("https://example.test/repo.git"),
-    () => { throw new Error(message); },
+    (_config, _executable, args) => {
+      if (args[0] === "fetch") throw new Error(message);
+      return Promise.resolve("");
+    },
     { attempts: 1 },
   ).then(() => null, (error: unknown) => error);
-  assert.ok(escaped instanceof Error, "the clone failure must escape provisioning, not be swallowed");
+  assert.ok(escaped instanceof Error, "the fetch failure must escape provisioning, not be swallowed");
 
   // Through the same function the production catch calls.
   const envelope = runnerExceptionEnvelope({
