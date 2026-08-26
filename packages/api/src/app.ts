@@ -1139,24 +1139,6 @@ const webhookConfigPatch = z.object({
   // null so the read side has exactly one representation of disabled.
   webhookReplayWindowSec: z.number().int().min(0).max(86_400).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
-const templateStepPatch = z.object({
-  opensPullRequest: z.boolean().optional(),
-  baseFromStepIndex: z.number().int().min(0).nullable().optional(),
-}).refine((value) => Object.keys(value).length > 0);
-const templateStepInput = z.object({
-  stepIndex: z.number().int().min(0),
-  name: z.string().trim().min(1).max(200),
-  assigneeType: z.nativeEnum(AssigneeType),
-  assigneeAgentId: id.nullable().default(null),
-  prompt: z.string().min(1).max(100_000),
-  approvalGate: z.boolean().default(false),
-  attachmentsFromPrevious: z.boolean().default(false),
-  spawnPolicy: z.record(z.string(), z.unknown()).nullable().default(null),
-  runner: z.nativeEnum(RunnerKind).nullable().default(null),
-  outputKind: z.string().trim().min(1).max(80).default("result"),
-  opensPullRequest: z.boolean().default(true),
-  baseFromStepIndex: z.number().int().min(0).nullable().default(null),
-}).strict();
 const taskOutputInput = z.object({
   fencingToken: fence.optional(),
   kind: z.string().trim().min(1).max(80),
@@ -2655,107 +2637,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
     });
     return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
-  });
-  app.post("/task-templates/:templateId/steps", async (context) => {
-    const templateId = id.parse(context.req.param("templateId"));
-    const body = await readJson(context.req.raw, templateStepInput);
-    const template = await db.taskTemplate.findUnique({
-      where: { id: templateId },
-      select: { id: true, projectId: true, webhookRepoId: true },
-    });
-    if (!template) return context.json({ error: "Template not found" }, 404);
-    if (body.assigneeType === AssigneeType.AGENT && !body.assigneeAgentId) {
-      return context.json({ error: "Agent template steps require an assignee" }, 400);
-    }
-    if (body.assigneeType === AssigneeType.HUMAN && body.assigneeAgentId) {
-      return context.json({ error: "Human template steps cannot have an agent assignee" }, 400);
-    }
-    const agent = body.assigneeAgentId
-      ? await db.agent.findFirst({ where: { id: body.assigneeAgentId, projectId: template.projectId } })
-      : null;
-    if (body.assigneeAgentId && !agent) {
-      return context.json({ error: "Assignee does not belong to this template's project" }, 400);
-    }
-    if (agent?.archivedAt) return context.json({ error: `Assignee ${agent.name} is archived` }, 400);
-    if (agent && template.webhookRepoId) {
-      const access = await db.agentRepoAccess.findFirst({
-        where: { projectId: template.projectId, agentId: agent.id, repoId: template.webhookRepoId },
-        select: { agentId: true },
-      });
-      if (!access) return context.json({ error: "Assignee has no grant for this template's Repo" }, 400);
-    }
-    // A template step is a standing assignment: every future instantiation and
-    // every webhook fire turns this row into a task and a run for this agent. So
-    // it joins the same Agent-row exclusion protocol as the task writers — the
-    // checks above answered from unlocked reads, and only this re-read under
-    // `lockAgentRow` decides. Duplicate detection and the create move inside the
-    // same transaction, because a step written after the lock was released is
-    // exactly the archived assignment this protocol exists to prevent.
-    const result = await db.$transaction(async (tx) => {
-      const blocked = await assignmentBlocked(tx, agent);
-      if (blocked) return { error: blocked, code: 400 as const };
-      const duplicate = await tx.taskTemplateStep.findFirst({
-        where: { taskTemplateId: template.id, stepIndex: body.stepIndex },
-        select: { id: true },
-      });
-      if (duplicate) return { error: "Template step index already exists", code: 409 as const };
-      if (body.baseFromStepIndex !== null) {
-        if (body.baseFromStepIndex >= body.stepIndex) {
-          return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
-        }
-        const baseStep = await tx.taskTemplateStep.findFirst({
-          where: { taskTemplateId: template.id, stepIndex: body.baseFromStepIndex },
-          select: { id: true },
-        });
-        if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
-      }
-      return { step: await tx.taskTemplateStep.create({ data: {
-        taskTemplateId: template.id,
-        stepIndex: body.stepIndex,
-        name: body.name,
-        assigneeType: body.assigneeType,
-        assigneeAgentId: body.assigneeAgentId,
-        prompt: body.prompt,
-        approvalGate: body.approvalGate,
-        attachmentsFromPrevious: body.attachmentsFromPrevious,
-        spawnPolicy: body.spawnPolicy === null ? Prisma.JsonNull : jsonValue(body.spawnPolicy),
-        runner: body.runner,
-        outputKind: body.outputKind,
-        opensPullRequest: body.opensPullRequest,
-        baseFromStepIndex: body.baseFromStepIndex,
-        layer: body.stepIndex,
-      } }) };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
-    return context.json(result.step, 201);
-  });
-  // Bounded on purpose: only delivery and base-pinning fields. A general
-  // template-step editor remains a separate authoring surface.
-  app.patch("/task-templates/:templateId/steps/:stepId", async (context) => {
-    const templateId = id.parse(context.req.param("templateId"));
-    const stepId = id.parse(context.req.param("stepId"));
-    const body = await readJson(context.req.raw, templateStepPatch);
-    // Ownership is checked, not assumed: the step id alone would let a caller
-    // patch another template's step through any templateId that happens to exist.
-    const result = await db.$transaction(async (tx) => {
-      const step = await tx.taskTemplateStep.findFirst({ where: { id: stepId, taskTemplateId: templateId } });
-      if (!step) return { error: "Template step not found", code: 404 as const };
-      if (body.baseFromStepIndex !== undefined && body.baseFromStepIndex !== null) {
-        if (body.baseFromStepIndex >= step.stepIndex) {
-          return { error: "baseFromStepIndex must reference a strictly earlier stepIndex", code: 400 as const };
-        }
-        const baseStep = await tx.taskTemplateStep.findFirst({
-          where: { taskTemplateId: templateId, stepIndex: body.baseFromStepIndex }, select: { id: true },
-        });
-        if (!baseStep) return { error: "baseFromStepIndex must reference an earlier step of the same template", code: 400 as const };
-      }
-      return { step: await tx.taskTemplateStep.update({
-        where: { id: stepId },
-        data: withoutUndefined(body),
-      }) };
-    });
-    if ("error" in result) return context.json({ error: result.error }, result.code);
-    return context.json(result.step);
   });
   app.patch("/task-templates/:templateId", async (context) => {
     const templateId = id.parse(context.req.param("templateId"));
