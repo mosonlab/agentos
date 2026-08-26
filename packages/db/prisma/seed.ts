@@ -16,7 +16,7 @@ import {
   legacyRegressionFirstThirteenStepTemplateName,
   legacyTenStepTemplateName,
 } from "../src/merge-integrator.js";
-import { loadAllTemplateStepSources } from "../src/template-sources.js";
+import { loadAllTemplateStepSources, type TemplateStepSource } from "../src/template-sources.js";
 
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
 // so that OSS-B0's first-run onboarding can read the same `agents/` contract
@@ -35,6 +35,54 @@ const HISTORICAL_NINE_STEP_CONTRACT = [
   [8, "librarian", AssigneeType.AGENT, "documentation", false],
   [9, null, AssigneeType.HUMAN, "approval", true],
 ] as const;
+
+const CANONICAL_STEP_NAMES = [
+  "Write a spec",
+  "Plan",
+  "Plan review",
+  "Revise plan",
+  "Implementation",
+  "Code review (Sol)",
+  "Code review (Opus blind)",
+  "Apply review fixes",
+  "Librarian",
+  "Regression verification",
+  "Merge authorization",
+  "Merge execution",
+] as const;
+
+const DIRECT_STEP_NAMES = [
+  "Implementation",
+  "Code review (Sol)",
+  "Code review (Opus blind)",
+  "Apply review fixes",
+  "Regression verification",
+  "Merge authorization",
+  "Merge execution",
+] as const;
+
+const upsertTemplateSteps = async (
+  tx: Prisma.TransactionClient,
+  templateId: string,
+  templateSteps: readonly TemplateStepSource[],
+  stepNames: readonly string[],
+  missingNameLabel: string,
+  agentByName: ReadonlyMap<string, { id: string }>,
+): Promise<void> => {
+  for (const step of templateSteps) {
+    const { stepIndex, layer, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
+    const name = stepNames[stepIndex - 1];
+    if (!name) throw new Error(`Missing ${missingNameLabel} template step name ${stepIndex}`);
+    const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
+    const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
+    if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
+    await tx.taskTemplateStep.upsert({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: templateId, stepIndex } },
+      update: { name, layer, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+      create: { taskTemplateId: templateId, stepIndex, layer, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
+    });
+  }
+};
 
 const main = async (): Promise<void> => {
   const [sources, templateStepsByName] = await Promise.all([loadAgentSources(), loadAllTemplateStepSources()]);
@@ -127,7 +175,7 @@ const main = async (): Promise<void> => {
       });
     }
   }
-  const template = await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx) => {
     const existing = await tx.taskTemplate.findUnique({
       where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
       include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
@@ -166,15 +214,15 @@ const main = async (): Promise<void> => {
       && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
     if (existing && (isRegressionFirstThirteenStepTemplate || legacyCanonical)) {
       const unfinishedTasks = await tx.task.count({
-        where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+        where: { templateId: existing.id, status: { not: TaskStatus.DONE } },
       });
       if (unfinishedTasks > 0) {
-        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+        throw new Error(`canonical-rollover-refused:unfinished-tasks: ${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
       }
       if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
         || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
         || existing.webhookReplayWindowSec !== null) {
-        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+        throw new Error(`canonical-rollover-refused:webhook-configuration: ${INTEGRATOR_TEMPLATE_NAME} ${existing.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
       }
     }
 
@@ -219,7 +267,7 @@ const main = async (): Promise<void> => {
       throw new Error(`Canonical template ${INTEGRATOR_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
     }
 
-    return tx.taskTemplate.upsert({
+    const template = await tx.taskTemplate.upsert({
       where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
       update: {
         description: "Twelve-step Full Assurance workflow with parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
@@ -232,36 +280,9 @@ const main = async (): Promise<void> => {
         variables: ["branchName"],
       },
     });
-  });
-  const stepNames = [
-    "Write a spec",
-    "Plan",
-    "Plan review",
-    "Revise plan",
-    "Implementation",
-    "Code review (Sol)",
-    "Code review (Opus blind)",
-    "Apply review fixes",
-    "Librarian",
-    "Regression verification",
-    "Merge authorization",
-    "Merge execution",
-  ] as const;
-  for (const step of templateSteps) {
-    const { stepIndex, layer, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
-    const name = stepNames[stepIndex - 1];
-    if (!name) throw new Error(`Missing canonical template step name ${stepIndex}`);
-    const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
-    const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
-    if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
-    await prisma.taskTemplateStep.upsert({
-      where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex } },
-      update: { name, layer, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-      create: { taskTemplateId: template.id, stepIndex, layer, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-    });
-  }
+    await upsertTemplateSteps(tx, template.id, templateSteps, CANONICAL_STEP_NAMES, "canonical", agentByName);
 
-  const historicalDirect = await prisma.taskTemplate.findUnique({
+  const historicalDirect = await tx.taskTemplate.findUnique({
     where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
     include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
   });
@@ -270,31 +291,31 @@ const main = async (): Promise<void> => {
     : null;
   const legacyDirect = historicalDirect && legacyDirectMarker !== null;
   if (legacyDirect) {
-    const unfinishedTasks = await prisma.task.count({
-      where: { templateId: historicalDirect.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+    const unfinishedTasks = await tx.task.count({
+      where: { templateId: historicalDirect.id, status: { not: TaskStatus.DONE } },
     });
     if (unfinishedTasks > 0) {
-      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      throw new Error(`canonical-rollover-refused:unfinished-tasks: ${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
     }
     if (historicalDirect.webhookSecretId !== null || historicalDirect.webhookRepoId !== null
       || historicalDirect.webhookPayloadMapping !== null || historicalDirect.webhookPausedAt !== null
       || historicalDirect.webhookReplayWindowSec !== null) {
-      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
+      throw new Error(`canonical-rollover-refused:webhook-configuration: ${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} has webhook configuration; canonical rollover will not move operator-owned trigger state`);
     }
   }
   if (legacyDirect) {
     const legacyName = legacyTemplateName(DIRECT_TEMPLATE_NAME, legacyDirectMarker!, historicalDirect.id);
-    const collision = await prisma.taskTemplate.findUnique({
+    const collision = await tx.taskTemplate.findUnique({
       where: { projectId_name: { projectId: project.id, name: legacyName } },
       select: { id: true },
     });
     if (collision) throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} cannot rename to ${legacyName}: target already exists`);
-    await prisma.taskTemplate.update({ where: { id: historicalDirect.id }, data: { name: legacyName } });
+    await tx.taskTemplate.update({ where: { id: historicalDirect.id }, data: { name: legacyName } });
   }
   if (historicalDirect?.steps.length === 6
     && historicalDirect.steps[5]?.assigneeType === AssigneeType.HUMAN
     && historicalDirect.steps[5]?.outputKind === "approval") {
-    await prisma.taskTemplate.update({
+    await tx.taskTemplate.update({
       where: { id: historicalDirect.id },
       data: { name: `${DIRECT_TEMPLATE_NAME}-legacy-human-6-${historicalDirect.id}` },
     });
@@ -308,7 +329,7 @@ const main = async (): Promise<void> => {
     && historicalDirect.steps.some((step, index) => step.stepIndex !== index + 1)) {
     throw new Error(`Canonical template ${DIRECT_TEMPLATE_NAME} has structural drift: step indexes are not contiguous`);
   }
-  const directTemplate = await prisma.taskTemplate.upsert({
+  const directTemplate = await tx.taskTemplate.upsert({
     where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
     update: {
       description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
@@ -321,28 +342,8 @@ const main = async (): Promise<void> => {
       variables: ["branchName"],
     },
   });
-  const directStepNames = [
-    "Implementation",
-    "Code review (Sol)",
-    "Code review (Opus blind)",
-    "Apply review fixes",
-    "Regression verification",
-    "Merge authorization",
-    "Merge execution",
-  ] as const;
-  for (const step of directTemplateSteps) {
-    const { stepIndex, layer, agentName, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy } = step;
-    const name = directStepNames[stepIndex - 1];
-    if (!name) throw new Error(`Missing direct template step name ${stepIndex}`);
-    const assigneeType = agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT;
-    const assigneeAgentId: string | null = agentName ? (agentByName.get(agentName)?.id ?? null) : null;
-    if (agentName && !assigneeAgentId) throw new Error(`Missing seeded agent ${agentName}`);
-    await prisma.taskTemplateStep.upsert({
-      where: { taskTemplateId_stepIndex: { taskTemplateId: directTemplate.id, stepIndex } },
-      update: { name, layer, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-      create: { taskTemplateId: directTemplate.id, stepIndex, layer, name, assigneeAgentId, assigneeType, runner: null, approvalGate, outputKind, prompt, opensPullRequest, attachmentsFromPrevious, baseFromStepIndex, spawnPolicy: spawnPolicy ?? Prisma.JsonNull },
-    });
-  }
+  await upsertTemplateSteps(tx, directTemplate.id, directTemplateSteps, DIRECT_STEP_NAMES, "direct", agentByName);
+  });
 
   console.log(`Seeded ${project.name} from agents/ with ${sources.roles.length} agents, the twelve-step feature template, and the seven-step direct template.`);
 };
