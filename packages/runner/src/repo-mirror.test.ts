@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -269,6 +269,87 @@ test("every mirror command runs through the run-as prefix, so the account with t
     // same account, not by node's fs as the daemon.
     assert.equal(argv.includes(`/bin/sh -c`), true);
     assert.equal(argv.includes(mirrorRoot), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a mirror root reached through a symlinked ancestor still counts as inside the workspace root", async () => {
+  const { root, remote, config } = await fixture("overlap");
+  const env = workspaceEnvironment(config);
+  try {
+    // Nothing textual connects these two paths; the link is what puts the
+    // mirror inside the tree the runner reclaims between runs.
+    await mkdir(config.workspaceRoot, { recursive: true });
+    await symlink(config.workspaceRoot, join(root, "alias"));
+    const overlapping = { ...config, repoMirrorRoot: join(root, "alias", "mirrors") } as RunnerConfig;
+
+    await assert.rejects(
+      withRepoMirror(overlapping, remote, root, env, passthrough, { report: silent() }, async () => undefined),
+      /overlaps the workspace root/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("staging the sweep could not remove is reported rather than swallowed", async () => {
+  const { root, remote, config, mirrorRoot } = await fixture("staging");
+  const env = workspaceEnvironment(config);
+  const stranded = join(mirrorRoot, ".stage-abandoned");
+  try {
+    await mkdir(mirrorRoot, { recursive: true });
+    // What a process killed between mktemp and mv leaves behind, aged past the
+    // sweep's threshold and made unremovable the way a restrictive ACL or a
+    // read-only filesystem would: rm cannot descend into it to empty it.
+    await mkdir(stranded, { recursive: true });
+    await writeFile(join(stranded, "HEAD"), "ref: refs/heads/main\n");
+    const aged = new Date(Date.now() - 3_600_000);
+    await utimes(stranded, aged, aged);
+    await chmod(stranded, 0o000);
+
+    const progress: RepoMirrorProgress[] = [];
+    await withRepoMirror(
+      config, remote, root, env, passthrough,
+      { report: (event) => progress.push(event) },
+      async () => undefined,
+    );
+
+    // The run still succeeds — a leaked copy is not a reason to refuse work —
+    // but it names what is now occupying the disk instead of exiting 0 over it.
+    assert.deepEqual(
+      progress.filter((event) => event.event === "staging-retained").map((event) => event.mirror),
+      [stranded],
+    );
+  } finally {
+    await chmod(stranded, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("mirror git runs are addressed by GIT_DIR, never by entering the mirror the daemon cannot", async () => {
+  const { root, remote, config, mirror } = await fixture("git-dir");
+  const env = workspaceEnvironment(config);
+  const runs: { args: string[]; cwd: string; gitDir: string | undefined }[] = [];
+  const observed: MirrorCommandExecutor = (mirrorConfig, executable, args, cwd, commandEnv, options = {}) => {
+    if (executable === "git") runs.push({ args, cwd, gitDir: commandEnv.GIT_DIR });
+    return runCommand(mirrorConfig.runAsPrefix, executable, args, cwd, commandEnv, options);
+  };
+  try {
+    await withRepoMirror(config, remote, root, env, observed, { report: silent() }, async () => undefined);
+
+    const bare = runs.filter((run) => run.args[0] === "fetch" || run.args[0] === "config");
+    assert.equal(bare.length > 0, true);
+    for (const run of bare) {
+      // GIT_DIR, because node chdirs into cwd as the daemon's own uid before
+      // the run-as prefix executes, and a task account's home is 0700.
+      assert.equal(typeof run.gitDir, "string");
+      assert.equal(run.cwd.startsWith(mirror), false);
+      assert.equal(run.cwd, root);
+      // The subcommand stays at argv[0] so network-retry's allowlist, and the
+      // timeout riding on it, still match.
+      assert.equal(run.args[0] === "fetch" || run.args[0] === "config", true);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

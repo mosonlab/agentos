@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { join, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
@@ -92,6 +93,16 @@ const MIRROR_LOCK_WAIT_MS = 600_000;
  * so this is a liveness signal rather than a guess about how long the work
  * takes — which matters because the local clone under the lock is deliberately
  * uncapped, and a laptop can suspend in the middle of one.
+ *
+ * A holder that stays alive but stops being scheduled for ten consecutive
+ * heartbeats is still stolen from, and no ordering of shell operations closes
+ * that: mutual exclusion built out of mkdir and mv bottoms out in "the lock
+ * looks dead". What makes it affordable is that the lock is an efficiency
+ * device and not the correctness barrier. Git is the barrier: concurrent
+ * fetches into one bare repository contend on ref locks and fail loudly, and
+ * nothing here prunes objects out from under a concurrent clone. The cost of a
+ * wrong steal is duplicated work or a visible git error, never a silently
+ * corrupt mirror.
  */
 const MIRROR_LOCK_STALE_MINUTES = 5;
 const MIRROR_LOCK_HEARTBEAT_MS = 30_000;
@@ -116,6 +127,32 @@ export class RepoMirrorError extends Error {
 
 const insideOrEqual = (root: string, candidate: string): boolean =>
   candidate === root || candidate.startsWith(`${root}${sep}`);
+
+/**
+ * The path as the filesystem sees it: symlinked ancestors resolved, and on a
+ * case-insensitive filesystem the case the directory actually has. A textual
+ * comparison would let `/srv/alias/mirrors` sit inside `/srv/runs` unnoticed
+ * whenever `/srv/alias` points at `/srv/runs`.
+ *
+ * Neither root need exist yet, and the daemon's own uid cannot traverse a 0700
+ * task home, so this walks up to whatever ancestor it can read and leaves the
+ * rest textual. That makes the overlap check sharper than it was, not exact —
+ * it is a tripwire for operator misconfiguration, and the paths it guards come
+ * from RUNNER_WORKSPACE_ROOT and RUNNER_REPO_MIRROR_ROOT.
+ */
+const canonicalize = (path: string): string => {
+  const absolute = resolve(path);
+  for (let ancestor = absolute, suffix = ""; ;) {
+    try {
+      return suffix ? join(realpathSync(ancestor), suffix) : realpathSync(ancestor);
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return absolute;
+      suffix = suffix ? join(ancestor.slice(parent.length + 1), suffix) : ancestor.slice(parent.length + 1);
+      ancestor = parent;
+    }
+  }
+};
 
 const progressReporter = (progress: RepoMirrorProgress): void => {
   console.log(JSON.stringify({ audit: "repo-mirror", ...progress }));
@@ -166,7 +203,11 @@ const ENSURE_ROOT = 'mkdir -p "$1" && chmod 700 "$1" && [ ! -L "$1" ] || exit 1;
   // Staging left behind by a process that died between mktemp and mv. Nothing
   // else may remove it: a *live* creation for a different remote holds a
   // different lock and is not covered by this one.
-  + ' find "$1" -maxdepth 1 -name ".stage-*" -mmin +"$2" -exec rm -rf {} + 2>/dev/null; exit 0';
+  + ' find "$1" -maxdepth 1 -name ".stage-*" -mmin +"$2" -exec rm -rf {} + 2>/dev/null;'
+  // What the sweep could not remove is named rather than swallowed: a
+  // permission, ACL or read-only-filesystem failure here leaks a whole
+  // repository copy per crash, and an exit status alone would not say which.
+  + ' find "$1" -maxdepth 1 -name ".stage-*" -mmin +"$2" -print 2>/dev/null; exit 0';
 
 const PROBE = 'if [ -L "$1" ]; then printf unusable;'
   + ' elif [ -d "$1" ]; then printf present;'
@@ -189,7 +230,14 @@ const ACQUIRE = 'if mkdir "$1" 2>/dev/null; then'
   + ' else printf held; fi';
 
 /** Release removes this lock, not whatever lock happens to be at the path: a
- *  holder whose lock was stolen must not delete its successor's. */
+ *  holder whose lock was stolen must not delete its successor's.
+ *
+ *  The read and the removal are two operations, so a holder that is stolen from
+ *  in between them still deletes its successor's lock. That window opens only
+ *  once the lock is already older than the stale threshold, which is the same
+ *  condition as a live holder being stolen from at all — see the note on
+ *  MIRROR_LOCK_STALE_MINUTES for why that costs a loud failure and not a
+ *  corrupt mirror. */
 const RELEASE = 'if [ "$(cat "$1/owner" 2>/dev/null)" = "$2" ]; then rm -rf "$1"; fi';
 
 const acquireMirrorLock = async (
@@ -218,9 +266,11 @@ const acquireMirrorLock = async (
       // this, the staleness threshold would have to bound the uncapped local
       // clone under the lock — and a suspended machine bounds nothing.
       const heartbeat = setInterval(() => {
-        // Guarded: an unguarded touch that lost a race with its own release
-        // would create a *file* where the lock directory was, and no later
-        // mkdir could acquire it.
+        // Guarded because an unguarded touch that lost a race with its own
+        // release would create a *file* where the lock directory was. The test
+        // and the touch are still two operations, so the guard narrows that
+        // window rather than closing it; what closes it is that the next
+        // acquisition steals anything at the path that is not a directory.
         void shell(config, execute, cwd, env, 'if [ -d "$1" ]; then touch "$1"; fi', lockPath).catch(() => undefined);
       }, heartbeatMs);
       heartbeat.unref?.();
@@ -435,11 +485,17 @@ export const withRepoMirror = async <T>(
   const retryOptions = options.fetchRetryOptions ?? {};
   const staleMinutes = options.lockStaleMinutes ?? MIRROR_LOCK_STALE_MINUTES;
   const root = resolve(options.mirrorRoot ?? repoMirrorRoot(config));
-  const workspaceRoot = resolve(config.workspaceRoot);
-  if (insideOrEqual(root, workspaceRoot) || insideOrEqual(workspaceRoot, root)) {
-    throw new Error(`Runner repository mirror root ${root} overlaps the workspace root ${workspaceRoot}`);
+  const canonicalRoot = canonicalize(root);
+  const canonicalWorkspaceRoot = canonicalize(config.workspaceRoot);
+  if (insideOrEqual(canonicalRoot, canonicalWorkspaceRoot) || insideOrEqual(canonicalWorkspaceRoot, canonicalRoot)) {
+    throw new Error(
+      `Runner repository mirror root ${root} overlaps the workspace root ${config.workspaceRoot}`,
+    );
   }
-  await shell(config, execute, cwd, env, ENSURE_ROOT, root, String(staleMinutes));
+  const retained = await shell(config, execute, cwd, env, ENSURE_ROOT, root, String(staleMinutes));
+  for (const staging of retained.split("\n").map((line) => line.trim()).filter(Boolean)) {
+    report({ event: "staging-retained", mirror: staging });
+  }
   const mirror = repoMirrorPath(root, remoteUrl);
   const release = await acquireMirrorLock(
     config, execute, cwd, env, `${mirror}.lock`, config.runnerId, options, report,
