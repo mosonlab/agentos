@@ -94,6 +94,8 @@ const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | unde
 
 const commitSha = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
 const nonEmptyString = z.string().trim().min(1);
+const passGateProof = z.string().regex(/^MERGE GATE: PASS [0-9a-f]{40}$/u);
+const failGateProof = z.string().regex(/^MERGE GATE: FAIL \(.+\)$/u);
 const stringList = z.array(nonEmptyString);
 const canonicalEnvelope = z.object({ schemaVersion: z.literal(1), headSha: commitSha });
 const reviewFinding = z.object({
@@ -386,6 +388,7 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
       outcome: z.literal("pass"),
       baseHeadSha: commitSha,
       gateVerdict: z.literal("PASS"),
+      gateProof: passGateProof,
     }),
     canonicalEnvelope.extend({
       schemaVersion: z.literal(REGRESSION_VERIFICATION_SCHEMA_VERSION),
@@ -398,6 +401,7 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
       outcome: z.literal("gate-fail"),
       baseHeadSha: commitSha,
       gateVerdict: z.literal("FAIL"),
+      gateProof: failGateProof,
       summary: nonEmptyString,
     }),
     canonicalEnvelope.extend({
@@ -412,7 +416,15 @@ const canonicalOutputSchemas: Record<string, z.ZodType> = {
       baseHeadSha: commitSha,
       summary: nonEmptyString,
     }),
-  ]),
+  ]).superRefine((verdict, context) => {
+    if (verdict.outcome === "pass" && verdict.gateProof !== `MERGE GATE: PASS ${verdict.headSha}`) {
+      context.addIssue({
+        code: "custom",
+        path: ["gateProof"],
+        message: "gate proof oid must match headSha",
+      });
+    }
+  }),
   documentation: canonicalEnvelope.extend({
     summary: nonEmptyString,
     changes: z.array(z.object({ path: nonEmptyString, action: z.enum(["ADDED", "UPDATED", "DELETED"]) })),

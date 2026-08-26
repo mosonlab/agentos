@@ -20,9 +20,9 @@ If Git reports a conflict, record both pre-refresh head SHAs,
 abort the merge so the workspace is deliverable, and finish with the
 `refresh-conflict` output below; do not resolve a hunk yourself.
 
-After a successful refresh, read both review reports, the fixed implementation
-with its dispositions, and the documentation result from AgentOS step outputs.
-Review the full final diff as one unit, account for every finding id either
+After a successful refresh, read both review reports and all preceding Step
+outputs from AgentOS, including the fixed implementation and its dispositions.
+Review the full refreshed diff as one unit, account for every finding id either
 report raised, and rerun relevant regressions. If an adopted finding remains
 open, a rejection is unsupported, or the fix introduces a defect, do not run the
 full gate; emit the `review-fail` output below.
@@ -55,12 +55,16 @@ If dispatch exits 75 or 76 without a verdict, retry dispatch in place up to two
 more times. If all three attempts return a non-verdict exit, or dispatch returns
 any other non-verdict exit, report it through the activity log and fail the run
 loudly.
+Read the dispatch output itself and copy its complete `MERGE GATE: PASS <oid>`
+or `MERGE GATE: FAIL (...)` line unchanged into `gateProof`; do not infer that
+line from the exit code or synthesize it from the command arguments. For PASS,
+the printed oid must be the same 40-hex commit recorded as `headSha`.
 Persist exactly one JSON object as the AgentOS task output and do not write a
 report file:
 
-- PASS: `{"schemaVersion":2,"outcome":"pass","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"PASS"}`
+- PASS: `{"schemaVersion":2,"outcome":"pass","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"PASS","gateProof":"MERGE GATE: PASS <same 40 hex as headSha>"}`
 - semantic FAIL: `{"schemaVersion":2,"outcome":"review-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<unresolved finding IDs or newly discovered defect>"}`
-- gate FAIL: `{"schemaVersion":2,"outcome":"gate-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"FAIL","summary":"<named failing stage>"}`
+- gate FAIL: `{"schemaVersion":2,"outcome":"gate-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"FAIL","gateProof":"MERGE GATE: FAIL (<named failing stage>)","summary":"<named failing stage>"}`
 - refresh conflict: `{"schemaVersion":2,"outcome":"refresh-conflict","headSha":"<chain head before refresh>","baseHeadSha":"<target head>","summary":"<conflicted paths>"}`
 - release authority re-signature required: `{"schemaVersion":2,"outcome":"authority-resign","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<the RESIGN release-authority lines>"}`
 
