@@ -515,6 +515,15 @@ export const canonicalOutputRefusal = (
 };
 
 /**
+ * A findings artifact is the review it records; a later run may not replace it,
+ * which `persistSessionTaskOutput` enforces. A run that finds one already
+ * persisted therefore has nothing left to author, whoever wrote it.
+ */
+export const outputIsImmutableOncePersisted = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isCanonicalSolFindingsStep(step) || isCanonicalBlindFindingsStep(step)
+);
+
+/**
  * The output kind a step's own agent must author, or null when completion may
  * synthesize one. Canonical agent nodes and the Regression node are the two
  * families whose deliverable is evidence rather than prose, so completion
@@ -587,8 +596,7 @@ export const persistSessionTaskOutput = async (
   const legacyBlind = isLegacyCombinedBlindReviewStep(step);
   const phase = metadataPhase(input.metadata);
   const existing = await tx.taskStepOutput.findUnique({ where: { taskId: input.task.id } });
-  const immutableReviewOutput = isCanonicalSolFindingsStep(step)
-    || isCanonicalBlindFindingsStep(step);
+  const immutableReviewOutput = outputIsImmutableOncePersisted(step);
   if (immutableReviewOutput && existing) {
     return { ok: false, reason: `${step?.outputKind ?? input.kind} task output is immutable once persisted` };
   }

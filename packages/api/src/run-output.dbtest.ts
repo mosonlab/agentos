@@ -446,6 +446,45 @@ test("a required deliverable the run never persisted is a retryable failure, not
   assert.deepEqual(releasedChainLeases, []);
 });
 
+test("a run that authored nothing is re-queued even when a prior run's output is on the task", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "implementation",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 1,
+  });
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "prior-output-runner-1");
+  const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "implementation",
+    body: implementationOutput("Run 1 implementation"),
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  assert.equal((await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    failedCompletion("prior-output-runner-1", first.fencingToken, first.run.branch ?? "master"),
+  )).status, 200);
+  const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const secondRunId = retried.body.id as string;
+  const claimed = await claimRun(secondRunId, "prior-output-runner-2");
+
+  const completed = await call(
+    "POST", `/runner/runs/${secondRunId}/complete`, RUNNER,
+    succeededCompletion("prior-output-runner-2", claimed.fencingToken, claimed.run.branch ?? "master"),
+  );
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.succeeded, false);
+  assert.equal(completed.body.retryCreated, true);
+  // The row an earlier run authored is neither counted as this run's work nor
+  // disturbed by the retry it produces.
+  assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: task.id } })).runId, firstRunId);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status, TaskStatus.DOING);
+  assert.equal((await db.run.findFirstOrThrow({ where: { taskId: task.id, runNumber: 3 } })).status, "QUEUED");
+});
+
 test("a required deliverable that is present still settles SUCCEEDED", async () => {
   const { task } = await seedTask(REGRESSION_STEP);
   const runId = await enqueue(task.id);
@@ -595,6 +634,9 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
   assert.equal(retried.status, 201, JSON.stringify(retried.body));
   const second = await claimRun(retried.body.id as string, "canonical-runner-2");
+  // The budget is spent on this attempt, so the run that authors nothing is
+  // not re-queued and this refusal is the terminal outcome.
+  await db.run.update({ where: { id: second.run.id }, data: { maxRunsPerTask: 2 } });
   const completed = await call(
     "POST", `/runner/runs/${second.run.id}/complete`, RUNNER,
     succeededCompletion("canonical-runner-2", second.fencingToken, second.run.branch ?? "master"),

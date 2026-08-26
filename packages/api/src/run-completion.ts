@@ -47,6 +47,7 @@ import type { CompletionInput } from "./app.js";
 import {
   canonicalOutputRefusal,
   isCanonicalAgentStep,
+  outputIsImmutableOncePersisted,
   REGRESSION_VERIFICATION_KIND,
   requiredOutputKind,
 } from "./canonical-task-output.js";
@@ -300,19 +301,27 @@ export const completeRun = async (
     // failure that the retry path below re-queues inside the task's existing
     // budget.
     //
-    // Two bounds keep this narrow. The absence is the whole test: an output
-    // this run or a prior one did persist still belongs to
-    // `canonicalOutputRefusal`, the authority on whether a persisted artifact
-    // counts. And the diversion applies only while an attempt is left — the
-    // ceiling is the run's own, because a missing deliverable is never an
-    // external failure and so never refunds one. Once the budget is spent the
-    // completion settles exactly as it did before this: the terminal park
-    // naming the absent output, with the chain-lease release, the merge-tail
-    // stop notice and the refusal activity that park has always written.
+    // Two bounds keep this narrow. Only this run's own absence counts: an
+    // output bound to this run belongs to `canonicalOutputRefusal`, the
+    // authority on whether a persisted artifact counts, and a findings artifact
+    // an earlier run persisted can never be replaced — a retry there would
+    // author nothing and spend the budget proving it. And the diversion applies
+    // only while an attempt is left: the ceiling is the run's own, because a
+    // missing deliverable is never an external failure and so never refunds
+    // one. Once the budget is spent the completion settles exactly as it did
+    // before this — the terminal park naming the absent output, with the
+    // chain-lease release, the merge-tail stop notice and the refusal activity
+    // that park has always written.
     const requiredKind = requiredOutputKind(run.task?.templateStep);
-    const missingOutputReason = reportedSuccess && requiredKind && run.taskId
-      && run.runNumber < run.maxRunsPerTask
-      && !(await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { id: true } }))
+    const outputTaskId = reportedSuccess && requiredKind && run.runNumber < run.maxRunsPerTask
+      ? run.taskId
+      : null;
+    const persistedOutput = outputTaskId
+      ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId }, select: { runId: true } })
+      : null;
+    const missingOutputReason = outputTaskId && requiredKind
+      && persistedOutput?.runId !== run.id
+      && !(persistedOutput && outputIsImmutableOncePersisted(run.task?.templateStep))
       ? `missing ${requiredKind} task output for current Run ${run.id}`
       : null;
     const succeeded = reportedSuccess && !missingOutputReason;
