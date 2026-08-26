@@ -552,9 +552,9 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
     }));
   }
   const landed = verify.snapshot.pullRequest.mergeCommit;
-  if (verify.snapshot.baseRefOid !== mergeCommitSha
-    || (landed !== null && (landed.oid !== mergeCommitSha || landed.parents.length < 2
-      || landed.parents[0] !== authorization.baseSha || landed.parents[1] !== authorization.headSha))) {
+  const landedIdentifiesMerge = landed !== null && landed.oid === mergeCommitSha && landed.parents.length >= 2
+    && landed.parents[0] === authorization.baseSha && landed.parents[1] === authorization.headSha;
+  if (!landedIdentifiesMerge && (verify.snapshot.baseRefOid !== mergeCommitSha || landed !== null)) {
     return stop("base-drift-post-merge", JSON.stringify({
       mergeCommitSha,
       landed,

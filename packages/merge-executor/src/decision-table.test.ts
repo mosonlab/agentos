@@ -41,6 +41,46 @@ test("the happy path merges once, under the authorized head, and verifies the la
   assertNoPublication(fake.calls());
 });
 
+test("post-merge verification accepts our identified merge after a concurrent base advance", async () => {
+  const concurrentMergeSha = "d".repeat(40);
+  const fake = makeFake({
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: { ...mergedSnapshot(), baseRefOid: concurrentMergeSha } },
+    ],
+  });
+
+  assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
+});
+
+test("post-merge verification stops after a concurrent base advance without positive merge identity", async () => {
+  const concurrentMergeSha = "d".repeat(40);
+  const mismatchedMergeSha = "e".repeat(40);
+  const cases = [
+    { label: "missing merge commit", mergeCommit: null },
+    {
+      label: "mismatched merge commit",
+      mergeCommit: { oid: mismatchedMergeSha, parents: [AUTHORIZED_BASE, AUTHORIZED_HEAD] },
+    },
+  ];
+
+  for (const { label, mergeCommit } of cases) {
+    const fake = makeFake({
+      reads: [
+        { status: "ok", snapshot: cleanSnapshot() },
+        { status: "ok", snapshot: cleanSnapshot() },
+        {
+          status: "ok",
+          snapshot: { ...mergedSnapshot({ mergeCommit }), baseRefOid: concurrentMergeSha },
+        },
+      ],
+    });
+
+    assert.equal(stopped(await execute(fake.deps)).condition, "base-drift-post-merge", label);
+  }
+});
+
 test("a successful atomic ref update is not falsely rejected while GitHub still reports the PR open", async () => {
   const landedRefBeforePrProjection = mergedSnapshot({
     state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
