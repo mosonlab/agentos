@@ -13,7 +13,6 @@ import {
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
-  Prisma,
   type PrismaClient,
   RunStatus,
   SessionExecutionStatus,
