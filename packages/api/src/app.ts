@@ -3567,14 +3567,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const locked = await lockRunRow(tx, runId);
       // Inbox resume reuses the same Run and Session. Keep the original
       // lifecycle anchor when the resumed provider calls /start again; only a
-      // run that has never started gets this request's timestamp. The Session
-      // fallback repairs the rare legacy row whose Run anchor is still null
-      // without making a resume look like a fresh execution.
+      // run that has never started gets this request's timestamp.
       const existing = locked === null ? null : await tx.run.findUnique({
         where: { id: runId },
-        select: { startedAt: true, session: { select: { startedAt: true } } },
+        select: { startedAt: true },
       });
-      const startedAt = existing?.startedAt ?? existing?.session?.startedAt ?? now;
+      const startedAt = existing?.startedAt ?? now;
       const updated = await tx.run.updateMany({
         where: fencedRunWhere(fence),
         data: {
