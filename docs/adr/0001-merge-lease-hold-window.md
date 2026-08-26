@@ -22,10 +22,15 @@ Chain `af3c73f5` (*Run duration display*, PR #138):
 | --- | --- |
 | 10:57:30 | regression run 7 acquires the lease, refreshes onto `origin/main` `0cb8f3c`, merge commit `d532af7` |
 | 11:00:44 | semantic verification passes (3m14s) |
-| 11:05:05 | `MERGE GATE: PASS` at `d532af7`; the run's own activity records "Merge lease released" |
+| 11:03:51 | the run issues `git push ... ; scripts/merge-lease.sh release --task af3c73f5-... ; echo "EXIT=$?"` |
+| 11:04:08 | the push fails (`SSL_ERROR_SYSCALL`); the release runs anyway and reports `MERGE LEASE: released` |
+| 11:04:14 | the run retries the push and it succeeds |
+| 11:05:05 | `MERGE GATE: PASS` at `d532af7`; the run reports "branch pushed fast-forward" |
 | 11:06:34 | regression PASS recorded; readiness queued |
-| 11:06:40 | independent review obligation opened |
-| 11:59:13 | independent review approved (52m33s) |
+| 11:06:40 | independent review obligation opened; review run 1 starts |
+| 11:36:51 | review run 1 declared `lost` (runner heartbeat starved) after 30m10s |
+| 11:51:53 | review run 2 declared `lost` after 15m01s |
+| 11:59:13 | review run 3 approves after 7m18s (52m33s wall clock across three runs) |
 | 11:59:18 | mechanical authorization |
 | 11:59:32 | merged as `f1d6cf6` |
 
@@ -94,9 +99,13 @@ parks readiness with `INDEPENDENT_REVIEW_OPEN_PREFIX` without releasing.
 `merge-lease.ts:mergeTailLeaseChainId` enumerates independent reviews as tasks
 that run under the lease, so this is intended behaviour, not an oversight. The
 review neither produces nor consumes the gate proof: it reads
-`baseSha..headSha` on GitHub and returns findings. Its duration is an agent
-session's duration - 8m06s in one observation, 52m33s in the other - and all of
-it is charged to every other delivery line's queue.
+`baseSha..headSha` on GitHub and returns findings. All of its duration is charged to every other
+delivery line's queue, and that duration is not bounded by review effort. In the
+`af3c73f5` observation the obligation was open for 52m33s across three runs: two
+were declared `lost` to runner heartbeat starvation after 30m10s and 15m01s, and
+only the third did the review, in 7m18s. The in-lock window is therefore set by
+runner-loss detection and retry count, not by how long a review takes. The other
+observation, `ff7a6904`, took 8m06s in a single run.
 
 The review's cost is bounded three times over: up to
 `MAX_BLOCKING_REVIEW_ROUNDS = 3` blocking rounds, each round adding a review-fix
@@ -140,15 +149,34 @@ verification phase inside the lock - see finding E.
 
 ### C. A regression agent released the lease itself
 
-At 11:05:05 chain `af3c73f5`'s regression run recorded: "Gate PASS at `d532af7`
-against baseline `0cb8f3c`; release-authority check exit 0. Merge lease
-released, branch pushed fast-forward, pass output persisted."
+The session transcript for chain `af3c73f5`'s regression run 7 is unambiguous.
+At 11:03:51 it ran, as one shell line:
 
-Nothing asked it to. Neither regression prompt nor `agents/roles/regression-verifier.md`
-mentions release; the release contract exists only in control-plane code, so it
-is invisible to the agent, while `AGENTS.md:102` ("Release it immediately after
-the delivery lands or fails") reads as an instruction to release whenever it
-reaches a chain agent's context.
+```sh
+git push origin HEAD:fix/run-duration-display 2>&1 | tail -3; \
+scripts/merge-lease.sh release --task af3c73f5-... 2>&1 | tail -3; echo "EXIT=$?"
+```
+
+and at 11:04:08 got back:
+
+```
+fatal: unable to access 'https://github.com/mosonlab/agentos.git/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443
+merge-lease: released refs/merge-lease/holder (1c9e90d...)
+```
+
+No cancellation and no lost run occurred anywhere between 11:04 and 11:17:35,
+so this release, and not a control-plane path, is what freed the ref.
+
+Two things went wrong on that one line. The release was never authorized:
+neither regression prompt nor `agents/roles/regression-verifier.md` mentions
+release, the release contract exists only in control-plane code and is invisible
+to the agent, and `AGENTS.md:102` ("Release it immediately after the delivery
+lands or fails") reads as an instruction to release whenever it reaches a chain
+agent's context. And the release ran after the push had already failed, because
+`;` ignores the push's status and `EXIT=$?` reports the exit of `tail -3` rather
+than of either real command - so the run had no failure signal at all where the
+prompt requires it to fail loudly. The branch reached `origin` only on a retry at
+11:04:14, a minute after the global lock had been handed away.
 
 The consequence is the expensive one in this incident. `af3c73f5` then ran its
 52-minute review, authorized, and merged PR #138 at 11:59:30 holding no lease at
@@ -258,3 +286,10 @@ would only paper over findings A and E.
   PR #138.
 - Until R2 lands, semantic verification stays inside the lock, so holds shorten
   but do not become minimal.
+
+## Out of scope, reported not fixed
+
+Two independent review runs were lost to runner heartbeat starvation on
+2026-08-26 (30m10s and 15m01s before detection). That is a runner reliability
+question, not a lease question, and it is recorded here only because it is what
+made one in-lock window seven times longer than the work inside it.
