@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
@@ -161,14 +161,23 @@ const acquireMirrorLock = async (
       // mkdir is the atomic operation: exactly one caller creates it, everyone
       // else gets EEXIST. No lock file content participates in the decision.
       await mkdir(lockPath, { mode: MIRROR_DIRECTORY_MODE });
-      const release = async (): Promise<void> => { await rm(lockPath, { recursive: true, force: true }); };
+      const held = `${owner}:${process.pid}:${randomUUID()}\n`;
+      const ownerFile = join(lockPath, "owner");
+      const discard = async (): Promise<void> => { await rm(lockPath, { recursive: true, force: true }); };
       try {
-        await writeFile(join(lockPath, "owner"), `${owner}\n`, { mode: 0o644 });
+        await writeFile(ownerFile, held, { mode: 0o644 });
       } catch (error: unknown) {
-        await release();
+        await discard();
         throw error;
       }
-      return release;
+      // Release removes this lock, not whatever lock happens to be at the path.
+      // Without the check, a holder that was declared stale and taken over would
+      // delete its successor's lock on the way out, and the mirror would end up
+      // with two writers and no lock at all.
+      return async (): Promise<void> => {
+        const current = await readFile(ownerFile, "utf8").catch(() => "");
+        if (current === held) await discard();
+      };
     } catch (error: unknown) {
       if (errorCode(error) !== "EEXIST") throw error;
     }
@@ -230,7 +239,9 @@ const configureMirror = async (
   // Every object git writes here gets 0644 (directories 0755) whatever the
   // daemon's umask is. Without it, a restrictive umask would make the mirror
   // unreadable to the account a RUNNER_RUN_AS_PREFIX deployment clones as —
-  // and only on the machines that set one.
+  // and only on the machines that set one. `git init --shared` covers the
+  // directories init creates; this covers every write after it, and re-asserts
+  // the setting on a mirror whose configuration was edited by hand.
   await execute(config, "git", ["config", "core.sharedRepository", "0644"], mirror, env);
   // Blind-review provisioning fetches an exact object id out of this mirror.
   // upload-pack refuses unadvertised objects by default, and the refusal would
@@ -252,7 +263,7 @@ const createMirror = async (
   // runs would mistake for a populated mirror.
   const staging = await mkdtemp(join(root, ".stage-"));
   try {
-    await execute(config, "git", ["init", "--bare", "--quiet", staging], root, env);
+    await execute(config, "git", ["init", "--bare", "--shared=0644", "--quiet", staging], root, env);
     await execute(config, "git", ["remote", "add", "origin", remoteUrl], staging, env);
     await configureMirror(config, staging, env, execute);
     await fetchFromRemote(config, staging, [...REFRESH_ARGS], env, execute, retryOptions);
@@ -338,7 +349,11 @@ export const ensureMirrorRevisions = async (
   await fetchFromRemote(config, mirror, ["fetch", "--no-tags", "--quiet", "origin", ...missing], env, execute, retryOptions);
   const settled = await mirrorRevisionsPresent(config, mirror, missing, env, execute);
   const absent = missing.filter((revision) => settled.get(revision) !== true);
-  if (absent.length > 0) throw new RepoMirrorError(mirror, `object-absent-on-remote:${absent.join(",")}`);
+  // Not a RepoMirrorError: the mirror did what it was asked and the remote came
+  // back without the object. Rebuilding the mirror would not change that answer.
+  if (absent.length > 0) {
+    throw new Error(`Recorded commits are absent from the remote: ${absent.join(", ")}`);
+  }
 };
 
 /** Whether the mirror carries this branch. Read after a refresh, this is the

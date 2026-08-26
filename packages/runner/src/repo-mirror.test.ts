@@ -189,6 +189,42 @@ test("a held lock is waited for, and one left behind by a dead holder is taken o
   }
 });
 
+test("a holder that was taken over does not delete its successor's lock", async () => {
+  const { root, remote, config, mirror } = await fixture("release");
+  const env = workspaceEnvironment(config);
+  const lock = `${mirror}.lock`;
+  try {
+    await withRepoMirror(config, remote, env, passthrough, { report: silent() }, async () => {
+      // What a stale takeover looks like from inside the declared-dead holder:
+      // its lock is gone and someone else's is at the path.
+      await rm(lock, { recursive: true, force: true });
+      await mkdir(lock);
+      await writeFile(join(lock, "owner"), "successor\n");
+      return null;
+    });
+    assert.equal((await readFile(join(lock, "owner"), "utf8")).trim(), "successor");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the mirror stays readable to another account whatever umask the daemon runs under", async () => {
+  const { root, remote, config, mirror } = await fixture("umask");
+  const previous = process.umask(0o077);
+  try {
+    await provisionWorkspace(config, claimFor(remote, "umask"), undefined, {}, {}, { report: silent() });
+    // A RUNNER_RUN_AS_PREFIX deployment clones as an account that owns nothing
+    // here, so every directory git created must stay world-traversable and
+    // listable — including the ones `git init` made before any config existed.
+    for (const path of [mirror, join(mirror, "objects"), join(mirror, "refs")]) {
+      assert.equal((await stat(path)).mode & 0o055, 0o055, path);
+    }
+  } finally {
+    process.umask(previous);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("object presence is read from cat-file's own answer, never from an exit code", async () => {
   const { root, remote, seed, config } = await fixture("objects");
   const env = workspaceEnvironment(config);

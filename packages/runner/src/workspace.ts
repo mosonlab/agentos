@@ -9,7 +9,7 @@ import { materializeWorkspaceDependencies, type DependencyCacheOptions } from ".
 import { runCommand, type CommandOptions } from "./exec.js";
 import { type RetryOptions } from "./network-retry.js";
 import {
-  ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, RepoMirrorError, type RepoMirrorOptions,
+  ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
 } from "./repo-mirror.js";
 
 export type Workspace = {
@@ -403,7 +403,10 @@ export const provisionWorkspace = async (
           cloneTarget = branch;
         }
         if (!await mirrorHasBranch(mirrorConfig, mirror, cloneTarget, mirrorEnv, execute)) {
-          throw new RepoMirrorError(mirror, `branch-absent:${cloneTarget}`);
+          // The mirror was pruned against the remote moments ago, so this is the
+          // remote's answer, not a mirror fault: the branch the run was told to
+          // start from does not exist.
+          throw new Error(`Branch ${cloneTarget} is absent from ${claim.repo.remoteUrl}`);
         }
         // Local clone: git hardlinks the object database instead of copying it,
         // which is what turns a two-minute transfer into a disk operation. The
