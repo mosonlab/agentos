@@ -116,6 +116,8 @@
     { "glob": "scripts/gate-worker/bench-postgres.sh", "purpose": "gate worker: throwaway-postgres settings benchmark over one fixed commit" },
     { "glob": "scripts/gate-worker/gate-dispatch.sh", "purpose": "gate worker: slot-rationed dispatch across the local machine and the worker" },
     { "glob": "scripts/gate-worker/gate-dispatch.test.mjs", "purpose": "gate worker and merge lease: slot-lock concurrency, dispatcher retry and exit-code behavior, and origin-ref lease regression tests" },
+    { "glob": "scripts/gate-worker/gate-env.mjs", "purpose": "gate worker: what the gate reads out of the environment, and which of it a fixture may inherit" },
+    { "glob": "scripts/gate-worker/gate-env.test.mjs", "purpose": "gate worker: fixture-environment guard and the coverage test that keeps the inherited list closed" },
     { "glob": "scripts/gate-worker/gate-worker.test.mjs", "purpose": "gate worker: credential red-line parity, remote-value allowlists, exact-ref transport retries and run-gate no-verdict regression tests" },
     { "glob": "scripts/gate-worker/lib.sh", "purpose": "gate worker: shared repository-name derivation for the local-side scripts" },
     { "glob": "scripts/gate-worker/mirror-push.sh", "purpose": "gate worker: mirror push, the only path code reaches the worker by" },

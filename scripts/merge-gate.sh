@@ -1254,7 +1254,7 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 parallel_steps "dependencies and the install-free suites" \
   "npm ci" install_dependencies :: \
   "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs :: \
-  "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs :: \
+  "gate worker harness and slot fixtures" node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs :: \
   "parallel-group fixtures" node --test scripts/merge-gate-parallel.test.mjs :: \
   "build layer fixtures" node --test scripts/build-layers.test.mjs
 
