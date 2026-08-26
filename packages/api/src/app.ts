@@ -641,7 +641,12 @@ const instantiateTemplateInput = z.object({
   autoStart: z.boolean().default(false),
   afterTaskId: id.optional(),
   name: z.string().trim().min(1).max(200).optional(),
-  description: z.string().min(1).max(50_000),
+  // Whether a brief is required is a property of the template's steps, not of
+  // this route, so `instantiateTemplate` decides it for every caller. Requiring
+  // it here would answer a briefless direct chain with an unmatched ZodError —
+  // a bare 400 "Validation failed" — and would still leave the two fire routes,
+  // which send no description, free to create one.
+  description: z.string().max(50_000).optional(),
   stepOverrides: stepOverridesInput.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;

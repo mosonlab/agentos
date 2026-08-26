@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  DIRECT_TEMPLATE_NAME,
   Prisma,
   RunStatus,
   RunnerKind,
@@ -1228,17 +1229,39 @@ test("template instantiate route maps an archived step agent to a named 400", as
   });
 });
 
-test("template instantiate route requires a feature brief before database access", async () => {
+test("a briefless direct chain is refused by name, not by the request schema", async () => {
+  // Whether a brief is required is a property of the template's steps, so the
+  // route must read the template to decide it and the rule cannot live in the
+  // request schema. The regression this pins: a schema-level `min(1)` answered
+  // this exact body — the one the New Task panel sends — with an unmatched
+  // ZodError, so every template creation from the panel died as a bare 400
+  // "Validation failed" that named neither the field nor the reason.
   await withTokens(async () => {
-    const database = new Proxy({}, {
-      get: () => { throw new Error("database must not be read when the feature brief is missing"); },
-    }) as unknown as PrismaClient;
+    const agent = { id: "agent-1", name: "Dev", archivedAt: null, model: "codex" };
+    const database = {
+      taskTemplate: {
+        findFirst: async () => ({
+          id: "template-1",
+          name: DIRECT_TEMPLATE_NAME,
+          variables: [],
+          steps: [{
+            id: "step-2", stepIndex: 2, name: "Code review (Sol)", prompt: "review",
+            outputKind: "sol-findings", attachmentsFromPrevious: false, assigneeType: "AGENT",
+            assigneeAgentId: agent.id, assigneeAgent: agent, approvalGate: false, runner: null,
+          }],
+        }),
+      },
+      repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    } as unknown as PrismaClient;
     const response = await createApp(database).request("/projects/project-1/task-templates/template-1/instantiate", {
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({ repoId: "repo-1", variables: {}, autoStart: false }),
     });
     assert.equal(response.status, 400);
+    const body = await response.json() as { error: string; code: string };
+    assert.equal(body.code, "feature_brief_required");
+    assert.match(body.error, /task brief/u);
   });
 });
 

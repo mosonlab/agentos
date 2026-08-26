@@ -140,6 +140,20 @@ export const isCanonicalSolFindingsStep = (step: TemplateStepIdentity | null | u
   || isNamedStep(step, INTEGRATOR_TEMPLATE_NAME, FULL_SOL_REVIEW_STEP_INDEX, "sol-findings")
 );
 
+/**
+ * A direct chain's review steps read the task brief as their specification
+ * authority (`directAuthority` in specification-fidelity.ts), so a direct chain
+ * instantiated without a brief refuses every review claim it will ever make.
+ * The compound chain reads its approved spec step output instead, and every
+ * other template runs no specification check at all, so neither needs a brief.
+ * Instantiation consults this to refuse the briefless chain up front rather
+ * than materialising one that can only wedge later.
+ */
+export const isDirectChainBriefAuthorityStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_SOL_REVIEW_STEP_INDEX, "sol-findings")
+  || isNamedStep(step, DIRECT_TEMPLATE_NAME, DIRECT_BLIND_REVIEW_STEP_INDEX, "blind-findings")
+);
+
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
   const phase = (metadata as Record<string, unknown>).phase;

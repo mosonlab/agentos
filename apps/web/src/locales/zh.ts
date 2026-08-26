@@ -326,6 +326,8 @@ export const zh = {
   "newTask.field.assigneeType.label": "指派类型",
   "newTask.field.branch.hint": "留空则回退到仓库默认分支。",
   "newTask.field.branch.label": "目标分支",
+  "newTask.field.brief.hint": "该链的规格依据。评审步以简报为依据的模板，缺少它将拒绝实例化。",
+  "newTask.field.brief.label": "功能简报",
   "newTask.field.maxRuns.hint": "重试到此为止，随后收件箱会收到一条操作员消息。",
   "newTask.field.maxRuns.label": "每个任务的最大运行次数",
   "newTask.field.prompt.hint": "连同基础提示词与角色提示词一起原样交给 agent。",

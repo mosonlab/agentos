@@ -16,6 +16,7 @@ import {
 } from "@agentos/db";
 
 import { isValidBranchName } from "./branch-name.js";
+import { isDirectChainBriefAuthorityStep } from "./canonical-task-output.js";
 import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
 import { TemplateInstantiationRefusal } from "./template-errors.js";
 
@@ -89,6 +90,11 @@ const overrideRefusal = (
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
 
 const bindingRefusal = (
+  code: string,
+  message: string,
+): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
+
+const briefRefusal = (
   code: string,
   message: string,
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
@@ -221,6 +227,25 @@ export const instantiateTemplate = async (
     throw new Error("Invalid template branch name");
   }
   assertValidBaseReferences(template.steps);
+  // The brief is this chain's review authority, not a description. Refusing a
+  // briefless direct chain here rather than in one route's request schema is
+  // what makes the rule hold for every caller: the webhook fire and the manual
+  // trigger fire construct their own input and send no description at all, so a
+  // schema-level `min(1)` would leave both free to materialise a chain whose
+  // every review claim is refused for as long as it exists.
+  if (
+    (input.description === undefined || input.description.trim() === "")
+    && template.steps.some((step) => isDirectChainBriefAuthorityStep({
+      stepIndex: step.stepIndex,
+      outputKind: step.outputKind,
+      taskTemplate: { name: template.name },
+    }))
+  ) {
+    throw briefRefusal(
+      "feature_brief_required",
+      `Template ${template.name} has a direct-chain review step whose specification authority is the task brief; instantiating it without a description would refuse every review claim on the chain`,
+    );
+  }
 
   const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
   for (const [stepIndex] of overrideEntries) {

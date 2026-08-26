@@ -329,6 +329,8 @@ export const en = {
   "newTask.field.assigneeType.label": "Assignee type",
   "newTask.field.branch.hint": "Empty falls back to the repo default branch.",
   "newTask.field.branch.label": "Target branch",
+  "newTask.field.brief.hint": "The chain's specification of record. A template whose review steps read the brief refuses to instantiate without one.",
+  "newTask.field.brief.label": "Feature brief",
   "newTask.field.maxRuns.hint": "Retries stop here and the Inbox gets an operator message.",
   "newTask.field.maxRuns.label": "Max runs per task",
   "newTask.field.prompt.hint": "Handed to the agent verbatim together with its foundation and role prompt.",

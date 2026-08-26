@@ -74,6 +74,10 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
       variables,
       autoStart: false,
       ...(form.name.trim() === "" ? {} : { name: form.name }),
+      // The brief is the chain's specification of record, and a template whose
+      // review steps read it cannot be instantiated without one. Omitting the
+      // field when blank keeps briefless templates behaving exactly as before.
+      ...(form.description.trim() === "" ? {} : { description: form.description }),
     }));
     if (ok) { onCreated(); onClose(); }
   };
@@ -168,6 +172,9 @@ export const NewTask = ({ projectId, agents, repos, onClose, onCreated }: {
                   <Select value={form.repoId} onChange={(event) => setForm({ ...form, repoId: event.target.value })}>
                     {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
                   </Select>
+                </Field>
+                <Field label={t("newTask.field.brief.label")} hint={t("newTask.field.brief.hint")}>
+                  <Textarea rows={8} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
                 </Field>
                 {(template?.variables ?? []).map((variable) => (
                   <Field key={variable} label={variable}>

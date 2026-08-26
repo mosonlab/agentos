@@ -5,6 +5,7 @@ import {
   AssigneeType,
   CANONICAL_AGENT_DEFAULTS,
   CodexServiceTier,
+  DIRECT_TEMPLATE_NAME,
   executionModeFor,
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_SENTINEL_MODEL,
@@ -392,6 +393,89 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
   assert.equal(created[1]!.opensPullRequest, false);
   assert.equal(lockQueries.length, 3, "one Agent lock plus one grant lock per distinct effective assignee");
   assert.match(lockQueries[0]!, /ORDER BY "id" FOR UPDATE/u);
+});
+
+/**
+ * The brief is a direct chain's review authority, so the rule belongs to the
+ * template's steps and not to any one caller's request schema. These cases pin
+ * it at `instantiateTemplate`, which is the only thing the instantiate route,
+ * the webhook fire, and the manual trigger fire all pass through.
+ */
+const briefAuthorityTemplate = (name: string, reviewStep: { stepIndex: number; outputKind: string }) => {
+  const agent = {
+    id: "agent-1", name: "Dev", archivedAt: null, model: "codex",
+    runnerPreference: RunnerPreference.CODEX, foundationalPrompt: "foundation", rolePrompt: "role",
+  };
+  const step = (stepIndex: number, stepName: string, outputKind: string) => ({
+    id: `step-${stepIndex}`, stepIndex, name: stepName, prompt: "work",
+    outputKind, attachmentsFromPrevious: false, assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: agent.id, assigneeAgent: agent, approvalGate: false, runner: null,
+  });
+  return {
+    taskTemplate: {
+      findFirst: async () => ({
+        id: "template-1",
+        name,
+        variables: [],
+        steps: [
+          step(1, "Implementation", "implementation"),
+          step(reviewStep.stepIndex, "Code review", reviewStep.outputKind),
+        ],
+      }),
+    },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
+    $transaction: async () => { throw new Error("must not reach chain creation"); },
+  } as unknown as PrismaClient;
+};
+
+test("a direct chain whose review authority is the brief refuses to instantiate without one", async () => {
+  // Both direct review steps carry the authority, and each must refuse on its
+  // own: a template is reachable with either one present.
+  for (const reviewStep of [
+    { stepIndex: 2, outputKind: "sol-findings" },
+    { stepIndex: 3, outputKind: "blind-findings" },
+  ]) {
+    const db = briefAuthorityTemplate(DIRECT_TEMPLATE_NAME, reviewStep);
+    // Absent, empty, and whitespace-only all compose a description with no
+    // `Feature brief:` segment, so all three are the same wedge.
+    for (const description of [undefined, "", "   \n  "]) {
+      await assert.rejects(
+        () => instantiateTemplate(db, "project-1", "template-1", {
+          repoId: "repo-1",
+          variables: {},
+          autoStart: false,
+          ...(description === undefined ? {} : { description }),
+        }),
+        (error: unknown) => isTemplateInstantiationRefusal(error)
+          && error.code === "feature_brief_required",
+        `description ${JSON.stringify(description)} must be refused`,
+      );
+    }
+  }
+});
+
+test("the brief requirement reaches past its own step index and past the compound chain", async () => {
+  // A compound chain's authority is its approved spec step output, and an
+  // ordinary template runs no specification check at all. Refusing either would
+  // break `Normal chains ... claim and review exactly as before`.
+  for (const [name, reviewStep] of [
+    [INTEGRATOR_TEMPLATE_NAME, { stepIndex: 6, outputKind: "sol-findings" }],
+    ["ordinary-template", { stepIndex: 2, outputKind: "result" }],
+    // The step index is part of the identity: a `sol-findings` step sitting at
+    // the compound chain's index on a direct template is not the direct
+    // chain's authority step and must not be mistaken for it.
+    [DIRECT_TEMPLATE_NAME, { stepIndex: 6, outputKind: "sol-findings" }],
+  ] as const) {
+    const db = briefAuthorityTemplate(name, reviewStep);
+    await assert.rejects(
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
+      // Reaching chain creation is the pass: it proves the brief check let it
+      // through rather than refusing it.
+      /must not reach chain creation/u,
+      `${name} step ${reviewStep.stepIndex} must not require a brief`,
+    );
+  }
 });
 
 test("step override structural refusals happen before template reads and carry stable codes", async () => {
