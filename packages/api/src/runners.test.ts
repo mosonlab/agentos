@@ -198,13 +198,21 @@ test("invalid optional telemetry cannot block empty or successful claims", async
 test("a stale heartbeat still records that the daemon is alive", async () => {
   await withTokens(async () => {
     const database = makeDatabase() as unknown as { run: Record<string, unknown> };
-    database.run = { ...database.run, updateMany: async () => ({ count: 0 }), findFirst: async () => null };
+    // `findUnique` is what the refusal is explained from: no row means the
+    // heartbeat is refused as `unknown-run` rather than guessed at.
+    database.run = {
+      ...database.run,
+      updateMany: async () => ({ count: 0 }),
+      findFirst: async () => null,
+      findUnique: async () => null,
+    };
     const app = createApp(database as unknown as PrismaClient);
     const response = await app.request("/runner/runs/run-1/heartbeat", {
       method: "POST", headers: { Authorization: "Bearer runners-test-runner", "Content-Type": "application/json" },
       body: JSON.stringify({ runnerId: "heartbeat-runner", fencingToken: "1:run-1:fence", leaseSeconds: 60, processAlive: true, daemonVersion: "0.0.0" }),
     });
     assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: "Stale fencing token", reason: "unknown-run" });
     const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
     const body = await status.json() as { daemons: Array<{ runnerId: string }> };
     assert.equal(body.daemons[0]?.runnerId, "heartbeat-runner");

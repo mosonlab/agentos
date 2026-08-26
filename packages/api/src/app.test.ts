@@ -482,6 +482,14 @@ test("fencing rejects an expired generation token", async () => {
       run: {
         updateMany: async ({ where }: { where: { fencingToken: string } }) => ({ count: where.fencingToken === currentToken ? 1 : 0 }),
         findFirst: async () => null,
+        // The refusal is explained from the row, not guessed from the miss.
+        findUnique: async () => ({
+          runnerId: "runner-1",
+          fencingToken: currentToken,
+          cancelRequestedAt: null,
+          leaseExpiresAt: new Date(Date.now() + 60_000),
+          status: RunStatus.RUNNING,
+        }),
       },
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/runner/runs/run-1/heartbeat", {
@@ -495,7 +503,7 @@ test("fencing rejects an expired generation token", async () => {
       }),
     });
     assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), { error: "Stale fencing token" });
+    assert.deepEqual(await response.json(), { error: "Stale fencing token", reason: "stale-fence" });
   });
 });
 

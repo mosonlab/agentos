@@ -32,6 +32,7 @@ import {
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockChainRows,
+  lockRunRow,
   nativeImplementationSubagentRunConfig,
   NetworkingMode,
   Prisma,
@@ -176,6 +177,7 @@ import {
 } from "./workspace-reclaim.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { isSerializationConflict, serializationRetryDelay } from "./serialization-retry.js";
+import { activeRunStatuses, explainFenceRefusal, fencedRunWhere, type RunFence } from "./run-fence.js";
 import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
@@ -1357,8 +1359,6 @@ const isPublic = (path: string, method: string): boolean =>
   path === "/" || path === "/health" || path === "/version" || method === "OPTIONS"
   || method === "POST" && /^\/hooks\/templates\/[^/]+$/.test(path);
 
-const activeRunStatuses = [RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX];
-
 type CancellationSettlement =
   | { error: string; code: 404 | 409 }
   | {
@@ -1384,7 +1384,7 @@ const settleCancellation = async (
     baseSha?: string;
   },
 ): Promise<CancellationSettlement> => {
-  await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${input.runId} FOR UPDATE`;
+  await lockRunRow(tx, input.runId);
   const run = await tx.run.findUnique({
     where: { id: input.runId },
     select: {
@@ -5123,17 +5123,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, startInput);
     const now = new Date();
+    // A run that has already started is not startable again, so this fence is
+    // narrower than the live-lease set every other route uses.
+    const fence: RunFence = {
+      runId,
+      runnerId: body.runnerId,
+      fencingToken: body.fencingToken,
+      at: now,
+      statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING],
+    };
     const started = await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      await lockRunRow(tx, runId);
       const updated = await tx.run.updateMany({
-        where: {
-          id: runId,
-          runnerId: body.runnerId,
-          fencingToken: body.fencingToken,
-          cancelRequestedAt: null,
-          leaseExpiresAt: { gt: now },
-          status: { in: [RunStatus.CLAIMED, RunStatus.PROVISIONING] },
-        },
+        where: fencedRunWhere(fence),
         data: {
           status: RunStatus.RUNNING,
           startedAt: now,
@@ -5146,7 +5148,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           baseSha: body.baseSha ?? null,
         },
       });
-      if (updated.count !== 1) return false;
+      if (updated.count !== 1) return explainFenceRefusal(tx, fence);
       const session = await tx.session.updateMany({
         where: { runId, executionStatus: SessionExecutionStatus.PROVISIONING },
         data: {
@@ -5158,9 +5160,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
       if (session.count !== 1) throw new Error(`Run ${runId} has no startable Session`);
-      return true;
+      return null;
     });
-    return started ? context.json({ ok: true }) : context.json({ error: "Stale fencing token" }, 409);
+    return started === null
+      ? context.json({ ok: true })
+      : context.json({ error: "Stale fencing token", reason: started }, 409);
   });
 
   app.post("/runner/runs/:runId/heartbeat", async (context) => {
@@ -5168,15 +5172,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, heartbeatInput);
     const now = new Date();
     runners.note(body.runnerId, body, now);
+    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: now };
     const updated = await db.run.updateMany({
-      where: {
-        id: runId,
-        runnerId: body.runnerId,
-        fencingToken: body.fencingToken,
-        cancelRequestedAt: null,
-        leaseExpiresAt: { gt: now },
-        status: { in: activeRunStatuses },
-      },
+      where: fencedRunWhere(fence),
       data: {
         heartbeatAt: now,
         ...(body.processAlive ? {
@@ -5216,7 +5214,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
     return waiting
       ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-      : context.json({ error: "Stale fencing token" }, 409);
+      : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
   });
 
   app.post("/runner/runs/:runId/cancel/acknowledge", async (context) => {
@@ -5246,6 +5244,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, publicationInput);
     const now = new Date();
+    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: now };
     const run = await db.run.findUnique({
       where: { id: runId },
       select: {
@@ -5269,17 +5268,19 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const salvage = owned && run?.repoId !== null
       && body.pushedBranch === salvageBranch
       && (run?.pushedBranch === null || run?.pushedBranch === body.pushedBranch);
-    if (!live && !salvage) return context.json({ error: "Stale fencing token" }, 409);
+    if (!live && !salvage) {
+      return context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+    }
     const updated = await db.$transaction(async (tx) => {
       const ack = await tx.run.updateMany({
-        where: {
-          id: runId,
-          runnerId: body.runnerId,
-          fencingToken: body.fencingToken,
-          ...(live
-            ? { cancelRequestedAt: null, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } }
-            : { OR: [{ pushedBranch: null }, { pushedBranch: body.pushedBranch }] }),
-        },
+        where: live
+          ? fencedRunWhere(fence)
+          : {
+              id: runId,
+              runnerId: body.runnerId,
+              fencingToken: body.fencingToken,
+              OR: [{ pushedBranch: null }, { pushedBranch: body.pushedBranch }],
+            },
         data: { pushedBranch: body.pushedBranch },
       });
       if (ack.count !== 1 || !salvage || !run?.taskId) return { count: ack.count, repair: "none" as const };
@@ -5294,7 +5295,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ? context.json({ ok: true, replacementRepair: updated.repair })
       : updated.count === 1
         ? context.json({ error: "Salvage is durable, but the replacement already started from its prior base" }, 409)
-      : context.json({ error: "Stale fencing token" }, 409);
+      : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
   });
 
   // Cleanup is still runner-owned after the live lease is gone. This endpoint
@@ -5336,17 +5337,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.post("/runner/runs/:runId/events", async (context) => {
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, eventsInput);
+    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: new Date() };
     const result = await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      await lockRunRow(tx, runId);
       const run = await tx.run.findFirst({
-        where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
+        where: fencedRunWhere(fence),
         include: { session: true },
       });
       if (!run?.session) {
         const waiting = await tx.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
         return waiting
           ? { error: "Run suspended for Inbox", code: "WAITING_INBOX" as const }
-          : { error: "Stale fencing token", code: "STALE" as const };
+          : { error: "Stale fencing token", code: "STALE" as const, reason: await explainFenceRefusal(tx, fence) };
       }
       await tx.sessionEvent.createMany({
         data: body.events.map((event) => ({
@@ -5374,7 +5376,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if ("error" in result) {
       return result.code === "WAITING_INBOX"
         ? context.json({ error: result.error, code: result.code }, 409)
-        : context.json({ error: result.error }, 409);
+        : context.json({ error: result.error, reason: result.reason }, 409);
     }
     // Recompute on "a FINAL_OUTPUT arrived", not "this payload had usage": a batch
     // whose event was already stored still recomputes, which is what self-heals a
@@ -5402,15 +5404,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, fencedActivityInput);
     const principal = context.get("principal");
+    const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
     const result = await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      await lockRunRow(tx, runId);
       const run = await tx.run.findFirst({
         where: {
-          id: runId,
-          fencingToken: body.fencingToken,
-          cancelRequestedAt: null,
-          leaseExpiresAt: { gt: new Date() },
-          status: { in: activeRunStatuses },
+          ...fencedRunWhere(fence),
+          // A session principal carries its own generation of the same fence.
           ...(principal.kind === "runner" ? {} : { leaseGeneration: principal.kind === "session" ? principal.leaseGeneration : -1 }),
         },
         select: {
@@ -5422,7 +5422,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           } } } },
         },
       });
-      if (!run?.taskId) return null;
+      if (!run?.taskId) return { refusal: await explainFenceRefusal(tx, fence) };
       const metadata = body.metadata
         ? {
             ...body.metadata,
@@ -5443,7 +5443,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         },
       });
     });
-    return result ? context.json(result, 201) : context.json({ error: "Stale fencing token" }, 409);
+    return "refusal" in result
+      ? context.json({ error: "Stale fencing token", reason: result.refusal }, 409)
+      : context.json(result, 201);
   };
   app.post("/runner/runs/:runId/activity", appendFencedActivity);
   app.post("/session/runs/:runId/activity", appendFencedActivity);
@@ -5569,8 +5571,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     if (principal.kind !== "session" || principal.runId !== runId) return context.json({ error: "Forbidden for principal" }, 403);
     const body = await readJson(context.req.raw, taskOutputInput);
     if (!body.fencingToken) return context.json({ error: "fencingToken is required" }, 400);
+    const fence: RunFence = { runId, fencingToken: body.fencingToken, at: new Date() };
     const run = await db.run.findFirst({
-      where: { id: runId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: new Date() }, status: { in: activeRunStatuses } },
+      where: fencedRunWhere(fence),
       select: {
         taskId: true,
         runnerId: true,
@@ -5593,7 +5596,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         } },
       },
     });
-    if (!run?.taskId) return context.json({ error: "Stale fencing token" }, 409);
+    if (!run?.taskId) {
+      return context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
+    }
     const executionMode = executionModeFor(run.task?.templateStep ?? null);
     if (executionMode !== "mechanical" && !body.commitSha) {
       return context.json({ error: "commitSha is required" }, 400);
@@ -5730,6 +5735,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const body = await readJson(context.req.raw, completionInput);
     const principal = context.get("principal");
     const now = new Date();
+    const fence: RunFence = { runId, runnerId: body.runnerId, fencingToken: body.fencingToken, at: now };
     // §4.0. Completing a mechanical run is what makes the chain believe a merge
     // happened, so it is bound to the same independently authenticated
     // principal that was allowed to claim it — and, symmetrically, the executor
@@ -5752,9 +5758,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       // Run owns fencing, cancellation, and terminalization. Take that mutex
       // before Task so completion, cancellation, and canonical output writes
       // cannot deadlock by entering the same two rows in opposite orders.
-      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      await lockRunRow(tx, runId);
       const run = await tx.run.findFirst({
-        where: { id: runId, runnerId: body.runnerId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
+        where: fencedRunWhere(fence),
         include: {
           // §D-P5. The step's template name is part of the step-12 identity, so
           // the completion route has to read it rather than the step alone.
@@ -5910,7 +5916,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           ? RunStatus.TIMED_OUT
           : RunStatus.FAILED;
       const closed = await tx.run.updateMany({
-        where: { id: runId, fencingToken: body.fencingToken, cancelRequestedAt: null, leaseExpiresAt: { gt: now }, status: { in: activeRunStatuses } },
+        // The terminal compare-and-set deliberately drops `runnerId`: settlement
+        // races completion on this row and neither may win twice. Same instant
+        // as the read above, which is what `at` on the fence is for.
+        where: fencedRunWhere({ runId, fencingToken: body.fencingToken, at: now }),
         data: {
           status: terminalStatus,
           endedAt: now,
@@ -6522,7 +6531,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       const waiting = await db.run.findFirst({ where: { id: runId, status: RunStatus.WAITING_INBOX }, select: { id: true } });
       return waiting
         ? context.json({ error: "Run suspended for Inbox", code: "WAITING_INBOX" }, 409)
-        : context.json({ error: "Stale fencing token" }, 409);
+        : context.json({ error: "Stale fencing token", reason: await explainFenceRefusal(db, fence) }, 409);
     }
     await releaseMergeLeaseSafely(releaseChainLease, result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
@@ -6604,7 +6613,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const runId = id.parse(context.req.param("runId"));
     const body = await readJson(context.req.raw, cancelRunInput);
     const result = await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+      await lockRunRow(tx, runId);
       const run = await tx.run.findUnique({
         where: { id: runId },
         select: {

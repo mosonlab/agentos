@@ -294,6 +294,28 @@ export const lockTaskRow = async (
 };
 
 /**
+ * Takes the Run-row mutex every fencing writer takes.
+ *
+ * Run owns fencing, cancellation and terminalization, so this lock is entered
+ * before the Task lock by completion, cancellation and canonical output writes
+ * -- entering the two rows in opposite orders is how they would deadlock.
+ *
+ * Its callers ignore the row: they take the mutex and then re-read through the
+ * fenced predicate. It is returned anyway, for the same reason `lockTaskRow`
+ * returns one -- a caller that needs to tell "locked" from "no such run" apart
+ * should not have to issue a second statement.
+ */
+export const lockRunRow = async (
+  tx: Tx,
+  runId: string,
+): Promise<{ id: string } | null> => {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE
+  `;
+  return rows[0] ?? null;
+};
+
+/**
  * Takes the Agent-row mutex that archive and every assignment/run writer share.
  *
  * Archive used to write `archivedAt` unconditionally while task creation,
