@@ -88,6 +88,7 @@ import {
   type CardRow,
   type DecisionRow,
   asJsonObject,
+  INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
   MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
@@ -344,12 +345,18 @@ const createReviewFollowUpCard = async (
   },
 ): Promise<{ taskId: string } | { refusal: string }> => {
   if (!input.repoId) return { refusal: "independent review task has no repository" };
-  const agent = await tx.agent.findFirst({
-    where: { projectId: input.projectId, name: input.agentName, archivedAt: null },
+  const named = await tx.agent.findFirst({
+    where: { projectId: input.projectId, name: input.agentName },
+    select: { id: true },
   });
-  if (!agent) return { refusal: `follow-up agent ${input.agentName} is absent or archived` };
-  const grant = await tx.agentRepoAccess.findFirst({
-    where: { projectId: input.projectId, agentId: agent.id, repoId: input.repoId },
+  if (!named) return { refusal: `follow-up agent ${input.agentName} is absent` };
+  // A card assigned to an agent archived a moment later, or pointing at a
+  // revoked grant, is a card nothing can ever run. Both facts are therefore
+  // taken under the same mutexes the archive and revoke paths take.
+  const agent = await lockAgentRow(tx, named.id);
+  if (!agent || agent.archivedAt) return { refusal: `follow-up agent ${input.agentName} is absent or archived` };
+  const grant = await lockAgentRepoGrant(tx, {
+    projectId: input.projectId, agentId: agent.id, repoId: input.repoId,
   });
   if (!grant) return { refusal: `follow-up agent ${input.agentName} has no repository grant` };
   const task = await tx.task.create({ data: {
@@ -1545,7 +1552,7 @@ const activateMergeTailTarget = async (
     // the review has to hand it back; anything else in REVIEW is a real stop
     // and stays stopped.
     const resumed = await tx.task.updateMany({
-      where: { id: taskId, status: TaskStatus.REVIEW, failureReason: { startsWith: "independent-review-open:" } },
+      where: { id: taskId, status: TaskStatus.REVIEW, failureReason: { startsWith: INDEPENDENT_REVIEW_OPEN_PREFIX } },
       data: { status: TaskStatus.TODO, failureReason: null },
     });
     await tx.taskActivity.create({ data: {
@@ -6244,8 +6251,24 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
             const regressionTaskId = reviewMarker.regressionTaskId;
             const reviewHeadSha = reviewMarker.headSha;
             const reviewBaseSha = typeof reviewMarker.baseSha === "string" ? reviewMarker.baseSha : null;
-            const reviewOutput = await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { body: true } });
-            const parsedReview = parseIndependentReviewDecision(reviewOutput?.body, reviewHeadSha);
+            // Review evidence is run-scoped even though TaskStepOutput is not.
+            // An earlier attempt's decision is not this attempt's decision, and
+            // a decision not bound to the reviewed head is not evidence about
+            // it: either one would let an unreviewed head through.
+            const persistedReview = await tx.taskStepOutput.findUnique({
+              where: { taskId: run.taskId }, select: { body: true, runId: true, commitSha: true },
+            });
+            const reviewOutput = persistedReview?.runId === run.id && persistedReview.commitSha === reviewHeadSha
+              ? persistedReview
+              : null;
+            const parsedReview = reviewOutput
+              ? parseIndependentReviewDecision(reviewOutput.body, reviewHeadSha)
+              : {
+                status: "invalid" as const,
+                reason: persistedReview
+                  ? `decision is bound to run ${persistedReview.runId ?? "none"} at ${persistedReview.commitSha ?? "no head"}, not this run at ${reviewHeadSha}`
+                  : "missing independent review output",
+              };
             const reviewSessionId = run.session.id;
             // A finding's own text reaches these reasons, so every one of them
             // is bounded exactly where a client-supplied reason would be.
@@ -6267,7 +6290,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               // with the finding lost.
               const followUpCardIds: string[] = [];
               let followUpRefusal: string | null = null;
-              const followUpAgentName = await mergeTailFixAgentName(tx, reviewRegression);
+              const followUpAgentName = await mergeTailFixAgentName(tx, await tx.task.findUnique({
+                where: { id: regressionTaskId },
+                select: { projectId: true, chainId: true, templateId: true },
+              }));
               for (const finding of parsedReview.decision.findings) {
                 const card = await createReviewFollowUpCard(tx, {
                   projectId: run.task.projectId,
@@ -6345,26 +6371,58 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
                 // blocking rounds mean the repair loop is not converging, so the
                 // tail stops and says so instead of spending a fourth round.
                 await stopTail(`independent review rejected ${reviewHeadSha} on blocking round ${round} of ${MAX_BLOCKING_REVIEW_ROUNDS}; automatic repair is exhausted: ${summary}`);
-              } else if (!reviewRegression || !reviewBaseSha) {
-                await stopTail(`independent review rejected ${reviewHeadSha} but its Regression task or base head is unavailable for automatic repair`);
+              } else if (!reviewBaseSha) {
+                await stopTail(`independent review rejected ${reviewHeadSha} but its base head is unavailable for automatic repair`);
               } else {
-                const repair = await createMergeTailRepairTask(tx, {
-                  regressionTask: { id: regressionTaskId, ...reviewRegression },
-                  sourceRun: { id: run.id, branch: run.branch },
-                  agentName: await mergeTailFixAgentName(tx, reviewRegression),
-                  repairKind: "review-fix",
-                  headSha: reviewHeadSha,
-                  baseHeadSha: reviewBaseSha,
-                  summary,
-                  now,
+                // The chain mutex is held now; the Regression row read before it
+                // may already be stale, and a repair bound to a stale repository
+                // or target branch cannot hand off to the fresh Regression run.
+                const lockedRegression = await tx.task.findUnique({
+                  where: { id: regressionTaskId },
+                  select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
                 });
-                if ("refusal" in repair) {
-                  await stopTail(`independent review rejected ${reviewHeadSha} and automatic repair was refused: ${repair.refusal}`);
+                // Claiming the park this review owns is what makes the repair
+                // automatic without overruling anyone: an operator who moved
+                // readiness out of it while the review ran keeps that decision,
+                // and no repair run starts behind their back.
+                const claimedPark = await tx.task.updateMany({
+                  where: { id: readinessTaskId, status: TaskStatus.REVIEW, failureReason: { startsWith: INDEPENDENT_REVIEW_OPEN_PREFIX } },
+                  data: { failureReason: `review-fix: automatic repair queued at ${reviewHeadSha}` },
+                });
+                if (!lockedRegression) {
+                  await stopTail(`independent review rejected ${reviewHeadSha} but its Regression task is gone`);
+                } else if (claimedPark.count !== 1) {
+                  await tx.taskActivity.create({ data: {
+                    taskId: readinessTaskId,
+                    actorType: "control-plane",
+                    body: `Independent review rejected ${reviewHeadSha}, but readiness is no longer parked on that review; automatic repair was not started`,
+                    metadata: {
+                      kind: MERGE_TAIL_KIND.reviewObligation,
+                      schemaVersion: 1,
+                      state: "repair-skipped",
+                      reviewTaskId: run.taskId,
+                      headSha: reviewHeadSha,
+                    },
+                  } });
                 } else {
-                  await tx.task.update({
-                    where: { id: readinessTaskId },
-                    data: { status: TaskStatus.REVIEW, failureReason: `review-fix: automatic repair ${repair.taskId} queued at ${reviewHeadSha}` },
+                  const repair = await createMergeTailRepairTask(tx, {
+                    regressionTask: { id: regressionTaskId, ...lockedRegression },
+                    sourceRun: { id: run.id, branch: run.branch },
+                    agentName: await mergeTailFixAgentName(tx, lockedRegression),
+                    repairKind: "review-fix",
+                    headSha: reviewHeadSha,
+                    baseHeadSha: reviewBaseSha,
+                    summary,
+                    now,
                   });
+                  if ("refusal" in repair) {
+                    await stopTail(`independent review rejected ${reviewHeadSha} and automatic repair was refused: ${repair.refusal}`);
+                  } else {
+                    await tx.task.update({
+                      where: { id: readinessTaskId },
+                      data: { status: TaskStatus.REVIEW, failureReason: `review-fix: automatic repair ${repair.taskId} queued at ${reviewHeadSha}` },
+                    });
+                  }
                 }
               }
             }

@@ -22,6 +22,13 @@ export const MERGE_TAIL_KIND = {
   readiness: "mergeTail.readiness",
 } as const;
 
+/**
+ * The failure reason a merge-readiness step carries while an independent review
+ * is open. It is a park the review owns and resolves, not a stalled step, so
+ * generic recovery has to be able to recognise it.
+ */
+export const INDEPENDENT_REVIEW_OPEN_PREFIX = "independent-review-open:";
+
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
 export const MAX_BASE_DRIFT_CLASSIFICATION_RETRIES = 30;
 
@@ -286,6 +293,18 @@ export type IndependentReviewParse =
 /** Blocking rejections the autonomous tail repairs before it stops for a human. */
 export const MAX_BLOCKING_REVIEW_ROUNDS = 3;
 
+/**
+ * What one decision may contain.
+ *
+ * Every follow-up finding becomes a Task and an Activity written serially while
+ * the completion transaction holds the whole chain mutex, so an unbounded
+ * findings array is an unbounded transaction. A review that has more than this
+ * to say about one exact range is not a decision the tail can act on.
+ */
+export const MAX_REVIEW_FINDINGS = 50;
+export const MAX_REVIEW_FINDING_TITLE = 200;
+export const MAX_REVIEW_FINDING_TEXT = 4_000;
+
 const reviewFinding = (value: unknown, index: number): IndependentReviewFinding | string => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return `finding ${index} is not an object`;
@@ -297,12 +316,21 @@ const reviewFinding = (value: unknown, index: number): IndependentReviewFinding 
   if (typeof finding.title !== "string" || finding.title.trim().length === 0) {
     return `finding ${index} has no title`;
   }
+  if (finding.title.length > MAX_REVIEW_FINDING_TITLE) {
+    return `finding ${index} has a title longer than ${String(MAX_REVIEW_FINDING_TITLE)} characters`;
+  }
   if (typeof finding.detail !== "string" || finding.detail.trim().length === 0) {
     return `finding ${index} has no detail`;
+  }
+  if (finding.detail.length > MAX_REVIEW_FINDING_TEXT) {
+    return `finding ${index} has a detail longer than ${String(MAX_REVIEW_FINDING_TEXT)} characters`;
   }
   if (finding.severity === "blocking"
     && (typeof finding.reachability !== "string" || finding.reachability.trim().length === 0)) {
     return `blocking finding ${index} has no reachability argument`;
+  }
+  if (typeof finding.reachability === "string" && finding.reachability.length > MAX_REVIEW_FINDING_TEXT) {
+    return `finding ${index} has a reachability argument longer than ${String(MAX_REVIEW_FINDING_TEXT)} characters`;
   }
   return {
     severity: finding.severity,
@@ -341,6 +369,9 @@ export const parseIndependentReviewDecision = (
     return { status: "invalid", reason: `independent review decision is bound to ${value.headSha}, not ${expectedHeadSha}` };
   }
   if (!Array.isArray(value.findings)) return { status: "invalid", reason: "independent review output has no findings array" };
+  if (value.findings.length > MAX_REVIEW_FINDINGS) {
+    return { status: "invalid", reason: `independent review reported more than ${String(MAX_REVIEW_FINDINGS)} findings for one exact range` };
+  }
   const findings: IndependentReviewFinding[] = [];
   for (const [index, entry] of value.findings.entries()) {
     const finding = reviewFinding(entry, index);

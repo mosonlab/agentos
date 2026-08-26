@@ -43,7 +43,7 @@ import {
   resolveChainTarget,
   stopStateFor,
 } from "./merge-integrator-db.js";
-import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
+import { INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -1463,6 +1463,21 @@ const activateChainSuccessorInternal = async (
         taskId: successor.id,
         actorType: "control-plane",
         body: `Predecessor layer completed; ${parked}`,
+      } });
+      continue;
+    }
+    // A merge-readiness step parked on an open independent review is not
+    // stalled: the review owns that park and hands the step back when it
+    // resolves. Resuming it here would race the worker into re-parking a step
+    // whose review has already finished, which is the stall this recovery
+    // exists to prevent.
+    const reviewOwnedPark = successor.status === TaskStatus.REVIEW
+      && (successor.failureReason?.startsWith(INDEPENDENT_REVIEW_OPEN_PREFIX) ?? false);
+    if (reviewOwnedPark) {
+      await tx.taskActivity.create({ data: {
+        taskId: successor.id,
+        actorType: "control-plane",
+        body: "Predecessor layer completed; successor is held by an open independent review",
       } });
       continue;
     }

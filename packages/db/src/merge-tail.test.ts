@@ -11,6 +11,8 @@ import {
   isMergeReadinessStep,
   mergeRecoveryPhase,
   mergeRecoveryTransitionAllowed,
+  MAX_REVIEW_FINDINGS,
+  MAX_REVIEW_FINDING_TEXT,
   parseIndependentReviewDecision,
   parseResolverResult,
   parseRegressionVerdict,
@@ -171,4 +173,12 @@ test("a finding with an unknown severity or an empty title is invalid", () => {
   assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, severity: "must-fix" }]), A).status, "invalid");
   assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, title: "  " }]), A).status, "invalid");
   assert.equal(parseIndependentReviewDecision(reviewBody([{ ...followUp, detail: "" }]), A).status, "invalid");
+});
+
+test("a decision with more findings than one range can carry, or an over-long field, is invalid", () => {
+  const many = Array.from({ length: MAX_REVIEW_FINDINGS + 1 }, () => followUp);
+  assert.equal(parseIndependentReviewDecision(reviewBody(many), A).status, "invalid");
+  assert.equal(parseIndependentReviewDecision(reviewBody(Array.from({ length: MAX_REVIEW_FINDINGS }, () => followUp)), A).status, "ok");
+  const long = { ...followUp, detail: "d".repeat(MAX_REVIEW_FINDING_TEXT + 1) };
+  assert.equal(parseIndependentReviewDecision(reviewBody([long]), A).status, "invalid");
 });

@@ -242,6 +242,7 @@ const rejectIndependentReviewAfterPass = async (
   seeded: Awaited<ReturnType<typeof seedRegression>>,
   findings: unknown[] = [BLOCKING_FINDING],
   priorBlockingRounds = 0,
+  beforeCompletion: (input: { readinessId: string; reviewTaskId: string; reviewRunId: string }) => Promise<void> = async () => {},
 ) => {
   const pass = JSON.stringify({
     schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "PASS",
@@ -348,6 +349,7 @@ const rejectIndependentReviewAfterPass = async (
         headSha: HEAD, baseSha: BASE, summary: blockingSummary, blockingRound: index + 1,
       },
     })) });
+  await beforeCompletion({ readinessId: readiness.id, reviewTaskId: review.id, reviewRunId: reviewRun.id });
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "merge-tail-review-token";
   try {
@@ -641,6 +643,39 @@ test("a second blocking round still repairs itself", async () => {
   assert.equal(await db.task.count({ where: {
     projectId: seeded.project.id, name: "Autonomous merge tail: review-fix",
   } }), 1);
+});
+
+test("a decision left behind by an earlier review run is not evidence about this one", async () => {
+  const seeded = await seedRegression();
+  const stopped = await rejectIndependentReviewAfterPass(seeded, [], 0, async ({ reviewTaskId }) => {
+    const other = await db.run.create({ data: {
+      projectId: seeded.project.id, taskId: reviewTaskId, agentId: seeded.reviewAgent.id, repoId: seeded.repo.id,
+      runNumber: 2, dedupeKey: `task:${reviewTaskId}:run:2`, runner: "CODEX", model: seeded.reviewAgent.model,
+      promptHash: "stale", status: "FAILED",
+    } });
+    await db.taskStepOutput.update({ where: { taskId: reviewTaskId }, data: { runId: other.id } });
+  });
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: stopped.readiness.id } });
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.match(readiness.failureReason ?? "", /unusable decision/u);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(notice.kind, "TEXT");
+});
+
+test("a blocking rejection does not restart work an operator parked while the review ran", async () => {
+  const seeded = await seedRegression();
+  await rejectIndependentReviewAfterPass(seeded, [BLOCKING_FINDING], 0, async ({ readinessId }) => {
+    await db.task.update({ where: { id: readinessId }, data: { status: TaskStatus.BACKLOG, failureReason: null } });
+  });
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id, name: "Autonomous merge tail: review-fix",
+  } }), 0);
+  const parked = await db.task.findFirstOrThrow({ where: { projectId: seeded.project.id, name: "Readiness" } });
+  assert.equal(parked.status, TaskStatus.BACKLOG);
+  assert.equal(parked.failureReason, null);
+  await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: parked.id, metadata: { path: ["state"], equals: "repair-skipped" },
+  } });
 });
 
 test("a stale repair output stops the queued Regression Run before a provider session starts", async () => {
