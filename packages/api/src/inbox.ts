@@ -42,7 +42,7 @@ export const supersedeTaskInboxMessage = async (
 ): Promise<SupersedeInboxMessageResult> => db.$transaction(async (tx) => {
   const initial = await tx.inboxMessage.findUnique({
     where: { id: messageId },
-    select: { status: true, from: true, taskId: true, replyToMessageId: true },
+    select: { status: true, from: true, taskId: true, gateTaskId: true, replyToMessageId: true },
   });
   if (!initial) return { error: "Inbox message not found", code: 404 };
   if (initial.taskId === null) {
@@ -50,6 +50,9 @@ export const supersedeTaskInboxMessage = async (
   }
   if (initial.from !== InboxSender.AGENT || initial.replyToMessageId !== null) {
     return { error: "Only a top-level agent Inbox message can be superseded", code: 409 };
+  }
+  if (initial.gateTaskId !== null) {
+    return { error: "Only a non-gate Inbox message can be superseded", code: 409 };
   }
   // A prior successful supersession is safe to acknowledge without touching
   // the Task row again. This keeps retries idempotent even if the operator
@@ -67,20 +70,14 @@ export const supersedeTaskInboxMessage = async (
     return { error: "Only an Inbox message for an archived task can be superseded", code: 409 };
   }
 
-  // Re-read after the Task lock. The conditional update below is the message
-  // CAS: concurrent decisions or closes may win, but this action never turns a
-  // non-OPEN message into CLOSED.
+  // Re-read the mutable status after the Task lock. The conditional update
+  // below is the message CAS: concurrent decisions or closes may win, but this
+  // action never turns an ineligible or non-OPEN message into CLOSED.
   const message = await tx.inboxMessage.findUnique({
     where: { id: messageId },
-    select: { status: true, from: true, taskId: true, replyToMessageId: true },
+    select: { status: true },
   });
   if (!message) return { error: "Inbox message not found", code: 404 };
-  if (message.taskId !== task.id) {
-    return { error: "Inbox message is no longer linked to that task", code: 409 };
-  }
-  if (message.from !== InboxSender.AGENT || message.replyToMessageId !== null) {
-    return { error: "Only a top-level agent Inbox message can be superseded", code: 409 };
-  }
   if (message.status === InboxStatus.CLOSED) {
     return { closed: false, duplicate: true, requestId };
   }
@@ -89,12 +86,25 @@ export const supersedeTaskInboxMessage = async (
   }
 
   const closed = await tx.inboxMessage.updateMany({
-    where: { id: messageId, taskId: task.id, status: InboxStatus.OPEN },
+    where: {
+      id: messageId,
+      taskId: task.id,
+      gateTaskId: null,
+      status: InboxStatus.OPEN,
+    },
     // Superseded is not an answer. CLOSED removes the active Inbox noise while
     // leaving answeredAt null and preserving the absence of a decision.
     data: { status: InboxStatus.CLOSED },
   });
-  if (closed.count === 1) return { closed: true, duplicate: false, requestId };
+  if (closed.count === 1) {
+    await tx.taskActivity.create({ data: {
+      taskId: task.id,
+      actorType: "operator",
+      body: "Inbox message superseded",
+      metadata: { inboxMessageId: messageId, requestId },
+    } });
+    return { closed: true, duplicate: false, requestId };
+  }
 
   const current = await tx.inboxMessage.findUnique({ where: { id: messageId }, select: { status: true } });
   if (current?.status === InboxStatus.CLOSED) return { closed: false, duplicate: true, requestId };

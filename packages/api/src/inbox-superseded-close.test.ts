@@ -30,25 +30,35 @@ type Fixture = {
   taskUpdateCount: number;
   runWriteCount: number;
   activityWriteCount: number;
+  activityWrites: Array<Record<string, unknown>>;
   answeredAt: Date | null;
 };
 
 const fixture = (options: {
   status?: InboxStatus;
   taskArchived?: boolean;
+  taskId?: string | null;
   from?: "AGENT" | "HUMAN";
+  gateTaskId?: string | null;
   replyToMessageId?: string | null;
+  messageMissing?: boolean;
+  loseCas?: boolean;
 } = {}): Fixture => {
   const state = {
     status: options.status ?? InboxStatus.OPEN,
     taskArchived: options.taskArchived ?? true,
+    taskId: options.taskId === undefined ? "task-1" : options.taskId,
     from: options.from ?? "AGENT",
+    gateTaskId: options.gateTaskId ?? null,
     replyToMessageId: options.replyToMessageId ?? null,
+    messageMissing: options.messageMissing ?? false,
+    loseCas: options.loseCas ?? false,
     updateCount: 0,
     taskLockCount: 0,
     taskUpdateCount: 0,
     runWriteCount: 0,
     activityWriteCount: 0,
+    activityWrites: [] as Array<Record<string, unknown>>,
     answeredAt: null as Date | null,
   };
   const task = {
@@ -80,18 +90,20 @@ const fixture = (options: {
     },
     inboxMessage: {
       findUnique: async ({ select }: { select?: Record<string, unknown> }) => {
+        if (state.messageMissing) return null;
         if (select && "status" in select) {
           return {
             status: state.status,
             from: state.from,
-            taskId: "task-1",
+            taskId: state.taskId,
+            gateTaskId: state.gateTaskId,
             replyToMessageId: state.replyToMessageId,
           };
         }
-        return { taskId: "task-1" };
+        return { taskId: state.taskId };
       },
       updateMany: async ({ data }: { data: { status: InboxStatus; answeredAt?: Date } }) => {
-        if (state.status !== InboxStatus.OPEN) return { count: 0 };
+        if (state.status !== InboxStatus.OPEN || state.loseCas) return { count: 0 };
         state.status = data.status;
         state.answeredAt = data.answeredAt ?? null;
         state.updateCount += 1;
@@ -105,9 +117,10 @@ const fixture = (options: {
       },
     },
     taskActivity: {
-      create: async () => {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
         state.activityWriteCount += 1;
-        throw new Error("supersede must not create activity");
+        state.activityWrites.push(data);
+        return data;
       },
     },
   };
@@ -161,7 +174,16 @@ test("operator supersede closes an open message for an archived task under the t
     assert.equal(state.taskLockCount, 1, "archivedAt is checked while the Task row is locked");
     assert.equal(state.taskUpdateCount, 0);
     assert.equal(state.runWriteCount, 0);
-    assert.equal(state.activityWriteCount, 0);
+    assert.equal(state.activityWriteCount, 1);
+    assert.deepEqual(state.activityWrites, [{
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Inbox message superseded",
+      metadata: {
+        inboxMessageId: "message-1",
+        requestId: "supersede-message-1",
+      },
+    }]);
   });
 });
 
@@ -192,6 +214,45 @@ test("supersede refuses human replies and other non-top-level messages", async (
   });
 });
 
+test("supersede refuses approval-gate cards without changing the Inbox message", async () => {
+  await withTokens(async () => {
+    const state = fixture({ gateTaskId: "task-1" });
+    const response = await request(state.database, "/inbox/messages/message-1/supersede");
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json() as { error: string }).error), /non-gate Inbox message/u);
+    assert.equal(state.updateCount, 0);
+    assert.equal(state.taskLockCount, 0);
+    assert.equal(state.activityWriteCount, 0);
+  });
+});
+
+test("supersede refuses a missing or detached Inbox message before locking a task", async () => {
+  await withTokens(async () => {
+    const missing = fixture({ messageMissing: true });
+    const missingResponse = await request(missing.database, "/inbox/messages/message-1/supersede");
+    assert.equal(missingResponse.status, 404);
+    assert.equal((await missingResponse.json() as { error: string }).error, "Inbox message not found");
+    assert.equal(missing.taskLockCount, 0);
+
+    const detached = fixture({ taskId: null });
+    const detachedResponse = await request(detached.database, "/inbox/messages/message-1/supersede");
+    assert.equal(detachedResponse.status, 409);
+    assert.match(String((await detachedResponse.json() as { error: string }).error), /task-linked/u);
+    assert.equal(detached.taskLockCount, 0);
+  });
+});
+
+test("supersede reports a lost compare-and-set without recording an activity", async () => {
+  await withTokens(async () => {
+    const state = fixture({ loseCas: true });
+    const response = await request(state.database, "/inbox/messages/message-1/supersede");
+    assert.equal(response.status, 409);
+    assert.match(String((await response.json() as { error: string }).error), /changed before/u);
+    assert.equal(state.updateCount, 0);
+    assert.equal(state.activityWriteCount, 0);
+  });
+});
+
 test("supersede is idempotent on replay, including when the request id changes", async () => {
   await withTokens(async () => {
     const state = fixture();
@@ -211,6 +272,7 @@ test("supersede is idempotent on replay, including when the request id changes",
     });
     assert.equal(state.updateCount, 1);
     assert.equal(state.taskLockCount, 1, "the replay needs no second lifecycle lock");
+    assert.equal(state.activityWriteCount, 1, "the replay does not duplicate the audit activity");
   });
 });
 
