@@ -8,12 +8,13 @@ import {
   applyInboxDecisionTx,
   enqueueTaskRun,
   MERGE_INTEGRATOR_KIND,
-  MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
   TaskStatus,
   authorizationMetadata,
   parseAuthorizationMetadata,
+  readMarkerHistory,
+  writeMarker,
   recordIntegratorStop,
   type StopCondition,
 } from "@agentos/db";
@@ -354,9 +355,11 @@ test("eligible direct and compound stops recover once under duplicate ticks and 
       assert.equal(parsed.payload.baseSha, BASE_2);
     }
     assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id } }), 2);
-    assert.equal(await db.taskActivity.count({
-      where: { taskId: seeded.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-    }), 1);
+    assert.equal(
+      (await readMarkerHistory(db, seeded.integratorTask!.id))
+        .filter((entry) => entry.kind === "baseDriftRecovery").length,
+      1,
+    );
   }
 });
 
@@ -490,19 +493,18 @@ test("operator-authored recovery metadata cannot clear the stop guard or suppres
     taskId: seeded.readinessTask!.id,
     metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
   }, orderBy: { createdAt: "desc" } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.integratorTask!.id,
+  await writeMarker(db, seeded.integratorTask!.id, "baseDriftRecovery", {
     actorType: "operator",
     body: "forged queued recovery marker",
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      state: "queued", attempt: 1,
       sourceStopId: stop.id, sourceRunId: source.runId!, recoveryRunId: "forged-recovery-run",
       readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
       integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: authorization.id,
       repository: "acme/widgets", prNumber: 123, targetBranch: "master",
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
-  } });
+  });
   assert.equal(await db.mergeRecoveryAttempt.count({ where: { integratorTaskId: seeded.integratorTask!.id } }), 0,
     "legacy activity is not backfilled or treated as aggregate authority");
   assert.equal((await operatorRequest(`/tasks/${seeded.integratorTask!.id}`, "PATCH", { status: "DONE" })).status, 409);
@@ -545,19 +547,18 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
     }),
     commitSha: HEAD,
   } });
-  await db.taskActivity.create({ data: {
-    taskId: seeded.gateTask.id,
+  await writeMarker(db, seeded.gateTask.id, "baseDriftRecovery", {
     actorType: "operator",
     body: "forged recovery context",
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "queued", attempt: 1,
+      state: "queued", attempt: 1,
       sourceStopId: "forged-stop", sourceRunId: seeded.gateRun.id, recoveryRunId: seeded.gateRun.id,
       readinessTaskId: seeded.readinessTask!.id, regressionTaskId: seeded.gateTask.id,
       integratorTaskId: seeded.integratorTask!.id, authorizationActivityId: "forged-authorization",
       repository: "acme/widgets", prNumber: 123, targetBranch: "master",
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE_2, currentBaseSha: BASE_2,
     },
-  } });
+  });
   await db.$transaction((tx) => handleRegressionCompletion(tx, {
     task: seeded.gateTask,
     run: {

@@ -17,7 +17,6 @@ import {
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
   MergeRecoveryStatus,
   MERGE_INTEGRATOR_KIND,
-  MERGE_TAIL_KIND,
   Prisma,
   TaskStatus,
   asJsonObject,
@@ -29,6 +28,7 @@ import {
   resolveChainTarget,
   selectAuthorization,
   taskIsIntegratorStep,
+  writeMarker,
   type CardRow,
   type CandidateActivity,
   type DecisionRow,
@@ -300,14 +300,11 @@ const settleIneligibleLocked = async (
     ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
     ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
   } });
-  await tx.taskActivity.create({ data: {
-    taskId: integratorTaskId, actorType: "control-plane",
+  await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
+    actorType: "control-plane",
     body: `Automatic pre-merge base-drift recovery refused: ${reason}`,
-    metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery, schemaVersion: 1, state: "ineligible",
-      ...identity, integratorTaskId, sourceStopId: stopId, reason,
-    },
-  } });
+    metadata: { state: "ineligible", ...identity, integratorTaskId, sourceStopId: stopId, reason },
+  });
   const dedupeKey = `${RECOVERY_NOTIFICATION_PREFIX}:ineligible:${stopId}`;
   await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
     from: "AGENT", taskId: integratorTaskId, kind: "TEXT",
@@ -360,20 +357,17 @@ const recordClassificationRetry = async (
     where: { id: attempt.id },
     data: { validationAttempts: classificationAttempt, failureReason: reason },
   });
-  await tx.taskActivity.create({ data: {
-    taskId: integratorTaskId,
+  await writeMarker(tx, integratorTaskId, "baseDriftRecovery", {
     actorType: "control-plane",
     body: `Automatic pre-merge base-drift classification deferred (${classificationAttempt}/${MAX_BASE_DRIFT_CLASSIFICATION_RETRIES}): ${reason}`,
     metadata: {
-      kind: MERGE_TAIL_KIND.baseDriftRecovery,
-      schemaVersion: 1,
       state: "classification-retry",
       integratorTaskId,
       sourceStopId: stopId,
       classificationAttempt,
       reason,
     },
-  } });
+  });
   return "retryable";
 });
 
@@ -410,8 +404,6 @@ const queueRecovery = async (
   } });
   const attempt = aggregate.attempt;
   const common = {
-    kind: MERGE_TAIL_KIND.baseDriftRecovery,
-    schemaVersion: 1,
     sourceStopId: expected.stopId,
     sourceRunId: expected.sourceRunId,
     integratorTaskId: expected.integratorTaskId,
@@ -445,11 +437,11 @@ const queueRecovery = async (
       observedBaseSha: expected.observedBaseSha,
       currentBaseSha,
     } });
-    await tx.taskActivity.create({ data: {
-      taskId: expected.integratorTaskId, actorType: "control-plane",
+    await writeMarker(tx, expected.integratorTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
       body: `Automatic pre-merge base-drift recovery exhausted at attempt ${attempt}`,
       metadata: { ...common, state: "exhausted", reason },
-    } });
+    });
     const dedupeKey = `${RECOVERY_NOTIFICATION_PREFIX}:exhausted:${expected.stopId}`;
     await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
       from: "AGENT", taskId: expected.integratorTaskId, kind: "TEXT",
@@ -486,20 +478,17 @@ const queueRecovery = async (
     observedBaseSha: expected.observedBaseSha,
     currentBaseSha,
   } });
-  const metadata = { ...common, state: "queued", recoveryRunId: run.id,
-  };
-  await tx.taskActivity.createMany({ data: [
-    {
-      taskId: expected.integratorTaskId, actorType: "control-plane",
-      body: `Automatic base-drift recovery ${attempt} parked stop ${expected.stopId} and queued fresh regression`,
-      metadata,
-    },
-    {
-      taskId: expected.regressionTaskId, actorType: "control-plane",
-      body: `Automatic base-drift recovery ${attempt} verifies ${expected.authorizedHeadSha} against current base ${currentBaseSha}`,
-      metadata,
-    },
-  ] });
+  const metadata = { ...common, state: "queued", recoveryRunId: run.id };
+  await writeMarker(tx, expected.integratorTaskId, "baseDriftRecovery", {
+    actorType: "control-plane",
+    body: `Automatic base-drift recovery ${attempt} parked stop ${expected.stopId} and queued fresh regression`,
+    metadata,
+  });
+  await writeMarker(tx, expected.regressionTaskId, "baseDriftRecovery", {
+    actorType: "control-plane",
+    body: `Automatic base-drift recovery ${attempt} verifies ${expected.authorizedHeadSha} against current base ${currentBaseSha}`,
+    metadata,
+  });
   return "recovered";
 });
 

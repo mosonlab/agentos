@@ -15,6 +15,9 @@ import {
   MERGE_TAIL_KIND,
   PrismaClient,
   TaskStatus,
+  latestMarker,
+  readMarkers,
+  writeMarker,
 } from "@agentos/db";
 
 import { handleRegressionCompletion } from "./app.js";
@@ -353,37 +356,35 @@ const rejectIndependentReviewAfterPass = async (
     body: outputBody,
     commitSha: HEAD,
   } });
-  await db.taskActivity.createMany({ data: [
-    {
-      taskId: readiness.id,
-      actorType: "control-plane",
-      body: `Independent review obligation opened for ${HEAD}`,
-      metadata: {
-        kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "open",
-        reviewTaskId: review.id, headSha: HEAD, baseSha: BASE,
-      },
+  await writeMarker(db, readiness.id, "reviewObligation", {
+    actorType: "control-plane",
+    body: `Independent review obligation opened for ${HEAD}`,
+    metadata: { state: "open", reviewTaskId: review.id, headSha: HEAD, baseSha: BASE },
+  });
+  await writeMarker(db, review.id, "reviewObligation", {
+    actorType: "control-plane",
+    body: `Blind review obligation for readiness task ${readiness.id}`,
+    metadata: {
+      state: "open",
+      readinessTaskId: readiness.id,
+      regressionTaskId: seeded.regression.id,
+      headSha: HEAD,
+      baseSha: BASE,
     },
-    {
-      taskId: review.id,
-      actorType: "control-plane",
-      body: `Blind review obligation for readiness task ${readiness.id}`,
-      metadata: {
-        kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "open",
-        readinessTaskId: readiness.id, regressionTaskId: seeded.regression.id,
-        headSha: HEAD, baseSha: BASE,
-      },
-    },
-  ] });
-  if (priorBlockingRounds > 0) await db.taskActivity.createMany({ data:
-    Array.from({ length: priorBlockingRounds }, (_unused, index) => ({
-      taskId: readiness.id,
+  });
+  for (let index = 0; index < priorBlockingRounds; index += 1) {
+    await writeMarker(db, readiness.id, "reviewObligation", {
       actorType: "control-plane",
       body: `Independent review rejected exact head ${HEAD} on blocking round ${String(index + 1)}`,
       metadata: {
-        kind: "mergeTail.reviewObligation", schemaVersion: 1, state: "rejected",
-        headSha: HEAD, baseSha: BASE, summary: blockingSummary, blockingRound: index + 1,
+        state: "rejected",
+        headSha: HEAD,
+        baseSha: BASE,
+        summary: blockingSummary,
+        blockingRound: index + 1,
       },
-    })) });
+    });
+  }
   await beforeCompletion({ readinessId: readiness.id, reviewTaskId: review.id, reviewRunId: reviewRun.id });
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "merge-tail-review-token";
@@ -424,11 +425,9 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
   }));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
-  const result = await db.taskActivity.findFirstOrThrow({ where: {
-    taskId: seeded.regression.id,
-    metadata: { path: ["kind"], equals: "mergeTail.repairResult" },
-  } });
-  assert.match(result.body, new RegExp(`${HEAD}.*${RESOLVED}`));
+  const result = latestMarker(await readMarkers(db, seeded.regression.id), "repairResult");
+  assert.equal(result?.startHeadSha, HEAD);
+  assert.equal(result?.resolvedHeadSha, RESOLVED);
 
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
   assert.equal(await repairCount(seeded), 1);
