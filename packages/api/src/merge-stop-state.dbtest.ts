@@ -65,8 +65,7 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   try {
     const response = await createApp(db, {
       releaseMergeLease: async (chainId) => {
-      releasedChainLeases.push(chainId);
-      return { outcome: "released", ref: "refs/merge-lease/holder", sha: "lease-fixture" };
+      if (chainId) releasedChainLeases.push(chainId);
     },
     }).request(path, {
       method,

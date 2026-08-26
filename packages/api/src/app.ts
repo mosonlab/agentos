@@ -85,8 +85,7 @@ import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin
 import {
   mergeTailLeaseChainId,
   releaseMergeLease,
-  releaseMergeLeaseSafely,
-  type MergeLeaseReleaser,
+  type ReleaseMergeLease,
 } from "./merge-lease.js";
 import { createRunnerRegistry } from "./runners.js";
 import {
@@ -180,7 +179,7 @@ const runFenceRefusal = (refused: FenceRefusalResponse): Refusal => (
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
-  releaseMergeLease?: MergeLeaseReleaser;
+  releaseMergeLease?: ReleaseMergeLease;
 }
 
 
@@ -3491,7 +3490,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }));
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...settlement } = result;
-    await releaseMergeLeaseSafely(releaseChainLease, releaseMergeLeaseTask);
+    await releaseChainLease(releaseMergeLeaseTask);
     return context.json(settlement);
   });
 
@@ -3987,7 +3986,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       claimantClass: principal.kind === "merge-executor" ? "merge-executor" : "runner",
     });
     if ("message" in result) return refusalJson(context, result);
-    await releaseMergeLeaseSafely(releaseChainLease, result.releaseMergeLeaseTask);
+    await releaseChainLease(result.releaseMergeLeaseTask);
     await options.ownership.assertHeld();
     // Nothing is deleted here, or anywhere else in this process. The runner
     // removed its own workspace before it called /complete and reported the
@@ -4184,7 +4183,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     });
     if ("message" in result) return refusalJson(context, result);
     const { releaseMergeLeaseTask, ...cancellation } = result;
-    await releaseMergeLeaseSafely(releaseChainLease, releaseMergeLeaseTask);
+    await releaseChainLease(releaseMergeLeaseTask);
     return context.json(cancellation);
   });
 

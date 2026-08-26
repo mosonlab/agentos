@@ -53,7 +53,7 @@ const readOutcome = (output: string): MergeLeaseRelease | null => {
   }
 };
 
-export const releaseMergeLease: MergeLeaseReleaser = async (chainId) => {
+const releaseMergeLeaseAdapter: MergeLeaseReleaser = async (chainId) => {
   try {
     const { stdout, stderr } = await execFileAsync("bash", [mergeLeaseScript, "release", "--task", chainId], {
       timeout: 90_000,
@@ -75,29 +75,35 @@ export const releaseMergeLease: MergeLeaseReleaser = async (chainId) => {
   }
 };
 
-export const releaseMergeLeaseSafely = async (
+const releaseMergeLeaseWith = async (
   releaser: MergeLeaseReleaser,
   chainId: string | null,
-): Promise<MergeLeaseRelease | null> => {
-  if (!chainId) return null;
+): Promise<void> => {
+  if (!chainId) return;
+  let release: MergeLeaseRelease;
   try {
-    return await releaser(chainId);
+    release = await releaser(chainId);
   } catch (error: unknown) {
-    console.error(`Merge lease release failed for chain ${chainId}`, error);
-    return { outcome: "unreachable", detail: error instanceof Error ? error.message : String(error) };
+    release = { outcome: "unreachable", detail: error instanceof Error ? error.message : String(error) };
   }
+  reportMergeLeaseAnomaly(chainId, release);
+};
+
+export type ReleaseMergeLease = (chainId: string | null) => Promise<void>;
+
+export const releaseMergeLease: ReleaseMergeLease = async (chainId) => {
+  await releaseMergeLeaseWith(releaseMergeLeaseAdapter, chainId);
 };
 
 /**
  * Say out loud that a release did not free the lock it was asked to free.
  * `released` and `not-held` are the ordinary answers. The other three are
- * anomalies on the lock that serialises the merge window on main -- the lease is
+ * anomalies on the Lease that serialises the merge window on main -- the Lease is
  * still standing, or nobody knows whether it is -- and they arrive on a path
- * that otherwise reports nothing at all. This reports and returns: what the
- * merge tail should do about a stuck lease is not decided here.
+ * that otherwise reports nothing at all. The caller has no reporting
+ * obligation: every release adapter result is consumed inside this module.
  */
-export const reportMergeLeaseAnomaly = (chainId: string | null, release: MergeLeaseRelease | null): void => {
-  if (!chainId || !release) return;
+const reportMergeLeaseAnomaly = (chainId: string, release: MergeLeaseRelease): void => {
   switch (release.outcome) {
     case "released":
     case "not-held":
@@ -186,7 +192,7 @@ const CONTENDED_EXIT = 75;
  * string matches the one the chain's own regression run writes, so an operator
  * reading `merge-lease.sh status` sees the same lease either way.
  */
-export const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
+const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
   try {
     const { stdout, stderr } = await execFileAsync("bash", [
       mergeLeaseScript,
@@ -207,5 +213,55 @@ export const acquireMergeLease: MergeLeaseAcquirer = async (chainId) => {
     const detail = `${failure.stdout ?? ""}${failure.stderr ?? ""}`.trim();
     console.error(`Merge lease acquire failed for chain ${chainId}${detail ? `: ${detail}` : ""}`);
     return { outcome: "unreachable", detail: detail || String(error) };
+  }
+};
+
+export type LeaseDisposition = "release" | "retain";
+
+export type MergeLeaseDependencies = {
+  acquire: MergeLeaseAcquirer;
+  release: MergeLeaseReleaser;
+};
+
+export type WithMergeLease = <T>(
+  chainId: string | null,
+  fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+) => Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }>;
+
+/**
+ * Run one authorization attempt under the Chain's merge Lease. A successful
+ * authorization explicitly hands the Lease to mechanical merge with `retain`;
+ * every other completed or exceptional callback path gives it back here.
+ * A Task without a Chain has no Lease to acquire or release, but still runs the
+ * callback through the same interface.
+ */
+export const withMergeLease = async <T>(
+  chainId: string | null,
+  fn: () => Promise<{ disposition: LeaseDisposition; value: T }>,
+  dependencies: MergeLeaseDependencies = {
+    acquire: acquireMergeLease,
+    release: releaseMergeLeaseAdapter,
+  },
+): Promise<{ outcome: "contended" } | { outcome: "ran"; value: T }> => {
+  if (chainId === null) {
+    const result = await fn();
+    return { outcome: "ran", value: result.value };
+  }
+
+  const acquisition = await dependencies.acquire(chainId);
+  if (acquisition.outcome === "contended") return { outcome: "contended" };
+  if (acquisition.outcome === "unreachable") {
+    throw new Error(`merge lease acquire is unreachable: ${acquisition.detail}`);
+  }
+
+  let disposition: LeaseDisposition = "release";
+  try {
+    const result = await fn();
+    disposition = result.disposition;
+    return { outcome: "ran", value: result.value };
+  } finally {
+    if (disposition === "release") {
+      await releaseMergeLeaseWith(dependencies.release, chainId);
+    }
   }
 };
