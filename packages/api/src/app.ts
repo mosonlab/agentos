@@ -8,17 +8,16 @@ import {
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
-  deriveRunConfig,
   FailureClass,
   GoalStatus,
   enqueueTaskRun,
+  openRun,
   InboxStatus,
   lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockChainRows,
   lockRunRow,
-  nativeImplementationSubagentRunConfig,
   NetworkingMode,
   Prisma,
   type PrismaClient,
@@ -29,7 +28,6 @@ import {
   RunnerKind,
   RunnerPreference,
   recomputeSessionUsage,
-  resolveRunBranches,
   runnerFor,
   sessionUsageCost,
   sumUsageCosts,
@@ -43,7 +41,6 @@ import {
   isMergeExecutorRunnerId,
   mechanicalPrincipalRefusal,
   executionModeFor,
-  integratorBindingRefusal,
   integratorBindingRefusalFor,
   projectMergeOutcome,
   runOwnsMergeOutcome,
@@ -56,7 +53,6 @@ import {
   resolveChainTarget,
   selectAuthorization,
   stopStateFor,
-  stopStateRefusal,
   taskIsIntegratorStep,
   type CandidateActivity,
   type CardRow,
@@ -107,7 +103,6 @@ import {
 } from "./chain.js";
 import {
   jsonValue,
-  makeDedupeKey,
   normalizeSessionEventValue,
   runBudgetCeiling,
 } from "./execution.js";
@@ -175,6 +170,13 @@ const refusalJson = (context: Context, refused: Refusal): Response => {
 const runFenceRefusal = (refused: FenceRefusalResponse): Refusal => (
   refusal("conflict", refused.error, { reason: refused.reason })
 );
+
+class TaskCreateOpenRunRefusal extends Error {
+  constructor(readonly refusal: Refusal) {
+    super(refusal.message);
+    this.name = "TaskCreateOpenRunRefusal";
+  }
+}
 
 export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
@@ -2216,70 +2218,55 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     } catch (error: unknown) {
       return context.json({ error: error instanceof Error ? error.message : "Invalid schedule" }, 400);
     }
-    const task = await db.$transaction(async (tx) => {
-      // The check above answered from an unlocked read. This one holds the
-      // Agent-row mutex through the task — and the inline run below — so a
-      // concurrent archive either loses the race or is refused for this run.
-      const currentAgent = agent ? await lockAgentRow(tx, agent.id) : null;
-      if (agent && !currentAgent) return refusal("invalid-request", "Assignee does not belong to this project");
-      if (currentAgent?.archivedAt) return refusal("invalid-request", `Assignee ${currentAgent.name} is archived`);
-      // §D-P4, inside the transaction and before `tx.task.create` and the inline
-      // `tx.run.create` below. This route cannot set `templateStepId` at all, so
-      // in practice it refuses the sentinel Agent outright — which is the point:
-      // an ordinary task assigned to the sentinel would claim as `agent` and
-      // spawn a model CLI with `mechanical/merge-executor-v1` as its model.
-      const bindingRefusal = await integratorBindingRefusalFor(tx, {
-        assigneeAgentName: currentAgent?.name ?? null,
-        templateStep: null,
-      });
-      if (bindingRefusal) return refusal("invalid-request", bindingRefusal);
-      const created = await tx.task.create({
-        data: {
-          ...withoutUndefined(body),
-          ...schedule,
-          projectId,
-          chainLayer: body.chainId === undefined ? null : body.chainIndex,
-        } as Prisma.TaskUncheckedCreateInput,
-      });
-      await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
-      // API-created chains arrive one task at a time. Only index 0 may receive
-      // an eager run; later indexed steps stay parked until
-      // activateChainSuccessor observes their predecessor's durable success.
-      // Without this guard every POST snapshots the fallback base before step
-      // 0 can publish, and all runners race the same new shared head.
-      const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
-      if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
-        const derived = deriveRunConfig(currentAgent, null, created);
-        // This run is built inline rather than through enqueueTaskRun, so it is
-        // one of the paths a chain fix can miss. Missing it puts step ① on a
-        // per-task branch while ②–⑨ share the chain branch — i.e. step ①'s work
-        // silently absent from the tree every later step reviews.
-        const branches = await resolveRunBranches(tx, { ...created, repo }, null);
-        await tx.run.create({
-          data: {
-            projectId,
-            taskId: created.id,
-            agentId: currentAgent.id,
-            repoId: repo.id,
-            runNumber: 1,
-            dedupeKey: makeDedupeKey(created.id, 1),
-            runner: derived.runner,
-            model: derived.model,
-            codexServiceTier: derived.codexServiceTier,
-            targetBranch: branches.targetBranch,
-            branch: branches.branch,
-            opensPullRequest: created.opensPullRequest,
-            promptHash: derived.promptHash,
-            maxDurationMin: body.maxDurationMin,
-            stallTimeoutMin: body.stallTimeoutMin,
-            maxRunsPerTask: body.maxSessionsPerTask,
-          },
+    try {
+      const task = await db.$transaction(async (tx) => {
+        // The check above answered from an unlocked read. This one holds the
+        // Agent-row mutex through the task and `openRun`, so a
+        // concurrent archive either loses the race or is refused for this run.
+        const currentAgent = agent ? await lockAgentRow(tx, agent.id) : null;
+        if (agent && !currentAgent) return refusal("invalid-request", "Assignee does not belong to this project");
+        if (currentAgent?.archivedAt) return refusal("invalid-request", `Assignee ${currentAgent.name} is archived`);
+        // §D-P4, inside the transaction and before `tx.task.create`. This route
+        // cannot set `templateStepId` at all, so in practice it refuses the
+        // sentinel Agent outright — which is the point: an ordinary task
+        // assigned to the sentinel would claim as `agent` and spawn a model CLI
+        // with `mechanical/merge-executor-v1` as its model.
+        const bindingRefusal = await integratorBindingRefusalFor(tx, {
+          assigneeAgentName: currentAgent?.name ?? null,
+          templateStep: null,
         });
-      }
-      return { created };
-    });
-    if ("message" in task) return refusalJson(context, task);
-    return context.json(task.created, 201);
+        if (bindingRefusal) return refusal("invalid-request", bindingRefusal);
+        const created = await tx.task.create({
+          data: {
+            ...withoutUndefined(body),
+            ...schedule,
+            projectId,
+            chainLayer: body.chainId === undefined ? null : body.chainIndex,
+          } as Prisma.TaskUncheckedCreateInput,
+        });
+        await tx.taskActivity.create({ data: { taskId: created.id, actorType: "operator", body: "Task created" } });
+        // API-created chains arrive one task at a time. Only index 0 may receive
+        // an eager run; later indexed steps stay parked until
+        // activateChainSuccessor observes their predecessor's durable success.
+        // Without this guard every POST snapshots the fallback base before step
+        // 0 can publish, and all runners race the same new shared head.
+        const mayQueueInline = created.chainIndex == null || created.chainIndex === 0;
+        if (currentAgent && repo && body.assigneeType === AssigneeType.AGENT && schedule.scheduleKind === ScheduleKind.NOW && mayQueueInline) {
+          // Bypassing `openRun` here once put step 1 on a per-Task branch while
+          // every later Step shared the Chain branch, silently dropping step 1.
+          const opened = await openRun(tx, created.id, { kind: "task-created", readyAt: new Date() });
+          // A refusal must roll back the Task born earlier in this transaction;
+          // returning it would commit a Task whose requested eager Run is absent.
+          if (!opened.ok) throw new TaskCreateOpenRunRefusal(opened.refusal);
+        }
+        return { created };
+      });
+      if ("message" in task) return refusalJson(context, task);
+      return context.json(task.created, 201);
+    } catch (error: unknown) {
+      if (error instanceof TaskCreateOpenRunRefusal) return refusalJson(context, error.refusal);
+      throw error;
+    }
   });
   app.get("/tasks/:taskId", async (context) => {
     const task = await db.task.findUnique({
@@ -2533,9 +2520,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const result = await db.$transaction(async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return refusal("not-found", "Task not found");
-      // Retry joins the exclusion protocol: a guard set in which one writer
-      // ignores archivedAt excludes nothing.
-      if (locked.archivedAt !== null) return refusal("conflict", "Cannot retry an archived task");
       const task = await tx.task.findUnique({
         where: { id: taskId },
         include: {
@@ -2566,7 +2550,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           return refusal("conflict", `Cannot retry ${task.name}; predecessor ${blocker.name} is not done`);
         }
       }
-      const integratorStepShape = task.templateStep;
       const last = task.runs[0];
       if (!last) return refusal("conflict", "Task has no run to retry");
       // Checked across ALL of the task's runs with the shared active set, not
@@ -2578,57 +2561,9 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       if (activeRuns > 0) {
         return refusal("conflict", "Task already has an active run");
       }
-      const stoppedForRetry = await stopStateFor(tx, taskId);
-      if (stoppedForRetry) return refusal("conflict", stopStateRefusal(stoppedForRetry));
-      // The same ceiling the Start gate uses, for the same reason: the budget an
-      // operator configured now, plus what has been granted on top of it. The
-      // old `last.maxRunsPerTask` could not tell a refund from a budget that had
-      // since been lowered.
-      if (last.runNumber >= runBudgetCeiling(task.maxSessionsPerTask, last.budgetGrants)) {
-        return refusal("conflict", "Run budget exhausted");
-      }
-      if (!task.assigneeAgent) {
-        return refusal("conflict", "Task assignee no longer exists; assign an agent before retrying");
-      }
-      // Retry builds its Run inline rather than through enqueueTaskRun, so it
-      // takes the Agent-row mutex itself — Task row first, Agent row second.
-      const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
-      if (!lockedAgent || lockedAgent.archivedAt) {
-        return refusal("conflict", `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`);
-      }
-      const currentBinding = integratorBindingRefusal(lockedAgent.name, integratorStepShape);
-      if (currentBinding) return refusal("invalid-request", currentBinding);
-      const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-      const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
-      // A task with no repo cannot be a chain step with a branch, and this route
-      // already tolerates a null repoId — so it keeps inheriting run-1's fields.
-      const branches = task.repo
-        ? await resolveRunBranches(tx, { ...task, repo: task.repo }, last)
-        : null;
-      const run = await tx.run.create({
-        data: {
-          projectId: last.projectId,
-          taskId,
-          goalId: last.goalId,
-          agentId: lockedAgent.id,
-          repoId: task.repoId,
-          runNumber: last.runNumber + 1,
-          dedupeKey: makeDedupeKey(taskId, last.runNumber + 1),
-          runner: derived.runner,
-          model: derived.model,
-          codexServiceTier: derived.codexServiceTier,
-          ...subagent,
-          targetBranch: branches ? branches.targetBranch : last.targetBranch,
-          branch: branches ? branches.branch : last.branch,
-          opensPullRequest: task.opensPullRequest,
-          promptHash: derived.promptHash,
-          maxDurationMin: last.maxDurationMin,
-          stallTimeoutMin: last.stallTimeoutMin,
-          maxRunsPerTask: runBudgetCeiling(task.maxSessionsPerTask, last.budgetGrants),
-          budgetGrants: last.budgetGrants,
-          readyAt: now,
-        },
-      });
+      const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
+      if (!opened.ok) return opened.refusal;
+      const run = opened.run;
       await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Run ${run.runNumber} queued by operator retry` } });
       return { run };

@@ -10,6 +10,7 @@ import {
   MergeRecoveryStatus,
   Prisma,
   RunStatus,
+  type Run,
   RunnerKind,
   RunnerPreference,
   SessionExecutionStatus,
@@ -32,10 +33,10 @@ import {
 } from "./merge-integrator.js";
 import {
   applyStopAnswer,
-  createAuthorizedIntegratorRun,
-  assertIntegratorBinding,
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
+  IntegratorBindingError,
+  integratorBindingRefusalFor,
   isIntegratorBindingError,
   parseStopQuestionKey,
   recoverRefreshRequestedConfirmationCard,
@@ -47,6 +48,11 @@ import { AUTHORITY_RESIGN_OPEN_PREFIX, INDEPENDENT_REVIEW_OPEN_PREFIX, isMergeRe
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
+
+export const runBudgetCeiling = (
+  maxSessionsPerTask: number,
+  budgetGrants: number | null | undefined,
+): number => maxSessionsPerTask + Math.max(0, budgetGrants ?? 0);
 
 const promptHash = (parts: string[]): string => createHash("sha256").update(parts.join("\n")).digest("hex");
 
@@ -424,8 +430,8 @@ export const lockAgentRepoGrantForRevocation = async (
 };
 
 /** The shape `resolveRunBranches` needs. Structural rather than a Prisma payload
- *  type, so the five call sites can pass rows from five differently-shaped
- *  queries — the same reason `packages/api/src/chain.ts` keeps `ChainRow` plain. */
+ *  type so `openRun` can pass each intent's branch facts without coupling the
+ *  resolver to its full Task query. */
 export type RunBranchTask = {
   id: string;
   projectId: string;
@@ -549,11 +555,10 @@ export const resolveRequeueBase = async (
 };
 
 /**
- * Decides a new Run's head (`branch`) and base (`targetBranch`). The only place
- * that decision is made; `enqueueTaskRun`, `POST /tasks`, the operator retry
- * route, the automatic retry in the completion transaction and the lost-lease
- * requeue all call this, because five copies of the expression is how step ①
- * ended up on a different branch from steps ②–⑨.
+ * Decides a new Run's head (`branch`) and base (`targetBranch`). `openRun` is
+ * its only Run-birth caller; keeping the branch rule behind that seam prevents
+ * one intent from putting a Step on a different branch from the rest of its
+ * Chain.
  *
  * Writes at most one TaskActivity row (see the chain branch below), so it takes
  * the caller's transaction.
@@ -648,13 +653,86 @@ export const resolveRunBranches = async (
 
 type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: string };
 
-const enqueueTaskRunInternal = async (
+export type OpenRunIntent =
+  | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
+  | { kind: "task-created"; readyAt: Date }
+  | { kind: "retry"; readyAt: Date }
+  | { kind: "integrator-authorized"; readyAt: Date }
+  | {
+    kind: "retry-after-completion";
+    readyAt: Date;
+    sourceRunId: string;
+    sourceMaxRunsPerTask: number;
+    sourceBudgetGrants: number;
+    budgetGrant: 0 | 1;
+  }
+  | {
+    kind: "retry-after-lease-loss";
+    readyAt: Date;
+    sourceRunId: string;
+    sourceMaxRunsPerTask: number;
+    sourceBudgetGrants: number;
+  };
+
+export type OpenRunRefusal = {
+  reason:
+    | "invalid-request"
+    | "not-found"
+    | "conflict"
+    | "compound-implementation-assignee"
+    | "archived-assignee"
+    | "archived-task"
+    | "integrator-stopped";
+  message: string;
+  detail?: Readonly<Record<string, string | number | boolean | null>>;
+  context?: Readonly<{
+    taskId?: string;
+    taskName?: string;
+    agentName?: string;
+    condition?: string;
+    code?: string;
+  }>;
+};
+
+export type OpenRunResult =
+  | { ok: true; run: Run }
+  | { ok: false; refusal: OpenRunRefusal };
+
+const openRunRefusal = (
+  reason: OpenRunRefusal["reason"],
+  message: string,
+  detail?: OpenRunRefusal["detail"],
+  context?: OpenRunRefusal["context"],
+): OpenRunResult => ({
+  ok: false,
+  refusal: {
+    reason,
+    message,
+    ...(detail ? { detail } : {}),
+    ...(context ? { context } : {}),
+  },
+});
+
+const sourceRetryIntent = (
+  intent: OpenRunIntent,
+): intent is Extract<OpenRunIntent, { kind: "retry-after-completion" | "retry-after-lease-loss" }> =>
+  intent.kind === "retry-after-completion" || intent.kind === "retry-after-lease-loss";
+
+/**
+ * The only place a Run comes into existence.
+ *
+ * Every birth intent crosses the same task, stop-state, Agent-row, compound
+ * assignee and integrator-binding guards. The discriminated intent owns the
+ * few differences that are real domain rules: which prior configuration and
+ * branch snapshot a retry preserves, and whether a human authorization may
+ * grant enough budget for the next mechanical run.
+ */
+export const openRun = async (
   tx: Tx,
   taskId: string,
-  now: Date,
-  stopBypass: IntegratorStopBypass | null,
-) => {
-  const task = await tx.task.findUniqueOrThrow({
+  intent: OpenRunIntent,
+): Promise<OpenRunResult> => {
+  const task = await tx.task.findUnique({
     where: { id: taskId },
     include: {
       assigneeAgent: true,
@@ -663,31 +741,56 @@ const enqueueTaskRunInternal = async (
       runs: { orderBy: { runNumber: "desc" }, take: 1 },
     },
   });
-  if (task.assigneeType !== AssigneeType.AGENT || !task.assigneeAgent || !task.repo) {
-    throw new Error(`Task ${task.id} cannot be queued without an agent and repo`);
+  if (!task) return openRunRefusal("not-found", "Task not found");
+  if (task.assigneeType !== AssigneeType.AGENT) {
+    return openRunRefusal("invalid-request", `Task ${task.id} cannot open a Run without an Agent assignee`);
+  }
+  if (!task.assigneeAgent) {
+    return openRunRefusal("conflict", "Task assignee no longer exists; assign an agent before retrying");
+  }
+  if (!task.repo && (intent.kind === "enqueue" || intent.kind === "task-created" || intent.kind === "integrator-authorized")) {
+    return openRunRefusal("invalid-request", `Task ${task.id} cannot open a ${intent.kind} Run without a Repo`);
   }
   // Checked before the assignee, because an archived task is archived whoever
   // it is assigned to. The runner claims only `TODO|DOING` and unarchived tasks,
   // so a run queued here would never be claimed and never complete.
   if (task.archivedAt) {
-    throw new ArchivedTaskError(task.id, task.name);
+    const message = intent.kind === "retry"
+      ? "Cannot retry an archived task"
+      : `Task ${task.name} is archived; unarchive it before queueing a run`;
+    return openRunRefusal("archived-task", message, undefined, {
+      taskId: task.id,
+      taskName: task.name,
+    });
   }
-  // §D-P7, the last line of the exclusivity guard. This function is the single
-  // place a Run comes into existence outside the two inline creates and the
-  // answer transaction, so a route added later inherits the refusal by
-  // construction rather than by remembering to ask.
+  // §D-P7, the last line of the exclusivity guard. `openRun` is the single
+  // place a Run comes into existence, so a new birth intent inherits the
+  // refusal by construction rather than by remembering to ask.
   const stopped = await stopStateFor(tx, task.id);
+  const stopBypass = intent.kind === "enqueue" ? intent.stopBypass ?? null : null;
   if (stopped && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
-    throw new IntegratorStoppedError(task.id, stopped.stop.condition);
+    return openRunRefusal(
+      "integrator-stopped",
+      `Merge integrator stopped on ${stopped.stop.condition}; answer the stop question before starting another run`,
+      undefined,
+      { taskId: task.id, condition: stopped.stop.condition },
+    );
   }
   // The assignee is re-read under the shared Agent-row mutex, not trusted from
-  // the relation above: this function is the single place a Run comes into
+  // the relation above: `openRun` is the single place a Run comes into
   // existence, so an archive committing in parallel has to lose here or be
-  // refused for the run this call is about to create. A row that vanished
-  // falls back to the relation; the foreign key decides that case.
+  // refused for the Run this call is about to create.
   const lockedAgent = await lockAgentRow(tx, task.assigneeAgent.id);
   if (!lockedAgent || lockedAgent.archivedAt) {
-    throw new ArchivedAssigneeError(task.id, task.name, task.assigneeAgent.name);
+    const message = intent.kind === "retry"
+      ? `Assignee ${task.assigneeAgent.name} is archived; unarchive it to retry`
+      : `Task ${task.name} assignee ${task.assigneeAgent.name} is archived; unarchive the agent to queue this step`;
+    return openRunRefusal(
+      "archived-assignee",
+      message,
+      undefined,
+      { taskId: task.id, taskName: task.name, agentName: task.assigneeAgent.name },
+    );
   }
   if (!compoundImplementationAssigneeValid(
     task.projectId,
@@ -695,52 +798,170 @@ const enqueueTaskRunInternal = async (
     lockedAgent,
     task.templateStep,
   )) {
-    throw new CompoundImplementationAssigneeError();
+    const error = new CompoundImplementationAssigneeError();
+    return openRunRefusal("compound-implementation-assignee", error.message, { code: error.code });
   }
-  // §D-P4, the last line of the binding invariant, for the same reason: this is
-  // the shared enqueue path, so a route added later inherits the refusal. The
+  // §D-P4, the last line of the binding invariant, for the same reason. The
   // Agent name comes from the locked re-read, never the stale task relation.
-  await assertIntegratorBinding(tx, {
+  const bindingRefusal = await integratorBindingRefusalFor(tx, {
     assigneeAgentName: lockedAgent.name,
-    templateStepId: task.templateStepId,
+    templateStep: task.templateStep,
   });
+  if (bindingRefusal) {
+    return openRunRefusal("invalid-request", bindingRefusal, undefined, { code: "INTEGRATOR_BINDING_INVALID" });
+  }
+
   const prior = task.runs[0];
+  if (intent.kind === "task-created" && prior) {
+    return openRunRefusal("conflict", `Task ${task.name} already has a Run`);
+  }
+  if ((intent.kind === "retry" || intent.kind === "integrator-authorized" || sourceRetryIntent(intent)) && !prior) {
+    return openRunRefusal("conflict", `Task ${task.name} has no Run to continue`);
+  }
+  if (sourceRetryIntent(intent) && prior?.id !== intent.sourceRunId) {
+    return openRunRefusal("conflict", `Run ${intent.sourceRunId} is no longer the latest Run for task ${task.name}`);
+  }
+  if (intent.kind === "integrator-authorized" && (!task.templateStep || stepRole(task.templateStep) !== "integrator")) {
+    return openRunRefusal("invalid-request", `Task ${task.name} is not an integrator Step`);
+  }
+
   const runNumber = (prior?.runNumber ?? 0) + 1;
-  const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
-  const subagent = nativeImplementationSubagentRunConfig(derived.runner, task.templateStep);
-  const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
-  return tx.run.create({ data: {
+  let budgetGrants = prior?.budgetGrants ?? 0;
+  let maxRunsPerTask: number;
+  if (intent.kind === "integrator-authorized") {
+    budgetGrants = Math.max(budgetGrants, runNumber - task.maxSessionsPerTask);
+    maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
+  } else if (intent.kind === "retry-after-completion") {
+    budgetGrants = intent.sourceBudgetGrants + intent.budgetGrant;
+    maxRunsPerTask = runBudgetCeiling(intent.sourceMaxRunsPerTask, intent.budgetGrant);
+  } else if (intent.kind === "retry-after-lease-loss") {
+    budgetGrants = intent.sourceBudgetGrants + 1;
+    maxRunsPerTask = runBudgetCeiling(intent.sourceMaxRunsPerTask, 1);
+  } else {
+    maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
+  }
+  if (intent.kind === "retry" && prior && prior.runNumber >= maxRunsPerTask) {
+    return openRunRefusal("conflict", "Run budget exhausted");
+  }
+
+  const branches = intent.kind === "integrator-authorized"
+    ? { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch }
+    : !task.repo
+      ? { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch }
+      : intent.kind === "retry-after-completion"
+        ? task.chainId && (task.templateId || task.chainIndex !== null)
+          ? await resolveRunBranches(
+            tx,
+            { ...task, repo: task.repo },
+            task.templateId ? { branch: prior?.branch ?? null } : null,
+          )
+          : {
+            branch: null,
+            targetBranch: prior
+              ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, prior)
+              : task.targetBranch ?? task.repo.defaultBranch,
+          }
+        : intent.kind === "retry-after-lease-loss"
+          ? task.templateStep?.baseFromStepIndex != null
+            ? await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: prior?.branch ?? null })
+            : task.chainId && task.chainIndex !== null && !task.templateId
+              ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
+              : {
+                branch: prior?.branch ?? null,
+                targetBranch: prior
+                  ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, prior)
+                  : task.targetBranch ?? task.repo.defaultBranch,
+              }
+          : await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
+
+  const preservedConfiguration = sourceRetryIntent(intent) && prior
+    ? {
+      runner: prior.runner,
+      model: prior.model,
+      codexServiceTier: prior.codexServiceTier,
+      subagentModel: prior.subagentModel,
+      subagentMaxConcurrent: prior.subagentMaxConcurrent,
+      promptHash: prior.promptHash,
+    }
+    : null;
+  const configuration = intent.kind === "integrator-authorized"
+    ? {
+      runner: prior?.runner ?? RunnerKind.CLAUDE,
+      model: lockedAgent.model,
+      promptHash: prior?.promptHash ?? "mechanical",
+    }
+    : preservedConfiguration ?? (() => {
+      const derived = deriveRunConfig(lockedAgent, task.templateStep, task);
+      return {
+        ...derived,
+        ...nativeImplementationSubagentRunConfig(derived.runner, task.templateStep),
+      };
+    })();
+  const preservesPriorTiming = intent.kind === "retry" || sourceRetryIntent(intent);
+
+  const run = await tx.run.create({ data: {
     projectId: task.projectId,
     taskId: task.id,
+    ...((intent.kind === "retry" || sourceRetryIntent(intent)) && prior?.goalId ? { goalId: prior.goalId } : {}),
     agentId: lockedAgent.id,
-    repoId: task.repo.id,
+    repoId: task.repoId,
     runNumber,
     dedupeKey: `task:${task.id}:run:${runNumber}`,
-    runner: derived.runner,
-    model: derived.model,
-    codexServiceTier: derived.codexServiceTier,
-    ...subagent,
+    ...configuration,
     targetBranch: branches.targetBranch,
     branch: branches.branch,
-    opensPullRequest: task.opensPullRequest,
-    promptHash: derived.promptHash,
-    maxDurationMin: task.maxDurationMin,
-    stallTimeoutMin: task.stallTimeoutMin,
+    opensPullRequest: intent.kind === "integrator-authorized" ? false : task.opensPullRequest,
+    maxDurationMin: preservesPriorTiming ? prior?.maxDurationMin ?? task.maxDurationMin : task.maxDurationMin,
+    stallTimeoutMin: preservesPriorTiming ? prior?.stallTimeoutMin ?? task.stallTimeoutMin : task.stallTimeoutMin,
     // The configured budget plus the grants already earned, not the budget
-    // alone. This is the fifth run-creating path (chain successors, template
-    // steps, schedules, approval rejections) and it used to reset
-    // `maxRunsPerTask` to the task's raw budget, throwing away every refund an
-    // external failure had bought — issue #113. A task whose provisioning
-    // failures had lifted the ceiling to 7 and reached run 6 would be handed
-    // `runNumber: 7, maxRunsPerTask: 5` and the runner's own boot gate
-    // (`runNumber > maxRunsPerTask`) would refuse it: a run nothing could ever
-    // claim. Recomputing from `maxSessionsPerTask` each time, rather than
-    // carrying the prior absolute ceiling forward, is what lets an operator
-    // lower a task's budget and have it take effect.
-    maxRunsPerTask: task.maxSessionsPerTask + (prior?.budgetGrants ?? 0),
-    budgetGrants: prior?.budgetGrants ?? 0,
-    readyAt: now,
+    // alone. Automatic retries deliberately use the already-authorized source
+    // ceiling as their base: a mid-Run task edit cannot retroactively revoke a
+    // Run, while later operator actions recompute from the current task budget.
+    maxRunsPerTask,
+    budgetGrants,
+    readyAt: intent.readyAt,
   } });
+  return { ok: true, run };
+};
+
+const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
+  if (refusal.reason === "archived-task") {
+    return new ArchivedTaskError(
+      String(refusal.context?.taskId ?? "unknown"),
+      String(refusal.context?.taskName ?? "unknown"),
+    );
+  }
+  if (refusal.reason === "archived-assignee") {
+    return new ArchivedAssigneeError(
+      String(refusal.context?.taskId ?? "unknown"),
+      String(refusal.context?.taskName ?? "unknown"),
+      String(refusal.context?.agentName ?? "unknown"),
+    );
+  }
+  if (refusal.reason === "integrator-stopped") {
+    return new IntegratorStoppedError(
+      String(refusal.context?.taskId ?? "unknown"),
+      String(refusal.context?.condition ?? "unknown"),
+    );
+  }
+  if (refusal.reason === "compound-implementation-assignee") {
+    return new CompoundImplementationAssigneeError();
+  }
+  if (refusal.context?.code === "INTEGRATOR_BINDING_INVALID") {
+    return new IntegratorBindingError(refusal.message);
+  }
+  return new Error(refusal.message);
+};
+
+const enqueueTaskRunInternal = async (
+  tx: Tx,
+  taskId: string,
+  now: Date,
+  stopBypass: IntegratorStopBypass | null,
+): Promise<Run> => {
+  const opened = await openRun(tx, taskId, { kind: "enqueue", readyAt: now, stopBypass });
+  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
+  return opened.run;
 };
 
 export const enqueueTaskRun = async (tx: Tx, taskId: string, now = new Date()) =>
@@ -1895,7 +2116,12 @@ export const produceMergeAuthorization = async (
     // A renewal. The successor is already active, so activateChainSuccessor
     // would produce a run at the original ceiling that runner.ts then refuses
     // at claim. This is the only writer of a ceiling above the task's original.
-    await createAuthorizedIntegratorRun(tx, integrator.id, now);
+    const opened = await openRun(tx, integrator.id, { kind: "integrator-authorized", readyAt: now });
+    if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
+    await tx.task.updateMany({
+      where: { id: integrator.id, status: { in: [TaskStatus.REVIEW, TaskStatus.TODO, TaskStatus.DOING] } },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
     await tx.taskActivity.create({ data: {
       taskId: integrator.id,
       actorType: "control-plane",

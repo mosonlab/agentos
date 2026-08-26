@@ -3,15 +3,14 @@ import {
   FailureClass,
   InboxStatus,
   lockTaskRow,
-  resolveRequeueBase,
-  resolveRunBranches,
+  openRun,
+  runBudgetCeiling,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
   type PrismaClient,
 } from "@agentos/db";
 
-import { makeDedupeKey } from "./execution.js";
 import { mergeTailLeaseChainId, releaseMergeLease, type ReleaseMergeLease } from "./merge-lease.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 
@@ -222,7 +221,9 @@ export const reconcileDatabaseRuns = async (
         continue;
       }
       // Losing a lease is an external failure: it buys an attempt, never spends one.
-      const budgetCeiling = run.maxRunsPerTask + 1;
+      // A lost lease refunds the already-authorized Run; it does not recompute
+      // from a task budget that may have changed while the Run was in flight.
+      const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, 1);
       // The same grant, recorded apart from the ceiling it produced, so the
       // gates an operator reaches can still tell it from the configured budget
       // after that budget changes. See `runBudgetCeiling`.
@@ -258,63 +259,37 @@ export const reconcileDatabaseRuns = async (
       });
       if (!run.taskId) continue;
       if (run.runNumber < budgetCeiling) {
-        // Chain steps recompute; everything else keeps the lost run's own base,
-        // because the resolver's non-chain answer reads the *task's* current
-        // targetBranch and the lost run's may predate an operator edit. That
-        // snapshot still has to answer to publication evidence, though:
-        // copying it verbatim requeued a pre-fix run onto the very ref no
-        // remote had (issue #118), and dropped a salvage the lost run pushed.
-        const task = await tx.task.findUnique({
-          where: { id: run.taskId },
-          select: {
-            id: true, projectId: true, repoId: true, chainId: true, chainIndex: true, templateId: true,
-            targetBranch: true, opensPullRequest: true,
-            templateStep: { select: { baseFromStepIndex: true } },
-            repo: { select: { defaultBranch: true } },
-          },
+        const opened = await openRun(tx, run.taskId, {
+          kind: "retry-after-lease-loss",
+          sourceRunId: run.id,
+          sourceMaxRunsPerTask: run.maxRunsPerTask,
+          sourceBudgetGrants: run.budgetGrants,
+          readyAt: now,
         });
-        // Ordinary chain steps recompute without inheriting the lost run.
-        // Pinned template steps pass only the workspace branch identity; the
-        // resolver re-reads their immutable source range and never trusts the
-        // lost run's targetBranch as a commit.
-        const branches = task?.templateStep?.baseFromStepIndex != null && task.repo
-          ? await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch })
-          : task?.chainId && task.chainIndex !== null && !task.templateId && task.repo
-          ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
-          : {
-            branch: run.branch,
-            targetBranch: task?.repo
-              ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, run)
-              : run.targetBranch,
-          };
-        await tx.run.create({
-          data: {
-            projectId: run.projectId,
-            taskId: run.taskId,
-            goalId: run.goalId,
-            agentId: run.agentId,
-            repoId: run.repoId,
-            runNumber: run.runNumber + 1,
-            dedupeKey: makeDedupeKey(run.taskId, run.runNumber + 1),
-            runner: run.runner,
-            model: run.model,
-            codexServiceTier: run.codexServiceTier,
-            subagentModel: run.subagentModel,
-            subagentMaxConcurrent: run.subagentMaxConcurrent,
-            targetBranch: branches.targetBranch,
-            branch: branches.branch,
-            opensPullRequest: task?.opensPullRequest ?? true,
-            promptHash: run.promptHash,
-            maxDurationMin: run.maxDurationMin,
-            stallTimeoutMin: run.stallTimeoutMin,
-            maxRunsPerTask: budgetCeiling,
-            budgetGrants,
-          },
-        });
-        await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
-        await tx.taskActivity.create({
-          data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${run.runNumber + 1} queued` },
-        });
+        if (opened.ok) {
+          await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
+          await tx.taskActivity.create({
+            data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
+          });
+        } else {
+          const lostChainId = await mergeTailLeaseChainId(tx, run.taskId);
+          if (lostChainId) stranded.add(lostChainId);
+          await tx.task.update({
+            where: { id: run.taskId },
+            data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
+          });
+          await tx.taskActivity.create({
+            data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; automatic retry refused: ${opened.refusal.message}` },
+          });
+          await tx.inboxMessage.create({
+            data: {
+              from: "AGENT",
+              taskId: run.taskId,
+              kind: "TEXT",
+              body: `Automatic retry refused after lease loss: ${opened.refusal.message}`,
+            },
+          });
+        }
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.

@@ -78,8 +78,7 @@ export const externalFailure = (evidence: {
  * same refund one route away, would have let it run. A ceiling only half the
  * system honours is not a ceiling.
  */
-export const runBudgetCeiling = (maxSessionsPerTask: number, budgetGrants: number | null | undefined): number =>
-  maxSessionsPerTask + Math.max(0, budgetGrants ?? 0);
+export { runBudgetCeiling } from "@agentos/db";
 
 export const retryDelayMs = (runNumber: number, failureClass: FailureClass): number => {
   const base = failureClass === FailureClass.RATE_LIMITED ? 60_000 : 30_000;

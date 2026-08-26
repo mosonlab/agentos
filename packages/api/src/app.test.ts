@@ -662,21 +662,29 @@ test("only environment failures are external, so agent failures still spend budg
   assert.equal(externalFailure({ succeeded: false, failureClass: "TASK_FAILED" }), false);
 });
 
-test("an archived assignee's automatic retry is queued, audited, and does not spend an external-failure attempt", async () => {
+test("completion refunds an external failure but refuses an automatic retry for an archived Agent", async () => {
   const previousRoot = process.env.RUNNER_WORKSPACE_ROOT;
   process.env.RUNNER_WORKSPACE_ROOT = `/tmp/agentos-missing-${Date.now()}`;
   try {
     await withTokens(async () => {
     let closed: Record<string, unknown> | undefined;
     let retry: Record<string, unknown> | undefined;
+    const taskWrites: Record<string, unknown>[] = [];
+    const inbox: Record<string, unknown>[] = [];
+    const archivedAt = new Date("2026-08-16T06:00:00.000Z");
     const run = {
       id: "run-3", projectId: "project-1", taskId: "task-1", goalId: null, agentId: "agent-1", repoId: "repo-1",
       runNumber: 3, maxRunsPerTask: 3, runner: "CLAUDE", model: "claude", targetBranch: "main", branch: "feat/x",
+      codexServiceTier: "DEFAULT", subagentModel: null, subagentMaxConcurrent: null, budgetGrants: 0,
       baseSha: null, promptHash: "hash", maxDurationMin: 120, stallTimeoutMin: 10,
       task: {
-        id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: null, chainIndex: null,
+        id: "task-1", projectId: "project-1", name: "Archived retry", description: "retry",
+        assigneeType: "AGENT", assigneeAgentId: "agent-1",
+        assigneeAgent: { id: "agent-1", name: "Archived Retry Agent", archivedAt },
+        repoId: "repo-1", chainId: null, chainIndex: null,
         templateId: null, templateStep: null, repo: null, targetBranch: "main", opensPullRequest: true,
-        status: "DOING", archivedAt: null,
+        maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3,
+        status: "DOING", archivedAt: null, templateStepId: null,
       }, session: { id: "session-1" },
     };
     const tx = {
@@ -686,15 +694,19 @@ test("an archived assignee's automatic retry is queued, audited, and does not sp
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { closed = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { retry = data; return { id: "run-4", ...data }; },
       },
+      agent: { findUnique: async () => run.task.assigneeAgent },
       session: { update: async () => ({}) },
       task: {
-        updateMany: async () => ({ count: 1 }),
-        findUnique: async () => run.task,
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => { taskWrites.push(data); return { count: 1 }; },
+        findUnique: async () => ({
+          ...run.task,
+          runs: [{ ...run, task: undefined, session: undefined, maxRunsPerTask: 4, budgetGrants: 1 }],
+        }),
         findUniqueOrThrow: async () => run.task,
       },
       taskActivity: { create: async () => ({}) },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
-      inboxMessage: { create: async () => ({}) },
+      inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     };
     const database = {
       $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
@@ -714,23 +726,16 @@ test("an archived assignee's automatic retry is queued, audited, and does not sp
     });
     assert.equal(response.status, 200);
     assert.equal(closed?.maxRunsPerTask, 4);
-    // Run 3 of 3 would have been the last attempt; the refunded ceiling requeues it.
-    assert.equal(retry?.runNumber, 4);
-    assert.equal(retry?.maxRunsPerTask, 4);
-    const notices: Record<string, unknown>[] = [];
-    const auditDb = {
-      run: {
-        findMany: async () => [{
-          id: "run-4", taskId: "task-1", runNumber: retry?.runNumber,
-          agent: { name: "Archived Retry Agent", archivedAt: new Date("2026-08-16T06:00:00.000Z") },
-        }],
-      },
-      taskActivity: {
-        createMany: async ({ data }: { data: Record<string, unknown>[] }) => { notices.push(...data); return { count: data.length }; },
-      },
-    } as unknown as PrismaClient;
-    assert.equal(await noteArchivedQueuedRuns(auditDb), 1);
-    assert.match(String(notices[0]?.body), /Archived Retry Agent.*run 4/);
+    assert.equal(retry, undefined);
+    assert.match(String(taskWrites.at(-1)?.failureReason), /Automatic retry refused.*Archived Retry Agent/);
+    assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived Retry Agent/);
+    assert.deepEqual(await response.json(), {
+      taskId: "task-1",
+      succeeded: false,
+      retryCreated: false,
+      failureClass: "TRANSIENT_PROVIDER",
+      releaseMergeLeaseTask: null,
+    });
     });
   } finally {
     if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
@@ -788,9 +793,17 @@ const retryRequest = async (
     archivedAt?: Date | null;
     name?: string;
   } | null,
-  templateStep: { runner: RunnerKind | null } | null = null,
+  templateStep: {
+    runner: RunnerKind | null;
+    stepIndex?: number;
+    outputKind?: string;
+    taskTemplate?: { name: string };
+  } | null = null,
 ) => {
   let created: Record<string, unknown> | undefined;
+  const currentTemplateStep = templateStep
+    ? { stepIndex: 1, outputKind: "result", taskTemplate: { name: "direct-engineer-workflow" }, ...templateStep }
+    : null;
   const last = {
     id: "run-1",
     projectId: "project-1",
@@ -821,12 +834,25 @@ const retryRequest = async (
         findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
         findUnique: async () => ({
           id: "task-1",
+          projectId: "project-1",
           name: "Retry me",
           description: "Use current config",
+          assigneeType: "AGENT",
+          assigneeAgentId: assigneeAgent?.id ?? null,
           repoId: "repo-current",
+          repo: null,
+          templateId: null,
+          templateStepId: currentTemplateStep ? "step-1" : null,
           maxSessionsPerTask: 4,
+          maxDurationMin: 120,
+          stallTimeoutMin: 10,
+          opensPullRequest: true,
+          chainId: null,
+          chainIndex: null,
+          targetBranch: "main",
+          archivedAt: null,
           assigneeAgent,
-          templateStep,
+          templateStep: currentTemplateStep,
           runs: [last],
         }),
         update: async () => ({}),
@@ -916,6 +942,30 @@ test("operator retry honors a template-step runner override", async () => {
     }, { runner: RunnerKind.CODEX });
     assert.equal(response.status, 201);
     assert.equal(created?.runner, RunnerKind.CODEX);
+  });
+});
+
+test("operator retry refuses a compound implementation Step assigned to a non-executioner Agent", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-1",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      name: "senior-dev",
+    }, {
+      runner: RunnerKind.CODEX,
+      stepIndex: 5,
+      outputKind: "implementation",
+      taskTemplate: { name: "compound-engineer-workflow" },
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID",
+    });
+    assert.equal(created, undefined);
   });
 });
 

@@ -164,11 +164,13 @@ test("startup reconciliation does not fail when archived notice persistence fail
   }
 });
 
-test("lease-loss requeue for an archived agent becomes visible through the sweep", async () => {
+test("lease-loss retry refuses an archived Agent and parks the Task visibly", async () => {
   const now = new Date("2026-08-16T06:00:00.000Z");
   let queued: Record<string, unknown> | undefined;
   let lostUpdate: Record<string, unknown> | undefined;
   const activities: Record<string, unknown>[] = [];
+  const taskUpdates: Record<string, unknown>[] = [];
+  const inbox: Record<string, unknown>[] = [];
   const candidate = {
     id: "lost-1", heartbeatAt: new Date(now.getTime() - 20 * 60_000),
     leaseExpiresAt: new Date(now.getTime() - 10 * 60_000), projectId: "project-1",
@@ -184,21 +186,31 @@ test("lease-loss requeue for an archived agent becomes visible through the sweep
     },
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
       $queryRaw: async () => [{ id: "task-1", archivedAt: null }],
+      agent: { findUnique: async () => ({ id: "agent-1", name: "Archived", archivedAt: now }) },
       run: {
         findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { lostUpdate = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
       },
       session: { updateMany: async () => ({ count: 1 }) },
-      // The requeue loads the task to decide whether to recompute a chain
-      // step's branches; a null row keeps the lost run's fields verbatim.
       task: {
-        update: async () => ({}),
-        findUnique: async () => null,
+        update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return {}; },
+        findUnique: async () => ({
+          id: "task-1", projectId: "project-1", name: "Lost task", description: "retry",
+          assigneeType: "AGENT", assigneeAgentId: "agent-1",
+          assigneeAgent: { id: "agent-1", name: "Archived", archivedAt: now },
+          repoId: null, repo: null, templateId: null, templateStepId: null, templateStep: null,
+          chainId: null, chainIndex: null, targetBranch: "main", opensPullRequest: true,
+          maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3, archivedAt: null,
+          runs: [{ ...candidate, maxRunsPerTask: 4, budgetGrants: 1 }],
+        }),
         findUniqueOrThrow: async () => ({ id: "task-1", archivedAt: null }),
       },
-      taskActivity: { create: async () => ({}) },
-      inboxMessage: { create: async () => ({}) },
+      taskActivity: {
+        findMany: async () => [],
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+      },
+      inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
     }),
     taskActivity: {
       createMany: async ({ data }: { data: Record<string, unknown>[] }) => { activities.push(...data); return { count: data.length }; },
@@ -207,6 +219,9 @@ test("lease-loss requeue for an archived agent becomes visible through the sweep
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
   assert.equal(lostUpdate?.failureClass, "CANCELLED_OR_TIMED_OUT");
   assert.match(String(lostUpdate?.failureReason), /heartbeat starved.*lease expired/i);
-  assert.equal(await noteArchivedQueuedRuns(database), 1);
-  assert.match(String(activities[0]?.body), /Archived.*run 2/);
+  assert.equal(queued, undefined);
+  assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
+  assert.match(String(taskUpdates.at(-1)?.failureReason), /retry refused.*Archived/i);
+  assert.match(String(activities.at(-1)?.body), /automatic retry refused.*Archived/i);
+  assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived/i);
 });

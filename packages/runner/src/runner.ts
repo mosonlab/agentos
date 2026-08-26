@@ -267,6 +267,8 @@ export const executeClaim = async (
       });
       return;
     }
+    // `maxRunsPerTask` is the persisted authorization written by `openRun`;
+    // this boot gate consumes that verdict and must not recompute a Task budget.
     if (claim.run.runNumber > claim.run.maxRunsPerTask) {
       const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, false);
       await completeRun(config, claim, {

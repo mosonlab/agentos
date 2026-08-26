@@ -26,6 +26,7 @@ import {
   MAX_BLOCKING_REVIEW_ROUNDS,
   MERGE_TAIL_KIND,
   mechanicalPrincipalRefusal,
+  openRun,
   openReviewObligation,
   parseIndependentReviewDecision,
   parseMergeResult,
@@ -35,8 +36,7 @@ import {
   readMarkerHistory,
   readMarkers,
   recordIntegratorStop,
-  resolveRequeueBase,
-  resolveRunBranches,
+  runBudgetCeiling,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
@@ -57,7 +57,6 @@ import {
   externalFailure,
   failureIsRetryable,
   jsonValue,
-  makeDedupeKey,
   retryDelayMs,
 } from "./execution.js";
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
@@ -374,7 +373,7 @@ export const completeRun = async (
     // not get to raise the ceiling on this step either.
     const mechanical = isIntegratorStep(run.task?.templateStep ?? null);
     const refunded = external && !mechanical ? 1 : 0;
-    const budgetCeiling = run.maxRunsPerTask + refunded;
+    const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, refunded);
     // One marker read for both completion outcomes; this handler used to
     // declare `tailRows` twice and scan twice. The success path consults it
     // only for a standalone auxiliary task — an automatic repair or an
@@ -538,69 +537,18 @@ export const completeRun = async (
       },
     });
     let retryCreated = false;
+    let retryRefusal: Refusal | null = null;
     if (!succeeded && retryable && run.task && run.runNumber < budgetCeiling) {
-      const currentTask = await tx.task.findUniqueOrThrow({
-        where: { id: run.task.id },
-        include: { templateStep: true, repo: { select: { defaultBranch: true } } },
+      const opened = await openRun(tx, run.task.id, {
+        kind: "retry-after-completion",
+        sourceRunId: run.id,
+        sourceMaxRunsPerTask: run.maxRunsPerTask,
+        sourceBudgetGrants: run.budgetGrants,
+        budgetGrant: refunded,
+        readyAt: retryAt ?? now,
       });
-      // The fifth run-creating path. Indexed chains already resolve their
-      // branch here; template chains must do the same or a retry is created
-      // with `branch: null` and workspace.ts silently moves it to a per-run
-      // branch. Pass the failed template run as the prior so publication
-      // evidence — including WIP salvage written by this completion — still
-      // decides the retry's base; the resolved logical chain head wins over
-      // that run's workspace branch. Non-template
-      // chains retain their existing no-prior resolution, and non-chain
-      // retries retain the historical `branch: null` behavior.
-      //
-      // All of this runs *after* the updateMany that writes the completing
-      // run's `branch`/`pushedBranch`, so the run's own push — a chain step's
-      // publication, or a failed run's salvage — is evidence in this
-      // transaction. `body.branch ?? run.branch` is that same effective value,
-      // because `run` was read before the update.
-      const resolveChain = currentTask.repo && currentTask.chainId
-        && (currentTask.templateId || currentTask.chainIndex !== null);
-      const branches = resolveChain && currentTask.repo
-        ? await resolveRunBranches(
-          tx,
-          { ...currentTask, repo: currentTask.repo },
-          currentTask.templateId ? { branch: body.branch ?? run.branch } : null,
-        )
-        : {
-          branch: null,
-          targetBranch: currentTask.repo
-            ? await resolveRequeueBase(tx, { ...currentTask, repo: currentTask.repo }, {
-              branch: body.branch ?? run.branch,
-              targetBranch: run.targetBranch,
-            })
-            : run.targetBranch,
-        };
-      await tx.run.create({
-        data: {
-          projectId: run.projectId,
-          taskId: run.taskId,
-          goalId: run.goalId,
-          agentId: run.agentId,
-          repoId: run.repoId,
-          runNumber: run.runNumber + 1,
-          dedupeKey: makeDedupeKey(run.task.id, run.runNumber + 1),
-          runner: run.runner,
-          model: run.model,
-          codexServiceTier: run.codexServiceTier,
-          subagentModel: run.subagentModel,
-          subagentMaxConcurrent: run.subagentMaxConcurrent,
-          targetBranch: branches.targetBranch,
-          branch: branches.branch,
-          opensPullRequest: currentTask.opensPullRequest,
-          promptHash: run.promptHash,
-          maxDurationMin: run.maxDurationMin,
-          stallTimeoutMin: run.stallTimeoutMin,
-          maxRunsPerTask: budgetCeiling,
-          budgetGrants,
-          readyAt: retryAt ?? now,
-        },
-      });
-      retryCreated = true;
+      if (opened.ok) retryCreated = true;
+      else retryRefusal = opened.refusal;
     }
     if (!succeeded && !retryCreated && (mechanical
       || isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
@@ -608,7 +556,7 @@ export const completeRun = async (
       releaseMergeLeaseTask = tailLeaseChainId;
     }
     if (run.taskId) {
-      const budgetExhausted = !succeeded && retryable && !retryCreated;
+      const budgetExhausted = !succeeded && retryable && !retryCreated && !retryRefusal;
       let canonicalOutputFailure: string | null = null;
       if (!succeeded && !retryCreated && run.task) {
         // The same markers the success path above read, from the same scan.
@@ -1028,7 +976,9 @@ export const completeRun = async (
             // message below.
             failureReason: succeeded ? null : missingOutputReason ?? (budgetExhausted
               ? `Maximum ${budgetCeiling} runs reached`
-              : body.failureReason ?? "Execution failed"),
+              : retryRefusal
+                ? `Automatic retry refused: ${retryRefusal.message}`
+                : body.failureReason ?? "Execution failed"),
           },
         });
       }
@@ -1041,6 +991,7 @@ export const completeRun = async (
             : succeeded && (run.task?.templateId || run.task?.chainId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
             : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
             : retryCreated ? `Run ${run.runNumber} failed; retry queued`
+              : retryRefusal ? `Run ${run.runNumber} failed; automatic retry refused: ${retryRefusal.message}`
               : `Run ${run.runNumber} failed; task moved to review`,
           metadata: jsonValue({ exitCode: body.exitCode, terminalEventSeen: body.terminalEventSeen, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl }),
         },
@@ -1053,6 +1004,17 @@ export const completeRun = async (
             taskId: run.taskId,
             kind: "TEXT",
             body: `Run budget exhausted after ${budgetCeiling} attempts; operator action required.`,
+          },
+        });
+      }
+      if (retryRefusal) {
+        await tx.inboxMessage.create({
+          data: {
+            from: "AGENT",
+            sessionId: run.session.id,
+            taskId: run.taskId,
+            kind: "TEXT",
+            body: `Automatic retry refused: ${retryRefusal.message}`,
           },
         });
       }

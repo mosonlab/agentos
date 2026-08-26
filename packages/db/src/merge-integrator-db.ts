@@ -14,7 +14,6 @@ import {
   InboxSender,
   InboxStatus,
   Prisma,
-  RunnerKind,
   TaskStatus,
 } from "@prisma/client";
 
@@ -386,75 +385,6 @@ export const findEvidenceRequestByNonce = async (
     if (request?.nonce === nonce) return request;
   }
   return null;
-};
-
-// ---------------------------------------------------------------------------
-// §D-P5 — the budget-exempt run an answer creates
-// ---------------------------------------------------------------------------
-
-/**
- * The only writer of a `maxRunsPerTask` above the task's original ceiling.
- * `runner.ts` refuses at claim when `runNumber > maxRunsPerTask`, so a renewed
- * authorization has to raise the ceiling on the row it creates — and completion
- * is separately prevented (Step 4) from raising it on any other path, which is
- * what makes "only a human answer may exceed the ceiling" true rather than
- * merely claimed.
- */
-export const createAuthorizedIntegratorRun = async (
-  tx: Tx,
-  integratorTaskId: string,
-  now = new Date(),
-): Promise<{ id: string; runNumber: number } | null> => {
-  const task = await tx.task.findUniqueOrThrow({
-    where: { id: integratorTaskId },
-    include: {
-      assigneeAgent: true,
-      repo: true,
-      templateStep: { include: { taskTemplate: { select: { name: true } } } },
-      runs: { orderBy: { runNumber: "desc" }, take: 1 },
-    },
-  });
-  if (!isIntegratorStep(task.templateStep)) throw new Error("Not an integrator step");
-  if (!task.assigneeAgent || !task.repo) throw new Error("Integrator step has no assignee or repo");
-  const prior = task.runs[0];
-  const runNumber = (prior?.runNumber ?? 0) + 1;
-  const ceiling = Math.max(prior?.maxRunsPerTask ?? task.maxSessionsPerTask, runNumber);
-  // The same authorization expressed as a grant rather than an absolute
-  // ceiling, so the operator-facing budget gates can tell it apart from the
-  // task's configured budget — including after that budget is edited. This is a
-  // human re-authorization, so it must survive exactly as a refund does.
-  const budgetGrants = Math.max(prior?.budgetGrants ?? 0, ceiling - task.maxSessionsPerTask);
-  const run = await tx.run.create({ data: {
-    projectId: task.projectId,
-    taskId: task.id,
-    agentId: task.assigneeAgent.id,
-    repoId: task.repo.id,
-    runNumber,
-    dedupeKey: `task:${task.id}:run:${runNumber}`,
-    // Inert. The sentinel Agent's runner is never used to spawn anything: the
-    // merge executor claims by runnerId allowlist and the ordinary runner
-    // refuses a mechanical claim outright (§D-P1 rules 3-4). The column is
-    // non-nullable, so it carries the prior row's value or a fixed default.
-    runner: prior?.runner ?? RunnerKind.CLAUDE,
-    model: task.assigneeAgent.model,
-    targetBranch: prior?.targetBranch ?? task.targetBranch,
-    branch: prior?.branch ?? null,
-    // Step 10 publishes nothing. The row-level flag is the second half of the
-    // §6.1 non-publication guarantee; the first is that the executor process
-    // contains no delivery code at all.
-    opensPullRequest: false,
-    promptHash: prior?.promptHash ?? "mechanical",
-    maxDurationMin: task.maxDurationMin,
-    stallTimeoutMin: task.stallTimeoutMin,
-    maxRunsPerTask: ceiling,
-    budgetGrants,
-    readyAt: now,
-  } });
-  await tx.task.updateMany({
-    where: { id: task.id, status: { in: [TaskStatus.REVIEW, TaskStatus.TODO, TaskStatus.DOING] } },
-    data: { status: TaskStatus.TODO, failureReason: null },
-  });
-  return { id: run.id, runNumber: run.runNumber };
 };
 
 /** Marks every still-OPEN question on the integrator task closed. Used when a disposition is terminal. */

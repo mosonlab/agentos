@@ -133,6 +133,7 @@ test("task creation keeps its runner, model, and promptHash output while derivat
   process.env.OPERATOR_TOKEN = "operator-workflow-test";
   try {
     let runData: Record<string, unknown> | undefined;
+    let createdTask: Record<string, unknown> | undefined;
     const agent = runAgent({
       model: "OpenAI-CoDeX/GPT",
       runnerPreference: RunnerPreference.INHERIT,
@@ -146,7 +147,19 @@ test("task creation keeps its runner, model, and promptHash output while derivat
       $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
         $queryRaw: async () => [{ id: agent.id, archivedAt: null }],
         agent: { findUnique: async () => agent },
-        task: { create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "task-1", ...data }) },
+        task: {
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            createdTask = { id: "task-1", ...data };
+            return createdTask;
+          },
+          findUnique: async () => createdTask ? {
+            ...createdTask,
+            assigneeAgent: agent,
+            repo: { id: "repo-1", defaultBranch: "main" },
+            templateStep: null,
+            runs: [],
+          } : null,
+        },
         taskActivity: { create: async () => ({ id: "activity-1" }) },
         run: { create: async ({ data }: { data: Record<string, unknown> }) => { runData = data; return { id: "run-1", ...data }; } },
       }),
@@ -197,22 +210,27 @@ test("layer activation refuses a missing chain row instead of following a linked
 
 test("a later chain step runs on the chain's shared branch so the chain lands in one PR", async () => {
   const queued: Record<string, unknown>[] = [];
+  const task = {
+    id: "task-2", projectId: "project-1", name: "Plan", description: "plan", assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: "agent-1", repoId: "repo-1", templateId: "template-1", templateStepId: "step-2",
+    chainId: "chain-1", chainIndex: 2, targetBranch: "feat/lines", opensPullRequest: true, maxDurationMin: 120,
+    stallTimeoutMin: 10, maxSessionsPerTask: 5, archivedAt: null, runs: [],
+    assigneeAgent: runAgent(),
+    repo: { id: "repo-1", defaultBranch: "main" },
+    templateStep: { stepIndex: 2, outputKind: "plan", baseFromStepIndex: null, runner: null, taskTemplate: { name: "template" } },
+  };
   const tx = {
     $queryRaw: async () => [{ id: "agent-1", archivedAt: null }],
     agent: { findUnique: async () => runAgent() },
     task: {
-      findUniqueOrThrow: async () => ({
-        id: "task-2", projectId: "project-1", name: "Plan", description: "plan", assigneeType: AssigneeType.AGENT,
-        assigneeAgentId: "agent-1", templateId: "template-1", targetBranch: "feat/lines", maxDurationMin: 120,
-        stallTimeoutMin: 10, maxSessionsPerTask: 5, runs: [],
-        assigneeAgent: runAgent(),
-        repo: { id: "repo-1", defaultBranch: "main" }, templateStep: { runner: null },
-      }),
-      // §D-P7's stop-state guard reads the task with its template step before
-      // queueing. This one is not a chain's step-12 task, so it is a no-op.
-      findUnique: async () => ({ id: "task-2", templateStep: { runner: null } }),
+      findUniqueOrThrow: async () => task,
+      findUnique: async () => task,
+      findFirst: async () => null,
     },
-    run: { create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1", ...data }; } },
+    run: {
+      findFirst: async () => null,
+      create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-1", ...data }; },
+    },
   } as any;
   await enqueueTaskRun(tx, "task-2");
   assert.equal(queued[0]!.branch, "feat/lines");
@@ -274,7 +292,6 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
     assigneeAgent: runAgent(),
     repo: { id: "repo-1", defaultBranch: "main" }, templateStep: { runner: null }, runs: [{ runNumber: 1, branch: "feature/x" }],
   };
-  let lookup = 0;
   const tx = {
     // The Task-row mutex the reject path takes before queueing the redo, then
     // the Agent-row mutex enqueueTaskRun takes before creating the run.
@@ -299,7 +316,7 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
     inboxDecision: { create: async () => ({}) },
     task: {
       update: async () => ({}),
-      findUniqueOrThrow: async () => { lookup += 1; return executable; },
+      findUniqueOrThrow: async () => executable,
       findUnique: async () => executable,
     },
     taskActivity: { create: async () => ({}) },
@@ -313,14 +330,13 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
       create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-2", ...data }; },
     },
   } as any;
-  return { tx, queued, locks, lookups: () => lookup };
+  return { tx, queued, locks };
 };
 
 test("rejecting a gate transactionally returns the producing step to the queue", async () => {
-  const { tx, queued, locks, lookups } = rejectionTx();
+  const { tx, queued, locks } = rejectionTx();
   const result = await applyInboxDecisionTx(tx, { inboxMessageId: "gate-1", externalEventId: "feishu:evt-1", decision: "reject" });
   assert.equal(result.gateAction, "rejected");
-  assert.equal(lookups(), 1);
   // Task row first, Agent row second: the one global lock order.
   assert.deepEqual(locks, ["task-1", "agent-1"]);
   assert.equal(queued[0]!.runNumber, 2);
@@ -424,9 +440,10 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
     $queryRaw: async () => [{ id: "agent-1", archivedAt: new Date() }],
     agent: { findUnique: async () => runAgent({ name: "Ada", archivedAt: new Date() }) },
     task: {
-      findUniqueOrThrow: async () => ({
-        id: "task-archived", projectId: "project-1", name: "Archived work", description: "work",
-        assigneeType: AssigneeType.AGENT, templateId: null, targetBranch: "main",
+      findUnique: async () => ({
+        id: "task-archived", projectId: "project-1", name: "Archived work", description: "work", archivedAt: null,
+        assigneeType: AssigneeType.AGENT, assigneeAgentId: "agent-1", repoId: "repo-1", templateId: null,
+        templateStepId: null, chainId: null, chainIndex: null, targetBranch: "main", opensPullRequest: true,
         maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3, runs: [],
         assigneeAgent: {
           id: "agent-1", name: "Ada", archivedAt: new Date(), model: "claude",
@@ -435,7 +452,6 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
         repo: { id: "repo-1", defaultBranch: "main" },
         templateStep: null,
       }),
-      findUnique: async () => ({ id: "task-archived", templateStep: null }),
     },
     run: { create: async () => { throw new Error("must not create run"); } },
   } as any;
@@ -458,15 +474,21 @@ test("enqueueTaskRun preserves the precise archived-assignee refusal for a compo
     $queryRaw: async () => [{ id: executioner.id }],
     agent: { findUnique: async () => executioner },
     task: {
-      findUniqueOrThrow: async () => ({
+      findUnique: async () => ({
         id: "compound-implementation",
         projectId: "project-1",
         name: "Implementation",
         description: "implement",
+        archivedAt: null,
         assigneeType: AssigneeType.AGENT,
+        assigneeAgentId: executioner.id,
+        repoId: "repo-1",
         templateId: "compound-template",
         templateStepId: "implementation-step",
+        chainId: "chain-1",
+        chainIndex: 5,
         targetBranch: "main",
+        opensPullRequest: true,
         maxDurationMin: 120,
         stallTimeoutMin: 10,
         maxSessionsPerTask: 3,
@@ -476,10 +498,10 @@ test("enqueueTaskRun preserves the precise archived-assignee refusal for a compo
         templateStep: {
           stepIndex: 5,
           outputKind: "implementation",
+          baseFromStepIndex: null,
           taskTemplate: { name: "compound-engineer-workflow" },
         },
       }),
-      findUnique: async () => ({ id: "compound-implementation", templateStep: null }),
     },
     run: { create: async () => { throw new Error("must not create run"); } },
   } as any;
