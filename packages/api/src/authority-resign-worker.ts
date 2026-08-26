@@ -12,6 +12,7 @@
  * not cover the tree parks the step again, up to `MAX_AUTHORITY_RESIGN_ROUNDS`.
  */
 import {
+  AUTHORITY_RESIGN_DEDUPE_PREFIX,
   AUTHORITY_RESIGN_OPEN_PREFIX,
   InboxStatus,
   MERGE_TAIL_KIND,
@@ -64,7 +65,6 @@ export const authorityResignTick = async (
   db: PrismaClient,
   reader: GitHubReader | null = createGitHubReader(),
   now = new Date(),
-  limit = 5,
 ): Promise<AuthorityResignTickResult> => {
   const result: AuthorityResignTickResult = { resumed: 0, waiting: 0, unwatchable: 0 };
   const parked = await db.task.findMany({
@@ -75,7 +75,6 @@ export const authorityResignTick = async (
     },
     include: { repo: { select: { defaultBranch: true } } },
     orderBy: { createdAt: "asc" },
-    take: limit,
   });
   for (const task of parked) {
     const parkReason = task.failureReason;
@@ -112,14 +111,20 @@ export const authorityResignTick = async (
         result.waiting += 1;
         continue;
       }
-      if (!snapshot.baseSha) {
+      // From the parked head, not from the base: what has to be proven is that
+      // the attestation moved *after* this park. A base-relative comparison
+      // would also match the re-signature of an earlier round, and would resume
+      // a step whose own migration is still unattested.
+      const diff = await reader.compareCommits(target.repository, request.headSha, snapshot.headRefOid, controller.signal);
+      // `behind` or `diverged` means the parked head is not an ancestor of what
+      // is on the branch now: the file list no longer describes "what was added
+      // since the park", so it cannot answer the question either.
+      if (diff.status !== "ahead" && diff.status !== "identical") {
         result.waiting += 1;
         continue;
       }
-      const diff = await reader.compareCommits(target.repository, snapshot.baseSha, snapshot.headRefOid, controller.signal);
-      // The whole range, not the new commits: the attestation has to be
-      // re-signed relative to the base this branch merges into, and a truncated
-      // file list cannot show that it was.
+      // A truncated list cannot show the attestation is absent, only that it was
+      // not among the first 300 paths.
       if (!diff.filesComplete || !diff.files.some((file) => file.filename === RELEASE_AUTHORITY_FILE)) {
         result.waiting += 1;
         continue;
@@ -151,7 +156,7 @@ export const authorityResignTick = async (
           },
         } });
         await tx.inboxMessage.updateMany({
-          where: { dedupeKey: `authority-resign:${task.id}:${request.headSha}`, status: InboxStatus.OPEN },
+          where: { dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${task.id}:${request.headSha}`, status: InboxStatus.OPEN },
           data: { status: InboxStatus.CLOSED, answeredAt: now },
         });
         return true;

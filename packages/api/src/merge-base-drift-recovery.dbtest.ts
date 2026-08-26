@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  AUTHORITY_RESIGN_OPEN_PREFIX,
   AUTHORIZED_MERGE_METHOD,
   applyInboxDecisionTx,
   enqueueTaskRun,
@@ -569,6 +570,37 @@ test("operator-authored recovery metadata cannot suppress an ordinary gate repai
   assert.equal(await db.inboxMessage.count({ where: {
     dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
   } }), 0);
+});
+
+test("a recovery regression that needs a re-signature parks and asks instead of stopping the tail", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "tail-resign");
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
+  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
+  const body = {
+    schemaVersion: 1, outcome: "authority-resign", headSha: HEAD, baseHeadSha: BASE_2,
+    summary: "added packages/db/prisma/migrations/20260826000000_probe/migration.sql",
+  };
+  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id }, create: {
+    taskId: seeded.gateTask.id, runId: run.id, kind: "regression-verification", body: JSON.stringify(body), commitSha: HEAD,
+  }, update: { runId: run.id, body: JSON.stringify(body), commitSha: HEAD } });
+
+  await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: { id: run.id, agentId: run.agentId, branch: "agentos/chain/demo", headSha: HEAD, sessionId: seeded.gateSession.id },
+    now: new Date(),
+  }));
+
+  // A recovery needs the same signature as any other chain, and the resign
+  // worker resumes the same step for it: this is not a dead end.
+  const gate = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(gate.status, TaskStatus.REVIEW);
+  assert.equal(gate.failureReason, `${AUTHORITY_RESIGN_OPEN_PREFIX}${HEAD}`);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.gateTask.id } });
+  assert.match(notice.body, /must be re-signed/u);
+  assert.equal(await db.task.count({ where: { name: { startsWith: "Autonomous merge tail:" } } }), 0);
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "REPAIRING");
 });
 
 test("a recovery regression conflict, semantic failure, or gate failure stops without an auxiliary repair task", async () => {

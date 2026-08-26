@@ -44,6 +44,14 @@ export const INDEPENDENT_REVIEW_OPEN_PREFIX = "independent-review-open:";
 export const AUTHORITY_RESIGN_OPEN_PREFIX = "authority-resign-open:";
 
 /**
+ * The dedupe key prefix of the inbox message that carries a re-signature
+ * request: `authority-resign:<taskId>:<headSha>`. Only the control plane can
+ * write a dedupe key, so counting these keys is how many rounds a task has
+ * actually been sent back — a number no run can inflate.
+ */
+export const AUTHORITY_RESIGN_DEDUPE_PREFIX = "authority-resign:";
+
+/**
  * How many times one chain may be sent back for a re-signature before the tail
  * stops instead. Re-signing is an operator action, so a repeat means the last
  * signature did not in fact cover this tree; a third one is a loop, not

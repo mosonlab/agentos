@@ -88,6 +88,7 @@ import {
   type CardRow,
   type DecisionRow,
   asJsonObject,
+  AUTHORITY_RESIGN_DEDUPE_PREFIX,
   AUTHORITY_RESIGN_OPEN_PREFIX,
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
@@ -421,6 +422,14 @@ const openMergeTailStopNotice = async (
  * filled in by hand. Nothing else in the chain is blocked while it waits, and
  * the resign worker resumes this step on its own once the signature is pushed.
  */
+/**
+ * A branch name may legally contain `$`, a backtick or a semicolon, and this
+ * message is written to be pasted into a shell that will be holding the release
+ * signing key. Every interpolated value is quoted, including the embedded single
+ * quote a refname may also carry.
+ */
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
 const openAuthorityResignNotice = async (
   tx: DbTx,
   input: {
@@ -440,21 +449,21 @@ const openAuthorityResignNotice = async (
     [
       "Run this in the checkout that holds the private revalidation document, with the signing key at hand:",
       "",
-      `  git fetch origin ${input.branch}`,
-      `  git switch --detach ${input.headSha}`,
+      `  git fetch origin ${shellQuote(input.branch)}`,
+      `  git switch --detach ${shellQuote(input.headSha)}`,
       "  RELEASE_AUTHORITY_KEY=~/.agentos-keys/release-authority.ed25519 \\",
       `  GOAL5A0_MASTER_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').masterSha")" \\`,
       `  GOAL5A0_CONTROL_PLANE_A_SHA="$(node -p "require('./${RELEASE_AUTHORITY_FILE}').controlPlaneASha")" \\`,
       "    npm run snapshot:authority",
       `  npm run db:authority-check -w @agentos/db`,
       `  git add ${RELEASE_AUTHORITY_FILE}`,
-      `  git commit -m "chore(release): re-sign the release authority for ${input.branch}"`,
-      `  git push origin HEAD:${input.branch}`,
+      `  git commit -m ${shellQuote(`chore(release): re-sign the release authority for ${input.branch}`)}`,
+      `  git push origin ${shellQuote(`HEAD:${input.branch}`)}`,
     ].join("\n"),
     `Nothing else is needed. The server watches the pull request and re-runs regression verification as soon as the re-signed ${RELEASE_AUTHORITY_FILE} is on ${input.branch}.`,
   ].join("\n\n");
   await tx.inboxMessage.upsert({
-    where: { dedupeKey: `authority-resign:${input.taskId}:${input.headSha}` },
+    where: { dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.taskId}:${input.headSha}` },
     create: {
       from: "AGENT",
       agentId: input.agentId,
@@ -462,7 +471,7 @@ const openAuthorityResignNotice = async (
       taskId: input.taskId,
       kind: "TEXT",
       body,
-      dedupeKey: `authority-resign:${input.taskId}:${input.headSha}`,
+      dedupeKey: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.taskId}:${input.headSha}`,
     },
     update: {},
   });
@@ -610,48 +619,50 @@ export const handleRegressionCompletion = async (
     return "advance";
   }
 
-  if (recovery) {
-    await stopBaseDriftRecoveryTail(
-      tx,
-      recovery,
-      "regression",
-      verdict.outcome === "refresh-conflict"
-        ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-        : verdict.outcome === "review-fail"
-          ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-          : verdict.outcome === "authority-resign"
-            ? `release authority re-signature required at ${verdict.headSha}: ${verdict.summary}`
-            : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
-    );
-    return "handled";
-  }
-
   if (verdict.outcome === "authority-resign") {
-    // The park is owned by the resign worker, which returns this step to TODO
-    // once the re-signed attestation is on the branch. Counting only `open`
-    // rounds is the anti-thrash bound: a repeat means the last signature did
-    // not cover this tree, and a chain that keeps asking is not progressing.
-    const priorRounds = (await tx.taskActivity.findMany({
-      where: { taskId: input.task.id }, select: { metadata: true },
-    })).filter((row) => {
-      const metadata = asJsonObject(row.metadata);
-      return metadata?.kind === MERGE_TAIL_KIND.authorityResign && metadata.state === "open";
-    }).length;
-    const round = priorRounds + 1;
-    if (round > MAX_AUTHORITY_RESIGN_ROUNDS) {
-      return stop(truncateFailureReason(
-        `release authority re-signature round ${round} exceeds ${MAX_AUTHORITY_RESIGN_ROUNDS} at ${verdict.headSha}: ${verdict.summary}`,
-        FAILURE_REASON_LIMIT,
-      ));
-    }
-    if (!input.run.branch) {
-      return stop(`release authority re-signature is required at ${verdict.headSha} but this run names no chain branch`);
-    }
+    // Rounds are counted from the notices this function itself wrote, not from
+    // the activity log: `actorType` and `metadata` are caller-supplied on the
+    // activity route, and an inbox `dedupeKey` is written nowhere else. The
+    // bound is anti-thrash — a repeat means the last signature did not cover
+    // this tree, and a chain that keeps asking is not progressing.
+    const round = await tx.inboxMessage.count({
+      where: { taskId: input.task.id, dedupeKey: { startsWith: `${AUTHORITY_RESIGN_DEDUPE_PREFIX}${input.task.id}:` } },
+    }) + 1;
+    const exhausted = round > MAX_AUTHORITY_RESIGN_ROUNDS;
     const branch = input.run.branch;
-    await tx.task.update({ where: { id: input.task.id }, data: {
-      status: TaskStatus.REVIEW,
-      failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${verdict.headSha}`,
-    } });
+    if (exhausted || !branch) {
+      const reason = exhausted
+        ? `release authority re-signature round ${round} exceeds ${MAX_AUTHORITY_RESIGN_ROUNDS} at ${verdict.headSha}: ${verdict.summary}`
+        : `release authority re-signature is required at ${verdict.headSha} but this run names no chain branch`;
+      const bounded = truncateFailureReason(reason, FAILURE_REASON_LIMIT);
+      if (recovery) {
+        await stopBaseDriftRecoveryTail(tx, recovery, "regression", bounded);
+        return "handled";
+      }
+      return stop(bounded);
+    }
+    // A step an operator has already taken over is not re-parked under it: the
+    // completion holds the chain mutex only from here, so the row is claimed
+    // rather than overwritten.
+    const parked = await tx.task.updateMany({
+      where: { id: input.task.id, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
+      data: { status: TaskStatus.REVIEW, failureReason: `${AUTHORITY_RESIGN_OPEN_PREFIX}${verdict.headSha}` },
+    });
+    if (parked.count !== 1) {
+      await tx.taskActivity.create({ data: {
+        taskId: input.task.id,
+        actorType: "control-plane",
+        body: `Release authority re-signature is required at ${verdict.headSha} but this step is no longer the tail's to park`,
+        metadata: {
+          kind: MERGE_TAIL_KIND.authorityResign,
+          schemaVersion: 1,
+          state: "park-skipped",
+          headSha: verdict.headSha,
+          summary: verdict.summary,
+        },
+      } });
+      return "handled";
+    }
     await tx.taskActivity.create({ data: {
       taskId: input.task.id,
       actorType: "control-plane",
@@ -676,6 +687,26 @@ export const handleRegressionCompletion = async (
       summary: verdict.summary,
       round,
     });
+    // A base-drift recovery that reaches this needs the same signature as any
+    // other chain, and the resign worker resumes the same step for it. The
+    // recovery aggregate keeps its own state; nothing about it is decided here.
+    return "handled";
+  }
+
+  if (recovery) {
+    await stopBaseDriftRecoveryTail(
+      tx,
+      recovery,
+      "regression",
+      truncateFailureReason(
+        verdict.outcome === "refresh-conflict"
+          ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+          : verdict.outcome === "review-fail"
+            ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+            : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+        FAILURE_REASON_LIMIT,
+      ),
+    );
     return "handled";
   }
 
