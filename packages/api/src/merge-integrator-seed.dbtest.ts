@@ -196,8 +196,24 @@ test("canonical sync rolls the adjudication-era graphs only after their old task
   const oldTasks: Task[] = [];
   for (const template of [direct, compound]) {
     const blind = template.steps.find((step) => step.outputKind === "blind-findings")!;
-    const adjudicator = await db.agent.findFirstOrThrow({
-      where: { projectId: template.projectId, name: "review-adjudicator-opus" },
+    // The adjudicator role is archived, so the seed no longer creates its
+    // Agent row; production still carries the row the old node was bound to.
+    const opus = await db.agent.findFirstOrThrow({
+      where: { projectId: template.projectId, name: "review-coordinator-opus" },
+    });
+    const adjudicator = await db.agent.upsert({
+      where: { projectId_name: { projectId: template.projectId, name: "review-adjudicator-opus" } },
+      update: {},
+      create: {
+        projectId: template.projectId,
+        environmentId: opus.environmentId,
+        name: "review-adjudicator-opus",
+        title: "Review Adjudicator (Opus)",
+        model: opus.model,
+        foundationalPrompt: opus.foundationalPrompt,
+        rolePrompt: opus.rolePrompt,
+        runnerPreference: opus.runnerPreference,
+      },
     });
     for (const step of [...template.steps].reverse()) {
       if (step.stepIndex <= blind.stepIndex) continue;
@@ -278,8 +294,8 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
   });
   const regressionSteps = [
-    direct.steps.find(({ stepIndex }) => stepIndex === 6)!,
-    compound.steps.find(({ stepIndex }) => stepIndex === 11)!,
+    direct.steps.find(({ stepIndex }) => stepIndex === 5)!,
+    compound.steps.find(({ stepIndex }) => stepIndex === 10)!,
   ];
   const opus = await db.agent.findFirstOrThrow({
     where: { projectId: direct.projectId, name: "review-coordinator-opus" },

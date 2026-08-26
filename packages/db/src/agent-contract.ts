@@ -17,7 +17,6 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "regression-verifier", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
-  { name: "review-adjudicator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "senior-dev", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
@@ -56,10 +55,6 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
   ["regression-verifier", {
     from: { model: "openai-codex/gpt-5.6-sol:medium", runnerPreference: RunnerPreference.PI },
     to: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
-  }],
-  ["review-adjudicator-opus", {
-    from: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
-    to: { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE },
   }],
   ["senior-dev", {
     from: { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX },

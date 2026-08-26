@@ -58,6 +58,13 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   assert.equal(direct.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   for (const steps of [direct, full]) {
+    // The contract the removed adjudication node used to carry, now on the step that replaced it.
+    const fix = steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
+    assert.match(fix.prompt, /`sol-findings` and `blind-findings`/u);
+    assert.match(fix.prompt, /No adjudication step stands between the reviews and this one/u);
+    assert.match(fix.prompt, /exactly one disposition per finding id/u);
+    assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
+    assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
     const regression = steps.find(({ outputKind }) => outputKind === "regression-verification")!;
     assert.match(regression.prompt, /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
     assert.match(regression.prompt, /retry it up to three times/u);

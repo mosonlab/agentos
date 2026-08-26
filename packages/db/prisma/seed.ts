@@ -18,9 +18,6 @@ import {
 } from "../src/merge-integrator.js";
 import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
-const ADJUDICATOR_AGENT_NAME = "review-adjudicator-opus";
-const ADJUDICATOR_AGENT_SOURCE = "review-coordinator-opus";
-
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
 // so that OSS-B0's first-run onboarding can read the same `agents/` contract
 // without running this seed, which creates the internal multi-role
@@ -64,8 +61,7 @@ const main = async (): Promise<void> => {
     },
   });
 
-  const ordinaryRoles = sources.roles.filter((role) => role.name !== ADJUDICATOR_AGENT_NAME);
-  for (const role of ordinaryRoles) {
+  for (const role of sources.roles) {
     const existing = await prisma.agent.findUnique({
       where: { projectId_name: { projectId: project.id, name: role.name } },
       select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
@@ -107,74 +103,6 @@ const main = async (): Promise<void> => {
         rolePrompt: role.rolePrompt,
       },
     });
-  }
-
-  const adjudicatorRole = sources.roles.find((role) => role.name === ADJUDICATOR_AGENT_NAME);
-  if (!adjudicatorRole) throw new Error(`Canonical role ${ADJUDICATOR_AGENT_NAME} was not found`);
-  const existingAdjudicator = await prisma.agent.findUnique({
-    where: { projectId_name: { projectId: project.id, name: ADJUDICATOR_AGENT_NAME } },
-    select: {
-      id: true,
-      archivedAt: true,
-      model: true,
-      runnerPreference: true,
-      runtimeConfigCustomized: true,
-    },
-  });
-  if (existingAdjudicator?.archivedAt) {
-    throw new Error(`Canonical Agent ${ADJUDICATOR_AGENT_NAME} is archived; seed will not resurrect it`);
-  }
-  if (existingAdjudicator) {
-    const runtimeConfigCustomized = existingAdjudicator.runtimeConfigCustomized
-      || existingAdjudicator.model !== adjudicatorRole.model
-      || existingAdjudicator.runnerPreference !== adjudicatorRole.runnerPreference;
-    await prisma.agent.update({
-      where: { id: existingAdjudicator.id },
-      data: {
-        title: adjudicatorRole.title,
-        ...(runtimeConfigCustomized
-          ? {}
-          : { model: adjudicatorRole.model, runnerPreference: adjudicatorRole.runnerPreference }),
-        runtimeConfigCustomized,
-        inboxAccess: adjudicatorRole.inboxAccess,
-        foundationalPrompt: sources.foundationalPrompt,
-        rolePrompt: adjudicatorRole.rolePrompt,
-      },
-    });
-  } else {
-    const sourceAgent = await prisma.agent.findUnique({
-      where: { projectId_name: { projectId: project.id, name: ADJUDICATOR_AGENT_SOURCE } },
-      select: {
-        environmentId: true,
-        disabledTools: true,
-        archivedAt: true,
-        repoAccess: { select: { projectId: true, repoId: true, mountPath: true, permissions: true } },
-      },
-    });
-    if (!sourceAgent || sourceAgent.archivedAt) {
-      throw new Error(`Cannot create ${ADJUDICATOR_AGENT_NAME}: active source Agent ${ADJUDICATOR_AGENT_SOURCE} was not found`);
-    }
-    const createdAdjudicator = await prisma.agent.create({
-      data: {
-        projectId: project.id,
-        environmentId: sourceAgent.environmentId,
-        name: adjudicatorRole.name,
-        title: adjudicatorRole.title,
-        model: adjudicatorRole.model,
-        runtimeConfigCustomized: false,
-        codexServiceTier: CodexServiceTier.DEFAULT,
-        runnerPreference: adjudicatorRole.runnerPreference,
-        inboxAccess: adjudicatorRole.inboxAccess,
-        disabledTools: sourceAgent.disabledTools,
-        foundationalPrompt: sources.foundationalPrompt,
-        rolePrompt: adjudicatorRole.rolePrompt,
-      },
-    });
-    if (sourceAgent.repoAccess.length > 0) {
-      await prisma.agentRepoAccess.createMany({
-        data: sourceAgent.repoAccess.map((grant) => ({ ...grant, agentId: createdAdjudicator.id })),
-      });
-    }
   }
 
   const agentByName = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
@@ -379,13 +307,13 @@ const main = async (): Promise<void> => {
   const directTemplate = await prisma.taskTemplate.upsert({
     where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
     update: {
-      description: "Direct-tier workflow: implementation from the task brief, parallel independent code review with fresh Opus adjudication, fix application, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
+      description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
       variables: ["branchName"],
     },
     create: {
       projectId: project.id,
       name: DIRECT_TEMPLATE_NAME,
-      description: "Direct-tier workflow: implementation from the task brief, parallel independent code review with fresh Opus adjudication, fix application, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
+      description: "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution.",
       variables: ["branchName"],
     },
   });

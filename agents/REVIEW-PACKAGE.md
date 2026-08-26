@@ -2,13 +2,14 @@
 
 Status: current as of 2026-08-26.
 
-The adjudication node was removed from both canonical templates on 2026-08-26.
-The `review-adjudicator-opus` sections below describe the node as it ran until
-then and as it still runs for chains created under it; no canonical template
-step binds that role now. The fix step reads both immutable reports and records
-a disposition for every finding id in its own output.
+The adjudication node was removed from both canonical templates on 2026-08-26
+and the `review-adjudicator-opus` role was archived with it: the fix step reads
+both immutable reports and records a disposition for every finding id in its
+own output. Chains created before that date still carry the node on their
+renamed template rows, and the Agent rows those chains reference are retained
+as history.
 
-The canonical roster contains fifteen LLM roles and one mechanical sentinel:
+The canonical roster contains fourteen LLM roles and one mechanical sentinel:
 
 - `default`
 - `spec`
@@ -21,7 +22,6 @@ The canonical roster contains fifteen LLM roles and one mechanical sentinel:
 - `review-coordinator`
 - `review-coordinator-sol`
 - `review-coordinator-opus`
-- `review-adjudicator-opus`
 - `regression-verifier`
 - `librarian`
 - `merge-resolver`
@@ -47,14 +47,12 @@ those reports through attachments, task outputs, chain activity, or any other
 session-scoped route for the entire task and provider session. It emits one
 immutable `blind-findings` output.
 
-`review-adjudicator-opus` is a separate cross-vendor authority after the two
-review nodes in the parallel layer are both `DONE`. It always starts a fresh
-Opus provider Session; it never resumes the blind conversation and needs no
-provider conversation id or continuation proof. Its claim guard verifies both
-immutable sibling reports, their `DONE` task status, their output kinds, and
-the same pinned implementation base/head before it reads either report. It
-applies the canonical merge matrix and emits the final immutable `must-fix`
-output with a disposition for every finding id from both reports.
+The fix step is the join successor of that parallel layer. It reads both
+immutable sibling reports directly, and its output contract refuses any
+`fixed-implementation` output whose dispositions do not exactly cover the
+union of finding ids from the two reports, or whose reports are not bound to
+the head the fix was made from. That check is the one the adjudication node
+used to perform; it now runs in the platform rather than in a role.
 
 `regression-verifier` reads the closed must-fix package after repairs, performs
 the bounded whole-fix semantic verification at Sol medium, and runs the one
@@ -85,29 +83,24 @@ canonical roles in the Full Assurance template. An operator's model or runner
 selection is an explicit runtime override and survives seed and canonical sync.
 
 The Sol and blind Opus review tasks occupy one parallel execution layer and
-are independently claimable after implementation. The adjudicator is the
-single join successor, so it cannot start after only one report. Existing task
-rows keep the assignee captured when their chain was created; the split does
-not rewrite archived prompts, active runs, sessions, or stored outputs.
-
-Canonical sync may create the adjudicator Agent from this source for an
-existing installation while preserving the active blind review Agent's
-environment, repository grants, and disabled-tool boundary. It never changes
-an active or completed chain.
+are independently claimable after implementation. The fix step is the single
+join successor, so it cannot start after only one report. Existing task rows
+keep the assignee captured when their chain was created; the split does not
+rewrite archived prompts, active runs, sessions, or stored outputs.
 
 ## Acceptance
 
-- Exactly seventeen role files pass the canonical source contract, including
+- Exactly fifteen role files pass the canonical source contract, including
   the mechanical merge sentinel.
 - Sol reviews both Standards and Specification axes in one high session and
   emit one `sol-findings` output; no review role launches a nested review
   subprocess or carries a service-tier override.
-- The blind Opus report is durable before the adjudicator can read it, and
+- The blind Opus report is durable before the fix step can read it, and
   blind-session scope remains unable to read the Sol sibling before or after
   persistence.
-- The adjudicator runs in a fresh Opus Session only after both review tasks
-  are `DONE`, verifies the pinned base/head and both immutable reports, and
-  produces a closed must-fix disposition for every finding id.
+- The fix step runs only after both review tasks are `DONE`, and its output is
+  refused unless both reports are bound to the head it fixed and every finding
+  id from either report carries exactly one disposition.
 - The post-fix verdict accounts for every must-fix at one exact head.
 - The review prompt requires repository evidence for every finding.
 - The security lens derives applicable trust boundaries and negative tests;

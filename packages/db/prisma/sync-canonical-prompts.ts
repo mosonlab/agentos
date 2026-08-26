@@ -16,8 +16,6 @@ import {
 
 const REGRESSION_AGENT_NAME = "regression-verifier";
 const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
-const ADJUDICATOR_AGENT_NAME = "review-adjudicator-opus";
-const ADJUDICATOR_AGENT_SOURCE = "review-coordinator-opus";
 const CANONICAL_TEMPLATE_DESCRIPTIONS = new Map([
   ["compound-engineer-workflow", "Twelve-step Full Assurance workflow with parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution."],
   ["direct-engineer-workflow", "Direct-tier workflow: implementation from the task brief, parallel independent code review, operator-free fix adjudication inside the fix step, refreshed exact-head regression verification, mechanical readiness, and mechanical merge execution."],
@@ -251,48 +249,6 @@ const main = async (): Promise<void> => {
           })) })).count;
         }
         createdAgents = 1;
-      }
-      const adjudicatorRole = rolesByName.get(ADJUDICATOR_AGENT_NAME);
-      if (!adjudicatorRole) throw new Error(`Canonical role ${ADJUDICATOR_AGENT_NAME} was not found`);
-      const existingAdjudicatorAgent = await tx.agent.findUnique({
-        where: { projectId_name: { projectId: canonicalProject.id, name: ADJUDICATOR_AGENT_NAME } },
-        select: { id: true, archivedAt: true },
-      });
-      if (existingAdjudicatorAgent?.archivedAt) {
-        throw new Error(`Canonical Agent ${ADJUDICATOR_AGENT_NAME} is archived; sync will not resurrect it`);
-      }
-      if (!existingAdjudicatorAgent) {
-        const source = await tx.agent.findUnique({
-          where: { projectId_name: { projectId: canonicalProject.id, name: ADJUDICATOR_AGENT_SOURCE } },
-          select: {
-            environmentId: true,
-            disabledTools: true,
-            archivedAt: true,
-            repoAccess: { select: { projectId: true, repoId: true, mountPath: true, permissions: true } },
-          },
-        });
-        if (!source || source.archivedAt) {
-          throw new Error(`Cannot create ${ADJUDICATOR_AGENT_NAME}: active source Agent ${ADJUDICATOR_AGENT_SOURCE} was not found`);
-        }
-        const created = await tx.agent.create({ data: {
-          projectId: canonicalProject.id,
-          environmentId: source.environmentId,
-          name: adjudicatorRole.name,
-          title: adjudicatorRole.title,
-          model: adjudicatorRole.model,
-          runnerPreference: adjudicatorRole.runnerPreference,
-          inboxAccess: adjudicatorRole.inboxAccess,
-          disabledTools: source.disabledTools,
-          foundationalPrompt: sources.foundationalPrompt,
-          rolePrompt: adjudicatorRole.rolePrompt,
-        } });
-        if (source.repoAccess.length > 0) {
-          createdAgentRepoGrants += (await tx.agentRepoAccess.createMany({ data: source.repoAccess.map((grant) => ({
-            ...grant,
-            agentId: created.id,
-          })) })).count;
-        }
-        createdAgents += 1;
       }
       const createdCanonicalTemplates = await transitionCanonicalTemplateRows(tx, templateSources);
       const updatedSteps: Record<string, Record<number, number>> = {};
