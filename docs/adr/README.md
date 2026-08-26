@@ -11,5 +11,6 @@ consequences. Status is one of proposed, accepted, or superseded (with a
 pointer to the superseding record). Decisions made during card intake or
 grill sessions that outlive the card belong here, not on the card.
 
-No records exist yet; the first accepted decision starts the sequence at
-`0001`.
+`0001` is proposed and awaiting a ruling; a proposed record holds its number
+from the moment it is written, so the next record starts at `0002` whether or
+not `0001` is accepted.
