@@ -5,6 +5,8 @@ import { loadAgentSources } from "../src/agent-sources.js";
 import {
   legacyTemplateName,
   matchedLegacyGeneration,
+  TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES,
+  templateRolloverBlockerCount,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
 import {
@@ -198,11 +200,21 @@ const main = async (): Promise<void> => {
       && existing.steps[12]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
       && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
     if (existing && (isRegressionFirstThirteenStepTemplate || legacyCanonical)) {
-      const unfinishedTasks = await tx.task.count({
+      const rolloverTasks = await tx.task.findMany({
         where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+        select: {
+          chainId: true,
+          status: true,
+          _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
+        },
       });
-      if (unfinishedTasks > 0) {
-        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
+        chainId: task.chainId,
+        status: task.status,
+        activeRunCount: task._count.runs,
+      })));
+      if (blockers > 0) {
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
       }
       if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
         || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
@@ -295,11 +307,21 @@ const main = async (): Promise<void> => {
     : null;
   const legacyDirect = historicalDirect && legacyDirectMarker !== null;
   if (legacyDirect) {
-    const unfinishedTasks = await prisma.task.count({
+    const rolloverTasks = await prisma.task.findMany({
       where: { templateId: historicalDirect.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+      select: {
+        chainId: true,
+        status: true,
+        _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
+      },
     });
-    if (unfinishedTasks > 0) {
-      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+    const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
+      chainId: task.chainId,
+      status: task.status,
+      activeRunCount: task._count.runs,
+    })));
+    if (blockers > 0) {
+      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
     }
     if (historicalDirect.webhookSecretId !== null || historicalDirect.webhookRepoId !== null
       || historicalDirect.webhookPayloadMapping !== null || historicalDirect.webhookPausedAt !== null

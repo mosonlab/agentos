@@ -9,6 +9,7 @@ import {
   isCanonicalSolFindingsStep,
   isCanonicalFixStep,
   canonicalOutputRefusal,
+  requiredOutputKind,
 } from "./canonical-task-output.js";
 
 const step = (template: string, stepIndex: number, outputKind: string) => ({
@@ -35,6 +36,34 @@ test("legacy-v1 agent ranges remain authoritative at their old positions", () =>
   assert.equal(isCanonicalAgentStep(step("direct-engineer-workflow-legacy-v1", 6, "merge-authorization")), false);
   assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow-legacy-v1", 10, "documentation")), true);
   assert.equal(isCanonicalAgentStep(step("compound-engineer-workflow-legacy-v1", 11, "merge-authorization")), false);
+});
+
+test("Regression v2 is canonical while the rolled v1 contract remains readable", () => {
+  const headSha = "a".repeat(40);
+  const baseHeadSha = "b".repeat(40);
+  const current = step("direct-engineer-workflow", 5, "regression-verification-v2");
+  const legacy = step(
+    "direct-engineer-workflow-legacy-pre-narrow-regression-lease-template-1",
+    5,
+    "regression-verification",
+  );
+  const output = (kind: string, schemaVersion: number) => ({
+    runId: "run-1",
+    kind,
+    body: JSON.stringify({ schemaVersion, outcome: "pass", headSha, baseHeadSha, gateVerdict: "PASS" }),
+    commitSha: headSha,
+    metadata: null,
+  });
+
+  assert.equal(requiredOutputKind(current), "regression-verification-v2");
+  assert.equal(canonicalOutputRefusal(current, output("regression-verification-v2", 2), "run-1", headSha), null);
+  assert.match(
+    canonicalOutputRefusal(current, output("regression-verification-v2", 1), "run-1", headSha) ?? "",
+    /schemaVersion 2/u,
+  );
+  assert.equal(isCanonicalAgentStep(legacy), true);
+  assert.equal(requiredOutputKind(legacy), "regression-verification");
+  assert.equal(canonicalOutputRefusal(legacy, output("regression-verification", 1), "run-1", headSha), null);
 });
 
 test("the canonical graphs carry blind findings and no adjudication node", () => {

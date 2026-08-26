@@ -3,7 +3,7 @@ stepIndex: 5
 layer: 4
 agent: regression-verifier
 approvalGate: false
-outputKind: regression-verification
+outputKind: regression-verification-v2
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null
@@ -12,10 +12,8 @@ spawnPolicy: null
 The platform-pinned `run.pullRequestBase` in the agent prompt is the integration
 line authority. Every reference below to the current target branch or target
 branch means that exact branch, regardless of any branch name in task-authored
-text. Refresh `{{branchName}}` onto it before reviewing: before the first fetch,
-acquire the chain merge lease with `scripts/merge-lease.sh acquire --task {{chainId}} --reason "chain merge tail {{chainId}}"`.
-An acquire timeout (exit 75) or any other acquire error fails the run loudly.
-Fetch `origin/<run.pullRequestBase>`; if it fails, retry it up to three times
+text. Refresh `{{branchName}}` onto it before reviewing. Fetch
+`origin/<run.pullRequestBase>`; if it fails, retry it up to three times
 before failing the run loudly. Then record its exact 40-hex head as `baseHeadSha` and
 merge that commit into the checked-out chain branch with a normal merge commit.
 If Git reports a conflict, record both pre-refresh head SHAs,
@@ -38,8 +36,21 @@ gate, and finish with the `authority-resign` output below, carrying the printed
 signing key is the operator's and is in no checkout. Any other exit is a loud
 run failure.
 
-Only after semantic verification passes and that check is clean, run
+Only after semantic verification passes and that check is clean, acquire the
+chain merge lease with `scripts/merge-lease.sh acquire --task {{chainId}} --reason "chain merge tail {{chainId}}"`.
+An acquire timeout (exit 75) or any
+other acquire error fails the run loudly. Lease release and steal are exclusively
+control-plane operations: never call `scripts/merge-lease.sh release` or
+`scripts/merge-lease.sh steal`, including on failure or after writing output.
+
+After acquire, fetch `origin/<run.pullRequestBase>` again, with the same
+three-attempt network retry. If its exact head still equals `baseHeadSha`, run
 `scripts/gate-worker/gate-dispatch.sh <head-sha> --master <baseHeadSha>`.
+If the target head advanced, merge the new exact target head into the chain
+branch and update `baseHeadSha`. A conflict follows the same `refresh-conflict`
+contract above. A successful merge changed the verified tree, so repeat the
+full semantic verification and release-authority check before dispatching the
+gate against the new exact head; do not reuse the earlier result.
 If dispatch exits 75 or 76 without a verdict, retry dispatch in place up to two
 more times. If all three attempts return a non-verdict exit, or dispatch returns
 any other non-verdict exit, report it through the activity log and fail the run
@@ -47,11 +58,11 @@ loudly.
 Persist exactly one JSON object as the AgentOS task output and do not write a
 report file:
 
-- PASS: `{"schemaVersion":1,"outcome":"pass","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"PASS"}`
-- semantic FAIL: `{"schemaVersion":1,"outcome":"review-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<unresolved finding IDs or newly discovered defect>"}`
-- gate FAIL: `{"schemaVersion":1,"outcome":"gate-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"FAIL","summary":"<named failing stage>"}`
-- refresh conflict: `{"schemaVersion":1,"outcome":"refresh-conflict","headSha":"<chain head before refresh>","baseHeadSha":"<target head>","summary":"<conflicted paths>"}`
-- release authority re-signature required: `{"schemaVersion":1,"outcome":"authority-resign","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<the RESIGN release-authority lines>"}`
+- PASS: `{"schemaVersion":2,"outcome":"pass","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"PASS"}`
+- semantic FAIL: `{"schemaVersion":2,"outcome":"review-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<unresolved finding IDs or newly discovered defect>"}`
+- gate FAIL: `{"schemaVersion":2,"outcome":"gate-fail","headSha":"<40 hex>","baseHeadSha":"<40 hex>","gateVerdict":"FAIL","summary":"<named failing stage>"}`
+- refresh conflict: `{"schemaVersion":2,"outcome":"refresh-conflict","headSha":"<chain head before refresh>","baseHeadSha":"<target head>","summary":"<conflicted paths>"}`
+- release authority re-signature required: `{"schemaVersion":2,"outcome":"authority-resign","headSha":"<40 hex>","baseHeadSha":"<40 hex>","summary":"<the RESIGN release-authority lines>"}`
 
 No other output shape advances the chain. A non-verdict gate exit is neither
 PASS nor FAIL.

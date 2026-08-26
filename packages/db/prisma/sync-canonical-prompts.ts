@@ -5,6 +5,8 @@ import { loadAgentSources, roleSourceStructureDifferences } from "../src/agent-s
 import {
   legacyTemplateName,
   matchedLegacyGeneration,
+  TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES,
+  templateRolloverBlockerCount,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
 import {
@@ -170,11 +172,21 @@ const transitionCanonicalTemplateRows = async (
       const persistedSteps = row.steps as unknown as PersistedTransitionStep[];
       const legacyMarker = matchedLegacyGeneration(templateName, persistedSteps);
       if (legacyMarker === null) continue;
-      const unfinishedTasks = await tx.task.count({
+      const rolloverTasks = await tx.task.findMany({
         where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
+        select: {
+          chainId: true,
+          status: true,
+          _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
+        },
       });
-      if (unfinishedTasks > 0) {
-        throw new Error(`${templateName} ${row.id} still has ${unfinishedTasks} unfinished tasks; canonical rollover requires its existing chains to finish first`);
+      const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
+        chainId: task.chainId,
+        status: task.status,
+        activeRunCount: task._count.runs,
+      })));
+      if (blockers > 0) {
+        throw new Error(`${templateName} ${row.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
       }
       if (row.webhookSecretId !== null || row.webhookRepoId !== null
         || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null

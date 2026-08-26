@@ -7,10 +7,21 @@ import {
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
+  LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX,
+  LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX,
   LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
 } from "./merge-integrator.js";
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
+export const REGRESSION_VERIFICATION_SCHEMA_VERSION = 2;
+export const REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification-v2";
+export const LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification";
+export const REGRESSION_VERIFICATION_OUTPUT_KINDS = [
+  REGRESSION_VERIFICATION_OUTPUT_KIND,
+  LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND,
+] as const;
+export const isRegressionVerificationOutputKind = (kind: string | null | undefined): boolean =>
+  REGRESSION_VERIFICATION_OUTPUT_KINDS.some((candidate) => candidate === kind);
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
 export const DIRECT_MERGE_READINESS_STEP_INDEX = 6;
 export const MERGE_READINESS_STEP_INDEX = 11;
@@ -111,18 +122,20 @@ export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPh
 
 const SHA = /^[0-9a-f]{40}$/u;
 
+type RegressionVerdictSchemaVersion = typeof MERGE_TAIL_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_SCHEMA_VERSION;
+
 export type RegressionVerdict =
-  | { schemaVersion: 1; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
-  | { schemaVersion: 1; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
-  | { schemaVersion: 1; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
-  | { schemaVersion: 1; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string }
+  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
+  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
+  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string }
+  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string }
   /**
    * The tree moved attested release-path files without re-signing
    * `release-authority.json`, so the migration preflight refuses it and the
    * gate cannot pass. Reported instead of a gate run: no agent can close it,
    * because the signing key is the operator's and never enters a run.
    */
-  | { schemaVersion: 1; outcome: "authority-resign"; headSha: string; baseHeadSha: string; summary: string };
+  | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "authority-resign"; headSha: string; baseHeadSha: string; summary: string };
 
 export type RegressionRepairHandoff = {
   schemaVersion: 1;
@@ -163,7 +176,10 @@ export type RegressionParse =
   | { status: "ok"; verdict: RegressionVerdict }
   | { status: "invalid"; reason: string };
 
-export const parseRegressionVerdict = (body: string | null | undefined): RegressionParse => {
+export const parseRegressionVerdict = (
+  body: string | null | undefined,
+  outputKind?: string | null,
+): RegressionParse => {
   if (!body) return { status: "invalid", reason: "missing regression output" };
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { return { status: "invalid", reason: "regression output is not JSON" }; }
@@ -171,7 +187,18 @@ export const parseRegressionVerdict = (body: string | null | undefined): Regress
     return { status: "invalid", reason: "regression output is not an object" };
   }
   const value = parsed as Record<string, unknown>;
-  if (value.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION) return { status: "invalid", reason: "unsupported regression schemaVersion" };
+  const expectedSchemaVersion = outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
+    ? REGRESSION_VERIFICATION_SCHEMA_VERSION
+    : outputKind === LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND
+      ? MERGE_TAIL_SCHEMA_VERSION
+      : null;
+  if (expectedSchemaVersion !== null && value.schemaVersion !== expectedSchemaVersion) {
+    return { status: "invalid", reason: `regression ${outputKind} requires schemaVersion ${String(expectedSchemaVersion)}` };
+  }
+  if (value.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION
+    && value.schemaVersion !== REGRESSION_VERIFICATION_SCHEMA_VERSION) {
+    return { status: "invalid", reason: "unsupported regression schemaVersion" };
+  }
   if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return { status: "invalid", reason: "invalid regression headSha" };
   if (typeof value.baseHeadSha !== "string" || !SHA.test(value.baseHeadSha)) return { status: "invalid", reason: "invalid regression baseHeadSha" };
   if (value.outcome === "pass" && value.gateVerdict === "PASS") {
@@ -244,6 +271,10 @@ export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean => 
     || (name?.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX) === true
       && step.stepIndex === LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX)
     || (name?.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX) === true
+      && step.stepIndex === MERGE_READINESS_STEP_INDEX)
+    || (name?.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX) === true
+      && step.stepIndex === DIRECT_MERGE_READINESS_STEP_INDEX)
+    || (name?.startsWith(LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX) === true
       && step.stepIndex === MERGE_READINESS_STEP_INDEX);
 };
 

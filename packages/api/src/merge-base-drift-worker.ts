@@ -26,6 +26,7 @@ import {
   latestRecordedStop,
   openStopQuestion,
   parseMergeResult,
+  REGRESSION_VERIFICATION_OUTPUT_KINDS,
   resolveChainTarget,
   selectAuthorization,
   taskIsIntegratorStep,
@@ -168,7 +169,11 @@ const loadCandidate = async (db: DbReader, integratorTaskId: string): Promise<Ca
       include: { templateStep: { include: { taskTemplate: { select: { name: true } } } }, stepOutput: true },
     }),
     db.task.findFirst({
-      where: { projectId: task.projectId, chainId: task.chainId, templateStep: { outputKind: "regression-verification" } },
+      where: {
+        projectId: task.projectId,
+        chainId: task.chainId,
+        templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
+      },
     }),
   ]);
   if (!readiness || !isMergeReadinessStep(readiness.templateStep) || !regression) {

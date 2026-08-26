@@ -87,6 +87,107 @@ const ADJUDICATION_STEPS = {
   "compound-engineer-workflow": { stepIndex: 8, layer: 7, baseFromStepIndex: 5 },
 } as const;
 
+test("sync rolls the v1 Regression contract forward and preserves its template row", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: ["direct-engineer-workflow", "compound-engineer-workflow"] } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  const oldPrompt = "Acquire before fetch and emit the v1 Regression contract.";
+  const parkedTaskIds: string[] = [];
+  for (const template of templates) {
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
+      data: { outputKind: "regression-verification", prompt: oldPrompt },
+    });
+    const regressionIndex = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!.stepIndex;
+    const chainId = `parked-v1-${template.id}`;
+    for (const step of template.steps) {
+      const task = await prisma.task.create({ data: {
+        projectId: project.id,
+        templateId: template.id,
+        templateStepId: step.id,
+        name: `parked-v1-${template.name}-${step.stepIndex}`,
+        description: "parked v1 rollover compatibility fixture",
+        assigneeAgentId: step.assigneeAgentId,
+        assigneeType: step.assigneeType,
+        status: step.stepIndex < regressionIndex
+          ? TaskStatus.DONE
+          : step.stepIndex === regressionIndex
+            ? TaskStatus.BACKLOG
+            : TaskStatus.TODO,
+        chainId,
+        chainIndex: step.stepIndex,
+        chainLayer: step.layer,
+      } });
+      parkedTaskIds.push(task.id);
+    }
+  }
+
+  const parkedBefore = await snapshotInstantiatedTasks(parkedTaskIds);
+  const activeTarget = await prisma.task.findFirstOrThrow({
+    where: { id: { in: parkedTaskIds }, status: TaskStatus.BACKLOG },
+    include: { assigneeAgent: { select: { model: true } } },
+  });
+  const activeRun = await prisma.run.create({ data: {
+    projectId: activeTarget.projectId,
+    taskId: activeTarget.id,
+    agentId: activeTarget.assigneeAgentId!,
+    runNumber: 1,
+    dedupeKey: `parked-v1-active:${activeTarget.id}`,
+    runner: "CODEX",
+    model: activeTarget.assigneeAgent!.model,
+    promptHash: "parked-v1-active",
+  } });
+
+  const refusedWhileActive = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.notEqual(refusedWhileActive.status, 0, refusedWhileActive.output);
+  assert.match(refusedWhileActive.output, /active or unparked unfinished tasks/u);
+  await prisma.run.delete({ where: { id: activeRun.id } });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":2/u);
+  assert.equal(await snapshotInstantiatedTasks(parkedTaskIds), parkedBefore);
+
+  for (const template of templates) {
+    const legacyName = `${template.name}-legacy-pre-narrow-regression-lease-${template.id}`;
+    const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: legacyName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(legacy.id, template.id);
+    const legacyRegression = legacy.steps.find(({ outputKind }) => outputKind === "regression-verification")!;
+    assert.equal(legacyRegression.prompt, oldPrompt);
+    const readiness = legacy.steps.find(({ outputKind }) => outputKind === "merge-authorization")!;
+    const integrator = legacy.steps.find(({ outputKind }) => outputKind === "merge-result")!;
+    assert.equal(isMergeReadinessStep({
+      stepIndex: readiness.stepIndex,
+      outputKind: readiness.outputKind,
+      taskTemplateName: legacyName,
+    }), true);
+    assert.equal(isIntegratorStep({
+      stepIndex: integrator.stepIndex,
+      outputKind: integrator.outputKind,
+      taskTemplate: { name: legacyName },
+    }), true);
+
+    const current = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: template.name } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.notEqual(current.id, template.id);
+    const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
+    assert.match(currentRegression.prompt, /semantic verification passes[\s\S]*merge-lease\.sh acquire/u);
+    assert.match(currentRegression.prompt, /never call `scripts\/merge-lease\.sh release`/u);
+  }
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdCanonicalTemplates":0/u);
+  await prisma.task.deleteMany({ where: { id: { in: parkedTaskIds } } });
+});
+
 test("sync rolls the exact adjudication-era graphs forward without touching instantiated evidence", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const agents = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
@@ -136,6 +237,10 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       baseFromStepIndex: adjudication.baseFromStepIndex,
       prompt: `Adjudicate the two review reports for ${template.name}.`,
     } });
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
+      data: { outputKind: "regression-verification" },
+    });
     // The adjudication-era compound graph still gated its spec and revise-plan
     // steps; the zero-gate transition removed those gates from the sources this
     // fixture derives from, so it restores them to land on the exact
@@ -246,6 +351,10 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },
     data: { approvalGate: true },
+  });
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: full.id, outputKind: "regression-verification-v2" },
+    data: { outputKind: "regression-verification" },
   });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -387,7 +496,7 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   });
   const regressionSteps = await prisma.taskTemplateStep.findMany({
     where: {
-      outputKind: "regression-verification",
+      outputKind: "regression-verification-v2",
       taskTemplate: { projectId: project.id },
     },
     select: { id: true, taskTemplate: { select: { name: true } } },
@@ -425,7 +534,7 @@ test("sync refuses canonical step drift when instantiated tasks would be mutated
     where: { projectId_name: { projectId: project.id, name: "direct-engineer-workflow" } },
   });
   const step = await prisma.taskTemplateStep.findFirstOrThrow({
-    where: { taskTemplateId: template.id, outputKind: "regression-verification" },
+    where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
   });
   await prisma.taskTemplateStep.update({ where: { id: step.id }, data: { assigneeAgentId: source.id } });
   const task = await prisma.task.create({ data: {

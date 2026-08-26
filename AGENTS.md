@@ -98,12 +98,13 @@ remote slot runs it. Read [`docs/runbooks/gate-worker.md`](docs/runbooks/gate-wo
 before operating or troubleshooting a remote worker.
 
 Every delivery that advances `main` — PR merge or direct push, regardless of
-size — must acquire `scripts/merge-lease.sh` before beginning the final sequence
-of integrating the latest `main`, running the merge gate, and performing the
-merge. Release it immediately after the delivery lands or fails. Writing code,
-pushing a feature branch, and opening a PR do not require the lease. The lease
-keeps an exact-head gate proof valid from the moment its baseline is fixed until
-that proof is consumed by the merge.
+size — must acquire `scripts/merge-lease.sh` before running the merge gate for
+the final integrated head, and hold it until that proof is consumed by the
+merge. An autonomous Regression run acquires only after its semantic checks,
+then rechecks the target base before gate dispatch; the control plane alone
+releases or steals that chain lease. Other delivery paths release immediately
+after the delivery lands or fails. Writing code, pushing a feature branch, and
+opening a PR do not require the lease.
 
 Pass `--task <id>` to both `acquire` and `release`. The default holder is
 `user@host`, which every agent window on one machine shares, so without a task

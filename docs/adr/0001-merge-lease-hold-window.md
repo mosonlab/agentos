@@ -274,6 +274,11 @@ the defense list; it was authorized explicitly on 2026-08-26.
 3. Amend `AGENTS.md:101` in the same change, since (2) contradicts its current
    wording for the chain tail.
 
+Implemented by the `regression-verification-v2` template rollover. The output
+kind is the structural generation marker: renamed v1 rows preserve their
+frozen prompts and schema, while new canonical rows require schema version 2
+and the narrowed lease protocol above.
+
 ### R3. Revisit `STALE_SECONDS` and the acquire timeout after R1
 
 With R1 and R2 the tail's hold drops to roughly gate plus authorization plus
@@ -315,8 +320,8 @@ would only paper over findings A and E.
   instead of 12:20:05, and `ff7a6904`'s wasted 44-minute hold would not have
   happened at all, because `af3c73f5` would have had to acquire before merging
   PR #138.
-- Until R2 lands, semantic verification stays inside the lock, so holds shorten
-  but do not become minimal.
+- New v2 chains keep semantic verification outside the lock. Renamed v1 chains
+  retain their original protocol as immutable execution history.
 
 ## Out of scope, reported not fixed
 

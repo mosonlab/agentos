@@ -17,6 +17,7 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   isIntegratorStep,
   isMergeReadinessStep,
+  isRegressionVerificationOutputKind,
   latestMarker,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
   LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
@@ -48,7 +49,6 @@ import {
   canonicalOutputRefusal,
   isCanonicalAgentStep,
   outputIsImmutableOncePersisted,
-  REGRESSION_VERIFICATION_KIND,
   requiredOutputKind,
 } from "./canonical-task-output.js";
 import {
@@ -603,7 +603,7 @@ export const completeRun = async (
       retryCreated = true;
     }
     if (!succeeded && !retryCreated && (mechanical
-      || run.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_KIND
+      || isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
       || mergeTailAuxiliary)) {
       releaseMergeLeaseTask = tailLeaseChainId;
     }
@@ -717,7 +717,7 @@ export const completeRun = async (
               reason: outputRefusal,
             },
           } });
-          if (run.task.templateStep?.outputKind === REGRESSION_VERIFICATION_KIND) {
+          if (isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)) {
             releaseMergeLeaseTask = tailLeaseChainId;
           }
         }
@@ -730,7 +730,7 @@ export const completeRun = async (
           // The current Run succeeded as a process, but it did not publish a
           // canonical deliverable bound to that Run and head. The REVIEW
           // state written above is the terminal control-plane outcome.
-        } else if (run.task.templateStep?.outputKind === REGRESSION_VERIFICATION_KIND) {
+        } else if (isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)) {
           const result = await handleRegressionCompletion(tx, {
             task: run.task,
             run: {

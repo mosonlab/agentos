@@ -1,5 +1,6 @@
 import {
   asJsonObject,
+  isRegressionVerificationOutputKind,
   MERGE_TAIL_KIND,
   parseIndependentReviewDecision,
   parseRegressionVerdict,
@@ -38,13 +39,13 @@ export const regressionRepairHandoffForClaim = async (
     outputKind: string | null;
   },
 ): Promise<RegressionRepairHandoffSelection> => {
-  if (input.outputKind !== "regression-verification") return { status: "none" };
+  if (!isRegressionVerificationOutputKind(input.outputKind)) return { status: "none" };
   const priorOutput = await tx.taskStepOutput.findUnique({
     where: { taskId: input.taskId },
     select: { body: true, runId: true, updatedAt: true },
   });
   if (!priorOutput?.runId || priorOutput.runId === input.runId) return { status: "none" };
-  const parsed = parseRegressionVerdict(priorOutput.body);
+  const parsed = parseRegressionVerdict(priorOutput.body, input.outputKind);
   if (parsed.status === "invalid") return { status: "none" };
   const invalid = (reason: string): RegressionRepairHandoffSelection => ({
     status: "invalid",

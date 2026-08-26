@@ -236,6 +236,10 @@ test("canonical sync rolls the adjudication-era graphs only after their old task
       attachmentsFromPrevious: true,
       baseFromStepIndex: blind.baseFromStepIndex,
     } });
+    await db.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
+      data: { outputKind: "regression-verification" },
+    });
     // The adjudication-era compound graph still gated its spec and revise-plan
     // steps; the zero-gate transition removed those gates from the seeded
     // sources, so the rebuild restores them to land on the exact enumerated
@@ -263,7 +267,7 @@ test("canonical sync rolls the adjudication-era graphs only after their old task
 
   const refused = await sync();
   assert.notEqual(refused.code, 0, refused.output);
-  assert.match(refused.output, /still has 1 unfinished tasks/u);
+  assert.match(refused.output, /still has 1 active or unparked unfinished tasks/u);
   assert.equal((await db.taskTemplate.findUniqueOrThrow({ where: { id: compound.id } })).name, INTEGRATOR_TEMPLATE_NAME);
 
   for (const task of oldTasks) {

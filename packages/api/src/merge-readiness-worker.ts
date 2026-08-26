@@ -27,6 +27,7 @@ import {
   INDEPENDENT_REVIEW_OPEN_PREFIX,
   isMergeReadinessStep,
   parseRegressionVerdict,
+  REGRESSION_VERIFICATION_OUTPUT_KINDS,
   readMarkerHistory,
   recoveryContext,
   resolveChainTarget,
@@ -465,7 +466,7 @@ const readReadiness = async (
       projectId: readiness.projectId,
       chainId: readiness.chainId,
       templateId: readiness.templateId,
-      templateStep: { outputKind: "regression-verification" },
+      templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
     },
     include: READINESS_REGRESSION_INCLUDE,
   });
@@ -510,7 +511,7 @@ const readReadiness = async (
     if (!regression.stepOutput) {
       return claimedRead({ ...context, stage: "missing-regression-evidence" });
     }
-    const verdict = parseRegressionVerdict(regression.stepOutput.body);
+    const verdict = parseRegressionVerdict(regression.stepOutput.body, regression.stepOutput.kind);
     if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass"
       || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
       return claimedRead({ ...context, stage: "invalid-regression-evidence" });
