@@ -825,6 +825,7 @@ export const en = {
   "tasks.notice.copyFailed": "The browser refused clipboard access; open the task to read the error",
   "tasks.pill.approval": "Approval",
   "tasks.pill.cron": "cron",
+  "tasks.pill.repair": "Repair {kind}",
   "tasks.pill.template": "Template",
   "tasks.pill.webhook": "webhook",
   "tasks.schedule.AT": "at",

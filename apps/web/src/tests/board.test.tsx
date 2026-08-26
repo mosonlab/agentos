@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState, focusAfterMove,
-  moveTargets, parseStatus, retryable, sameEdges, scheduleLabel, statusLabel, storedScroll,
+  chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
+  focusAfterMove, moveTargets, parseStatus, retryable, sameEdges, scheduleLabel, statusLabel, storedScroll,
 } from "../lib/board";
 import type { BoardTask, ChainProgress } from "../lib/types";
 
@@ -27,6 +27,24 @@ const step = (position: number, overrides: Partial<BoardTask> = {}): BoardTask =
     chainId: "c1", done: 1, total: 9, activeStepName: "Implementation", activeStatus: "doing", currentLayer: 2, layerCount: 7, position,
   } satisfies ChainProgress,
   ...overrides,
+});
+
+/* ------------------------------------------------------------- the binding */
+
+test("a merge-tail repair task binds to a chain it has no columns for", () => {
+  assert.deepEqual(chainBinding(step(4, { chainName: "Release" })), { id: "c1", name: "Release" });
+  assert.equal(chainBinding(task()), null);
+  // Chain-detached by design: the binding is the API's resolution of the
+  // repair marker, and it is the only thing that puts the card with its chain.
+  const repair = task({ repairOf: { chainId: "c1", chainName: "Release", repairKind: "gate-fix" } });
+  assert.deepEqual(chainBinding(repair), { id: "c1", name: "Release" });
+  assert.equal(chainBindingLabel(chainBinding(repair)!), "Release");
+  // A chain with no step of its own on the page has no derived name, so the
+  // card names it by a short id rather than by nothing at all.
+  assert.equal(
+    chainBindingLabel(chainBinding(task({ repairOf: { chainId: "cmt38t30u000fmpru2uc4emc9", chainName: null, repairKind: "review-fix" } }))!),
+    "cmt38t30",
+  );
 });
 
 /* --------------------------------------------------------- schedule labels */
