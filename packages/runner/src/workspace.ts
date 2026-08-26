@@ -372,6 +372,14 @@ export const provisionWorkspace = async (
           // source is the mirror, which does carry the chain ref: a fetch
           // transfers only what the requested objects reach, never the mirror's
           // other refs.
+          //
+          // What this has never been is a sandbox. The mirror sits in the
+          // reviewer's own account home, and the reviewer could already fetch
+          // the chain ref straight from GitHub: no runtime reads
+          // Environment.networking, and a session is not isolated from other
+          // processes of its own user (see api/src/onboarding.ts). The property
+          // is that provisioning does not *hand* a blind reviewer its
+          // predecessor's report, and that is what the object-id fetch keeps.
           await ensureMirrorRevisions(
             config, mirror, [implementationBaseSha, pinnedBaseSha], root, env, execute, retryOptions,
           );
