@@ -64,10 +64,13 @@ test("instantiating the canonical feature template copies every layer and writes
     // The Agent-row mutex and each exact Repo-grant mutex are acquired before
     // the first task write. Returning both row shapes lets the shared lock
     // helpers exercise their normal paths.
-    $queryRaw: async () => [...agents.values()].map((agent) => ({
-      id: agent.id, name: agent.name, projectId: "project-1", archivedAt: null,
-      agentId: agent.id, repoId: "repo-1",
-    })),
+    $queryRaw: async () => [
+      { id: "template-1", name: "compound-engineer-workflow" },
+      ...[...agents.values()].map((agent) => ({
+        id: agent.id, name: agent.name, projectId: "project-1", archivedAt: null,
+        agentId: agent.id, repoId: "repo-1",
+      })),
+    ],
     agent: {
       findUnique: async ({ where }: { where: { id: string } }) =>
         [...agents.values()].find((agent) => agent.id === where.id) ?? null,
@@ -152,6 +155,80 @@ test("instantiating the canonical feature template copies every layer and writes
   assert.equal(runs.length, 1, "omitting autoStart defaults to an inert chain with no queued run");
 });
 
+test("template instantiation retries against the canonical row after rollover", async () => {
+  const agent = { id: "agent-1", name: "Agent", projectId: "project-1", archivedAt: null };
+  const step = {
+    id: "step-canonical",
+    stepIndex: 1,
+    name: "Implementation",
+    prompt: "work",
+    outputKind: "result",
+    attachmentsFromPrevious: false,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: agent.id,
+    assigneeAgent: agent,
+    approvalGate: false,
+    opensPullRequest: true,
+    layer: 1,
+    baseFromStepIndex: null,
+    runner: null,
+  };
+  const oldTemplate = { id: "template-old", name: "Template", variables: [], steps: [{ ...step, id: "step-old" }] };
+  const canonicalTemplate = { id: "template-canonical", name: "Template", variables: [], steps: [step] };
+  const created: Array<Record<string, unknown>> = [];
+  let templateRead = 0;
+  let transactionCount = 0;
+  const lockQueries: string[] = [];
+  const db = {
+    taskTemplate: {
+      findFirst: async ({ where }: { where: { id?: string; name?: string } }) => {
+        if (where.id) {
+          templateRead += 1;
+          return oldTemplate;
+        }
+        return canonicalTemplate;
+      },
+    },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => {
+      transactionCount += 1;
+      const tx = {
+        $queryRaw: async (query: TemplateStringsArray) => {
+          const sql = query.join(" ");
+          lockQueries.push(sql);
+          if (sql.includes('FROM "TaskTemplate"')) {
+            return transactionCount === 1
+              ? [{ id: oldTemplate.id, name: "Template-legacy-pre-adjudication-old" }]
+              : [{ id: canonicalTemplate.id, name: canonicalTemplate.name }];
+          }
+          return [
+            { id: agent.id, name: agent.name, projectId: agent.projectId, archivedAt: agent.archivedAt },
+            { agentId: agent.id, repoId: "repo-1" },
+          ];
+        },
+        agentRepoAccess: { count: async () => 1 },
+        task: {
+          create: async ({ data }: { data: Record<string, unknown> }) => {
+            const task = { id: `task-${created.length + 1}`, ...data };
+            created.push(task);
+            return task;
+          },
+        },
+        taskActivity: { createMany: async () => ({ count: created.length }) },
+      };
+      return operation(tx);
+    },
+  } as unknown as PrismaClient;
+
+  const result = await instantiateTemplate(db, "project-1", oldTemplate.id, { repoId: "repo-1", variables: {} });
+  assert.equal(templateRead, 1);
+  assert.equal(transactionCount, 2);
+  assert.equal(lockQueries.filter((query) => query.includes('FROM "TaskTemplate"')).length, 2);
+  assert.equal(result.tasks[0]!.templateId, canonicalTemplate.id);
+  assert.equal(result.tasks[0]!.templateStepId, step.id);
+});
+
 test("the lower-level materializer rejects blank variables and invalid branches before a transaction", async () => {
   const db = {
     taskTemplate: { findFirst: async () => ({
@@ -222,6 +299,7 @@ test("an agent archived after the step check still loses to the locked re-read",
     taskTemplate: {
       findFirst: async () => ({
         id: "template-1",
+        name: "Template",
         variables: [],
         steps: [{
           id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
@@ -233,7 +311,10 @@ test("an agent archived after the step check still loses to the locked re-read",
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { findFirst: async () => ({ agentId: agent.id }) },
     $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
-      $queryRaw: async () => [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }],
+      $queryRaw: async () => [
+        { id: "template-1", name: "Template" },
+        { id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() },
+      ],
       task: { create: async () => { taskCreates += 1; return { id: "task-1" }; } },
       run: { create: async () => { throw new Error("must not create run"); } },
       taskActivity: { createMany: async () => ({ count: 0 }) },
@@ -259,6 +340,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
     taskTemplate: {
       findFirst: async () => ({
         id: "template-1",
+        name: "Template",
         variables: [],
         steps: [{
           id: "step-1", stepIndex: 1, name: "Implementation", prompt: "work",
@@ -280,7 +362,10 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
             meta: { code: "40001", message: "could not serialize access due to concurrent update" },
           });
         }
-        return [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }];
+        return [
+          { id: "template-1", name: "Template" },
+          { id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() },
+        ];
       },
       task: { create: async () => { throw new Error("must not create task"); } },
       run: { create: async () => { throw new Error("must not create run"); } },
@@ -291,7 +376,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
     () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
     /Template step Implementation agent Racing Agent is archived/,
   );
-  assert.equal(attempts, 2, "the conflicting attempt is retried once and then decides on the re-read");
+  assert.equal(attempts, 3, "the conflicting attempt is retried once and then decides on the locked template and Agent re-reads");
 });
 
 test("template instantiation rejects an archived step agent and names the step", async () => {
@@ -338,6 +423,7 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
     $queryRaw: async (query: TemplateStringsArray) => {
       lockQueries.push(query.join(" "));
       return [
+        { id: "template-1", name: "Template" },
         ...[...agents, replacement].map((agent) => ({
           id: agent.id,
           name: agent.name,
@@ -373,8 +459,9 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
   assert.equal(created[1]!.assigneeType, AssigneeType.AGENT);
   assert.equal(created[1]!.approvalGate, true);
   assert.equal(created[1]!.opensPullRequest, false);
-  assert.equal(lockQueries.length, 3, "one Agent lock plus one grant lock per distinct effective assignee");
-  assert.match(lockQueries[0]!, /ORDER BY "id" FOR UPDATE/u);
+  assert.equal(lockQueries.length, 4, "one template lock, one Agent lock plus one grant lock per distinct effective assignee");
+  assert.match(lockQueries[0]!, /FROM "TaskTemplate"[\s\S]*FOR UPDATE/u);
+  assert.match(lockQueries[1]!, /ORDER BY "id" FOR UPDATE/u);
 });
 
 test("step override structural refusals happen before template reads and carry stable codes", async () => {

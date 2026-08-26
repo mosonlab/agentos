@@ -118,6 +118,31 @@ const interpolate = (source: string, variables: Record<string, string>): string 
   (_match, name: string) => variables[name] ?? `{{${name}}}`,
 );
 
+class TemplateRolloverConflict extends Error {
+  constructor(templateName: string) {
+    super(`Template ${templateName} was rolled over while it was being instantiated`);
+    this.name = "TemplateRolloverConflict";
+  }
+}
+
+const loadTemplate = async (
+  db: PrismaClient,
+  projectId: string,
+  templateId: string,
+) => db.taskTemplate.findFirst({
+  where: { id: templateId, projectId },
+  include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+});
+
+const loadTemplateByName = async (
+  db: PrismaClient,
+  projectId: string,
+  templateName: string,
+) => db.taskTemplate.findFirst({
+  where: { projectId, name: templateName },
+  include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+});
+
 export const isUsableTemplateVariable = (value: string | undefined): value is string => (
   value !== undefined && value.trim().length > 0
 );
@@ -173,15 +198,13 @@ export const instantiateTemplate = async (
       );
     }
   }
-  const [template, repo] = await Promise.all([
-    db.taskTemplate.findFirst({
-      where: { id: templateId, projectId },
-      include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
-    }),
+  const [loadedTemplate, repo] = await Promise.all([
+    loadTemplate(db, projectId, templateId),
     db.repo.findFirst({ where: { id: input.repoId, projectId } }),
   ]);
-  if (!template) throw new Error("Template not found in project");
+  if (!loadedTemplate) throw new Error("Template not found in project");
   if (!repo) throw new Error("Repo not found in project");
+  let template = loadedTemplate;
   if (template.steps.length === 0) throw new Error("Template has no steps");
   const missing = template.variables.filter((variable) => !isUsableTemplateVariable(input.variables[variable]));
   const unknown = Object.keys(input.variables).filter((variable) => !template.variables.includes(variable));
@@ -210,7 +233,7 @@ export const instantiateTemplate = async (
     });
     for (const row of rows) overrideAgents.set(row.id, row);
   }
-  const effectiveSteps = template.steps.map((step): EffectiveTemplateStep => {
+  const effectiveStepsFor = (currentTemplate: NonNullable<typeof template>): EffectiveTemplateStep[] => currentTemplate.steps.map((step): EffectiveTemplateStep => {
     const override = input.stepOverrides?.[String(step.stepIndex)];
     const assigneeAgentId = override?.assigneeAgentId ?? step.assigneeAgentId;
     return {
@@ -222,6 +245,7 @@ export const instantiateTemplate = async (
         : step.assigneeAgent,
     };
   });
+  let effectiveSteps = effectiveStepsFor(template);
 
   for (const effective of effectiveSteps) {
     const { step, override, assigneeAgent } = effective;
@@ -299,6 +323,22 @@ export const instantiateTemplate = async (
     const branchName = input.variables.branchName ?? `agentos/${chainId}`;
     try {
       return await db.$transaction(async (tx) => {
+        // The template was read before this transaction so the request can
+        // validate its inputs without holding a database transaction open.
+        // Lock and re-check its identity before the first task exists. A
+        // canonical rollover takes the same row lock before counting and
+        // renaming; whichever writer gets the lock first therefore decides
+        // whether the old row is counted or this chain is retried against the
+        // replacement canonical row.
+        const lockedTemplate = await tx.$queryRaw<Array<{ id: string; name: string }>>`
+          SELECT "id", "name" FROM "TaskTemplate"
+          WHERE "id" = ${template.id} AND "projectId" = ${projectId}
+          FOR UPDATE
+        `;
+        if (!lockedTemplate[0]) throw new Error("Template not found in project");
+        if (lockedTemplate[0].name !== template.name) {
+          throw new TemplateRolloverConflict(template.name);
+        }
         let predecessor: DispatchPredecessor | null = null;
         if (input.afterTaskId) {
           // The first read only discovers the chain mutex to take. No
@@ -549,6 +589,20 @@ export const instantiateTemplate = async (
           "after_task_already_bound",
           `Predecessor task ${input.afterTaskId} is already bound to another chain`,
         );
+      }
+      if (error instanceof TemplateRolloverConflict) {
+        if (attempt >= 12) throw error;
+        const rolledOverName = template.name;
+        const replacement = await loadTemplateByName(db, projectId, rolledOverName);
+        if (!replacement) {
+          throw new Error(`Template ${rolledOverName} was rolled over, but its canonical replacement was not found`);
+        }
+        template = replacement;
+        if (template.steps.length === 0) throw new Error("Template has no steps");
+        assertValidBaseReferences(template.steps);
+        effectiveSteps = effectiveStepsFor(template);
+        await serializationRetryDelay(attempt);
+        continue;
       }
       // Six simultaneous webhook fires can form a longer serialization queue
       // than five attempts, even with per-attempt jitter. Twelve bounded tries
