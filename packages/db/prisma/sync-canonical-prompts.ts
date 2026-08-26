@@ -176,17 +176,15 @@ const transitionCanonicalTemplateRows = async (
         where: { templateId: row.id, archivedAt: null, status: { not: TaskStatus.DONE } },
         select: {
           chainId: true,
-          status: true,
           _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
         },
       });
       const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
         chainId: task.chainId,
-        status: task.status,
         activeRunCount: task._count.runs,
       })));
       if (blockers > 0) {
-        throw new Error(`${templateName} ${row.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
+        throw new Error(`${templateName} ${row.id} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
       }
       if (row.webhookSecretId !== null || row.webhookRepoId !== null
         || row.webhookPayloadMapping !== null || row.webhookPausedAt !== null

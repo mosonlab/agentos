@@ -204,17 +204,15 @@ const main = async (): Promise<void> => {
         where: { templateId: existing.id, archivedAt: null, status: { not: TaskStatus.DONE } },
         select: {
           chainId: true,
-          status: true,
           _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
         },
       });
       const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
         chainId: task.chainId,
-        status: task.status,
         activeRunCount: task._count.runs,
       })));
       if (blockers > 0) {
-        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
+        throw new Error(`${INTEGRATOR_TEMPLATE_NAME} ${existing.id} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
       }
       if (existing.webhookSecretId !== null || existing.webhookRepoId !== null
         || existing.webhookPayloadMapping !== null || existing.webhookPausedAt !== null
@@ -311,17 +309,15 @@ const main = async (): Promise<void> => {
       where: { templateId: historicalDirect.id, archivedAt: null, status: { not: TaskStatus.DONE } },
       select: {
         chainId: true,
-        status: true,
         _count: { select: { runs: { where: { status: { in: [...TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES] } } } } },
       },
     });
     const blockers = templateRolloverBlockerCount(rolloverTasks.map((task) => ({
       chainId: task.chainId,
-      status: task.status,
       activeRunCount: task._count.runs,
     })));
     if (blockers > 0) {
-      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${blockers} active or unparked unfinished tasks; canonical rollover requires its active chains to finish or park first`);
+      throw new Error(`${DIRECT_TEMPLATE_NAME} ${historicalDirect.id} still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
     }
     if (historicalDirect.webhookSecretId !== null || historicalDirect.webhookRepoId !== null
       || historicalDirect.webhookPayloadMapping !== null || historicalDirect.webhookPausedAt !== null
