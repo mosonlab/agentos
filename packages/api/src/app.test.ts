@@ -20,7 +20,7 @@ import { LOOPBACK_BROWSER_ORIGINS } from "./local-origin.js";
 import { completionSucceeded, externalFailure } from "./execution.js";
 import { isStarterMountPath, isValidBranchName, onboardingInput, parseRepoRemote, slugify } from "./onboarding.js";
 import { RepositoryPreflightError } from "./onboarding-preflight.js";
-import { noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
+import { reconcileDatabaseRuns } from "./reconcile.js";
 import { activeRunStatuses } from "./run-fence.js";
 
 const withTokens = async (callback: () => Promise<void>): Promise<void> => {
