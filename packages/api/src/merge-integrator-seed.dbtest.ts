@@ -182,7 +182,7 @@ test("canonical sync restores step, merge-resolver role, and foundational prompt
   assert.equal(persistedAgent.rolePrompt, expectedRole.rolePrompt);
 });
 
-test("canonical sync rolls the adjudication-era graphs only after their old tasks finish", async () => {
+test("canonical sync rolls quiescent adjudication-era graphs only after active Runs settle", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
   const compound = await db.taskTemplate.findUniqueOrThrow({
@@ -265,14 +265,25 @@ test("canonical sync rolls the adjudication-era graphs only after their old task
     } }));
   }
 
+  const activeRuns = await Promise.all(oldTasks.map(async (task) => {
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: task.assigneeAgentId! } });
+    return db.run.create({ data: {
+      projectId: task.projectId,
+      taskId: task.id,
+      agentId: agent.id,
+      runNumber: 1,
+      dedupeKey: `adjudication-active:${task.id}`,
+      runner: "CODEX",
+      model: agent.model,
+      promptHash: "adjudication-active",
+    } });
+  }));
   const refused = await sync();
   assert.notEqual(refused.code, 0, refused.output);
-  assert.match(refused.output, /still has 1 active or unparked unfinished tasks/u);
+  assert.match(refused.output, /still has 1 tasks with active Runs or no chain identity/u);
   assert.equal((await db.taskTemplate.findUniqueOrThrow({ where: { id: compound.id } })).name, INTEGRATOR_TEMPLATE_NAME);
 
-  for (const task of oldTasks) {
-    await db.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE } });
-  }
+  await db.run.deleteMany({ where: { id: { in: activeRuns.map(({ id }) => id) } } });
   const synced = await sync();
   assert.equal(synced.code, 0, synced.output);
   assert.match(synced.output, /"createdCanonicalTemplates":2/u);
@@ -282,7 +293,7 @@ test("canonical sync rolls the adjudication-era graphs only after their old task
       where: { id: oldTemplate.id },
       include: { steps: { orderBy: { stepIndex: "asc" } } },
     });
-    // The old row keeps its step ids, so the finished tasks keep their contract.
+    // The old row keeps its step ids, so the quiescent tasks keep their contract.
     assert.equal(preserved.name, legacyAdjudicationTemplateName(oldTemplate.name, oldTemplate.id));
     assert.equal(preserved.steps.some((step) => step.outputKind === "must-fix"), true);
 

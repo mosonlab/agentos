@@ -87,21 +87,22 @@ const ADJUDICATION_STEPS = {
   "compound-engineer-workflow": { stepIndex: 8, layer: 7, baseFromStepIndex: 5 },
 } as const;
 
-test("sync rolls the v1 Regression contract forward and preserves its template row", async () => {
+test("sync rolls parked and not-yet-started v1 chains forward without changing them", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const templates = await prisma.taskTemplate.findMany({
     where: { projectId: project.id, name: { in: ["direct-engineer-workflow", "compound-engineer-workflow"] } },
     include: { steps: { orderBy: { stepIndex: "asc" } } },
   });
   const oldPrompt = "Acquire before fetch and emit the v1 Regression contract.";
-  const parkedTaskIds: string[] = [];
+  const legacyTaskIds: string[] = [];
   for (const template of templates) {
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
       data: { outputKind: "regression-verification", prompt: oldPrompt },
     });
     const regressionIndex = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!.stepIndex;
-    const chainId = `parked-v1-${template.id}`;
+    const parked = template.name === "compound-engineer-workflow";
+    const chainId = `${parked ? "parked" : "not-started"}-v1-${template.id}`;
     for (const step of template.steps) {
       const task = await prisma.task.create({ data: {
         projectId: project.id,
@@ -111,7 +112,9 @@ test("sync rolls the v1 Regression contract forward and preserves its template r
         description: "parked v1 rollover compatibility fixture",
         assigneeAgentId: step.assigneeAgentId,
         assigneeType: step.assigneeType,
-        status: step.stepIndex < regressionIndex
+        status: !parked
+          ? TaskStatus.TODO
+          : step.stepIndex < regressionIndex
           ? TaskStatus.DONE
           : step.stepIndex === regressionIndex
             ? TaskStatus.BACKLOG
@@ -120,13 +123,13 @@ test("sync rolls the v1 Regression contract forward and preserves its template r
         chainIndex: step.stepIndex,
         chainLayer: step.layer,
       } });
-      parkedTaskIds.push(task.id);
+      legacyTaskIds.push(task.id);
     }
   }
 
-  const parkedBefore = await snapshotInstantiatedTasks(parkedTaskIds);
+  const legacyBefore = await snapshotInstantiatedTasks(legacyTaskIds);
   const activeTarget = await prisma.task.findFirstOrThrow({
-    where: { id: { in: parkedTaskIds }, status: TaskStatus.BACKLOG },
+    where: { id: { in: legacyTaskIds }, status: TaskStatus.BACKLOG },
     include: { assigneeAgent: { select: { model: true } } },
   });
   const activeRun = await prisma.run.create({ data: {
@@ -142,13 +145,13 @@ test("sync rolls the v1 Regression contract forward and preserves its template r
 
   const refusedWhileActive = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refusedWhileActive.status, 0, refusedWhileActive.output);
-  assert.match(refusedWhileActive.output, /active or unparked unfinished tasks/u);
+  assert.match(refusedWhileActive.output, /tasks with active Runs or no chain identity/u);
   await prisma.run.delete({ where: { id: activeRun.id } });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.match(synced.output, /"createdCanonicalTemplates":2/u);
-  assert.equal(await snapshotInstantiatedTasks(parkedTaskIds), parkedBefore);
+  assert.equal(await snapshotInstantiatedTasks(legacyTaskIds), legacyBefore);
 
   for (const template of templates) {
     const legacyName = `${template.name}-legacy-pre-narrow-regression-lease-${template.id}`;
@@ -185,7 +188,7 @@ test("sync rolls the v1 Regression contract forward and preserves its template r
   const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(second.status, 0, second.output);
   assert.match(second.output, /"createdCanonicalTemplates":0/u);
-  await prisma.task.deleteMany({ where: { id: { in: parkedTaskIds } } });
+  await prisma.task.deleteMany({ where: { id: { in: legacyTaskIds } } });
 });
 
 test("sync rolls the exact adjudication-era graphs forward without touching instantiated evidence", async () => {
