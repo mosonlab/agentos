@@ -106,6 +106,7 @@ import { authenticate, issueSessionToken, principalMayAccess, type Principal } f
 import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
+import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import {
   canonicalOutputRefusal,
   isCanonicalAdjudicationStep,
@@ -918,8 +919,13 @@ export const taskInput = z.object({
     context.addIssue({ code: "custom", message: "chainId and chainIndex must be provided together" });
   }
 });
-const taskPatch = z.object(taskFields).partial().extend({ status: z.nativeEnum(TaskStatus).optional() })
-  .refine((value) => Object.keys(value).length > 0);
+// `failureReason` is patchable but not creatable: a task is never born with a
+// failure, and an operator whose task carries a stale one needs a way to clear
+// it — an explicit null — without inventing a run.
+const taskPatch = z.object(taskFields).partial().extend({
+  status: z.nativeEnum(TaskStatus).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
+}).refine((value) => Object.keys(value).length > 0);
 const activityInput = z.object({
   actorType: z.string().trim().min(1).max(40).default("operator"),
   actorId: z.string().trim().min(1).nullable().optional(),
@@ -960,7 +966,9 @@ const reclaimReportInput = z.object({
   results: z.array(z.object({
     runId: id,
     outcome: z.enum(["REMOVED", "REFUSED", "FAILED"]),
-    failureReason: z.string().max(2000).nullable().optional(),
+    // Half the usual limit: a reclaim report carries up to 5000 of these in one
+    // request, so its per-entry bound is a bound on the body as well.
+    failureReason: failureReasonText(FAILURE_REASON_LIMIT / 2).nullable().optional(),
   })).max(5000),
 });
 const reclaimSalvageInput = z.object({
@@ -1069,7 +1077,7 @@ const completionInput = z.object({
   terminalSuccess: z.boolean(),
   terminationReason: z.string().nullable().optional(),
   failureClass: z.nativeEnum(FailureClass).optional(),
-  failureReason: z.string().max(4000).optional(),
+  failureReason: failureReasonText(FAILURE_REASON_LIMIT).optional(),
   retryable: z.boolean().optional(),
   externalFailure: z.boolean().default(false),
   branch: z.string().nullable().optional(),
