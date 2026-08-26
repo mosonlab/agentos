@@ -86,6 +86,7 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
   onStart: (step: ChainStep) => void;
 }): ReactNode => {
   const t = useT();
+  const blockedOn = step.blockedOn ?? null;
   const note = step.status === "BACKLOG" ? t("chain.parked") : step.failureReason;
   return (
     <div data-chain-node={step.taskId} className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
@@ -95,6 +96,11 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
         {here ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.viewedHere")}</span> : null}
         {step.currentExecution ? <span className="ml-[8px] text-[11.5px] text-muted-foreground">{t("chain.currentExecution")}</span> : null}
         {note ? <span className={cn(HINT, "mt-[3px] block")}>{note}</span> : null}
+        {blockedOn ? (
+          <span data-chain-blocked-on="" className={cn(HINT, "mt-[3px] block")}>
+            {t("chain.blockedOnPredecessor", { name: blockedOn.name })}
+          </span>
+        ) : null}
         {blockedBy.length > 0 && step.status !== "DONE" ? (
           <span data-chain-join-blocked="" className={cn(HINT, "mt-[3px] block")}>
             {t("chain.blockedBy", { names: blockedBy.map((blocker) => blocker.stepName).join(", ") })}
@@ -105,8 +111,15 @@ export const ChainRow = ({ step, here, pending, blockedBy, onStart }: {
       {step.approvalGate ? <span title={t(GATE_TITLE_KEY)} className="text-muted-foreground"><IconLock /></span> : null}
       <TaskPill status={step.status} />
       {step.archivedAt === null ? null : <Pill tone="grey">{t("chain.archived")}</Pill>}
-      {step.startAction ? (
-        <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => onStart(step)}>
+      {step.startAction !== null || blockedOn !== null ? (
+        <Button
+          type="button"
+          variant="legacy"
+          size="legacySmall"
+          className="shadow-none"
+          disabled={pending || !step.startable || blockedOn !== null}
+          onClick={() => onStart(step)}
+        >
           {t(step.startAction === "recover" ? "chain.recoverParked" : "chain.startNext")}
         </Button>
       ) : null}

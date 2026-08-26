@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "commit": "d95d6405d7e8eab06589fcf0ced0d44df864fd2d",
-  "tree": "e91101e388010765c4132d007a9bcd52153d2a46",
+  "commit": "97d5770beea0a8c6e7949c470cf03f5e1d7c02e6",
+  "tree": "7fa52d0edc4d3499d4e2571aab2adadd1afb0101",
   "masterSha": "8d69ee8544196a3310b3d63caf8ce5ec9a0e023b",
   "controlPlaneASha": "29f8dd354cb99d671c2e2e4e9e23716fd8004f3d",
   "evidence": [
@@ -157,6 +157,11 @@
       "blob": "655d8fd302e5ce27f71cbad25d22e1d4616879ea"
     },
     {
+      "path": "packages/db/prisma/migrations/20260825120000_task_dispatch_binding/migration.sql",
+      "sha256": "97738a332c34e2fbe5a75fdbb7790eaa3e3574c2d361f8f4b70db105f589bde1",
+      "blob": "83e1981d9729c9f760501f9196b18422132946c2"
+    },
+    {
       "path": "packages/db/prisma/migrations/migration_lock.toml",
       "sha256": "d6bae7899f05da956e1070ba5703455503208ef79e161acb18c93bfe3c6cd236",
       "blob": "99e4f2009079447bfe87fb47e52dcb038d1aec08"
@@ -173,8 +178,8 @@
     },
     {
       "path": "packages/db/prisma/schema.prisma",
-      "sha256": "82e2bc17d3207cb3c08a8693deb9976c52eafbe484f2ccf2d41e4a8df871fdfa",
-      "blob": "0df94658db400a239ba000e7d2076e5817e07add"
+      "sha256": "c41c98d53ee64b120535b3c5ac77b41bb088526444d13b8beacd0e720827c420",
+      "blob": "d19186568394ea86f924cb3e78a04276c4194966"
     },
     {
       "path": "packages/db/src/release-authority.ts",
@@ -183,13 +188,13 @@
     },
     {
       "path": "packages/db/src/release-migrate.ts",
-      "sha256": "a3a76a606ce2058b4c0c22f5a1f1da003b4f517cefdb99d46299c08f2d4195a8",
-      "blob": "860becdd0da50d90e1c3b12fbb4de002b0b27dad"
+      "sha256": "d2812910adcd0b754dc6306eca50d797c7b26ad3b79132a9baf98ed85af9456d",
+      "blob": "bd8f100fff7ae392b72ad0e47bc465e4ee3065c3"
     },
     {
       "path": "packages/db/src/schema-census.ts",
-      "sha256": "adb4b2163ebdfa798bba712fcafca38ed85dced543b5ad0c6550ecd88c207bd0",
-      "blob": "337b50e57de818565fc0f19e24324247b10066df"
+      "sha256": "a315ae04070a79b50927b04f00325c97de3a92f0007386bd68bcc69f127fedae",
+      "blob": "f1ea9bb40bda0adfdb19fd680a731f0a67734824"
     },
     {
       "path": "release-authority.pub",
@@ -198,13 +203,13 @@
     }
   ],
   "migrations": {
-    "count": 29,
-    "terminal": "20260824100000_chain_layer_contract",
-    "sha256": "bc703b99df3509d909d9cf57df20d5e5ac332b087e78846769e167dfc778624e"
+    "count": 30,
+    "terminal": "20260825120000_task_dispatch_binding",
+    "sha256": "ef8b48b1aeb151d6fe64030a0df8a5b479bec98477e196bababc4416b8ced7a2"
   },
   "signature": {
     "algorithm": "ed25519",
     "publicKeySha256": "632a7cd307d0090855ebd79e92ae1e64a65d3cd3e66b53e2dffe3ac5aa39d3f5",
-    "value": "eq/qhkpq4lo3a6Xs+a//FXo4Rfhree4p8zg7HYSX6cQVA+lntG1rBqOy162wFXppyGGIzCRIjc7+77LUm4/sAg=="
+    "value": "2Xg/oVm6gY8sjujHSJCXDmQ7ZjMM3H8CIrU6JtJOu/Dty8iPWQfTGd9JuahnxPoHfPjWUkBVowuCp7ggJ2nXCw=="
   }
 }

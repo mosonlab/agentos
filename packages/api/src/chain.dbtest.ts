@@ -1241,9 +1241,38 @@ const operatorGet = async (path: string): Promise<{ status: number; body: any }>
   return { status: response.status, body: response.status === 204 ? null : await response.json() };
 });
 
+/** Counts the one optional Task.findFirst used to resolve a chain binding.
+ * Other detail queries use findUnique/findMany, while recovery uses its own
+ * delegate, so this adapter is an executable assertion about the lookup rather
+ * than a review-only claim about SQL shape. */
+const operatorGetWithBindingLookupCount = async (path: string): Promise<{ status: number; body: any; lookupCount: number }> => asOperator(async () => {
+  let lookupCount = 0;
+  const taskDelegate = new Proxy(db.task, {
+    get(target, property, receiver) {
+      if (property !== "findFirst") return Reflect.get(target, property, receiver);
+      return (...args: any[]) => {
+        lookupCount += 1;
+        return (target.findFirst as (...input: any[]) => unknown)(...args);
+      };
+    },
+  });
+  const countedDb = new Proxy(db, {
+    get(target, property, receiver) {
+      if (property === "task") return taskDelegate;
+      return Reflect.get(target, property, receiver);
+    },
+  }) as PrismaClient;
+  const response = await createApp(countedDb).request(path, { headers: { Authorization: `Bearer ${OPERATOR}` } });
+  return {
+    status: response.status,
+    body: response.status === 204 ? null : await response.json(),
+    lookupCount,
+  };
+});
+
 /** A real three-step template, instantiated through instantiateTemplate so the
  *  chain under test is the one the product actually creates. */
-const seedTemplateChain = async (label: string, stepCount = 3) => {
+const seedTemplateChain = async (label: string, stepCount = 3, autoStart = true) => {
   const project = await db.project.create({ data: { name: label, slug: `${label}-${Date.now()}` } });
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
   const agent = await db.agent.create({ data: {
@@ -1265,7 +1294,7 @@ const seedTemplateChain = async (label: string, stepCount = 3) => {
       prompt: `do step ${index + 1}`,
     })) },
   } });
-  const chain = await instantiateTemplate(db, project.id, template.id, { repoId: repo.id, variables: {}, autoStart: true });
+  const chain = await instantiateTemplate(db, project.id, template.id, { repoId: repo.id, variables: {}, autoStart });
   return { project, agent, repo, template, chain };
 };
 
@@ -1345,6 +1374,68 @@ test("GET /tasks/:id/chain returns every step in order with startable and gate f
   const advanced = await operatorGet(`/tasks/${chain.tasks[3]!.id}/chain`);
   assert.equal(advanced.body.steps[1].startable, true);
   assert.equal(advanced.body.steps[1].startAction, "start");
+});
+
+test("a bound first step is guarded by its predecessor and projects blockedOn with one lookup", async () => {
+  const { project, agent, repo, chain } = await seedTemplateChain("bound-detail", 2, false);
+  const predecessor = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Bound predecessor",
+    description: "predecessor",
+    assigneeAgentId: agent.id,
+    repoId: repo.id,
+    status: "TODO",
+    chainId: `predecessor-${Date.now()}`,
+    chainIndex: 0,
+    chainLayer: 0,
+  } });
+  const first = chain.tasks[0]!;
+  await db.task.update({ where: { id: first.id }, data: { dispatchAfterTaskId: predecessor.id } });
+
+  const unresolved = await operatorGetWithBindingLookupCount(`/tasks/${first.id}/chain`);
+  assert.equal(unresolved.status, 200);
+  assert.equal(unresolved.lookupCount, 1);
+  assert.deepEqual(unresolved.body.steps[0].blockedOn, {
+    taskId: predecessor.id,
+    name: predecessor.name,
+    status: "TODO",
+  });
+  assert.equal(unresolved.body.steps[0].startable, false);
+  assert.equal(unresolved.body.steps[0].startAction, null);
+  assert.equal(unresolved.body.steps[1].blockedOn, null);
+  const startability = await operatorGet(`/tasks/${first.id}/startability`);
+  assert.equal(startability.body.startable, false);
+  assert.equal(startability.body.checklist.predecessorsDone, false);
+
+  const refused = await asOperator(() => createApp(db).request(`/tasks/${first.id}/start`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPERATOR}` },
+  }));
+  assert.equal(refused.status, 409);
+  assert.match((await refused.json() as { error: string }).error, /Bound predecessor/u);
+  assert.equal(await db.run.count({ where: { taskId: first.id } }), 0);
+
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DONE" } });
+  const resolved = await operatorGetWithBindingLookupCount(`/tasks/${first.id}/chain`);
+  assert.equal(resolved.lookupCount, 1);
+  assert.equal(resolved.body.steps[0].blockedOn, null);
+  assert.equal(resolved.body.steps[0].startable, true);
+  assert.equal(resolved.body.steps[0].startAction, "start");
+
+  const started = await asOperator(() => createApp(db).request(`/tasks/${first.id}/start`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPERATOR}` },
+  }));
+  assert.equal(started.status, 201);
+  assert.equal(await db.run.count({ where: { taskId: first.id } }), 1);
+});
+
+test("an unbound chain detail does not issue a predecessor lookup", async () => {
+  const { chain } = await seedTemplateChain("unbound-detail", 2, false);
+  const response = await operatorGetWithBindingLookupCount(`/tasks/${chain.tasks[0]!.id}/chain`);
+  assert.equal(response.status, 200);
+  assert.equal(response.lookupCount, 0);
+  assert.deepEqual(response.body.steps.map((step: any) => step.blockedOn), [null, null]);
 });
 
 test("GET /tasks/:id/chain returns an empty envelope for a task with no chain", async () => {

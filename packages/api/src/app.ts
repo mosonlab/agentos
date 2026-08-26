@@ -166,6 +166,7 @@ import { suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
+import { isTemplateInstantiationRefusal } from "./template-errors.js";
 import { computeNextOccurrence, validateSchedule } from "./scheduler.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "./hooks.js";
 import { filesRootGrantKey, getFileStore } from "./files/config.js";
@@ -1136,22 +1137,57 @@ const inboxQuestionInput = z.object({
   chatId: z.string().min(1).optional(),
   resumableUntil: z.coerce.date().nullable().optional(),
 });
+const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
+const stepOverridesInput = z.record(z.string(), stepOverrideInput).superRefine((overrides, context) => {
+  for (const stepIndex of Object.keys(overrides)) {
+    if (!/^[1-9]\d*$/u.test(stepIndex)) {
+      context.addIssue({
+        code: "custom",
+        path: [stepIndex],
+        message: `Step override key ${stepIndex} must be a positive decimal step index without leading zeros`,
+        params: { templateRefusalCode: "step_override_invalid_key" },
+      });
+    }
+  }
+});
 const instantiateTemplateInput = z.object({
   repoId: id,
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
   autoStart: z.boolean().default(false),
+  afterTaskId: id.optional(),
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(50_000).optional(),
+  stepOverrides: stepOverridesInput.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;
   if (branchName !== undefined && !isValidBranchName(branchName)) {
     context.addIssue({ code: "custom", path: ["variables", "branchName"], message: "Template branchName is not a valid Git branch name" });
+  }
+  if (value.afterTaskId && value.autoStart) {
+    context.addIssue({
+      code: "custom",
+      path: ["afterTaskId"],
+      message: `afterTaskId ${value.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
+      params: { templateRefusalCode: "dispatch_conflicts_with_auto_start" },
+    });
   }
 });
 const isTemplateInputError = (error: unknown): error is Error => (
   error instanceof Error
   && /(not found|has no|is archived|Missing template|Unknown template|must be agent|Invalid template branch)/iu.test(error.message)
 );
+const templateSchemaRefusal = (error: unknown): { error: string; code: string } | null => {
+  if (!(error instanceof z.ZodError)) return null;
+  const issue = error.issues.find((candidate) => {
+    const params = (candidate as unknown as { params?: Record<string, unknown> }).params;
+    return typeof params?.templateRefusalCode === "string";
+  });
+  if (!issue) return null;
+  const params = (issue as unknown as { params?: Record<string, unknown> }).params;
+  return typeof params?.templateRefusalCode === "string"
+    ? { error: issue.message, code: params.templateRefusalCode }
+    : null;
+};
 // `Fire now` merges over the template's own defaults, so an all-defaulted
 // trigger fires from an empty body.
 const manualFireInput = z.object({
@@ -1465,6 +1501,8 @@ type LockedTask = {
   archivedAt: Date | null;
   projectId: string;
   chainId: string | null;
+  dispatchAfterTaskId: string | null;
+  dispatchAfter: { name: string; status: TaskStatus } | null;
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   templateStep: {
@@ -1487,6 +1525,8 @@ const lockedTaskSelect = {
   archivedAt: true,
   projectId: true,
   chainId: true,
+  dispatchAfterTaskId: true,
+  dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,
   assigneeAgentId: true,
   templateStep: {
@@ -2811,6 +2851,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         await readJson(context.req.raw, instantiateTemplateInput),
       ), 201);
     } catch (error: unknown) {
+      if (isTemplateInstantiationRefusal(error)) {
+        return context.json({ error: error.message, code: error.code }, 400);
+      }
+      const schemaRefusal = templateSchemaRefusal(error);
+      if (schemaRefusal) return context.json(schemaRefusal, 400);
       if (isTemplateInputError(error)) {
         return context.json({ error: error.message }, 400);
       }
@@ -3138,6 +3183,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           id: true, projectId: true, name: true, status: true, failureReason: true,
           scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
           templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, updatedAt: true,
+          dispatchAfterTaskId: true,
           assigneeAgent: { select: { id: true, title: true, model: true } },
           templateStep: { select: { name: true } },
           runs: {
@@ -3154,7 +3200,27 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       });
       const progressFor = await chainProgressLookup(rows);
       const displayByTask = chainDisplayByTask(rows);
-      return validated(context, rows.map((row) => boardCard(row, progressFor(row), displayByTask.get(row.id))));
+      // A bound first task is the only board row that can carry this marker.
+      // Resolve all page bindings in one batch, and skip the query entirely for
+      // the overwhelmingly common unbound page. The projection remains pure:
+      // it receives the resolved predecessor rather than reaching into Prisma.
+      const predecessorIds = [...new Set(rows
+        .map((row) => row.dispatchAfterTaskId)
+        .filter((value): value is string => typeof value === "string" && value.length > 0))];
+      const predecessorById = new Map<string, { id: string; name: string; status: TaskStatus }>();
+      if (predecessorIds.length > 0) {
+        const predecessors = await db.task.findMany({
+          where: { id: { in: predecessorIds } },
+          select: { id: true, name: true, status: true },
+        });
+        for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
+      }
+      return validated(context, rows.map((row) => boardCard(
+        row,
+        progressFor(row),
+        displayByTask.get(row.id),
+        row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+      )));
     }
 
     const tasks = await db.task.findMany({
@@ -3354,6 +3420,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       include: {
         assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
         repo: { select: { id: true, name: true, defaultBranch: true } },
+        dispatchAfter: { select: { id: true, name: true, status: true } },
       },
     });
     if (!task) return context.json({ error: "Task not found" }, 404);
@@ -3438,10 +3505,32 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         include: chainInclude,
       });
 
+    // Bindings are stored only on the first task. Keep the common unbound path
+    // at zero predecessor lookups, and resolve the one pointer only when the
+    // chain's first execution row carries it. This is deliberately separate
+    // from the row include above: including the self-relation would make every
+    // historical chain pay for a relation query it cannot use.
+    const firstTask = [...rows].sort((left, right) => (
+      (left.chainLayer ?? left.chainIndex ?? 0) - (right.chainLayer ?? right.chainIndex ?? 0)
+        || (left.chainIndex ?? 0) - (right.chainIndex ?? 0)
+        || left.id.localeCompare(right.id)
+    ))[0];
+    const dispatchAfterTaskId = firstTask?.dispatchAfterTaskId ?? null;
+    const dispatchAfter = dispatchAfterTaskId === null
+      ? null
+      : await db.task.findFirst({
+        where: { id: dispatchAfterTaskId, projectId: subject.projectId },
+        select: { id: true, name: true, status: true },
+      });
+    const chainRows = rows.map((row) => ({
+      ...row,
+      dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
+    }));
+
     const [runGroups, recoveryRow] = await Promise.all([
-      rows.length === 0 ? [] : db.run.groupBy({
+      chainRows.length === 0 ? [] : db.run.groupBy({
         by: ["taskId", "status"],
-        where: { taskId: { in: rows.map((row) => row.id) } },
+        where: { taskId: { in: chainRows.map((row) => row.id) } },
         _count: { _all: true },
         // The grants travel with the count, in the same one query: a step whose
         // failures were all provisioning failures has been refunded them, and its
@@ -3455,18 +3544,18 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     ]);
     const mergeRecovery = mergeRecoveryProjection(recoveryRow);
     const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
-    const ordinals = positions(rows);
-    const progress = chainProgress(rows);
-    const decisions = chainStartDecisions(rows.map((row) => ({
+    const ordinals = positions(chainRows);
+    const progress = chainProgress(chainRows);
+    const decisions = chainStartDecisions(chainRows.map((row) => ({
       ...row,
       hasRepoGrant: Boolean(row.repoId && row.assigneeAgent?.repoAccess.some((grant) => grant.repoId === row.repoId)),
     })), facts);
 
     return context.json({
       chainId: subject.chainId,
-      total: progress?.total ?? rows.length,
+      total: progress?.total ?? chainRows.length,
       done: progress?.done ?? 0,
-      steps: rows.map((row) => ({
+      steps: chainRows.map((row) => ({
         taskId: row.id,
         position: ordinals.get(row.id) ?? 1,
         chainIndex: row.chainIndex,
@@ -3486,6 +3575,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         startable: decisions.get(row.id)?.startable ?? false,
         startAction: decisions.get(row.id)?.startAction ?? null,
         currentExecution: decisions.get(row.id)?.currentExecution ?? false,
+        blockedOn: row.id === firstTask?.id
+          && row.dispatchAfterTaskId !== null
+          && dispatchAfter !== null
+          && dispatchAfter.status !== TaskStatus.DONE
+          ? { taskId: dispatchAfter.id, name: dispatchAfter.name, status: dispatchAfter.status }
+          : null,
         mergeRecovery,
       })),
     });
@@ -3605,6 +3700,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         if (!locked) return { error: "Task not found", code: 404 as const };
         if (locked.archivedAt !== null) {
           return { error: "Cannot change the status of an archived task; unarchive it first", code: 409 as const };
+        }
+        if (typeof locked.dispatchAfterTaskId === "string"
+          && locked.dispatchAfter?.status !== TaskStatus.DONE
+          && body.status !== locked.status
+          && body.status !== TaskStatus.TODO) {
+          const predecessorName = locked.dispatchAfter?.name ?? locked.dispatchAfterTaskId;
+          return {
+            error: `Cannot change bound task status before predecessor ${predecessorName} is done`,
+            code: 409 as const,
+          };
         }
         // Task rows first, then the Agent row — the one global lock order.
         if (body.assigneeType !== undefined || body.assigneeAgentId !== undefined) {
@@ -3955,6 +4060,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           where: { id: taskId },
           include: {
             assigneeAgent: { select: { archivedAt: true } },
+            dispatchAfter: { select: { id: true, name: true, status: true } },
             templateStep: { include: { taskTemplate: { select: { name: true } } } },
           },
         });
@@ -3980,6 +4086,13 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
               code: 409 as const,
             };
           }
+        }
+        if (task.dispatchAfterTaskId !== null && task.dispatchAfter?.status !== TaskStatus.DONE) {
+          const predecessorName = task.dispatchAfter?.name ?? task.dispatchAfterTaskId;
+          return {
+            error: `Cannot start ${task.name}; bound predecessor ${predecessorName} is not done`,
+            code: 409 as const,
+          };
         }
         if (task.archivedAt !== null) return { error: "Cannot start an archived task", code: 409 as const };
         if (task.status === TaskStatus.DONE) return { error: "Task is already done", code: 409 as const };

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { projectMergeOutcome, runOwnsMergeOutcome, sessionUsageCost, sumUsageCosts, type MergeOutcomeProjection, type ScheduleKind, type TaskSource, type TaskStatus, type UsageCost } from "@agentos/db";
+import { projectMergeOutcome, runOwnsMergeOutcome, sessionUsageCost, sumUsageCosts, TaskStatus, type MergeOutcomeProjection, type ScheduleKind, type TaskSource, type TaskStatus as TaskStatusType, type UsageCost } from "@agentos/db";
 
 import type { ChainProgress } from "./chain.js";
 
@@ -23,7 +23,7 @@ export type BoardCard = {
   name: string;
   /** Display-only title with a verified chain prefix removed. */
   displayName: string;
-  status: TaskStatus;
+  status: TaskStatusType;
   /** Full text, not a truncation: the card clamps it to three lines but the
    *  card menu's `Copy error` hands the operator the whole thing. */
   failureReason: string | null;
@@ -37,6 +37,7 @@ export type BoardCard = {
   chainId: string | null;
   chainIndex: number | null;
   chainName: string | null;
+  blockedOn: { taskId: string; taskName: string } | null;
   updatedAt: Date;
   assigneeAgent: { id: string; title: string; model: string } | null;
   chainProgress: (ChainProgress & { position: number | null }) | null;
@@ -65,7 +66,7 @@ export type BoardRow = {
   id: string;
   projectId: string;
   name: string;
-  status: TaskStatus;
+  status: TaskStatusType;
   failureReason: string | null;
   scheduleKind: ScheduleKind;
   runAt: Date | null;
@@ -77,6 +78,7 @@ export type BoardRow = {
   chainId: string | null;
   chainIndex: number | null;
   chainLayer: number | null;
+  dispatchAfterTaskId: string | null;
   updatedAt: Date;
   assigneeAgent: { id: string; title: string; model: string } | null;
   templateStep: { name: string } | null;
@@ -96,6 +98,13 @@ export type BoardRow = {
     } | null;
   }>;
   stepOutput?: { kind: string; body: string; runId: string | null } | null;
+};
+
+/** The predecessor row resolved in one batch for the current board page. */
+export type BoardBlockedOnTask = {
+  id: string;
+  name: string;
+  status: TaskStatusType;
 };
 
 /** Decimal columns arrive as Prisma.Decimal; the web client reads them as the
@@ -161,6 +170,7 @@ export const boardCard = (
   row: BoardRow,
   chainProgress: (ChainProgress & { position: number | null }) | null,
   display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
+  predecessor: BoardBlockedOnTask | null = null,
 ): BoardCard => {
   const run = row.runs[0];
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
@@ -182,6 +192,9 @@ export const boardCard = (
     chainId: row.chainId,
     chainIndex: row.chainIndex,
     chainName: display.chainName,
+    blockedOn: row.dispatchAfterTaskId !== null && predecessor !== null && predecessor.status !== TaskStatus.DONE
+      ? { taskId: predecessor.id, taskName: predecessor.name }
+      : null,
     updatedAt: row.updatedAt,
     assigneeAgent: row.assigneeAgent === null
       ? null

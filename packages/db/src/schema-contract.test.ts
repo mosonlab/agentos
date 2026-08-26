@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   CHAIN_LAYER_CONTRACT_COLUMNS,
   CHAIN_LAYER_IDENTITY_CHECK,
+  TASK_DISPATCH_BINDING_COLUMNS,
 } from "./schema-census.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -46,6 +47,12 @@ test("the final chain schema contract and source census have one successor autho
     { table: "Task", column: "chainLayer", nullable: true },
   ]);
   assert.equal(CHAIN_LAYER_IDENTITY_CHECK, "Task_chain_identity_all_or_none_check");
+  assert.match(schema, /dispatchAfterTaskId\s+String\?\s+@unique/u);
+  assert.match(schema, /dispatchAfter\s+Task\?\s+@relation\("TaskDispatchBinding"/u);
+  assert.match(schema, /dispatchedChainFirstTask\s+Task\?\s+@relation\("TaskDispatchBinding"/u);
+  assert.deepEqual(TASK_DISPATCH_BINDING_COLUMNS, [
+    { table: "Task", column: "dispatchAfterTaskId", nullable: true },
+  ]);
 
   const forbiddenSourcePatterns = [
     new RegExp(retiredFollowUpToken, "u"),
