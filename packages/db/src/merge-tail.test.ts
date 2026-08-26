@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { MergeRecoveryStatus } from "@prisma/client";
@@ -88,20 +89,36 @@ test("merge-resolver results are versioned and head-bound", () => {
   })]) assert.equal(parseResolverResult(body).status, "invalid");
 });
 
-test("the defense list covers gate, migration, authority, role, template, and workflow paths", () => {
-  for (const path of [
-    "scripts/merge-gate.sh",
-    "scripts/gate-worker/gate-dispatch.sh",
-    "packages/db/prisma/migrations/20260821_tail/migration.sql",
-    "docs/release/release-authority.public.pem",
-    "agents/roles/merge-resolver.md",
-    "agents/templates/direct-engineer-workflow/06-merge-readiness.md",
-    "packages/api/src/merge-readiness-worker.ts",
-    "packages/api/src/merge-evidence-worker.ts",
-    "packages/api/src/github-read.ts",
-    "packages/api/src/index.ts",
-    "packages/api/src/app.ts",
-  ]) assert.notEqual(defenseListReason(path), null, path);
+test("the defense list covers tracked merge-tail machinery", () => {
+  const tracked = execFileSync("git", ["-C", "../..", "ls-files"], { encoding: "utf8" })
+    .trim().split("\n");
+  const sourcePaths = tracked.filter((path) => (
+    /^(?:packages\/api|packages\/db)\/src\/.*\.ts$/u.test(path) && !isTestPath(path)
+  ));
+  const sourcePatterns = [
+    /import\s*(?:type\s*)?\{[^}]*\}\s*from "\.\/merge-tail\.js"/su,
+    /\bRegressionRepairHandoff\b/u,
+    /\bREGRESSION_VERIFICATION_KIND\b/u,
+    /import\s*\{[^}]*\bhandleRegressionCompletion\b[^}]*\}\s*from "\.\/merge-tail-actions\.js"/su,
+    /\bmergeTailLeaseChainId\(/u,
+  ];
+  const structuralPaths = sourcePaths.filter((path) => {
+    const source = readFileSync(`../..\/${path}`, "utf8");
+    return sourcePatterns.some((pattern) => pattern.test(source));
+  });
+  const regressionPromptPaths = tracked.filter((path) => (
+    /^agents\/templates\/(?:direct|compound)-engineer-workflow\/\d+-regression-verification\.md$/u.test(path)
+  ));
+  const promptScriptPaths = regressionPromptPaths.flatMap((path) => (
+    [...readFileSync(`../..\/${path}`, "utf8").matchAll(/`(scripts\/[^\s`]+)[\s`]/gu)]
+      .flatMap((match) => match[1] ? [match[1]] : [])
+  ));
+
+  assert.ok(structuralPaths.length > 0);
+  assert.ok(promptScriptPaths.length > 0);
+  for (const path of new Set([...structuralPaths, ...promptScriptPaths])) {
+    assert.notEqual(defenseListReason(path), null, path);
+  }
   assert.equal(defenseListReason("apps/web/src/app.tsx"), null);
 });
 
