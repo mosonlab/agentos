@@ -123,6 +123,8 @@ test("a tampered direct review specification is refused before the claim CAS", a
   const stoppedStatuses: string[] = [];
   const tx = {
     $queryRaw: async () => [{ granted: true }],
+    // Each candidate decides inside its own savepoint.
+    $executeRawUnsafe: async () => 0,
     run: {
       findMany: async () => [candidate],
       updateMany: async ({ data }: { data: { status: string } }) => {

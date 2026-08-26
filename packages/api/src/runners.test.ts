@@ -66,6 +66,8 @@ const makeDatabase = (
 ): PrismaClient => {
   const tx = {
     $queryRaw: async () => [{ granted: barrierGranted }],
+    // The claim loop brackets every candidate in a savepoint.
+    $executeRawUnsafe: async () => 0,
     run: {
       findMany: async () => { onCandidateRead(); return candidates; },
       findFirst: async () => null,

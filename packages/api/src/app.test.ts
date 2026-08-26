@@ -509,6 +509,91 @@ test("fencing rejects an expired generation token", async () => {
   });
 });
 
+test("resuming a run preserves its original Run and Session start timestamps", async () => {
+  await withTokens(async () => {
+    const originalStartedAt = new Date("2026-08-21T00:00:00.000Z");
+    const runWrites: Array<Record<string, unknown>> = [];
+    const sessionWrites: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: async () => [{ id: "run-1" }],
+      run: {
+        findUnique: async () => ({ startedAt: originalStartedAt, session: { startedAt: originalStartedAt } }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          runWrites.push(data);
+          return { count: 1 };
+        },
+      },
+      session: {
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          sessionWrites.push(data);
+          return { count: 1 };
+        },
+      },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/runner/runs/run-1/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "test",
+        cliVersion: "test",
+        manifest: {},
+        workspacePath: "/scratch/resumed",
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(runWrites[0]?.startedAt, originalStartedAt);
+    assert.equal(sessionWrites[0]?.startedAt, originalStartedAt);
+  });
+});
+
+test("starting a fresh run stamps the same new timestamp on its Run and Session", async () => {
+  await withTokens(async () => {
+    const runWrites: Array<Record<string, unknown>> = [];
+    const sessionWrites: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: async () => [{ id: "run-1" }],
+      run: {
+        findUnique: async () => ({ startedAt: null, session: { startedAt: null } }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          runWrites.push(data);
+          return { count: 1 };
+        },
+      },
+      session: {
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          sessionWrites.push(data);
+          return { count: 1 };
+        },
+      },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const before = Date.now();
+    const response = await createApp(database).request("/runner/runs/run-1/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-1",
+        fencingToken: "1:run-1:current",
+        adapterVersion: "test",
+        cliVersion: "test",
+        manifest: {},
+        workspacePath: "/scratch/fresh",
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.ok(runWrites[0]?.startedAt instanceof Date);
+    assert.equal(sessionWrites[0]?.startedAt, runWrites[0]?.startedAt);
+    assert.ok((runWrites[0]?.startedAt as Date).getTime() >= before);
+  });
+});
+
 test("completion requires both exit zero and a successful terminal event", () => {
   assert.equal(completionSucceeded({
     exitCode: 0,
@@ -1331,6 +1416,8 @@ test("claim query filters archived agents before take so active work cannot star
     let claimedId: string | undefined;
     const tx = {
       $queryRaw: async () => [{ granted: true }],
+      // The claim loop brackets every candidate in a savepoint.
+      $executeRawUnsafe: async () => 0,
       run: {
         findMany: async ({ where, take }: { where: Record<string, any>; take: number }) => {
           claimWhere = where;
@@ -1921,7 +2008,13 @@ test("partitionArchivable keeps the busy tasks out of the archive set and counts
 
 /** A stub with just enough of `task` for `GET /tasks` to answer: the board row
  *  page, the chain-progress page, and the recurring groupBy the full shape adds. */
-const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
+/** `related` answers the by-id lookups the board makes for rows that are not on
+ *  the page — a bound task's predecessor and a repair task's regression task —
+ *  and `activity` the merge-tail markers that name the latter. */
+const boardDatabase = (
+  rows: Array<Record<string, unknown>>,
+  extras: { related?: Array<Record<string, unknown>>; activity?: Array<Record<string, unknown>> } = {},
+): PrismaClient => {
   let call = 0;
   const taskRows = [...rows].sort((left, right) => (
     (right.createdAt as Date).getTime() - (left.createdAt as Date).getTime()
@@ -1930,12 +2023,14 @@ const boardDatabase = (rows: Array<Record<string, unknown>>): PrismaClient => {
   return {
     task: {
       findMany: async (args: Record<string, unknown> | undefined) => {
+        if ((args?.where as Record<string, unknown> | undefined)?.id !== undefined) return extras.related ?? [];
         if (call++ !== 0) return [];
         assert.deepEqual(args?.orderBy, [{ createdAt: "desc" }, { id: "asc" }]);
         return taskRows;
       },
       groupBy: async () => [],
     },
+    taskActivity: { findMany: async () => extras.activity ?? [] },
   } as unknown as PrismaClient;
 };
 
@@ -1990,6 +2085,69 @@ test("the board derives a shared title and badge for API-created chains", async 
       { id: "build", name: "Release: Build", displayName: "Build", chainName: "Release" },
       { id: "review", name: "Release: Review", displayName: "Review", chainName: "Release" },
     ]);
+  });
+});
+
+test("the board binds a chain-detached repair task to the chain its marker names", async () => {
+  await withTokens(async () => {
+    const response = await getTasks(boardDatabase(
+      [
+        taskRow({ id: "regression", chainId: "c1", chainIndex: 1, name: "Release: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair", name: "Autonomous merge tail: gate-fix", templateStep: null }),
+      ],
+      {
+        related: [{ id: "regression", projectId: "p1", chainId: "c1" }],
+        activity: [{ taskId: "repair", metadata: {
+          schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression",
+        } }],
+      },
+    ), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; chainId: string | null; repairOf: unknown }>;
+    const repair = body.find((card) => card.id === "repair")!;
+    // The repair task stays chain-detached on the wire — the binding is the
+    // read side's answer to where the card belongs, not a chain column.
+    assert.equal(repair.chainId, null);
+    assert.deepEqual(repair.repairOf, { chainId: "c1", chainName: "Release", repairKind: "gate-fix" });
+    assert.equal(body.find((card) => card.id === "regression")!.repairOf, null);
+  });
+});
+
+test("a global board keeps two projects' same-named chains apart when it binds their repairs", async () => {
+  await withTokens(async () => {
+    // `chainId` is unique per project, not globally, so a board that spans
+    // projects can hold the same one twice. A repair card must be named by its
+    // own project's chain, not by whichever came first on the page.
+    const response = await getTasks(boardDatabase(
+      [
+        taskRow({ id: "regression-1", chainId: "c1", chainIndex: 1, name: "Release: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair-1", name: "Autonomous merge tail: gate-fix", templateStep: null }),
+        taskRow({ id: "regression-2", projectId: "p2", chainId: "c1", chainIndex: 1, name: "Hotfix: Regression", templateStep: { name: "Regression" } }),
+        taskRow({ id: "repair-2", projectId: "p2", name: "Autonomous merge tail: review-fix", templateStep: null }),
+      ],
+      {
+        related: [
+          { id: "regression-1", projectId: "p1", chainId: "c1" },
+          { id: "regression-2", projectId: "p2", chainId: "c1" },
+        ],
+        activity: [
+          { taskId: "repair-1", metadata: {
+            schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "gate-fix", regressionTaskId: "regression-1",
+          } },
+          { taskId: "repair-2", metadata: {
+            schemaVersion: 1, kind: "mergeTail.repairAttempt", repairKind: "review-fix", regressionTaskId: "regression-2",
+          } },
+        ],
+      },
+    ), "?view=board");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ id: string; repairOf: unknown }>;
+    assert.deepEqual(body.find((card) => card.id === "repair-1")!.repairOf, {
+      chainId: "c1", chainName: "Release", repairKind: "gate-fix",
+    });
+    assert.deepEqual(body.find((card) => card.id === "repair-2")!.repairOf, {
+      chainId: "c1", chainName: "Hotfix", repairKind: "review-fix",
+    });
   });
 });
 

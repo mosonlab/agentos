@@ -46,6 +46,30 @@ export const defaultTab = (counts: Counts): TaskStatus => {
   return STATUSES.filter((status) => status !== "DONE").find((status) => counts[status] > 0) ?? DEFAULT_STATUS;
 };
 
+/* ---------------------------------------------------------------- the chain */
+
+export type ChainBinding = { id: string; name: string | null };
+
+/**
+ * Which chain a board card belongs to.
+ *
+ * Read through this rather than off `chainId`, because an autonomous merge-tail
+ * repair task has no chain columns at all — it is created chain-detached so the
+ * chain stays a static, linear, once-through structure — and the API resolves
+ * its chain from the repair marker instead. Both answers are the same fact, and
+ * the filter, the card badge and the page's filter control all have to give the
+ * same one.
+ */
+export const chainBinding = (task: Pick<BoardTask, "chainId" | "chainName" | "repairOf">): ChainBinding | null => {
+  if (task.chainId !== null) return { id: task.chainId, name: task.chainName };
+  const repair = task.repairOf ?? null;
+  return repair === null ? null : { id: repair.chainId, name: repair.chainName };
+};
+
+/** What the chain is called on screen: its name where the API could derive one,
+ *  and a short form of its id where it could not. */
+export const chainBindingLabel = (binding: ChainBinding): string => binding.name ?? binding.id.slice(0, 8);
+
 /* ------------------------------------------------------------- the schedule */
 
 export type ScheduleSubject = Pick<

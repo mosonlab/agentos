@@ -224,6 +224,7 @@ export const zh = {
   "errors.unreachable": "无法连接控制面（{base}）。先启动 {command}。",
 
   "format.daysAgo": "{n} 天前",
+  "format.durationWithInboxWait": "{duration} 墙上时钟时间（包括收件箱等待）",
   "format.hoursAgo": "{n} 小时前",
   "format.inHours": "{n} 小时后",
   "format.inMinutes": "{n} 分钟后",
@@ -819,6 +820,7 @@ export const zh = {
   "tasks.notice.copyFailed": "浏览器拒绝访问剪贴板；请打开任务查看完整错误",
   "tasks.pill.approval": "需审批",
   "tasks.pill.cron": "cron",
+  "tasks.pill.repair": "修复 {kind}",
   "tasks.pill.template": "模板",
   "tasks.pill.webhook": "webhook",
   "tasks.schedule.AT": "定时",

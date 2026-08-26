@@ -43,9 +43,11 @@ import { lockTaskMutationRows } from "./task-write.js";
 import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
 import { createGitHubReader, type GitHubReader } from "./github-read.js";
 import {
+  acquireMergeLease,
   releaseMergeLease,
   releaseMergeLeaseSafely,
   reportMergeLeaseAnomaly,
+  type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
 } from "./merge-lease.js";
 
@@ -264,6 +266,26 @@ const createReviewObligation = async (
 
 export type ReadinessTickResult = { claimed: number; authorized: number; reviewing: number; requeued: number; stopped: number };
 
+/**
+ * Hand the lease back for the length of an independent review. The review
+ * neither produces nor consumes the exact-head gate proof -- it reads a diff on
+ * GitHub -- so holding the lease across it charges an agent session, and
+ * however many runner losses and retries that session takes, to every other
+ * delivery line's queue. `not-held` and `skipped` are ordinary answers here:
+ * this path has to leave the lock free, not prove it was the one holding it.
+ * Only "nobody knows" is worth saying out loud.
+ */
+const releaseForReview = async (
+  releaseChainLease: MergeLeaseReleaser,
+  chainId: string | null,
+): Promise<void> => {
+  const release = await releaseMergeLeaseSafely(releaseChainLease, chainId);
+  if (release?.outcome !== "unreachable") return;
+  console.error(
+    `Merge lease anomaly: the release for chain ${chainId ?? "unknown"} before its independent review could not be carried out: ${release.detail}. The merge window on main may stay locked for the length of that review.`,
+  );
+};
+
 const requeueRegression = async (
   db: PrismaClient,
   input: {
@@ -329,6 +351,7 @@ export const readinessTick = async (
   now = new Date(),
   limit = 5,
   releaseChainLease: MergeLeaseReleaser = async () => ({ outcome: "not-held" }),
+  acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired" }),
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, reviewing: 0, requeued: 0, stopped: 0 };
   const candidates = await db.task.findMany({
@@ -497,15 +520,17 @@ export const readinessTick = async (
           // written. Between the read above and here the review can have
           // completed and handed this step back; parking on that stale read
           // would strand a step no review is coming back for.
-          await db.$transaction(async (tx) => {
+          const parked = await db.$transaction(async (tx) => {
             await lockTaskMutationRows(tx, readiness.id);
             const current = await latestReviewState(tx, readiness.id, verdict.verdict.headSha, recovery ? snapshot.baseSha : null);
-            if (current?.state !== "open") return;
-            await tx.task.updateMany({
+            if (current?.state !== "open") return false;
+            const reparked = await tx.task.updateMany({
               where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
               data: { status: TaskStatus.REVIEW, failureReason: `${INDEPENDENT_REVIEW_OPEN_PREFIX}${String(current.reviewTaskId)}` },
             });
+            return reparked.count === 1;
           });
+          if (parked) await releaseForReview(releaseChainLease, readiness.chainId);
           result.reviewing += 1;
           continue;
         }
@@ -530,6 +555,7 @@ export const readinessTick = async (
           claimReason,
         });
         if (opened.ok) {
+          await releaseForReview(releaseChainLease, readiness.chainId);
           result.reviewing += 1;
         } else if ("lost" in opened) {
           // Another worker owns this readiness step now. Leaving its state
@@ -547,8 +573,27 @@ export const readinessTick = async (
         result.stopped += 1;
         continue;
       }
-      await db.$transaction(async (tx) => {
+      // The lock belongs here and only here. From the base this authorization
+      // pins to the merge that consumes it, `main` must not move; everything
+      // earlier in the tail -- the refresh, the semantic verification, the
+      // review -- can be redone if it does. An acquire that loses leaves the
+      // step claimed, so its claim expires and a later tick tries again, rather
+      // than authorizing a merge whose window nobody is holding open.
+      if (readiness.chainId) {
+        const acquisition = await acquireChainLease(readiness.chainId);
+        if (acquisition.outcome !== "acquired") continue;
+      }
+      const authorized = await db.$transaction(async (tx) => {
         await lockTaskMutationRows(tx, readiness.id);
+        // The claim is evidence until it is re-read under the mutex, and the
+        // acquire above is a network round trip spent inside the claim's lease.
+        // A worker that lost the step while acquiring must write nothing here:
+        // two authorizations would queue two merge executions.
+        const held = await tx.task.updateMany({
+          where: { id: readiness.id, status: TaskStatus.DOING, failureReason: claimReason },
+          data: { status: TaskStatus.DONE, failureReason: null },
+        });
+        if (held.count !== 1) return false;
         // Every exact-head/current-base cycle gets a distinct binding. The
         // obsolete authorization remains append-only evidence and cannot make a
         // refreshed authorization ambiguous or be reused by the executor.
@@ -570,7 +615,6 @@ export const readinessTick = async (
           create: { taskId: readiness.id, kind: "merge-authorization", body: JSON.stringify({ authorizationActivityId: activity.id, headSha: evidence.headSha }), commitSha: evidence.headSha },
           update: { kind: "merge-authorization", body: JSON.stringify({ authorizationActivityId: activity.id, headSha: evidence.headSha }), commitSha: evidence.headSha },
         });
-        await tx.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.DONE, failureReason: null } });
         await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
         await writeMarker(tx, readiness.id, "readiness", {
           actorType: "control-plane",
@@ -593,8 +637,9 @@ export const readinessTick = async (
         } else {
           await activateChainSuccessor(tx, readiness, {}, now);
         }
+        return true;
       });
-      result.authorized += 1;
+      if (authorized) result.authorized += 1;
     } catch (error: unknown) {
       await stopReadiness(db, { readinessTaskId: readiness.id, regressionTaskId: regression.id, reason: `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`, recovery }, releaseChainLease);
       result.stopped += 1;
@@ -610,7 +655,8 @@ export const startReadinessWorker = (
   reader: GitHubReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> => {
   const timer = setInterval(() => {
-    void readinessTick(db, reader, new Date(), 5, releaseMergeLease).catch((error: unknown) => console.error("Merge readiness tick failed", error));
+    void readinessTick(db, reader, new Date(), 5, releaseMergeLease, acquireMergeLease)
+      .catch((error: unknown) => console.error("Merge readiness tick failed", error));
   }, readinessPollIntervalMs());
   timer.unref?.();
   return timer;
