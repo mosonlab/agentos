@@ -377,6 +377,11 @@ export type BoardTask = {
   /** §SF-1, bound to `latestRun`: null whenever the newest run is not the run
    *  that recorded the outcome. */
   mergeOutcome?: MergeOutcome | null;
+  /** The chain an autonomous merge-tail repair task repairs. A repair task is
+   *  chain-detached by design, so this is the only thing that puts its card with
+   *  the chain it belongs to. Null on every other card, absent for older board
+   *  responses. */
+  repairOf?: { chainId: string; chainName: string | null; repairKind: string } | null;
 };
 
 export type UsageCost = {

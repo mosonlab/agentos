@@ -818,6 +818,7 @@ export const zh = {
   "tasks.notice.copyFailed": "浏览器拒绝访问剪贴板；请打开任务查看完整错误",
   "tasks.pill.approval": "需审批",
   "tasks.pill.cron": "cron",
+  "tasks.pill.repair": "修复 {kind}",
   "tasks.pill.template": "模板",
   "tasks.pill.webhook": "webhook",
   "tasks.schedule.AT": "定时",

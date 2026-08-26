@@ -882,7 +882,7 @@ export const completeRun = async (
               // or target branch cannot hand off to the fresh Regression run.
               const lockedRegression = await tx.task.findUnique({
                 where: { id: regressionTaskId },
-                select: { projectId: true, repoId: true, templateId: true, chainId: true, targetBranch: true },
+                select: { projectId: true, repoId: true, templateId: true, chainId: true, chainIndex: true, targetBranch: true },
               });
               // Claiming the park this review owns is what makes the repair
               // automatic without overruling anyone: an operator who moved
