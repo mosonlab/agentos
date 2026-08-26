@@ -475,6 +475,9 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
   assert.equal(git(mirror, "rev-parse", "refs/heads/main^{commit}"), oldMain, "transport rewrote or deleted the worker's main ref");
   assert.equal(git(mirror, "remote"), "", "the worker cache acquired a remote");
   assert.equal(readFileSync(join(fakeHome, "gate", "origin", "run-gate.sh"), "utf8"), readFileSync(runGatePath, "utf8"));
+  // run-gate.sh sources lib.sh on the worker, so an install that ships one
+  // without the other leaves a harness that cannot start.
+  assert.equal(readFileSync(join(fakeHome, "gate", "origin", "lib.sh"), "utf8"), readFileSync(libPath, "utf8"));
 });
 
 // --- run-gate.sh: the worker's state is never a verdict ----------------------
@@ -498,6 +501,10 @@ const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
 
   mkdirSync(home, { recursive: true });
   execFileSync("git", ["clone", "-q", "--bare", work, join(home, "mirror.git")], { env: FIXTURE_ENV });
+  // Both files, because mirror-push.sh installs both: run-gate.sh sources lib.sh
+  // for the verdict's codes and its reader, and a fixture that ships only the
+  // harness would be testing a gate home no push ever produces.
+  writeFileSync(join(home, "lib.sh"), readFileSync(libPath));
   writeFileSync(join(home, "run-gate.sh"), readFileSync(runGatePath));
   chmodSync(join(home, "run-gate.sh"), 0o755);
   return { root, home, oid };
@@ -565,6 +572,23 @@ test("a gate that dies without printing a verdict is not a FAIL", (t) => {
   const result = runGate(fixture.home, [fixture.oid]);
   assert.equal(result.status, 76);
   assert.match(result.stdout, /^GATE NOT RUN: the gate produced no verdict line/m);
+});
+
+test("a gate stopped by a signal keeps its own reason and its own exit code", (t) => {
+  // The live defect, both halves. merge-gate.sh traps TERM, prints its own
+  // GATE NOT RUN line through the EXIT trap and exits 143. run-gate.sh read the
+  // log with a pattern that only matched `MERGE GATE: `, so it found nothing,
+  // replaced the gate's reason with a statement that no line had been printed —
+  // which was false — and rewrote 143 to 76, contradicting the runbook's promise
+  // that 130 and 143 are reported under the signal that stopped them.
+  const fixture = gateHome(t, {
+    verdict:
+      'printf "\\n\\033[33mGATE NOT RUN: the gate was stopped by SIGTERM during the suites\\033[0m\\n"; exit 143',
+  });
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 143, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: the gate was stopped by SIGTERM during the suites$/m);
+  assert.doesNotMatch(result.stdout, /produced no verdict line/);
 });
 
 test("a malformed STALE_WORKTREE_MINUTES is refused rather than passed to find", (t) => {
@@ -804,21 +828,100 @@ test("a usage error is 2 everywhere the exit-code table applies", () => {
   assert.equal(dispatch.status, 2, dispatch.stderr);
 });
 
-test("the runbook and the scripts agree on the no-verdict exit code", () => {
+// --- the verdict --------------------------------------------------------------
+
+// One shell, sourcing lib.sh, so a case observes the module the way a script
+// does rather than by reading the file.
+const verdict = (call) =>
+  spawnSync("bash", ["-c", `set -uo pipefail\n. "${libPath}"\n${call}`], { encoding: "utf8" });
+
+test("every script that names the gate's exit codes takes them from lib.sh", () => {
+  // The seam, asserted as a seam. Four scripts declared `EXIT_NO_VERDICT=76`
+  // literally, which is four places for one number to drift; what replaces that
+  // grep is the property that made it unnecessary — each script sources the one
+  // file that defines it, and none of them redeclares it.
+  for (const name of ["run-gate.sh", "remote-gate.sh", "gate-dispatch.sh", "mirror-push.sh"]) {
+    const source = readFileSync(join(here, name), "utf8");
+    assert.match(source, /^\. "\$\{(SCRIPT_DIR|HARNESS_DIR)\}\/lib\.sh"$/m, `${name} does not source lib.sh`);
+    assert.doesNotMatch(source, /^EXIT_NO_VERDICT=/m, `${name} declares the no-verdict code again`);
+  }
+  const gate = readFileSync(join(here, "..", "merge-gate.sh"), "utf8");
+  assert.match(gate, /^\. "\$\{SCRIPT_DIR\}\/gate-worker\/lib\.sh"$/m);
+  assert.doesNotMatch(gate, /^EXIT_(FAIL|NOT_AUTHORITATIVE|NO_VERDICT)=/m);
+});
+
+test("every verdict shape survives the round trip out of lib.sh and back", (t) => {
+  // Emit with the emit function, read back with the reader, and require the line
+  // verbatim. The defect this replaces was a reader that knew three of the four
+  // shapes, so the shape that carries a stopped run's reason is in this table
+  // for the same reason the others are.
+  const root = scratch(t);
+  const cases = [
+    { emit: "gate_verdict_pass 0123456789abcdef0123456789abcdef01234567",
+      line: "MERGE GATE: PASS 0123456789abcdef0123456789abcdef01234567",
+      status: 0 },
+    { emit: "gate_verdict_fail 'unit tests'", line: "MERGE GATE: FAIL (unit tests)", status: 1 },
+    { emit: "gate_verdict_not_authoritative '--keep-postgres'",
+      line: "MERGE GATE: NOT AUTHORITATIVE (--keep-postgres)", status: 3 },
+    { emit: "gate_verdict_not_run 'the gate was stopped by SIGTERM during the suites'",
+      line: "GATE NOT RUN: the gate was stopped by SIGTERM during the suites", status: 76 },
+  ];
+  for (const [index, shape] of cases.entries()) {
+    const log = join(root, `verdict-${index}.log`);
+    const emitted = verdict(`${shape.emit} > "${log}"`);
+    assert.equal(emitted.status, 0, emitted.stderr);
+    // Colour is the emit function's business and must be gone by the time a
+    // caller sees the line: it is read over ssh and pasted into a PR.
+    assert.match(readFileSync(log, "utf8"), /\u001b\[\d+m/, `${shape.line} was emitted without colour`);
+    const read = verdict(`gate_verdict_read "${log}"`);
+    assert.equal(read.status, 0, read.stderr);
+    assert.equal(read.stdout, `${shape.line}\n`);
+
+    const judged = verdict(`gate_verdict_is_judgement ${shape.status}`);
+    assert.equal(judged.status, shape.status === 76 ? 1 : 0, `${shape.line} was classified wrong`);
+  }
+
+  // Nothing to read is not a verdict, and 2, 130, 143 and 137 are not judgements.
+  const empty = join(root, "silent.log");
+  writeFileSync(empty, "npm noise\nmore noise\n");
+  assert.equal(verdict(`gate_verdict_read "${empty}"`).stdout, "");
+  for (const code of [2, 75, 76, 130, 137, 143, 255]) {
+    assert.equal(verdict(`gate_verdict_is_judgement ${code}`).status, 1, `${code} was read as a verdict`);
+  }
+});
+
+test("the runbook's exit-code table is the table lib.sh defines", () => {
   // The contract is only useful if it is written down where an operator reads
-  // it, so the runbook naming 76 is part of the fix and not commentary on it.
+  // it, so the runbook naming these codes is part of the fix and not commentary
+  // on it. Asserted against lib.sh's values rather than against prose, so a code
+  // that changes in one place fails here instead of drifting.
+  const codes = verdict(
+    'printf "%s %s %s %s\n" "$GATE_EXIT_PASS" "$GATE_EXIT_FAIL" "$GATE_EXIT_NOT_AUTHORITATIVE" "$GATE_EXIT_NO_VERDICT"',
+  );
+  assert.equal(codes.status, 0, codes.stderr);
+  const [pass, fail, notAuthoritative, noVerdict] = codes.stdout.trim().split(" ");
+  assert.deepEqual([pass, fail, notAuthoritative, noVerdict], ["0", "1", "3", "76"], "the public codes changed");
+
   const runbook = readFileSync(runbookPath, "utf8");
-  assert.match(runbook, /\|\s*`76`\s*\|/);
-  assert.match(runbook, /GATE NOT RUN/);
+  for (const [code, line] of [
+    [pass, "MERGE GATE: PASS <oid>"],
+    [fail, "MERGE GATE: FAIL (<step>)"],
+    [notAuthoritative, "MERGE GATE: NOT AUTHORITATIVE"],
+    [noVerdict, "GATE NOT RUN: <reason>"],
+  ]) {
+    assert.match(
+      runbook,
+      new RegExp(`\\|\\s*\`${code}\`\\s*\\|[^|]*${line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+      `the runbook's row for ${code} does not carry ${line}`,
+    );
+  }
+  assert.match(runbook, /`scripts\/gate-worker\/lib\.sh`/);
   // 75 and 76 are only useful to an automation if the table says which is
   // which, and a gate the OOM killer takes is 128+N with no line at all — the
   // one case where a reader must not expect stdout to agree with the code.
   assert.match(runbook, /`75` and `76` are not interchangeable/);
   assert.match(runbook, /\|\s*`128\+N`\s*\|/);
   assert.match(runbook, /`137`/);
-  for (const path of [runGatePath, join(here, "remote-gate.sh"), join(here, "gate-dispatch.sh")]) {
-    assert.match(readFileSync(path, "utf8"), /EXIT_NO_VERDICT=76/, `${path} has no 76`);
-  }
 });
 
 test("the isolation claim stays the one that is actually enforced", () => {

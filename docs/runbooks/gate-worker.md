@@ -161,6 +161,14 @@ One rule: **a verdict and the absence of a verdict never share a code.**
 `gate-dispatch.sh` and `remote-gate.sh` transport verdicts and never form one,
 so neither can produce a `1` of its own.
 
+The codes below `128` and the four lines that carry them are defined once, in
+`scripts/gate-worker/lib.sh`, which every script in the chain sources —
+`merge-gate.sh` emits through it and `run-gate.sh` reads the log back through
+it. That file is the place to look when a code or a line is in question, and the
+only place to change one. `lib.sh` is installed on the worker beside
+`run-gate.sh` by `mirror-push.sh`, so the harness and the format it speaks
+always arrive together.
+
 | Code | Means | Is it a verdict? |
 | --- | --- | --- |
 | `0` | `MERGE GATE: PASS <oid>` | yes |

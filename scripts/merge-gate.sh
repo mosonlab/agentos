@@ -123,10 +123,6 @@ POSTGRES_IMAGE="${AGENTOS_GATE_POSTGRES_IMAGE:-postgres:16-alpine}"
 CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/agentos-merge-gate"
 BUILD_CACHE_MAX_ENTRIES=32
 
-EXIT_FAIL=1
-EXIT_NOT_AUTHORITATIVE=3
-EXIT_NO_VERDICT=76
-
 usage() {
   # No gate ran, so the EXIT trap must not print a verdict.
   trap - EXIT
@@ -161,9 +157,13 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-# Build-cache publication is shared by distinct worktrees on one host. Reuse
-# the tested atomic pid-lock primitive instead of a mkdir-then-pid lock whose
-# empty-owner window lets two concurrent gates both become the writer.
+# Two things come from here. Build-cache publication is shared by distinct
+# worktrees on one host, so it reuses the tested atomic pid-lock primitive
+# instead of a mkdir-then-pid lock whose empty-owner window lets two concurrent
+# gates both become the writer. And the verdict this gate exists to produce —
+# its exit codes and the four lines that carry them — is written by lib.sh's
+# emit functions, because run-gate.sh reads those lines back and one format
+# needs one writer.
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/gate-worker/lib.sh"
 CONTAINER="agentos-merge-gate-$$"
@@ -182,7 +182,7 @@ STEP_REPORT=()
 # Set only when the run was stopped rather than decided. It is what turns the
 # last line into GATE NOT RUN instead of a FAIL nothing formed.
 NO_VERDICT_REASON=""
-NO_VERDICT_EXIT="${EXIT_NO_VERDICT}"
+NO_VERDICT_EXIT="${GATE_EXIT_NO_VERDICT}"
 # Named the moment a step is seen to have failed on its own, which is earlier
 # than its group's accounting: a signal arriving while a later member is still
 # stuck must not erase a failure this run already observed.
@@ -195,7 +195,7 @@ note() { printf '   %s\n' "$1"; }
 die() {
   printf '\n\033[31mmerge-gate: %s\033[0m\n' "$1" >&2
   FAILED_STEP="${FAILED_STEP:-preflight}"
-  exit "${EXIT_FAIL}"
+  exit "${GATE_EXIT_FAIL}"
 }
 
 # Only ever discards the directory this run created, identified by the prefix it
@@ -294,26 +294,30 @@ cleanup() {
   # non-zero status and a FAILED_STEP naming wherever it happened to be, and
   # would otherwise print a judgement about the commit that nothing formed.
   if [ -n "${NO_VERDICT_REASON}" ]; then
-    printf '\n\033[33mGATE NOT RUN: %s\033[0m\n' \
-      "${NO_VERDICT_REASON}${cleanup_error:+; ${cleanup_error}}"
+    printf '\n'
+    gate_verdict_not_run "${NO_VERDICT_REASON}${cleanup_error:+; ${cleanup_error}}"
     printf 'Nothing judged %s. Re-run the gate; this is not a FAIL.\n' "${GATED_HEAD:-this commit}"
     exit "${NO_VERDICT_EXIT}"
   fi
 
   if [ "${status}" -ne 0 ] || [ -n "${FAILED_STEP}" ]; then
-    printf '\n\033[31mMERGE GATE: FAIL (%s)\033[0m\n' "${FAILED_STEP:-unknown}"
-    exit "${EXIT_FAIL}"
+    printf '\n'
+    gate_verdict_fail "${FAILED_STEP:-unknown}"
+    exit "${GATE_EXIT_FAIL}"
   fi
   if [ -n "${cleanup_error}" ]; then
-    printf '\n\033[31mMERGE GATE: FAIL (cleanup: %s)\033[0m\n' "${cleanup_error}"
-    exit "${EXIT_FAIL}"
+    printf '\n'
+    gate_verdict_fail "cleanup: ${cleanup_error}"
+    exit "${GATE_EXIT_FAIL}"
   fi
   if [ "${KEEP_POSTGRES}" -eq 1 ]; then
-    printf '\n\033[33mMERGE GATE: NOT AUTHORITATIVE (--keep-postgres)\033[0m\n'
+    printf '\n'
+    gate_verdict_not_authoritative '--keep-postgres'
     printf 'Every step passed, but this run left a container behind and must not authorise a merge.\n'
-    exit "${EXIT_NOT_AUTHORITATIVE}"
+    exit "${GATE_EXIT_NOT_AUTHORITATIVE}"
   fi
-  printf '\n\033[32mMERGE GATE: PASS %s\033[0m\n' "${GATED_HEAD}"
+  printf '\n'
+  gate_verdict_pass "${GATED_HEAD}"
   # What this PASS does NOT cover, stated here rather than left to be inferred
   # from a skipped test buried in the suite output. Both need live credentials
   # and neither can run inside a hermetic gate, so a green gate is silent about
@@ -364,7 +368,7 @@ stopped_from_outside() {
 
 record_stop() {
   NO_VERDICT_REASON="${1} was stopped before it could be judged"
-  NO_VERDICT_EXIT="${EXIT_NO_VERDICT}"
+  NO_VERDICT_EXIT="${GATE_EXIT_NO_VERDICT}"
 }
 
 record_real_failure() {

@@ -74,9 +74,6 @@ FETCH_LOG=0
 # table has one row for a usage error. Two numbers for one meaning is how a
 # caller ends up with a case it does not handle.
 EXIT_USAGE=2
-# Nothing here forms a verdict, so nothing here may exit 1: a precondition that
-# fails means no gate ran, and 76 is the code for that.
-EXIT_NO_VERDICT=76
 
 usage() {
   sed -n '2,65p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
@@ -86,7 +83,7 @@ usage() {
 no_verdict() {
   printf 'remote-gate: %s\n' "$1" >&2
   printf 'GATE NOT RUN: %s\n' "$1"
-  exit "$EXIT_NO_VERDICT"
+  exit "$GATE_EXIT_NO_VERDICT"
 }
 
 die() { printf 'remote-gate: %s\n' "$1" >&2; exit "${2:-$EXIT_USAGE}"; }
@@ -149,8 +146,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 # shellcheck source=scripts/gate-worker/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-# Everything below that ends up inside the ssh command string is checked here,
-# before anything is sent. lib.sh says what each of these accepts and why.
+# Nothing here forms a verdict, so nothing here may exit 1: a precondition that
+# fails means no gate ran, and lib.sh's GATE_EXIT_NO_VERDICT is the code for
+# that. Everything below that ends up inside the ssh command string is checked
+# here, before anything is sent. lib.sh says what each of these accepts and why.
 gate_valid_server "$SERVER" >/dev/null \
   || die "not a usable ssh destination: ${SERVER}" "$EXIT_USAGE"
 gate_valid_home "$GATE_HOME" >/dev/null \

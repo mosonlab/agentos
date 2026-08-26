@@ -1,10 +1,16 @@
-# Shared by the local-side gate-worker scripts (mirror-push.sh, remote-gate.sh,
-# gate-dispatch.sh) and merge-gate.sh's build-cache publisher. Not executable
-# on its own; source it.
+# Shared by merge-gate.sh, run-gate.sh and the local-side gate-worker scripts
+# (mirror-push.sh, remote-gate.sh, gate-dispatch.sh). Not executable on its own;
+# source it.
 #
-# Two things live here: the values that travel into a remote shell command
-# string, and the slot locks that ration how many gates run at once. Both are
-# places where being approximately right is the same as being wrong.
+# Three things live here: the values that travel into a remote shell command
+# string, the slot locks that ration how many gates run at once, and the gate's
+# verdict — the exit codes, the four lines and the reader that recovers one from
+# a log. All three are places where being approximately right is the same as
+# being wrong.
+#
+# run-gate.sh runs on the worker, where this file sits beside it because
+# mirror-push.sh installs the pair. Nothing here may assume a repository
+# checkout around it.
 
 # --- values that reach a remote shell ---------------------------------------
 #
@@ -249,4 +255,66 @@ gate_slot_release() {
   fi
   printf 'gate-slot: not releasing slot %s, it is now held by pid %s\n' "$slot" "${holder:-nobody}" >&2
   return 1
+}
+
+# --- the verdict -------------------------------------------------------------
+#
+# The gate's verdict crosses four processes — merge-gate.sh forms it,
+# run-gate.sh reads it back off a log on the worker, remote-gate.sh carries it
+# over ssh, gate-dispatch.sh decides from it — and before this section existed
+# each hop re-encoded it from prose. That is how run-gate.sh came to grep for
+# `MERGE GATE: ` alone: it could not match the `GATE NOT RUN:` line merge-gate.sh
+# prints when a run is stopped, so the gate's own reason was replaced with a
+# reconstructed one that said no line had been printed, and the signal exit code
+# the runbook promises was replaced with 76. One writer and one reader of the
+# wire format is the fix; the format itself is unchanged and is public API.
+#
+# AGENTS.md requires the literal string `MERGE GATE: PASS <oid>` for a merge,
+# two agent prompt templates read these lines, and docs/runbooks/gate-worker.md
+# publishes the codes to operators. Nothing here may change a byte of either
+# without changing those first.
+
+# The four codes a gate run can end on. A verdict and the absence of a verdict
+# never share a code: 1 is the only one that says the commit was judged and did
+# not pass. 2 (usage) belongs to each script's own argument parsing, not to the
+# gate, so it is deliberately absent.
+GATE_EXIT_PASS=0
+GATE_EXIT_FAIL=1
+GATE_EXIT_NOT_AUTHORITATIVE=3
+GATE_EXIT_NO_VERDICT=76
+
+# The colour escapes live here rather than at the call sites: they are part of
+# how the line is written, and a caller that restates them is a second writer of
+# the format. gate_verdict_read strips them again on the way back.
+gate_verdict_pass() { printf '\033[32mMERGE GATE: PASS %s\033[0m\n' "$1"; }
+gate_verdict_fail() { printf '\033[31mMERGE GATE: FAIL (%s)\033[0m\n' "$1"; }
+gate_verdict_not_authoritative() { printf '\033[33mMERGE GATE: NOT AUTHORITATIVE (%s)\033[0m\n' "$1"; }
+gate_verdict_not_run() { printf '\033[33mGATE NOT RUN: %s\033[0m\n' "$1"; }
+
+# The last verdict line of any of the four shapes, colour stripped; empty when
+# the log holds none, which is what a gate killed by a signal it cannot trap
+# leaves behind. All four shapes, not just the three that start `MERGE GATE: `:
+# a stopped run's reason is the one the caller most needs and the one that was
+# being discarded.
+#
+# The escape is a literal built with $'' rather than sed's \x1b, which only GNU
+# sed understands: on BSD sed the pattern silently matches nothing and every
+# colour code survives into whatever the line is pasted into.
+gate_verdict_read() {
+  local log="$1" esc
+  esc=$'\033'
+  grep -a -e 'MERGE GATE: ' -e 'GATE NOT RUN: ' "$log" 2>/dev/null \
+    | tail -1 \
+    | sed "s/${esc}\[[0-9;]*m//g"
+}
+
+# Did this exit code carry a judgement about the commit? The dispatcher decides
+# whether to report a result or try other capacity on exactly this question, and
+# answering it by restating 0|1|3 is how a fourth code would one day be added to
+# the table and to only some of the places that read it.
+gate_verdict_is_judgement() {
+  case "$1" in
+    "$GATE_EXIT_PASS" | "$GATE_EXIT_FAIL" | "$GATE_EXIT_NOT_AUTHORITATIVE") return 0 ;;
+    *) return 1 ;;
+  esac
 }

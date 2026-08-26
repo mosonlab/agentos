@@ -29,10 +29,13 @@
 #
 #   1. the exact candidate object, retained at refs/gate/candidates/<oid>;
 #   2. the exact baseline object, retained at refs/gate/baselines/<oid>;
-#   3. scripts/gate-worker/run-gate.sh, installed at ~/gate/<repo>/run-gate.sh,
-#      so the harness on the worker is the one in this checkout. The install is
-#      a copy to a temporary name in that directory followed by a rename, so the
-#      harness a gate reads is always a whole file even if two pushes race.
+#   3. scripts/gate-worker/lib.sh and scripts/gate-worker/run-gate.sh, installed
+#      at ~/gate/<repo>/, so the harness on the worker is the one in this
+#      checkout. run-gate.sh sources lib.sh for the verdict's exit codes and its
+#      reader, so the pair travels together and lib.sh lands first: the name
+#      run-gate.sh must never refer to a harness whose lib.sh is not beside it.
+#      Each install is a copy to a temporary name in that directory followed by a
+#      rename, so a file a gate reads is always whole even if two pushes race.
 #
 # The caller resolves both oids before taking a worker slot. This script refuses
 # an oid the checkout cannot resolve, pushes only those two immutable cache refs,
@@ -159,7 +162,6 @@ export GIT_SSH_COMMAND
 # servers. The scp:-style address form below leaves the expansion to the shell,
 # which is the behaviour this wants.
 REMOTE_MIRROR="${SERVER}:${REPO_HOME}/mirror.git"
-REMOTE_HARNESS="${SERVER}:${REPO_HOME}/run-gate.sh"
 CANDIDATE_REF="refs/gate/candidates/${CANDIDATE_OID}"
 BASELINE_REF="refs/gate/baselines/${BASELINE_OID}"
 
@@ -219,7 +221,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '   would push %s to %s\n' "$CANDIDATE_REF" "$REMOTE_MIRROR"
     printf '   would push %s to %s\n' "$BASELINE_REF" "$REMOTE_MIRROR"
   fi
-  printf '\n   would also install scripts/gate-worker/run-gate.sh at %s (copy to a\n   temporary name in the same directory, then rename into place)\n' "$REMOTE_HARNESS"
+  printf '\n   would also install scripts/gate-worker/lib.sh then scripts/gate-worker/run-gate.sh\n   under %s (copy to a temporary name in the same directory, then rename into\n   place)\n' "${SERVER}:${REPO_HOME}"
   printf '\nMIRROR PUSH: DRY RUN OK\n'
   exit 0
 fi
@@ -264,26 +266,31 @@ printf '\n== Installing the gate harness\n'
 # whole old file or the whole new one, never a mixture. A concurrent install only
 # decides which complete harness is available to the next invocation; a gate
 # already executing keeps the inode it opened.
-HARNESS_TMP_NAME="run-gate.sh.tmp.$$.${RANDOM}"
-REMOTE_HARNESS_TMP="${SERVER}:${REPO_HOME}/${HARNESS_TMP_NAME}"
+# lib.sh before run-gate.sh, because run-gate.sh sources it: the order is what
+# keeps the installed harness runnable at every instant of an install rather
+# than only at the end of one.
+for harness_file in lib.sh run-gate.sh; do
+  harness_tmp_name="${harness_file}.tmp.$$.${RANDOM}"
+  remote_harness_tmp="${SERVER}:${REPO_HOME}/${harness_tmp_name}"
 
-remove_harness_tmp() {
+  remove_harness_tmp() {
+    ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
+      "rm -f ${REPO_HOME}/${harness_tmp_name}" >/dev/null 2>&1 || true
+  }
+
+  scp ${SCP_OPTS[@]+"${SCP_OPTS[@]}"} -q "${SCRIPT_DIR}/${harness_file}" "$remote_harness_tmp" || {
+    remove_harness_tmp
+    die "could not copy ${harness_file} to ${remote_harness_tmp}"
+  }
+  # chmod before the rename, so the file is never in place without its mode: the
+  # name ${REPO_HOME}/${harness_file} only ever refers to a complete file.
   ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
-    "rm -f ${REPO_HOME}/${HARNESS_TMP_NAME}" >/dev/null 2>&1 || true
-}
-
-scp ${SCP_OPTS[@]+"${SCP_OPTS[@]}"} -q "${SCRIPT_DIR}/run-gate.sh" "$REMOTE_HARNESS_TMP" || {
-  remove_harness_tmp
-  die "could not copy run-gate.sh to ${REMOTE_HARNESS_TMP}"
-}
-# chmod before the rename, so the file is never in place without its mode: the
-# name ${REPO_HOME}/run-gate.sh only ever refers to a complete executable file.
-ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SERVER" \
-    "chmod 755 ${REPO_HOME}/${HARNESS_TMP_NAME} && mv -f ${REPO_HOME}/${HARNESS_TMP_NAME} ${REPO_HOME}/run-gate.sh" || {
-  remove_harness_tmp
-  die "could not install ${REPO_HOME}/run-gate.sh atomically"
-}
-printf '   %s\n' "$REMOTE_HARNESS"
+      "chmod 755 ${REPO_HOME}/${harness_tmp_name} && mv -f ${REPO_HOME}/${harness_tmp_name} ${REPO_HOME}/${harness_file}" || {
+    remove_harness_tmp
+    die "could not install ${REPO_HOME}/${harness_file} atomically"
+  }
+  printf '   %s\n' "${SERVER}:${REPO_HOME}/${harness_file}"
+done
 
 # Read the refs back rather than trusting the push. Object existence alone would
 # not prove that the immutable cache name carries the oid it claims to name.
