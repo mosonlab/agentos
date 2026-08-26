@@ -233,7 +233,11 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.ok(compoundRegression.indexOf("semantic verification passes") < compoundRegression.indexOf("merge-lease.sh acquire"));
   assert.match(compoundRegression, /never call `scripts\/merge-lease\.sh release` or\s+`scripts\/merge-lease\.sh steal`/u);
   assert.match(compoundRegression, /fetch `origin\/<run\.pullRequestBase>` again/u);
-  assert.match(compoundRegression, /documentation result/u);
+  assert.match(compoundRegression, /all preceding Step\s+outputs/u);
+  assert.match(compoundRegression, /"gateProof":"MERGE GATE: PASS <same 40 hex as headSha>"/u);
+  const directRegression = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))
+    .find((step) => step.stepIndex === 5)!.prompt;
+  assert.equal(compoundRegression, directRegression);
   assert.equal(templateSteps.every((step) => step.prompt.length > 0), true);
   assert.equal(templateSteps.every((step) => step.spawnPolicy === null), true);
   assert.match(templateSteps[1]!.prompt, /load-bearing decisions in `decisions\.md`/u);
