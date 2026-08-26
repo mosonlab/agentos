@@ -2,7 +2,7 @@ import { type DragEvent, type MouseEvent, type ReactNode, memo, useEffect, useSt
 
 import { chainPositionMarker } from "../lib/chain";
 import { duration, money, timeAgo, usageCostLabel } from "../lib/format";
-import { moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
+import { chainBinding, chainBindingLabel, moveTargets, retryable, scheduleLabel, statusLabel } from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
 import { navigate } from "../lib/router";
@@ -171,7 +171,9 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   const title = cardTitle(task);
-  const chainName = task.chainName ?? (task.chainId === null ? null : task.chainId.slice(0, 8));
+  const chain = chainBinding(task);
+  const chainLabel = chain === null ? null : chainBindingLabel(chain);
+  const repair = task.repairOf ?? null;
   return <article
     data-card={task.id}
     className={TASK_CARD}
@@ -209,25 +211,33 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
           </span>
         </div>
       ) : null}
-      {/* No placeholder for a chain-less card (K4). */}
-      {task.chainProgress ? (
+      {/* No placeholder for a chain-less card (K4). A merge-tail repair task is
+          chain-less in its own columns but not in fact, so the row is driven by
+          the binding rather than by the chain progress a detached task has none
+          of — otherwise the repair card sits on the board with nothing saying
+          which chain it belongs to. */}
+      {chainLabel === null ? null : (
         <div className={cn(TASK_META_ROW, "overflow-hidden text-ellipsis whitespace-nowrap")}>
-          {chainName === null ? null : (
-            <button
-              type="button"
-              className="max-w-full overflow-hidden text-ellipsis rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
-              title={chainName}
-              aria-label={t("tasks.card.filterChain", { name: chainName })}
-              onClick={(event) => { event.stopPropagation(); actions.onFilterChain(task); }}
-            >
-              {chainName}
-            </button>
-          )}
+          <button
+            type="button"
+            className="max-w-full overflow-hidden text-ellipsis rounded-full border border-border bg-secondary px-[7px] py-[1px] text-secondary-foreground hover:text-foreground"
+            title={chainLabel}
+            aria-label={t("tasks.card.filterChain", { name: chainLabel })}
+            onClick={(event) => { event.stopPropagation(); actions.onFilterChain(task); }}
+          >
+            {chainLabel}
+          </button>
+          {/* Which repair this is, in the chain's own row: a repair card carries
+              no step ordinal, and the kind is the only thing that distinguishes
+              two repairs of the same chain. */}
+          {repair === null
+            ? null
+            : <Pill tone="amber" className={TASK_PILL}>{t("tasks.pill.repair", { kind: repair.repairKind })}</Pill>}
           {/* The marker keeps the card's node ordinal and the API-derived dense
               execution-layer progress together, without recomputing either. */}
           <span>{chainPositionMarker(task.chainProgress)}</span>
         </div>
-      ) : null}
+      )}
       <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
       {task.assigneeAgent === null ? null : (
         <div className={TASK_META_ROW}>

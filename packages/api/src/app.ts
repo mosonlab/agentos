@@ -5,6 +5,7 @@ import {
   AssigneeType,
   agentArchiveBlocker,
   applyInboxDecision,
+  asJsonObject,
   catalogRunnerForModel,
   CleanupStatus,
   CodexServiceTier,
@@ -55,6 +56,7 @@ import {
   runOwnsMergeOutcome,
   INTEGRATOR_AGENT_NAME,
   MERGE_INTEGRATOR_KIND,
+  MERGE_TAIL_KIND,
   latestTargetCorrection,
   loadIntegratorTask,
   observedChainPullRequests,
@@ -78,7 +80,7 @@ import { getMimeType } from "hono/utils/mime";
 import { z } from "zod";
 
 import { authenticate, principalMayAccess, type Principal } from "./auth.js";
-import { boardCard, chainDisplayByTask, etagFor, etagMatches, serializeUsageCost } from "./board.js";
+import { boardCard, chainDisplayByTask, etagFor, etagMatches, repairBinding, serializeUsageCost, type RepairBinding } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
@@ -126,7 +128,7 @@ import {
 } from "./workspace-reclaim.js";
 import { encryptSecret } from "./secrets.js";
 import { activeRunStatuses, explainFenceRefusal, fencedRunWhere, type RunFence } from "./run-fence.js";
-import { suspendForInbox } from "./inbox.js";
+import { supersedeTaskInboxMessage, suspendForInbox } from "./inbox.js";
 import { createStarterInstallation, onboardingInput, onboardingStatus } from "./onboarding.js";
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
@@ -2313,11 +2315,66 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         });
         for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
       }
+      // A merge-tail repair task is chain-detached by design, so nothing on its
+      // own row says which chain it repairs — the board drew it as a loose card
+      // beside the work that produced it. Its `repairAttempt` marker names the
+      // regression task, and that task's chain is where the card belongs. One
+      // extra query over the page's chain-less rows, skipped entirely when a
+      // page has none, and a second only when a repair card is actually on it.
+      const detachedIds = rows.filter((row) => row.chainId === null).map((row) => row.id);
+      const repairMarkers = detachedIds.length === 0 ? [] : await db.taskActivity.findMany({
+        where: {
+          taskId: { in: detachedIds },
+          actorType: "control-plane",
+          metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt },
+        },
+        select: { taskId: true, metadata: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      });
+      const repairByTask = new Map<string, RepairBinding>();
+      if (repairMarkers.length > 0) {
+        const regressionIds = [...new Set(repairMarkers.flatMap((marker) => {
+          const value = asJsonObject(marker.metadata)?.regressionTaskId;
+          return typeof value === "string" ? [value] : [];
+        }))];
+        const regressionTasks = await db.task.findMany({
+          where: { id: { in: regressionIds }, ...(projectId ? { projectId } : {}) },
+          select: { id: true, projectId: true, chainId: true },
+        });
+        const chainOfTask = new Map<string, { key: string; chainId: string }>();
+        for (const task of regressionTasks) {
+          if (task.chainId === null) continue;
+          chainOfTask.set(task.id, { key: chainKey({ projectId: task.projectId, chainId: task.chainId }), chainId: task.chainId });
+        }
+        // The chain's display name is already derived once for this page. Keyed
+        // by `chainKey` rather than `chainId` for the same reason the page's own
+        // grouping is: a global board carries several projects, and two of them
+        // may hold the same chain id. A chain with no step of its own on the
+        // page has no name here, and the card falls back to naming it by id
+        // exactly as a chain step's card does.
+        const chainNameByKey = new Map<string, string | null>();
+        for (const row of rows) {
+          if (row.chainId === null) continue;
+          const key = chainKey({ projectId: row.projectId, chainId: row.chainId });
+          if (chainNameByKey.has(key)) continue;
+          chainNameByKey.set(key, displayByTask.get(row.id)?.chainName ?? null);
+        }
+        const chainOfRegressionTask = (taskId: string): { chainId: string; chainName: string | null } | null => {
+          const chain = chainOfTask.get(taskId);
+          return chain === undefined ? null : { chainId: chain.chainId, chainName: chainNameByKey.get(chain.key) ?? null };
+        };
+        for (const marker of repairMarkers) {
+          if (repairByTask.has(marker.taskId)) continue;
+          const binding = repairBinding(asJsonObject(marker.metadata), chainOfRegressionTask);
+          if (binding !== null) repairByTask.set(marker.taskId, binding);
+        }
+      }
       return validated(context, rows.map((row) => boardCard(
         row,
         progressFor(row),
         displayByTask.get(row.id),
         row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
+        repairByTask.get(row.id) ?? null,
       )));
     }
 
@@ -3355,6 +3412,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     }
     return context.json({ closed: true, duplicate: false, requestId: body.requestId });
   });
+  app.post("/inbox/messages/:messageId/supersede", async (context) => {
+    // principalMayAccess already restricts this operator action, but keep the
+    // check at the handler boundary so the lifecycle operation stays explicit
+    // if route middleware is ever rearranged.
+    if (context.get("principal").kind !== "operator") return context.json({ error: "Forbidden for principal" }, 403);
+    const body = await readJson(context.req.raw, inboxCloseInput);
+    const result = await supersedeTaskInboxMessage(
+      db,
+      id.parse(context.req.param("messageId")),
+      body.requestId,
+    );
+    if ("error" in result) return context.json({ error: result.error }, result.code);
+    return context.json(result);
+  });
 
   app.post("/runner/availability", async (context) => {
     const body = await readJson(context.req.raw, runnerAvailabilityInput);
@@ -3564,12 +3635,20 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       statuses: [RunStatus.CLAIMED, RunStatus.PROVISIONING],
     };
     const started = await db.$transaction(async (tx) => {
-      await lockRunRow(tx, runId);
+      const locked = await lockRunRow(tx, runId);
+      // Inbox resume reuses the same Run and Session. Keep the original
+      // lifecycle anchor when the resumed provider calls /start again; only a
+      // run that has never started gets this request's timestamp.
+      const existing = locked === null ? null : await tx.run.findUnique({
+        where: { id: runId },
+        select: { startedAt: true },
+      });
+      const startedAt = existing?.startedAt ?? now;
       const updated = await tx.run.updateMany({
         where: fencedRunWhere(fence),
         data: {
           status: RunStatus.RUNNING,
-          startedAt: now,
+          startedAt,
           adapterVersion: body.adapterVersion,
           cliVersion: body.cliVersion,
           authMode: body.authMode ?? null,
@@ -3587,7 +3666,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           runtimeHandle: body.runtimeHandle ?? null,
           resumeInput: null,
           provisionedAt: now,
-          startedAt: now,
+          startedAt,
         },
       });
       if (session.count !== 1) throw new Error(`Run ${runId} has no startable Session`);

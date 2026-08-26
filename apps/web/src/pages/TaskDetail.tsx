@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 
 import { api } from "../lib/api";
-import { compactTokens, duration, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
+import { compactTokens, durationWithInboxWait, formatDateTime, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
@@ -82,7 +82,7 @@ export const StartabilityChecklist = ({ verdict }: { verdict: TaskStartability }
   );
 };
 
-const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
+export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
   const t = useT();
   const tierApplies = supportsCodexServiceTier(run.runner, run.model);
   return (
@@ -92,7 +92,11 @@ const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: s
         <TableCell className={TABLE_NAME}>#{run.runNumber}<span className={TABLE_SUB}>{run.runner.toLowerCase()} · {run.model}{tierApplies ? ` · ${t(`serviceTier.${run.codexServiceTier}`)}` : ""}</span></TableCell>
         <TableCell><RunPill status={run.status} mergeOutcome={run.mergeOutcome} /></TableCell>
         <TableCell>{formatDateTime(run.startedAt ?? run.queuedAt)}</TableCell>
-        <TableCell>{duration(run.startedAt, run.endedAt)}</TableCell>
+        <TableCell>{durationWithInboxWait(
+          run.startedAt,
+          run.endedAt,
+          run.session?.executionStatus === "WAITING_INBOX" || (run.session?.resumeAttempt ?? 0) > 0,
+        )}</TableCell>
         <TableCell><BranchCell remoteUrl={remoteUrl} branch={run.branch ?? run.targetBranch} /></TableCell>
         {/* No size class: this cell carried `.small` before the batch, but
             `.table td { font-size: 12.5px }` outranks `.small` on specificity, so

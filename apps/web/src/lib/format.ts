@@ -79,6 +79,18 @@ export const duration = (from: string | null | undefined, to: string | null | un
   return formatT("format.minutesSeconds", { m: minutes, s: seconds % 60 });
 };
 
+export const durationWithInboxWait = (
+  from: string | null | undefined,
+  to: string | null | undefined,
+  includesInboxWait: boolean,
+  now = Date.now(),
+): string => {
+  const elapsed = duration(from, to, now);
+  return includesInboxWait && elapsed !== "—"
+    ? formatT("format.durationWithInboxWait", { duration: elapsed })
+    : elapsed;
+};
+
 /** Decimal columns arrive as strings; `null` means the runner never reported cost. */
 export const money = (value: string | number | null | undefined): string =>
   value === null || value === undefined ? "—" : `$${Number(value).toFixed(2)}`;
