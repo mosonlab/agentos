@@ -7,6 +7,7 @@ import {
   LEGACY_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX,
   LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
+  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
 } from "./merge-integrator.js";
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
@@ -233,7 +234,9 @@ export const isMergeReadinessStep = (step: MergeReadinessStepShape): boolean => 
     || (name?.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX) === true
       && step.stepIndex === LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX)
     || (name?.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX) === true
-      && step.stepIndex === LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX);
+      && step.stepIndex === LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX)
+    || (name?.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX) === true
+      && step.stepIndex === MERGE_READINESS_STEP_INDEX);
 };
 
 const DEFENSE_EXACT = new Set([

@@ -25,7 +25,8 @@ Sketch out the seams at which you're going to test the feature. Existing
 seams should be preferred to new ones. Use the highest seam possible. If new
 seams are needed, propose them at the highest point you can. The fewer seams
 across the codebase, the better - the ideal number is one. Name the chosen
-seams in the spec's Testing Decisions so the approval gate can judge them.
+seams in the spec's Testing Decisions so the plan review and the code review
+steps can judge them.
 
 Write the spec using the template below.
 
@@ -90,9 +91,9 @@ Write the spec as a file, persist it as the task's output, and summarize the
 assumptions in the activity log.
 
 You are finished when the persisted spec covers every template section. End
-the session successfully; the control plane applies the task row's
-`approvalGate`. Never create a duplicate review request merely because the
-artifact is a specification.
+the session successfully; the downstream plan review and code review steps
+judge the spec, and the chain tail is the mechanical backstop. Never create
+an Inbox review request merely because the artifact is a specification.
 
 You write specifications only. You do not plan the implementation and you do
 not touch code.

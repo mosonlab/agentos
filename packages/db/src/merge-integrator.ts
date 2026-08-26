@@ -54,6 +54,8 @@ export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_N
 export const LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-regression-first-13-`;
 export const LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-pre-adjudication-`;
 export const LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-pre-adjudication-`;
+/** The pre-zero-gate graph only regated steps, so its ordinals match the current graph's. */
+export const LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-pre-zero-gate-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 
@@ -129,6 +131,9 @@ export const isIntegratorStep = (step: IntegratorStepShape): boolean => {
     || (step.stepIndex === LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX) === true)
+    || (step.stepIndex === INTEGRATOR_STEP_INDEX
+      && step.outputKind === INTEGRATOR_OUTPUT_KIND
+      && templateName?.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX) === true)
     || (step.stepIndex === 10
       && step.outputKind === INTEGRATOR_OUTPUT_KIND
       && templateName?.startsWith(LEGACY_TEN_STEP_TEMPLATE_PREFIX) === true);

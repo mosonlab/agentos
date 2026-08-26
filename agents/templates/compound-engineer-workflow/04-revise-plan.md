@@ -2,7 +2,7 @@
 stepIndex: 4
 layer: 4
 agent: plan-reviser
-approvalGate: true
+approvalGate: false
 outputKind: revised-plan
 attachmentsFromPrevious: true
 opensPullRequest: false

@@ -3,8 +3,8 @@ import { AssigneeType, CodexServiceTier, Prisma, PrismaClient, TaskStatus } from
 import { CANONICAL_AGENT_RUNTIME_TRANSITIONS, DIRECT_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
 import {
-  legacyAdjudicationTemplateName,
-  legacyTemplateShapeRefusal,
+  legacyTemplateName,
+  matchedLegacyGeneration,
   type PersistedTransitionStep,
 } from "../src/canonical-template-transition.js";
 import {
@@ -132,8 +132,10 @@ const main = async (): Promise<void> => {
       where: { projectId_name: { projectId: project.id, name: INTEGRATOR_TEMPLATE_NAME } },
       include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
     });
-    const legacyCanonical = existing
-      && legacyTemplateShapeRefusal(INTEGRATOR_TEMPLATE_NAME, existing.steps as unknown as PersistedTransitionStep[]) === "legacy";
+    const legacyCanonicalMarker = existing
+      ? matchedLegacyGeneration(INTEGRATOR_TEMPLATE_NAME, existing.steps as unknown as PersistedTransitionStep[])
+      : null;
+    const legacyCanonical = existing && legacyCanonicalMarker !== null;
     const historicalIntegrator = existing?.steps.find((step) => step.stepIndex === 10);
     const isHistoricalNineStepTemplate = existing?.steps.length === HISTORICAL_NINE_STEP_CONTRACT.length
       && HISTORICAL_NINE_STEP_CONTRACT.every(([stepIndex, agentName, assigneeType, outputKind, approvalGate], index) => {
@@ -183,8 +185,8 @@ const main = async (): Promise<void> => {
     // new template for new Runs. Runtime mechanical recognition remains
     // limited to the marked 10-row shape, because the 9-row shape had no
     // integrator.
-    const legacyName = existing && legacyCanonical
-      ? legacyAdjudicationTemplateName(INTEGRATOR_TEMPLATE_NAME, existing.id)
+    const legacyName = existing && legacyCanonicalMarker !== null
+      ? legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, legacyCanonicalMarker, existing.id)
       : existing && isHistoricalHumanTwelveStepTemplate
       ? legacyHumanTwelveStepTemplateName(existing.id)
       : existing && isRegressionFirstThirteenStepTemplate
@@ -263,8 +265,10 @@ const main = async (): Promise<void> => {
     where: { projectId_name: { projectId: project.id, name: DIRECT_TEMPLATE_NAME } },
     include: { steps: { include: { assigneeAgent: { select: { name: true } } }, orderBy: { stepIndex: "asc" } } },
   });
-  const legacyDirect = historicalDirect
-    && legacyTemplateShapeRefusal(DIRECT_TEMPLATE_NAME, historicalDirect.steps as unknown as PersistedTransitionStep[]) === "legacy";
+  const legacyDirectMarker = historicalDirect
+    ? matchedLegacyGeneration(DIRECT_TEMPLATE_NAME, historicalDirect.steps as unknown as PersistedTransitionStep[])
+    : null;
+  const legacyDirect = historicalDirect && legacyDirectMarker !== null;
   if (legacyDirect) {
     const unfinishedTasks = await prisma.task.count({
       where: { templateId: historicalDirect.id, archivedAt: null, status: { not: TaskStatus.DONE } },
@@ -279,7 +283,7 @@ const main = async (): Promise<void> => {
     }
   }
   if (legacyDirect) {
-    const legacyName = legacyAdjudicationTemplateName(DIRECT_TEMPLATE_NAME, historicalDirect.id);
+    const legacyName = legacyTemplateName(DIRECT_TEMPLATE_NAME, legacyDirectMarker!, historicalDirect.id);
     const collision = await prisma.taskTemplate.findUnique({
       where: { projectId_name: { projectId: project.id, name: legacyName } },
       select: { id: true },

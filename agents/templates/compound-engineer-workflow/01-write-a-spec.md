@@ -2,11 +2,11 @@
 stepIndex: 1
 layer: 1
 agent: spec
-approvalGate: true
+approvalGate: false
 outputKind: spec
 attachmentsFromPrevious: false
 opensPullRequest: false
 baseFromStepIndex: null
 spawnPolicy: null
 ---
-Write a detailed feature specification for {{branchName}} and persist exactly one JSON object for human approval: `{"schemaVersion":1,"headSha":"<workspace HEAD>","spec":"<complete specification>"}`.
+Write a detailed feature specification for {{branchName}} and persist exactly one JSON object as the specification of record for the downstream steps: `{"schemaVersion":1,"headSha":"<workspace HEAD>","spec":"<complete specification>"}`.
