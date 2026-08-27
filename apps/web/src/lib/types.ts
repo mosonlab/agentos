@@ -548,6 +548,7 @@ export type TaskTemplateStep = {
   prompt: string;
   approvalGate: boolean;
   outputKind: string;
+  priorOutputKinds: string[];
   baseFromStepIndex: number | null;
   runner: RunnerKind | null;
   assigneeAgentId: string | null;

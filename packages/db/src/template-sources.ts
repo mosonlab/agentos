@@ -180,6 +180,19 @@ export const loadTemplateStepSources = async (
   if (JSON.stringify(indexes) !== JSON.stringify(expectedIndexes)) {
     throw new Error(`${templateRoot} stepIndex values must be contiguous from 1 through ${sourceSpec.stepCount}`);
   }
+  for (const step of steps) {
+    const duplicatePriorKind = step.priorOutputKinds.find((kind, index) => step.priorOutputKinds.indexOf(kind) !== index);
+    if (duplicatePriorKind) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} contains duplicate priorOutputKinds ${duplicatePriorKind}`);
+    }
+    const earlierOutputKinds = new Set(steps
+      .filter((candidate) => candidate.stepIndex < step.stepIndex)
+      .map((candidate) => candidate.outputKind));
+    const nonPriorKind = step.priorOutputKinds.find((kind) => !earlierOutputKinds.has(kind));
+    if (nonPriorKind) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} priorOutputKinds ${nonPriorKind} does not reference an earlier step`);
+    }
+  }
   for (let index = 1; index < steps.length; index += 1) {
     const previous = steps[index - 1]!;
     const current = steps[index]!;

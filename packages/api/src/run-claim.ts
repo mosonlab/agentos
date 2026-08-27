@@ -73,6 +73,7 @@ const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
 
 const MAX_OPERATOR_NOTES = 10;
 const MAX_OPERATOR_NOTES_CHARS = 4_000;
+const PRIOR_OUTPUT_MISSING_REASON = "prior-output-missing";
 export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
 
 /**
@@ -390,6 +391,40 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         if (parked.chainLocked) return HALT;
         return SKIP;
       }
+      const blindReviewTask = isCanonicalBlindFindingsStep(candidate.task.templateStep);
+      const declaredPriorOutputKinds = candidate.task.templateStep === null
+        ? null
+        : [...new Set(candidate.task.templateStep.priorOutputKinds)];
+      const priorOutputs = !blindReviewTask
+        && candidate.task.chainId && candidate.task.chainIndex !== null
+        ? await tx.taskStepOutput.findMany({
+          where: {
+            task: {
+              projectId: candidate.task.projectId,
+              chainId: candidate.task.chainId,
+              chainIndex: { lt: candidate.task.chainIndex },
+            },
+            ...(declaredPriorOutputKinds === null ? {} : { kind: { in: declaredPriorOutputKinds } }),
+          },
+          select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
+          orderBy: { task: { chainIndex: "asc" } },
+        })
+        : [];
+      if (declaredPriorOutputKinds !== null) {
+        const presentKinds = new Set(priorOutputs.map(({ kind }) => kind));
+        const missingKinds = declaredPriorOutputKinds.filter((kind) => !presentKinds.has(kind));
+        if (missingKinds.length > 0) {
+          const reason = `Prior output claim refused: missing declared output kind${missingKinds.length === 1 ? "" : "s"}: ${missingKinds.join(", ")}`;
+          await parkQueuedCandidate(candidate, {
+            reason,
+            condition: PRIOR_OUTPUT_MISSING_REASON,
+            activityBody: `Prior output claim stopped: ${reason}`,
+            inboxBody: `Prior output claim failed and the task was parked in Backlog: ${reason}`,
+            metadata: { missingKinds },
+          });
+          return { error: reason, reason: PRIOR_OUTPUT_MISSING_REASON };
+        }
+      }
       const prepared = await prepareSpecificationVerification(
         tx,
         { task: candidate.task, repo: candidate.repo, branch: candidate.branch },
@@ -506,26 +541,6 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
         })
         : null;
-      const blindReviewTask = isCanonicalBlindFindingsStep(candidate.task.templateStep);
-      const priorOutputsRaw = !blindReviewTask
-        && candidate.task.chainId && candidate.task.chainIndex !== null
-        && (candidate.task.templateStepId === null || candidate.task.templateStep?.attachmentsFromPrevious !== false)
-        ? await tx.taskStepOutput.findMany({
-          where: { task: {
-            projectId: candidate.task.projectId,
-            chainId: candidate.task.chainId,
-            chainIndex: { lt: candidate.task.chainIndex },
-          } },
-          select: { kind: true, body: true, task: { select: { name: true, chainIndex: true } } },
-          orderBy: { task: { chainIndex: "asc" } },
-        })
-        : [];
-      // Persisted outputs are chain authority, not activity previews. A
-      // silent tail slice can remove schemas, state machines, and approval
-      // assumptions while still presenting the remainder as complete. The
-      // write endpoint already caps each artifact at 500k; pass the durable
-      // body verbatim until artifact references replace prompt embedding.
-      const priorOutputs = priorOutputsRaw;
       const operatorNotes = blindReviewTask
         ? []
         : await operatorNotesForClaim(tx, candidate.task.id, candidate.runNumber, candidate.task.createdAt);

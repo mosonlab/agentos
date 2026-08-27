@@ -89,11 +89,30 @@ test("missing layer frontmatter is refused by the source loader", async () => {
 test("missing prior output declaration frontmatter is refused by the source loader", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*$/mu, "")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*\n/mu, "")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*priorOutputKinds/u,
     ),
+  );
+});
+
+test("prior output declarations are unique and reference only earlier steps", async () => {
+  await withTemplateCopy(
+    INTEGRATOR_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "08-apply-review-fixes.md", (source) => source.replace(
+      "priorOutputKinds: [sol-findings, blind-findings]",
+      "priorOutputKinds: [sol-findings, sol-findings]",
+    )),
+    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /duplicate priorOutputKinds sol-findings/u),
+  );
+  await withTemplateCopy(
+    INTEGRATOR_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "05-implementation.md", (source) => source.replace(
+      "priorOutputKinds: [revised-plan]",
+      "priorOutputKinds: [sol-findings]",
+    )),
+    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /priorOutputKinds sol-findings does not reference an earlier step/u),
   );
 });
 
