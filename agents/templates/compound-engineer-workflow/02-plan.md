@@ -4,6 +4,7 @@ layer: 2
 agent: plan
 approvalGate: false
 outputKind: plan
+priorOutputKinds: [spec]
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null
