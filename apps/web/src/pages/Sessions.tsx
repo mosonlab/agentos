@@ -12,7 +12,8 @@ import {
   type StreamNode, type ToolCall,
 } from "../lib/session-stream";
 import {
-  groupSessionsByDay, SESSION_DAY_PAGE_SIZE, sessionDayLabelKind, type SessionDayGroup,
+  groupSessionsByDay, isSessionUnseen, markSessionOpened, readSessionSeenState,
+  SESSION_DAY_PAGE_SIZE, sessionDayLabelKind, type SessionDayGroup, type SessionSeenState,
 } from "../lib/session-list";
 import { useEventStream } from "../lib/use-event-stream";
 import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
@@ -130,13 +131,16 @@ const sessionDotTone = (tone: PillTone): string | undefined => {
   return undefined;
 };
 
-const SessionHoverCard = ({ session }: { session: Session }): ReactNode => {
+const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boolean }): ReactNode => {
   const t = useT();
   return (
     <HoverCard openDelay={120} closeDelay={80}>
       <HoverCardTrigger asChild>
         <div data-session-title tabIndex={0} className={SESSION_TITLE}>
-          <div className="overflow-hidden text-ellipsis whitespace-nowrap font-bold text-foreground hover:underline">
+          <div className={cn(
+            "overflow-hidden text-ellipsis whitespace-nowrap text-foreground hover:underline",
+            unseen ? "font-bold" : "font-normal",
+          )}>
             {session.task
               ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link>
               : session.goal
@@ -168,7 +172,7 @@ const SessionHoverCard = ({ session }: { session: Session }): ReactNode => {
   );
 };
 
-export const SessionRow = ({ session }: { session: Session }): ReactNode => {
+export const SessionRow = ({ session, unseen = false }: { session: Session; unseen?: boolean }): ReactNode => {
   const { tone } = sessionPill(session.executionStatus, session.mergeOutcome);
   return (
     <div
@@ -179,7 +183,8 @@ export const SessionRow = ({ session }: { session: Session }): ReactNode => {
       onClick={(event) => { if (!event.defaultPrevented) navigate(`/sessions/${session.id}`); }}
     >
       <span aria-hidden="true" data-session-status className={cn(DOT, sessionDotTone(tone))} />
-      <SessionHoverCard session={session} />
+      <SessionHoverCard session={session} unseen={unseen} />
+      {unseen ? <span aria-hidden="true" data-session-unseen className={cn(DOT, DOT_TONE.green)} /> : null}
       <span data-session-time className="shrink-0 text-[11.5px] text-muted-foreground">
         {timeAgo(session.startedAt ?? session.requestedAt)}
       </span>
@@ -191,10 +196,12 @@ const SessionDayGroupView = ({
   group,
   expanded,
   onToggle,
+  seenState,
 }: {
   group: SessionDayGroup;
   expanded: boolean;
   onToggle: () => void;
+  seenState: SessionSeenState | null;
 }): ReactNode => {
   const t = useT();
   const kind = sessionDayLabelKind(group.key);
@@ -214,7 +221,13 @@ const SessionDayGroupView = ({
         </span>
       </div>
       <div className={SESSION_DAY_ROWS}>
-        {visible.map((session) => <SessionRow key={session.id} session={session} />)}
+        {visible.map((session) => (
+          <SessionRow
+            key={session.id}
+            session={session}
+            unseen={seenState !== null && isSessionUnseen(session, seenState)}
+          />
+        ))}
       </div>
       {remaining > 0 ? (
         <div className="border-t border-[color:var(--border-soft)] px-[20px] py-[9px]">
@@ -244,12 +257,23 @@ export const SessionsPage = (): ReactNode => {
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
   const [expandedDays, setExpandedDays] = useState<Set<string>>(() => new Set());
+  const [seenSnapshot, setSeenSnapshot] = useState<{ projectId: string; state: SessionSeenState } | null>(() => (
+    projectId === "" ? null : { projectId, state: readSessionSeenState(projectId) }
+  ));
   const t = useT();
+  const seenProjectAtMount = useRef(projectId);
   useEffect(() => {
+    const changedProject = projectId !== seenProjectAtMount.current;
+    seenProjectAtMount.current = projectId;
     setOlder([]);
     setExhausted(false);
     setMoreError(null);
     setExpandedDays(new Set());
+    if (projectId === "") {
+      setSeenSnapshot(null);
+    } else if (changedProject) {
+      setSeenSnapshot({ projectId, state: readSessionSeenState(projectId) });
+    }
   }, [projectId]);
 
   const sessions = useMemo(() => {
@@ -259,6 +283,7 @@ export const SessionsPage = (): ReactNode => {
   }, [head.data, older]);
 
   const dayGroups = useMemo(() => groupSessionsByDay(sessions), [sessions]);
+  const seenState = seenSnapshot?.projectId === projectId ? seenSnapshot.state : null;
 
   const toggleDay = (key: string): void => {
     setExpandedDays((current) => {
@@ -313,6 +338,7 @@ export const SessionsPage = (): ReactNode => {
                 key={group.key}
                 group={group}
                 expanded={expandedDays.has(group.key)}
+                seenState={seenState}
                 onToggle={() => toggleDay(group.key)}
               />
             ))}
@@ -573,6 +599,14 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   const t = useT();
   const terminal = session ? !isLive(session.executionStatus) : false;
   const stream = useEventStream(session?.runId ?? null, terminal);
+
+  // The list is unmounted by hash navigation, so the detail page is the one
+  // place that can acknowledge an open. Including terminal in the dependency
+  // list acknowledges the same Session again when it finishes while watched.
+  useEffect(() => {
+    if (session === null || session.id !== sessionId) return;
+    markSessionOpened(session.projectId, session.id);
+  }, [session?.id, session?.projectId, sessionId, terminal]);
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const [unseen, setUnseen] = useState(0);

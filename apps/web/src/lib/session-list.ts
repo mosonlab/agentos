@@ -1,4 +1,5 @@
-import type { Session } from "./types";
+import { storage } from "./storage";
+import type { Session, SessionExecutionStatus } from "./types";
 
 /** The number of rows that keep a busy calendar day from hiding later days. */
 export const SESSION_DAY_PAGE_SIZE = 5;
@@ -65,4 +66,98 @@ export const sessionDayLabelKind = (key: string, now = new Date()): SessionDayLa
   if (key === today) return "today";
   const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
   return key === localDayKey(yesterday.toISOString()) ? "yesterday" : "date";
+};
+
+/* ---------------------------------------------------------- seen sessions */
+
+export type SessionSeenState = {
+  since: string;
+  opened: Record<string, string>;
+};
+
+export const sessionSeenKey = (projectId: string): string => `agentos.sessions.seen.${projectId}`;
+
+/** Kept as a small alias for callers that only need to construct the key. */
+export const seenKey = sessionSeenKey;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const parseSeenState = (raw: string | null): SessionSeenState | null => {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || typeof parsed.since !== "string" || !isRecord(parsed.opened)) return null;
+    const opened: Record<string, string> = {};
+    for (const [id, at] of Object.entries(parsed.opened)) {
+      if (typeof at !== "string") return null;
+      opened[id] = at;
+    }
+    return { since: parsed.since, opened };
+  } catch {
+    return null;
+  }
+};
+
+const newSeenState = (): SessionSeenState => ({ since: new Date().toISOString(), opened: {} });
+
+const writeSeenState = (projectId: string, state: SessionSeenState): void => {
+  storage.set(sessionSeenKey(projectId), JSON.stringify(state));
+};
+
+/** Read once per list mount; a missing or malformed local cache starts clean. */
+export const readSessionSeenState = (projectId: string): SessionSeenState => {
+  const existing = parseSeenState(storage.get(sessionSeenKey(projectId)));
+  if (existing !== null) return existing;
+  const fresh = newSeenState();
+  writeSeenState(projectId, fresh);
+  return fresh;
+};
+
+const liveStatuses: SessionExecutionStatus[] = ["REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX"];
+
+export const isSessionLive = (status: SessionExecutionStatus): boolean => liveStatuses.includes(status);
+
+const instantValue = (value: string): number => {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+};
+
+/** A terminal row still has a meaningful finish instant when endedAt is absent. */
+export const sessionFinishTimestamp = (
+  session: Pick<Session, "endedAt" | "startedAt" | "requestedAt">,
+): string => session.endedAt ?? session.startedAt ?? session.requestedAt;
+
+export const isSessionUnseen = (session: Session, state: SessionSeenState): boolean => {
+  if (isSessionLive(session.executionStatus)) return false;
+  const finish = instantValue(sessionFinishTimestamp(session));
+  const seenAt = state.opened[session.id] ?? state.since;
+  return finish > instantValue(seenAt);
+};
+
+const pruneOpened = (opened: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(opened)
+      .map(([id, at], index) => ({ id, at, index }))
+      .sort((left, right) => {
+        const difference = instantValue(right.at) - instantValue(left.at);
+        return difference === 0 ? left.index - right.index : difference;
+      })
+      .slice(0, 500)
+      .map(({ id, at }) => [id, at]),
+  );
+
+/** Persist an open timestamp and bound the browser-local record. */
+export const markSessionOpened = (
+  projectId: string,
+  sessionId: string,
+  openedAt = new Date().toISOString(),
+): SessionSeenState => {
+  const current = readSessionSeenState(projectId);
+  const next: SessionSeenState = {
+    since: current.since,
+    opened: pruneOpened({ ...current.opened, [sessionId]: openedAt }),
+  };
+  writeSeenState(projectId, next);
+  return next;
 };

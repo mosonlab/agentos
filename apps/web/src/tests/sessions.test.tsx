@@ -10,6 +10,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { setFormatLocale } from "../lib/format";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
+import { sessionSeenKey } from "../lib/session-list";
+import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 
@@ -386,9 +388,106 @@ test("day expansion resets when the Project scope changes", async () => {
   }
 });
 
+test("an unseen terminal row has a trailing green dot and bold title, while a seen row has neither", () => {
+  const finished = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-21T00:00:00.000Z" });
+  const unseen = renderToStaticMarkup(<SessionRow session={finished} unseen />);
+  const seen = renderToStaticMarkup(<SessionRow session={finished} unseen={false} />);
+  assert.match(unseen, /data-session-unseen/);
+  assert.match(unseen, /data-session-unseen="true"[^>]*bg-\[color:var\(--status-green-fg\)\]/);
+  assert.ok(unseen.indexOf("data-session-unseen") < unseen.indexOf("data-session-time"), "unseen dot trails title and precedes time");
+  assert.match(unseen, /font-bold/);
+  assert.doesNotMatch(seen, /data-session-unseen/);
+  assert.match(seen, /font-normal/);
+});
+
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {
   const source = readFileSync(fileURLToPath(new URL("../pages/Sessions.tsx", import.meta.url)), "utf8");
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(source), false);
+});
+
+test("opening a Session marks it opened, and returning to the list clears its dot", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const detail = session({ projectId: "p-open", executionStatus: "SUCCEEDED", endedAt: "2026-08-21T01:00:00.000Z" });
+  const seenKey = sessionSeenKey("p-open");
+  storage.set(seenKey, JSON.stringify({ since: "2026-08-20T00:00:00.000Z", opened: {} }));
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+        : path.includes("/projects")
+          ? [{ id: "p-open", name: "Open project" }]
+          : path.includes("/sessions/session-1") ? detail : [detail];
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const { ProjectProvider } = await import("../lib/project");
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const opened = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
+    assert.ok(opened?.opened[detail.id], "detail mount records the opened Session");
+
+    await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
+    await flush();
+    assert.equal(dom.window.document.querySelectorAll("[data-session-unseen]").length, 0, container.innerHTML);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a Session finishing while its detail page is open is marked opened again", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  let detail = session({ projectId: "p-transition", executionStatus: "RUNNING", endedAt: null });
+  const seenKey = sessionSeenKey("p-transition");
+  storage.set(seenKey, JSON.stringify({ since: "2026-08-20T00:00:00.000Z", opened: {} }));
+  const originalFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 24; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const initial = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
+    assert.ok(initial?.opened[detail.id], "mount records the live Session too");
+
+    detail = { ...detail, executionStatus: "SUCCEEDED", endedAt: "2026-08-21T01:00:00.000Z" };
+    const refresh = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+    const transitioned = JSON.parse(storage.get(seenKey) ?? "null") as { opened: Record<string, string> } | null;
+    assert.ok(transitioned?.opened[detail.id], "terminal transition writes another opened stamp");
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    globalThis.fetch = originalFetch;
+  }
 });
 
 /* ------------------------------------------------------------ interaction */
