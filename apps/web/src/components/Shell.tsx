@@ -6,6 +6,7 @@ import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate, useRoute } from "../lib/router";
 import { initial } from "../lib/format";
+import { needsReply } from "../lib/inbox";
 import type { InboxMessage } from "../lib/types";
 import { useTheme, type ThemeMode } from "../lib/theme";
 import { cn } from "../lib/utils";
@@ -76,7 +77,11 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   const path = useRoute();
   // GET /inbox/messages is global: the control plane has no project filter on it.
   const { data: inbox } = usePoll<InboxMessage[]>("/inbox/messages", 5_000);
-  const openCount = (inbox ?? []).filter((message) => message.status === "OPEN").length;
+  /* Only cards the operator still owes an answer to. Detached notifications are
+   * open too, but nobody is blocked on them: counting them here is what made the
+   * badge read 145 with nothing actually waiting. They live in the Inbox's
+   * Notices lane instead. */
+  const openCount = (inbox ?? []).filter(needsReply).length;
   const t = useT();
 
   const active = (item: { to: string; match: string[] }): boolean =>

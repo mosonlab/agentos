@@ -110,44 +110,59 @@ test("operator principal cannot impersonate a runner", async () => {
   });
 });
 
-test("operator can close only detached agent notifications", async () => {
+/* A merge-tail stop report: agent-authored text, attached to the task it
+ * happened on, and nothing resumes on a reply. It is the shape the Inbox is
+ * full of, and the old "attached to nothing" rule refused to close it. */
+const stopReport = {
+  id: "message-1", status: "OPEN", from: "AGENT", kind: "TEXT", gateTaskId: null, replyToMessageId: null,
+};
+
+const closeRequest = async (app: ReturnType<typeof createApp>, messageId: string): Promise<Response> =>
+  await app.request(`/inbox/messages/${messageId}/close`, {
+    method: "POST",
+    headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: `close-${messageId}` }),
+  });
+
+test("operator can close a notification attached to a task when no run waits on it", async () => {
   await withTokens(async () => {
-    const notification = {
-      status: "OPEN", from: "AGENT", kind: "TEXT", taskId: null, goalId: null,
-      sessionId: null, gateTaskId: null, replyToMessageId: null,
-    };
     let updateWhere: unknown;
     const database = {
       inboxMessage: {
-        findUnique: async () => notification,
+        findUnique: async () => stopReport,
         updateMany: async ({ where }: { where: unknown }) => { updateWhere = where; return { count: 1 }; },
       },
+      session: { findMany: async () => [] },
     } as unknown as PrismaClient;
-    const response = await createApp(database).request("/inbox/messages/message-1/close", {
-      method: "POST",
-      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId: "close-message-1" }),
-    });
+    const response = await closeRequest(createApp(database), "message-1");
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { closed: true, duplicate: false, requestId: "close-message-1" });
+    // The conditional update guards what the row itself can prove; the waiting
+    // session is checked above it, and cannot appear for an existing card.
     assert.deepEqual(updateWhere, {
-      id: "message-1", status: "OPEN", from: "AGENT", kind: "TEXT", taskId: null,
-      goalId: null, sessionId: null, gateTaskId: null, replyToMessageId: null,
+      id: "message-1", status: "OPEN", from: "AGENT", kind: "TEXT",
+      gateTaskId: null, replyToMessageId: null,
     });
+  });
+});
 
+test("operator cannot close a gate, nor a card a suspended run resumes on", async () => {
+  await withTokens(async () => {
     const gateDatabase = {
-      inboxMessage: {
-        findUnique: async () => ({ ...notification, gateTaskId: "gate-1" }),
-        updateMany: async () => { throw new Error("must not close a gate"); },
-      },
+      inboxMessage: { findUnique: async () => ({ ...stopReport, gateTaskId: "gate-1" }) },
+      session: { findMany: async () => [] },
     } as unknown as PrismaClient;
-    const refused = await createApp(gateDatabase).request("/inbox/messages/message-2/close", {
-      method: "POST",
-      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId: "close-message-2" }),
-    });
-    assert.equal(refused.status, 409);
-    assert.match(String((await refused.json() as { error: string }).error), /Only a detached agent notification/u);
+    const gate = await closeRequest(createApp(gateDatabase), "message-2");
+    assert.equal(gate.status, 409);
+    assert.match(String((await gate.json() as { error: string }).error), /no run is waiting on/u);
+
+    const waitingDatabase = {
+      inboxMessage: { findUnique: async () => stopReport },
+      session: { findMany: async () => [{ waitingOnMessageId: "message-1" }] },
+    } as unknown as PrismaClient;
+    const waiting = await closeRequest(createApp(waitingDatabase), "message-1");
+    assert.equal(waiting.status, 409);
+    assert.match(String((await waiting.json() as { error: string }).error), /no run is waiting on/u);
   });
 });
 

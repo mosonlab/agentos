@@ -18,7 +18,7 @@ authoritative ones; the table below is an index, not a substitute.
 
 ## Third-party source carried in this repository
 
-One body of third-party code is checked in rather than installed.
+Two bodies of third-party material are checked in rather than installed.
 
 **shadcn/ui** — `apps/web/src/components/ui/*.tsx` (14 files).
 
@@ -32,6 +32,43 @@ project is MIT-licensed:
 MIT License
 
 Copyright (c) 2023 shadcn
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+**mattpocock/skills** — `agents/roles/*.md` and
+`agents/templates/*/*.md` (chain role and step prompts).
+
+Five upstream skills — `to-spec`, `to-tickets`, `implement-spec`, `code-review`
+and `resolving-merge-conflicts` — supply the working text of the corresponding
+chain prompts. Each of those prompts is upstream paragraphs carried verbatim
+plus paragraphs written here to bind them to this platform's contracts: the
+JSON step outputs, the layered chain, the pinned review range, the mechanical
+merge tail. The spec template, the slice ticket format and the seam, ticket and
+review disciplines are upstream text. Upstream baseline:
+[`mattpocock/skills`](https://github.com/mattpocock/skills) at commit
+`c75f10c`. Upstream copyright: `Copyright (c) 2026 Matt Pocock`, MIT:
+
+```
+MIT License
+
+Copyright (c) 2026 Matt Pocock
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

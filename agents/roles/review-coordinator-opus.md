@@ -1,7 +1,7 @@
 ---
 name: review-coordinator-opus
 title: Code Review Coordinator (Opus)
-model: claude-opus-5:medium
+model: claude-opus-5:high
 runner: claude
 inboxAccess: true
 collaborators: []

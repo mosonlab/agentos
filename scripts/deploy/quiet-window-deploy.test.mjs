@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -11,6 +12,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +43,7 @@ import {
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
   inspectProductionCheckout,
+  pruneDeployHistory,
   publishDirectories,
   workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
@@ -457,6 +460,72 @@ test("publication removes a retired CLI dist on commit and restores it on rollba
   await commitPublication.commit();
   assert.equal(existsSync(cliDist), false);
   rmSync(root, { recursive: true, force: true });
+});
+
+test("deploy history retention keeps bounded rollback builds and daily database coverage", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-retention-"));
+  const backups = join(root, "backups");
+  mkdirSync(backups);
+  const previousNames = [];
+  for (let index = 0; index < 6; index += 1) {
+    const name = `previous-${randomUUID()}`;
+    const path = join(root, name);
+    mkdirSync(path);
+    writeFileSync(join(path, "sentinel"), String(index));
+    const modified = new Date(Date.UTC(2026, 7, 20 + index));
+    utimesSync(path, modified, modified);
+    previousNames.push(name);
+  }
+  mkdirSync(join(root, "previous-not-a-deployer-transaction"));
+  const stageName = `stage-${randomUUID()}`;
+  mkdirSync(join(root, stageName));
+  writeFileSync(join(root, "escalated.json"), "retain\n");
+
+  const backupNames = [];
+  const createBackup = (day, hour, minute) => {
+    const timestamp = `${day}T${String(hour).padStart(2, "0")}-${String(minute).padStart(2, "0")}-00-000Z`;
+    const name = `${timestamp}-${"a".repeat(12)}-${"b".repeat(12)}.dump`;
+    const path = join(backups, name);
+    writeFileSync(path, name);
+    const modified = new Date(`${day}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00.000Z`);
+    utimesSync(path, modified, modified);
+    backupNames.push(name);
+  };
+  createBackup("2026-07-30", 12, 0);
+  for (let index = 0; index < 20; index += 1) createBackup("2026-08-25", Math.floor(index / 60), index % 60);
+  writeFileSync(join(backups, "operator-note.txt"), "retain\n");
+
+  const result = pruneDeployHistory({
+    stateDir: root,
+    now: Date.parse("2026-08-27T00:00:00.000Z"),
+  });
+
+  assert.deepEqual(result, { keptPrevious: 3, removedPrevious: 3, keptBackups: 15, removedBackups: 6 });
+  assert.deepEqual(
+    readdirSync(root).filter((name) => name.startsWith("previous-") && name !== "previous-not-a-deployer-transaction").sort(),
+    previousNames.slice(-3).sort(),
+  );
+  assert.ok(existsSync(join(root, "previous-not-a-deployer-transaction")));
+  assert.ok(existsSync(join(root, stageName)));
+  assert.equal(readFileSync(join(root, "escalated.json"), "utf8"), "retain\n");
+  assert.equal(readdirSync(backups).filter((name) => name.endsWith(".dump")).length, 15);
+  assert.ok(existsSync(join(backups, backupNames[0])));
+  assert.equal(readFileSync(join(backups, "operator-note.txt"), "utf8"), "retain\n");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("deploy history retention refuses a matched symlink without touching its target", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-deploy-retention-symlink-"));
+  const outside = mkdtempSync(join(tmpdir(), "agentos-deploy-retention-target-"));
+  writeFileSync(join(outside, "sentinel"), "retain\n");
+  symlinkSync(outside, join(root, `previous-${randomUUID()}`));
+  assert.throws(
+    () => pruneDeployHistory({ stateDir: root }),
+    /deploy-retention-refused/u,
+  );
+  assert.equal(readFileSync(join(outside, "sentinel"), "utf8"), "retain\n");
+  rmSync(root, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
 });
 
 test("dry-run reads every decision surface and invokes no mutation", async () => {

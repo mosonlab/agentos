@@ -221,11 +221,29 @@ The old `dist/` trees and `node_modules` stay in a private `previous-*`
 transaction directory. A
 build, migration, sync, swap, notification, or restart failure restores or
 retains the previous build. Database migration rollback is not attempted.
-Database backups and successful previous-build directories are not deleted
-automatically; retain or remove them under the operator's backup policy.
+After a successful deploy, and on every no-op invocation, retention keeps the
+newest three successful `previous-*` directories. It keeps the newest fourteen
+database dumps plus the newest dump for each UTC day in the last thirty days.
+Only names produced by this deployer are eligible; active stages, the live
+build, locks, escalation state, and unrecognized entries are never touched.
+Retention runs under the deploy process lock after publication has committed
+and the deploy barrier has been released. A cleanup refusal or filesystem error
+fails loudly and is retried by a later no-op invocation without rolling back a
+healthy deployed build.
 If Docker, the container, or `pg_dump` fails, the attempt stops as
 `database-backup-failed`, removes the partial host file, and performs no
 migration, sync, publication, or restart.
+
+To apply the same bounded policy immediately, after a passing dry-run and while
+no deploy process owns the lock:
+
+```sh
+node scripts/deploy/quiet-window-deploy.mjs --prune-history
+```
+
+The command refuses a non-main or dirty appliance checkout and shares the same
+exclusive deploy process lock. It does not fetch, migrate, restart services,
+touch the live build, clear escalation state, or delete an active run workspace.
 
 Success and failure create an AgentOS Inbox message containing both revisions
 and the named outcome. A failure also writes

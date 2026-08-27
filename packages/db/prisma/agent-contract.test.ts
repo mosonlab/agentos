@@ -86,18 +86,18 @@ test("canonical profiles start at Default and native child capability replaces A
 
 test("signed AgentOS model routing stays pinned in the canonical contract", () => {
   const canonical = new Map(CANONICAL_AGENT_DEFAULTS.map((role) => [role.name, role]));
-  assert.deepEqual(canonical.get("spec"), {
-    name: "spec",
-    model: "gpt-5.6-sol:high",
-    runner: RunnerPreference.CODEX,
-  });
-  for (const name of ["frontend-dev", "review-coordinator-opus"] as const) {
+  for (const name of ["spec", "review-coordinator-opus"] as const) {
     assert.deepEqual(canonical.get(name), {
       name,
-      model: "claude-opus-5:medium",
+      model: "claude-opus-5:high",
       runner: RunnerPreference.CLAUDE,
     });
   }
+  assert.deepEqual(canonical.get("frontend-dev"), {
+    name: "frontend-dev",
+    model: "claude-opus-5:medium",
+    runner: RunnerPreference.CLAUDE,
+  });
   assert.deepEqual(canonical.get("review-coordinator"), {
     name: "review-coordinator",
     model: "openai-codex/gpt-5.6-sol:xhigh",

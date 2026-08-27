@@ -25,9 +25,11 @@
     "@agentos/build-info": "0.3.0",
     "@agentos/db": "0.3.0",
     "@agentos/github-client": "0.3.0",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "fs-ext": "^2.1.1"
   },
   "devDependencies": {
+    "@types/fs-ext": "^2.0.3",
     "@types/node": "^24.10.1",
     "tsx": "^4.20.6"
   }

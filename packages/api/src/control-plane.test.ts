@@ -111,10 +111,13 @@ test("an approval gate card carries the producing step's task, so the board can 
   await withOperator(async () => {
     // The card's own taskId is the gate step; the artifact belongs to the step
     // whose run opened it, reachable only through the card's session.
-    const database = { inboxMessage: { findMany: async () => [
-      { id: "gate-1", from: "AGENT", gateTaskId: "gate-task", taskId: "gate-task", session: { taskId: "producing-task" } },
-      { id: "plain-1", from: "AGENT", gateTaskId: null, taskId: "some-task", session: { taskId: "some-task" } },
-    ] } } as unknown as PrismaClient;
+    const database = {
+      inboxMessage: { findMany: async () => [
+        { id: "gate-1", from: "AGENT", kind: "MULTIPLE_CHOICE", replyToMessageId: null, gateTaskId: "gate-task", taskId: "gate-task", session: { taskId: "producing-task" } },
+        { id: "plain-1", from: "AGENT", kind: "TEXT", replyToMessageId: null, gateTaskId: null, taskId: "some-task", session: { taskId: "some-task" } },
+      ] },
+      session: { findMany: async () => [] },
+    } as unknown as PrismaClient;
     const response = await request(database, "/inbox/messages");
     assert.equal(response.status, 200);
     const messages = await response.json() as Array<Record<string, unknown>>;
@@ -123,16 +126,23 @@ test("an approval gate card carries the producing step's task, so the board can 
     // session relation never reaches the client either way.
     assert.equal(messages[1]?.artifactTaskId, null);
     assert.equal(messages[0]?.session, undefined);
+    // A gate owes a decision; a plain text card attached to a finished task
+    // owes nothing, which is what lets the Inbox offer to archive it.
+    assert.equal(messages[0]?.dismissible, false);
+    assert.equal(messages[1]?.dismissible, true);
   });
 });
 
 test("Inbox list applies project scope and returns stored human replies", async () => {
   await withOperator(async () => {
     let query: Record<string, unknown> | undefined;
-    const database = { inboxMessage: { findMany: async (arguments_: Record<string, unknown>) => {
-      query = arguments_;
-      return [{ id: "question-1", from: "AGENT", replies: [{ id: "reply-1", from: "HUMAN", body: "continue" }] }];
-    } } } as unknown as PrismaClient;
+    const database = {
+      inboxMessage: { findMany: async (arguments_: Record<string, unknown>) => {
+        query = arguments_;
+        return [{ id: "question-1", from: "AGENT", replies: [{ id: "reply-1", from: "HUMAN", body: "continue" }] }];
+      } },
+      session: { findMany: async () => [] },
+    } as unknown as PrismaClient;
     const response = await request(database, "/inbox/messages?projectId=project-1");
     assert.equal(response.status, 200);
     const messages = await response.json() as Array<{ replies: Array<{ from: string }> }>;

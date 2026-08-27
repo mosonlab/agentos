@@ -18,11 +18,11 @@ export const CANONICAL_AGENT_DEFAULTS = [
   { name: "plan-reviser", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "regression-verifier", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
-  { name: "review-coordinator-opus", model: "claude-opus-5:medium", runner: RunnerPreference.CLAUDE },
+  { name: "review-coordinator-opus", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
   { name: "review-coordinator-sol", model: "openai-codex/gpt-5.6-sol:xhigh", runner: RunnerPreference.PI },
   { name: "senior-dev", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
   { name: "senior-dev-luna", model: "gpt-5.6-luna:max", runner: RunnerPreference.CODEX },
-  { name: "spec", model: "gpt-5.6-sol:high", runner: RunnerPreference.CODEX },
+  { name: "spec", model: "claude-opus-5:high", runner: RunnerPreference.CLAUDE },
 ] as const;
 
 /**
@@ -68,6 +68,17 @@ export const CANONICAL_AGENT_RUNTIME_TRANSITIONS = new Map<string, {
   ["plan-reviser", {
     from: { model: "claude-fable-5:medium", runnerPreference: RunnerPreference.CLAUDE },
     to: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+  }],
+  // 2026-08-26 ruling: the spec is the specification of record every later step
+  // is measured against, and the blind review is the only independent second
+  // pair of eyes on the diff, so both buy frontier-tier depth.
+  ["spec", {
+    from: { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    to: { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE },
+  }],
+  ["review-coordinator-opus", {
+    from: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
+    to: { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE },
   }],
 ]);
 
