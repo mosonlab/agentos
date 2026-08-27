@@ -42,7 +42,7 @@ export const specificationMaterializationForDirectImplementation = (
     templateStep?: {
       stepIndex?: number;
       outputKind?: string;
-      attachmentsFromPrevious: boolean;
+      priorOutputKinds: readonly string[];
       taskTemplate?: { name: string } | null;
     } | null;
   },
@@ -53,7 +53,7 @@ export const specificationMaterializationForDirectImplementation = (
     || !branch || !isValidBranchName(branch)) return null;
   const body = featureBriefFromTaskDescription(
     task.description,
-    task.templateStep?.attachmentsFromPrevious ?? false,
+    (task.templateStep?.priorOutputKinds.length ?? 0) > 0,
   );
   return body === null ? null : {
     kind: "direct-implementation",
@@ -130,7 +130,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 
 type AuthoritySource = {
   description: string;
-  templateStep: { outputKind: string; attachmentsFromPrevious: boolean } | null;
+  templateStep: { outputKind: string; priorOutputKinds: string[] } | null;
   stepOutput: { kind: string; body: string } | null;
 };
 
@@ -159,7 +159,7 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
   }
   const text = featureBriefFromTaskDescription(
     source.description,
-    source.templateStep.attachmentsFromPrevious,
+    source.templateStep.priorOutputKinds.length > 0,
   );
   return text === null
     ? { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain task brief is unavailable") }
@@ -183,7 +183,7 @@ const authorityFor = async (
     },
     select: {
       description: true,
-      templateStep: { select: { outputKind: true, attachmentsFromPrevious: true } },
+      templateStep: { select: { outputKind: true, priorOutputKinds: true } },
       stepOutput: { select: { kind: true, body: true } },
     },
   });

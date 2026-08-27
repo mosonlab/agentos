@@ -86,7 +86,7 @@ test("direct implementation materialization uses only the marker-delimited autho
   const description = composeTemplateTaskDescription({
     prompt: "Implement the feature below.",
     featureBrief: "the exact brief",
-    attachmentsFromPrevious: false,
+    priorOutputKinds: [],
     outputKind: "implementation",
   });
   assert.deepEqual(specificationMaterializationForDirectImplementation({
@@ -96,7 +96,7 @@ test("direct implementation materialization uses only the marker-delimited autho
     templateStep: {
       stepIndex: 1,
       outputKind: "implementation",
-      attachmentsFromPrevious: false,
+      priorOutputKinds: [],
       taskTemplate: { name: "direct-engineer-workflow" },
     },
   }, "feature/direct"), {
@@ -117,7 +117,7 @@ test("direct authority is read from the implementation task and compound authori
   const directTx = {
     task: { findMany: async () => [{
       description,
-      templateStep: { outputKind: "implementation", attachmentsFromPrevious: false },
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
@@ -140,11 +140,11 @@ test("direct authority is read from the implementation task and compound authori
   const compoundTx = {
     task: { findMany: async () => [{
       description: "specification task",
-      templateStep: { outputKind: "spec", attachmentsFromPrevious: false },
+      templateStep: { outputKind: "spec", priorOutputKinds: [] },
       stepOutput: { kind: "spec", body: JSON.stringify({ schemaVersion: 1, spec: "approved compound spec" }) },
     }, {
       description: "implementation task",
-      templateStep: { outputKind: "implementation", attachmentsFromPrevious: true },
+      templateStep: { outputKind: "implementation", priorOutputKinds: ["spec"] },
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
@@ -175,7 +175,7 @@ test("an unsupported repository remote is refused before repository I/O with a n
   const tx = {
     task: { findMany: async () => [{
       description,
-      templateStep: { outputKind: "implementation", attachmentsFromPrevious: false },
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
