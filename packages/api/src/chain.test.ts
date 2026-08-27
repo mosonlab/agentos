@@ -5,10 +5,9 @@ import {
   chainKey,
   chainProgress,
   chainProgressByChain,
-  chainStartDecisions,
+  blockingPredecessor,
   positions,
   runFactsByTask,
-  startable,
   stepName,
   taskStartability,
   type ChainRow,
@@ -138,7 +137,7 @@ const startableRow = (overrides: Partial<StartableRow> = {}): StartableRow => ({
 });
 
 test("a TODO agent step with no runs is startable", () => {
-  assert.equal(startable(startableRow(), { total: 0, active: false }, 3), true);
+  assert.equal(taskStartability(startableRow(), { total: 0, active: false }, 3, true).startable, true);
 });
 
 test("an unresolved dispatch binding blocks the first-step decision", () => {
@@ -149,25 +148,14 @@ test("an unresolved dispatch binding blocks the first-step decision", () => {
   const verdict = taskStartability(rowWithBinding, { total: 0, active: false }, 3, true);
   assert.equal(verdict.startable, false);
   assert.equal(verdict.checklist.predecessorsDone, false);
-  const decision = chainStartDecisions([
-    decisionRow(1, {
-      dispatchAfterTaskId: "predecessor",
-      dispatchAfter: { status: "TODO" },
-    }),
-  ], new Map()).get("step-1")!;
-  assert.equal(decision.startable, false);
-  assert.equal(decision.startAction, null);
 });
 
 test("a resolved dispatch binding restores the ordinary first-step decision", () => {
-  const decision = chainStartDecisions([
-    decisionRow(1, {
-      dispatchAfterTaskId: "predecessor",
-      dispatchAfter: { status: "DONE" },
-    }),
-  ], new Map()).get("step-1")!;
-  assert.equal(decision.startable, true);
-  assert.equal(decision.startAction, "start");
+  const resolved = startableRow({
+    dispatchAfterTaskId: "predecessor",
+    dispatchAfter: { status: "DONE" },
+  });
+  assert.equal(taskStartability(resolved, { total: 0, active: false }, 3, true).startable, true);
 });
 
 test("the exposed checklist and overall verdict come from the shared start predicate", () => {
@@ -200,39 +188,39 @@ test("the exposed checklist and overall verdict come from the shared start predi
 });
 
 test("a BACKLOG agent step is startable — that is what parks it there", () => {
-  assert.equal(startable(startableRow({ status: "BACKLOG" }), { total: 0, active: false }, 3), true);
+  assert.equal(taskStartability(startableRow({ status: "BACKLOG" }), { total: 0, active: false }, 3, true).startable, true);
 });
 
 test("human steps, done steps, and archived steps are not startable", () => {
-  assert.equal(startable(startableRow({ assigneeType: "HUMAN", assigneeAgentId: null }), { total: 0, active: false }, 3), false);
-  assert.equal(startable(startableRow({ status: "DONE" }), { total: 0, active: false }, 3), false);
-  assert.equal(startable(startableRow({ status: "REVIEW" }), { total: 0, active: false }, 3), false);
-  assert.equal(startable(startableRow({ archivedAt: new Date() }), { total: 0, active: false }, 3), false);
+  assert.equal(taskStartability(startableRow({ assigneeType: "HUMAN", assigneeAgentId: null }), { total: 0, active: false }, 3, true).startable, false);
+  assert.equal(taskStartability(startableRow({ status: "DONE" }), { total: 0, active: false }, 3, true).startable, false);
+  assert.equal(taskStartability(startableRow({ status: "REVIEW" }), { total: 0, active: false }, 3, true).startable, false);
+  assert.equal(taskStartability(startableRow({ archivedAt: new Date() }), { total: 0, active: false }, 3, true).startable, false);
 });
 
 test("a step with no agent or no repo is not startable", () => {
-  assert.equal(startable(startableRow({ assigneeAgentId: null }), { total: 0, active: false }, 3), false);
-  assert.equal(startable(startableRow({ repoId: null }), { total: 0, active: false }, 3), false);
+  assert.equal(taskStartability(startableRow({ assigneeAgentId: null }), { total: 0, active: false }, 3, true).startable, false);
+  assert.equal(taskStartability(startableRow({ repoId: null }), { total: 0, active: false }, 3, true).startable, false);
 });
 
 test("a missing repo grant blocks starting", () => {
-  assert.equal(startable(startableRow({ hasRepoGrant: false }), { total: 0, active: false }, 3), false);
+  assert.equal(taskStartability(startableRow({ hasRepoGrant: false }), { total: 0, active: false }, 3, true).startable, false);
 });
 
 test("an archived assignee blocks starting", () => {
-  assert.equal(startable(startableRow({ assigneeAgent: { archivedAt: new Date() } }), { total: 0, active: false }, 3), false);
+  assert.equal(taskStartability(startableRow({ assigneeAgent: { archivedAt: new Date() } }), { total: 0, active: false }, 3, true).startable, false);
 });
 
 test("an active run blocks starting — including a run parked on an Inbox question", () => {
   // `active` is computed from ACTIVE_RUN_STATUSES, which includes WAITING_INBOX:
   // that run resumes the moment the operator answers.
-  assert.equal(startable(startableRow(), { total: 1, active: true }, 3), false);
+  assert.equal(taskStartability(startableRow(), { total: 1, active: true }, 3, true).startable, false);
 });
 
 test("the run budget compares the count of runs, not the latest one", () => {
-  assert.equal(startable(startableRow(), { total: 2, active: false }, 3), true);
-  assert.equal(startable(startableRow(), { total: 3, active: false }, 3), false);
-  assert.equal(startable(startableRow(), { total: 4, active: false }, 3), false);
+  assert.equal(taskStartability(startableRow(), { total: 2, active: false }, 3, true).startable, true);
+  assert.equal(taskStartability(startableRow(), { total: 3, active: false }, 3, true).startable, false);
+  assert.equal(taskStartability(startableRow(), { total: 4, active: false }, 3, true).startable, false);
 });
 
 test("a run refunded as an external failure does not count against the budget", () => {
@@ -240,10 +228,10 @@ test("a run refunded as an external failure does not count against the budget", 
   // refunded. Exactly one attempt of a budget of three has actually been spent,
   // so the step is still startable — and it was not, because this predicate
   // only ever read the task's configured budget.
-  assert.equal(startable(startableRow(), { total: 3, active: false, budgetGrants: 2 }, 3), true);
-  assert.equal(startable(startableRow(), { total: 5, active: false, budgetGrants: 2 }, 3), false);
+  assert.equal(taskStartability(startableRow(), { total: 3, active: false, budgetGrants: 2 }, 3, true).startable, true);
+  assert.equal(taskStartability(startableRow(), { total: 5, active: false, budgetGrants: 2 }, 3, true).startable, false);
   // Omitted entirely — a caller with nothing granted — is the configured budget.
-  assert.equal(startable(startableRow(), { total: 3, active: false }, 3), false);
+  assert.equal(taskStartability(startableRow(), { total: 3, active: false }, 3, true).startable, false);
 });
 
 test("lowering a task's budget bites immediately, and only the grants survive it", () => {
@@ -251,12 +239,12 @@ test("lowering a task's budget bites immediately, and only the grants survive it
   // `maxRunsPerTask`: two ordinary EXECUTE failures leave `maxRunsPerTask: 5`
   // on their rows and grant nothing. After the budget is lowered to 2 those
   // rows must not buy a third attempt.
-  assert.equal(startable(startableRow(), { total: 2, active: false, budgetGrants: 0 }, 2), false);
+  assert.equal(taskStartability(startableRow(), { total: 2, active: false, budgetGrants: 0 }, 2, true).startable, false);
   // A task that really was refunded twice keeps both refunds across the same
   // edit: two runs, none of them the agent's own attempt.
-  assert.equal(startable(startableRow(), { total: 2, active: false, budgetGrants: 2 }, 2), true);
+  assert.equal(taskStartability(startableRow(), { total: 2, active: false, budgetGrants: 2 }, 2, true).startable, true);
   // And raising the budget takes effect just as directly.
-  assert.equal(startable(startableRow(), { total: 3, active: false, budgetGrants: 0 }, 5), true);
+  assert.equal(taskStartability(startableRow(), { total: 3, active: false, budgetGrants: 0 }, 5, true).startable, true);
 });
 
 test("runFactsByTask sums a grouped run query into totals, an active flag and the grants", () => {
@@ -278,70 +266,17 @@ test("runFactsByTask tolerates a grouped query with no grants column", () => {
   assert.deepEqual(facts.get("a"), { total: 2, active: false, budgetGrants: null });
 });
 
-const decisionRow = (index: number, overrides: Partial<ChainRow & StartableRow & { maxSessionsPerTask: number }> = {}) => ({
-  ...row({ id: `step-${index}`, chainIndex: index }),
-  ...startableRow(),
-  maxSessionsPerTask: 3,
-  ...overrides,
-});
+test("blockingPredecessor respects layered siblings and surviving archived rows", () => {
+  const rows = [
+    row({ id: "done", chainIndex: 1, chainLayer: 1, status: "DONE" }),
+    row({ id: "sibling-a", chainIndex: 2, chainLayer: 2 }),
+    row({ id: "sibling-b", chainIndex: 3, chainLayer: 2 }),
+    row({ id: "join", chainIndex: 4, chainLayer: 3 }),
+  ];
+  assert.equal(blockingPredecessor(rows, "sibling-a"), null);
+  assert.equal(blockingPredecessor(rows, "sibling-b"), null);
+  assert.equal(blockingPredecessor(rows, "join")?.id, "sibling-a");
 
-test("chain dependency exposes only the first unfinished TODO or BACKLOG action", () => {
-  const prefix = [1, 2, 3].map((index) => decisionRow(index, { status: "DONE" }));
-  const doing = chainStartDecisions([...prefix, decisionRow(4, { status: "DOING" }), decisionRow(5), decisionRow(6)], new Map());
-  assert.deepEqual([...doing.values()].map((item) => item.startAction), [null, null, null, null, null, null]);
-  assert.equal(doing.get("step-5")!.blockingPredecessor?.name, "Task step-4");
-
-  const todo = chainStartDecisions([...prefix, decisionRow(4), decisionRow(5)], new Map());
-  assert.equal(todo.get("step-4")!.startAction, "start");
-  assert.equal(todo.get("step-5")!.startAction, null);
-
-  const parked = chainStartDecisions([...prefix, decisionRow(4, { status: "BACKLOG" }), decisionRow(5)], new Map());
-  assert.equal(parked.get("step-4")!.startAction, "recover");
-});
-
-test("layered chain siblings are candidates together and do not block one another", () => {
-  const decisions = chainStartDecisions([
-    decisionRow(1, { chainLayer: 1, status: "DONE" }),
-    decisionRow(2, { chainLayer: 2 }),
-    decisionRow(3, { chainLayer: 2 }),
-    decisionRow(4, { chainLayer: 3 }),
-  ], new Map());
-  assert.equal(decisions.get("step-2")!.startAction, "start");
-  assert.equal(decisions.get("step-3")!.startAction, "start");
-  assert.equal(decisions.get("step-2")!.blockingPredecessor, null);
-  assert.equal(decisions.get("step-3")!.blockingPredecessor, null);
-  assert.deepEqual(decisions.get("step-4")!.blockingPredecessor, {
-    id: "step-2", name: "Task step-2",
-  });
-});
-
-test("REVIEW, HUMAN, archive, grant, budget, and active-run facts fail closed", () => {
-  for (const first of [
-    decisionRow(1, { status: "REVIEW" }),
-    decisionRow(1, { assigneeType: "HUMAN", assigneeAgentId: null }),
-    decisionRow(1, { archivedAt: new Date() }),
-    decisionRow(1, { hasRepoGrant: false }),
-  ]) {
-    assert.equal(chainStartDecisions([first, decisionRow(2)], new Map()).get("step-1")!.startAction, null);
-  }
-  assert.equal(chainStartDecisions([decisionRow(1)], new Map([["step-1", { total: 3, active: false }]])).get("step-1")!.startAction, null);
-  // …but the same three runs with two of them refunded still leave an attempt.
-  assert.equal(
-    chainStartDecisions([decisionRow(1)], new Map([["step-1", { total: 3, active: false, budgetGrants: 2 }]])).get("step-1")!.startAction,
-    "start",
-  );
-  const active = chainStartDecisions([decisionRow(1)], new Map([["step-1", { total: 1, active: true }]])).get("step-1")!;
-  assert.equal(active.startAction, null);
-  assert.equal(active.currentExecution, true);
-});
-
-test("deleted predecessors disappear while archived unfinished predecessors still block", () => {
-  const deletedGap = chainStartDecisions([decisionRow(1, { status: "DONE" }), decisionRow(3)], new Map());
-  assert.equal(deletedGap.get("step-3")!.startAction, "start");
-  const archived = chainStartDecisions([
-    decisionRow(1, { status: "DONE" }),
-    decisionRow(2, { status: "BACKLOG", archivedAt: new Date() }),
-    decisionRow(3),
-  ], new Map());
-  assert.equal(archived.get("step-3")!.blockingPredecessor?.id, "step-2");
+  const archived = row({ id: "archived", chainIndex: 2, chainLayer: 2, status: "BACKLOG", archivedAt: new Date() });
+  assert.equal(blockingPredecessor([rows[0]!, archived, rows[3]!], "join")?.id, "archived");
 });

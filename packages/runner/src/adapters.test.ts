@@ -326,7 +326,7 @@ test("the prompt manifest names the AgentOS tools the session actually got", () 
     "task_activity_log", "task_output", "task_status", "inbox_ask",
     "files_list", "files_read", "files_write", "files_delete",
   ]) assert.match(prompt, new RegExp(tool));
-  assert.match(prompt, /without a grant they return 403/);
+  assert.match(prompt, /Requires a matching FilesystemGrant or returns 403/u);
   // codex/claude see MCP tool names; pi gets the same tools as extension tools.
   assert.match(prompt, /MCP server 'agentos'/);
   assert.match(buildPrompt({ ...claim, runner: "PI" }), /pi extension tools/);
