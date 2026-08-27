@@ -4,6 +4,7 @@ layer: 2
 agent: review-coordinator-opus
 approvalGate: false
 outputKind: blind-findings
+priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: false
 baseFromStepIndex: 1

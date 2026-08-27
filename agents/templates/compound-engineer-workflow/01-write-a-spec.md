@@ -4,6 +4,7 @@ layer: 1
 agent: spec
 approvalGate: false
 outputKind: spec
+priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: false
 baseFromStepIndex: null

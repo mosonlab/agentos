@@ -58,6 +58,16 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   assert.equal(direct.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   for (const steps of [direct, full]) {
+    assert.deepEqual(
+      steps.find(({ outputKind }) => outputKind === "sol-findings")!.priorOutputKinds,
+      ["implementation"],
+    );
+    assert.deepEqual(
+      steps.find(({ outputKind }) => outputKind === "blind-findings")!.priorOutputKinds,
+      [],
+    );
+    const librarian = steps.find(({ outputKind }) => outputKind === "documentation");
+    if (librarian) assert.deepEqual(librarian.priorOutputKinds, ["implementation", "fixed-implementation"]);
     // The contract the removed adjudication node used to carry, now on the step that replaced it.
     const fix = steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
     assert.match(fix.prompt, /`sol-findings` and `blind-findings`/u);
@@ -84,6 +94,50 @@ test("missing layer frontmatter is refused by the source loader", async () => {
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*layer/u,
+    ),
+  );
+});
+
+test("missing prior output declaration frontmatter is refused by the source loader", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*\n/mu, "")),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /frontmatter must contain exactly .*priorOutputKinds/u,
+    ),
+  );
+});
+
+test("prior output declarations are unique and reference only earlier steps", async () => {
+  await withTemplateCopy(
+    INTEGRATOR_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "08-apply-review-fixes.md", (source) => source.replace(
+      "priorOutputKinds: [sol-findings, blind-findings]",
+      "priorOutputKinds: [sol-findings, sol-findings]",
+    )),
+    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /duplicate priorOutputKinds sol-findings/u),
+  );
+  await withTemplateCopy(
+    INTEGRATOR_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "05-implementation.md", (source) => source.replace(
+      "priorOutputKinds: [revised-plan]",
+      "priorOutputKinds: [sol-findings]",
+    )),
+    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /priorOutputKinds sol-findings does not reference an earlier step/u),
+  );
+});
+
+test("blind review steps cannot declare prior outputs", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-opus-blind.md", (source) => source.replace(
+      "priorOutputKinds: []",
+      "priorOutputKinds: [implementation]",
+    )),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /blind-findings cannot declare priorOutputKinds/u,
     ),
   );
 });
@@ -160,6 +214,7 @@ test("layer is a structural field in canonical prompt drift comparison", async (
     approvalGate: expected.approvalGate,
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy as PersistedTemplateStepStructure["spawnPolicy"],

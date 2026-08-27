@@ -1308,6 +1308,47 @@ test("Codex structured errors take precedence over stderr warnings", () => {
   assert.equal(failureReasonFromEvidence({ ...evidence, stderr: "models cache warning" }), "policy denied");
 });
 
+test("Codex treats recovered reconnect evidence as provisional after terminal completion", () => {
+  const state = parseCodexTranscript([
+    { type: "error", message: "Reconnecting... 1/5" },
+    { type: "error", message: "Reconnecting... 2/5" },
+    { type: "item.completed", item: { type: "agent_message", text: "implementation persisted" } },
+    { type: "turn.completed" },
+  ]);
+  const evidence = evidenceFromState(state);
+
+  assert.equal(evidence.terminalEventSeen, true);
+  assert.equal(evidence.terminalSuccess, true);
+  assert.equal(evidence.providerError, "Reconnecting... 2/5");
+  assert.equal(adapterExecutionSucceeded(evidence), true);
+});
+
+test("Codex reconnect classification follows the counter shape instead of a fixed retry budget", () => {
+  const cases = [
+    { message: "Reconnecting... 2/8", terminalSuccess: true },
+    { message: "stream disconnected", terminalSuccess: false },
+  ] as const;
+
+  for (const { message, terminalSuccess } of cases) {
+    const state = parseCodexTranscript([
+      { type: "error", message },
+      { type: "turn.completed" },
+    ]);
+    assert.equal(state.terminalSuccess, terminalSuccess, message);
+  }
+});
+
+test("Codex preserves reconnect evidence when the stream ends before completion", () => {
+  const reconnectMessage = "Reconnecting... 3/5";
+  const state = parseCodexTranscript([{ type: "error", message: reconnectMessage }]);
+  const evidence = evidenceFromState(state, 1);
+
+  assert.equal(evidence.terminalEventSeen, false);
+  assert.equal(evidence.terminalSuccess, false);
+  assert.equal(adapterExecutionSucceeded(evidence), false);
+  assert.equal(failureReasonFromEvidence(evidence), reconnectMessage);
+});
+
 test("PI terminal success follows the final provider attempt after an internal retry", () => {
   const state = parsePiTranscript([
     { type: "turn_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" } },

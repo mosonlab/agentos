@@ -12,6 +12,7 @@ import {
 } from "../src/canonical-template-transition.js";
 import {
   loadAllTemplateStepSources,
+  LEGACY_ALL_PRIOR_OUTPUTS,
   templateStepStructureDifferences,
   type CanonicalTemplateName,
   type TemplateStepSource,
@@ -155,6 +156,7 @@ const createCanonicalTemplate = async (
         prompt: step.prompt,
         opensPullRequest: step.opensPullRequest,
         attachmentsFromPrevious: step.attachmentsFromPrevious,
+        priorOutputKinds: step.priorOutputKinds,
         baseFromStepIndex: step.baseFromStepIndex,
         spawnPolicy: step.spawnPolicy ?? Prisma.JsonNull,
       },
@@ -272,6 +274,7 @@ const main = async (): Promise<void> => {
       const updatedSteps: Record<string, Record<number, number>> = {};
       let adoptedAssignees = 0;
       let adoptedStepBases = 0;
+      let adoptedPriorOutputDeclarations = 0;
       let renamedSteps = 0;
       let templateCount = 0;
       const regressionSteps: Array<{ id: string; projectId: string }> = [];
@@ -304,6 +307,7 @@ const main = async (): Promise<void> => {
               approvalGate: true,
               outputKind: true,
               attachmentsFromPrevious: true,
+              priorOutputKinds: true,
               opensPullRequest: true,
               baseFromStepIndex: true,
               spawnPolicy: true,
@@ -326,6 +330,10 @@ const main = async (): Promise<void> => {
             const adoptedDifferences = new Set([
               ...(adoptsCanonicalAssignee ? ["agent"] : []),
               ...(adoptsCanonicalBase ? ["baseFromStepIndex"] : []),
+              ...(differences.includes("priorOutputKinds")
+                && persisted.priorOutputKinds.length === 1
+                && persisted.priorOutputKinds[0] === LEGACY_ALL_PRIOR_OUTPUTS
+                ? ["priorOutputKinds"] : []),
             ]);
             if (differences.some((difference) => !adoptedDifferences.has(difference))) {
               throw new Error(`${templateName} step ${step.stepIndex} on template ${persisted.taskTemplateId} differs from canonical Markdown structure: ${differences.join(", ")}`);
@@ -359,6 +367,13 @@ const main = async (): Promise<void> => {
                 data: { baseFromStepIndex: baseTransition.to },
               });
               adoptedStepBases += 1;
+            }
+            if (adoptedDifferences.has("priorOutputKinds")) {
+              await tx.taskTemplateStep.update({
+                where: { id: persisted.id },
+                data: { priorOutputKinds: step.priorOutputKinds },
+              });
+              adoptedPriorOutputDeclarations += 1;
             }
             const nameTransition = STEP_NAME_TRANSITIONS.get(`${templateName}:${step.stepIndex}`);
             if (nameTransition?.from === persisted.name) {
@@ -534,6 +549,7 @@ const main = async (): Promise<void> => {
         createdAgentRepoGrants,
         adoptedAssignees,
         adoptedStepBases,
+        adoptedPriorOutputDeclarations,
         renamedSteps,
         migratedTasks,
         preservedTaskAssignments,
@@ -544,6 +560,7 @@ const main = async (): Promise<void> => {
       };
     }, { timeout: 30_000 });
     const updated = result.createdCanonicalTemplates + result.createdAgents + result.createdAgentRepoGrants + result.adoptedAssignees + result.adoptedStepBases
+      + result.adoptedPriorOutputDeclarations
       + result.renamedSteps + result.migratedTasks + result.adoptedAgentDefaults + Object.values(result.updatedSteps)
       .flatMap((byStep) => Object.values(byStep))
       .reduce((sum, count) => sum + count, 0)
