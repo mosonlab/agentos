@@ -110,8 +110,9 @@ export const NETWORK_ATTEMPTS = 6;
  * the lease allows. That is the trade this issue accepts: a push slower than
  * 20s was already racing reconciliation, and failing it fast and transiently
  * is cheaper than being declared LOST. The push runs first in delivery, so it
- * has first claim on the shared budget; the `gh` calls after it degrade to
- * "open the PR manually", which costs a message, not the run's work.
+ * has first claim on the shared budget. When a run must open a pull request,
+ * the `gh` calls after it fail delivery while leaving the published branch in
+ * place for the retry.
  *
  * NETWORK_OPERATION_BUDGET_MS is only the fallback for a caller that supplies
  * no phase deadline. Delivery always supplies one.
