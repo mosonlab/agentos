@@ -55,6 +55,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
   executionMode: "agent",
   task: {
     id: "task-113",
+    chainId: null,
     name: "Rate limit the inbox poller",
     description: "work",
     repoId: "repo-1",

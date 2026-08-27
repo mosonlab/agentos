@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.6 (2026-08-27: adds dependency qualification — every instantiation classifies chain-to-chain dependency before choosing `afterTaskId` or parallel dispatch)
+Version: 1.7 (2026-08-27: absorbs the dispatch rules formerly split into `AGENTS.md` — tier selection detail, implementation-assignee routing, and `afterTaskId` mechanics; `AGENTS.md` now carries a pointer only)
 
 Status: Active
 
@@ -45,7 +45,13 @@ Choose the shortest tier that satisfies the Product Contract. This contract defi
 
 Direct is a formal chain route, not an exemption from review or exact-head mechanical authorization. Full Assurance is required when the Product Contract calls for specification, planning, plan review, or revised-plan implementation authorization.
 
-Template choice and dispatch-time implementation-assignee escalation follow the "Work directly" section of `AGENTS.md`.
+Choose Direct when one implementation context window can deliver a brief whose change points are enumerable; write the brief from `docs/BRIEF-TEMPLATE.md` before instantiating, because the chain's implementation `description` is the specification of record. Choose Full Assurance when the work exceeds one implementation window or decomposes into independently demonstrable slices; a surface too large for a brief to enumerate belongs here, not to an assignee escalation.
+
+## Implementation assignee routing
+
+Keep the template's default implementation assignee. Assign `senior-dev` (same rule for the review-fix step) only when the work touches persisted data or a defense-list path — merge gate, gate worker, migrations, merge automation — or when that classification is uncertain. Assign `frontend-dev` when the work is primarily a new or redesigned web page or UI surface (Leo 2026-08-27); the defense-list rule wins when both apply.
+
+A backlog card that needs a non-default implementation assignee states it as the machine-readable line `Route: implementation=senior-dev` (or `=frontend-dev`) in its description; the dispatcher copies it into `stepOverrides`. Only the implementation step is routable this way.
 
 ## Critical classification
 
@@ -91,7 +97,7 @@ If risk or ambiguity increases during execution, pause before the newly unsafe w
 A backlog card is a dispatch-ready brief waiting for a decision, not a work item of its own. The board holds either the card or its chain, never both.
 
 - Create the card with `assigneeType: HUMAN` so no runner claims it, with the brief as its description (written from `docs/BRIEF-TEMPLATE.md`) plus the machine-readable `Route:` line when the implementation assignee is non-default. The create API has no status field and lands the card in TODO; move it to BACKLOG explicitly.
-- Dispatch instantiates a chain from the card: the brief becomes the instantiate `description` (the chain's implementation task is then the specification of record) and the `Route:` line becomes `stepOverrides`. Chain-to-chain ordering uses `afterTaskId` per the dispatch rules in `AGENTS.md`.
+- Dispatch instantiates a chain from the card: the brief becomes the instantiate `description` (the chain's implementation task is then the specification of record) and the `Route:` line becomes `stepOverrides`. Chain-to-chain ordering passes `afterTaskId` (the predecessor chain's final task) to the instantiate endpoint; the bound chain dispatches when the predecessor completes. `afterTaskId` is incompatible with `autoStart`, and each predecessor task takes one successor.
 - Dependency qualification precedes every instantiation: classify the new chain against every in-flight or co-dispatched chain and pick exactly one outcome.
   1. True dependency — the new chain consumes another chain's output, or needs that chain merged and deployed first: bind with `afterTaskId` and record the basis (`Depends on: <chain> — <what is consumed or why deploy-first>`) in the instantiate description or the card's activity log.
   2. Heavy overlap — no dependency, but both chains rewrite the same code area: weigh expected refresh-conflict repair cost against serial wall-clock loss; either choice is valid, and a serial choice records its reason the same way.

@@ -34,6 +34,7 @@ export type ClaimedTask = {
   executionMode: "mechanical" | "agent";
   task: {
     id: string;
+    chainId: string | null;
     name: string;
     description: string;
     repoId: string;
@@ -41,7 +42,7 @@ export type ClaimedTask = {
     maxDurationMin: number;
     stallTimeoutMin: number;
     maxSessionsPerTask: number;
-    templateStep?: { name: string } | null;
+    templateStep?: { name: string; outputKind?: string } | null;
   };
   agent: {
     id: string;
