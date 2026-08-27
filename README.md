@@ -56,10 +56,6 @@ by a webhook trigger, not by a standing objective. See
 
 <div align="center">
 
-<img src="docs/media/chain.png" alt="Chain view: a twelve-step assurance workflow with assigned agent roles" width="880">
-
-<sub>A task chain: each step carries its own role, prompt and review gate.</sub>
-
 <img src="docs/media/agents.png" alt="Agents view: each agent's role, model, reasoning effort and runner" width="880">
 
 <sub>Agents: a role, a prompt, a model and effort, and the runner it goes to.</sub>

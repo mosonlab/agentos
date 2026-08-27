@@ -46,10 +46,6 @@ AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、prov
 
 <div align="center">
 
-<img src="docs/media/chain.png" alt="链视图：十二步保障工作流，每一步标注其指派的 agent 角色" width="880">
-
-<sub>任务链：每一步都带着自己的角色、提示词与评审关卡。</sub>
-
 <img src="docs/media/agents.png" alt="Agents 视图：每个 agent 的角色、模型、推理档位与 runner" width="880">
 
 <sub>Agents：一个角色、一段提示词、一个模型与档位，以及它派往的 runner。</sub>
