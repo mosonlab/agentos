@@ -1,17 +1,9 @@
-import {
-  defenseTriggers,
-  type ChangedFile,
-  type MergeEvidence,
-} from "@agentos/db";
+import { randomUUID } from "node:crypto";
 
-import type { GitHubReadError, PullRequestSnapshot } from "./github-read.js";
+import { defenseTriggers, type MergeEvidence } from "@agentos/db";
 
-type Comparison = {
-  status: "ahead" | "behind" | "diverged" | "identical";
-  behindBy: number;
-  filesComplete: boolean;
-  files: ChangedFile[];
-};
+import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
+import { GitHubReadError, type PullRequestReader } from "./github-read.js";
 
 type ReadinessContext = {
   readiness: {
@@ -28,12 +20,12 @@ type RegressionPass = {
   baseHeadSha: string;
 };
 
+export const READINESS_READ_BUDGET_MS = 20_000;
+
 export type ReadinessInput = ReadinessContext & (
   | { stage: "claim-lost" | "regression-pending" }
   | { stage: "missing-regression-evidence" }
   | { stage: "invalid-regression-evidence" }
-  | { stage: "reader-unavailable" }
-  | { stage: "target-unresolved"; unresolvable: "none" | "ambiguous" | "repository" }
   | {
       stage: "read-failed";
       failure: {
@@ -44,10 +36,10 @@ export type ReadinessInput = ReadinessContext & (
   | {
       stage: "ready";
       regression: RegressionPass;
-      target: { repository: string; prNumber: number };
-      snapshot: PullRequestSnapshot;
-      comparison: Comparison | null;
-      evidence: MergeEvidence | { error: string } | null;
+      target:
+        | { resolved: true; repository: string; prNumber: number }
+        | { resolved: false; unresolvable: "none" | "ambiguous" | "repository" };
+      defaultBranch: string;
     }
 );
 
@@ -80,7 +72,26 @@ const stop = (condition: string, evidence: string): ReadinessDecision => (
   { kind: "stop", condition, evidence }
 );
 
-export const readinessDecision = (input: ReadinessInput): ReadinessDecision => {
+const readFailureDecision = (failure: {
+  kind: GitHubReadError["kind"] | "unexpected";
+  message: string;
+}): ReadinessDecision => {
+  const evidence = `readiness evaluation failed: ${failure.message}`;
+  if (failure.kind === "timeout" || failure.kind === "transport") {
+    return { kind: "defer", reason: evidence };
+  }
+  return stop("readiness-read-failed", evidence);
+};
+
+/**
+ * Owns the complete remote-read sequence and the decision derived from it.
+ * The worker supplies durable facts and applies the result; this module alone
+ * decides which GitHub facts are needed and when a later read can be skipped.
+ */
+export const evaluateReadiness = async (
+  facts: PullRequestReader | null,
+  input: ReadinessInput,
+): Promise<ReadinessDecision> => {
   switch (input.stage) {
     case "claim-lost":
     case "regression-pending":
@@ -89,74 +100,90 @@ export const readinessDecision = (input: ReadinessInput): ReadinessDecision => {
       return stop("regression-evidence-missing", "missing head-bound regression PASS evidence");
     case "invalid-regression-evidence":
       return stop("regression-evidence-invalid", "missing or stale head-bound regression PASS evidence");
-    case "reader-unavailable":
-      return stop("github-reader-unavailable", "server-side GitHub comparison reader is unavailable");
-    case "target-unresolved":
-      return stop("pull-request-target-unresolved", `pull-request target is ${input.unresolvable}`);
-    case "read-failed": {
-      const evidence = `readiness evaluation failed: ${input.failure.message}`;
-      if (input.failure.kind === "timeout" || input.failure.kind === "transport") {
-        return { kind: "defer", reason: evidence };
-      }
-      return stop("readiness-read-failed", evidence);
-    }
+    case "read-failed":
+      return readFailureDecision(input.failure);
     case "ready":
       break;
   }
 
-  const { regression, snapshot } = input;
-  if (snapshot.headRefOid !== regression.headSha) {
-    return {
-      kind: "requeue-regression",
-      staleBaseSha: regression.baseHeadSha,
-      currentBaseSha: snapshot.baseSha ?? "missing",
-      reason: `stale PASS head ${regression.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
-    };
+  if (!facts?.compareCommits) {
+    return stop("github-reader-unavailable", "server-side GitHub comparison reader is unavailable");
   }
-  if (!snapshot.baseSha || !snapshot.baseRefName) {
-    return stop("pull-request-base-missing", "pull request base identity is unavailable");
-  }
-  if (snapshot.baseSha !== regression.baseHeadSha) {
-    return {
-      kind: "requeue-regression",
-      staleBaseSha: regression.baseHeadSha,
-      currentBaseSha: snapshot.baseSha,
-      reason: "target base advanced after regression PASS",
-    };
-  }
-  const comparison = input.comparison;
-  if (!comparison) {
-    return stop("readiness-facts-incomplete", "server-side comparison facts are unavailable");
-  }
-  if (!comparison.filesComplete) {
-    return stop(
-      "comparison-incomplete",
-      "GitHub comparison file list is truncated or completeness is unproven",
-    );
-  }
-  if ((comparison.status !== "ahead" && comparison.status !== "identical") || comparison.behindBy !== 0) {
-    return {
-      kind: "requeue-regression",
-      staleBaseSha: regression.baseHeadSha,
-      currentBaseSha: snapshot.baseSha,
-      reason: `server-side ancestry check refused ${comparison.status} comparison with behind_by=${comparison.behindBy}`,
-    };
+  if (!input.target.resolved) {
+    return stop("pull-request-target-unresolved", `pull-request target is ${input.target.unresolvable}`);
   }
 
-  if (!input.evidence) {
-    return stop("readiness-facts-incomplete", "merge evidence facts are unavailable");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
+  try {
+    const snapshot = await facts.readPullRequest(
+      input.target.repository,
+      input.target.prNumber,
+      input.defaultBranch,
+      controller.signal,
+    );
+    if (snapshot.headRefOid !== input.regression.headSha) {
+      return {
+        kind: "requeue-regression",
+        staleBaseSha: input.regression.baseHeadSha,
+        currentBaseSha: snapshot.baseSha ?? "missing",
+        reason: `stale PASS head ${input.regression.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
+      };
+    }
+    if (!snapshot.baseSha || !snapshot.baseRefName) {
+      return stop("pull-request-base-missing", "pull request base identity is unavailable");
+    }
+    if (snapshot.baseSha !== input.regression.baseHeadSha) {
+      return {
+        kind: "requeue-regression",
+        staleBaseSha: input.regression.baseHeadSha,
+        currentBaseSha: snapshot.baseSha,
+        reason: "target base advanced after regression PASS",
+      };
+    }
+
+    const comparison = await facts.compareCommits(
+      input.target.repository,
+      snapshot.baseSha,
+      input.regression.headSha,
+      controller.signal,
+    );
+    if (!comparison.filesComplete) {
+      return stop(
+        "comparison-incomplete",
+        "GitHub comparison file list is truncated or completeness is unproven",
+      );
+    }
+    if ((comparison.status !== "ahead" && comparison.status !== "identical")
+      || comparison.behindBy !== 0) {
+      return {
+        kind: "requeue-regression",
+        staleBaseSha: input.regression.baseHeadSha,
+        currentBaseSha: snapshot.baseSha,
+        reason: `server-side ancestry check refused ${comparison.status} comparison with behind_by=${comparison.behindBy}`,
+      };
+    }
+
+    const evidence = evidenceFromSnapshot(snapshot, randomUUID());
+    if ("error" in evidence) {
+      return stop("merge-evidence-invalid", evidence.error);
+    }
+    return {
+      kind: "authorize",
+      evidence,
+      repository: input.target.repository,
+      prNumber: input.target.prNumber,
+      issuedAt: input.now.toISOString(),
+      baseSha: snapshot.baseSha,
+      headSha: input.regression.headSha,
+      auditTriggers: defenseTriggers(comparison.files),
+    };
+  } catch (error: unknown) {
+    return readFailureDecision({
+      kind: error instanceof GitHubReadError ? error.kind : "unexpected",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    clearTimeout(timer);
   }
-  if ("error" in input.evidence) {
-    return stop("merge-evidence-invalid", input.evidence.error);
-  }
-  return {
-    kind: "authorize",
-    evidence: input.evidence,
-    repository: input.target.repository,
-    prNumber: input.target.prNumber,
-    issuedAt: input.now.toISOString(),
-    baseSha: snapshot.baseSha,
-    headSha: regression.headSha,
-    auditTriggers: defenseTriggers(comparison.files),
-  };
 };

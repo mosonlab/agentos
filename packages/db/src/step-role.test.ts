@@ -42,6 +42,9 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
         assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
         assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), generation.marker);
       }
+      const implementation = { outputKind: "implementation", taskTemplate: { name: persistedName } };
+      assert.equal(isCompoundImplementationStep(implementation), templateName === "compound-engineer-workflow");
+      assert.equal(isDirectImplementationStep(implementation), templateName === "direct-engineer-workflow");
     });
   }
 }

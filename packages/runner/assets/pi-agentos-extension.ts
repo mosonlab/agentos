@@ -1,17 +1,141 @@
 /** AgentOS tools for pi.
  *
  *  pi deliberately ships no MCP client ("It intentionally does not include
- *  built-in MCP..."), so the same four AgentOS tools are registered as pi
+ *  built-in MCP..."), so the same eight AgentOS tools are registered as pi
  *  extension tools instead. The runner injects this file with `--extension`;
  *  credentials come from the inherited environment, exactly as the MCP server
  *  reads them, so the tool surface matches across all three CLIs.
  *
  *  Loaded by pi's own loader, not compiled by the runner's tsc — keep it
- *  dependency-free and self-contained. */
+ *  dependency-free and self-contained. SessionToolContract is inlined here at
+ *  build time; session-tool-contract.test.ts checks the inlined adapter against
+ *  the canonical definitions and request shapes. */
 
 import { execFileSync } from "node:child_process";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
+type ToolName = "task_activity_log" | "task_output" | "task_status" | "inbox_ask"
+  | "files_list" | "files_read" | "files_write" | "files_delete";
+type ToolRequest = {
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  path: string;
+  body?: Record<string, unknown>;
+  query?: Record<string, string>;
+};
+
+const SESSION_TOOLS: ReadonlyArray<{
+  name: ToolName;
+  label: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}> = [
+  {
+    name: "task_activity_log",
+    label: "Append to the task activity log",
+    description: "Record notable progress on the current AgentOS task. This is the routine progress channel; it never interrupts a human.",
+    parameters: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "What happened, in one or two sentences." },
+        metadata: { type: "object", description: "Optional structured detail stored alongside the entry.", additionalProperties: true },
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "task_output",
+    label: "Persist the task output",
+    description: "Persist this Step's deliverable as the AgentOS task output. Later Steps in the Chain read it, and the Approval gate shows it to the human. Canonical Steps may require a phase-specific write sequence from the task contract. A rejected write changes nothing; never probe the contract with placeholder content. A closed final output may be immutable.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: { type: "string", description: "Output kind, e.g. spec, plan, review, result." },
+        body: { type: "string", description: "The deliverable itself, in full." },
+        metadata: { type: "object", description: "Optional structured detail, e.g. branch or commit.", additionalProperties: true },
+      },
+      required: ["kind", "body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "task_status",
+    label: "Read the task and Run status",
+    description: "Read the current AgentOS task and Run: name, status, Approval gate, Run number and budget, branch, and whether an output has already been persisted.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "inbox_ask",
+    label: "Ask the human a question",
+    description: "Ask the human a question through the AgentOS Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
+    parameters: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "The question, with enough context for a human to answer it cold." },
+        choices: {
+          type: "array",
+          description: "Optional fixed choices. Omit for a free-text question.",
+          items: {
+            type: "object",
+            properties: { id: { type: "string" }, label: { type: "string" } },
+            required: ["id", "label"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "files_list",
+    label: "List files",
+    description: "List one granted Files Root directory non-recursively.",
+    parameters: {
+      type: "object",
+      properties: { dir: { type: "string", description: "Files-Root-relative POSIX directory path; empty means root." } },
+      required: ["dir"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "files_read",
+    label: "Read a file",
+    description: "Read one granted file; binary content is returned with encoding base64.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "files_write",
+    label: "Write a file",
+    description: "Write one granted file, creating parent directories as needed.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+        encoding: { type: "string", enum: ["utf8", "base64"] },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "files_delete",
+    label: "Delete a file",
+    description: "Delete one granted file or empty directory.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+];
 
 const credentials = () => {
   const apiUrl = process.env.AGENTOS_API_URL;
@@ -34,12 +158,99 @@ const workspaceHead = (): string => {
   return head;
 };
 
-const call = async (method: string, path: string, body?: Record<string, unknown>): Promise<unknown> => {
+const asRecord = (value: unknown): Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+const nonEmptyString = (value: unknown): string | null =>
+  typeof value === "string" && value.trim().length > 0 ? value : null;
+
+const requestFor = (tool: ToolName, rawArguments: Record<string, unknown>): ToolRequest => {
   const session = credentials();
-  const response = await fetch(`${session.apiUrl}/session/runs/${session.runId}${path}`, {
-    method,
+  if (tool === "task_activity_log") {
+    const body = nonEmptyString(rawArguments.body);
+    if (!body) throw new Error("task_activity_log requires a non-empty body");
+    return {
+      method: "POST",
+      path: "/activity",
+      body: {
+        fencingToken: session.fencingToken,
+        actorType: "agent",
+        body,
+        ...(rawArguments.metadata ? { metadata: asRecord(rawArguments.metadata) } : {}),
+      },
+    };
+  }
+  if (tool === "task_output") {
+    const kind = nonEmptyString(rawArguments.kind);
+    const body = nonEmptyString(rawArguments.body);
+    if (!kind || !body) throw new Error("task_output requires kind and body");
+    return {
+      method: "PUT",
+      path: "/output",
+      body: {
+        fencingToken: session.fencingToken,
+        kind,
+        body,
+        commitSha: workspaceHead(),
+        ...(rawArguments.metadata ? { metadata: asRecord(rawArguments.metadata) } : {}),
+      },
+    };
+  }
+  if (tool === "task_status") return { method: "GET", path: "/status" };
+  if (tool === "inbox_ask") {
+    const body = nonEmptyString(rawArguments.body);
+    if (!body) throw new Error("inbox_ask requires a non-empty body");
+    const choices = Array.isArray(rawArguments.choices)
+      ? rawArguments.choices.flatMap((choice) => {
+        const record = asRecord(choice);
+        const id = nonEmptyString(record.id);
+        const label = nonEmptyString(record.label);
+        return id && label ? [{ id, label }] : [];
+      })
+      : [];
+    return {
+      method: "POST",
+      path: "/inbox/questions",
+      body: {
+        fencingToken: session.fencingToken,
+        requestId: `pi:${session.runId}:${body.slice(0, 80)}`,
+        body,
+        choices,
+      },
+    };
+  }
+  if (tool === "files_list") {
+    const dir = typeof rawArguments.dir === "string" ? rawArguments.dir : null;
+    if (dir === null) throw new Error("files_list requires dir");
+    return { method: "GET", path: "/files", query: { dir } };
+  }
+  if (tool === "files_read") {
+    const path = nonEmptyString(rawArguments.path);
+    if (!path) throw new Error("files_read requires path");
+    return { method: "GET", path: "/files/content", query: { path } };
+  }
+  if (tool === "files_write") {
+    const path = nonEmptyString(rawArguments.path);
+    const content = typeof rawArguments.content === "string" ? rawArguments.content : null;
+    const encoding = rawArguments.encoding === undefined ? "utf8" : rawArguments.encoding;
+    if (!path || content === null || (encoding !== "utf8" && encoding !== "base64")) {
+      throw new Error("files_write requires path, content, and optional encoding utf8 or base64");
+    }
+    return { method: "PUT", path: "/files/content", body: { path, content, encoding } };
+  }
+  const path = nonEmptyString(rawArguments.path);
+  if (!path) throw new Error("files_delete requires path");
+  return { method: "DELETE", path: "/files", query: { path } };
+};
+
+const call = async (request: ToolRequest): Promise<unknown> => {
+  const session = credentials();
+  const url = new URL(`${session.apiUrl}/session/runs/${session.runId}${request.path}`);
+  for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);
+  const response = await fetch(url, {
+    method: request.method,
     headers: { Authorization: `Bearer ${session.sessionToken}`, "Content-Type": "application/json" },
-    ...(body ? { body: JSON.stringify({ fencingToken: session.fencingToken, ...body }) } : {}),
+    ...(request.body ? { body: JSON.stringify(request.body) } : {}),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`AgentOS API ${response.status}: ${text.slice(0, 500)}`);
@@ -47,6 +258,26 @@ const call = async (method: string, path: string, body?: Record<string, unknown>
 };
 
 const said = (text: string): ToolResult => ({ content: [{ type: "text", text }], details: {} });
+
+const invokeTool = async (name: ToolName, params: Record<string, unknown>): Promise<ToolResult> => {
+  const result = await call(requestFor(name, params));
+  if (name === "task_activity_log") return said("Activity recorded.");
+  if (name === "task_output") {
+    const body = params.body as string;
+    const kind = params.kind as string;
+    const predecessorOutputs = (result as { predecessorOutputs?: unknown } | null)?.predecessorOutputs;
+    return said([
+      `Output persisted as '${kind}' (${body.length} characters).`,
+      ...(Array.isArray(predecessorOutputs) && predecessorOutputs.length > 0
+        ? ["Predecessor Step outputs are now available:", JSON.stringify(predecessorOutputs, null, 2)]
+        : []),
+    ].join("\n\n"));
+  }
+  if (name === "inbox_ask") {
+    return said("Question sent. This Session is suspended until the human answers; the Session resumes with their reply.");
+  }
+  return said(JSON.stringify(result, null, 2));
+};
 
 export default function (pi: {
   registerTool(tool: Record<string, unknown>): void;
@@ -86,98 +317,13 @@ export default function (pi: {
     };
   });
 
-  pi.registerTool({
-    name: "task_activity_log",
-    label: "AgentOS activity",
-    description: "Record notable progress on the current AgentOS task. Routine progress channel; it never interrupts a human.",
-    promptSnippet: "Record progress on the current AgentOS task",
-    promptGuidelines: ["Use task_activity_log to record notable progress instead of narrating it only in your final answer."],
-    parameters: {
-      type: "object",
-      properties: {
-        body: { type: "string", description: "What happened, in one or two sentences." },
-        metadata: { type: "object", description: "Optional structured detail.", additionalProperties: true },
+  for (const tool of SESSION_TOOLS) {
+    pi.registerTool({
+      ...tool,
+      promptSnippet: tool.description,
+      async execute(_toolCallId: string, params: Record<string, unknown>): Promise<ToolResult> {
+        return invokeTool(tool.name, params);
       },
-      required: ["body"],
-    },
-    async execute(_toolCallId: string, params: { body: string; metadata?: Record<string, unknown> }): Promise<ToolResult> {
-      await call("POST", "/activity", { actorType: "agent", body: params.body, ...(params.metadata ? { metadata: params.metadata } : {}) });
-      return said("Activity recorded.");
-    },
-  });
-
-  pi.registerTool({
-    name: "task_output",
-    label: "AgentOS output",
-    description: "Persist this step's deliverable as the AgentOS task output. Later chain steps read it and the approval gate shows it to the human.",
-    promptSnippet: "Persist the deliverable as the AgentOS task output",
-    promptGuidelines: ["Use task_output to persist the final deliverable before you finish; a deliverable that is only in your answer is not delivered."],
-    parameters: {
-      type: "object",
-      properties: {
-        kind: { type: "string", description: "Output kind, e.g. spec, plan, review, result." },
-        body: { type: "string", description: "The deliverable itself, in full." },
-        metadata: { type: "object", description: "Optional structured detail.", additionalProperties: true },
-      },
-      required: ["kind", "body"],
-    },
-    async execute(_toolCallId: string, params: { kind: string; body: string; metadata?: Record<string, unknown> }): Promise<ToolResult> {
-      const persisted = await call("PUT", "/output", {
-        kind: params.kind,
-        body: params.body,
-        commitSha: workspaceHead(),
-        ...(params.metadata ? { metadata: params.metadata } : {}),
-      }) as { predecessorOutputs?: unknown } | null;
-      const predecessorOutputs = persisted?.predecessorOutputs;
-      return said([
-        `Output persisted as '${params.kind}' (${params.body.length} characters).`,
-        ...(Array.isArray(predecessorOutputs) && predecessorOutputs.length > 0
-          ? ["Predecessor step outputs are now available:", JSON.stringify(predecessorOutputs, null, 2)]
-          : []),
-      ].join("\n\n"));
-    },
-  });
-
-  pi.registerTool({
-    name: "task_status",
-    label: "AgentOS status",
-    description: "Read the current AgentOS task and run: status, approval gate, run number and budget, branch, and whether an output exists.",
-    promptSnippet: "Read the current AgentOS task and run status",
-    parameters: { type: "object", properties: {} },
-    async execute(): Promise<ToolResult> {
-      return said(JSON.stringify(await call("GET", "/status"), null, 2));
-    },
-  });
-
-  pi.registerTool({
-    name: "inbox_ask",
-    label: "AgentOS inbox",
-    description: "Ask the human a question through the AgentOS Inbox. SUSPENDS this session until they answer; you resume in place with their reply.",
-    promptSnippet: "Ask the human a blocking question through the AgentOS Inbox",
-    promptGuidelines: ["Use inbox_ask only when genuinely blocked; finish everything that does not depend on the answer first."],
-    parameters: {
-      type: "object",
-      properties: {
-        body: { type: "string", description: "The question, with enough context to answer it cold." },
-        choices: {
-          type: "array",
-          description: "Optional fixed choices; omit for free text.",
-          items: {
-            type: "object",
-            properties: { id: { type: "string" }, label: { type: "string" } },
-            required: ["id", "label"],
-          },
-        },
-      },
-      required: ["body"],
-    },
-    async execute(_toolCallId: string, params: { body: string; choices?: Array<{ id: string; label: string }> }): Promise<ToolResult> {
-      await call("POST", "/inbox/questions", {
-        requestId: `pi:${credentials().runId}:${params.body.slice(0, 80)}`,
-        body: params.body,
-        choices: params.choices ?? [],
-      });
-      return said("Question sent. This session is suspended until the human answers.");
-    },
-  });
+    });
+  }
 }

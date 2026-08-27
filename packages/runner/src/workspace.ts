@@ -449,6 +449,36 @@ export const captureWorkspaceResult = async (
   return { branch, baseSha: workspace.baseSha, headSha };
 };
 
+export type WorkspaceSnapshot = {
+  headSha: string;
+  status: string;
+  trackedDiff: string;
+  untrackedFiles: Array<{ path: string; objectId: string }>;
+};
+
+/** Capture enough of HEAD, the index and the working tree to prove that a
+ * runner-owned continuation did not mutate the deliverable it was asked only
+ * to describe. Untracked contents are hashed separately because `git diff`
+ * does not include them. */
+export const captureWorkspaceSnapshot = async (
+  config: RunnerConfig,
+  workspace: Workspace,
+): Promise<WorkspaceSnapshot> => {
+  const env = workspaceEnvironment(config);
+  const [headSha, status, trackedDiff, untrackedOutput] = await Promise.all([
+    command(config, "git", ["rev-parse", "HEAD"], workspace.path, env),
+    command(config, "git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], workspace.path, env),
+    command(config, "git", ["diff", "--binary", "HEAD", "--"], workspace.path, env),
+    command(config, "git", ["ls-files", "-z", "--others", "--exclude-standard"], workspace.path, env),
+  ]);
+  const untrackedPaths = untrackedOutput.split("\0").filter(Boolean);
+  const untrackedFiles = await Promise.all(untrackedPaths.map(async (path) => ({
+    path,
+    objectId: await command(config, "git", ["hash-object", "--", path], workspace.path, env),
+  })));
+  return { headSha, status, trackedDiff, untrackedFiles };
+};
+
 export const cleanupWorkspace = async (
   config: RunnerConfig,
   workspacePath: string,

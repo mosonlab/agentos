@@ -10,6 +10,7 @@
  * them is a second thing to get wrong.
  */
 
+import { legacyTemplateName } from "./canonical-template-transition.js";
 import { stepRole } from "./step-role.js";
 
 export { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
@@ -51,16 +52,6 @@ export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
 export const DIRECT_INTEGRATOR_TEMPLATE_NAME = "direct-engineer-workflow";
 export const LEGACY_INTEGRATOR_TEMPLATE_NAME = `${INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
 export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
-export const LEGACY_NINE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-9-`;
-export const LEGACY_TEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-10-`;
-export const LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-human-12-`;
-export const LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-regression-first-13-`;
-export const LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-pre-adjudication-`;
-export const LEGACY_PRE_ADJUDICATION_DIRECT_TEMPLATE_PREFIX = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-pre-adjudication-`;
-/** The pre-zero-gate graph only regated steps, so its ordinals match the current graph's. */
-export const LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-pre-zero-gate-`;
-export const LEGACY_PRE_NARROW_REGRESSION_LEASE_TEMPLATE_PREFIX = `${INTEGRATOR_TEMPLATE_NAME}-legacy-pre-narrow-regression-lease-`;
-export const LEGACY_PRE_NARROW_REGRESSION_LEASE_DIRECT_TEMPLATE_PREFIX = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-pre-narrow-regression-lease-`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 
@@ -70,16 +61,16 @@ export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
  * this marker makes the rename deterministic and collision-free on retries.
  */
 export const legacyTenStepTemplateName = (templateId: string): string =>
-  `${LEGACY_TEN_STEP_TEMPLATE_PREFIX}${templateId}`;
+  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "10", templateId);
 
 export const legacyNineStepTemplateName = (templateId: string): string =>
-  `${LEGACY_NINE_STEP_TEMPLATE_PREFIX}${templateId}`;
+  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "9", templateId);
 
 export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
-  `${LEGACY_HUMAN_TWELVE_STEP_TEMPLATE_PREFIX}${templateId}`;
+  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "human-12", templateId);
 
 export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string): string =>
-  `${LEGACY_REGRESSION_FIRST_THIRTEEN_STEP_TEMPLATE_PREFIX}${templateId}`;
+  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "regression-first-13", templateId);
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant

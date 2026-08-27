@@ -262,13 +262,7 @@ export const patchTask = async (
               orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
               select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
             });
-            const blocker = blockingPredecessor(chainRows.map((row) => ({
-              ...row,
-              projectId: locked.projectId,
-              chainId: locked.chainId,
-              archivedAt: null,
-              templateStep: null,
-            })), taskId);
+            const blocker = blockingPredecessor(chainRows, taskId);
             if (blocker) {
               return refuse(`Cannot complete ${before.name}; predecessor ${blocker.name} is not done`);
             }

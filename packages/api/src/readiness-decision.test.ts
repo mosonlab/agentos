@@ -3,8 +3,8 @@ import test from "node:test";
 
 import type { MergeEvidence } from "@agentos/db";
 
-import { readinessDecision, type ReadinessInput } from "./readiness-decision.js";
-import type { PullRequestSnapshot } from "./github-read.js";
+import { evaluateReadiness, type ReadinessInput } from "./readiness-decision.js";
+import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -34,7 +34,7 @@ const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnap
 });
 
 const evidence: MergeEvidence = {
-  schemaVersion: 2,
+  schemaVersion: 1,
   nonce: "nonce",
   repository: "mosonlab/agentos",
   prNumber: 42,
@@ -51,19 +51,38 @@ const context = {
   now: NOW,
 } as const;
 
-const ready = (overrides: Partial<Extract<ReadinessInput, { stage: "ready" }>> = {}): Extract<ReadinessInput, { stage: "ready" }> => ({
+const ready = (): Extract<ReadinessInput, { stage: "ready" }> => ({
   ...context,
   stage: "ready",
   regression: { headSha: HEAD, baseHeadSha: BASE },
-  target: { repository: "mosonlab/agentos", prNumber: 42 },
-  snapshot: snapshot(),
-  comparison: { status: "ahead", behindBy: 0, filesComplete: true, files: [] },
-  evidence,
-  ...overrides,
+  target: { resolved: true, repository: "mosonlab/agentos", prNumber: 42 },
+  defaultBranch: "main",
 });
 
-test("authorize carries the exact head evidence into apply", () => {
-  assert.deepEqual(readinessDecision(ready()), {
+type Comparison = Awaited<ReturnType<NonNullable<PullRequestReader["compareCommits"]>>>;
+
+const compared: Comparison = {
+  status: "ahead",
+  behindBy: 0,
+  filesComplete: true,
+  files: [],
+};
+
+const reader = (values: {
+  snapshot?: PullRequestSnapshot;
+  comparison?: Comparison;
+} = {}): PullRequestReader => ({
+  readPullRequest: async () => values.snapshot ?? snapshot(),
+  compareCommits: async () => values.comparison ?? compared,
+});
+
+test("authorize carries the exact head evidence into apply", async () => {
+  const decision = await evaluateReadiness(reader(), ready());
+  assert.equal(decision.kind, "authorize");
+  if (decision.kind !== "authorize") return;
+  assert.equal(typeof decision.evidence.nonce, "string");
+  assert.deepEqual({ ...decision.evidence, nonce: "nonce" }, evidence);
+  assert.deepEqual({ ...decision, evidence: { ...decision.evidence, nonce: "nonce" } }, {
     kind: "authorize",
     evidence,
     repository: "mosonlab/agentos",
@@ -75,63 +94,96 @@ test("authorize carries the exact head evidence into apply", () => {
   });
 });
 
-test("a defense-list path authorizes the merge and is reported as audit triggers", () => {
+test("a defense-list path authorizes the merge and is reported as audit triggers", async () => {
   // The defence list used to hold the merge for a blind review. It now only
   // names what a human would want to have seen move, and the merge proceeds.
-  const decision = readinessDecision(ready({
+  const decision = await evaluateReadiness(reader({
     comparison: {
-      status: "ahead",
-      behindBy: 0,
-      filesComplete: true,
+      ...compared,
       files: [{ filename: "packages/api/src/app.ts", previousFilename: null, patch: null }],
     },
-  }));
+  }), ready());
   assert.equal(decision.kind, "authorize");
   assert.deepEqual(decision.kind === "authorize" ? decision.auditTriggers : null, [
     { path: "packages/api/src/app.ts", reason: "merge-tail-machinery" },
   ]);
 });
 
-test("head drift requeues Regression", () => {
-  const decision = readinessDecision(ready({ snapshot: snapshot({ headRefOid: "c".repeat(40) }) }));
+test("head drift requeues Regression without comparing commits", async () => {
+  const calls: string[] = [];
+  const recordingReader: PullRequestReader = {
+    readPullRequest: async () => {
+      calls.push("readPullRequest");
+      return snapshot({ headRefOid: "c".repeat(40) });
+    },
+    compareCommits: async () => {
+      calls.push("compareCommits");
+      return compared;
+    },
+  };
+  const decision = await evaluateReadiness(recordingReader, ready());
   assert.equal(decision.kind, "requeue-regression");
-  assert.match(decision.reason, /stale PASS head/u);
+  assert.match(decision.kind === "requeue-regression" ? decision.reason : "", /stale PASS head/u);
+  assert.deepEqual(calls, ["readPullRequest"]);
 });
 
-test("timeout and transport failures defer without a terminal stop", () => {
-  for (const kind of ["timeout", "transport"] as const) {
-    assert.deepEqual(readinessDecision({
-      ...context,
-      stage: "read-failed",
-      failure: { kind, message: `${kind} failure` },
-    }), {
-      kind: "defer",
-      reason: `readiness evaluation failed: ${kind} failure`,
-    });
+test("timeout and transport failures defer from either remote read", async () => {
+  for (const phase of ["readPullRequest", "compareCommits"] as const) {
+    for (const kind of ["timeout", "transport"] as const) {
+      const failingReader: PullRequestReader = {
+        readPullRequest: async () => {
+          if (phase === "readPullRequest") throw new GitHubReadError(`${kind} failure`, kind);
+          return snapshot();
+        },
+        compareCommits: async () => {
+          if (phase === "compareCommits") throw new GitHubReadError(`${kind} failure`, kind);
+          return compared;
+        },
+      };
+      assert.deepEqual(await evaluateReadiness(failingReader, ready()), {
+        kind: "defer",
+        reason: `readiness evaluation failed: ${kind} failure`,
+      });
+    }
   }
 });
 
-test("deterministic GitHub response failures stop", () => {
-  const decision = readinessDecision({
-    ...context,
-    stage: "read-failed",
-    failure: { kind: "response", message: "malformed comparison" },
+test("a reader without commit comparison stops before reading the pull request", async () => {
+  let reads = 0;
+  const incompleteReader: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      return snapshot();
+    },
+  };
+  assert.deepEqual(await evaluateReadiness(incompleteReader, ready()), {
+    kind: "stop",
+    condition: "github-reader-unavailable",
+    evidence: "server-side GitHub comparison reader is unavailable",
   });
-  assert.deepEqual(decision, {
+  assert.equal(reads, 0);
+});
+
+test("deterministic GitHub response failures stop", async () => {
+  const failingReader: PullRequestReader = {
+    readPullRequest: async () => { throw new GitHubReadError("malformed comparison", "response"); },
+    compareCommits: async () => compared,
+  };
+  assert.deepEqual(await evaluateReadiness(failingReader, ready()), {
     kind: "stop",
     condition: "readiness-read-failed",
     evidence: "readiness evaluation failed: malformed comparison",
   });
 });
 
-test("an unclaimed candidate skips", () => {
-  assert.deepEqual(readinessDecision({ ...context, stage: "claim-lost" }), { kind: "skip" });
+test("an unclaimed candidate skips", async () => {
+  assert.deepEqual(await evaluateReadiness(null, { ...context, stage: "claim-lost" }), { kind: "skip" });
 });
 
-test("an incomplete comparison is a named stop", () => {
-  const decision = readinessDecision(ready({
-    comparison: { status: "ahead", behindBy: 0, filesComplete: false, files: [] },
-  }));
+test("an incomplete comparison is a named stop", async () => {
+  const decision = await evaluateReadiness(reader({
+    comparison: { ...compared, filesComplete: false },
+  }), ready());
   assert.equal(decision.kind, "stop");
-  assert.equal(decision.condition, "comparison-incomplete");
+  assert.equal(decision.kind === "stop" ? decision.condition : null, "comparison-incomplete");
 });

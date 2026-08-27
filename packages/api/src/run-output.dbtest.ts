@@ -195,6 +195,14 @@ const regressionOutput = (summary: string, headSha = SHA) => JSON.stringify({
   gateVerdict: "FAIL",
   summary,
 });
+const solFindingsOutput = (headSha = SHA) => JSON.stringify({
+  schemaVersion: 1,
+  headSha,
+  reviewedBase: "b".repeat(40),
+  reviewedHead: headSha,
+  findings: [],
+  commandsRun: ["git diff --check"],
+});
 const specOutput = (spec: string, headSha = SHA) => JSON.stringify({ schemaVersion: 1, headSha, spec });
 
 const failedCompletion = (runnerId: string, fencingToken: string, branch: string) => ({
@@ -473,6 +481,7 @@ test("a run that authored nothing is re-queued even when a prior run's output is
   assert.equal(status.status, 200, JSON.stringify(status.body));
   assert.equal(status.body.task.outputRequired, true);
   assert.equal(status.body.task.outputRemediationAllowed, true);
+  assert.equal(status.body.task.outputSatisfiedByPriorRun, false);
   assert.equal(status.body.task.outputPersisted, false, "the prior Run's output is not this Run's deliverable");
 
   const completed = await call(
@@ -487,6 +496,40 @@ test("a run that authored nothing is re-queued even when a prior run's output is
   assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: task.id } })).runId, firstRunId);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status, TaskStatus.DOING);
   assert.equal((await db.run.findFirstOrThrow({ where: { taskId: task.id, runNumber: 3 } })).status, "QUEUED");
+});
+
+test("an immutable prior Run output disables remediation and explicitly satisfies the task", async () => {
+  const { task } = await seedTask({
+    chained: true,
+    outputKind: "sol-findings",
+    templateName: DIRECT_TEMPLATE_NAME,
+    stepIndex: 2,
+  });
+  const firstRunId = await enqueue(task.id);
+  const first = await claimRun(firstRunId, "immutable-output-runner-1");
+  const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
+    fencingToken: first.fencingToken,
+    kind: "sol-findings",
+    body: solFindingsOutput(),
+    commitSha: SHA,
+  });
+  assert.equal(written.status, 200, JSON.stringify(written.body));
+  assert.equal((await call(
+    "POST", `/runner/runs/${firstRunId}/complete`, RUNNER,
+    failedCompletion("immutable-output-runner-1", first.fencingToken, first.run.branch ?? "master"),
+  )).status, 200);
+  const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  const secondRunId = retried.body.id as string;
+  const second = await claimRun(secondRunId, "immutable-output-runner-2");
+
+  const status = await call("GET", `/session/runs/${secondRunId}/status`, second.sessionToken);
+
+  assert.equal(status.status, 200, JSON.stringify(status.body));
+  assert.equal(status.body.task.outputRequired, true);
+  assert.equal(status.body.task.outputRemediationAllowed, false);
+  assert.equal(status.body.task.outputSatisfiedByPriorRun, true);
+  assert.equal(status.body.task.outputPersisted, false);
 });
 
 test("a required deliverable that is present still settles SUCCEEDED", async () => {

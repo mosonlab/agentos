@@ -15,7 +15,6 @@ import {
   InboxKind,
   InboxSender,
   InboxStatus,
-  lockAgentRepoGrant,
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockChainRows,
@@ -59,7 +58,6 @@ import {
   type CandidateActivity,
   type CardRow,
   type DecisionRow,
-  isMergeReadinessStep,
   mergeRecoveryPhase,
   type MergeRecoveryAttempt,
 } from "@agentos/db";
@@ -98,18 +96,15 @@ import {
 import {
   chainKey,
   chainProgress,
-  chainStartDecisions,
   chainProgressByChain,
   positions,
-  blockingPredecessor,
-  runFactsByTask,
-  taskStartability,
+  readStepAdmission,
+  readStepAdmissions,
   stepName,
 } from "./chain.js";
 import {
   jsonValue,
   normalizeSessionEventValue,
-  runBudgetCeiling,
 } from "./execution.js";
 import { createArchivedRunNoticeScheduler, noteArchivedQueuedRuns, reconcileDatabaseRuns } from "./reconcile.js";
 import {
@@ -2405,49 +2400,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.get("/tasks/:taskId/startability", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const task = await db.task.findUnique({
-      where: { id: taskId },
-      include: {
-        assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
-        repo: { select: { id: true, name: true, defaultBranch: true } },
-        dispatchAfter: { select: { id: true, name: true, status: true } },
-      },
-    });
-    if (!task) return context.json({ error: "Task not found" }, 404);
-    const [grant, budget, activeRuns, prefix] = await Promise.all([
-      task.assigneeAgentId && task.repoId
-        ? db.agentRepoAccess.findFirst({
-          where: { projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId },
-          select: { agentId: true },
-        })
-        : null,
-      db.run.aggregate({
-        where: { taskId },
-        _count: { _all: true },
-        _max: { budgetGrants: true },
-      }),
-      db.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } }),
-      task.chainId && task.chainIndex !== null
-        ? db.task.findMany({
-          where: {
-            projectId: task.projectId,
-            chainId: task.chainId,
-          },
-          select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
-        })
-        : [],
-    ]);
-    const blocker = blockingPredecessor(prefix, taskId);
-    const verdict = taskStartability({
-      ...task,
-      hasRepoGrant: grant !== null,
-    }, {
-      total: budget._count._all,
-      active: activeRuns > 0,
-      budgetGrants: budget._max.budgetGrants,
-    }, task.maxSessionsPerTask, blocker === null);
+    const admission = await db.$transaction((tx) => readStepAdmission(tx, taskId, { locked: false }));
+    if (!admission.task) return refusalJson(context, admission.refusal);
+    const task = admission.task;
     return context.json({
-      ...verdict,
+      ...admission.verdict,
       task: {
         id: task.id,
         name: task.name,
@@ -2471,7 +2428,6 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         id: true,
         title: true,
         archivedAt: true,
-        repoAccess: { where: { projectId: subject.projectId }, select: { repoId: true } },
       } },
       templateStep: {
         select: {
@@ -2517,29 +2473,16 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       dispatchAfter: row.id === firstTask?.id ? dispatchAfter : null,
     }));
 
-    const [runGroups, recoveryRow] = await Promise.all([
-      chainRows.length === 0 ? [] : db.run.groupBy({
-        by: ["taskId", "status"],
-        where: { taskId: { in: chainRows.map((row) => row.id) } },
-        _count: { _all: true },
-        // The grants travel with the count, in the same one query: a step whose
-        // failures were all provisioning failures has been refunded them, and its
-        // Start button must say so.
-        _max: { budgetGrants: true },
-      }),
+    const [admissions, recoveryRow] = await Promise.all([
+      db.$transaction((tx) => readStepAdmissions(tx, chainRows.map((row) => row.id), { locked: false })),
       db.mergeRecoveryAttempt.findFirst({
         where: { integratorTask: { projectId: subject.projectId, chainId: subject.chainId } },
         orderBy: [{ startedAt: "desc" }, { id: "desc" }],
       }),
     ]);
     const mergeRecovery = mergeRecoveryProjection(recoveryRow);
-    const facts = runFactsByTask(runGroups, ACTIVE_RUN_STATUSES);
     const ordinals = positions(chainRows);
     const progress = chainProgress(chainRows);
-    const decisions = chainStartDecisions(chainRows.map((row) => ({
-      ...row,
-      hasRepoGrant: Boolean(row.repoId && row.assigneeAgent?.repoAccess.some((grant) => grant.repoId === row.repoId)),
-    })), facts);
 
     return context.json({
       chainId: subject.chainId,
@@ -2562,9 +2505,11 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         latestRun: row.runs[0]
           ? { id: row.runs[0].id, status: row.runs[0].status, runNumber: row.runs[0].runNumber }
           : null,
-        startable: decisions.get(row.id)?.startable ?? false,
-        startAction: decisions.get(row.id)?.startAction ?? null,
-        currentExecution: decisions.get(row.id)?.currentExecution ?? false,
+        startable: admissions.get(row.id)?.verdict.startable ?? false,
+        startAction: admissions.get(row.id)?.verdict.startable
+          ? row.status === TaskStatus.BACKLOG ? "recover" : "start"
+          : null,
+        currentExecution: admissions.get(row.id)?.facts.active ?? false,
         blockedOn: row.id === firstTask?.id
           && row.dispatchAfterTaskId !== null
           && dispatchAfter !== null
@@ -2598,45 +2543,14 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     const result = await db.$transaction(async (tx) => {
       const locked = await lockTaskMutationRows(tx, taskId);
       if (!locked) return refusal("not-found", "Task not found");
-      const task = await tx.task.findUnique({
-        where: { id: taskId },
-        include: {
-          assigneeAgent: true,
-          // The template name travels with the step because §D-P4's predicate
-          // needs all four facts; a stepIndex and an outputKind alone collide
-          // with any other template that uses the same step index.
-          templateStep: { include: { taskTemplate: { select: { name: true } } } },
-          repo: true,
-          runs: { orderBy: { runNumber: "desc" }, take: 1 },
-        },
-      });
-      if (!task) return refusal("not-found", "Task not found");
-      if (task.chainId && task.chainIndex !== null) {
-        const chainRows = await tx.task.findMany({
-          where: { projectId: task.projectId, chainId: task.chainId },
-          orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-          select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
-        });
-        const blocker = blockingPredecessor(chainRows.map((row) => ({
-          ...row,
-          projectId: task.projectId,
-          chainId: task.chainId,
-          archivedAt: null,
-          templateStep: null,
-        })), taskId);
-        if (blocker) {
-          return refusal("conflict", `Cannot retry ${task.name}; predecessor ${blocker.name} is not done`);
-        }
+      const admission = await readStepAdmission(tx, taskId, { locked: true });
+      if (!admission.task) return admission.refusal;
+      const task = admission.task;
+      if (admission.blocker) {
+        return refusal("conflict", `Cannot retry ${task.name}; predecessor ${admission.blocker.name} is not done`);
       }
-      const last = task.runs[0];
-      if (!last) return refusal("conflict", "Task has no run to retry");
-      // Checked across ALL of the task's runs with the shared active set, not
-      // the latest run's status alone: the old latest-only enum check missed
-      // PROVISIONING and WAITING_INBOX, so a retry during a clone or a
-      // 7-day Inbox suspension created a second concurrent run writing the
-      // same task and chain branch.
-      const activeRuns = await tx.run.count({ where: { taskId, status: { in: ACTIVE_RUN_STATUSES } } });
-      if (activeRuns > 0) {
+      if (admission.facts.total === 0) return refusal("conflict", "Task has no run to retry");
+      if (admission.facts.active) {
         return refusal("conflict", "Task already has an active run");
       }
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
@@ -2651,110 +2565,15 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   });
   app.post("/tasks/:taskId/start", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const identity = await db.task.findUnique({
-      where: { id: taskId }, select: { projectId: true, chainId: true },
-    });
-    if (!identity) return context.json({ error: "Task not found" }, 404);
     try {
       const result = await readCommitted(db, async (tx) => {
         if (!await lockTaskMutationRows(tx, taskId)) {
           return refusal("not-found", "Task not found");
         }
-        const task = await tx.task.findUniqueOrThrow({
-          where: { id: taskId },
-          include: {
-            assigneeAgent: { select: { archivedAt: true } },
-            dispatchAfter: { select: { id: true, name: true, status: true } },
-            templateStep: { include: { taskTemplate: { select: { name: true } } } },
-          },
-        });
-        if (identity.chainId) {
-          const prefix = await tx.task.findMany({
-            where: {
-              projectId: identity.projectId,
-              chainId: identity.chainId,
-            },
-            orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-            select: { id: true, name: true, status: true, chainIndex: true, chainLayer: true },
-          });
-          const blocker = blockingPredecessor(prefix.map((row) => ({
-            ...row,
-            projectId: identity.projectId,
-            chainId: identity.chainId,
-            archivedAt: null,
-            templateStep: null,
-          })), taskId);
-          if (blocker) {
-            return refusal("conflict", `Cannot start ${task.name}; predecessor ${blocker.name} is not done`);
-          }
-        }
-        if (task.dispatchAfterTaskId !== null && task.dispatchAfter?.status !== TaskStatus.DONE) {
-          const predecessorName = task.dispatchAfter?.name ?? task.dispatchAfterTaskId;
-          return refusal("conflict", `Cannot start ${task.name}; bound predecessor ${predecessorName} is not done`);
-        }
-        if (task.archivedAt !== null) return refusal("conflict", "Cannot start an archived task");
-        if (task.status === TaskStatus.DONE) return refusal("conflict", "Task is already done");
-        if (task.assigneeType !== AssigneeType.AGENT) {
-          return refusal("conflict", "Human steps cannot be started");
-        }
-        if (isMergeReadinessStep(task.templateStep)) {
-          return refusal("conflict", "Merge readiness is server-owned and cannot be started as a model run");
-        }
-        if (await hasActiveRun(tx, taskId)) {
-          return refusal("conflict", "Task already has an active run");
-        }
-        // A count, not the latest run number: Run is one-to-many and a task at
-        // its ceiling whose last run failed must not look startable.
-        //
-        // Measured against the configured budget *plus the grants on top of it*
-        // rather than the budget alone (issue #113). A run that died
-        // provisioning was refunded onto its own row, and this gate could not
-        // see the refund: a task whose two failures were sub-second clone errors
-        // answered "Run budget exhausted" here while `POST /tasks/:id/retry`,
-        // reading the very same refund one route away, would have queued the
-        // run. Reading the grant rather than the historical `maxRunsPerTask` is
-        // what keeps a budget an operator has just *lowered* in force.
-        const budget = await tx.run.aggregate({
-          where: { taskId },
-          _count: { _all: true },
-          _max: { budgetGrants: true },
-        });
-        const facts = { total: budget._count._all, active: false, budgetGrants: budget._max.budgetGrants };
-        if (facts.total >= runBudgetCeiling(task.maxSessionsPerTask, facts.budgetGrants)) {
-          return refusal("conflict", "Run budget exhausted");
-        }
-        // The specific messages above and below are a reason ladder in front of
-        // the shared predicate, so the operator gets the sentence that names
-        // their problem. `startable` itself is the authority: spec §4.3 defines
-        // the button's enabled state and this guard as one thing, and the route
-        // re-deriving them by hand was how it came to accept gated REVIEW steps
-        // and DOING steps and to answer 500 on a task with no repo.
-        if (task.status !== TaskStatus.TODO && task.status !== TaskStatus.BACKLOG) {
-          return refusal("conflict", "Only Todo and Backlog steps can be started");
-        }
-        if (!task.repoId) {
-          return refusal("invalid-request", "This task has no repository");
-        }
-        if (!task.assigneeAgentId) {
-          return refusal("invalid-request", "This task has no assignee");
-        }
-        const hasRepoGrant = await lockAgentRepoGrant(tx, {
-          projectId: task.projectId,
-          agentId: task.assigneeAgentId,
-          repoId: task.repoId,
-        });
-        if (!hasRepoGrant) {
-          return refusal("invalid-request", "Assignee has no grant for this Repo");
-        }
-        if (!taskStartability({ ...task, hasRepoGrant }, facts, task.maxSessionsPerTask).startable) {
-          // The one remaining `startable` condition with no message of its own
-          // is the archived assignee, and `enqueueTaskRun` already throws an
-          // error that names the agent — a better sentence than anything this
-          // branch could write. Fall through to it; the catch maps it to 409.
-          if (!task.assigneeAgent?.archivedAt) {
-            return refusal("conflict", "This step cannot be started");
-          }
-        }
+        const admission = await readStepAdmission(tx, taskId, { locked: true });
+        if (!admission.task) return admission.refusal;
+        if (admission.refusal) return admission.refusal;
+        const task = admission.task;
         const run = await enqueueTaskRun(tx, taskId);
         const recovering = task.status === TaskStatus.BACKLOG;
         if (recovering) {
@@ -3825,6 +3644,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       },
     });
     if (!run) return context.json({ error: "Run not found" }, 404);
+    const outputPersisted = run.task?.stepOutput?.runId === run.id;
+    const outputSatisfiedByPriorRun = Boolean(
+      run.task?.stepOutput
+      && !outputPersisted
+      && outputIsImmutableOncePersisted(run.task.templateStep),
+    );
     return context.json({
       run: {
         id: run.id,
@@ -3848,9 +3673,10 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
         outputRequired: requiredOutputKind(run.task.templateStep) !== null,
         outputRemediationAllowed:
           !(run.task.stepOutput && outputIsImmutableOncePersisted(run.task.templateStep)),
+        outputSatisfiedByPriorRun,
         // A retry must not mistake an earlier Run's artifact for its own. This
         // is the same run-scoped fact completion validates before it advances.
-        outputPersisted: run.task.stepOutput?.runId === run.id,
+        outputPersisted,
       } : null,
     });
   });
