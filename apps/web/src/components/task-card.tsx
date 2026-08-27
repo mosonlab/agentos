@@ -127,6 +127,12 @@ export const cardTitle = (task: BoardTask): string => {
   return task.displayName;
 };
 
+/** What the card's model line says. The line sits under the run line, so it is
+ *  the run's claimed model; a task with no run has only the assignee's
+ *  configured model to show. */
+export const cardModel = (task: BoardTask): string | null =>
+  task.latestRun?.model ?? task.assigneeAgent?.model ?? null;
+
 export const cardTime = (task: BoardTask, t: Translate, now = Date.now()): string => {
   const run = task.latestRun;
   if (!run) return timeAgo(task.updatedAt);
@@ -168,6 +174,7 @@ const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry
 const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNode => {
   const t = useT();
   const assignee = task.assigneeAgent?.title ?? t("ui.chip.unassigned");
+  const model = cardModel(task);
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   const title = cardTitle(task);
@@ -238,10 +245,14 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         </div>
       )}
       <div className={TASK_META_ROW}>{runLabel(task, t)}</div>
-      {task.assigneeAgent === null ? null : (
+      {/* The run's own model snapshot, because this line sits under the run line
+          and reads as the model that run used. The assignee's configured model
+          is only a fallback for a task that has not run yet: re-tiering an agent
+          must not relabel a finished run. */}
+      {model === null ? null : (
         <div className={TASK_META_ROW}>
-          <span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: task.assigneeAgent.model })}>
-            {task.assigneeAgent.model}
+          <span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model })}>
+            {model}
           </span>
         </div>
       )}

@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { InfoNotice } from "../components/ui";
 import { BOARD, BOARD_GRID, BoardArrows, BoardColumn, BoardNavigation, FRAME, dragEdgeStep } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
-import { cardTime, cardTitle, TaskCard } from "../components/task-card";
+import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
 import { COLUMNS, columnStep, countByStatus } from "../lib/board";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
@@ -372,10 +372,10 @@ test("running, ended, and absent runs render only durations their timestamps pro
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
   try {
     const t = (key: string, vars?: Record<string, string | number>): string => key === "tasks.card.runningDuration" ? `running ${vars?.duration}` : key;
-    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null } }), t), "running 12m 0s");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" } }), t), "8m 0s · 3h ago");
+    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null } }), t), "running 12m 0s");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" } }), t), "8m 0s · 3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" }), t), "3h ago");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null } }), t), "3h ago");
   } finally {
     Date.now = originalNow;
   }
@@ -395,7 +395,7 @@ test("a mounted running card advances elapsed time while its props stay unchange
   Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
   const root = (await reactDom()).createRoot(container);
   const running = task({ latestRun: {
-    id: "r1", runNumber: 1, status: "RUNNING", costUsd: null,
+    id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", costUsd: null,
     startedAt: "2026-08-16T00:00:00.000Z", endedAt: null,
   } });
   try {
@@ -492,6 +492,28 @@ test("the assignee is one line with a keyboard-reachable way to see the rest", (
   assert.match(markup, /gpt-5\.6-sol:medium/);
   assert.match(markup, /aria-label="Model gpt-5\.6-sol:medium"/);
   assert.doesNotMatch(markup, /truncate[^>]*>gpt-5\.6-sol:medium/);
+});
+
+test("the model line is the run's snapshot, not the agent's current tier", () => {
+  // A re-tiered agent used to relabel a finished run: the card read the
+  // assignee's current model directly under the run line, so a run claimed with
+  // claude-opus-5:medium showed as gpt-5.6-sol:high.
+  const markup = card({
+    assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" },
+    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", costUsd: null, startedAt: null, endedAt: null },
+  });
+  assert.match(markup, /claude-opus-5:medium/);
+  assert.doesNotMatch(markup, /gpt-5\.6-sol:high/);
+  assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
+});
+
+test("a task with no runs still shows the agent's configured model", () => {
+  const markup = card({ assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" }, latestRun: null });
+  assert.match(markup, /gpt-5\.6-sol:high/);
+});
+
+test("a card with neither a run nor an assignee has no model line", () => {
+  assert.equal(cardModel(task()), null);
 });
 
 test("a card with no assignee still says so", () => {
