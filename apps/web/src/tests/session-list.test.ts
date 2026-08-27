@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { storage } from "../lib/storage";
-import type { Session } from "../lib/types";
+import type { Session, SessionExecutionStatus } from "../lib/types";
 import {
-  groupSessionsByDay, isSessionUnseen, localDayKey, markSessionOpened,
-  readSessionSeenState, sessionFinishTimestamp, sessionSeenKey, sessionTimestamp,
+  ALL_SESSION_FILTER, filterAndGroupSessions, groupSessionsByDay, isSessionUnseen, localDayKey, sessionAgentOptions,
+  markSessionOpened, readSessionSeenState, sessionFinishTimestamp,
+  sessionSeenKey, sessionStatusMatches, sessionTimestamp,
 } from "../lib/session-list";
 
 const atLocalDay = (offset: number, hour: number): string => {
@@ -98,4 +99,51 @@ test("opening prunes to the 500 newest entries and malformed records recover", (
   const recovered = readSessionSeenState(malformedId);
   assert.deepEqual(recovered.opened, {});
   assert.deepEqual(JSON.parse(storage.get(sessionSeenKey(malformedId))!), recovered);
+});
+
+test("status filters map each lifecycle bucket without overlap", () => {
+  const statuses: SessionExecutionStatus[] = [
+    "REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX", "SUCCEEDED", "FAILED", "TIMED_OUT", "LOST", "CANCELLED",
+  ];
+  const expected = {
+    live: ["REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX"],
+    done: ["SUCCEEDED"],
+    failed: ["FAILED", "TIMED_OUT", "LOST"],
+    cancelled: ["CANCELLED"],
+  } as const;
+
+  for (const [bucket, matching] of Object.entries(expected)) {
+    for (const status of statuses) assert.equal(sessionStatusMatches(status, bucket as keyof typeof expected), matching.includes(status as never), `${bucket}/${status}`);
+  }
+  for (const status of statuses) assert.equal(sessionStatusMatches(status, ALL_SESSION_FILTER), true, `all/${status}`);
+});
+
+test("agent options are distinct, title-labelled, sorted, and include All", () => {
+  const sessions = [
+    { ...row("z", atLocalDay(0, 8)), agentId: "agent-1" },
+    { ...row("a", atLocalDay(0, 9)), agentId: "agent-z", agent: { id: "agent-z", title: "Zed" } },
+    { ...row("b", atLocalDay(0, 10)), agentId: "agent-a", agent: { id: "agent-a", title: "Ada" } },
+    { ...row("c", atLocalDay(0, 11)), agentId: "agent-z", agent: { id: "agent-z", title: "Zed" } },
+  ] as Session[];
+
+  assert.deepEqual(sessionAgentOptions(sessions), [
+    { value: ALL_SESSION_FILTER, label: "All" },
+    { value: "agent-a", label: "Ada" },
+    { value: "agent-1", label: "agent-1" },
+    { value: "agent-z", label: "Zed" },
+  ]);
+});
+
+test("filter composition happens before grouping and the day cap", () => {
+  const today = Array.from({ length: 7 }, (_, index) => ({
+    ...row(`match-${index}`, atLocalDay(0, 8 + index)),
+    agentId: index < 6 ? "agent-match" : "agent-other",
+  })) as Session[];
+  const groups = filterAndGroupSessions(today, { agentId: "agent-match", status: ALL_SESSION_FILTER });
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]?.sessions.length, 6, "heading count sees matching rows only");
+  assert.deepEqual(groups[0]?.sessions.slice(0, 5).map((session) => session.id), [
+    "match-5", "match-4", "match-3", "match-2", "match-1",
+  ], "the five-row cap is applied after filtering");
 });

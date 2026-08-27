@@ -12,8 +12,10 @@ import {
   type StreamNode, type ToolCall,
 } from "../lib/session-stream";
 import {
-  groupSessionsByDay, isSessionUnseen, markSessionOpened, readSessionSeenState,
-  SESSION_DAY_PAGE_SIZE, sessionDayLabelKind, type SessionDayGroup, type SessionSeenState,
+  ALL_SESSION_FILTER, filterAndGroupSessions, filterSessions, isLiveStatus,
+  isSessionUnseen, markSessionOpened, readSessionSeenState,
+  SESSION_DAY_PAGE_SIZE, SESSION_STATUS_FILTERS, sessionAgentOptions, sessionDayLabelKind,
+  type SessionDayGroup, type SessionSeenState, type SessionStatusFilter,
 } from "../lib/session-list";
 import { useEventStream } from "../lib/use-event-stream";
 import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
@@ -30,6 +32,7 @@ import {
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
+import { Select } from "../components/ui/select";
 import { cn } from "../lib/utils";
 
 /** `.eventLog` is the scroll container and `.eventRow` is the row grid — two
@@ -43,9 +46,7 @@ const BLOCK_MAX = 8_000;
 /** Auto-scroll only when the reader is already at the bottom (assumption A3). */
 const NEAR_BOTTOM_PX = 100;
 
-const LIVE_STATUSES: SessionExecutionStatus[] = ["REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX"];
-
-export const isLive = (status: SessionExecutionStatus): boolean => LIVE_STATUSES.includes(status);
+export const isLive = isLiveStatus;
 
 /** §4.1.1. Reuses the existing tone vocabulary; no new tones. */
 export const sessionPill = (
@@ -260,6 +261,8 @@ export const SessionsPage = (): ReactNode => {
   const [seenSnapshot, setSeenSnapshot] = useState<{ projectId: string; state: SessionSeenState } | null>(() => (
     projectId === "" ? null : { projectId, state: readSessionSeenState(projectId) }
   ));
+  const [agentFilter, setAgentFilter] = useState<string>(ALL_SESSION_FILTER);
+  const [statusFilter, setStatusFilter] = useState<SessionStatusFilter>(ALL_SESSION_FILTER);
   const t = useT();
   const seenProjectAtMount = useRef(projectId);
   useEffect(() => {
@@ -274,6 +277,8 @@ export const SessionsPage = (): ReactNode => {
     } else if (changedProject) {
       setSeenSnapshot({ projectId, state: readSessionSeenState(projectId) });
     }
+    setAgentFilter(ALL_SESSION_FILTER);
+    setStatusFilter(ALL_SESSION_FILTER);
   }, [projectId]);
 
   const sessions = useMemo(() => {
@@ -282,7 +287,18 @@ export const SessionsPage = (): ReactNode => {
     return [...byId.values()].sort((left, right) => right.requestedAt.localeCompare(left.requestedAt));
   }, [head.data, older]);
 
-  const dayGroups = useMemo(() => groupSessionsByDay(sessions), [sessions]);
+  const filteredSessions = useMemo(() => filterSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
+  const dayGroups = useMemo(() => filterAndGroupSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
+  const agentOptions = useMemo(() => sessionAgentOptions(sessions, t("sessions.filter.all")), [sessions, t]);
+  const statusOptions = useMemo(() => SESSION_STATUS_FILTERS.map((value) => ({
+    value,
+    label: value === ALL_SESSION_FILTER ? t("sessions.filter.all")
+      : value === "live" ? t("sessions.filter.live")
+        : value === "done" ? t("sessions.filter.done")
+          : value === "failed" ? t("sessions.filter.failed")
+            : t("sessions.filter.cancelled"),
+  })), [t]);
+  const filtersActive = agentFilter !== ALL_SESSION_FILTER || statusFilter !== ALL_SESSION_FILTER;
   const seenState = seenSnapshot?.projectId === projectId ? seenSnapshot.state : null;
 
   const toggleDay = (key: string): void => {
@@ -323,7 +339,31 @@ export const SessionsPage = (): ReactNode => {
           <h1 className={PAGE_HEAD_H1}>{t("sessions.head.title")}</h1>
           <div className={PAGE_HEAD_SUBTITLE}>{t("sessions.head.subtitle", { project: project?.name ?? t("tasks.head.thisProject") })}</div>
         </div>
-        <div className={PAGE_ACTIONS}>
+        <div className={cn(PAGE_ACTIONS, "flex-wrap justify-end")}>
+          <label className="flex items-center gap-[6px] text-[12px] text-secondary-foreground">
+            <span>{t("sessions.filter.agent")}</span>
+            <Select
+              aria-label={t("sessions.filter.agent")}
+              data-session-filter-agent
+              className="w-[150px]"
+              value={agentFilter}
+              onChange={(event) => setAgentFilter(event.target.value)}
+            >
+              {agentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </Select>
+          </label>
+          <label className="flex items-center gap-[6px] text-[12px] text-secondary-foreground">
+            <span>{t("sessions.filter.status")}</span>
+            <Select
+              aria-label={t("sessions.filter.status")}
+              data-session-filter-status
+              className="w-[130px]"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as SessionStatusFilter)}
+            >
+              {statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </Select>
+          </label>
           <Button type="button" variant="legacy" size="legacy" onClick={head.reload}><IconRefresh />{t("common.refresh")}</Button>
         </div>
       </div>
@@ -331,6 +371,7 @@ export const SessionsPage = (): ReactNode => {
       <div className={STACK}>
         {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
         {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
+        {filtersActive ? <div data-session-filter-hint className={HINT}>{t("sessions.filter.loaded")}</div> : null}
         <Card flush>
           <div data-session-list>
             {dayGroups.map((group) => (
@@ -343,8 +384,8 @@ export const SessionsPage = (): ReactNode => {
               />
             ))}
           </div>
-          {sessions.length === 0
-            ? <EmptyState>{t(head.loading ? "common.loading" : "sessions.empty")}</EmptyState>
+          {filteredSessions.length === 0
+            ? <EmptyState>{t(head.loading ? "common.loading" : sessions.length > 0 && filtersActive ? "sessions.empty.filtered" : "sessions.empty")}</EmptyState>
             : null}
         </Card>
         {sessions.length >= PAGE_SIZE && !exhausted ? (

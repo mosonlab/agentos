@@ -4,6 +4,33 @@ import type { Session, SessionExecutionStatus } from "./types";
 /** The number of rows that keep a busy calendar day from hiding later days. */
 export const SESSION_DAY_PAGE_SIZE = 5;
 
+/** The lifecycle states that are still running or waiting on work. Keep this
+ *  next to the list predicates so the filter and the page's status vocabulary
+ *  cannot drift apart. */
+export const LIVE_SESSION_STATUSES: readonly SessionExecutionStatus[] = [
+  "REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX",
+];
+
+export const isLiveStatus = (status: SessionExecutionStatus): boolean => LIVE_SESSION_STATUSES.includes(status);
+
+export const ALL_SESSION_FILTER = "all" as const;
+
+export const SESSION_STATUS_FILTERS = [
+  ALL_SESSION_FILTER, "live", "done", "failed", "cancelled",
+] as const;
+
+export type SessionStatusFilter = typeof SESSION_STATUS_FILTERS[number];
+
+export type SessionListFilters = {
+  agentId: string;
+  status: SessionStatusFilter;
+};
+
+export type SessionFilterOption = {
+  value: string;
+  label: string;
+};
+
 export type SessionDayGroup = {
   /** A local YYYY-MM-DD key, suitable for React keys and expansion state. */
   key: string;
@@ -15,6 +42,43 @@ export type SessionDayGroup = {
 /** The same instant the list uses for its relative time and day membership. */
 export const sessionTimestamp = (session: Pick<Session, "startedAt" | "requestedAt">): string =>
   session.startedAt ?? session.requestedAt;
+
+/** Match one execution status against the user-facing lifecycle buckets. */
+export const sessionStatusMatches = (status: SessionExecutionStatus, filter: SessionStatusFilter): boolean => {
+  if (filter === ALL_SESSION_FILTER) return true;
+  if (filter === "live") return isLiveStatus(status);
+  if (filter === "done") return status === "SUCCEEDED";
+  if (filter === "failed") return status === "FAILED" || status === "TIMED_OUT" || status === "LOST";
+  return filter === "cancelled" && status === "CANCELLED";
+};
+
+/** Distinct Agent choices from the Sessions that are already loaded. */
+export const sessionAgentOptions = (
+  sessions: readonly Pick<Session, "agentId" | "agent">[],
+  allLabel = "All",
+): SessionFilterOption[] => {
+  const labels = new Map<string, string>();
+  for (const session of sessions) {
+    const label = session.agent?.title || session.agentId;
+    const current = labels.get(session.agentId);
+    // A relation can be absent on a partially-expanded response. Prefer a
+    // later title when an earlier row only supplied the id.
+    if (current === undefined || current === session.agentId) labels.set(session.agentId, label);
+  }
+  const options = [...labels.entries()]
+    .map(([value, label]) => ({ value, label }))
+    .sort((left, right) => left.label.localeCompare(right.label) || left.value.localeCompare(right.value));
+  return [{ value: ALL_SESSION_FILTER, label: allLabel }, ...options];
+};
+
+/** Apply both client-side filters without changing the caller's array. */
+export const filterSessions = (
+  sessions: readonly Session[],
+  filters: SessionListFilters,
+): Session[] => sessions.filter((session) => (
+  (filters.agentId === ALL_SESSION_FILTER || session.agentId === filters.agentId)
+    && sessionStatusMatches(session.executionStatus, filters.status)
+));
 
 /** Format an instant as a calendar day in the browser's local timezone. */
 export const localDayKey = (value: string): string => {
@@ -57,6 +121,12 @@ export const groupSessionsByDay = (sessions: readonly Session[]): SessionDayGrou
   }
   return [...groups.values()];
 };
+
+/** Filtering must happen before day grouping and the group's row cap. */
+export const filterAndGroupSessions = (
+  sessions: readonly Session[],
+  filters: SessionListFilters,
+): SessionDayGroup[] => groupSessionsByDay(filterSessions(sessions, filters));
 
 export type SessionDayLabelKind = "today" | "yesterday" | "date";
 
