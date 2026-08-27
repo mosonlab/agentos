@@ -240,6 +240,19 @@ const instantiateFullAtReviewFrontier = async (): Promise<FullFixture> => {
     body: JSON.stringify({ schemaVersion: 1, headSha: IMPLEMENTATION_BASE, spec: SPECIFICATION_BRIEF }),
     commitSha: IMPLEMENTATION_BASE,
   } });
+  const revisedPlanTask = byIndex.get(4)!;
+  await db.taskStepOutput.create({ data: {
+    taskId: revisedPlanTask.id,
+    kind: "revised-plan",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: IMPLEMENTATION_BASE,
+      summary: "Parallel review fixture plan approved without revisions.",
+      addressedFindingIds: [],
+      declinedFindings: [],
+    }),
+    commitSha: IMPLEMENTATION_BASE,
+  } });
   const implementation = byIndex.get(5)!;
   await db.$transaction((tx) => enqueueTaskRun(tx, implementation.id));
   return {

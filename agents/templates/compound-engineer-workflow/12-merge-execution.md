@@ -4,6 +4,7 @@ layer: 11
 agent: merge-integrator
 approvalGate: false
 outputKind: merge-result
+priorOutputKinds: []
 attachmentsFromPrevious: true
 opensPullRequest: false
 baseFromStepIndex: null

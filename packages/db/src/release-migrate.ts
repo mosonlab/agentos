@@ -74,7 +74,7 @@ export const FILES_PRECHECK_COMMAND = ["npm", "run", "db:files-precheck"] as con
  * match what is on disk.
  */
 export const RELEASE_CANDIDATE_MIGRATIONS = {
-  count: 32,
+  count: 33,
   terminal: "20260827110000_run_prompt_hash_exact_dispatch",
 } as const;
 

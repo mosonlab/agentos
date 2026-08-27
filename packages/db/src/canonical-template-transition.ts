@@ -104,7 +104,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "e3aa0891ed24b265a0d8843881396d115457885ec3f1d2be37f53c788a48a459",
+      successorPromptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -117,8 +117,8 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
     },
     {
       marker: "pre-platform-spec-materialization",
-      promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "e3aa0891ed24b265a0d8843881396d115457885ec3f1d2be37f53c788a48a459",
+      promptDigest: "c1a9ec1f8e783c3c814c0d0f5f4a9b91d5759b9dc39473dc200447aeb96677c5",
+      successorPromptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -133,8 +133,8 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Prompt-only rollover: regression now delegates mechanical work to the
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
-      promptDigest: "3826487bd356bca1539efc62cb5d2722d75fcee73cdae41737380cff270b189f",
-      successorPromptDigest: "e3aa0891ed24b265a0d8843881396d115457885ec3f1d2be37f53c788a48a459",
+      promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
+      successorPromptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
         ["senior-dev-luna", AssigneeType.AGENT, false, "implementation", false, true, null, 1],
         ["review-coordinator-sol", AssigneeType.AGENT, false, "sol-findings", true, false, 1, 2],
@@ -204,7 +204,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
-      successorPromptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
+      successorPromptDigest: "f7635395085052a8f613a65a7e7c11f1389abd950fa624409eb52cac3133fa14",
       shape: [
         ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
         ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
@@ -225,7 +225,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
-      successorPromptDigest: "6429815e3f22bcb05a0912548fa1a470ab0c056ae746a21590ab5aa2b748f808",
+      successorPromptDigest: "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
       shape: [
         ["spec", AssigneeType.AGENT, false, "spec", false, false, null, 1],
         ["plan", AssigneeType.AGENT, false, "plan", true, false, null, 2],
@@ -318,6 +318,7 @@ export type PersistedTransitionStep = {
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
   opensPullRequest: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;

@@ -4,6 +4,7 @@ layer: 1
 agent: senior-dev-luna
 approvalGate: false
 outputKind: implementation
+priorOutputKinds: []
 attachmentsFromPrevious: false
 opensPullRequest: true
 baseFromStepIndex: null
