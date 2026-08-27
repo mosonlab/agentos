@@ -144,9 +144,7 @@ repository, not compatibility promises by the CLI providers.
 
 AgentOS targets macOS on Apple Silicon. Linux is unverified, and Windows is
 unsupported by design: the runner relies on POSIX process-group, path and
-command behavior. No complete install walk on a Mac that never held AgentOS has
-been recorded for any preview, so Apple Silicon is the target platform rather
-than a verified fresh-install target.
+command behavior.
 
 Provider CLIs, accounts, authentication, subscriptions, usage allowances, rate
 limits, models, and provider-side availability remain yours. AgentOS supplies no

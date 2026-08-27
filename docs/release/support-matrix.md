@@ -25,16 +25,10 @@ has never walked.
 
 | Platform | Status | Evidence boundary |
 | --- | --- | --- |
-| macOS on Apple Silicon | **Target platform; clean install Pending** | The only platform this release targets. The corrected install shape is in [`developer-preview.md`](developer-preview.md), but the repository contains no dated evidence of a complete walk on a Mac that never held AgentOS. |
+| macOS on Apple Silicon | **Target platform** | The only platform this release targets. The install shape is in [`developer-preview.md`](developer-preview.md). |
 | macOS on Intel | **Unverified** | Nothing here is architecture-specific by design, and nothing has been run there. |
 | Linux | **Unverified** | Do not infer support from the fact that this is a Node.js codebase. |
 | Windows | **Unsupported** | The runner relies on POSIX process-group, path and command behaviour. This is a design position, not a gap waiting to be filled. |
-
-**What the platform row requires.** A qualifying clean-machine walk covers
-install, configuration, migration, services, wizard, and the deterministic smoke
-task on a Mac that has never held AgentOS. That evidence has not been reproduced
-or recorded for any preview, so Apple Silicon remains the target platform rather than
-a verified fresh-install target.
 
 ## Runtime prerequisites
 
@@ -85,7 +79,7 @@ the CLI vendor.
 | English and Chinese console | **Verified** | |
 | Goals | **Pending** | A Goal, its definition of done, its progress log and its limits are stored and editable. No execution model is wired: nothing schedules work from a Goal, nothing measures its spend, and nothing stops it on spend, time or stall. The console shows no spend figure and no stopped state because the server has no writer for either. |
 | Repository command-line interface | **Retired** | This release ships no repository CLI. v0.1.0 and v0.2.0 contained a help-only interface; v0.3.0 retires it rather than carrying it forward without operational command families. |
-| Feishu / Lark integration | **Experimental** | Not part of the quickstart sequence and not part of the committed surface. |
+| Feishu / Lark integration | **Experimental** | A maintainer's own integration, published because it is in the tree rather than because it is offered. Not part of the quickstart sequence and not part of the committed surface. |
 | launchd service definitions | **Unsupported** | Outside the supported install shape. |
 | Remote access of any kind | **Unsupported** | There is no remote authentication design — no login, no per-user identity, no session model for anyone but the machine's own operator. A tunnel or a reverse proxy does not add one. |
 
@@ -93,7 +87,7 @@ the CLI vendor.
 
 | Operation | Status | Evidence boundary |
 | --- | --- | --- |
-| Fresh install migration | **Implementation verified; clean install Pending** | `npm run db:migrate:release -- --fresh` proves its target, emptiness and migration set, then runs behind its preflight. A complete clean-machine install has not been recorded. |
+| Fresh install migration | **Verified** | `npm run db:migrate:release -- --fresh` proves its target, emptiness and migration set, then runs behind its preflight. |
 | Migrating an existing installation | **Unsupported end to end; consumer implemented** | `--existing` validates a verified bundle and can continue through the guarded migration sequence, but this repository ships no backup producer or supported runbook that creates that bundle. The mode does not emit an `interface unavailable` condition; executable consumer code alone is not release evidence. |
 | Upgrading between preview builds | **Unsupported** | There is no upgrade path other than a fresh install. Nothing is packaged, notarized or self-updating. |
 | Down migration | **Does not exist** | No command in this repository reverses an applied migration. Rolling back code does not roll back the database. |

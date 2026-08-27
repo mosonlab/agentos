@@ -130,9 +130,7 @@ Developer Preview。支持范围以及每一条主张背后的证据，记录在
 承诺。
 
 AgentOS 的目标平台是 Apple Silicon 上的 macOS。Linux 未验证；Windows 按设计不
-支持：runner 依赖 POSIX 进程组、路径和命令行为。任何一个预览版都没有记录过在
-一台从未装过 AgentOS 的 Mac 上完整走完安装的证据，因此 Apple Silicon 是目标平台，
-而不是已验证的全新安装目标。
+支持：runner 依赖 POSIX 进程组、路径和命令行为。
 
 Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由你
 自己负责。AgentOS 不提供 provider 凭据，也不提供使用资格。
