@@ -133,7 +133,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     // before a deploy can acquire the exclusive half, and claims arriving
     // during a deploy return no work without observing candidates.
     if (!await deployBarrierAllowsClaim(tx)) return null;
-    const candidates = await tx.run.findMany({
+    const candidateWhere = {
       where: {
         status: RunStatus.QUEUED,
         readyAt: { lte: now },
@@ -149,6 +149,8 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         },
         OR: [{ blockedByRunId: null }, { blockedBy: { status: RunStatus.SUCCEEDED } }],
       },
+    } satisfies Pick<Prisma.RunFindManyArgs, "where">;
+    const candidateInclude = {
       include: {
         // templateStep travels with the claim so delivery can title the PR
         // after the chain rather than the step it happens to be running.
@@ -167,9 +169,67 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
           },
         },
       },
-      orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
-      take: 20,
-    });
+    } satisfies Pick<Prisma.RunFindManyArgs, "include">;
+    const candidates = claimantClass === "merge-executor"
+      ? await tx.run.findMany({
+        ...candidateWhere,
+        ...candidateInclude,
+        orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
+        take: 20,
+      })
+      : await (async () => {
+        // Rank every eligible general-lane candidate before truncating. The old
+        // readyAt-first window could hide a nearly-finished chain beyond its
+        // first 20 rows, defeating chain priority under oversubscription.
+        const queued = await tx.run.findMany({
+          ...candidateWhere,
+          select: {
+            id: true,
+            readyAt: true,
+            createdAt: true,
+            task: { select: { projectId: true, chainId: true } },
+          },
+          orderBy: [{ readyAt: "asc" }, { createdAt: "asc" }],
+        });
+        const chainIds = [...new Set(queued.flatMap(({ task }) =>
+          task?.chainId === null || task?.chainId === undefined ? [] : [task.chainId]
+        ))];
+        const unfinishedGroups = chainIds.length === 0 ? [] : await tx.task.groupBy({
+          by: ["projectId", "chainId"],
+          where: {
+            chainId: { in: chainIds },
+            status: { not: TaskStatus.DONE },
+          },
+          _count: { _all: true },
+        });
+        const chainKey = (projectId: string, chainId: string): string => JSON.stringify([projectId, chainId]);
+        const unfinishedByChain = new Map(unfinishedGroups.flatMap((group) =>
+          group.chainId === null
+            ? []
+            : [[chainKey(group.projectId, group.chainId), group._count._all] as const]
+        ));
+        const priority = (candidate: (typeof queued)[number]): number => {
+          const task = candidate.task;
+          if (task?.chainId === null || task?.chainId === undefined) return 1;
+          return unfinishedByChain.get(chainKey(task.projectId, task.chainId)) ?? 1;
+        };
+        const selectedIds = queued
+          .sort((left, right) => priority(left) - priority(right)
+            || left.readyAt.getTime() - right.readyAt.getTime()
+            || left.createdAt.getTime() - right.createdAt.getTime())
+          .slice(0, 20)
+          .map(({ id }) => id);
+        if (selectedIds.length === 0) return [];
+        const selected = await tx.run.findMany({
+          where: { id: { in: selectedIds } },
+          ...candidateInclude,
+        });
+        const selectedById = new Map(selected.map((candidate) => [candidate.id, candidate]));
+        return selectedIds.flatMap((id) => {
+          const candidate = selectedById.get(id);
+          return candidate ? [candidate] : [];
+        });
+      })();
     const executorRunnerIds = mergeExecutorRunnerIds();
     const parkQueuedCandidate = async (
       candidate: (typeof candidates)[number],
