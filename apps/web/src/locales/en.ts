@@ -600,6 +600,7 @@ export const en = {
   "sessions.result.failed": "Failed",
   "sessions.result.inProgress": "In progress",
   "sessions.result.success": "Success",
+  "sessions.row.failureReason": "Failure reason",
   "sessions.row.run": "run #{n}",
   "sessions.stat.files": "{n} files",
   "sessions.stat.messages": "{n} messages",

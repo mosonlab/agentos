@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compact, compactTokens, durationWithInboxWait, formatDateTime, formatT, money, repoWebUrl } from "../lib/format";
+import { compact, compactTokens, durationWithInboxWait, formatDateTime, formatT, money, repoWebUrl, timeAgo } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
@@ -20,12 +20,12 @@ import {
 import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
-  STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB,
-  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, Markdown, Page, Pill, Segmented,
+  STAT_PILL, STAT_PILLS,
+  Card, EmptyState, ErrorNotice, GapNotice, KeyValue, Markdown, Page, Pill, Segmented,
   SHOW_MORE_BUTTON, isLongText, type PillTone,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
 import { cn } from "../lib/utils";
 
 /** `.eventLog` is the scroll container and `.eventRow` is the row grid — two
@@ -113,37 +113,72 @@ const SessionStatusPill = ({ status, mergeOutcome }: { status: SessionExecutionS
 
 /* -------------------------------------------------------------- the list */
 
-export const SessionRow = ({ session }: { session: Session }): ReactNode => {
+const SESSION_ROW = "flex min-w-0 items-center gap-[12px] border-b border-[color:var(--border-soft)] px-[20px] py-[13px] last:border-b-0 hover:bg-secondary";
+const SESSION_TITLE = "min-w-0 flex-1 rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]";
+
+const sessionDotTone = (tone: PillTone): string | undefined => {
+  if (tone === "green") return DOT_TONE.green;
+  if (tone === "amber") return DOT_TONE.amber;
+  if (tone === "red") return DOT_TONE.red;
+  // The existing dot vocabulary intentionally has no coloured grey state;
+  // leaving the base DOT class in place preserves its faint/inert appearance.
+  return undefined;
+};
+
+const SessionHoverCard = ({ session }: { session: Session }): ReactNode => {
   const t = useT();
-  const target = session.task
-    ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link>
-    : session.goal
-      ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link>
-      : "—";
   return (
-    <TableRow
-      className="cursor-pointer"
+    <HoverCard openDelay={120} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <div data-session-title tabIndex={0} className={SESSION_TITLE}>
+          <div className="overflow-hidden text-ellipsis whitespace-nowrap font-bold text-foreground hover:underline">
+            {session.task
+              ? <Link to={`/tasks/${session.task.id}`}>{session.task.name}</Link>
+              : session.goal
+                ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link>
+                : session.id}
+          </div>
+          <div className="mt-[3px] overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] text-muted-foreground">
+            {session.agent?.title || session.agentId}
+          </div>
+        </div>
+      </HoverCardTrigger>
+      <HoverCardContent side="right" align="start" sideOffset={8} className="w-[320px] rounded-lg p-[14px]">
+        <KeyValue columns={2} items={[
+          { k: t("sessions.detail.started"), v: formatDateTime(session.startedAt ?? session.requestedAt) },
+          { k: t("sessions.detail.duration"), v: durationWithInboxWait(
+            session.startedAt,
+            session.endedAt,
+            session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
+          ) },
+          { k: t("sessions.table.runner"), v: session.runner },
+          { k: t("sessions.table.result"), v: resultWord(session) },
+          { k: t("sessions.detail.run"), v: session.run ? `#${session.run.runNumber}` : "—" },
+          ...(session.failureReason
+            ? [{ k: t("sessions.row.failureReason"), v: <span className="text-[color:var(--destructive-fg)] [overflow-wrap:anywhere]">{compact(session.failureReason, 200)}</span> }]
+            : []),
+        ]} />
+      </HoverCardContent>
+    </HoverCard>
+  );
+};
+
+export const SessionRow = ({ session }: { session: Session }): ReactNode => {
+  const { tone } = sessionPill(session.executionStatus, session.mergeOutcome);
+  return (
+    <div
+      data-session-row
+      className={cn(SESSION_ROW, "cursor-pointer")}
       // Link calls preventDefault and navigates but does not stop propagation,
       // so without this guard clicking the Task cell would open the session.
       onClick={(event) => { if (!event.defaultPrevented) navigate(`/sessions/${session.id}`); }}
     >
-      <TableCell className={TABLE_NAME}>
-        {formatDateTime(session.startedAt ?? session.requestedAt)}
-        <span className={TABLE_SUB}>{session.run ? t("sessions.row.run", { n: session.run.runNumber }) : session.id}</span>
-      </TableCell>
-      <TableCell><AgentChip agent={null} name={session.agent?.title ?? session.agentId} /></TableCell>
-      <TableCell>{target}</TableCell>
-      <TableCell><Pill tone="grey">{session.runner}</Pill></TableCell>
-      <TableCell>{durationWithInboxWait(
-        session.startedAt,
-        session.endedAt,
-        session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
-      )}</TableCell>
-      <TableCell><SessionStatusPill status={session.executionStatus} mergeOutcome={session.mergeOutcome} /></TableCell>
-      <TableCell {...(session.failureReason === null ? {} : { title: compact(session.failureReason, 200) })}>
-        {resultWord(session)}
-      </TableCell>
-    </TableRow>
+      <span aria-hidden="true" data-session-status className={cn(DOT, sessionDotTone(tone))} />
+      <SessionHoverCard session={session} />
+      <span data-session-time className="shrink-0 text-[11.5px] text-muted-foreground">
+        {timeAgo(session.startedAt ?? session.requestedAt)}
+      </span>
+    </div>
   );
 };
 
@@ -206,17 +241,9 @@ export const SessionsPage = (): ReactNode => {
         {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
         {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
         <Card flush>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t("sessions.table.started")}</TableHead><TableHead>{t("sessions.table.agent")}</TableHead><TableHead>{t("sessions.table.task")}</TableHead>
-                <TableHead>{t("sessions.table.runner")}</TableHead><TableHead>{t("sessions.table.duration")}</TableHead><TableHead>{t("sessions.table.status")}</TableHead><TableHead>{t("sessions.table.result")}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sessions.map((session) => <SessionRow key={session.id} session={session} />)}
-            </TableBody>
-          </Table>
+          <div data-session-list>
+            {sessions.map((session) => <SessionRow key={session.id} session={session} />)}
+          </div>
           {sessions.length === 0
             ? <EmptyState>{t(head.loading ? "common.loading" : "sessions.empty")}</EmptyState>
             : null}

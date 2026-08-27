@@ -7,15 +7,31 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  DebugEvents, FilesTouched, SessionRow, StreamNodeView, WaitingNotice, fileTrackingHint, lifecycleStat,
-  sessionPill, truncateBlock,
-} from "../pages/Sessions";
 import { setFormatLocale } from "../lib/format";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+
+// Radix chooses useLayoutEffect or useEffect when its module is first loaded.
+// Seed a browser global before importing Sessions so portaled hover-card content
+// is observable in this jsdom test, just as it is in the browser.
+const preloadDom = new JSDOM("<!doctype html><html><body></body></html>", { pretendToBeVisual: true });
+for (const [key, value] of Object.entries({
+  window: preloadDom.window, document: preloadDom.window.document, navigator: preloadDom.window.navigator,
+  HTMLElement: preloadDom.window.HTMLElement, Element: preloadDom.window.Element, Node: preloadDom.window.Node,
+  NodeFilter: preloadDom.window.NodeFilter,
+  CustomEvent: preloadDom.window.CustomEvent, MutationObserver: preloadDom.window.MutationObserver,
+  PointerEvent: preloadDom.window.MouseEvent, DOMRect: preloadDom.window.DOMRect,
+  getComputedStyle: preloadDom.window.getComputedStyle.bind(preloadDom.window),
+})) Object.defineProperty(globalThis, key, { configurable: true, value });
+Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+
+const {
+  DebugEvents, FilesTouched, SessionRow, StreamNodeView, WaitingNotice, fileTrackingHint, lifecycleStat,
+  sessionPill, truncateBlock,
+} = await import("../pages/Sessions");
+preloadDom.window.close();
 
 const STATUSES: SessionExecutionStatus[] = [
   "REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX", "SUCCEEDED", "FAILED", "TIMED_OUT", "CANCELLED", "LOST",
@@ -228,22 +244,28 @@ test("a WAITING_INBOX session always says why, with or without a message id", ()
   }
 });
 
-test("session durations identify wall-clock spans that include Inbox wait", () => {
-  const waiting = renderToStaticMarkup(<table><tbody><SessionRow session={session({ executionStatus: "WAITING_INBOX" })} /></tbody></table>);
-  assert.match(waiting, /wall-clock \(includes Inbox wait\)/);
+test("a session row leads with its title and status, not table columns", () => {
+  const markup = renderToStaticMarkup(<SessionRow session={session()} />);
+  assert.match(markup, /data-session-row/);
+  assert.match(markup, />Batch 4</);
+  assert.match(markup, />Frontend Dev</);
+  assert.match(markup, /bg-\[color:var\(--status-green-fg\)\]/);
+  assert.doesNotMatch(markup, /<table|Started|Runner|Duration|Result/);
+});
 
-  const resumed = renderToStaticMarkup(<table><tbody><SessionRow session={session({
-    executionStatus: "SUCCEEDED",
-    resumeAttempt: 1,
-    endedAt: "2026-08-16T00:05:01.000Z",
-  })} /></tbody></table>);
-  assert.match(resumed, /5m 0s wall-clock \(includes Inbox wait\)/);
+test("a session row title falls back from Task to Goal to Session id", () => {
+  const task = renderToStaticMarkup(<SessionRow session={session()} />);
+  assert.match(task, />Batch 4</);
 
-  const uninterrupted = renderToStaticMarkup(<table><tbody><SessionRow session={session({
-    executionStatus: "SUCCEEDED",
-    endedAt: "2026-08-16T00:05:01.000Z",
-  })} /></tbody></table>);
-  assert.doesNotMatch(uninterrupted, /wall-clock|Inbox wait/);
+  const goal = renderToStaticMarkup(<SessionRow session={session({
+    task: null, taskId: null, goal: { id: "goal-1", title: "Ship it" }, goalId: "goal-1",
+  })} />);
+  assert.match(goal, />Ship it</);
+
+  const id = renderToStaticMarkup(<SessionRow session={session({
+    task: null, taskId: null, goal: null, goalId: null,
+  })} />);
+  assert.match(id, />session-1</);
 });
 
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {
@@ -258,7 +280,10 @@ const jsdom = (): JSDOM => {
   const globals = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node,
-    MutationObserver: dom.window.MutationObserver, getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    NodeFilter: dom.window.NodeFilter,
+    CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver,
+    PointerEvent: dom.window.MouseEvent, DOMRect: dom.window.DOMRect,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
   };
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
@@ -269,13 +294,54 @@ const click = async (dom: JSDOM, node: Element): Promise<void> => {
   await act(async () => { node.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, button: 0 })); });
 };
 
+test("focusing the title opens the translated hover card, including Inbox-wait duration", async () => {
+  const data = session({
+    executionStatus: "FAILED", resumeAttempt: 1, endedAt: "2026-08-16T00:05:01.000Z",
+    failureReason: `first line ${"x".repeat(240)}`,
+  });
+  for (const [locale, labels] of [
+    ["en", { started: "Started", duration: "Duration", runner: "Runner", result: "Result", run: "Run", failure: "Failure reason", wait: "wall-clock \\(includes Inbox wait\\)" }],
+    ["zh", { started: "开始时间", duration: "时长", runner: "Runner", result: "结果", run: "运行", failure: "失败原因", wait: "墙上时钟时间（包括收件箱等待）" }],
+  ] as const) {
+    const dom = jsdom();
+    const container = dom.window.document.querySelector("#root");
+    assert.ok(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<LocaleProvider initialLocale={locale}><SessionRow session={data} /></LocaleProvider>); });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await act(async () => { await Promise.resolve(); });
+      const title = dom.window.document.querySelector<HTMLElement>("[data-session-title]");
+      assert.ok(title, container.innerHTML);
+      await act(async () => {
+        title.focus();
+        title.dispatchEvent(new dom.window.FocusEvent("focusin", { bubbles: true }));
+        await new Promise((resolve) => dom.window.setTimeout(resolve, 240));
+      });
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
+      const body = dom.window.document.body.textContent ?? "";
+      for (const label of [labels.started, labels.duration, labels.runner, labels.result, labels.run, labels.failure]) {
+        assert.match(body, new RegExp(label));
+      }
+      assert.match(body, new RegExp(labels.wait));
+      assert.match(body, /first line/);
+      assert.doesNotMatch(body, /x{240}/);
+      assert.equal(dom.window.document.querySelector("[data-slot='hover-card-content'] button"), null);
+    } finally {
+      await act(async () => root.unmount());
+      dom.window.close();
+    }
+  }
+});
+
 test("clicking the nested Task link opens the task, not the session", async () => {
   const dom = jsdom();
   dom.window.location.hash = "#/sessions";
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  await act(async () => { root.render(<table><tbody><SessionRow session={session()} /></tbody></table>); });
+  await act(async () => { root.render(<SessionRow session={session()} />); });
 
   const link = dom.window.document.querySelector<HTMLAnchorElement>("a[href='#/tasks/task-1']");
   assert.ok(link, container.innerHTML);
@@ -294,11 +360,11 @@ test("clicking a row anywhere else opens the session", async () => {
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
   const root = createRoot(container);
-  await act(async () => { root.render(<table><tbody><SessionRow session={session()} /></tbody></table>); });
+  await act(async () => { root.render(<SessionRow session={session()} />); });
 
-  const cell = dom.window.document.querySelectorAll("td")[4];
-  assert.ok(cell);
-  await click(dom, cell);
+  const row = dom.window.document.querySelector("[data-session-row]");
+  assert.ok(row);
+  await click(dom, row);
   assert.equal(dom.window.location.hash, "#/sessions/session-1");
 
   await act(async () => root.unmount());
@@ -523,7 +589,8 @@ test("Load more keeps page one and dedupes it against the live head", async () =
   await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
   await flush();
 
-  const rows = (): number => dom.window.document.querySelectorAll("tbody tr").length;
+  const rows = (): number => dom.window.document.querySelectorAll("[data-session-row]").length;
+  assert.equal(dom.window.document.querySelectorAll("table").length, 0);
   assert.equal(rows(), 50);
 
   const more = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
@@ -785,7 +852,7 @@ test("a failed Load more tells the operator instead of vanishing into the consol
   await flush();
 
   assert.match(container.textContent ?? "", /503/, "the failure is on the page, not only in the console");
-  assert.equal(dom.window.document.querySelectorAll("tbody tr").length, 50, "page one survives a failed page two");
+  assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 50, "page one survives a failed page two");
   const retry = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
   assert.ok(retry, "the button stays available as the retry");
   assert.equal(retry.hasAttribute("disabled"), false);

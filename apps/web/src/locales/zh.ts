@@ -597,6 +597,7 @@ export const zh = {
   "sessions.result.failed": "失败",
   "sessions.result.inProgress": "进行中",
   "sessions.result.success": "成功",
+  "sessions.row.failureReason": "失败原因",
   "sessions.row.run": "第 {n} 次运行",
   "sessions.stat.files": "{n} 个文件",
   "sessions.stat.messages": "{n} 条消息",
