@@ -1,3 +1,4 @@
+
 Goal: make the run-claim candidate ordering finish nearly-done chains first instead of interleaving all chains FIFO.
 
 Problem: claim ordering in packages/api/src/run-claim.ts is `orderBy [readyAt asc, createdAt asc]`. Under slot oversubscription this advances all in-flight chains in lockstep: a chain one step from merge waits behind new chains' step 1. That maximizes work-in-progress, so feature branches stay unmerged longer, drift from main, and generate avoidable refresh-conflict repair work.
