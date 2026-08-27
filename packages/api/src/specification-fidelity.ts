@@ -9,7 +9,7 @@ import { abortableDelay, abortReason } from "./abortable-delay.js";
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
 import { isValidBranchName } from "./branch-name.js";
 import { GitHubReadError } from "./github-read.js";
-import { featureBriefFromTaskDescription } from "./templates.js";
+import { readBrief } from "./task-brief.js";
 
 /** Stable, operator-visible reasons for the distinct fail-closed outcomes. */
 export const SPEC_TRANSCRIPTION_REFUSAL_REASON = "spec-transcription-mismatch";
@@ -53,14 +53,13 @@ export const specificationMaterializationForDirectImplementation = (
   if (!task.templateId || !task.chainId
     || !isDirectImplementationStep(task.templateStep ?? null)
     || !branch || !isValidBranchName(branch)) return null;
-  const body = featureBriefFromTaskDescription(
-    task.description,
-    (task.templateStep?.priorOutputKinds.length ?? 0) > 0,
-  );
-  return body === null ? null : {
+  const parsed = readBrief(task.description, {
+    legacyAttachmentsFromPrevious: (task.templateStep?.priorOutputKinds.length ?? 0) > 0,
+  });
+  return "unparseable" in parsed ? null : {
     kind: "direct-implementation",
     path: specificationPathForBranch(branch),
-    body,
+    body: parsed.brief,
   };
 };
 
@@ -161,13 +160,12 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
   if (!source.templateStep) {
     return { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain implementation step metadata is missing") };
   }
-  const text = featureBriefFromTaskDescription(
-    source.description,
-    source.templateStep.priorOutputKinds.length > 0,
-  );
-  return text === null
+  const parsed = readBrief(source.description, {
+    legacyAttachmentsFromPrevious: source.templateStep.priorOutputKinds.length > 0,
+  });
+  return "unparseable" in parsed
     ? { error: refusal(SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON, "direct-chain task brief is unavailable") }
-    : { text };
+    : { text: parsed.brief };
 };
 
 type AuthorityResult = { text: string } | { error: SpecificationRefusal };

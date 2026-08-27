@@ -3,6 +3,8 @@ import {
   type ClaimantClass,
   ACTIVE_RUN_STATUSES,
   advanceTemplateTask,
+  canonicalStepOrdinals,
+  canonicalTemplateIdentity,
   enqueueTaskRun,
   executionModeFor,
   FAILURE_ENVELOPE_VERSION,
@@ -17,8 +19,6 @@ import {
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
   latestMarker,
-  LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX,
-  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
   lockChainRows,
   lockRunRow,
   MERGE_TAIL_KIND,
@@ -66,10 +66,6 @@ import {
 } from "./merge-lease.js";
 import type { Refusal } from "./refusal.js";
 import { lockTask, lockTaskMutationRows } from "./task-write.js";
-
-/** Full Assurance regression and the documentation node a repair must reopen. */
-const FULL_REPAIR_DOCUMENTATION_ORDINALS = { regression: 10, documentation: 9 } as const;
-const LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS = { regression: 11, documentation: 10 } as const;
 
 const failureEnvelopeV1Input = z.object({
   version: z.number().int().positive(),
@@ -367,24 +363,26 @@ export const completeRun = async (
             chainId: true,
             templateId: true,
             chainIndex: true,
-            templateStep: { select: { stepIndex: true, taskTemplate: { select: { name: true } } } },
+            templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
           },
         })
       : null;
-    // The ordinals are the Full Assurance graph's, and the renamed
-    // adjudication-era rows keep the ones they were created under: a repair
-    // that lands on a chain from either graph still has to put its
-    // documentation node back.
-    const repairDocumentationOrdinals = repairRegression?.templateStep?.taskTemplate.name === INTEGRATOR_TEMPLATE_NAME
-        || repairRegression?.templateStep?.taskTemplate.name.startsWith(LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX)
-      ? FULL_REPAIR_DOCUMENTATION_ORDINALS
-      : repairRegression?.templateStep?.taskTemplate.name.startsWith(LEGACY_PRE_ADJUDICATION_TEMPLATE_PREFIX)
-        ? LEGACY_PRE_ADJUDICATION_REPAIR_DOCUMENTATION_ORDINALS
-        : null;
+    // A repair on any registered compound generation must put its
+    // Documentation Step back before Regression. Identity and ordinals come
+    // from the same registry that authorized the rollover.
+    const repairTemplateIdentity = repairRegression?.templateStep?.taskTemplate.name
+      ? canonicalTemplateIdentity(repairRegression.templateStep.taskTemplate.name)
+      : null;
+    const repairDocumentationOrdinals = repairTemplateIdentity?.canonicalName === INTEGRATOR_TEMPLATE_NAME
+      ? canonicalStepOrdinals(repairTemplateIdentity.canonicalName, repairTemplateIdentity.generation)
+      : null;
     const repairDocumentationTask = repairRegression?.chainId && repairRegression.templateId
       && repairDocumentationOrdinals
+      && repairRegression.templateStep
+      && isRegressionVerificationOutputKind(repairRegression.templateStep.outputKind)
       && repairRegression.chainIndex === repairDocumentationOrdinals.regression
-      && repairRegression.templateStep?.stepIndex === repairDocumentationOrdinals.regression
+      && repairRegression.templateStep.stepIndex === repairDocumentationOrdinals.regression
+      && repairDocumentationOrdinals.documentation !== undefined
       ? await tx.task.findFirst({
           where: {
             projectId: repairRegression.projectId,

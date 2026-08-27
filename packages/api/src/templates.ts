@@ -13,10 +13,10 @@ import {
   TaskSource,
   TaskStatus,
   type TriggerFireSource,
-  stepRole,
 } from "@agentos/db";
 
 import { isValidBranchName } from "./branch-name.js";
+import { composeBrief } from "./task-brief.js";
 import { TemplateInstantiationRefusal } from "./template-errors.js";
 import { serializable } from "./transaction.js";
 
@@ -120,59 +120,17 @@ export const interpolate = (source: string, variables: Record<string, string>): 
   (_match, name: string) => variables[name] ?? `{{${name}}}`,
 );
 
-const FEATURE_BRIEF_PREFIX = "\nFeature brief:\n";
-const PRIOR_OUTPUTS_REMINDER = "\nRead the prior template steps' persisted outputs before working.";
-const PERSIST_OUTPUT_PREFIX = "\nPersist the final ";
-const PERSIST_OUTPUT_SUFFIX = " output for this step through the AgentOS task output endpoint.";
-
-const isMechanicalTemplateStep = (outputKind: string): boolean => {
-  const role = stepRole({ outputKind });
-  return role === "readiness" || role === "integrator";
-};
-
-const outputIsPlatformAuthored = (outputKind: string): boolean => {
-  const role = stepRole({ outputKind });
-  return role === "readiness" || role === "integrator" || role === "regression";
-};
-
 export const composeTemplateTaskDescription = (input: {
   prompt: string;
   featureBrief?: string | undefined;
   priorOutputKinds: readonly string[];
   outputKind: string;
-}): string => {
-  // Readiness and merge execution are server-owned mechanical steps. Their
-  // task cards are still useful as a prompt/source preview, but no model reads
-  // the generated brief, predecessor reminder, or output-persistence contract.
-  if (isMechanicalTemplateStep(input.outputKind)) return input.prompt;
-  return [
-    input.prompt,
-    input.featureBrief ? `${FEATURE_BRIEF_PREFIX}${input.featureBrief}` : "",
-    input.priorOutputKinds.length > 0 ? PRIOR_OUTPUTS_REMINDER : "",
-    outputIsPlatformAuthored(input.outputKind)
-      ? ""
-      : `${PERSIST_OUTPUT_PREFIX}${input.outputKind}${PERSIST_OUTPUT_SUFFIX}`,
-  ].join("");
-};
-
-/** Recover exactly the user-authored brief from a platform-composed task description. */
-export const featureBriefFromTaskDescription = (
-  description: string,
-  hasPriorOutputsReminder: boolean,
-): string | null => {
-  const startMarker = description.indexOf(FEATURE_BRIEF_PREFIX);
-  const persistMarker = description.lastIndexOf(PERSIST_OUTPUT_PREFIX);
-  if (startMarker < 0) return null;
-  const start = startMarker + FEATURE_BRIEF_PREFIX.length;
-  const endMarker = persistMarker >= start ? persistMarker : description.length;
-  const reminderStart = endMarker - PRIOR_OUTPUTS_REMINDER.length;
-  const end = hasPriorOutputsReminder
-    && reminderStart >= start
-    && description.slice(reminderStart, endMarker) === PRIOR_OUTPUTS_REMINDER
-    ? reminderStart
-    : endMarker;
-  return description.slice(start, end);
-};
+}): string => composeBrief({
+  prompt: input.prompt,
+  brief: input.featureBrief,
+  attachmentsFromPrevious: input.priorOutputKinds.length > 0,
+  outputKind: input.outputKind,
+});
 
 export const isUsableTemplateVariable = (value: string | undefined): value is string => (
   value !== undefined && value.trim().length > 0

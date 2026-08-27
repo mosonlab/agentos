@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { requestFor } from "./session-tool-contract.js";
+
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "../../../scripts/regression-verification.sh");
 const SHA = /^[0-9a-f]{40}$/u;
 
@@ -158,6 +160,10 @@ test("finalize persists the dispatch PASS line verbatim and retains the lease", 
   });
   assert.equal(request?.kind, "regression-verification-v2");
   assert.equal(request?.commitSha, headSha);
+  assert.deepEqual(request, requestFor("task_output", {
+    kind: "regression-verification-v2",
+    body: JSON.stringify(verdict),
+  }, { fencingToken: "fence-1", commitSha: headSha }).body);
   assert.equal(finalized.stdout, `REGRESSION FINALIZE: pass ${headSha}\n`);
   assert.doesNotMatch(finalized.stdout, /verbose gate detail/u);
 });

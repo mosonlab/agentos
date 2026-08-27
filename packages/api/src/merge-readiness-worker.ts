@@ -22,10 +22,10 @@ import {
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { openDefenseAuditNotice } from "./merge-tail-actions.js";
-import { evidenceFromSnapshot } from "./merge-evidence-worker.js";
-import { createGitHubReader, GitHubReadError, type PullRequestReader } from "./github-read.js";
+import { createGitHubReader, type PullRequestReader } from "./github-read.js";
 import {
-  readinessDecision,
+  evaluateReadiness,
+  READINESS_READ_BUDGET_MS,
   type ReadinessDecision,
   type ReadinessInput,
 } from "./readiness-decision.js";
@@ -43,7 +43,7 @@ export const readinessPollIntervalMs = (): number => {
 };
 
 const READINESS_CLAIM_PREFIX = "merge-readiness-claim:";
-export const READINESS_READ_BUDGET_MS = 20_000;
+export { READINESS_READ_BUDGET_MS };
 export const READINESS_CLAIM_LEASE_MS = 60_000;
 const READINESS_CANDIDATE_INCLUDE = {
   templateStep: { include: { taskTemplate: { select: { name: true } } } },
@@ -296,7 +296,6 @@ const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
 
 const readReadiness = async (
   db: PrismaClient,
-  reader: PullRequestReader | null,
   readiness: ReadinessCandidate,
   now: Date,
 ): Promise<ReadinessRead> => {
@@ -331,7 +330,6 @@ const readReadiness = async (
   if (claimed.count !== 1) return { claimed: false, input: { ...context, stage: "claim-lost" } };
 
   let recovery: RecoveryContext | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     recovery = await recoveryContextFor(db, regression.id, readiness.id, regression.runs[0]?.id ?? null);
     if (recovery) {
@@ -356,60 +354,18 @@ const readReadiness = async (
       || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
       return claimedRead({ ...context, stage: "invalid-regression-evidence" });
     }
-    if (!reader?.compareCommits) {
-      return claimedRead({ ...context, stage: "reader-unavailable" });
-    }
     const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
-    if (!target.resolved) {
-      return claimedRead({ ...context, stage: "target-unresolved", unresolvable: target.unresolvable });
-    }
-
-    const controller = new AbortController();
-    timer = setTimeout(() => controller.abort(), READINESS_READ_BUDGET_MS);
-    const snapshot = await reader.readPullRequest(
-      target.repository,
-      target.prNumber,
-      readiness.repo?.defaultBranch ?? "main",
-      controller.signal,
-    );
-    const readyInput = (
-      values: Partial<Extract<ReadinessInput, { stage: "ready" }>> = {},
-    ): ClaimedReadiness => claimedRead({
+    return claimedRead({
       ...context,
       stage: "ready",
       regression: {
         headSha: verdict.verdict.headSha,
         baseHeadSha: verdict.verdict.baseHeadSha,
       },
-      target: { repository: target.repository, prNumber: target.prNumber },
-      snapshot,
-      comparison: null,
-      evidence: null,
-      ...values,
-    });
-    if (snapshot.headRefOid !== verdict.verdict.headSha
-      || !snapshot.baseSha
-      || !snapshot.baseRefName
-      || snapshot.baseSha !== verdict.verdict.baseHeadSha) {
-      return readyInput();
-    }
-    const comparison = await reader.compareCommits(
-      target.repository,
-      snapshot.baseSha,
-      verdict.verdict.headSha,
-      controller.signal,
-    );
-    if (!comparison.filesComplete
-      || ((comparison.status !== "ahead" && comparison.status !== "identical")
-        || comparison.behindBy !== 0)) {
-      return readyInput({ comparison });
-    }
-    return readyInput({
-      comparison,
-      evidence: evidenceFromSnapshot(snapshot, randomUUID()),
+      target,
+      defaultBranch: readiness.repo?.defaultBranch ?? "main",
     });
   } catch (error: unknown) {
-    const kind = error instanceof GitHubReadError ? error.kind : "unexpected";
     const message = error instanceof Error ? error.message : String(error);
     return {
       claimed: true,
@@ -417,10 +373,8 @@ const readReadiness = async (
       regression,
       recovery,
       claimReason,
-      input: { ...context, stage: "read-failed", failure: { kind, message } },
+      input: { ...context, stage: "read-failed", failure: { kind: "unexpected", message } },
     };
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 };
 
@@ -669,8 +623,8 @@ export const readinessTick = async (
     if (result.claimed >= limit) break;
     if (!isMergeReadinessStep(readiness.templateStep)) continue;
 
-    const read = await readReadiness(db, reader, readiness, now);
-    const decision = readinessDecision(read.input);
+    const read = await readReadiness(db, readiness, now);
+    const decision = await evaluateReadiness(reader, read.input);
     if (!read.claimed) continue;
     result.claimed += 1;
     try {
