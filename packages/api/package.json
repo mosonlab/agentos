@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json && node ../build-info/stamp.mjs dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build -w @agentos/github-client && npm run build -w @agentos/db",
-    "test": "node --import tsx --test src/*.test.ts src/files/*.test.ts",
+    "test": "node --import tsx --test src/*.test.ts src/files/*.test.ts ${TEST_CONCURRENCY:+--test-concurrency=$TEST_CONCURRENCY}",
     "pretest:db": "npm run build -w @agentos/github-client && npm run build -w @agentos/db && npm run build -w @agentos/runner && npm run build -w @agentos/api",
     "test:db": "node --import tsx scripts/dbtest.mjs",
     "dev": "tsx watch src/index.ts",
