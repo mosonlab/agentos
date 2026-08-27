@@ -34,7 +34,8 @@ When the user requests a chain:
   task) to the instantiate endpoint; the bound chain dispatches when the
   predecessor completes. Incompatible with `autoStart`; one successor per
   predecessor task.
-- Dispatching, gating, or rerouting a chain follows
+- Dispatching, gating, rerouting, and the backlog card lifecycle (create,
+  route, archive at instantiation) follow
   [`docs/governance/task-routing-v1.md`](docs/governance/task-routing-v1.md).
 
 Before changing canonical Agents, roles, or task templates, read

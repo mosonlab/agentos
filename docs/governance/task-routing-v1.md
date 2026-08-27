@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.4 (2026-08-27: the tier list names only the two chain tiers, matching the rule that in-session work sits outside them; wording is English throughout)
+Version: 1.5 (2026-08-27: adds the backlog card lifecycle — a card is a dispatch-ready brief, archived at instantiation)
 
 Status: Active
 
@@ -85,3 +85,11 @@ Reason: Bounded change; Direct review and exact-head acceptance remain intact.
 ```
 
 If risk or ambiguity increases during execution, pause before the newly unsafe work and reroute. If rerouting changes a Product Contract boundary, return to the product owner for approval. New work uses the current routing contract; active work keeps its recorded snapshot until explicitly rerouted.
+
+## Backlog card lifecycle
+
+A backlog card is a dispatch-ready brief waiting for a decision, not a work item of its own. The board holds either the card or its chain, never both.
+
+- Create the card with `assigneeType: HUMAN` so no runner claims it, with the brief as its description (written from `docs/BRIEF-TEMPLATE.md`) plus the machine-readable `Route:` line when the implementation assignee is non-default. The create API has no status field and lands the card in TODO; move it to BACKLOG explicitly.
+- Dispatch instantiates a chain from the card: the brief becomes the instantiate `description` (the chain's implementation task is then the specification of record) and the `Route:` line becomes `stepOverrides`. Chain-to-chain ordering uses `afterTaskId` per the dispatch rules in `AGENTS.md`.
+- Archive the card at the moment of instantiation. The archived card remains recoverable in the Archived view; re-dispatching its work is a new decision, not a revival of the card.
