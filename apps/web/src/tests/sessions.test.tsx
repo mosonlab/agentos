@@ -587,7 +587,7 @@ test("the detail page does not call the initial drain `N new`", async () => {
       await act(async () => { for (let inner = 0; inner < 20; inner += 1) await Promise.resolve(); });
       await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
     }
-    assert.match(container.innerHTML, /line 11/, "both pages drained");
+    assert.match(container.innerHTML, /line 5/, "both pages drained into the visible merged node");
     assert.doesNotMatch(container.innerHTML, /new ↓/, "history is not news");
   } finally {
     // The page polls forever on real timers; without an unmount on the failure
