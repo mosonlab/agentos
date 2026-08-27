@@ -72,6 +72,7 @@ import { z } from "zod";
 import { authenticate, principalMayAccess, type Principal } from "./auth.js";
 import { etagFor, etagMatches, readBoard, readTaskList, serializeUsageCost, type TaskReadScope } from "./board.js";
 import { isValidBranchName } from "./branch-name.js";
+import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, readProjectCosts } from "./costs.js";
 import { chainExecutionOwner } from "./chain-execution-owner.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import {
@@ -1334,6 +1335,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   app.delete("/projects/:projectId", async (context) => {
     await db.project.delete({ where: { id: id.parse(context.req.param("projectId")) } });
     return context.body(null, 204);
+  });
+
+  app.get("/projects/:projectId/costs", async (context) => {
+    const raw = context.req.query("days");
+    const days = raw === undefined ? COSTS_DEFAULT_DAYS : Number.parseInt(raw, 10);
+    // Refused rather than clamped: a window the caller did not ask for would be
+    // read as the one they did, and the totals would be quietly wrong.
+    if (!COSTS_RANGE_DAYS.includes(days)) {
+      return context.json({ error: `days must be one of ${COSTS_RANGE_DAYS.join(", ")}` }, 400);
+    }
+    return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days));
   });
 
   app.get("/projects/:projectId/environments", async (context) => context.json(await db.environment.findMany({
