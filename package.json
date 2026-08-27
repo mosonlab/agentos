@@ -50,6 +50,7 @@
     "db:drift-check": "npm run db:drift-check -w @agentos/db",
     "db:seed": "npm run db:seed -w @agentos/db",
     "db:sync-canonical-prompts": "npm run db:sync-canonical-prompts -w @agentos/db",
+    "db:template-digest": "npm run db:template-digest -w @agentos/db",
     "db:verify-agent-template": "npm run db:verify-agent-template -w @agentos/db",
     "db:validate": "npm run db:validate -w @agentos/db",
     "db:preflight-goal-execution": "npm run db:preflight-goal-execution -w @agentos/db",

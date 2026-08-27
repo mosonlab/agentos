@@ -37,8 +37,8 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
   for (const generation of generations) {
     test(`${templateName} ${generation.marker} exposes every registered Step role`, () => {
       const persistedName = legacyTemplateName(templateName, generation.marker, "template-row");
-      for (const tuple of generation.shape) {
-        const outputKind = tuple[3];
+      for (const step of generation.shape) {
+        const { outputKind } = step;
         assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
         assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), generation.marker);
       }

@@ -37,7 +37,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     id: `step-${String(step.stepIndex)}`,
     taskTemplateId: "template",
     stepIndex: step.stepIndex,
-    name: step.outputKind,
+    name: step.name,
     assigneeAgent: step.agentName === null ? null : { name: step.agentName },
     assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
     layer: step.layer,
@@ -77,10 +77,10 @@ test("every registered compound generation derives its repair Step ordinals", ()
   for (const generation of LEGACY_TEMPLATE_GENERATIONS["compound-engineer-workflow"]) {
     const ordinals = canonicalStepOrdinals("compound-engineer-workflow", generation.marker);
     assert.ok(ordinals, generation.marker);
-    assert.equal(ordinals.documentation, generation.shape.findIndex((tuple) => tuple[3] === "documentation") + 1);
+    assert.equal(ordinals.documentation, generation.shape.findIndex((step) => step.outputKind === "documentation") + 1);
     assert.equal(
       ordinals.regression,
-      generation.shape.findIndex((tuple) => tuple[3].startsWith("regression-verification")) + 1,
+      generation.shape.findIndex((step) => step.outputKind.startsWith("regression-verification")) + 1,
     );
   }
   assert.deepEqual(
@@ -110,9 +110,20 @@ test("a prompt generation is decided by step index and text, not by array order"
 test("a structure-identical generation is decided by its prompt digest alone", () => {
   // The predicate, exercised directly on a synthetic pair: same shape, one
   // registered prompt generation. This is the case a shape can never express.
-  const shape = [["senior-dev", "AGENT", false, "implementation", false, true, null, 1]] as const;
+  const shape = [{
+    name: "Implementation",
+    agentName: "senior-dev",
+    assigneeType: "AGENT",
+    approvalGate: false,
+    outputKind: "implementation",
+    attachmentsFromPrevious: false,
+    opensPullRequest: true,
+    baseFromStepIndex: null,
+    layer: 1,
+    spawnPolicy: null,
+  }] as const;
   const stepsWith = (prompt: string): PersistedTransitionStep[] => [{
-    id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "implementation",
+    id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "Implementation",
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
     priorOutputKinds: [],

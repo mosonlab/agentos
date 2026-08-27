@@ -249,6 +249,7 @@ test("parallel nodes share one non-null base and never open a pull request", asy
 test("layer is a structural field in canonical prompt drift comparison", async () => {
   const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[1]!;
   const persisted: PersistedTemplateStepStructure = {
+    name: expected.name,
     assigneeAgent: { name: expected.agentName! },
     assigneeType: "AGENT",
     layer: expected.layer,
