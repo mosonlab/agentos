@@ -24,6 +24,8 @@
 import { isDeterministicRefusal } from "@agentos/github-client";
 import type { ChangedFile } from "@agentos/db";
 
+import { decodeStrictBase64 } from "./base64.js";
+
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
 /** §11.1 — one round trip per verification pass. */
@@ -104,6 +106,13 @@ export type GitHubReader = {
     filesComplete: boolean;
     files: ChangedFile[];
   }>;
+  /** Read the exact bytes of one repository path at a pinned commit. */
+  readFileAtCommit?: (
+    repository: string,
+    path: string,
+    commitSha: string,
+    signal: AbortSignal,
+  ) => Promise<Buffer>;
 };
 
 type GitHubReadRetryOptions = {
@@ -116,6 +125,20 @@ const waitForRetry = (delayMs: number): Promise<void> => new Promise((resolve) =
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asObject = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+const decodeBase64 = (content: string): Buffer => {
+  // GitHub wraps Contents API base64 in newlines. Buffer.from is intentionally
+  // not used as the validator because it silently ignores invalid characters
+  // and truncated input, which could turn a malformed authority file into a
+  // different, apparently valid byte sequence.
+  const compact = content.replace(/[ \t\r\n]/gu, "");
+  if (compact === "") return Buffer.alloc(0);
+  const bytes = decodeStrictBase64(compact);
+  if (!bytes) {
+    throw new GitHubReadError("repository file response has malformed base64 content", "response");
+  }
+  return bytes;
+};
 
 /**
  * The required checks for a base ref are the union of every protection rule
@@ -245,7 +268,7 @@ export const createGitHubReader = (
 ): GitHubReader | null => {
   if (!token) return null;
   const wait = retryOptions.wait ?? waitForRetry;
-  const request = async (url: string, init: RequestInit): Promise<Response> => {
+  const request = async (url: string, init: RequestInit, options: { missingMessage?: string } = {}): Promise<Response> => {
     for (let attempt = 0; ; attempt += 1) {
       let response: Response;
       try {
@@ -263,6 +286,9 @@ export const createGitHubReader = (
       }
       if (response.status === 401 || response.status === 403) {
         throw new GitHubReadError(`GitHub read refused with ${response.status}`, "permission");
+      }
+      if (response.status === 404 && options.missingMessage !== undefined) {
+        throw new GitHubReadError(options.missingMessage, "response");
       }
       if (response.ok) return response;
       const delay = GITHUB_READ_RETRY_DELAYS_MS[attempt];
@@ -332,6 +358,47 @@ export const createGitHubReader = (
       // pages. Exactly 300 is therefore ambiguous and must not be read as a
       // complete benign diff.
       return { status, behindBy, filesComplete: files.length < 300, files };
+    },
+    readFileAtCommit: async (repository, path, commitSha, signal) => {
+      const [owner, name, ...rest] = repository.split("/");
+      if (!owner || !name || rest.length > 0) {
+        throw new GitHubReadError(`malformed repository ${repository}`, "response");
+      }
+      if (path.length === 0) throw new GitHubReadError("malformed repository file path", "response");
+      if (commitSha.length === 0) throw new GitHubReadError("malformed repository commit", "response");
+
+      let encodedPath: string;
+      let encodedCommit: string;
+      try {
+        // Keep path separators as route separators while escaping every path
+        // segment, including `?`, `#`, and spaces.
+        encodedPath = path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+        encodedCommit = encodeURIComponent(commitSha);
+      } catch {
+        throw new GitHubReadError("malformed repository file path or commit", "response");
+      }
+
+      const response = await request(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/${encodedPath}?ref=${encodedCommit}`,
+        {
+          method: "GET",
+          signal,
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+        },
+        { missingMessage: `repository file is missing at ${repository}@${commitSha}:${path}` },
+      );
+
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new GitHubReadError("repository file response is malformed JSON", "response");
+      }
+      const file = asObject(payload);
+      if (!file || file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
+        throw new GitHubReadError("repository file response is malformed", "response");
+      }
+      return decodeBase64(file.content);
     },
   };
 };
