@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 
 import {
   AssigneeType,
+  INTEGRATOR_TEMPLATE_NAME,
+  legacyTemplateName,
   PrismaClient,
   TaskStatus,
   latestMarker,
@@ -39,7 +41,9 @@ const IMPLEMENTATION_BODY = "Feature brief: reject unregistered graphs at every 
 const SOL_FINDINGS_BODY = "sol-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
 const BLIND_FINDINGS_BODY = "blind-findings: the manual fire path repeats the same bypass and the board reads the retired field.";
 
-const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
+type RegressionSeedOptions = { withLibrarian?: boolean; templateName?: string };
+
+const seedRegression = async (options: RegressionSeedOptions = {}) => {
   // A test may seed several chains in one millisecond, and both the slug and the
   // chain id have to stay distinct across them.
   const seedId = `${Date.now()}-${(seedCounter += 1)}`;
@@ -63,7 +67,8 @@ const seedRegression = async (options: { withLibrarian?: boolean } = {}) => {
     } });
   }
   const template = await db.taskTemplate.create({ data: {
-    projectId: project.id, name: options.withLibrarian ? "compound-engineer-workflow" : "direct-engineer-workflow",
+    projectId: project.id,
+    name: options.templateName ?? (options.withLibrarian ? INTEGRATOR_TEMPLATE_NAME : "direct-engineer-workflow"),
     description: "tail", variables: [],
   } });
   const fixIndex = options.withLibrarian ? 8 : 4;
@@ -162,7 +167,7 @@ type RegressionOutcome = "refresh-conflict" | "review-fail" | "gate-fail";
 
 const exercise = async (
   outcome: RegressionOutcome,
-  options: { withLibrarian?: boolean; branch?: string } = {},
+  options: RegressionSeedOptions & { branch?: string } = {},
 ) => {
   const seeded = await seedRegression(options);
   await db.taskStepOutput.create({ data: {
@@ -419,6 +424,29 @@ test("a Full Assurance repair revalidates documentation before Regression", asyn
   assert.equal(await db.run.count({ where: { taskId: seeded.librarian.id } }), 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.REVIEW);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("repairs on every previously omitted legacy generation reopen the Librarian Step", async () => {
+  for (const marker of [
+    "pre-narrow-regression-lease",
+    "pre-blind-review-retirement",
+    "pre-regression-step-split",
+  ]) {
+    const seeded = await exercise("review-fail", {
+      withLibrarian: true,
+      templateName: legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, marker, `template-${marker}`),
+    });
+    const repair = await repairFor(seeded, "review-fix");
+    await completeRepair(seeded, repair.id, `Closed ${marker} findings.`);
+    assert.ok(seeded.librarian, marker);
+    assert.equal(
+      (await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).status,
+      TaskStatus.TODO,
+      marker,
+    );
+    assert.equal(await db.run.count({ where: { taskId: seeded.librarian.id } }), 1, marker);
+    assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1, marker);
+  }
 });
 
 test("invalid Regression output opens a stop notice with no unusable operator choices", async () => {

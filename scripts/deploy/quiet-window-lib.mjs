@@ -6,6 +6,7 @@ export const DEPLOY_STEPS = Object.freeze([
   "build",
   "backup",
   "guarded-migration",
+  "generate-prisma-client",
   "canonical-prompt-sync",
   "verify-runtime-prisma-client",
   "publish-build",
@@ -22,6 +23,10 @@ export const SERVICE_LABELS = Object.freeze([
   "com.agentos.runner-4",
   "com.agentos.runner-5",
   "com.agentos.runner-6",
+  "com.agentos.runner-7",
+  "com.agentos.runner-8",
+  "com.agentos.runner-9",
+  "com.agentos.runner-10",
   "com.agentos.web",
 ]);
 
@@ -67,6 +72,7 @@ export const executeUpgrade = async (host, initialRevisions) => {
     await host.build();
     await host.backup();
     await host.guardedMigration();
+    await host.generatePrismaClient();
     await host.syncCanonicalPrompts();
     await host.verifyRuntimePrismaClient();
     await host.assertQuietBeforeRestart();

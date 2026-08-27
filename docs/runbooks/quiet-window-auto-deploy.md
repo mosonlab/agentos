@@ -3,7 +3,7 @@
 This job advances one macOS launchd deployment from its currently stamped
 build to `origin/main`. It is for the checkout whose services are
 `com.agentos.api`, `com.agentos.inbox`, `com.agentos.runner`,
-`com.agentos.runner-2` through `com.agentos.runner-6`, and `com.agentos.web`.
+`com.agentos.runner-2` through `com.agentos.runner-10`, and `com.agentos.web`.
 It does not deploy an AgentOS run workspace.
 
 ## Preconditions
@@ -20,7 +20,7 @@ The checkout must have:
 - the running PostgreSQL container `agentos-postgres-1`, with executable
   `/usr/local/bin/pg_dump` inside it (the path used by the supported
   `postgres:16-alpine` image);
-- all nine service labels above already loaded.
+- all thirteen service labels above already loaded.
 
 ## Appliance checkout
 
@@ -47,7 +47,7 @@ Relocating an existing installation is a controlled cutover:
 2. Stage replacement LaunchAgent definitions from the loaded definitions,
    preserving their environment and changing only paths rooted in the old
    checkout. Validate every staged plist before touching launchd.
-3. At a quiet window, replace all nine service definitions and the auto-deploy
+3. At a quiet window, replace all thirteen service definitions and the auto-deploy
    definition as one change. Restart the services from the dedicated clone.
 4. Require all labels to be running, `/health` to pass, `/version` to report the
    prepared commit, every loaded program and working directory to resolve inside
@@ -153,9 +153,10 @@ The job then performs exactly this sequence and stops at the first failure:
    The remote revision read and fetch each make at most three attempts, waiting
    two seconds and then five seconds; only the final failure escalates;
 2. create a detached staging worktree under `.agentos-deploy/` and run `npm ci`
-   against the target lockfile. The root `postinstall` generates Prisma Client,
-   so the deploy does not run the same generation a second time; the runtime
-   client is still verified before publication;
+   against the target lockfile. The root `postinstall` generates the initial
+   Prisma Client; after the migration, the deploy runs `npm run db:generate`
+   again before canonical prompt sync. The runtime client is still verified
+   before publication;
 3. materialize the exact target revision's local merge-gate `dist/` snapshot
    when it is present and valid, otherwise run `npm run build` in staging, then
    verify the API build stamp. A missing or cache-evicted snapshot is an explicit

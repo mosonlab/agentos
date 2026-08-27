@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 import { AssigneeType, Prisma, RunStatus } from "@prisma/client";
 
+import { stepRole, type StepRole } from "./step-role.js";
+
 export type LegacyStepTuple = readonly [
   string,
   AssigneeType,
@@ -72,7 +74,7 @@ export type LegacyTemplateGeneration = Readonly<{
   successorPromptDigest?: string;
 }>;
 
-export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly LegacyTemplateGeneration[]>> = {
+const legacyTemplateGenerations = {
   "direct-engineer-workflow": [
     {
       marker: "pre-narrow-regression-lease",
@@ -242,6 +244,71 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<Record<string, readonly Legac
       ],
     },
   ],
+} as const satisfies Readonly<Record<string, readonly LegacyTemplateGeneration[]>>;
+
+export type CanonicalTemplateRegistryName = keyof typeof legacyTemplateGenerations;
+
+export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
+  Record<CanonicalTemplateRegistryName, readonly LegacyTemplateGeneration[]>
+> = legacyTemplateGenerations;
+
+export type CanonicalTemplateIdentity = Readonly<{
+  canonicalName: CanonicalTemplateRegistryName;
+  generation: string | null;
+}>;
+
+export type CanonicalStepOrdinals = Readonly<Partial<Record<StepRole, number>>>;
+
+const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGeneration[] | null =>
+  Object.hasOwn(LEGACY_TEMPLATE_GENERATIONS, canonicalName)
+    ? LEGACY_TEMPLATE_GENERATIONS[canonicalName as CanonicalTemplateRegistryName]
+    : null;
+
+/**
+ * Resolve a current or registered retired canonical template name through the
+ * registry. Legacy names include a row id after the generation marker; a bare
+ * prefix is not an identity minted by `legacyTemplateName`.
+ */
+export const canonicalTemplateIdentity = (templateName: string): CanonicalTemplateIdentity | null => {
+  for (const canonicalName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
+    if (templateName === canonicalName) return { canonicalName, generation: null };
+    for (const generation of LEGACY_TEMPLATE_GENERATIONS[canonicalName]) {
+      const prefix = `${canonicalName}-legacy-${generation.marker}-`;
+      if (templateName.startsWith(prefix) && templateName.length > prefix.length) {
+        return { canonicalName, generation: generation.marker };
+      }
+    }
+  }
+  return null;
+};
+
+/**
+ * Derive Step role ordinals from one registered graph. The current graph is
+ * derivable only when the newest registry entry is a prompt-only transition:
+ * its shape is then also the successor's shape. A future structural rollover
+ * must extend this interface rather than silently reusing stale ordinals.
+ */
+export const canonicalStepOrdinals = (
+  canonicalName: CanonicalTemplateRegistryName,
+  generation: string | null,
+): CanonicalStepOrdinals | null => {
+  const generations = LEGACY_TEMPLATE_GENERATIONS[canonicalName];
+  const registered = generation === null
+    ? generations.at(-1)
+    : generations.find((candidate) => candidate.marker === generation);
+  if (!registered) return null;
+  if (generation === null && (registered.promptDigest === undefined || registered.successorPromptDigest === undefined)) {
+    throw new Error(`Current ${canonicalName} Step ordinals are not derivable from its latest structural transition`);
+  }
+
+  const ordinals: Partial<Record<StepRole, number>> = {};
+  for (const [index, tuple] of registered.shape.entries()) {
+    const role = stepRole({ outputKind: tuple[3] });
+    if (role === null) throw new Error(`Registered ${canonicalName} generation ${registered.marker} has unknown outputKind ${tuple[3]}`);
+    if (ordinals[role] !== undefined) throw new Error(`Registered ${canonicalName} generation ${registered.marker} repeats Step role ${role}`);
+    ordinals[role] = index + 1;
+  }
+  return ordinals;
 };
 
 /**
@@ -265,14 +332,8 @@ export const templatePromptGenerationDigest = (
   return hash.digest("hex");
 };
 
-export const legacyGenerationMarkerForTemplateName = (templateName: string): string | null => {
-  for (const [canonicalName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
-    for (const generation of generations) {
-      if (templateName.startsWith(`${canonicalName}-legacy-${generation.marker}-`)) return generation.marker;
-    }
-  }
-  return null;
-};
+export const legacyGenerationMarkerForTemplateName = (templateName: string): string | null =>
+  canonicalTemplateIdentity(templateName)?.generation ?? null;
 
 /**
  * The rename target is minted per row and per generation: fixed identities
@@ -373,7 +434,7 @@ export const successorPromptDrift = (
   marker: string,
   sourceSteps: readonly { stepIndex: number; prompt: string }[],
 ): string | null => {
-  const generation = LEGACY_TEMPLATE_GENERATIONS[templateName]?.find((candidate) => candidate.marker === marker);
+  const generation = registeredGenerations(templateName)?.find((candidate) => candidate.marker === marker);
   if (!generation?.successorPromptDigest) return null;
   const actual = templatePromptGenerationDigest(sourceSteps);
   if (actual === generation.successorPromptDigest) return null;
@@ -397,7 +458,7 @@ export const matchedLegacyGeneration = (
   templateName: string,
   steps: readonly PersistedTransitionStep[],
 ): string | null =>
-  LEGACY_TEMPLATE_GENERATIONS[templateName]
+  registeredGenerations(templateName)
     ?.find((generation) => legacyGenerationMatches(generation, steps))?.marker ?? null;
 
 /**
@@ -410,6 +471,6 @@ export const legacyTemplateShapeRefusal = (
   templateName: string,
   steps: readonly PersistedTransitionStep[],
 ): string | null => {
-  if (!LEGACY_TEMPLATE_GENERATIONS[templateName]) return `unknown canonical template ${templateName}`;
+  if (!registeredGenerations(templateName)) return `unknown canonical template ${templateName}`;
   return matchedLegacyGeneration(templateName, steps) === null ? null : "legacy";
 };

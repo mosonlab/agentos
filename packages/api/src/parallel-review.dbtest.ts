@@ -10,7 +10,7 @@ import {
   DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
   INTEGRATOR_TEMPLATE_NAME,
-  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
+  legacyTemplateName,
   PrismaClient,
   RepoPermission,
   RunStatus,
@@ -546,7 +546,7 @@ test("a faithful rolled-over compound chain still resolves the approved specific
   const fixture = await instantiateFullAtReviewFrontier();
   await db.taskTemplate.update({
     where: { id: fixture.fullTemplateId },
-    data: { name: `${LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX}${fixture.fullTemplateId}` },
+    data: { name: legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "pre-zero-gate", fixture.fullTemplateId) },
   });
   await completeImplementation(fixture, "legacy-compound-implementation");
   const reviewed = await claim("legacy-compound-review");

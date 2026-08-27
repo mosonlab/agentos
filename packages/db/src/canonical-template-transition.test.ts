@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canonicalStepOrdinals,
+  canonicalTemplateIdentity,
   LEGACY_TEMPLATE_GENERATIONS,
   legacyGenerationMatches,
+  legacyTemplateName,
   matchedLegacyGeneration,
   successorPromptDrift,
   templatePromptGenerationDigest,
   templateRolloverBlockerCount,
+  type CanonicalTemplateRegistryName,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
 import { loadAllTemplateStepSources, type TemplateStepSource } from "./template-sources.js";
@@ -47,13 +51,50 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     prompt: step.prompt,
   }));
 
-const generationOf = (templateName: string, marker: string) => {
+const generationOf = (templateName: CanonicalTemplateRegistryName, marker: string) => {
   const generation = LEGACY_TEMPLATE_GENERATIONS[templateName]?.find((candidate) => candidate.marker === marker);
   assert.ok(generation, `${templateName} must register ${marker}`);
   return generation;
 };
 
 const PROMPT_ROLLOVER_TEMPLATES = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
+
+test("canonical identity parses current names and every registered generation", () => {
+  for (const [canonicalName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
+    assert.deepEqual(canonicalTemplateIdentity(canonicalName), { canonicalName, generation: null });
+    for (const generation of generations) {
+      assert.deepEqual(
+        canonicalTemplateIdentity(legacyTemplateName(canonicalName, generation.marker, "template-row")),
+        { canonicalName, generation: generation.marker },
+      );
+    }
+  }
+  assert.equal(canonicalTemplateIdentity("compound-engineer-workflow-legacy-pre-zero-gate-"), null);
+  assert.equal(canonicalTemplateIdentity("unregistered-workflow"), null);
+});
+
+test("every registered compound generation derives its repair Step ordinals", () => {
+  for (const generation of LEGACY_TEMPLATE_GENERATIONS["compound-engineer-workflow"]) {
+    const ordinals = canonicalStepOrdinals("compound-engineer-workflow", generation.marker);
+    assert.ok(ordinals, generation.marker);
+    assert.equal(ordinals.documentation, generation.shape.findIndex((tuple) => tuple[3] === "documentation") + 1);
+    assert.equal(
+      ordinals.regression,
+      generation.shape.findIndex((tuple) => tuple[3].startsWith("regression-verification")) + 1,
+    );
+  }
+  assert.deepEqual(
+    canonicalStepOrdinals("compound-engineer-workflow", "pre-narrow-regression-lease"),
+    { spec: 1, plan: 2, "plan-review": 3, "revised-plan": 4, implementation: 5,
+      "sol-findings": 6, "blind-findings": 7, "fixed-implementation": 8,
+      documentation: 9, regression: 10, readiness: 11, integrator: 12 },
+  );
+  for (const marker of ["pre-blind-review-retirement", "pre-regression-step-split"] as const) {
+    const ordinals = canonicalStepOrdinals("compound-engineer-workflow", marker);
+    assert.equal(ordinals?.documentation, 9, marker);
+    assert.equal(ordinals?.regression, 10, marker);
+  }
+});
 
 test("a prompt generation is decided by step index and text, not by array order", () => {
   const forward = [{ stepIndex: 1, prompt: "one" }, { stepIndex: 2, prompt: "two" }];
