@@ -9,6 +9,7 @@ import type { ClaimedTask, FailureClass } from "./api.js";
 import type { InFlightTool } from "./budget.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { isTransientNetworkError } from "./network-retry.js";
+import { manifestLines, toolsFor, type SessionToolTransport } from "./session-tool-contract.js";
 import type { AgentScratch } from "./workspace.js";
 import { createClaudeAdapter, claudeArgs, claudeChildEnvironment, provisionClaudeSessionConfig } from "./adapters/claude.js";
 import {
@@ -38,20 +39,7 @@ export const PI_TOOL_NAMES: Partial<Record<ToolKey, string>> = {
 const toolManifest = (claim: ClaimedTask): string[] => [
   "",
   RUNNER_DEFINITIONS[claim.runner].toolIntroduction,
-  "- task_activity_log(body): record notable progress in the task activity log. Routine channel; never interrupts a human.",
-  "- task_output(kind, body, metadata?): persist this step's deliverable using the task's exact output contract. Rejected writes change nothing; never submit placeholder probes. Closed final outputs may be immutable.",
-  "- task_status(): read the current task and run status, budget, branch, and whether an output exists.",
-  "- inbox_ask(body, choices?): ask the human. Suspends this session until they answer; you resume in place with the reply.",
-  "- files_list(dir): list one Files Root directory non-recursively. Empty dir means the root.",
-  "- files_read(path): read one file; binary content comes back with encoding base64.",
-  "- files_write(path, content, encoding?): write one file, creating parent directories as needed.",
-  "- files_delete(path): delete one file or empty directory.",
-  // The four files_* tools are advertised to every session and authorized server-side per
-  // request: without a matching FilesystemGrant they return 403. They are named here
-  // anyway, and unconditionally, because the manifest is the only place a session learns
-  // what exists -- discovering a capability by having a tool call fail is worse than
-  // seeing a tool that may be denied.
-  "  files_* are authorized per request against this agent's FilesystemGrant rows; without a grant they return 403.",
+  ...manifestLines(RUNNER_DEFINITIONS[claim.runner].toolTransport),
 ];
 
 export const buildPrompt = (claim: ClaimedTask): string => {
@@ -850,7 +838,7 @@ export type RunnerDefinition = {
   binaryEnvironment: string;
   defaultBinary: string;
   toolIntroduction: string;
-  toolTransport: "mcp-stdio" | "pi-extension";
+  toolTransport: SessionToolTransport;
   toolEntrypoint(): string;
   adapter: CliAdapter;
   args(spec: RunSpec, resume?: ResumeSpec): string[];
@@ -945,6 +933,6 @@ export const manifestFor = (spec: RunSpec, dispatchedPrompt: string): Record<str
   agentosTools: {
     transport: RUNNER_DEFINITIONS[spec.claim.runner].toolTransport,
     entrypoint: RUNNER_DEFINITIONS[spec.claim.runner].toolEntrypoint(),
-    tools: ["task_activity_log", "task_output", "task_status", "inbox_ask"],
+    tools: toolsFor(RUNNER_DEFINITIONS[spec.claim.runner].toolTransport).map((tool) => tool.name),
   },
 });
