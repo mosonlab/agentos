@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -970,6 +971,44 @@ test("PI config overrides are stripped and the isolated config root is runner-pi
   assert.notEqual(env.PI_CODING_AGENT_DIR, "/hostile/pi-agent");
 });
 
+test("Codex and PI child environments preserve the configured runner Git identity", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "agentos-git-identity-"));
+  const runnerHome = join(fixture, "runner-home");
+  await mkdir(runnerHome, { recursive: true });
+  await writeFile(join(runnerHome, ".gitconfig"), [
+    "[user]",
+    "\tname = AgentOS Runner",
+    "\temail = runner@agentos.invalid",
+    "",
+  ].join("\n"));
+  try {
+    for (const runner of ["CODEX", "PI"] satisfies RunnerKind[]) {
+      const repository = join(fixture, runner.toLowerCase());
+      const runnerScratch = { ...scratch, configRoot: join(fixture, `${runner.toLowerCase()}-config`) };
+      await mkdir(repository, { recursive: true });
+      await mkdir(runnerScratch.configRoot, { recursive: true });
+      const env = buildChildEnvironment(
+        { path: process.env.PATH ?? "/usr/bin:/bin", home: runnerHome, apiUrl: "http://api", runAsPrefix: [] },
+        { ...claim, runner, secrets: { ...claim.secrets, GIT_CONFIG_GLOBAL: "/hostile/.gitconfig" } },
+        runnerScratch,
+        repository,
+      );
+      execFileSync("git", ["init", "--quiet"], { cwd: repository, env });
+      await writeFile(join(repository, "tracked.txt"), `${runner}\n`);
+      execFileSync("git", ["add", "tracked.txt"], { cwd: repository, env });
+      execFileSync("git", ["commit", "--quiet", "-m", "test identity"], { cwd: repository, env });
+      const author = execFileSync("git", ["show", "-s", "--format=%an <%ae>", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+        env,
+      }).trim();
+      assert.equal(author, "AgentOS Runner <runner@agentos.invalid>", `${runner} lost the configured runner Git identity`);
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("child environment is an explicit allowlist and excludes host variables", () => {
   const previous = process.env.HOST_ONLY_CREDENTIAL;
   process.env.HOST_ONLY_CREDENTIAL = "must-not-leak";
@@ -1019,6 +1058,13 @@ test("a run-as launcher cannot strip the operator-selected gate destination", ()
 // spawn() cannot see this, so the stub below reports what the *final* process
 // actually got. PATH is empty on the far side of `env -i`, so the stub is
 // invoked by absolute path and uses only shell builtins.
+const hostSkillSentinels = [
+  { shellName: "home_agents", environmentVariable: "HOME", relativeRoot: ".agents/skills", fixtureRoot: ".agents/skills", expected: { CLAUDE: 1, CODEX: 0, PI: 0 } },
+  { shellName: "home_claude", environmentVariable: "HOME", relativeRoot: ".claude/skills", fixtureRoot: ".claude/skills", expected: { CLAUDE: 1, CODEX: 0, PI: 0 } },
+  { shellName: "codex", environmentVariable: "CODEX_HOME", relativeRoot: "skills", fixtureRoot: ".codex/skills", expected: { CLAUDE: 0, CODEX: 0, PI: 0 } },
+  { shellName: "pi", environmentVariable: "PI_CODING_AGENT_DIR", relativeRoot: "skills", fixtureRoot: ".pi/agent/skills", expected: { CLAUDE: 0, CODEX: 0, PI: 0 } },
+] as const;
+
 const rootReportingStub = [
   "#!/bin/sh",
   'skill_policy=""',
@@ -1028,29 +1074,31 @@ const rootReportingStub = [
   '  shift',
   'done',
   '[ -n "$CODEX_HOME" ] && [ "$HOME" = "$CODEX_HOME" ] && skill_policy="codex-home-relocated"',
+  ...hostSkillSentinels.flatMap(({ shellName, environmentVariable, relativeRoot }) => [
+    `${shellName}=0`,
+    `[ -e "$${environmentVariable}/${relativeRoot}/host-personal/SKILL.md" ] && ${shellName}=1`,
+  ]),
   'resolved_host_skills=0',
   'if [ -n "$CODEX_HOME" ]; then',
-  '  [ -e "$HOME/.agents/skills/host-personal/SKILL.md" ] && resolved_host_skills=1',
-  '  [ -e "$CODEX_HOME/skills/host-personal/SKILL.md" ] && resolved_host_skills=1',
+  '  resolved_host_skills=$((home_agents + codex))',
   'elif [ -n "$PI_CODING_AGENT_DIR" ]; then',
   '  if [ "$skill_policy" != "pi-skills-disabled" ]; then',
-  '    [ -e "$HOME/.agents/skills/host-personal/SKILL.md" ] && resolved_host_skills=1',
-  '    [ -e "$PI_CODING_AGENT_DIR/skills/host-personal/SKILL.md" ] && resolved_host_skills=1',
+  '    resolved_host_skills=$((home_agents + pi))',
   '  fi',
   'elif [ "$skill_policy" != "claude-user-source-disabled" ]; then',
-  '  [ -e "$HOME/.claude/skills/host-personal/SKILL.md" ] && resolved_host_skills=1',
+  '  resolved_host_skills=$home_claude',
   'fi',
   // Drain the prompt so the parent never sees EPIPE instead of the report.
   "while read -r _line; do :; done",
-  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","home":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$HOME" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$resolved_host_skills"',
+  'printf \'{"type":"turn.completed","workspaceRoot":"%s","stateDir":"%s","home":"%s","gitConfigGlobal":"%s","codexConfigRoot":"%s","piConfigRoot":"%s","skillPolicy":"%s","hostSkillSentinels":"%s,%s,%s,%s","resolvedHostSkills":%s}\\n\' "$RUNNER_WORKSPACE_ROOT" "$CONTROL_PLANE_STATE_DIR" "$HOME" "$GIT_CONFIG_GLOBAL" "$CODEX_HOME" "$PI_CODING_AGENT_DIR" "$skill_policy" "$home_agents" "$home_claude" "$codex" "$pi" "$resolved_host_skills"',
   "",
 ].join("\n");
 
 test("a scrubbing run-as launcher cannot strip the isolation roots from any session", { timeout: 60_000 }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-runas-scrub-"));
   const stub = join(fixture, "agent-stub.sh");
-  for (const relativeRoot of [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills"]) {
-    const markerRoot = join(fixture, relativeRoot, "host-personal");
+  for (const { fixtureRoot } of hostSkillSentinels) {
+    const markerRoot = join(fixture, fixtureRoot, "host-personal");
     await mkdir(markerRoot, { recursive: true });
     await writeFile(join(markerRoot, "SKILL.md"), "host-only\n");
   }
@@ -1093,9 +1141,11 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
           workspaceRoot?: string;
           stateDir?: string;
           home?: string;
+          gitConfigGlobal?: string;
           codexConfigRoot?: string;
           piConfigRoot?: string;
           skillPolicy?: string;
+          hostSkillSentinels?: string;
           resolvedHostSkills?: number;
         };
         assert.equal(report.workspaceRoot, runScratch.workspaceRoot, `${runner} ${mode} lost RUNNER_WORKSPACE_ROOT across the launcher`);
@@ -1103,6 +1153,12 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
         assert.notEqual(report.workspaceRoot, config.workspaceRoot);
         assert.notEqual(report.workspaceRoot, productionRoot);
         assert.notEqual(report.stateDir, productionRoot);
+        assert.equal(report.gitConfigGlobal, join(config.home, ".gitconfig"), `${runner} ${mode} lost the runner Git config across the launcher`);
+        assert.deepEqual(
+          report.hostSkillSentinels?.split(",").map(Number),
+          hostSkillSentinels.map(({ expected }) => expected[runner]),
+          `${runner} ${mode} did not probe every host-personal skill sentinel`,
+        );
         assert.equal(report.resolvedHostSkills, 0, `${runner} ${mode} resolved a host-personal skill sentinel`);
         if (runner === "CLAUDE") {
           assert.equal(report.home, config.home, `${mode} lost Claude's Keychain-compatible HOME across the launcher`);

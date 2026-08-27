@@ -46,7 +46,9 @@ export const claudeArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     "--model", model, "--effort", effort ?? "high",
     ...denyArgs(spec.claim.agent.disabledTools),
     // Excluding the user source prevents host CLAUDE.md, settings, hooks,
-    // plugins, memory, and ~/.claude/skills from entering the session.
+    // plugins, memory, and Claude's user skill root ~/.claude/skills from
+    // entering the session. Audited separately: this CLI does not discover the
+    // cross-agent ~/.agents/skills root used by Codex and PI.
     // Authentication remains the CLI's existing Keychain flow: no
     // CLAUDE_CONFIG_DIR or HOME override is supplied here.
     "--setting-sources", "project,local", "--settings", claudePlatformSettingsPath(),
