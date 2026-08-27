@@ -1364,6 +1364,70 @@ test("successful execution with failed delivery salvages before removing the wor
   }
 });
 
+test("a pull-request failure after publication keeps the primary delivery evidence and skips salvage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pr-failure-after-push-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const log = join(root, "codex-argv.log");
+    const binary = join(root, "codex.sh");
+    const gh = join(root, "gh");
+    const githubRemote = "git@github.com:owner/name.git";
+    await writeFile(binary, successfulCodexMutationStub(log, 'printf "delivered work\\n" > delivered.txt'));
+    await chmod(binary, 0o755);
+    await writeFile(gh, [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then echo "gh version 2.0.0"; exit 0; fi',
+      'if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo "[]"; exit 0; fi',
+      'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then echo "GraphQL: Base branch was not found" 1>&2; exit 1; fi',
+      "exit 1",
+    ].join("\n"));
+    await chmod(gh, 0o755);
+    const remote = await seedRemote(root);
+    git(root, "config", "--file", join(root, ".gitconfig"), `url.${remote}.insteadOf`, githubRemote);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, any> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const configured = {
+      ...codexOnly(workspaces, root, binary),
+      path: `${root}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      failedWorkspaceRetention: 0,
+    };
+
+    await executeClaim(configured, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      session: testSession(root),
+      repo: { ...mechanicalClaim.repo, remoteUrl: githubRemote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: {
+        ...mechanicalClaim.run,
+        model: "gpt-5.6-sol",
+        maxRunsPerTask: 3,
+        opensPullRequest: true,
+        branch: "declared/head",
+      },
+    });
+
+    const publications = posts.filter((post) => post.path.endsWith("/publication"));
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.deepEqual(publications.map((post) => post.body.pushedBranch), ["declared/head"]);
+    assert.equal(completion?.body.terminalSuccess, false);
+    assert.equal(completion?.body.pushStatus, "FAILED");
+    assert.equal(completion?.body.pushedBranch, "declared/head");
+    assert.match(String(completion?.body.failureReason), /Base branch was not found/u);
+    assert.match(String(completion?.body.deliveryInstructions), /PR creation failed/u);
+    assert.equal((completion?.body.failureEnvelope as { phase?: string }).phase, "DELIVER");
+    assert.equal(git(root, `--git-dir=${remote}`, "branch", "--list", "agentos/task-10/run-1"), "");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a successful pinned review never publishes its dirty detached checkout", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-pinned-no-salvage-"));
   try {
