@@ -8,12 +8,12 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
-  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, CODEX_STARTER_MODEL, createAdapterState, failureReasonFromEvidence,
+  adapterExecutionSucceeded, adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
   claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
   PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
-import { parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
+import { CODEX_STARTER_MODEL, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
 import { parsePiTranscript } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -1618,4 +1618,18 @@ test("an adapter is substituted by injection, never by writing over the exported
   assert.notEqual(adapters.CODEX.kill, adapters.PI.kill);
   assert.notEqual(adapters.CLAUDE.classifyError, adapters.CODEX.classifyError);
   assert.notEqual(adapters.CODEX.classifyError, adapters.PI.classifyError);
+});
+
+test("the runner registry owns session isolation and startup preflight model identity", () => {
+  assert.deepEqual(
+    Object.fromEntries(RUNNER_KINDS.map((runner) => [runner, {
+      isolatesSessionConfig: RUNNER_DEFINITIONS[runner].isolatesSessionConfig,
+      startupPreflightModel: RUNNER_DEFINITIONS[runner].startupPreflightModel,
+    }])),
+    {
+      CLAUDE: { isolatesSessionConfig: false, startupPreflightModel: null },
+      CODEX: { isolatesSessionConfig: true, startupPreflightModel: CODEX_STARTER_MODEL },
+      PI: { isolatesSessionConfig: true, startupPreflightModel: "openai-codex/gpt-5.6-luna" },
+    },
+  );
 });
