@@ -18,7 +18,7 @@ Developer Preview 只面向一个平台：Apple Silicon Mac。本版本应使用
   (`gh`)；只交付 branch 时不需要它。
 
 本预览只要求 Codex 这一个 provider CLI：它安装的 starter agent 跑在 Codex 上；
-Claude Code 与实验性的 Pi adapter 都是可选的，没装它们的机器同样是一份完整安装。
+Claude Code 与 Pi 都是可选的，没装它们的机器同样是一份完整安装。
 AgentOS 从不替你登录 provider，也从不读取任何凭据存储。
 
 ```sh

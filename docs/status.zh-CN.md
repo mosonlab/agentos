@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | Codex CLI | **已验证** | adapter/runtime 和订阅认证路径已验证；全新安装证据为 **待完成（OSS-B）**。 |
 | Claude Code | **已验证** / **维护者已验证** | adapter/runtime 已验证；Claude Pro/Max 认证已由维护者在 macOS Apple Silicon 上验证；全新安装关卡为 **待完成（OSS-B）**。 |
-| Pi | **实验性** | adapter 代码已存在，但 Pi 不属于已承诺的支持范围。 |
+| Pi | **已验证** | adapter/运行时与订阅认证路径均已验证。干净全新安装的证据仍为 **Pending (OSS-B)**。 |
 
 Provider CLI、账号、认证、订阅、用量、速率限制、模型和 provider 侧可用性均由
 用户负责。AgentOS 不提供 provider 凭据或使用资格。

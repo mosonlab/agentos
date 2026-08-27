@@ -40,7 +40,7 @@ AgentOS orchestrates a coding CLI you already have. It bundles no subscription
 and resells no capacity: your provider account, its plan limits, its rate
 limits, and its availability remain yours.
 
-Claude Code and the experimental Pi adapter are optional. The preview installs
+Claude Code and Pi are optional. The preview installs
 one starter agent and that agent runs on Codex, so Codex is the only backend
 this quickstart requires — a machine with no Claude CLI on it is a complete
 installation.

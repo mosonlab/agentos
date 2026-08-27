@@ -12,7 +12,7 @@ Web 控制台
           |
 本地 runner -----> 临时 git 工作区
           |
-          +----> Codex CLI / Claude Code / 实验性 Pi adapter
+          +----> Codex CLI / Claude Code / Pi
                          |
                          +----> AgentOS session 工具（MCP 或 Pi extension）
 ```
@@ -62,7 +62,7 @@ Web 控制台
   授权 secret；runner 不会整体复制 host 环境。
 - Runner 的代理是显式开启的，经由 `RUNNER_HTTP_PROXY`、`RUNNER_HTTPS_PROXY` 和
   `RUNNER_NO_PROXY` 配置。一旦配置，它作用于整条由 runner 控制的网络路径：Claude、
-  Codex、实验性的 Pi adapter，以及 Git 和工作区的准备与交付命令。常规的 host 代理
+  Codex、Pi，以及 Git 和工作区的准备与交付命令。常规的 host 代理
   环境变量会被忽略。`RUNNER_RUN_AS_PREFIX` 启动器必须保留这份显式环境；代理 URL
   不会被序列化进 provider 的 argv。
 - 持久化 secret 使用 AES-256-GCM；公开 API 的 secret 表示不包含明文或密文。

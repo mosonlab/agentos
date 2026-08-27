@@ -13,7 +13,7 @@ Control-plane API  <---->  PostgreSQL
           |
 Local runner -----> ephemeral git workspace
           |
-          +----> Codex CLI / Claude Code / experimental Pi adapter
+          +----> Codex CLI / Claude Code / Pi
                          |
                          +----> AgentOS session tools (MCP or Pi extension)
 ```
@@ -38,7 +38,7 @@ Local runner -----> ephemeral git workspace
    be stored as control-plane configuration, but they are not currently sent to
    the runner as runtime grants.
 2. The operator creates a task directly or from a task-chain template and
-   selects Codex, Claude, or the experimental Pi path.
+   selects the Codex, Claude, or Pi path.
 3. The runner claims the queued Run with a lease and fencing generation, then
    provisions an ephemeral clone and a run-specific git branch.
 4. Provider preflight checks the configured binary, version command, and login
@@ -72,7 +72,7 @@ Local runner -----> ephemeral git workspace
   runner does not copy the host environment wholesale.
 - Runner proxying is opt-in through `RUNNER_HTTP_PROXY`, `RUNNER_HTTPS_PROXY`,
   and `RUNNER_NO_PROXY`. When configured, it applies to the whole
-  runner-controlled network path: Claude, Codex, the experimental Pi adapter,
+  runner-controlled network path: Claude, Codex, Pi,
   and Git/workspace provisioning and delivery commands. Conventional host proxy
   variables are ignored. A `RUNNER_RUN_AS_PREFIX` launcher must preserve the
   explicit environment; proxy URLs are not serialized into provider argv.

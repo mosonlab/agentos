@@ -20,7 +20,7 @@ also need
   account, if AgentOS should open pull requests automatically.
 
 Codex is the only provider CLI this preview requires. The starter agent it
-installs runs on Codex; Claude Code and the experimental Pi adapter are optional,
+installs runs on Codex; Claude Code and Pi are optional,
 and a machine without them is a complete installation. AgentOS never logs you
 into a provider and never reads a credential store.
 
