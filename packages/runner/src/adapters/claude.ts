@@ -129,7 +129,10 @@ const preflight = async (spec: PreflightSpec): Promise<PreflightResult> => {
       error: PREFLIGHT_REASONS.cliIncompatible,
     };
   }
-  Object.assign(capabilities, { verifiedModel: spec.model, cliProtocol: "print-stream-json-user-source-isolated" });
+  Object.assign(capabilities, {
+    ...(spec.model === null ? {} : { verifiedModel: spec.model }),
+    cliProtocol: "print-stream-json-user-source-isolated",
+  });
   const auth = await capturePreflight(spec.config, "CLAUDE", ["auth", "status"], spec.env);
   const text = `${auth.stdout}\n${auth.stderr}`;
   const ok = auth.code === 0 && /"loggedIn"\s*:\s*true/u.test(text);

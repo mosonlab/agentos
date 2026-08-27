@@ -4,13 +4,14 @@ import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, test } from "node:test";
+import { test } from "node:test";
 
-import type { ClaimedTask } from "./api.js";
+import { ControlPlaneError, type ClaimedTask } from "./api.js";
 import { adapters, type RuntimeHandle } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
 import { RUNNER_EXCEPTION_REASON, summarizeEvidence } from "./envelope.js";
 import { executeClaim } from "./runner.js";
+import { createControlPlaneDouble } from "./test-control-plane.js";
 
 /**
  * What a failed run actually hands the API.
@@ -218,10 +219,6 @@ const outputStatus = (overrides: Partial<{
   },
 });
 
-const runnerEvents = (posts: Array<{ path: string; body: Record<string, unknown> }>) => posts
-  .filter((post) => post.path.endsWith("/events"))
-  .flatMap((post) => (post.body.events as Array<{ type: string; payload: Record<string, unknown> }> | undefined) ?? []);
-
 /**
  * The succeeding stub again, with one addition: it drops a sentinel file on its
  * way out. The fetch stub below watches for that file, so a request can be
@@ -231,9 +228,6 @@ const runnerEvents = (posts: Array<{ path: string; body: Record<string, unknown>
 const succeedingAgentThatSignalsExit = (sentinel: string): string =>
   succeedingAgent.replace(/exit 0$/u, `touch ${sentinel}\nexit 0`);
 
-const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
-
 test("a failed run's completion carries the output tail the run produced", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-"));
   try {
@@ -242,26 +236,22 @@ test("a failed run's completion carries the output tail the run produced", async
     await writeFile(agentBinary, failingAgent);
     await chmod(agentBinary, 0o755);
 
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble();
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote), { controlPlane: controlPlane.controlPlane });
 
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must complete even though the agent failed");
-    assert.equal(completion.body.terminalSuccess, false, "this is the failing case, not a success in disguise");
+    assert.equal(completion.terminalSuccess, false, "this is the failing case, not a success in disguise");
     // The two facts issue #114 turns on: the tail exists on the wire, and it is
     // the agent's own account of what it found — the thing that used to be
     // dropped by the handler that received it.
-    assert.equal(typeof completion.body.output, "string");
+    assert.equal(typeof completion.output, "string");
     assert.match(
-      String(completion.body.output),
+      String(completion.output),
       /reproduced the deadlock: workers 3 and 7 both hold the inbox advisory lock/,
     );
-    assert.match(String(completion.body.output), /lock ordering inverted in reconcile\.ts$/);
+    assert.match(String(completion.output), /lock ordering inverted in reconcile\.ts$/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -275,19 +265,15 @@ test("a successful run's completion carries its final output as the same tail", 
     await writeFile(agentBinary, succeedingAgent);
     await chmod(agentBinary, 0o755);
 
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble();
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote), { controlPlane: controlPlane.controlPlane });
 
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must complete");
-    assert.equal(completion.body.terminalSuccess, true);
+    assert.equal(completion.terminalSuccess, true);
     assert.equal(
-      completion.body.output,
+      completion.output,
       "inverted the lock ordering in reconcile.ts and added the regression test",
     );
   } finally {
@@ -304,37 +290,37 @@ test("a successful run remediates its missing required output in the same provid
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
 
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     let statusReads = 0;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => {
         statusReads += 1;
-        return new Response(JSON.stringify(outputStatus({ outputPersisted: statusReads >= 2 })), {
-          status: 200, headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+        return outputStatus({ outputPersisted: statusReads >= 2 }).task;
+      },
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote));
+    await executeClaim(
+      config(join(root, "workspaces"), agentBinary),
+      requiredOutputClaim(remote),
+      { controlPlane: controlPlane.controlPlane },
+    );
 
     assert.equal(
       statusReads,
       2,
-      `runner must confirm both the miss and its repair; calls: ${posts.map(({ path }) => path).join(", ")}`,
+      "runner must confirm both the miss and its repair",
     );
     const prompt = await readFile(remediationPrompt, "utf8");
     assert.match(prompt, /call task_output with kind 'implementation'/u);
     assert.match(prompt, /Do not redo the task/u);
-    const eventTypes = runnerEvents(posts).map(({ type }) => type);
+    const eventTypes = controlPlane.eventBatches
+      .flatMap((batch) => batch)
+      .map(({ type }) => type);
     assert.ok(eventTypes.includes("TASK_OUTPUT_REMEDIATION_STARTED"));
     assert.ok(eventTypes.includes("TASK_OUTPUT_REMEDIATION_FINISHED"));
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    const completion = controlPlane.completions.at(-1);
     assert.ok(completion);
-    assert.equal(completion.body.terminalSuccess, true);
-    assert.equal(completion.body.output, "implemented the requested change");
+    assert.equal(completion.terminalSuccess, true);
+    assert.equal(completion.output, "implemented the requested change");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -348,24 +334,20 @@ test("an immutable output satisfied by a prior Run skips remediation", async () 
     const agentBinary = join(root, "remediating-agent.sh");
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
-        return new Response(JSON.stringify(outputStatus({
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus({
           outputRemediationAllowed: false,
           outputSatisfiedByPriorRun: true,
-        })), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+      }).task,
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
 
     assert.equal(existsSync(remediationPrompt), false);
-    assert.ok(runnerEvents(posts).some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_SKIPPED"));
-    assert.equal(posts.find((post) => post.path.endsWith("/complete"))?.body.terminalSuccess, true);
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_SKIPPED"));
+    assert.equal(controlPlane.completions.at(-1)?.terminalSuccess, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -378,24 +360,20 @@ test("missing output with no provider conversation reports remediation unavailab
     const agentBinary = join(root, "agent.sh");
     await writeFile(agentBinary, succeedingAgent);
     await chmod(agentBinary, 0o755);
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
-        return new Response(JSON.stringify(outputStatus()), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
 
-    const unavailable = runnerEvents(posts).find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_UNAVAILABLE");
+    const unavailable = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_UNAVAILABLE");
     assert.ok(unavailable);
     assert.equal(unavailable.payload.providerConversationIdAvailable, false);
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.terminalSuccess, false);
-    assert.equal(completion?.body.failureClass, "PROTOCOL_ERROR");
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -409,25 +387,22 @@ test("a failed output status read is diagnosed without attempting remediation", 
     const agentBinary = join(root, "remediating-agent.sh");
     await writeFile(agentBinary, remediatingAgent(remediationPrompt));
     await chmod(agentBinary, 0o755);
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
-        return new Response(JSON.stringify({ error: "status unavailable" }), {
-          status: 503, headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => {
+        throw new ControlPlaneError(503, "status unavailable");
+      },
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
 
     assert.equal(existsSync(remediationPrompt), false);
-    const failed = runnerEvents(posts).find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_CHECK_FAILED");
+    const events = controlPlane.eventBatches.flat();
+    const failed = events.find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_CHECK_FAILED");
     assert.ok(failed);
     assert.match(String(failed.payload.message), /503/u);
-    assert.equal(runnerEvents(posts).some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"), false);
+    assert.equal(events.some(({ type }) => type === "TASK_OUTPUT_REMEDIATION_STARTED"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -442,29 +417,25 @@ test("remediation that still leaves output missing fails with provider evidence"
     const remediationResult = `${"x".repeat(5_000)}diagnostic final output`;
     await writeFile(agentBinary, remediatingAgent(remediationPrompt, [], remediationResult));
     await chmod(agentBinary, 0o755);
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
-        return new Response(JSON.stringify(outputStatus()), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
 
-    const finished = runnerEvents(posts).find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     assert.ok(finished);
     assert.equal(finished.payload.outputPersisted, false);
     const evidence = finished.payload.evidence as Record<string, unknown>;
     assert.equal(evidence.finalOutputTail, summarizeEvidence(remediationResult));
     assert.match(String(evidence.finalOutputTail), /^…\[\d+ earlier characters truncated\]/u);
     assert.match(String(evidence.finalOutputTail), /diagnostic final output$/u);
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.terminalSuccess, false);
-    assert.equal(completion?.body.failureClass, "PROTOCOL_ERROR");
-    assert.match(String(completion?.body.failureReason), /finished without persisting implementation output/u);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.match(String(completion?.failureReason), /finished without persisting implementation output/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -496,36 +467,33 @@ test("cancellation during remediation drains the resumed handle before ACK", asy
         return result;
       },
     };
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     let cancellationSent = false;
     let ackObservedAfterDrain = false;
+    let acknowledgementCount = 0;
     const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
-        return new Response(JSON.stringify(outputStatus()), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (path.endsWith("/heartbeat") && resumeReturning && !cancellationSent) {
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+      heartbeat: async () => {
+        if (!resumeReturning || cancellationSent) return { ok: true, cancellation: null };
         cancellationSent = true;
-        return new Response(JSON.stringify({
+        return {
           ok: false,
           cancellation: { requestId: "cancel-remediation", reason: "operator stop", requestedAt: new Date(0).toISOString() },
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (path.endsWith("/cancel/acknowledge")) ackObservedAfterDrain = resumedHandleDrained;
-      return new Response(JSON.stringify({ ok: true, cancellation: null }), {
-        status: 200, headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
+        };
+      },
+      acknowledgeCancellation: async () => {
+        acknowledgementCount += 1;
+        ackObservedAfterDrain = resumedHandleDrained;
+      },
+    });
 
-    await executeClaim(configured, requiredOutputClaim(remote), { adapter });
+    await executeClaim(configured, requiredOutputClaim(remote), { adapter, controlPlane: controlPlane.controlPlane });
 
     assert.equal(cancellationSent, true);
     assert.equal(resumedHandleDrained, true);
     assert.equal(ackObservedAfterDrain, true);
-    assert.equal(posts.filter((post) => post.path.endsWith("/cancel/acknowledge")).length, 1);
-    assert.equal(posts.some((post) => post.path.endsWith("/complete")), false);
+    assert.equal(acknowledgementCount, 1);
+    assert.equal(controlPlane.completions.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -544,32 +512,28 @@ test("remediation cannot change workspace HEAD or publish its changes", async ()
       "git -c user.name='AgentOS Test' -c user.email='runner@agentos.local' commit -m 'forbidden remediation edit' >/dev/null",
     ]));
     await chmod(agentBinary, 0o755);
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     let statusReads = 0;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => {
         statusReads += 1;
-        return new Response(JSON.stringify(outputStatus({ outputPersisted: statusReads >= 2 })), {
-          status: 200, headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+        return outputStatus({ outputPersisted: statusReads >= 2 }).task;
+      },
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), requiredOutputClaim(remote), {
+      controlPlane: controlPlane.controlPlane,
+    });
 
-    const finished = runnerEvents(posts).find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     assert.ok(finished);
     assert.equal(finished.payload.workspaceChanged, true);
     assert.notEqual(
       (finished.payload.workspaceBefore as Record<string, unknown>).headSha,
       (finished.payload.workspaceAfter as Record<string, unknown>).headSha,
     );
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.failureClass, "PROTOCOL_ERROR");
-    assert.equal(completion?.body.pushStatus, "NOT_REQUESTED");
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.failureClass, "PROTOCOL_ERROR");
+    assert.equal(completion?.pushStatus, "NOT_REQUESTED");
     assert.equal(git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master"), originalHead);
     assert.deepEqual(git(root, `--git-dir=${remote}`, "for-each-ref", "--format=%(refname)", "refs/heads").split("\n"), ["refs/heads/master"]);
   } finally {
@@ -585,31 +549,23 @@ test("the original Run budget continues through remediation", async () => {
     const agentBinary = join(root, "remediating-agent.sh");
     await writeFile(agentBinary, remediatingAgent(remediationPrompt, ["sleep 30"]));
     await chmod(agentBinary, 0o755);
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      if (path.endsWith("/status")) {
-        return new Response(JSON.stringify(outputStatus()), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(JSON.stringify({ ok: true, cancellation: null }), {
-        status: 200, headers: { "content-type": "application/json" },
-      });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble({
+      readSessionTaskOutputStatus: async () => outputStatus().task,
+    });
     const configured = { ...config(join(root, "workspaces"), agentBinary), heartbeatIntervalMs: 10 };
     const claimed = requiredOutputClaim(remote);
     claimed.run.maxDurationMin = 0.002;
 
-    await executeClaim(configured, claimed);
+    await executeClaim(configured, claimed, { controlPlane: controlPlane.controlPlane });
     // Let the heartbeat callback that performed the budget kill finish its
     // best-effort API report before afterEach restores the real global fetch.
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
 
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
-    assert.equal(completion?.body.terminalSuccess, false);
-    assert.equal(completion?.body.failureClass, "BUDGET_EXCEEDED");
-    assert.match(String(completion?.body.failureReason), /walltime budget exceeded/u);
-    const finished = runnerEvents(posts).find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.terminalSuccess, false);
+    assert.equal(completion?.failureClass, "BUDGET_EXCEEDED");
+    assert.match(String(completion?.failureReason), /walltime budget exceeded/u);
+    const finished = controlPlane.eventBatches.flat().find(({ type }) => type === "TASK_OUTPUT_REMEDIATION_FINISHED");
     assert.ok(finished);
     assert.equal(finished.payload.outputPersisted, false);
   } finally {
@@ -626,30 +582,28 @@ test("output the agent already produced survives a delivery-phase failure", asyn
     await writeFile(agentBinary, succeedingAgentThatSignalsExit(sentinel));
     await chmod(agentBinary, 0o755);
 
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const path = String(input);
-      posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    const controlPlane = createControlPlaneDouble({
+      appendEvents: async () => {
       // The event flush the runner performs once the agent is gone, on its way
       // into delivery. A dropped connection there is ordinary — and it throws
       // out of the try block, into the catch that reports the run.
-      if (path.endsWith("/events") && existsSync(sentinel)) throw new Error("connection reset by peer");
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+        if (existsSync(sentinel)) throw new Error("connection reset by peer");
+      },
+    });
 
-    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote));
+    await executeClaim(config(join(root, "workspaces"), agentBinary), claim(remote), { controlPlane: controlPlane.controlPlane });
 
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "the run must still be completed");
     // The failure is the runner's own, reported as such: this is the exception
     // path, not the ordinary one.
-    assert.equal(completion.body.terminationReason, RUNNER_EXCEPTION_REASON);
-    assert.match(String(completion.body.failureReason), /connection reset by peer/);
+    assert.equal(completion.terminationReason, RUNNER_EXCEPTION_REASON);
+    assert.match(String(completion.failureReason), /connection reset by peer/);
     // And the agent's work is still in it. This path used to rebuild its
     // evidence from the error message alone, so a run that had produced a real
     // answer reported nothing but the plumbing fault that followed it.
     assert.equal(
-      completion.body.output,
+      completion.output,
       "inverted the lock ordering in reconcile.ts and added the regression test",
     );
   } finally {
@@ -660,11 +614,7 @@ test("output the agent already produced survives a delivery-phase failure", asyn
 test("a run that fails before its agent exists sends no output at all", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-none-"));
   try {
-    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    const controlPlane = createControlPlaneDouble();
 
     // A remote no clone can reach: the run dies in PROVISION, before any agent
     // has run. The carried tail must stay null rather than report an empty
@@ -672,11 +622,12 @@ test("a run that fails before its agent exists sends no output at all", async ()
     await executeClaim(
       config(join(root, "workspaces"), join(root, "never-spawned.sh")),
       claim("/nonexistent/agentos-issue-114-no-such-repo.git"),
+      { controlPlane: controlPlane.controlPlane },
     );
 
-    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    const completion = controlPlane.completions.at(-1);
     assert.ok(completion, "a provisioning failure still completes the run");
-    assert.equal(completion.body.output ?? null, null);
+    assert.equal(completion.output ?? null, null);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

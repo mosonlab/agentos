@@ -4,17 +4,18 @@ import { createHash } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, test } from "node:test";
+import { test } from "node:test";
 
 import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
-import type { ClaimedTask } from "./api.js";
+import type { ClaimedTask, ControlPlane } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
   cliAvailabilityHeartbeatSchedule,
-  executeClaim,
-  reportCliAvailabilityHeartbeat,
-  runStartupPreflight,
+  executeClaim as executeClaimProduction,
+  reportCliAvailabilityHeartbeat as reportCliAvailabilityHeartbeatProduction,
+  runStartupPreflight as runStartupPreflightProduction,
 } from "./runner.js";
+import { createControlPlaneDouble, createRoutedControlPlaneDouble, type ControlPlaneFetchHandler } from "./test-control-plane.js";
 import {
   cleanupAgentScratch, provisionSessionConfig, writeSessionCredentials, type AgentScratch,
 } from "./workspace.js";
@@ -102,16 +103,29 @@ const mechanicalClaim: ClaimedTask = {
   regressionRepairHandoff: null,
 };
 
-const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
+let injectedControlPlane: ControlPlane = createControlPlaneDouble().controlPlane;
+const setControlPlane = (handler: ControlPlaneFetchHandler): void => {
+  injectedControlPlane = createRoutedControlPlaneDouble(handler).controlPlane;
+};
+const executeClaim = (
+  ...[runnerConfig, claim, dependencies = {}]: Parameters<typeof executeClaimProduction>
+) => executeClaimProduction(runnerConfig, claim, { ...dependencies, controlPlane: injectedControlPlane });
+const runStartupPreflight = (
+  runnerConfig: Parameters<typeof runStartupPreflightProduction>[0],
+  options: Parameters<typeof runStartupPreflightProduction>[1] = {},
+) => runStartupPreflightProduction(runnerConfig, { ...options, controlPlane: injectedControlPlane });
+const reportCliAvailabilityHeartbeat = (
+  runnerConfig: Parameters<typeof reportCliAvailabilityHeartbeatProduction>[0],
+  options: Parameters<typeof reportCliAvailabilityHeartbeatProduction>[1] = {},
+) => reportCliAvailabilityHeartbeatProduction(runnerConfig, { ...options, controlPlane: injectedControlPlane });
 
 test("a mechanical claim is refused before any adapter, workspace or child environment exists", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-mechanical-"));
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
+  });
 
   // Any adapter entry point reached at all is the failure this test exists to
   // catch: a merge credential must never be in a process that spawns a CLI.
@@ -134,10 +148,10 @@ test("a mechanical claim is refused before any adapter, workspace or child envir
 test("an ordinary claim is not short-circuited by the mechanical refusal", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "runner-agent-"));
   const calls: string[] = [];
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  setControlPlane(async (input: string | URL | Request) => {
     calls.push(String(input));
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
+  });
   // Over budget, so it exits on the very next guard — enough to prove the
   // mechanical branch did not swallow it, without provisioning anything.
   await executeClaim(config(workspaceRoot), {
@@ -301,10 +315,10 @@ test("Codex provision auth failure is PROVISION, retains its root, and never spa
     await chmod(binary, 0o755);
     const configured = codexOnly(join(root, "workspaces"), root, binary);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     let preflightCalls = 0;
     let startCalls = 0;
     const adapter: CliAdapter = {
@@ -346,10 +360,10 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
       sessionConfigBaselineRoot: join(root, "missing-baseline"),
     };
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     let preflightCalls = 0;
     let startCalls = 0;
     const adapter: CliAdapter = {
@@ -407,10 +421,10 @@ test("Codex rejects a run-as config-root symlink in PROVISION without copying ho
       runAsPrefix: [launcher],
     };
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     let preflightCalls = 0;
     let startCalls = 0;
     const adapter: CliAdapter = {
@@ -482,7 +496,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
     const maybeResolveActiveFailures = (): void => {
       if (heartbeatAttempts >= 2 && eventFailures >= 2) resolveActiveFailures();
     };
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
       posts.push({ path, body });
@@ -503,7 +517,7 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
         acceptedBatches.push((body.events as Array<{ seq: number }>).map((event) => event.seq));
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     const adapter: CliAdapter = {
       ...adapters.CLAUDE,
@@ -594,10 +608,10 @@ test("startup reports Claude and Pi blocked, keeps their telemetry, and passes C
     await writeFile(binary, codexStub(log));
     await chmod(binary, 0o755);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     const availability: Array<{ runner: string; available: boolean; resolvedPath: string | null }> = [];
     const results = await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary), {
@@ -652,10 +666,10 @@ test("startup blocks a Codex CLI that lacks the exec protocol AgentOS invokes", 
     ].join("\n"));
     await chmod(binary, 0o755);
     const posts: Array<{ body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (_input: string | URL | Request, init?: RequestInit) => {
       posts.push({ body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     assert.deepEqual(
       await runStartupPreflight(codexOnly(join(root, "workspaces"), root, binary)),
@@ -678,12 +692,12 @@ test("startup retries a temporarily unavailable API without rerunning CLI probes
     await chmod(binary, 0o755);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     let calls = 0;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       calls += 1;
       if (calls <= 2) throw new TypeError("fetch failed");
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const waits: number[] = [];
     const retries: Array<{ runner: string; attempt: number; attempts: number }> = [];
 
@@ -713,10 +727,10 @@ test("startup does not retry an API authentication refusal", async () => {
   try {
     const waits: number[] = [];
     let calls = 0;
-    globalThis.fetch = (async () => {
+    setControlPlane(async () => {
       calls += 1;
       return new Response(JSON.stringify({ code: "unauthorized" }), { status: 401, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await assert.rejects(
       runStartupPreflight(codexOnly(join(root, "workspaces"), root, join(root, "codex")), {
@@ -743,10 +757,10 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     const configured = codexOnly(join(root, "workspaces"), root, binary);
     // Startup first, exactly as `index.ts` orders it: the claim below runs on a
@@ -796,10 +810,10 @@ test("an outside worktree is reported without changing a successful run outcome"
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
@@ -843,10 +857,10 @@ test("Codex records success after reconnecting and reaching terminal completion"
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
@@ -883,10 +897,10 @@ test("Codex preserves reconnect evidence when the stream ends before terminal co
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
@@ -927,10 +941,10 @@ test("Codex preserves reconnect evidence when terminal completion is followed by
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim({ ...codexOnly(join(root, "workspaces"), root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
@@ -964,14 +978,14 @@ test("a failed first completion request restores and retains CODEX_HOME", async 
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
     let completionAttempts = 0;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const post = { path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> };
       posts.push(post);
       if (post.path.endsWith("/complete") && completionAttempts++ === 0) {
         return new Response(JSON.stringify({ error: "completion unavailable" }), { status: 503, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim(codexOnly(join(root, "workspaces"), root, binary), {
       ...mechanicalClaim,
@@ -1040,10 +1054,10 @@ test("session-config cleanup failure does not turn delivered work into a failed 
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim(codexOnly(join(root, "workspaces"), root, binary), {
       ...mechanicalClaim,
@@ -1087,10 +1101,10 @@ test("default failed-workspace retention still salvages and records the exact du
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = codexOnly(workspaces, root, binary);
 
     await executeClaim(configured, {
@@ -1131,7 +1145,7 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     let started = false;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       if (path.endsWith("/start")) started = true;
@@ -1139,7 +1153,7 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
         return new Response(JSON.stringify({ error: "Stale fencing token" }), { status: 409, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
 
     await executeClaim(configured, {
@@ -1180,7 +1194,7 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     let started = false;
     let cancellationSent = false;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       if (path.endsWith("/start")) started = true;
@@ -1197,7 +1211,7 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ ok: true, cancellation: null }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = { ...codexOnly(workspaces, root, binary), heartbeatIntervalMs: 20 };
 
     await executeClaim(configured, {
@@ -1238,7 +1252,7 @@ test("a provisioning cancellation is acknowledged only after provider launch is 
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     let credentialsWriting = false;
     let cancellationSent = false;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       if (credentialsWriting && path.endsWith("/heartbeat") && !cancellationSent) {
@@ -1249,7 +1263,7 @@ test("a provisioning cancellation is acknowledged only after provider launch is 
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ ok: true, cancellation: null }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = { ...codexOnly(workspaces, root, binary), heartbeatIntervalMs: 20 };
 
     await executeClaim(configured, {
@@ -1294,10 +1308,10 @@ test("a clean failed run records that there is nothing to salvage before cleanup
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
 
     await executeClaim(configured, {
@@ -1338,10 +1352,10 @@ test("failed-run salvage excludes worktrees created at the instructed in-workspa
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
@@ -1377,10 +1391,10 @@ test("a failed salvage keeps the workspace and reports cleanup failure", async (
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
 
     await executeClaim(configured, {
@@ -1424,10 +1438,10 @@ test("successful execution with failed delivery salvages before removing the wor
     ].join("\n"));
     await chmod(hook, 0o755);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = { ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 };
     await executeClaim(configured, {
       ...mechanicalClaim,
@@ -1481,10 +1495,10 @@ test("a pull-request failure after publication keeps the primary delivery eviden
     git(root, "config", "--file", join(root, ".gitconfig"), `url.${remote}.insteadOf`, githubRemote);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     const configured = {
       ...codexOnly(workspaces, root, binary),
       path: `${root}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -1535,10 +1549,10 @@ test("a successful pinned review never publishes its dirty detached checkout", a
     await seedCodexAuth(root);
     const pinned = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master");
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
       executionMode: "agent",
@@ -1577,10 +1591,10 @@ test("a failed pinned review reports failure without publishing its dirty detach
     await seedCodexAuth(root);
     const pinned = git(root, `--git-dir=${remote}`, "rev-parse", "refs/heads/master");
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
@@ -1627,7 +1641,7 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
     await chmod(hook, 0o755);
     const posts: Array<{ path: string; body: Record<string, any> }> = [];
     let started = false;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       posts.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, any> });
       if (path.endsWith("/start")) started = true;
@@ -1635,7 +1649,7 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
         return new Response(JSON.stringify({ error: "Stale fencing token" }), { status: 409, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
     await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
       ...mechanicalClaim,
       executionMode: "agent",
@@ -1682,10 +1696,10 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     const configured = codexOnly(join(root, "workspaces"), root, binary);
     assert.deepEqual(await runStartupPreflight(configured), { CLAUDE: false, CODEX: false, PI: false });
@@ -1734,10 +1748,10 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
     const remote = await seedRemote(root);
     await seedCodexAuth(root);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }) as typeof fetch;
+    });
 
     const configured = codexOnly(join(root, "workspaces"), root, join(root, "no-codex-here"));
     assert.deepEqual(await runStartupPreflight(configured), { CLAUDE: false, CODEX: false, PI: false });
@@ -1770,10 +1784,10 @@ test("an availability heartbeat reports a CLI recovery without restarting the ru
     const binary = join(root, "codex");
     const configured = codexOnly(join(root, "workspaces"), root, binary);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
       return new Response(null, { status: 200 });
-    }) as typeof fetch;
+    });
 
     await reportCliAvailabilityHeartbeat(configured);
     await writeFile(binary, "#!/bin/sh\nexit 0\n");
@@ -1808,7 +1822,7 @@ test("an availability heartbeat runs one requested preflight and reports its rec
     await chmod(binary, 0o755);
     const configured = codexOnly(join(root, "workspaces"), root, binary);
     const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
       const path = String(input);
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       posts.push({ path, body });
@@ -1817,7 +1831,7 @@ test("an availability heartbeat runs one requested preflight and reports its rec
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    });
 
     await reportCliAvailabilityHeartbeat(configured);
 
