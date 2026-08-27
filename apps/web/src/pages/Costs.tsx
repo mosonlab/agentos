@@ -23,46 +23,23 @@ export type CostsRange = typeof COSTS_RANGES[number];
  *  time is the one they meant. */
 const RANGE_KEY = "agentos.costs.days";
 
-/** Categorical slots defined in `styles.css`. Identity is assigned in fixed
- *  order by total spend and never cycled. */
+/** Hand-tuned categorical slots defined in `styles.css`. Further series use
+ *  deterministic golden-angle hues instead of folding or cycling identity. */
 export const SERIES_SLOTS = 6;
 
-/** The folded remainder. A `\u0000` prefix cannot collide with an agent title,
- *  which is what lets the chart carry the fold as an ordinary series. */
-export const OTHER_SERIES = "\u0000other";
-
 export const seriesColor = (rank: number): string =>
-  `var(--series-${rank < SERIES_SLOTS ? rank + 1 : "other"})`;
+  rank < SERIES_SLOTS
+    ? `var(--series-${rank + 1})`
+    : `hsl(${((rank * 137.45) % 360).toFixed(1)} 64% 43%)`;
 
 /**
  * The series the chart draws, in stacking order.
  *
- * Past six agents the tail is *summed into one* neutral series rather than
- * drawn as many bands that happen to share a colour — this project runs
- * nineteen agents in a ninety-day window, and thirteen identical grey bands
- * would claim an identity the colour cannot deliver. The by-agent table below
- * the chart is where every agent still appears by name.
+ * Every agent remains its own series. `byAgent` is already sorted by total
+ * spend, giving both stacking and deterministic styling one stable order.
  */
 export const chartSeries = (byAgent: CostsReport["byAgent"]): string[] =>
-  byAgent.length <= SERIES_SLOTS
-    ? byAgent.map((entry) => entry.agent)
-    : [...byAgent.slice(0, SERIES_SLOTS).map((entry) => entry.agent), OTHER_SERIES];
-
-/** Re-buckets each day against the folded series list. */
-export const foldDaily = (daily: CostsReport["daily"], series: readonly string[]): CostsReport["daily"] => {
-  if (!series.includes(OTHER_SERIES)) return daily;
-  const named = new Set(series);
-  return daily.map((bucket) => {
-    const folded: Record<string, string> = {};
-    let other = 0;
-    for (const [agent, usd] of Object.entries(bucket.byAgent)) {
-      if (named.has(agent)) folded[agent] = usd;
-      else other += Number(usd);
-    }
-    if (other > 0) folded[OTHER_SERIES] = String(other);
-    return { date: bucket.date, byAgent: folded };
-  });
-};
+  byAgent.map((entry) => entry.agent);
 
 /* ------------------------------------------------------------------- chart */
 
@@ -121,7 +98,8 @@ export const chartSegments = (
       const full = (entry.usd / max) * PLOT_HEIGHT;
       // The gap comes out of the segment, never out of the value it encodes: a
       // sliver thinner than the gap keeps its full height instead of vanishing.
-      const height = full > SEGMENT_GAP * 2 ? full - SEGMENT_GAP : full;
+      const hasSegmentAbove = position < stacked.length - 1;
+      const height = hasSegmentAbove && full > SEGMENT_GAP * 2 ? full - SEGMENT_GAP : full;
       segments.push({
         key: `${bucket.date}:${entry.agent}`,
         agent: entry.agent,
@@ -192,7 +170,7 @@ export const DailySpendChart = ({ daily, order, colors }: {
       {segments.map((segment) => (
         <path key={segment.key} d={segmentPath(segment)} fill={colors(segment.agent)}>
           <title>{t("costs.chart.tooltip", {
-            agent: segment.agent === OTHER_SERIES ? t("costs.chart.otherShort") : segment.agent,
+            agent: segment.agent,
             date: segment.date,
             amount: usageMoney(segment.usd),
           })}</title>
@@ -214,19 +192,16 @@ export const DailySpendChart = ({ daily, order, colors }: {
   );
 };
 
-export const ChartLegend = ({ order, colors, folded }: {
+export const ChartLegend = ({ order, colors }: {
   order: readonly string[];
   colors: (agent: string) => string;
-  /** How many agents the neutral series stands for. */
-  folded: number;
 }): ReactNode => {
-  const t = useT();
   return (
     <div className={`${ROW_WRAP} mt-[12px]`}>
       {order.map((agent) => (
         <span key={agent} className="inline-flex items-center gap-[6px] text-[11.5px] text-muted-foreground">
           <span className="size-[9px] rounded-[2px]" style={{ background: colors(agent) }} aria-hidden="true" />
-          {agent === OTHER_SERIES ? t("costs.chart.other", { n: folded }) : agent}
+          {agent}
         </span>
       ))}
     </div>
@@ -260,8 +235,7 @@ export const CostsPage = (): ReactNode => {
     const assigned = new Map(order.map((agent, rank) => [agent, seriesColor(rank)]));
     return (agent: string): string => assigned.get(agent) ?? "var(--series-other)";
   }, [order]);
-  const daily = useMemo(() => foldDaily(report?.daily ?? [], order), [report, order]);
-  const folded = (report?.byAgent.length ?? 0) - order.filter((agent) => agent !== OTHER_SERIES).length;
+  const daily = report?.daily ?? [];
 
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
 
@@ -297,7 +271,10 @@ export const CostsPage = (): ReactNode => {
             <div className={METRICS}>
               <Metric label={t("costs.metric.total")} value={usageMoney(report.totalUsd)} />
               <Metric label={t("costs.metric.runs")} value={report.runCount} />
-              <Metric label={t("costs.metric.avg")} value={usageMoney(report.avgUsd)} />
+              <Metric
+                label={t("costs.metric.avg")}
+                value={report.runCount === report.costUnavailableRuns ? "—" : usageMoney(report.avgUsd)}
+              />
             </div>
             {/* Neither number is decoration. An estimated share says part of the
                 total is the control plane's own pricing, and an unavailable
@@ -314,7 +291,7 @@ export const CostsPage = (): ReactNode => {
 
             <Card title={t("costs.chart.title")}>
               <DailySpendChart daily={daily} order={order} colors={colors} />
-              {order.length > 1 ? <ChartLegend order={order} colors={colors} folded={folded} /> : null}
+              {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
             </Card>
 
             <Card title={t("costs.byAgent.title")} flush>
@@ -338,10 +315,17 @@ export const CostsPage = (): ReactNode => {
                                 <span className="size-[9px] rounded-[2px]" style={{ background: colors(entry.agent) }} aria-hidden="true" />
                                 {entry.agent}
                               </span>
+                              {entry.costUnavailableRuns > 0
+                                ? <span className={TABLE_SUB}>{t("costs.byAgent.unavailable", { n: entry.costUnavailableRuns })}</span>
+                                : null}
                             </TableCell>
-                            <TableCell className={TABLE_TIGHT}>{usageMoney(entry.usd)}</TableCell>
+                            <TableCell className={TABLE_TIGHT}>
+                              {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.usd)}
+                            </TableCell>
                             <TableCell className={TABLE_TIGHT}>{entry.runs}</TableCell>
-                            <TableCell className={TABLE_TIGHT}>{usageMoney(entry.avgUsd)}</TableCell>
+                            <TableCell className={TABLE_TIGHT}>
+                              {entry.runs === entry.costUnavailableRuns ? "—" : usageMoney(entry.avgUsd)}
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>

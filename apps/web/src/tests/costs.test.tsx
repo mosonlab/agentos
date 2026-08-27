@@ -6,8 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { installDom, reactDom } from "./dom-harness";
 
 import {
-  ChartLegend, DailySpendChart, OTHER_SERIES, SERIES_SLOTS, axisDates, chartSegments, chartSeries,
-  foldDaily, seriesColor,
+  ChartLegend, DailySpendChart, SERIES_SLOTS, axisDates, chartSegments, chartSeries, seriesColor,
 } from "../pages/Costs";
 import type { CostsReport } from "../lib/types";
 
@@ -24,10 +23,8 @@ test("series slots are assigned in fixed order and never cycled", () => {
   const slots = Array.from({ length: SERIES_SLOTS }, (_, rank) => seriesColor(rank));
   assert.deepEqual(slots, ["var(--series-1)", "var(--series-2)", "var(--series-3)",
     "var(--series-4)", "var(--series-5)", "var(--series-6)"]);
-  // The seventh agent folds into the neutral rather than reusing slot 1, which
-  // would read as two agents being the same one.
-  assert.equal(seriesColor(SERIES_SLOTS), "var(--series-other)");
-  assert.equal(seriesColor(SERIES_SLOTS + 40), "var(--series-other)");
+  assert.equal(seriesColor(SERIES_SLOTS), "hsl(104.7 64% 43%)");
+  assert.notEqual(seriesColor(SERIES_SLOTS), seriesColor(SERIES_SLOTS + 40));
   assert.equal(new Set(slots).size, SERIES_SLOTS);
 });
 
@@ -50,9 +47,7 @@ test("a full-height day reaches the top of the plot and rests on the baseline", 
   const [only] = chartSegments([bucket("2026-08-26", { Dev: "5" })], ["Dev"], 5);
   assert.ok(only);
   const bottom = only.y + only.height;
-  // The single segment is the top of its column, so it gives up the gap; the
-  // baseline it is measured from is where the stack ends, not where the fill does.
-  assert.ok(only.y < 20, `top ${only.y}`);
+  assert.equal(only.y, 12);
   assert.equal(bottom, 216);
 });
 
@@ -109,61 +104,39 @@ test("a window with no spend says so instead of drawing an empty box", () => {
 
 test("the legend names every series, so identity is never colour alone", () => {
   const order = ["Dev", "Reviewer", "Integrator"];
-  const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} folded={0} />);
+  const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} />);
   for (const agent of order) assert.ok(markup.includes(agent), agent);
   assert.equal(markup.match(/var\(--series-\d\)/g)?.length, 3);
 });
 
-/* -------------------------------------------------------------------- fold */
+/* ---------------------------------------------------------- all agents */
 
 const agents = (count: number): CostsReport["byAgent"] =>
   Array.from({ length: count }, (_, index) => ({
-    agent: `Agent ${index}`, usd: String(count - index), runs: 1, avgUsd: String(count - index),
+    agent: `Agent ${index}`, usd: String(count - index), runs: 1, costUnavailableRuns: 0,
+    avgUsd: String(count - index),
   }));
 
 test("six agents or fewer are each their own series", () => {
   const series = chartSeries(agents(SERIES_SLOTS));
   assert.equal(series.length, SERIES_SLOTS);
-  assert.ok(!series.includes(OTHER_SERIES));
 });
 
-test("past six agents the tail becomes one folded series, not repeated colours", () => {
+test("past six agents every agent remains an individual, distinguishable series", () => {
   const series = chartSeries(agents(19));
-  assert.equal(series.length, SERIES_SLOTS + 1);
-  assert.equal(series.at(-1), OTHER_SERIES);
-  // The named six are the six biggest spenders, in rank order.
-  assert.deepEqual(series.slice(0, SERIES_SLOTS), agents(19).slice(0, SERIES_SLOTS).map((entry) => entry.agent));
-  // Nothing beyond the fold reuses a numbered slot.
-  assert.equal(new Set(series.map((_, rank) => seriesColor(rank))).size, SERIES_SLOTS + 1);
+  assert.deepEqual(series, agents(19).map((entry) => entry.agent));
+  assert.equal(new Set(series.map((_, rank) => seriesColor(rank))).size, 19);
 });
 
-test("folding sums the tail into one amount per day rather than dropping it", () => {
+test("a day with more than six agents retains every segment and its exact total", () => {
   const daily = [bucket("2026-08-26", {
     "Agent 0": "6", "Agent 1": "5", "Agent 2": "4", "Agent 3": "3",
     "Agent 4": "2", "Agent 5": "1", "Agent 6": "0.5", "Agent 7": "0.25",
   })];
   const series = chartSeries(agents(8));
-  const folded = foldDaily(daily, series);
-  assert.equal(folded[0]?.byAgent[OTHER_SERIES], "0.75");
-  assert.equal(folded[0]?.byAgent["Agent 0"], "6");
-  assert.ok(!("Agent 6" in (folded[0]?.byAgent ?? {})));
-  // The day's total survives the fold exactly.
-  const sum = (entry: Record<string, string>): number =>
-    Object.values(entry).reduce((total, usd) => total + Number(usd), 0);
-  assert.equal(sum(folded[0]?.byAgent ?? {}), sum(daily[0]?.byAgent ?? {}));
-});
-
-test("an unfolded window is passed through untouched", () => {
-  const daily = [bucket("2026-08-26", { Dev: "2" })];
-  assert.equal(foldDaily(daily, ["Dev"]), daily);
-});
-
-test("the folded series is labelled with how many agents it stands for", () => {
-  const order = [...agents(SERIES_SLOTS).map((entry) => entry.agent), OTHER_SERIES];
-  const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} folded={13} />);
-  assert.ok(markup.includes("Other (13 agents)"));
-  // The sentinel itself is never shown to a reader.
-  assert.ok(!markup.includes(OTHER_SERIES));
+  const segments = chartSegments(daily, series, 21.75);
+  assert.deepEqual(segments.map((entry) => entry.agent), series);
+  assert.equal(segments.reduce((total, entry) => total + entry.usd, 0), 21.75);
 });
 
 /* ---------------------------------------------------------------- the page */
@@ -178,8 +151,8 @@ const report = (overrides: Partial<CostsReport> = {}): CostsReport => ({
   avgUsd: "4.653387",
   daily: [bucket("2026-08-26", { "Senior Developer": "600", Planner: "45.87" })],
   byAgent: [
-    { agent: "Senior Developer", usd: "1800", runs: 400, avgUsd: "4.5" },
-    { agent: "Planner", usd: "689.211742", runs: 288, avgUsd: "2.393096" },
+    { agent: "Senior Developer", usd: "1800", runs: 400, costUnavailableRuns: 100, avgUsd: "6" },
+    { agent: "Planner", usd: "689.211742", runs: 288, costUnavailableRuns: 53, avgUsd: "2.932816" },
   ],
   topRuns: [{
     runId: "run-1", taskName: "Costs dashboard page: Implementation", agent: "Senior Developer",
@@ -230,7 +203,7 @@ test("the page reads the default window and shows the three tiles", async () => 
   assert.match(text, /\$2489\.21/);
   assert.match(text, /Runs/);
   assert.match(text, /688/);
-  assert.match(text, /Avg per run/);
+  assert.match(text, /Avg per priced run/);
   assert.match(text, /\$4\.65/);
 });
 
@@ -255,4 +228,15 @@ test("both tables render, and an estimated run cost is labelled as one", async (
   assert.match(text, /Top runs/);
   assert.match(text, /Costs dashboard page: Implementation/);
   assert.match(text, /\$36\.50 est\./);
+});
+
+test("an agent with no priced runs shows unavailable cost instead of zero spend", async () => {
+  const { text } = await readPage(report({
+    totalUsd: "0", estimatedUsd: "0", runCount: 3, costUnavailableRuns: 3, avgUsd: "0",
+    daily: [], topRuns: [],
+    byAgent: [{ agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0" }],
+  }));
+  assert.match(text, /codex/);
+  assert.match(text, /3 costs unavailable/);
+  assert.match(text, /codex3 costs unavailable—3—/);
 });

@@ -1,30 +1,24 @@
-import { Prisma, type PrismaClient, sessionUsageCost, type UsageCost } from "@agentos/db";
+import { Prisma, type PrismaClient, RunnerKind, sessionUsageCost, type UsageCost } from "@agentos/db";
 
 import { terminalRunStatuses } from "./workspace-reclaim.js";
 
 /**
  * Spend aggregation for the Costs dashboard.
  *
- * WHY NOT `groupBy`. Prisma's `groupBy` can only sum a stored column, and
- * `Session.costUsd` is not a complete record of spend: it is NULL for every
- * codex session, because that CLI reports usage without an amount. Summing the
- * column would silently read those runs as zero. Cost per session is therefore
- * derived row by row through `sessionUsageCost` (packages/db/src/cost.ts), the
- * repository's one source of truth for "what did this session cost" — provider
- * amount when it exists, a repository-priced estimate when the token columns
- * are complete, and *nothing at all* when neither holds. A run in that last
- * group is counted in `costUnavailableRuns` and left out of every total.
+ * Prisma `groupBy` owns the settled run counts by stable agent id. Amounts still
+ * require the detailed rows because `Session.costUsd` is NULL for every codex
+ * session, and `groupBy` cannot combine stored provider amounts with estimates
+ * derived from token columns. `aggregateCosts` reconciles the grouped counts
+ * with those detail rows before returning either result.
  *
  * TOKEN NORMALIZATION. `Session.totalTokens` is never read here, and must not
  * be: its meaning differs per runner. A claude session stores
  * `inputTokens + outputTokens` with `cachedInputTokens` excluded, while a codex
  * session stores `inputTokens` with cached input already counted inside it, so
  * the same column means two different things and summing it across runners is
- * meaningless. The normalized basis both runners agree on is the raw triple
- * (`inputTokens`, `cachedInputTokens`, `outputTokens`), which is what
- * `sessionUsageCost` prices: it charges `inputTokens - cachedInputTokens` at the
- * uncached rate and `cachedInputTokens` at the cached one, and refuses to price
- * a row where `cachedInputTokens > inputTokens` rather than invent a number.
+ * meaningless. `runCost` converts Claude/PI's disjoint input and cache counts
+ * to the cached-inclusive shape expected by `sessionUsageCost`; Codex is already
+ * in that shape. Rows missing any pricing input remain explicitly unavailable.
  */
 
 export const COSTS_DEFAULT_DAYS = 30;
@@ -40,10 +34,11 @@ const AMOUNT_DECIMALS = 6;
 
 export type CostsRunRow = {
   id: string;
+  runner: RunnerKind;
   model: string;
   subagentModel: string | null;
   startedAt: Date;
-  agent: { title: string };
+  agent: { id: string; name: string };
   task: { name: string } | null;
   session: {
     costUsd: Prisma.Decimal | null;
@@ -54,7 +49,13 @@ export type CostsRunRow = {
 };
 
 export type CostsDailyBucket = { date: string; byAgent: Record<string, string> };
-export type CostsAgentTotal = { agent: string; usd: string; runs: number; avgUsd: string };
+export type CostsAgentTotal = {
+  agent: string;
+  usd: string;
+  runs: number;
+  costUnavailableRuns: number;
+  avgUsd: string;
+};
 export type CostsTopRun = {
   runId: string;
   taskName: string | null;
@@ -67,8 +68,8 @@ export type CostsTopRun = {
 
 export type CostsReport = {
   days: number;
-  /** Inclusive lower bound of the window, as an ISO instant, so a reader can
-   *  reconcile the totals with a `WHERE "startedAt" >= …` sum by hand. */
+  /** Inclusive lower bound of the whole-day window, as an ISO instant. Together
+   *  with `days`, it gives a reader both bounds needed for reconciliation. */
   since: string;
   totalUsd: string;
   /** The part of `totalUsd` that came from repository pricing rather than from
@@ -101,6 +102,11 @@ export const costsWindowStart = (now: Date, days: number): Date => {
   return start;
 };
 
+/** Exclusive upper bound paired with `costsWindowStart`: runner clock skew or
+ *  a row committed across UTC midnight cannot escape the chart's buckets. */
+export const costsWindowEnd = (now: Date): Date =>
+  new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+
 /** Every UTC day in the window, oldest first, including the ones nothing ran
  *  on: a chart that skips empty days misreports the shape of the spend. */
 const windowDays = (since: Date, days: number): string[] => {
@@ -113,36 +119,67 @@ const windowDays = (since: Date, days: number): string[] => {
   return dates;
 };
 
-const runCost = (run: CostsRunRow): UsageCost | null =>
-  run.session === null
-    ? null
-    // A run that dispatched native children reports one aggregate token total
-    // for a mix of models. `mixedModels` keeps those tokens visible while
-    // refusing to price them at the root model's rate.
-    : sessionUsageCost(run.model, run.session, { mixedModels: run.subagentModel !== null });
+const runCost = (run: CostsRunRow): UsageCost | null => {
+  if (run.session === null) return null;
+  const session = run.runner === RunnerKind.CODEX || run.session.costUsd !== null
+    ? run.session
+    : {
+        ...run.session,
+        // Claude and PI store uncached input disjoint from cached input, while
+        // `sessionUsageCost` accepts Codex's cached-inclusive input shape.
+        inputTokens: run.session.inputTokens === null || run.session.cachedInputTokens === null
+          ? run.session.inputTokens
+          : run.session.inputTokens + run.session.cachedInputTokens,
+      };
+  // A run that dispatched native children reports one aggregate token total
+  // for a mix of models. `mixedModels` keeps those tokens visible while
+  // refusing to price them at the root model's rate.
+  return sessionUsageCost(run.model, session, { mixedModels: run.subagentModel !== null });
+};
 
-export const aggregateCosts = (runs: readonly CostsRunRow[], since: Date, days: number): CostsReport => {
+export type CostsRunGroup = { agentId: string; _count: { _all: number } };
+
+export const aggregateCosts = (
+  runs: readonly CostsRunRow[],
+  groupedRuns: readonly CostsRunGroup[],
+  since: Date,
+  days: number,
+): CostsReport => {
   const daily = new Map<string, Map<string, Prisma.Decimal>>(
     windowDays(since, days).map((date) => [date, new Map<string, Prisma.Decimal>()]),
   );
-  const perAgent = new Map<string, { usd: Prisma.Decimal; runs: number }>();
+  const groupedCountByAgent = new Map(groupedRuns.map((group) => [group.agentId, group._count._all]));
+  const observedCountByAgent = new Map<string, number>();
+  const perAgent = new Map<string, {
+    agent: string;
+    usd: Prisma.Decimal;
+    pricedRuns: number;
+    costUnavailableRuns: number;
+  }>();
   const priced: Array<{ run: CostsRunRow; cost: UsageCost & { costUsd: Prisma.Decimal } }> = [];
   let total = ZERO;
   let estimated = ZERO;
   let unavailable = 0;
 
   for (const run of runs) {
-    const agent = run.agent.title;
+    const agentId = run.agent.id;
+    const agent = run.agent.name;
+    observedCountByAgent.set(agentId, (observedCountByAgent.get(agentId) ?? 0) + 1);
     const cost = runCost(run);
-    // `perAgent.runs` counts what the agent ran, priced or not, so the by-agent
-    // table's run column reconciles with the Runs tile.
-    const held = perAgent.get(agent) ?? { usd: ZERO, runs: 0 };
+    const agentTotal = perAgent.get(agentId) ?? {
+      agent, usd: ZERO, pricedRuns: 0, costUnavailableRuns: 0,
+    };
     const usd = cost?.costUsd ?? null;
-    perAgent.set(agent, { usd: usd === null ? held.usd : held.usd.plus(usd), runs: held.runs + 1 });
     if (cost === null || usd === null) {
       unavailable += 1;
+      perAgent.set(agentId, { ...agentTotal, costUnavailableRuns: agentTotal.costUnavailableRuns + 1 });
       continue;
     }
+    perAgent.set(agentId, {
+      ...agentTotal,
+      usd: agentTotal.usd.plus(usd),
+      pricedRuns: agentTotal.pricedRuns + 1,
+    });
     total = total.plus(usd);
     if (cost.estimated) estimated = estimated.plus(usd);
     const bucket = daily.get(utcDay(run.startedAt));
@@ -153,13 +190,22 @@ export const aggregateCosts = (runs: readonly CostsRunRow[], since: Date, days: 
     priced.push({ run, cost: { ...cost, costUsd: usd } });
   }
 
-  const pricedRuns = runs.length - unavailable;
+  for (const [agentId, count] of observedCountByAgent) {
+    if (groupedCountByAgent.get(agentId) !== count) {
+      throw new Error(`Grouped and detailed cost run counts disagree for agent ${agentId}`);
+    }
+  }
+  if (groupedCountByAgent.size !== observedCountByAgent.size) {
+    throw new Error("Grouped and detailed cost run agents disagree");
+  }
+  const runCount = groupedRuns.reduce((sum, group) => sum + group._count._all, 0);
+  const pricedRuns = runCount - unavailable;
   return {
     days,
     since: since.toISOString(),
     totalUsd: amount(total),
     estimatedUsd: amount(estimated),
-    runCount: runs.length,
+    runCount,
     costUnavailableRuns: unavailable,
     avgUsd: amount(pricedRuns === 0 ? ZERO : total.dividedBy(pricedRuns)),
     daily: [...daily].map(([date, byAgent]) => ({
@@ -167,11 +213,12 @@ export const aggregateCosts = (runs: readonly CostsRunRow[], since: Date, days: 
       byAgent: Object.fromEntries([...byAgent].map(([agent, usd]) => [agent, amount(usd)])),
     })),
     byAgent: [...perAgent]
-      .map(([agent, held]) => ({
-        agent,
-        usd: amount(held.usd),
-        runs: held.runs,
-        avgUsd: amount(held.runs === 0 ? ZERO : held.usd.dividedBy(held.runs)),
+      .map(([agentId, agentTotal]) => ({
+        agent: agentTotal.agent,
+        usd: amount(agentTotal.usd),
+        runs: groupedCountByAgent.get(agentId) ?? 0,
+        costUnavailableRuns: agentTotal.costUnavailableRuns,
+        avgUsd: amount(agentTotal.pricedRuns === 0 ? ZERO : agentTotal.usd.dividedBy(agentTotal.pricedRuns)),
       }))
       .sort((left, right) => Number(right.usd) - Number(left.usd) || left.agent.localeCompare(right.agent)),
     topRuns: priced
@@ -181,7 +228,7 @@ export const aggregateCosts = (runs: readonly CostsRunRow[], since: Date, days: 
       .map(({ run, cost }) => ({
         runId: run.id,
         taskName: run.task?.name ?? null,
-        agent: run.agent.title,
+        agent: run.agent.name,
         model: run.model,
         usd: amount(cost.costUsd),
         estimated: cost.estimated,
@@ -197,30 +244,46 @@ export const readProjectCosts = async (
   now: Date = new Date(),
 ): Promise<CostsReport> => {
   const since = costsWindowStart(now, days);
-  const runs = await db.run.findMany({
-    where: {
-      projectId,
-      // Settled runs only: an in-flight run's usage is still being written, so
-      // including it would make the same window answer differently each poll.
-      status: { in: [...terminalRunStatuses] },
-      startedAt: { gte: since },
-    },
-    select: {
-      id: true,
-      model: true,
-      subagentModel: true,
-      startedAt: true,
-      agent: { select: { title: true } },
-      task: { select: { name: true } },
-      // Deliberately not `totalTokens` — see the module comment.
-      session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true } },
-    },
-    orderBy: { startedAt: "asc" },
-  });
-  return aggregateCosts(
-    // `startedAt` is non-null by the filter above; the select cannot say so.
-    runs.map((run) => ({ ...run, startedAt: run.startedAt as Date })),
-    since,
-    days,
-  );
+  const until = costsWindowEnd(now);
+  const where: Prisma.RunWhereInput = {
+    projectId,
+    // Settled runs only: an in-flight run's usage is still being written, so
+    // including it would make the same window answer differently each poll.
+    status: { in: [...terminalRunStatuses] },
+    startedAt: { gte: since, lt: until },
+  };
+  // Count aggregation stays in PostgreSQL. The detail query deliberately reads
+  // the raw runner plus token triple: Codex input includes cached input; Claude
+  // and PI input excludes it, and `runCost` normalizes that difference before
+  // pricing. Neither query reads or sums runner-dependent `totalTokens`.
+  return db.$transaction(async (tx) => {
+    const groupedRuns = await tx.run.groupBy({
+      by: ["agentId"],
+      where,
+      orderBy: { agentId: "asc" },
+      _count: { _all: true },
+    });
+    const runs = await tx.run.findMany({
+      where,
+      select: {
+        id: true,
+        runner: true,
+        model: true,
+        subagentModel: true,
+        startedAt: true,
+        agent: { select: { id: true, name: true } },
+        task: { select: { name: true } },
+        // Deliberately not `totalTokens` — see the module comment.
+        session: { select: { costUsd: true, inputTokens: true, cachedInputTokens: true, outputTokens: true } },
+      },
+      orderBy: { startedAt: "asc" },
+    });
+    return aggregateCosts(
+      // `startedAt` is non-null by the filter above; the select cannot say so.
+      runs.map((run) => ({ ...run, startedAt: run.startedAt as Date })),
+      groupedRuns,
+      since,
+      days,
+    );
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 };

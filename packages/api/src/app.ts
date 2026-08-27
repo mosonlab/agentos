@@ -1339,10 +1339,12 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
 
   app.get("/projects/:projectId/costs", async (context) => {
     const raw = context.req.query("days");
-    const days = raw === undefined ? COSTS_DEFAULT_DAYS : Number.parseInt(raw, 10);
+    const days = raw === undefined
+      ? COSTS_DEFAULT_DAYS
+      : COSTS_RANGE_DAYS.find((candidate) => raw === String(candidate));
     // Refused rather than clamped: a window the caller did not ask for would be
     // read as the one they did, and the totals would be quietly wrong.
-    if (!COSTS_RANGE_DAYS.includes(days)) {
+    if (days === undefined) {
       return context.json({ error: `days must be one of ${COSTS_RANGE_DAYS.join(", ")}` }, 400);
     }
     return context.json(await readProjectCosts(db, id.parse(context.req.param("projectId")), days));

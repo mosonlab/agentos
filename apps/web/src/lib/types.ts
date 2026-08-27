@@ -408,7 +408,13 @@ export type CostsReport = {
   costUnavailableRuns: number;
   avgUsd: string;
   daily: Array<{ date: string; byAgent: Record<string, string> }>;
-  byAgent: Array<{ agent: string; usd: string; runs: number; avgUsd: string }>;
+  byAgent: Array<{
+    agent: string;
+    usd: string;
+    runs: number;
+    costUnavailableRuns: number;
+    avgUsd: string;
+  }>;
   topRuns: Array<{
     runId: string;
     taskName: string | null;

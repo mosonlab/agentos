@@ -11,12 +11,11 @@ import { resetTestDb, setupTestDb } from "./testdb.js";
 /**
  * `GET /projects/:projectId/costs` against a real PostgreSQL.
  *
- * The point of the file is the reconciliation test: the route's `totalUsd` is
- * compared with a raw SQL sum over the very same window, which is the acceptance
- * criterion for the dashboard. The other tests pin the behaviours the aggregate
- * cannot express in one number — that an unpriced codex session is counted apart
- * instead of read as zero, that an estimate is labelled, and that runs outside
- * the window or still in flight are not in the answer.
+ * The point of the file is the reconciliation test: provider-reported spend is
+ * compared with a raw SQL sum over the same bounded window, while the estimated
+ * share is pinned separately. The other tests cover behaviours that one total
+ * cannot express — runner-specific token normalization, unavailable costs,
+ * stable agent identity, exact range parsing, and UTC window boundaries.
  */
 
 let db: PrismaClient;
@@ -59,7 +58,7 @@ const seedProject = async (label: string) => {
 type RunSpec = {
   agentId: string;
   model: string;
-  runner: "CLAUDE" | "CODEX";
+  runner: "CLAUDE" | "CODEX" | "PI";
   startedAt: Date;
   status?: "SUCCEEDED" | "FAILED" | "RUNNING";
   subagentModel?: true;
@@ -116,6 +115,11 @@ test("totalUsd reconciles with a raw SQL sum over the same window", async () => 
     agentId: reviewer.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: daysAgo(3),
     session: { costUsd: "0.7500" },
   });
+  await seedRun(project.id, repo.id, "Estimated in window", {
+    agentId: dev.id, model: "openai-codex/gpt-5.6-luna", runner: "CODEX", startedAt: daysAgo(2),
+    // 900k uncached + 100k cached input and 500k output = $0.782.
+    session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
+  });
   // Outside the 7-day window, and so outside both the route and the SQL sum.
   await seedRun(project.id, repo.id, "Old", {
     agentId: dev.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: daysAgo(40),
@@ -137,13 +141,14 @@ test("totalUsd reconciles with a raw SQL sum over the same window", async () => 
     WHERE r."projectId" = ${project.id}
       AND r.status IN ('succeeded', 'failed', 'timed-out', 'cancelled', 'lost')
       AND r."startedAt" >= ${new Date(body.since)}
+      AND r."startedAt" < ${new Date(new Date(body.since).getTime() + 7 * 24 * 60 * 60 * 1000)}
   `;
-  assert.equal(Number(body.totalUsd), Number(manual?.sum));
-  assert.equal(Number(body.totalUsd), 2);
-  assert.equal(body.runCount, 2);
+  assert.equal(Number(body.totalUsd) - Number(body.estimatedUsd), Number(manual?.sum));
+  assert.equal(Number(body.totalUsd), 2.782);
+  assert.equal(body.runCount, 3);
   assert.equal(body.costUnavailableRuns, 0);
-  assert.equal(Number(body.avgUsd), 1);
-  assert.equal(Number(body.estimatedUsd), 0);
+  assert.equal(Number(body.avgUsd), 0.927333);
+  assert.equal(Number(body.estimatedUsd), 0.782);
 });
 
 test("a codex session without a reported amount is counted apart, never as zero", async () => {
@@ -179,7 +184,9 @@ test("a codex session without a reported amount is counted apart, never as zero"
   assert.equal(Number(body.avgUsd), 2);
   assert.equal(body.byAgent.length, 1);
   assert.equal(body.byAgent[0].runs, 4);
+  assert.equal(body.byAgent[0].costUnavailableRuns, 3);
   assert.equal(Number(body.byAgent[0].usd), 2);
+  assert.equal(Number(body.byAgent[0].avgUsd), 2);
 });
 
 test("a complete codex token set is priced and labelled as an estimate", async () => {
@@ -199,8 +206,66 @@ test("a complete codex token set is priced and labelled as an estimate", async (
   assert.equal(body.topRuns.length, 1);
   assert.equal(body.topRuns[0].estimated, true);
   assert.equal(body.topRuns[0].taskName, "Estimated");
-  assert.equal(body.topRuns[0].agent, "Frontend Dev");
+  assert.equal(body.topRuns[0].agent, "dev");
   assert.equal(body.topRuns[0].model, "openai-codex/gpt-5.6-luna");
+});
+
+test("token estimates normalize cached input according to each runner", async () => {
+  const { project, repo, agent } = await seedProject("costs-runner-normalization");
+  const codex = await agent("codex", "Implementer");
+  const pi = await agent("pi", "PI Implementer");
+  await seedRun(project.id, repo.id, "Codex estimated", {
+    agentId: codex.id, model: "openai-codex/gpt-5.6-luna", runner: "CODEX", startedAt: daysAgo(1),
+    // Codex input includes its cached subset.
+    session: { costUsd: null, inputTokens: 1_000_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
+  });
+  await seedRun(project.id, repo.id, "PI estimated", {
+    agentId: pi.id, model: "openai-codex/gpt-5.6-luna", runner: "PI", startedAt: daysAgo(1),
+    // PI input is already uncached and cache reads are disjoint.
+    session: { costUsd: null, inputTokens: 900_000, cachedInputTokens: 100_000, outputTokens: 500_000 },
+  });
+
+  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  assert.equal(Number(body.totalUsd), 1.564);
+  assert.equal(Number(body.estimatedUsd), 1.564);
+  assert.deepEqual(body.byAgent.map((entry: { agent: string; usd: string }) => [entry.agent, Number(entry.usd)]), [
+    ["codex", 0.782],
+    ["pi", 0.782],
+  ]);
+});
+
+test("agents with the same title remain distinct by their unique names", async () => {
+  const { project, repo, agent } = await seedProject("costs-agent-identity");
+  const first = await agent("frontend-dev", "Developer");
+  const second = await agent("backend-dev", "Developer");
+  await seedRun(project.id, repo.id, "Frontend", {
+    agentId: first.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: daysAgo(1),
+    session: { costUsd: "1.0000" },
+  });
+  await seedRun(project.id, repo.id, "Backend", {
+    agentId: second.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: daysAgo(1),
+    session: { costUsd: "2.0000" },
+  });
+
+  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  assert.deepEqual(
+    body.daily.find((entry: { byAgent: Record<string, string> }) => Object.keys(entry.byAgent).length > 0)?.byAgent,
+    { "backend-dev": "2", "frontend-dev": "1" },
+  );
+  assert.deepEqual(body.byAgent.map((entry: { agent: string }) => entry.agent), ["backend-dev", "frontend-dev"]);
+  assert.deepEqual(body.topRuns.map((run: { agent: string }) => run.agent), ["backend-dev", "frontend-dev"]);
+});
+
+test("an entirely unpriced agent is explicit rather than indistinguishable from free", async () => {
+  const { project, repo, agent } = await seedProject("costs-all-unpriced");
+  const dev = await agent("codex", "Codex");
+  await seedRun(project.id, repo.id, "Unknown", {
+    agentId: dev.id, model: "openai-codex/gpt-5.6-luna", runner: "CODEX", startedAt: daysAgo(1),
+    session: { costUsd: null, inputTokens: 100 },
+  });
+
+  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  assert.deepEqual(body.byAgent, [{ agent: "codex", usd: "0", runs: 1, costUnavailableRuns: 1, avgUsd: "0" }]);
 });
 
 test("the window is a whole number of UTC day buckets, and every day is present", async () => {
@@ -221,10 +286,26 @@ test("the window is a whole number of UTC day buckets, and every day is present"
   assert.equal(body.days, 7);
   const today = new Date().toISOString().slice(0, 10);
   assert.equal(body.daily.at(-1).date, today);
-  assert.deepEqual(body.daily.at(-1).byAgent, { "Frontend Dev": "3", Reviewer: "1" });
+  assert.deepEqual(body.daily.at(-1).byAgent, { dev: "3", reviewer: "1" });
   // Days nothing ran on are present and empty rather than missing.
   assert.deepEqual(body.daily[0].byAgent, {});
-  assert.deepEqual(body.byAgent.map((entry: { agent: string }) => entry.agent), ["Frontend Dev", "Reviewer"]);
+  assert.deepEqual(body.byAgent.map((entry: { agent: string }) => entry.agent), ["dev", "reviewer"]);
+});
+
+test("runs beyond the captured UTC window end are excluded", async () => {
+  const { project, repo, agent } = await seedProject("costs-future");
+  const dev = await agent("dev", "Developer");
+  const tomorrow = new Date();
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  tomorrow.setUTCHours(0, 5, 0, 0);
+  await seedRun(project.id, repo.id, "Future", {
+    agentId: dev.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: tomorrow,
+    session: { costUsd: "9.0000" },
+  });
+
+  const { body } = await call(`/projects/${project.id}/costs?days=7`);
+  assert.equal(body.runCount, 0);
+  assert.equal(Number(body.totalUsd), 0);
 });
 
 test("top runs are the ten most expensive, most expensive first", async () => {
@@ -245,7 +326,7 @@ test("top runs are the ten most expensive, most expensive first", async () => {
   );
 });
 
-test("the default window is 30 days and an unsupported one is refused", async () => {
+test("the default window is 30 days and unsupported or malformed values are refused", async () => {
   const { project } = await seedProject("costs-range");
   const fallback = await call(`/projects/${project.id}/costs`);
   assert.equal(fallback.status, 200);
@@ -255,4 +336,9 @@ test("the default window is 30 days and an unsupported one is refused", async ()
   const refused = await call(`/projects/${project.id}/costs?days=45`);
   assert.equal(refused.status, 400);
   assert.match(refused.body.error, /7, 30, 90/);
+
+  for (const malformed of ["7.5", "7junk", "90days"]) {
+    const response = await call(`/projects/${project.id}/costs?days=${malformed}`);
+    assert.equal(response.status, 400, malformed);
+  }
 });

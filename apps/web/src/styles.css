@@ -40,18 +40,16 @@
   --toggle-knob:#fffdf7; --toggle-knob-active:#4c3b00; --check-border:#9a8c68; --row-hover:#eee6d5;
   --primary-badge-background:#f1df9b; --event-line:#ddd3bd; --badge-foreground:#ffffff; --radio-border:#9a8c68;
   --scrim:rgba(37,33,22,.45); --modal-shadow:rgba(37,33,22,.25);
-  /* Categorical chart series. Identity, not magnitude: slots are assigned in
-     fixed order and never cycled — a seventh series folds into `--series-other`
-     rather than reusing slot 1. Both columns are selected for their own surface
+  /* Categorical chart series. Identity, not magnitude: the first six slots are
+     assigned in fixed order and never cycled; later series use deterministic
+     golden-angle hues from the Costs component. Both columns are selected for their own surface
      (`--card`), not flipped, and validated as a set: worst adjacent CVD deltaE
      9.1 light / 8.4 dark, worst adjacent normal-vision deltaE 19.6 / 19.3. Three
      light slots sit under 3:1 against the light card, so the Costs page ships the
      same figures as a table beside the chart, which is the relief that permits
      them.
-     `--series-other` is not a seventh hue. It is deliberately achromatic, which
-     is how a reader tells a fold from a series, and it is checked against the
-     only slot it can ever touch - slot 6, since the fold always sits at the top
-     of a stack: CVD deltaE 8.4 light / 13.5 dark, normal-vision 17.1 / 21.5. */
+     `--series-other` is retained only as a defensive fallback for an agent not
+     present in the report's stable series order. */
   --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a;
   --series-4:#eda100; --series-5:#e87ba4; --series-6:#008300; --series-other:#7a7466;
   --radius:8px; --radius-card:10px;
