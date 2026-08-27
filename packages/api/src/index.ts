@@ -192,7 +192,9 @@ const main = async (): Promise<void> => {
 
   await ownership.assertHeld();
   const reconciliation = await reconcileAtStartup(prisma);
+  const parks = reconciliation.retiredParks;
   console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.openReclaimIntents} workspace reclaim intents awaiting their runner, ${reconciliation.archivedNotices} archived-run notices`);
+  console.log(`Retired merge-tail parks: ${parks.unparkedReviews} review parks and ${parks.unparkedResigns} re-signature parks returned to the queue, ${parks.archivedReviewTasks} review tasks archived, ${parks.cancelledReviewRuns} queued review runs cancelled, ${parks.closedResignMessages} re-signature messages closed, ${parks.reviewTasksWithActiveRuns} review tasks left for their active run`);
   await ensureStartupActive();
 
   const githubReader = createGitHubReader();

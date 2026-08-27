@@ -1,6 +1,52 @@
 # 0001 - Narrow the merge lease hold window
 
-Status: accepted (2026-08-26)
+Status: accepted (2026-08-26), amended (2026-08-26)
+
+## Amendment (2026-08-26): the independent review and the release-authority check are retired
+
+Two layers this record analyses no longer exist in the merge tail. Everything
+below the amendment is kept verbatim as the analysis and incident record that
+produced the decision; read it as history, not as current protocol.
+
+Retired:
+
+- **The independent blind review of defense-list diffs.** Gone with it:
+  `createReviewObligation`, the review obligation markers and the
+  `INDEPENDENT_REVIEW_OPEN_PREFIX` park and handback, the review completion
+  path, the three blocking rounds (`MAX_BLOCKING_REVIEW_ROUNDS`), and the
+  review-driven follow-up cards. Defense-list detection survives but is
+  audit-only: when a diff touches a defense-list path, merge readiness writes
+  one inbox message on the readiness task naming the triggered paths and
+  reasons, and the merge proceeds unblocked. Nothing in the tail blocks on a
+  review any more. (This is unrelated to the in-chain review template steps
+  `code-review-sol` and `code-review-opus-blind`, which are unchanged.)
+- **The release-authority Ed25519 signing layer.** Gone with it: the authority
+  key material, the signing and verification module, the `db:authority-check`
+  npm script the regression step ran before the gate, the migration preflight's
+  `authority` condition, the authority-resign worker, and the
+  `authority-resign` regression verdict.
+
+What that retires in this record:
+
+- R1's first bullet ("when readiness parks on an open review obligation, it
+  releases") has no subject: readiness never parks on a review. The rest of R1
+  stands and is in force - readiness acquires the Lease, once and without
+  polling, immediately before it writes an authorization, and re-affirms its
+  claim inside the authorization transaction.
+- R2 item 2's ordering no longer includes a release-authority check; the acquire
+  moves to immediately before gate dispatch, after semantic verification.
+- The first consequence below (base drift during an independent review becoming
+  an ordinary path) does not apply. Drift is still handled by the same requeue,
+  but the review is no longer a window in which it happens.
+- Finding A and the "move the review" / "run the review concurrently"
+  alternatives are historical only; there is nothing left to move or
+  parallelise.
+
+Unaffected and still current: the Lease itself and its hold window, gate
+attestation, the merge gate's build, lint, and test steps, and the `pass`,
+`gate-fail`, and `refresh-conflict` regression verdicts with their gateProof
+binding. R3 stands, and the retirements only shorten the holds it asks to be
+re-measured.
 
 ## Context
 
@@ -239,6 +285,7 @@ long. So:
 
 - When readiness parks on an open review obligation, it releases. The review
   reads a diff on GitHub; it neither produces nor consumes the proof.
+  (Retired 2026-08-26 with the independent review itself - see the amendment.)
 - Before it writes an authorization, readiness acquires - one attempt, never a
   poll, since a tick cannot block on a lock another line may hold for minutes.
   `merge-lease.sh acquire --timeout-minutes 0` already exits 75 on contention,
@@ -268,9 +315,10 @@ the defense list; it was authorized explicitly on 2026-08-26.
 1. State the release contract in both regression prompts: the control plane owns
    release; the run never calls `release` or `steal`. (Fixes C at the source.)
 2. Move the acquire from "before the first fetch" to immediately before gate
-   dispatch, after semantic verification and the release-authority check pass,
-   and add a post-acquire re-check that the base head has not moved since the
-   refresh - re-fetch and re-merge if it has. (Fixes E.)
+   dispatch, after semantic verification passes, and add a post-acquire re-check
+   that the base head has not moved since the refresh - re-fetch and re-merge if
+   it has. (Fixes E. The release-authority check that used to sit between the
+   two was retired on 2026-08-26.)
 3. Amend `AGENTS.md:101` in the same change, since (2) contradicts its current
    wording for the chain tail.
 
@@ -312,7 +360,9 @@ would only paper over findings A and E.
 - Base drift during an independent review becomes likely rather than rare, so
   the requeue path in `merge-readiness-worker.ts` moves from a rarely-exercised
   safety net to an ordinary path. It costs the drifting chain one full
-  regression run, semantic verification included.
+  regression run, semantic verification included. (Retired 2026-08-26: with no
+  review in the tail, this window is gone. The requeue path is unchanged and
+  still the safety net for drift from any other cause.)
 - The exact-head correctness argument is unchanged: it never rested on the
   lease. R1 removes an efficiency guarantee over one segment, not a safety one.
 - Concurrent delivery lines stop paying each other's agent-session time. Under

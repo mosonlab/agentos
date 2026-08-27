@@ -210,7 +210,7 @@ const fullRun = (options = {}) => {
   const run = runAcceptance({
     run: stub.run,
     ...(options.repositoryPath === undefined ? {} : { repositoryPath: options.repositoryPath }),
-    environment: options.environment ?? { nodeSupported: true, recordedAuthority: true, redLines: true },
+    environment: options.environment ?? { nodeSupported: true, redLines: true },
     documents: { ...documentsFor(), ...(options.documents ?? {}) },
     secretValues: options.secretValues ?? [],
     target: options.target ?? { ok: true },
@@ -611,20 +611,39 @@ test("a pending dependency is reported as pending, never as verified or skipped"
 });
 
 test("a pending prerequisite blocks without being counted as a candidate failure", () => {
-  const { run, statusOf } = fullRun({
-    environment: { nodeSupported: true, recordedAuthority: false, redLines: true },
+  // The public tree does not ship the operator-only rehearsal, so the row that
+  // spawns it is pending on a file rather than on a candidate failure.
+  const documents = documentsFor();
+  delete documents["deploy/rehearse-postgres-release-migrate.sh"];
+  const stub = stubRunner({ root: cleanTree() });
+  const run = runAcceptance({
+    run: stub.run,
+    environment: { nodeSupported: true, redLines: true },
+    documents,
+    target: { ok: true },
+    label: "oss-b0-verify-fixture",
     stage: "release-candidate",
   });
+  const statusOf = (id) => run.records.find((entry) => entry.check === id);
   assert.equal(statusOf("release-migration").status, "pending");
   assert.equal(statusOf("release-migration-existing-mode").reason, "dependency-unavailable");
   assert.equal(run.result, "pending");
+});
+
+test("the release rehearsal runs without any recorded signing authority", () => {
+  // The Ed25519 release-authority layer is retired: nothing in the environment
+  // gates this row any more, so a release-candidate run with a present
+  // rehearsal spawns it and reads its verdict.
+  const { stub, statusOf } = fullRun({ stage: "release-candidate" });
+  assert.equal(statusOf("release-migration").status, "verified");
+  assert.ok(stub.order.includes("zsh deploy/rehearse-postgres-release-migrate.sh"));
 });
 
 test("an unsupported Node version stops the run at the first check", () => {
   const { stub } = fullRun({});
   const unsupported = runAcceptance({
     run: stub.run,
-    environment: { nodeSupported: false, recordedAuthority: true, redLines: true },
+    environment: { nodeSupported: false, redLines: true },
     documents: documentsFor(),
     target: { ok: true },
     label: "oss-b0-verify-fixture",
@@ -878,7 +897,7 @@ test("E7b is pending, not green, while Step 7's page is unwritten", () => {
   const stub = stubRunner({ root: cleanTree() });
   const run = runAcceptance({
     run: stub.run,
-    environment: { nodeSupported: true, recordedAuthority: true, redLines: true },
+    environment: { nodeSupported: true, redLines: true },
     documents,
     target: { ok: true },
     label: "oss-b0-verify-fixture",
@@ -1236,7 +1255,7 @@ test("the red lines are a prerequisite edge, so no command can be scheduled arou
   }
 
   const { stub, run, statusOf } = fullRun({
-    environment: { nodeSupported: true, recordedAuthority: true, redLines: false },
+    environment: { nodeSupported: true, redLines: false },
   });
   assert.equal(statusOf("test-red-lines").status, "refused");
   assert.equal(statusOf("test-red-lines").reason, "test-redline-unavailable");

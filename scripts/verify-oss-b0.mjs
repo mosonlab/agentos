@@ -648,7 +648,6 @@ export const ACCEPTANCE_CHECKS = Object.freeze([
     // Its own disposable Compose project, volume, port and worktree, all
     // carrying its own generated label; it refuses an operator installation.
     commands: [["zsh", "deploy/rehearse-postgres-release-migrate.sh"]],
-    requiresRecordedAuthority: true,
     // Anchored to the whole line: `result=pass-preparatory` is the verdict the
     // rehearsal printed while OSS-D was unmerged, and a prefix match would have
     // accepted it as a completed fresh migration.
@@ -1023,13 +1022,6 @@ export const runAcceptance = ({
       records.push(stopped);
       continue;
     }
-    if (check.requiresRecordedAuthority === true && environment.recordedAuthority !== true) {
-      const pending = record(check, "pending", "dependency-unavailable", []);
-      byId.set(check.id, pending);
-      records.push(pending);
-      continue;
-    }
-
     const commands = [];
     const outputs = [];
     let failure = null;
@@ -1554,8 +1546,6 @@ if (isCli) {
       environment: {
         nodeSupported: nodeSatisfiesRange(process.version),
         redLines: workspace.ok === true,
-        recordedAuthority: process.env.GOAL5A0_MASTER_SHA !== undefined
-          && process.env.GOAL5A0_CONTROL_PLANE_A_SHA !== undefined,
       },
       documents,
       repositoryPath: REPOSITORY_ROOT,
