@@ -96,8 +96,8 @@ test("a fresh seed writes the twelve-step and seven-step autonomous merge templa
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.assigneeAgentId,
     (await db.agent.findFirstOrThrow({ where: { name: "librarian" } })).id);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.attachmentsFromPrevious, true);
-  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /merge-lease\.sh acquire --task \{\{chainId\}\}/u);
-  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /exits 75 or 76[\s\S]*up to two[\s\S]*more times/u);
+  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /regression-verification\.sh prepare/u);
+  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   // The fix step reads both reports itself; no node authors must-fix any more.
   assert.equal(step.taskTemplate.steps.some((candidate) => candidate.outputKind === "must-fix"), false);
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 8)?.prompt ?? "", /Read both immutable review outputs from the preceding layer/u);
@@ -120,7 +120,7 @@ test("a fresh seed writes the twelve-step and seven-step autonomous merge templa
   assert.equal(direct.steps[5]?.outputKind, "merge-authorization");
   assert.equal(direct.steps[6]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(direct.steps[6]?.outputKind, INTEGRATOR_OUTPUT_KIND);
-  assert.match(direct.steps[4]?.prompt ?? "", /retry it up to three times/u);
+  assert.match(direct.steps[4]?.prompt ?? "", /regression-verification\.sh finalize/u);
   const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
   assert.equal(resolver.model, "gpt-5.6-sol:high");
   assert.equal(resolver.runnerPreference, "CODEX");
