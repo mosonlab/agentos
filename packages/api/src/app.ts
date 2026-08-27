@@ -133,6 +133,7 @@ import { createStarterInstallation, onboardingInput, onboardingStatus } from "./
 import { preflightOnboardingRepository, RepositoryPreflightError } from "./onboarding-preflight.js";
 import { instantiateTemplate, isUsableTemplateVariable } from "./templates.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
+import type { SpecificationReader } from "./specification-fidelity.js";
 import {
   readCommitted,
   serializable,
@@ -182,6 +183,8 @@ export interface LiveAppOptions {
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   releaseMergeLease?: ReleaseMergeLease;
+  /** Repository content capability used to verify materialized review specs. */
+  specificationReader?: SpecificationReader | null;
 }
 
 
@@ -3295,10 +3298,17 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
     await options.ownership.assertHeld();
     await reconcileDatabaseRuns(db, now, releaseChainLease);
     await noteArchivedQueuedRunsOnClaim(now).catch((error: unknown) => console.error("Archived-run notice failed", error));
-    const claimed = await claimRun(db, { body, claimantClass, now });
+    const claimed = await claimRun(db, {
+      body,
+      claimantClass,
+      now,
+      specificationReader: options.specificationReader ?? null,
+      signal: context.req.raw.signal,
+    });
     if (claimed && "error" in claimed) {
       if (typeof claimed.error !== "string") throw new TypeError("Run claim refusal has no message");
-      return refusalJson(context, refusal("conflict", claimed.error));
+      if (typeof claimed.reason !== "string") throw new TypeError("Run claim refusal has no reason");
+      return context.json({ error: claimed.error, reason: claimed.reason }, 409);
     }
     return claimed ? context.json(claimed) : context.body(null, 204);
   });

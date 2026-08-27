@@ -29,6 +29,14 @@ import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js"
 import { activeRunStatuses } from "./run-fence.js";
 import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
+import {
+  prepareSpecificationVerification,
+  type SpecificationReader,
+  type SpecificationRefusal,
+  SPEC_TRANSCRIPTION_REFUSAL_REASON,
+  specificationUnreadableRefusal,
+  verifyPreparedSpecification,
+} from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
 import { isSerializationConflict, serializable } from "./transaction.js";
 
@@ -55,7 +63,12 @@ export type ClaimRunInput = {
   /** The instant the whole claim is decided at, including the caller's
    *  pre-claim reconciliation. */
   now: Date;
+  /** Explicit capability: null refuses review claims rather than bypassing verification. */
+  specificationReader: SpecificationReader | null;
+  signal?: AbortSignal;
 };
+
+const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
 
 /**
  * Claim one queued run, or answer that nothing was claimable.
@@ -67,7 +80,8 @@ export type ClaimRunInput = {
  */
 export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
   const { body, claimantClass, now } = input;
-  return serializable(db, async (tx) => {
+  const verificationResults = new Map<string, SpecificationRefusal | null>();
+  const transactionalAttempt = () => serializable(db, async (tx) => {
     // This is the shared half of the production deploy barrier. It is the
     // first statement in the claim transaction: an in-flight claim finishes
     // before a deploy can acquire the exclusive half, and claims arriving
@@ -312,6 +326,66 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
         }
         return SKIP;
       }
+      const prepared = await prepareSpecificationVerification(
+        tx,
+        { task: candidate.task, repo: candidate.repo, branch: candidate.branch },
+        implementationRange?.implementationHeadSha ?? null,
+      );
+      if (prepared.status === "refused") {
+        return { error: prepared.refusal.message, reason: prepared.refusal.reason };
+      }
+      if (prepared.status === "ready") {
+        if (!verificationResults.has(prepared.verification.key)) {
+          // Repository I/O must not happen while this serializable transaction
+          // holds candidate/chain rows. The outer claim loop performs the read
+          // and retries the transaction with the cached verdict.
+          return { verification: prepared.verification };
+        }
+        const refusal = verificationResults.get(prepared.verification.key) ?? null;
+        if (refusal) {
+          if (refusal.reason === SPEC_TRANSCRIPTION_REFUSAL_REASON) {
+            const stopped = await tx.run.updateMany({
+              where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+              data: {
+                status: RunStatus.FAILED,
+                failureClass: FailureClass.TASK_FAILED,
+                failureReason: refusal.message,
+                retryable: false,
+                endedAt: now,
+              },
+            });
+            if (stopped.count === 1) {
+              await writeTask(tx, candidate.task.id, async () => ({
+                update: { status: TaskStatus.BACKLOG, failureReason: refusal.message },
+                activity: {
+                  actorType: "control-plane",
+                  body: `Review claim stopped: ${refusal.message}`,
+                  metadata: {
+                    runId: candidate.id,
+                    condition: refusal.reason,
+                    implementationHeadSha: prepared.verification.implementationHeadSha,
+                  },
+                },
+                value: null,
+              }));
+              const dedupeKey = `${refusal.reason}:${candidate.id}`;
+              await tx.inboxMessage.upsert({
+                where: { dedupeKey },
+                create: {
+                  from: "AGENT",
+                  agentId: candidate.agentId,
+                  taskId: candidate.task.id,
+                  kind: "TEXT",
+                  body: `Review claim failed and the task was parked in Backlog: ${refusal.message}`,
+                  dedupeKey,
+                },
+                update: {},
+              });
+            }
+          }
+          return { error: refusal.message, reason: refusal.reason };
+        }
+      }
       const generation = candidate.leaseGeneration + 1;
       const fencingToken = makeFencingToken(candidate.id, generation);
       const sessionCredential = issueSessionToken();
@@ -491,6 +565,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${savepoint}`);
       // A chained park that committed ends the claim here on purpose (lock
       // order), and it outranks an earlier candidate's isolated error.
+      if ("verification" in decided || "error" in decided) return decided;
       if (decided.outcome === "halt") return null;
       if (decided.outcome === "claimed") return decided.claim;
     }
@@ -501,6 +576,38 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     if (isolated !== null) throw isolated;
     return null;
   }, { attempts: 6 });
+
+  for (;;) {
+    const attempted = await transactionalAttempt();
+    if (!attempted || !("verification" in attempted)) return attempted;
+
+    // The repository read is deliberately outside the serializable claim
+    // transaction. A slow provider must not hold Run, Task, or chain locks.
+    const deadline = new AbortController();
+    const requestSignal = input.signal;
+    const abortFromRequest = () => deadline.abort(requestSignal?.reason);
+    if (requestSignal?.aborted) abortFromRequest();
+    else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
+    const timer = setTimeout(() => deadline.abort(), SPECIFICATION_READ_TIMEOUT_MS);
+    let verdict: SpecificationRefusal | null;
+    try {
+      verdict = await verifyPreparedSpecification(
+        attempted.verification,
+        input.specificationReader,
+        deadline.signal,
+      );
+    } catch (error: unknown) {
+      if (requestSignal?.aborted) throw error;
+      if (!deadline.signal.aborted) throw error;
+      verdict = specificationUnreadableRefusal(
+        `repository content read exceeded the ${SPECIFICATION_READ_TIMEOUT_MS}ms server deadline`,
+      );
+    } finally {
+      clearTimeout(timer);
+      requestSignal?.removeEventListener("abort", abortFromRequest);
+    }
+    verificationResults.set(attempted.verification.key, verdict);
+  }
 };
 
 export type ClaimedRun = NonNullable<Awaited<ReturnType<typeof claimRun>>>;

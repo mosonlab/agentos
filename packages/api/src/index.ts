@@ -164,6 +164,7 @@ const main = async (): Promise<void> => {
   const [
     database,
     { createApp },
+    { createGitHubReader },
     { reconcileAtStartup },
     { startScheduler },
     { startEvidenceWorker },
@@ -175,6 +176,7 @@ const main = async (): Promise<void> => {
   ] = await Promise.all([
     import("@agentos/db"),
     import("./app.js"),
+    import("./github-read.js"),
     import("./reconcile.js"),
     import("./scheduler.js"),
     import("./merge-evidence-worker.js"),
@@ -198,7 +200,11 @@ const main = async (): Promise<void> => {
   console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${reconciliation.openReclaimIntents} workspace reclaim intents awaiting their runner, ${reconciliation.archivedNotices} archived-run notices`);
   await ensureStartupActive();
 
-  const app = createApp(prisma, { ownership });
+  const githubReader = createGitHubReader();
+  const specificationReader = githubReader?.readFileAtCommit
+    ? { readFileAtCommit: githubReader.readFileAtCommit }
+    : null;
+  const app = createApp(prisma, { ownership, specificationReader });
   const { host: hostname, port } = startup;
   const activeServer = serve({ fetch: app.fetch, hostname, port });
   server = activeServer;
