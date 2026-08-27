@@ -47,9 +47,9 @@ type Comparison = { status: string; behindBy: number };
 export type RecoveryPullRequestFacts = {
   repository: string;
   number: number;
-  state: string;
-  isDraft: boolean;
-  merged: boolean;
+  state: string | null;
+  isDraft: boolean | null;
+  merged: boolean | null;
   baseRefName: string | null;
   baseSha: string | null;
   headRefOid: string | null;
