@@ -52,6 +52,7 @@ import {
   provisionWorkspace, reuseWorkspace, sessionConfigRootExists, workspaceEnvironment, writeSessionCredentials,
   type AgentScratch, type Workspace,
 } from "./workspace.js";
+import { observeExternalWorktrees } from "./worktree-observer.js";
 
 const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unknown> | null => tool ? {
   id: tool.id,
@@ -150,6 +151,33 @@ export const executeClaim = async (
   // that had already produced one, which is the exact loss issue #114 is about,
   // one stage further along.
   let producedOutput: string | null = null;
+  // Collected while the checkout still exists, then reused if a later cleanup
+  // or completion write throws into the outer exception path. The observation
+  // is report-only: failure to list worktrees is activity evidence, never a
+  // different terminal verdict.
+  let worktreeContainmentObserved = false;
+  let worktreeContainmentViolations: string[] = [];
+  const worktreeContainmentReport = async (): Promise<{ worktreeContainmentViolations?: string[] }> => {
+    if (!workspace) return {};
+    if (!worktreeContainmentObserved) {
+      worktreeContainmentObserved = true;
+      try {
+        worktreeContainmentViolations = await observeExternalWorktrees(
+          config,
+          workspace.path,
+          workspace.path,
+        );
+      } catch (error: unknown) {
+        await appendActivity(
+          config,
+          claim,
+          `Unable to observe run worktree containment: ${errorMessage(error)}`,
+          { stream: "runner" },
+        ).catch(() => undefined);
+      }
+    }
+    return worktreeContainmentViolations.length > 0 ? { worktreeContainmentViolations } : {};
+  };
   // The lease the claim granted; every successful heartbeat below moves it.
   // Delivery derives its deadline from this, not from "now", because by the
   // time the agent exits the last renewal can already be half a lease old.
@@ -338,6 +366,7 @@ export const executeClaim = async (
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       const evidence = preflightEvidence(preflight.error ?? "Preflight failed");
       const classified = adapter.classifyError(evidence);
+      const worktreeReport = await worktreeContainmentReport();
       const { salvage: _salvage, ...finishedCleanup } = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
       const retainedPath = await retainedSessionConfigPath(claim.runner, scratch);
       await completeRun(config, claim, {
@@ -355,6 +384,7 @@ export const executeClaim = async (
         branch: workspace.branch,
         baseSha: workspace.baseSha,
         headSha: workspace.baseSha,
+        ...worktreeReport,
         ...finishedCleanup,
       });
       return;
@@ -511,6 +541,7 @@ export const executeClaim = async (
     }
     const primaryDelivery = delivery;
     const succeeded = executionSucceeded && primaryDelivery?.pushStatus !== "FAILED";
+    const worktreeReport = await worktreeContainmentReport();
     const cleaned = await cleanup(
       config,
       claim,
@@ -599,6 +630,7 @@ export const executeClaim = async (
       }),
       ...gitResult,
       ...deliveryPayload,
+      ...worktreeReport,
       ...completionCleanup,
     });
     scratch = null;
@@ -630,6 +662,7 @@ export const executeClaim = async (
     }
     const evidence = preflightEvidence(message);
     const classified = adapter.classifyError(evidence);
+    const worktreeReport = await worktreeContainmentReport();
     const cleaned = await cleanup(config, claim, workspace, config.failedWorkspaceRetention > 0);
     const { salvage, ...finishedCleanup } = cleaned;
     let restorationFailure: string | null = null;
@@ -677,6 +710,7 @@ export const executeClaim = async (
       output: producedOutput,
       ...(workspace ? { branch: workspace.branch, baseSha: workspace.baseSha, headSha: workspace.baseSha } : {}),
       ...(salvage ?? {}),
+      ...worktreeReport,
       ...finishedCleanup,
       ...(scratchCleanupFailure ? {
         cleanupStatus: "FAILED" as const,

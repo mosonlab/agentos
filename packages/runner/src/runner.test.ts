@@ -747,9 +747,52 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
     assert.ok(completion);
     assert.equal(completion.body.terminalSuccess, true);
     assert.equal(completion.body.failureClass ?? null, null);
+    assert.equal(completion.body.worktreeContainmentViolations, undefined);
     const configRoot = await readFile(configReportPath, "utf8");
     await assert.rejects(stat(configRoot), /ENOENT/u, "successful Codex runs must remove CODEX_HOME");
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an outside worktree is reported without changing a successful run outcome", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-worktree-containment-"));
+  try {
+    const workspaces = join(root, "workspaces");
+    const outsideWorktree = join(root, "outside-worktree");
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, successfulCodexMutationStub(
+      join(root, "argv.log"),
+      `git worktree add --detach '${outsideWorktree}' HEAD >/dev/null 2>&1`,
+    ));
+    await chmod(binary, 0o755);
+    const remote = await seedRemote(root);
+    await seedCodexAuth(root);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      posts.push({ path: String(input), body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await executeClaim({ ...codexOnly(workspaces, root, binary), failedWorkspaceRetention: 0 }, {
+      ...mechanicalClaim,
+      executionMode: "agent",
+      runner: "CODEX",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
+      session: testSession(root),
+    });
+
+    const completion = posts.find((post) => post.path.endsWith("/complete"));
+    assert.ok(completion);
+    assert.equal(completion.body.terminalSuccess, true);
+    assert.equal(completion.body.failureClass, undefined);
+    assert.equal(completion.body.pushStatus, "SUCCEEDED");
+    assert.equal(completion.body.cleanupStatus, "SUCCEEDED");
+    assert.deepEqual(completion.body.worktreeContainmentViolations, [await realpath(outsideWorktree)]);
+  } finally {
+    await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
   }
 });

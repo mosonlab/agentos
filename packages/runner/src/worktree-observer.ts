@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
@@ -46,6 +47,18 @@ const listedWorktreePaths = (output: string): string[] => output
 const within = (root: string, candidate: string): boolean =>
   candidate === root || candidate.startsWith(`${root}${sep}`);
 
+type ResolvedPath = { path: string; physical: boolean };
+
+const resolvedPath = async (path: string): Promise<ResolvedPath> => {
+  const absolute = resolve(path);
+  try {
+    return { path: await realpath(absolute), physical: true };
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path: absolute, physical: false };
+    throw error;
+  }
+};
+
 /**
  * Reports registered worktrees whose resolved path lies outside `workspaceRoot`.
  *
@@ -69,9 +82,20 @@ export const observeExternalWorktrees = async (
     checkoutPath,
     workspaceEnvironment(config),
   );
-  const root = resolve(workspaceRoot);
   const checkout = resolve(checkoutPath);
-  return listedWorktreePaths(output)
-    .map((listedPath) => resolve(checkout, listedPath))
-    .filter((worktreePath) => !within(root, worktreePath));
+  const lexicalRoot = resolve(workspaceRoot);
+  const root = await resolvedPath(lexicalRoot);
+  const worktrees = await Promise.all(listedWorktreePaths(output).map(
+    (listedPath) => resolvedPath(resolve(checkout, listedPath)),
+  ));
+  return worktrees
+    .filter((worktree) => {
+      // Existing paths are judged by their physical location so aliases and
+      // symlinks cannot disguise an escape. A stale registered path has no
+      // physical answer; compare its spelling against both forms of the root
+      // so /tmp and /private/tmp do not manufacture a macOS-only violation.
+      if (worktree.physical) return !within(root.path, worktree.path);
+      return !within(root.path, worktree.path) && !within(lexicalRoot, worktree.path);
+    })
+    .map((worktree) => worktree.path);
 };
