@@ -265,6 +265,7 @@ export type PersistedTransitionStep = {
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
   opensPullRequest: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;

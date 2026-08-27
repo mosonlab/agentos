@@ -86,6 +86,17 @@ test("missing layer frontmatter is refused by the source loader", async () => {
   );
 });
 
+test("missing prior output declaration frontmatter is refused by the source loader", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*$/mu, "")),
+    (root) => assert.rejects(
+      loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
+      /frontmatter must contain exactly .*priorOutputKinds/u,
+    ),
+  );
+});
+
 test("inserting a duplicate outputKind into a canonical template is refused", async () => {
   await withTemplateCopy(
     INTEGRATOR_TEMPLATE_NAME,
@@ -158,6 +169,7 @@ test("layer is a structural field in canonical prompt drift comparison", async (
     approvalGate: expected.approvalGate,
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    priorOutputKinds: expected.priorOutputKinds,
     opensPullRequest: expected.opensPullRequest,
     baseFromStepIndex: expected.baseFromStepIndex,
     spawnPolicy: expected.spawnPolicy as PersistedTemplateStepStructure["spawnPolicy"],

@@ -7,7 +7,7 @@ import type { Prisma } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
-import { parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
+import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
 export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
@@ -30,6 +30,7 @@ const STRUCTURAL_FIELDS = [
   "approvalGate",
   "outputKind",
   "attachmentsFromPrevious",
+  "priorOutputKinds",
   "opensPullRequest",
   "baseFromStepIndex",
   "spawnPolicy",
@@ -42,6 +43,7 @@ export type TemplateStepSource = {
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
   opensPullRequest: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.InputJsonObject | null;
@@ -60,6 +62,7 @@ export type PersistedTemplateStepStructure = {
   approvalGate: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
+  priorOutputKinds: string[];
   opensPullRequest: boolean;
   baseFromStepIndex: number | null;
   spawnPolicy: Prisma.JsonValue;
@@ -77,6 +80,7 @@ export const templateStepStructureDifferences = (
     ["approvalGate", actual.approvalGate, expected.approvalGate],
     ["outputKind", actual.outputKind, expected.outputKind],
     ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
+    ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
     ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
     ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
     ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
@@ -155,6 +159,7 @@ export const loadTemplateStepSources = async (
       approvalGate: parseBoolean(requiredFrontmatter(document, "approvalGate", filePath), filePath, "approvalGate"),
       outputKind: requiredFrontmatter(document, "outputKind", filePath),
       attachmentsFromPrevious: parseBoolean(requiredFrontmatter(document, "attachmentsFromPrevious", filePath), filePath, "attachmentsFromPrevious"),
+      priorOutputKinds: parseInlineList(document.attributes.priorOutputKinds, filePath, "priorOutputKinds"),
       opensPullRequest: parseBoolean(requiredFrontmatter(document, "opensPullRequest", filePath), filePath, "opensPullRequest"),
       baseFromStepIndex: parseOptionalStepIndex(requiredFrontmatter(document, "baseFromStepIndex", filePath), filePath),
       spawnPolicy: parseSpawnPolicy(requiredFrontmatter(document, "spawnPolicy", filePath), filePath),
