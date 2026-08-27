@@ -369,13 +369,7 @@ export const projectStream = (
   runner: RunnerKind,
   terminal: boolean,
 ): StreamProjection => {
-  // The normalizer intentionally gives an orphan tool completion a useful
-  // fallback item. A projection has a stricter boundary: primitive/array
-  // payloads are malformed input and must not turn into a visible tool line.
-  // Keep the normalizer itself unchanged (its defensive contract and fixtures
-  // remain the source of truth) and discard only those impossible payloads at
-  // this pass.
-  const normalized = normalize(events.filter((event) => asRecord(event.payload) !== null), runner, terminal);
+  const normalized = normalize(events, runner, terminal);
   const nodes: StreamNode[] = [];
   let tools: ToolCall[] = [];
 
@@ -384,6 +378,16 @@ export const projectStream = (
     | { index: number; marker: Extract<StreamNode, { kind: "marker" }> }
     | { index: number; input: Extract<StreamNode, { kind: "input" }> };
 
+  const eventIndexes = new Map<string, number>();
+  const toolIndexes = new Map<string, number>();
+  for (const [index, event] of events.entries()) {
+    if (!eventIndexes.has(event.id)) eventIndexes.set(event.id, index);
+    if (event.type === "TOOL_STARTED" || event.type === "TOOL_COMPLETED") {
+      const toolId = event.toolCallId ?? event.id;
+      if (!toolIndexes.has(toolId)) toolIndexes.set(toolId, index);
+    }
+  }
+
   const eventIndexForItem = (item: StreamItem): number => {
     // Tool ids are call ids rather than event ids, so anchor them at their
     // first start/completion event. Other normalized items retain their source
@@ -391,13 +395,10 @@ export const projectStream = (
     // the original stream without making the normalizer carry presentation
     // metadata.
     if (item.kind === "tool") {
-      const toolIndex = events.findIndex((event) =>
-        (event.type === "TOOL_STARTED" || event.type === "TOOL_COMPLETED")
-        && (event.toolCallId ?? event.id) === item.id);
-      if (toolIndex >= 0) return toolIndex;
+      const toolIndex = toolIndexes.get(item.id);
+      if (toolIndex !== undefined) return toolIndex;
     }
-    const directIndex = events.findIndex((event) => event.id === item.id);
-    return directIndex >= 0 ? directIndex : events.length;
+    return eventIndexes.get(item.id) ?? events.length;
   };
 
   const entries: ProjectionEntry[] = normalized.items
@@ -408,6 +409,7 @@ export const projectStream = (
 
   let processStarts = 0;
   for (const [index, event] of events.entries()) {
+    if (asRecord(event.payload) === null) continue;
     if (event.type === "ADAPTER_ERROR" || event.type === "PROMPT_DELIVERY_FAILED") {
       entries.push({
         index,
@@ -423,8 +425,6 @@ export const projectStream = (
       }
     }
   }
-  entries.sort((left, right) => left.index - right.index);
-
   const piInputSeen = new Set<string>();
   for (const [index, event] of events.entries()) {
     if (runner !== "PI" || event.type !== "MODEL_COMPLETED") continue;
@@ -457,6 +457,8 @@ export const projectStream = (
     tools = [];
   };
 
+  const lastTextConstituent = new Map<string, string>();
+
   const pushTextNode = (item: Extract<StreamItem, { kind: "text" | "final" }>, final: boolean): void => {
     // Empty output is not a message. In particular, ignoring it before
     // flushing tools means a provider's empty delta cannot split a tool run.
@@ -466,16 +468,19 @@ export const projectStream = (
     if (final) {
       // CODEX's final output repeats its last agent message. Keep the original
       // node (and its Agent heading) rather than showing the same prose twice.
-      if (previous?.kind === "text" && previous.text === item.text) return;
+      if (previous?.kind === "text"
+        && (previous.text === item.text || lastTextConstituent.get(previous.id) === item.text)) return;
     } else if (previous?.kind === "text" && !previous.final) {
       // Streaming boundaries are not reader-visible boundaries. The first
       // node owns the id and timestamp, while each message remains separated
       // by a blank line inside the same prose card.
       previous.text = `${previous.text}\n\n${item.text}`;
+      lastTextConstituent.set(previous.id, item.text);
       return;
     }
 
     nodes.push({ kind: "text", id: item.id, at: item.at, text: item.text, final });
+    if (!final) lastTextConstituent.set(item.id, item.text);
   };
 
   for (const entry of entries) {
@@ -516,8 +521,3 @@ export const projectStream = (
     },
   };
 };
-
-/** Short alias for callers that treat the stream module as the projection
- * boundary. Keep the descriptive export above for call sites that have more
- * than one kind of projection in scope. */
-export const project = projectStream;

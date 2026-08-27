@@ -148,7 +148,16 @@ test("a failed tool line shows the first result line in the destructive tone", (
   const markup = renderToStaticMarkup(<StreamNodeView node={failed} />);
   assert.match(markup, /first failure line/);
   assert.doesNotMatch(markup, /second failure line/);
-  assert.match(markup, /text-destructive/);
+  assert.match(markup, /text-\[color:var\(--destructive-fg\)\]/);
+});
+
+test("a failed tool line without result text keeps its primary argument", () => {
+  const failed = {
+    ...toolNode,
+    calls: [{ ...toolNode.calls[1]!, state: "error" as const, result: null }],
+  };
+  const markup = renderToStaticMarkup(<StreamNodeView node={failed} />);
+  assert.match(markup, /npm test/);
 });
 
 test("text nodes keep the existing Agent and Result message headings", () => {
@@ -1121,31 +1130,29 @@ test("the detail page does not call the initial drain `N new`", async () => {
   }
 });
 
-test("the live stream counts a newly arrived tool group as one new node", async () => {
+test("the live stream counts a call added to the tail tool group as one new node", async () => {
   const dom = jsdom();
   Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
   Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
   Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
 
-  const initial = event({
-    id: "initial", seq: 1, source: "CLAUDE", type: "MODEL_DELTA",
-    payload: CLAUDE_TEXT_ASSISTANT,
-  });
-  const calls = [
-    event({ id: "tool-1-start", seq: 2, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-1", payload: { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/a.ts" } } }),
-    event({ id: "tool-1-end", seq: 3, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-1", payload: { tool_use_id: "tool-1", content: "a", is_error: false } }),
-    event({ id: "tool-2-start", seq: 4, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-2", payload: { type: "tool_use", id: "tool-2", name: "Bash", input: { command: "npm test" } } }),
-    event({ id: "tool-2-end", seq: 5, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-2", payload: { tool_use_id: "tool-2", content: "ok", is_error: false } }),
+  const initial = [
+    event({ id: "tool-1-start", seq: 1, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-1", payload: { type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "/a.ts" } } }),
+    event({ id: "tool-1-end", seq: 2, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-1", payload: { tool_use_id: "tool-1", content: "a", is_error: false } }),
   ];
-  let current = [initial];
+  const calls = [
+    event({ id: "tool-2-start", seq: 3, source: "CLAUDE", type: "TOOL_STARTED", toolCallId: "tool-2", payload: { type: "tool_use", id: "tool-2", name: "Bash", input: { command: "npm test" } } }),
+    event({ id: "tool-2-end", seq: 4, source: "CLAUDE", type: "TOOL_COMPLETED", toolCallId: "tool-2", payload: { tool_use_id: "tool-2", content: "ok", is_error: false } }),
+  ];
+  let current = initial;
   const detail = session({ executionStatus: "RUNNING" });
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (input: string) => {
       const path = String(input);
       const payload = path.includes("/runs/")
-        ? path.includes("afterSeq=1")
-          ? { events: calls, nextAfterSeq: 5, hasMore: false, total: 5 }
+        ? path.includes("afterSeq=2")
+          ? { events: calls, nextAfterSeq: 4, hasMore: false, total: 4 }
           : { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
@@ -1165,13 +1172,13 @@ test("the live stream counts a newly arrived tool group as one new node", async 
     const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
     assert.ok(scroller, container.innerHTML);
     scroller.scrollTop = 0;
-    current = [initial, ...calls];
+    current = [...initial, ...calls];
     const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
     assert.ok(refresh, container.innerHTML);
     await click(dom, refresh);
     await flush();
 
-    assert.match(container.textContent ?? "", /1 new ↓/u, "one projected tools node is new");
+    assert.match(container.textContent ?? "", /1 new ↓/u, "one call inside the projected tools node is new");
     assert.equal((container.textContent?.match(/Tool calls/gu) ?? []).length, 1);
     const news = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "1 new ↓");
     assert.ok(news, container.innerHTML);
@@ -1218,6 +1225,7 @@ test("a live stream at the bottom auto-scrolls after its initial drain", async (
     const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
     assert.ok(scroller, container.innerHTML);
     assert.equal(scroller.scrollTop, 5_000);
+    scroller.scrollTop = 4_600;
     current = [initial, event({ id: "new-bottom", seq: 2, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT })];
     const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
     assert.ok(refresh, container.innerHTML);
@@ -1225,6 +1233,54 @@ test("a live stream at the bottom auto-scrolls after its initial drain", async (
     await flush();
     assert.equal(scroller.scrollTop, 5_000);
     assert.doesNotMatch(container.textContent ?? "", /new ↓/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test("a live stream counts assistant prose absorbed by the tail text node", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window.Element.prototype, "scrollHeight", { configurable: true, get: () => 5_000 });
+  Object.defineProperty(dom.window.Element.prototype, "clientHeight", { configurable: true, get: () => 400 });
+  const first = event({ id: "assistant-1", seq: 1, source: "CLAUDE", type: "MODEL_DELTA", payload: CLAUDE_TEXT_ASSISTANT });
+  let current = [first];
+  const detail = session({ executionStatus: "RUNNING" });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: async (input: string) => {
+      const path = String(input);
+      const payload = path.includes("/runs/")
+        ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        : detail;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+    },
+  });
+
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  const flush = async (): Promise<void> => {
+    await act(async () => { for (let turn = 0; turn < 30; turn += 1) await Promise.resolve(); });
+  };
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await flush();
+    const scroller = container.querySelector<HTMLElement>('div[class*="max-h-[720px]"]');
+    assert.ok(scroller, container.innerHTML);
+    scroller.scrollTop = 0;
+    current = [first, event({
+      id: "assistant-2", seq: 2, source: "CLAUDE", type: "MODEL_DELTA",
+      payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "more prose" }] } },
+    })];
+    const refresh = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Refresh");
+    assert.ok(refresh, container.innerHTML);
+    await click(dom, refresh);
+    await flush();
+    assert.match(container.textContent ?? "", /more prose/u);
+    assert.match(container.textContent ?? "", /1 new ↓/u);
   } finally {
     await act(async () => root.unmount());
     dom.window.close();

@@ -365,6 +365,21 @@ test("projection drops a repeated final output but keeps a distinct final output
   }
 });
 
+test("CODEX final output does not repeat the last constituent of merged prose", () => {
+  const projection = projectStream([
+    event("MODEL_DELTA", { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "Ran the tests." } }, { source: "CODEX" }),
+    event("MODEL_DELTA", { type: "item.completed", item: { id: "message-2", type: "agent_message", text: "All 42 pass." } }, { source: "CODEX" }),
+    event("FINAL_OUTPUT", { type: "turn.completed" }, { source: "CODEX" }),
+  ], "CODEX", true);
+
+  assert.deepEqual(projection.nodes.map((node) => node.kind), ["text"]);
+  assert.equal(projection.nodes[0]?.kind, "text");
+  if (projection.nodes[0]?.kind === "text") {
+    assert.equal(projection.nodes[0].text, "Ran the tests.\n\nAll 42 pass.");
+    assert.equal(projection.nodes[0].final, false);
+  }
+});
+
 test("projection message count follows merging and final-output dropping in a mixed stream", () => {
   const events = [
     event("MODEL_DELTA", {
@@ -471,13 +486,34 @@ test("projection drops noise, unknown events and malformed payloads without thro
   const malformed = [null, 42, "text", []];
   for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
     const events = noise.map((type) => event(type, { unexpected: true }));
-    for (const payload of malformed) events.push(event("MODEL_DELTA", payload));
-    events.push(event("MODEL_COMPLETED", null), event("TOOL_STARTED", null), event("TOOL_COMPLETED", null), event("FINAL_OUTPUT", null));
+    for (const payload of malformed) {
+      events.push(
+        event("MODEL_DELTA", payload),
+        event("ADAPTER_ERROR", payload),
+        event("PROMPT_DELIVERY_FAILED", payload),
+        event("PROCESS_STARTED", payload),
+        event("PROCESS_STARTED", payload),
+      );
+    }
+    events.push(event("MODEL_COMPLETED", null), event("FINAL_OUTPUT", null));
     assert.doesNotThrow(() => projectStream(events, runner, true), runner);
     const projection = projectStream(events, runner, true);
     assert.deepEqual(projection.nodes, [], runner);
     assert.deepEqual(projection.counts, { messages: 0, toolCalls: 0, files: 0 }, runner);
   }
+});
+
+test("projection preserves the normalizer's orphan tool completion fallback", () => {
+  const projection = projectStream([
+    event("TOOL_COMPLETED", null, { toolCallId: "orphan-tool" }),
+  ], "CLAUDE", true);
+
+  assert.equal(projection.nodes.length, 1);
+  assert.equal(projection.nodes[0]?.kind, "tools");
+  if (projection.nodes[0]?.kind === "tools") {
+    assert.equal(projection.nodes[0].calls[0]?.id, "orphan-tool");
+  }
+  assert.equal(projection.counts.toolCalls, 1);
 });
 
 test("line clamp keeps the first N lines and reports withheld lines", () => {

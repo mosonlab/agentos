@@ -172,7 +172,7 @@ test("agent options are distinct, title-labelled, sorted, and include All", () =
     { ...row("c", atLocalDay(0, 11)), agentId: "agent-z", agent: { id: "agent-z", title: "Zed" } },
   ] as Session[];
 
-  assert.deepEqual(sessionAgentOptions(sessions), [
+  assert.deepEqual(sessionAgentOptions(sessions, "All"), [
     { value: ALL_SESSION_FILTER, label: "All" },
     { value: "agent-a", label: "Ada" },
     { value: "agent-1", label: "agent-1" },

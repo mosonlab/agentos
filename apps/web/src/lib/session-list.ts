@@ -55,7 +55,7 @@ export const sessionStatusMatches = (status: SessionExecutionStatus, filter: Ses
 /** Distinct Agent choices from the Sessions that are already loaded. */
 export const sessionAgentOptions = (
   sessions: readonly Pick<Session, "agentId" | "agent">[],
-  allLabel = "All",
+  allLabel: string,
 ): SessionFilterOption[] => {
   const labels = new Map<string, string>();
   for (const session of sessions) {
@@ -147,9 +147,6 @@ export type SessionSeenState = {
 
 export const sessionSeenKey = (projectId: string): string => `agentos.sessions.seen.${projectId}`;
 
-/** Kept as a small alias for callers that only need to construct the key. */
-export const seenKey = sessionSeenKey;
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -184,25 +181,16 @@ export const readSessionSeenState = (projectId: string): SessionSeenState => {
   return fresh;
 };
 
-const liveStatuses: SessionExecutionStatus[] = ["REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX"];
-
-export const isSessionLive = (status: SessionExecutionStatus): boolean => liveStatuses.includes(status);
-
-const instantValue = (value: string): number => {
-  const parsed = new Date(value).getTime();
-  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
-};
-
 /** A terminal row still has a meaningful finish instant when endedAt is absent. */
 export const sessionFinishTimestamp = (
   session: Pick<Session, "endedAt" | "startedAt" | "requestedAt">,
 ): string => session.endedAt ?? session.startedAt ?? session.requestedAt;
 
 export const isSessionUnseen = (session: Session, state: SessionSeenState): boolean => {
-  if (isSessionLive(session.executionStatus)) return false;
-  const finish = instantValue(sessionFinishTimestamp(session));
+  if (isLiveStatus(session.executionStatus)) return false;
+  const finish = timestampValue(sessionFinishTimestamp(session));
   const seenAt = state.opened[session.id] ?? state.since;
-  return finish > instantValue(seenAt);
+  return finish > timestampValue(seenAt);
 };
 
 const pruneOpened = (opened: Record<string, string>): Record<string, string> =>
@@ -210,7 +198,7 @@ const pruneOpened = (opened: Record<string, string>): Record<string, string> =>
     Object.entries(opened)
       .map(([id, at], index) => ({ id, at, index }))
       .sort((left, right) => {
-        const difference = instantValue(right.at) - instantValue(left.at);
+        const difference = timestampValue(right.at) - timestampValue(left.at);
         return difference === 0 ? left.index - right.index : difference;
       })
       .slice(0, 500)

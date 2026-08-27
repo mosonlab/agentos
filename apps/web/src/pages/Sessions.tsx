@@ -12,7 +12,7 @@ import {
   type StreamNode, type ToolCall,
 } from "../lib/session-stream";
 import {
-  ALL_SESSION_FILTER, filterAndGroupSessions, filterSessions, isLiveStatus,
+  ALL_SESSION_FILTER, filterAndGroupSessions, isLiveStatus,
   isSessionUnseen, markSessionOpened, readSessionSeenState,
   SESSION_DAY_PAGE_SIZE, SESSION_STATUS_FILTERS, sessionAgentOptions, sessionDayLabelKind,
   type SessionDayGroup, type SessionSeenState, type SessionStatusFilter,
@@ -27,8 +27,8 @@ import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   STAT_PILL, STAT_PILLS,
-  Card, EmptyState, ErrorNotice, GapNotice, KeyValue, Markdown, Page, Pill, Segmented,
-  SHOW_MORE_BUTTON, isLongText, type PillTone,
+  Card, EmptyState, ErrorNotice, GapNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
+  type PillTone,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
@@ -161,8 +161,8 @@ const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boole
             session.endedAt,
             session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0,
           ) },
-          { k: t("sessions.table.runner"), v: session.runner },
-          { k: t("sessions.table.result"), v: resultWord(session) },
+          { k: t("sessions.hover.runner"), v: session.runner },
+          { k: t("sessions.hover.result"), v: resultWord(session) },
           { k: t("sessions.detail.run"), v: session.run ? `#${session.run.runNumber}` : "—" },
           ...(session.failureReason
             ? [{ k: t("sessions.row.failureReason"), v: <span className="text-[color:var(--destructive-fg)] [overflow-wrap:anywhere]">{compact(session.failureReason, 200)}</span> }]
@@ -287,7 +287,6 @@ export const SessionsPage = (): ReactNode => {
     return [...byId.values()].sort((left, right) => right.requestedAt.localeCompare(left.requestedAt));
   }, [head.data, older]);
 
-  const filteredSessions = useMemo(() => filterSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
   const dayGroups = useMemo(() => filterAndGroupSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
   const agentOptions = useMemo(() => sessionAgentOptions(sessions, t("sessions.filter.all")), [sessions, t]);
   const statusOptions = useMemo(() => SESSION_STATUS_FILTERS.map((value) => ({
@@ -384,7 +383,7 @@ export const SessionsPage = (): ReactNode => {
               />
             ))}
           </div>
-          {filteredSessions.length === 0
+          {dayGroups.length === 0
             ? <EmptyState>{t(head.loading ? "common.loading" : sessions.length > 0 && filtersActive ? "sessions.empty.filtered" : "sessions.empty")}</EmptyState>
             : null}
         </Card>
@@ -458,7 +457,7 @@ const ToolCallLine = ({ call }: { call: ToolCall }): ReactNode => {
   const kind = toolKind(call.name);
   const Icon = TOOL_KIND_ICONS[kind];
   const failedSummary = call.result?.split(/\r?\n/u)[0]?.trim() ?? "";
-  const summary = call.state === "error" ? failedSummary : call.primaryArg ?? "";
+  const summary = call.state === "error" ? (failedSummary || call.primaryArg || "") : call.primaryArg ?? "";
   return (
     <div className="border-b border-[color:var(--border-soft)] last:border-b-0">
       <button
@@ -472,7 +471,7 @@ const ToolCallLine = ({ call }: { call: ToolCall }): ReactNode => {
         <span className="text-foreground">{call.name}</span>
         <span className={cn(
           "min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap",
-          call.state === "error" ? "text-destructive" : "text-muted-foreground",
+          call.state === "error" ? "text-[color:var(--destructive-fg)]" : "text-muted-foreground",
         )}>{summary}</span>
         <span className={cn("text-[11.5px]", TOOL_STATE_TONE[call.state] ?? "text-muted-foreground")}>{t(`sessions.tool.state.${call.state}`)}</span>
         <span className={MSG_TIME}>{formatDateTime(call.at)}</span>
@@ -508,27 +507,8 @@ export const ToolGroup = ({ node }: { node: Extract<StreamNode, { kind: "tools" 
   );
 };
 
-/** Markdown renders several block elements, so the shared ShowMore component's
- *  single-text-node clamp cannot wrap it directly. Clamp the source at the
- *  stream's line budget for the closed view, keep the rendered markdown intact,
- *  and use the same existing control to reveal the full body. */
 const TextNodeBody = ({ text }: { text: string }): ReactNode => {
-  const [open, setOpen] = useState(false);
-  const t = useT();
-  const clamped = clampLines(text, TEXT_NODE_MAX_LINES);
-  const long = clamped.dropped > 0 || isLongText(text, TEXT_NODE_MAX_LINES);
-  return (
-    <div>
-      <div className={cn(!open && long && "max-h-[300px] overflow-hidden")}>
-        <Markdown text={open ? text : clamped.text} />
-      </div>
-      {long ? (
-        <button type="button" className={SHOW_MORE_BUTTON} onClick={() => setOpen((current) => !current)}>
-          <IconChevron open={open} />{t(open ? "ui.showMore.less" : "ui.showMore.more")}
-        </button>
-      ) : null}
-    </div>
-  );
+  return <MarkdownClamp text={text} lines={TEXT_NODE_MAX_LINES} maxHeightClass="max-h-[300px]" />;
 };
 
 export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
@@ -537,7 +517,7 @@ export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
   if (node.kind === "marker") {
     return node.variant === "error"
       ? <ErrorNotice message={node.text} />
-      : <div className="text-[12px] text-muted-foreground">{t(node.text === RESUME_MARKER_TEXT ? RESUME_MARKER_TEXT : "sessions.stream.resumed")}</div>;
+      : <div className="text-[12px] text-muted-foreground">{t(RESUME_MARKER_TEXT)}</div>;
   }
   if (node.kind === "input") {
     return (
@@ -651,7 +631,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const [unseen, setUnseen] = useState(0);
-  const lastCount = useRef(0);
+  const lastNodeRevisions = useRef(new Map<string, string>());
   /** The initial drain is history, not news, and it arrives over several pages.
    *  Without this the page opens claiming every event is new (seen in the
    *  browser against a real 771-event session: the stream rendered `98 new ↓`
@@ -660,7 +640,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   const drained = useRef(false);
 
   useEffect(() => {
-    lastCount.current = 0;
+    lastNodeRevisions.current = new Map();
     primed.current = false;
     drained.current = false;
     setUnseen(0);
@@ -682,8 +662,12 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   }, []);
 
   useEffect(() => {
-    const added = nodes.length - lastCount.current;
-    lastCount.current = nodes.length;
+    const current = new Map(nodes.map((node) => [node.id, JSON.stringify(node)]));
+    const added = [...current].reduce(
+      (count, [id, revision]) => count + (lastNodeRevisions.current.get(id) === revision ? 0 : 1),
+      0,
+    );
+    lastNodeRevisions.current = current;
     if (added <= 0) return;
     const node = scroller.current;
     if (!node) return;
@@ -691,7 +675,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
     const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= NEAR_BOTTOM_PX;
     if (atBottom) scrollToBottom();
     else setUnseen((current) => current + added);
-  }, [nodes.length, scrollToBottom]);
+  }, [nodes, scrollToBottom]);
 
   // The drain is over on the `loading` true → false *transition*, not on a bare
   // `loading === false`: the hook starts with `loading` false while `runId` is
