@@ -26,8 +26,10 @@ import { activeRunStatuses } from "./run-fence.js";
 const withTokens = async (callback: () => Promise<void>): Promise<void> => {
   const operator = process.env.OPERATOR_TOKEN;
   const runner = process.env.RUNNER_TOKEN;
+  const mergeExecutor = process.env.MERGE_EXECUTOR_TOKEN;
   process.env.OPERATOR_TOKEN = "operator-unit-token";
   process.env.RUNNER_TOKEN = "runner-unit-token";
+  process.env.MERGE_EXECUTOR_TOKEN = "merge-executor-unit-token";
   try {
     await callback();
   } finally {
@@ -35,6 +37,8 @@ const withTokens = async (callback: () => Promise<void>): Promise<void> => {
     else process.env.OPERATOR_TOKEN = operator;
     if (runner === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = runner;
+    if (mergeExecutor === undefined) delete process.env.MERGE_EXECUTOR_TOKEN;
+    else process.env.MERGE_EXECUTOR_TOKEN = mergeExecutor;
   }
 };
 
@@ -678,6 +682,40 @@ test("starting a run without an exact dispatched prompt hash is refused before d
       }),
     });
     assert.equal(response.status, 400);
+  });
+});
+
+test("the mechanical merge-executor start body is accepted without a prompt hash", async () => {
+  await withTokens(async () => {
+    const runWrites: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: async () => [{ id: "mechanical-run" }],
+      run: {
+        findUnique: async () => ({ startedAt: null }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          runWrites.push(data);
+          return { count: 1 };
+        },
+      },
+      session: { updateMany: async () => ({ count: 1 }) },
+    };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/runner/runs/mechanical-run/start", {
+      method: "POST",
+      headers: { Authorization: "Bearer merge-executor-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "merge-executor-1",
+        fencingToken: "1:mechanical-run:current",
+        adapterVersion: "merge-executor-v1",
+        cliVersion: "merge-executor-v1",
+        workspacePath: null,
+        manifest: { executionMode: "mechanical", childProcessCount: 0 },
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(runWrites[0]?.promptHash, null);
   });
 });
 
