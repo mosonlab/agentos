@@ -110,6 +110,8 @@ export type ClaimedTask = {
   sessionToken: string;
   secrets: Record<string, string>;
   priorOutputs: Array<{ kind: string; body: string; task: { name: string; chainIndex: number | null } }>;
+  /** Direct operator comments eligible for claim-time prompt delivery. */
+  operatorNotes: string[];
   /** Immediate prior attempt evidence for a fresh provider Session. */
   previousRunHandoff: {
     schemaVersion: 1;
