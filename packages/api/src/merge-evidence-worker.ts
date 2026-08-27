@@ -25,7 +25,7 @@ import {
   serializeEvidence,
 } from "@agentos/db";
 
-import { checkConclusionFor, createGitHubReader, GitHubReadError, type GitHubReader, type PullRequestSnapshot } from "./github-read.js";
+import { checkConclusionFor, createGitHubReader, GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 
 export const evidenceReadTimeoutMs = (): number => {
   const raw = Number(process.env.MERGE_EVIDENCE_READ_TIMEOUT_MS);
@@ -116,7 +116,7 @@ export type EvidenceTickResult = { claimed: number; filled: number; unavailable:
  */
 export const evidenceTick = async (
   db: PrismaClient,
-  reader: GitHubReader | null,
+  reader: PullRequestReader | null,
   now = new Date(),
   limit = 5,
 ): Promise<EvidenceTickResult> => {
@@ -226,7 +226,7 @@ const chainBaseRefFor = async (db: PrismaClient, request: PendingEvidenceRequest
 
 export const startEvidenceWorker = (
   db: PrismaClient,
-  reader: GitHubReader | null = createGitHubReader(),
+  reader: PullRequestReader | null = createGitHubReader(),
 ): ReturnType<typeof setInterval> | null => {
   const interval = evidencePollIntervalMs();
   const timer = setInterval(() => {

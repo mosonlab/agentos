@@ -22,7 +22,7 @@ import {
 
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { authorityResignTick } from "./authority-resign-worker.js";
-import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
+import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -1061,7 +1061,7 @@ test("a repair completion does not restart a step parked for a re-signature", as
 const PR_NUMBER = 41;
 const RESIGNED = "d".repeat(40);
 
-type ResignReader = GitHubReader & { comparisons: Array<{ base: string; head: string }> };
+type ResignReader = PullRequestReader & { comparisons: Array<{ base: string; head: string }> };
 
 const resignReader = (
   headRefOid: string,

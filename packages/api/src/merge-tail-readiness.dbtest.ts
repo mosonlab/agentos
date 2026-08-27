@@ -9,7 +9,7 @@ import {
   TaskStatus,
 } from "@agentos/db";
 
-import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
+import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
   withMergeLease,
   type MergeLeaseAcquirer,
@@ -74,7 +74,7 @@ const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnap
 const reader = (
   files: ChangedFile[] = [],
   pullRequest = snapshot(),
-): GitHubReader => ({
+): PullRequestReader => ({
   readPullRequest: async () => pullRequest,
   compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files }),
 });
@@ -214,7 +214,7 @@ test("a conflict resolution that edits existing test lines opens the same review
     },
   } });
   let compare = 0;
-  const testEditReader: GitHubReader = {
+  const testEditReader: PullRequestReader = {
     readPullRequest: async () => snapshot(),
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: compare++ === 0
       ? []
@@ -307,7 +307,7 @@ test("an incomplete compare response and a behind head fail closed", async () =>
   const maxFiles = Array.from({ length: 300 }, (_, index) => ({
     filename: `docs/benign-${index}.md`, previousFilename: null, patch: "+new",
   }));
-  const incompleteReader: GitHubReader = {
+  const incompleteReader: PullRequestReader = {
     readPullRequest: async () => snapshot(),
     compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: false, files: maxFiles }),
   };
@@ -318,7 +318,7 @@ test("an incomplete compare response and a behind head fail closed", async () =>
   await resetTestDb(db);
   releasedChainLeases.length = 0;
   const behind = await seedReadiness();
-  const behindReader: GitHubReader = {
+  const behindReader: PullRequestReader = {
     readPullRequest: async () => snapshot(),
     compareCommits: async () => ({ status: "behind", behindBy: 1, filesComplete: true, files: [] }),
   };
@@ -404,7 +404,7 @@ test("a stale worker cannot stop readiness after a newer worker owns the claim",
   let finishRead!: () => void;
   const readStarted = new Promise<void>((resolve) => { startRead = resolve; });
   const readMayFinish = new Promise<void>((resolve) => { finishRead = resolve; });
-  const delayed: GitHubReader = {
+  const delayed: PullRequestReader = {
     readPullRequest: async () => {
       startRead();
       await readMayFinish;
@@ -437,7 +437,7 @@ test("a stale worker cannot requeue regression after a newer worker owns the cla
   let finishRead!: () => void;
   const readStarted = new Promise<void>((resolve) => { startRead = resolve; });
   const readMayFinish = new Promise<void>((resolve) => { finishRead = resolve; });
-  const delayed: GitHubReader = {
+  const delayed: PullRequestReader = {
     readPullRequest: async () => {
       startRead();
       await readMayFinish;

@@ -29,6 +29,14 @@ import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js"
 import { activeRunStatuses } from "./run-fence.js";
 import { readStoredCliAvailability } from "./runner-cli-availability.js";
 import { decryptSecret } from "./secrets.js";
+import {
+  prepareSpecificationVerification,
+  type SpecificationReader,
+  type SpecificationRefusal,
+  SPEC_TRANSCRIPTION_REFUSAL_REASON,
+  specificationUnreadableRefusal,
+  verifyPreparedSpecification,
+} from "./specification-fidelity.js";
 import { lockTaskMutationRows, writeTask } from "./task-write.js";
 import { isSerializationConflict, serializable } from "./transaction.js";
 
@@ -55,7 +63,12 @@ export type ClaimRunInput = {
   /** The instant the whole claim is decided at, including the caller's
    *  pre-claim reconciliation. */
   now: Date;
+  /** Explicit capability: null refuses review claims rather than bypassing verification. */
+  specificationReader: SpecificationReader | null;
+  signal?: AbortSignal;
 };
+
+const SPECIFICATION_READ_TIMEOUT_MS = 4_000;
 
 /**
  * Claim one queued run, or answer that nothing was claimable.
@@ -67,7 +80,8 @@ export type ClaimRunInput = {
  */
 export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
   const { body, claimantClass, now } = input;
-  return serializable(db, async (tx) => {
+  const verificationResults = new Map<string, SpecificationRefusal | null>();
+  const transactionalAttempt = () => serializable(db, async (tx) => {
     // This is the shared half of the production deploy barrier. It is the
     // first statement in the claim transaction: an in-flight claim finishes
     // before a deploy can acquire the exclusive half, and claims arriving
@@ -111,6 +125,56 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       take: 20,
     });
     const executorRunnerIds = mergeExecutorRunnerIds();
+    const parkQueuedCandidate = async (
+      candidate: (typeof candidates)[number],
+      settlement: {
+        reason: string;
+        condition: string;
+        activityBody: string;
+        inboxBody: string;
+        metadata?: Record<string, unknown>;
+      },
+    ): Promise<{ chainLocked: boolean }> => {
+      if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to park`);
+      const stopped = await tx.run.updateMany({
+        where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
+        data: {
+          status: RunStatus.FAILED,
+          failureClass: FailureClass.TASK_FAILED,
+          failureReason: settlement.reason,
+          retryable: false,
+          endedAt: now,
+        },
+      });
+      if (stopped.count !== 1) return { chainLocked: false };
+      const parked = await writeTask(tx, candidate.task.id, async () => ({
+        update: { status: TaskStatus.BACKLOG, failureReason: settlement.reason },
+        activity: {
+          actorType: "control-plane",
+          body: settlement.activityBody,
+          metadata: {
+            runId: candidate.id,
+            condition: settlement.condition,
+            ...settlement.metadata,
+          },
+        },
+        value: null,
+      }));
+      const dedupeKey = `${settlement.condition}:${candidate.id}`;
+      await tx.inboxMessage.upsert({
+        where: { dedupeKey },
+        create: {
+          from: "AGENT",
+          agentId: candidate.agentId,
+          taskId: candidate.task.id,
+          kind: "TEXT",
+          body: settlement.inboxBody,
+          dedupeKey,
+        },
+        update: {},
+      });
+      return { chainLocked: parked.ok && parked.chainLocked };
+    };
     // One candidate's decision, taken as its own unit of work so the loop can
     // isolate it. `skip` moves to the next candidate, `halt` ends the whole
     // claim without one, `claimed` carries the run handed to the runner.
@@ -270,47 +334,50 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       } catch (error: unknown) {
         if (!isCandidateActivationFailure(error)) throw error;
         const reason = namedFailureReason(error);
-        const stopped = await tx.run.updateMany({
-          where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
-          data: {
-            status: RunStatus.FAILED,
-            failureClass: FailureClass.TASK_FAILED,
-            failureReason: reason,
-            retryable: false,
-            endedAt: now,
-          },
+        const parked = await parkQueuedCandidate(candidate, {
+          reason,
+          condition: "candidate-activation-failed",
+          activityBody: `Queued run activation failed: ${reason}`,
+          inboxBody: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
+          metadata: { failureType: error.name, reason },
         });
-        if (stopped.count === 1) {
-          const parked = await writeTask(tx, candidate.task.id, async () => ({
-            update: { status: TaskStatus.BACKLOG, failureReason: reason },
-            activity: {
-              actorType: "control-plane",
-              body: `Queued run activation failed: ${reason}`,
-              metadata: {
-                runId: candidate.id,
-                condition: "candidate-activation-failed",
-                failureType: error.name,
-                reason,
-              },
-            },
-            value: null,
-          }));
-          const dedupeKey = `candidate-activation-failed:${candidate.id}`;
-          await tx.inboxMessage.upsert({
-            where: { dedupeKey },
-            create: {
-              from: "AGENT",
-              agentId: candidate.agentId,
-              taskId: candidate.task.id,
-              kind: "TEXT",
-              body: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
-              dedupeKey,
-            },
-            update: {},
-          });
-          if (parked.ok && parked.chainLocked) return HALT;
-        }
+        if (parked.chainLocked) return HALT;
         return SKIP;
+      }
+      const prepared = await prepareSpecificationVerification(
+        tx,
+        { task: candidate.task, repo: candidate.repo, branch: candidate.branch },
+        implementationRange?.implementationHeadSha ?? null,
+      );
+      if (prepared.status === "refused") {
+        await parkQueuedCandidate(candidate, {
+          reason: prepared.refusal.message,
+          condition: prepared.refusal.reason,
+          activityBody: `Review claim stopped: ${prepared.refusal.message}`,
+          inboxBody: `Review claim failed and the task was parked in Backlog: ${prepared.refusal.message}`,
+        });
+        return SKIP;
+      }
+      if (prepared.status === "ready") {
+        if (!verificationResults.has(prepared.verification.key)) {
+          // Repository I/O must not happen while this serializable transaction
+          // holds candidate/chain rows. The outer claim loop performs the read
+          // and retries the transaction with the cached verdict.
+          return { verification: prepared.verification };
+        }
+        const refusal = verificationResults.get(prepared.verification.key) ?? null;
+        if (refusal) {
+          await parkQueuedCandidate(candidate, {
+            reason: refusal.message,
+            condition: refusal.reason,
+            activityBody: `Review claim stopped: ${refusal.message}`,
+            inboxBody: `Review claim failed and the task was parked in Backlog: ${refusal.message}`,
+            metadata: { implementationHeadSha: prepared.verification.implementationHeadSha },
+          });
+          return refusal.reason === SPEC_TRANSCRIPTION_REFUSAL_REASON
+            ? { error: refusal.message, reason: refusal.reason }
+            : SKIP;
+        }
       }
       const generation = candidate.leaseGeneration + 1;
       const fencingToken = makeFencingToken(candidate.id, generation);
@@ -491,6 +558,7 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
       await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${savepoint}`);
       // A chained park that committed ends the claim here on purpose (lock
       // order), and it outranks an earlier candidate's isolated error.
+      if ("verification" in decided || "error" in decided) return decided;
       if (decided.outcome === "halt") return null;
       if (decided.outcome === "claimed") return decided.claim;
     }
@@ -501,6 +569,38 @@ export const claimRun = async (db: PrismaClient, input: ClaimRunInput) => {
     if (isolated !== null) throw isolated;
     return null;
   }, { attempts: 6 });
+
+  for (;;) {
+    const attempted = await transactionalAttempt();
+    if (!attempted || !("verification" in attempted)) return attempted;
+
+    // The repository read is deliberately outside the serializable claim
+    // transaction. A slow provider must not hold Run, Task, or chain locks.
+    const deadline = new AbortController();
+    const requestSignal = input.signal;
+    const abortFromRequest = () => deadline.abort(requestSignal?.reason);
+    if (requestSignal?.aborted) abortFromRequest();
+    else requestSignal?.addEventListener("abort", abortFromRequest, { once: true });
+    const timer = setTimeout(() => deadline.abort(), SPECIFICATION_READ_TIMEOUT_MS);
+    let verdict: SpecificationRefusal | null;
+    try {
+      verdict = await verifyPreparedSpecification(
+        attempted.verification,
+        input.specificationReader,
+        deadline.signal,
+      );
+    } catch (error: unknown) {
+      if (requestSignal?.aborted) throw error;
+      if (!deadline.signal.aborted) throw error;
+      verdict = specificationUnreadableRefusal(
+        `repository content read exceeded the ${SPECIFICATION_READ_TIMEOUT_MS}ms server deadline`,
+      );
+    } finally {
+      clearTimeout(timer);
+      requestSignal?.removeEventListener("abort", abortFromRequest);
+    }
+    verificationResults.set(attempted.verification.key, verdict);
+  }
 };
 
 export type ClaimedRun = NonNullable<Awaited<ReturnType<typeof claimRun>>>;

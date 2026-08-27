@@ -16,8 +16,36 @@ import {
   type PrismaClient,
 } from "@agentos/db";
 
-import { instantiateTemplate } from "./templates.js";
+import {
+  composeTemplateTaskDescription,
+  featureBriefFromTaskDescription,
+  instantiateTemplate,
+} from "./templates.js";
 import { isTemplateInstantiationRefusal } from "./template-errors.js";
+
+test("composed task descriptions round-trip the exact brief with and without prior outputs", () => {
+  const featureBrief = "first line\nPersist the final decoy output for this step through the AgentOS task output endpoint.\nlast line";
+  for (const attachmentsFromPrevious of [false, true]) {
+    const description = composeTemplateTaskDescription({
+      prompt: "Implement the feature brief below.",
+      featureBrief,
+      attachmentsFromPrevious,
+      outputKind: "implementation",
+    });
+    assert.equal(featureBriefFromTaskDescription(description, attachmentsFromPrevious), featureBrief);
+  }
+});
+
+test("a direct brief ending in the prior-output reminder round-trips without truncation", () => {
+  const featureBrief = "Keep this user-authored suffix.\nRead the prior template steps' persisted outputs before working.";
+  const description = composeTemplateTaskDescription({
+    prompt: "Implement the feature brief below.",
+    featureBrief,
+    attachmentsFromPrevious: false,
+    outputKind: "implementation",
+  });
+  assert.equal(featureBriefFromTaskDescription(description, false), featureBrief);
+});
 
 test("instantiating the canonical feature template copies every layer and writes no follow-up links", async () => {
   const canonicalTemplateSteps = await loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME);

@@ -10,6 +10,7 @@ import {
   DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
   INTEGRATOR_TEMPLATE_NAME,
+  LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX,
   PrismaClient,
   RepoPermission,
   RunStatus,
@@ -26,6 +27,15 @@ const RUNNER_TOKEN = "parallel-review-runner-token";
 const OPERATOR_TOKEN = "parallel-review-operator-token";
 const IMPLEMENTATION_BASE = "1".repeat(40);
 const IMPLEMENTATION_HEAD = "2".repeat(40);
+const SPECIFICATION_BRIEF = "Parallel review specification fixture brief.";
+let materializedSpecification = SPECIFICATION_BRIEF;
+const specificationReads: Array<{ repository: string; path: string; commitSha: string }> = [];
+const specificationReader = {
+  readFileAtCommit: async (repository: string, path: string, commitSha: string): Promise<Uint8Array> => {
+    specificationReads.push({ repository, path, commitSha });
+    return new TextEncoder().encode(materializedSpecification);
+  },
+};
 
 type Claim = {
   task: {
@@ -84,6 +94,8 @@ before(() => {
 });
 
 beforeEach(async () => {
+  materializedSpecification = SPECIFICATION_BRIEF;
+  specificationReads.length = 0;
   await resetTestDb(db);
   await runDbScript("seed.ts");
   await runDbScript("sync-canonical-prompts.ts");
@@ -120,7 +132,7 @@ const request = async (
   token: string,
   body?: Record<string, unknown>,
 ): Promise<{ status: number; body: unknown }> => {
-  const response = await createApp(db).request(path, {
+  const response = await createApp(db, { specificationReader }).request(path, {
     method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -140,7 +152,7 @@ const seedRepoGrants = async (projectId: string): Promise<string> => {
     data: {
       projectId,
       name: "parallel-review-repo",
-      remoteUrl: "https://example.test/parallel-review.git",
+      remoteUrl: "https://github.com/example/parallel-review.git",
       mountPath: "/repo",
       defaultBranch: "main",
     },
@@ -180,12 +192,13 @@ const canonicalInstallation = async (): Promise<CanonicalInstallation> => {
   };
 };
 
-const instantiateDirect = async (): Promise<DirectFixture> => {
+const instantiateDirect = async (brief = SPECIFICATION_BRIEF): Promise<DirectFixture> => {
   const installation = await canonicalInstallation();
   const branchName = `parallel/direct-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
   const chain = await instantiateTemplate(db, installation.projectId, installation.directTemplateId, {
     repoId: installation.repoId,
     variables: { branchName },
+    description: brief,
     autoStart: true,
   });
   const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
@@ -209,11 +222,19 @@ const instantiateFullAtReviewFrontier = async (): Promise<FullFixture> => {
   const chain = await instantiateTemplate(db, installation.projectId, installation.fullTemplateId, {
     repoId: installation.repoId,
     variables: { branchName },
+    description: SPECIFICATION_BRIEF,
     autoStart: false,
   });
   const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
   const priorIds = chain.tasks.filter((task) => (task.chainIndex ?? 0) < 5).map((task) => task.id);
   await db.task.updateMany({ where: { id: { in: priorIds } }, data: { status: TaskStatus.DONE } });
+  const specificationTask = byIndex.get(1)!;
+  await db.taskStepOutput.create({ data: {
+    taskId: specificationTask.id,
+    kind: "spec",
+    body: JSON.stringify({ schemaVersion: 1, headSha: IMPLEMENTATION_BASE, spec: SPECIFICATION_BRIEF }),
+    commitSha: IMPLEMENTATION_BASE,
+  } });
   const implementation = byIndex.get(5)!;
   await db.$transaction((tx) => enqueueTaskRun(tx, implementation.id));
   return {
@@ -339,6 +360,10 @@ const reviewClaims = async (
     assert.equal(claimed.run.pinnedBaseSha, IMPLEMENTATION_HEAD);
     assert.equal(claimed.run.targetBranch, IMPLEMENTATION_HEAD);
   }
+  assert.ok(specificationReads.length >= 2);
+  assert.ok(specificationReads.every(({ commitSha, path }) => (
+    commitSha === IMPLEMENTATION_HEAD && path === `.chain/${fixture.branchName}/spec.md`
+  )));
   return { first, second };
 };
 
@@ -367,6 +392,143 @@ test("Direct sync instantiates a parallel review frontier claimable by distinct 
   assert.notEqual(first.run.id, second.run.id);
   assert.deepEqual(new Set([first.task.chainLayer, second.task.chainLayer]), new Set([2]));
   assert.deepEqual(new Set([first.task.chainIndex, second.task.chainIndex]), new Set([2, 3]));
+});
+
+test("a faithful direct brief ending in the prior-output reminder remains claimable", async () => {
+  const brief = "Preserve this exact ending.\nRead the prior template steps' persisted outputs before working.";
+  materializedSpecification = brief;
+  const fixture = await instantiateDirect(brief);
+  await completeImplementation(fixture, "reminder-implementation");
+  const reviewed = await claim("reminder-review");
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
+});
+
+test("a faithful direct spec with one conventional final newline remains claimable", async () => {
+  const brief = "Preserve this exact ending without a final newline.";
+  materializedSpecification = `${brief}\n`;
+  const fixture = await instantiateDirect(brief);
+  await completeImplementation(fixture, "final-newline-implementation");
+  const reviewed = await claim("final-newline-review");
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
+});
+
+test("a repository change between verification and claim triggers verification against the new repository", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "repository-change-implementation");
+  const repositoriesRead: string[] = [];
+  const response = await createApp(db, {
+    specificationReader: {
+      readFileAtCommit: async (repository) => {
+        repositoriesRead.push(repository);
+        if (repositoriesRead.length === 1) {
+          await db.repo.update({
+            where: { id: fixture.repoId },
+            data: { remoteUrl: "https://github.com/example/replaced-review.git" },
+          });
+        }
+        return new TextEncoder().encode(SPECIFICATION_BRIEF);
+      },
+    },
+  }).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "repository-change-review", leaseSeconds: 120 }),
+  });
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  const reviewed = JSON.parse(responseText) as Claim;
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
+  assert.deepEqual(repositoriesRead, [
+    "example/parallel-review",
+    "example/replaced-review",
+  ]);
+});
+
+test("a faithful rolled-over compound chain still resolves the approved specification", async () => {
+  const fixture = await instantiateFullAtReviewFrontier();
+  await db.taskTemplate.update({
+    where: { id: fixture.fullTemplateId },
+    data: { name: `${LEGACY_PRE_ZERO_GATE_TEMPLATE_PREFIX}${fixture.fullTemplateId}` },
+  });
+  await completeImplementation(fixture, "legacy-compound-implementation");
+  const reviewed = await claim("legacy-compound-review");
+  assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
+});
+
+test("an unreadable review candidate is parked without blocking an unrelated claim in the same poll", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "unreadable-implementation");
+  const unrelatedChain = await instantiateTemplate(db, fixture.projectId, fixture.directTemplateId, {
+    repoId: fixture.repoId,
+    variables: { branchName: `parallel/unrelated-${Date.now()}` },
+    description: "unrelated implementation brief",
+    autoStart: true,
+  });
+  const unrelatedImplementationTask = unrelatedChain.tasks.find((task) => task.chainIndex === 1);
+  assert.ok(unrelatedImplementationTask);
+
+  const response = await createApp(db, { specificationReader: null }).request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "unrelated-runner", leaseSeconds: 120 }),
+  });
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  const claimed = JSON.parse(responseText) as Claim;
+  assert.equal(claimed.run.taskId, unrelatedImplementationTask.id);
+
+  const failedReviews = await db.run.findMany({
+    where: {
+      taskId: { in: [fixture.solTaskId, fixture.blindTaskId] },
+      status: RunStatus.FAILED,
+    },
+    select: { id: true, taskId: true, failureReason: true, retryable: true },
+  });
+  assert.equal(failedReviews.length, 2);
+  assert.ok(failedReviews.every((run) => run.retryable === false && run.failureReason?.includes("spec-transcription-unreadable")));
+  for (const failed of failedReviews) {
+    assert.ok(failed.taskId);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: failed.taskId } })).status, TaskStatus.BACKLOG);
+    assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `spec-transcription-unreadable:${failed.id}` } }), 1);
+  }
+});
+
+test("tampered direct and compound materializations refuse claim with the named reason without starving the sibling", async () => {
+  for (const shape of ["direct", "compound"] as const) {
+    await resetTestDb(db);
+    await runDbScript("seed.ts");
+    await runDbScript("sync-canonical-prompts.ts");
+    materializedSpecification = "tampered specification";
+    specificationReads.length = 0;
+    const fixture = shape === "direct"
+      ? await instantiateDirect()
+      : await instantiateFullAtReviewFrontier();
+    await completeImplementation(fixture, `${shape}-implementation`);
+
+    const refused = await runnerRequest("/runner/tasks/claim", {
+      runnerId: `${shape}-review`,
+      leaseSeconds: 120,
+    });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    const refusalBody = refused.body as { error: string; reason: string };
+    assert.equal(refusalBody.reason, "spec-transcription-mismatch");
+    assert.match(refusalBody.error, /Spec transcription claim refused: spec-transcription-mismatch/u);
+
+    const failed = await db.run.findFirstOrThrow({
+      where: { taskId: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: RunStatus.FAILED },
+      select: { id: true, taskId: true, failureReason: true, retryable: true },
+    });
+    assert.equal(failed.retryable, false);
+    assert.ok(failed.taskId);
+    assert.match(failed.failureReason ?? "", /spec-transcription-mismatch/u);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: failed.taskId } })).status, TaskStatus.BACKLOG);
+    assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `spec-transcription-mismatch:${failed.id}` } }), 1);
+
+    materializedSpecification = SPECIFICATION_BRIEF;
+    const sibling = await claim(`${shape}-sibling`);
+    assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(sibling.run.taskId));
+    assert.notEqual(sibling.run.taskId, failed.taskId);
+  }
 });
 
 test("the HTTP join stays closed after the first review and creates one fix-step run after the second", async () => {

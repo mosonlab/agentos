@@ -31,7 +31,7 @@ import {
 } from "./merge-lease.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
-import type { GitHubReader, PullRequestSnapshot } from "./github-read.js";
+import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -90,7 +90,7 @@ const reader = (
   current: PullRequestSnapshot,
   files: Array<{ filename: string; previousFilename: string | null; patch: string | null }> = [],
   filesComplete = true,
-): GitHubReader => ({
+): PullRequestReader => ({
   readPullRequest: async () => current,
   compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete, files }),
 });
