@@ -381,7 +381,8 @@ export const projectStream = (
 
   type ProjectionEntry =
     | { index: number; item: StreamItem }
-    | { index: number; marker: Extract<StreamNode, { kind: "marker" }> };
+    | { index: number; marker: Extract<StreamNode, { kind: "marker" }> }
+    | { index: number; input: Extract<StreamNode, { kind: "input" }> };
 
   const eventIndexForItem = (item: StreamItem): number => {
     // Tool ids are call ids rather than event ids, so anchor them at their
@@ -424,6 +425,31 @@ export const projectStream = (
   }
   entries.sort((left, right) => left.index - right.index);
 
+  const piInputSeen = new Set<string>();
+  for (const [index, event] of events.entries()) {
+    if (runner !== "PI" || event.type !== "MODEL_COMPLETED") continue;
+    const message = asRecord(asRecord(event.payload)?.message);
+    if (asString(message?.role) !== "user") continue;
+    const content = message?.content;
+    const text = Array.isArray(content) ? contentText(content) : asString(content) ?? "";
+    if (text.trim().length === 0) continue;
+
+    // PI may repeat a completed message on `turn_end`, just as it repeats
+    // assistant messages. Use its provider identity where available, while
+    // preserving anonymous user messages rather than guessing they are dupes.
+    const timestamp = message?.timestamp;
+    const identity = typeof timestamp === "number" || typeof timestamp === "string"
+      ? String(timestamp)
+      : textSignatureId(content);
+    if (identity !== null) {
+      if (piInputSeen.has(identity)) continue;
+      piInputSeen.add(identity);
+    }
+
+    entries.push({ index, input: { kind: "input", id: event.id, at: event.at, text } });
+  }
+  entries.sort((left, right) => left.index - right.index);
+
   const flushTools = (): void => {
     if (tools.length === 0) return;
     const first = tools[0]!;
@@ -456,6 +482,11 @@ export const projectStream = (
     if ("marker" in entry) {
       flushTools();
       nodes.push(entry.marker);
+      continue;
+    }
+    if ("input" in entry) {
+      flushTools();
+      nodes.push(entry.input);
       continue;
     }
     const item = entry.item;

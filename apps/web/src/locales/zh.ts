@@ -607,6 +607,7 @@ export const zh = {
   "sessions.stream.empty": "还没有事件。",
   "sessions.stream.loading": "正在加载事件…",
   "sessions.stream.new": "{n} 条新内容 ↓",
+  "sessions.stream.operator": "操作员",
   "sessions.stream.result": "结果",
   "sessions.stream.resumed": "会话已恢复",
   "sessions.stream.title": "流",

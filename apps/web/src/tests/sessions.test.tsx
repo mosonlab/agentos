@@ -164,6 +164,17 @@ test("stream markers render muted resume copy in both locales and errors through
   assert.match(errorMarkup, /var\(--destructive-bg\)/);
 });
 
+test("operator input renders in the message card under a translated Operator heading", () => {
+  const input = { kind: "input" as const, id: "input-1", at: "2026-08-16T00:00:00.000Z", text: "continue with the repair" };
+  const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={input} /></LocaleProvider>);
+  const chinese = renderToStaticMarkup(<LocaleProvider initialLocale="zh"><StreamNodeView node={input} /></LocaleProvider>);
+  assert.match(english, /Operator/);
+  assert.match(english, /continue with the repair/);
+  assert.match(english, /rounded-xl border border-border bg-card/);
+  assert.match(chinese, /操作员/);
+  assert.match(chinese, /continue with the repair/);
+});
+
 test("tool groups and text node headings are translated in English and Chinese", () => {
   try {
     const english = renderToStaticMarkup(<LocaleProvider initialLocale="en"><StreamNodeView node={toolNode} /></LocaleProvider>);

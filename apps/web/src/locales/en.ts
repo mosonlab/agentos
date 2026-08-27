@@ -610,6 +610,7 @@ export const en = {
   "sessions.stream.empty": "No events yet.",
   "sessions.stream.loading": "Loading events…",
   "sessions.stream.new": "{n} new ↓",
+  "sessions.stream.operator": "Operator",
   "sessions.stream.result": "Result",
   "sessions.stream.resumed": "Session resumed",
   "sessions.stream.title": "Stream",

@@ -365,6 +365,32 @@ test("projection marks only the second and later process starts as resume bounda
   }
 });
 
+test("a PI completed user message becomes an input node with its source timestamp", () => {
+  const input = event("MODEL_COMPLETED", {
+    type: "message_end",
+    message: { role: "user", content: [{ type: "text", text: "continue with the repair" }], timestamp: 1786788190000 },
+  }, { source: "PI", at: "2026-08-15T10:03:00.000Z" });
+  const projection = projectStream([input], "PI", false);
+
+  assert.deepEqual(projection.nodes, [{
+    kind: "input", id: input.id, at: input.at, text: "continue with the repair",
+  }]);
+  assert.deepEqual(projection.counts, { messages: 0, toolCalls: 0, files: 0 });
+});
+
+test("only PI user completions become input nodes; assistant messages and other runners do not", () => {
+  const user = (runner: RunnerKind) => event("MODEL_COMPLETED", {
+    type: "message_end", message: { role: "user", content: [{ type: "text", text: "operator input" }], timestamp: 1 },
+  }, { source: runner });
+  const assistant = event("MODEL_COMPLETED", {
+    type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "agent response" }], timestamp: 2 },
+  }, { source: "PI" });
+
+  assert.equal(projectStream([user("CLAUDE")], "CLAUDE", false).nodes.some((node) => node.kind === "input"), false);
+  assert.equal(projectStream([user("CODEX")], "CODEX", false).nodes.some((node) => node.kind === "input"), false);
+  assert.equal(projectStream([assistant], "PI", false).nodes.some((node) => node.kind === "input"), false);
+});
+
 test("projection counts derive from the nodes it returns", () => {
   const events = [
     event("MODEL_DELTA", CLAUDE_TEXT_ASSISTANT),

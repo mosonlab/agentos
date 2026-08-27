@@ -372,10 +372,17 @@ export const StreamNodeView = ({ node }: { node: StreamNode }): ReactNode => {
       ? <ErrorNotice message={node.text} />
       : <div className="text-[12px] text-muted-foreground">{t(node.text === RESUME_MARKER_TEXT ? RESUME_MARKER_TEXT : "sessions.stream.resumed")}</div>;
   }
-  // Operator-input rendering is owned by the input slice. Keeping the variant
-  // in the union now makes this renderer exhaustive without producing an input
-  // node before its projection rule lands.
-  if (node.kind === "input") return null;
+  if (node.kind === "input") {
+    return (
+      <div className={MSG_CARD}>
+        <div className={MSG_HEAD}>
+          <span className="text-foreground">{t("sessions.stream.operator")}</span>
+          <span className={MSG_TIME}>{formatDateTime(node.at)}</span>
+        </div>
+        <Markdown text={node.text} />
+      </div>
+    );
+  }
   return (
     <div className={MSG_CARD}>
       <div className={MSG_HEAD}>
