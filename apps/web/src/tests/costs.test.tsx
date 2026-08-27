@@ -39,4 +39,3 @@ test("cost helpers preserve valid amounts and avoid invalid chart geometry", () 
   assert.equal(costNumber("not-a-number"), 0);
   assert.equal(costDateLabel("2026-08-24", "en"), "Aug 24");
 });
-
