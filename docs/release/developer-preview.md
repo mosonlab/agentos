@@ -34,7 +34,7 @@ fresh install.
 | Docker | Docker Desktop must be running, with Docker Compose available. The supported local shape needs loopback ports `5432`, `3000`, and `5173` free. |
 | Git | Any recent version, with `user.name` and `user.email` configured for the runner account. The source must be a working clone. |
 | Codex CLI | The official Codex CLI, already installed **and already signed in**, under the same macOS account that will run the AgentOS runner. The runner does not inherit your interactive shell's `PATH`; see the preflight below. |
-| GitHub CLI | Optional for branch-only delivery and the deterministic smoke task. `gh` is required for automatic pull-request creation and must be authenticated as the runner account. Without it, AgentOS pushes the branch and returns manual PR instructions. |
+| GitHub CLI | Optional for branch-only delivery and the deterministic smoke task. `gh` is required for automatic pull-request creation and must be authenticated as the runner account. If a run must open a pull request and `gh` cannot record one, AgentOS preserves the pushed branch and fails the run for retry. Manual PR instructions are reserved for non-GitHub remotes, where automatic creation is impossible by design. |
 
 AgentOS orchestrates a coding CLI you already have. It bundles no subscription
 and resells no capacity: your provider account, its plan limits, its rate
