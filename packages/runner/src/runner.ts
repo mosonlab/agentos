@@ -382,11 +382,17 @@ export const executeClaim = async (
     }
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     phase = "EXECUTE";
+    // A resume dispatches its continuation input rather than the fresh prompt.
+    // Keep the launch manifest and durable Run hash tied to the bytes that this
+    // invocation actually handed to the provider.
+    const dispatchedPrompt = claim.resume?.input ?? prompt;
+    const manifest = manifestFor(spec, dispatchedPrompt);
     await startRun(config, claim, {
       adapterVersion: ADAPTER_VERSION,
       cliVersion: preflight.cliVersion ?? "unknown",
       authMode: preflight.authMode,
-      manifest: manifestFor(spec),
+      manifest,
+      promptHash: manifest.promptHash,
       workspacePath: workspace.path,
       branch: workspace.branch,
       baseSha: workspace.baseSha,

@@ -620,7 +620,11 @@ export const spawnAdapterRuntime = (implementation: AdapterImplementation, spec:
     args,
     promptTransport: "stdin",
     promptBytes: Buffer.byteLength(input),
-    promptHash: spec.claim.run.promptHash,
+    // The persisted Run value is the hash available at queue time, before
+    // claim-time handoffs and notes have been appended. Hash the bytes actually
+    // delivered to this provider invocation so this event cannot claim a digest
+    // for a different prompt (and resume inputs are covered too).
+    promptHash: promptHashFor(input),
   } });
   return handle;
 };
@@ -902,7 +906,10 @@ export const adapters: Readonly<Record<RunnerKind, CliAdapter>> = Object.freeze(
   RUNNER_KINDS.map((runner) => [runner, RUNNER_DEFINITIONS[runner].adapter]),
 ) as Record<RunnerKind, CliAdapter>);
 
-export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
+/** Hash the exact prompt bytes sent to the provider on this invocation. */
+export const promptHashFor = (prompt: string): string => createHash("sha256").update(prompt).digest("hex");
+
+export const manifestFor = (spec: RunSpec, dispatchedPrompt = spec.prompt): Record<string, unknown> => ({
   adapterVersion: ADAPTER_VERSION,
   runner: spec.claim.runner,
   binary: spec.config.binaries[spec.claim.runner],
@@ -911,7 +918,7 @@ export const manifestFor = (spec: RunSpec): Record<string, unknown> => ({
   codexServiceTier: spec.claim.run.codexServiceTier,
   subagentModel: spec.claim.run.subagentModel,
   subagentMaxConcurrent: spec.claim.run.subagentMaxConcurrent,
-  promptHash: createHash("sha256").update(spec.prompt).digest("hex"),
+  promptHash: promptHashFor(dispatchedPrompt),
   promptTransport: "stdin",
   structuredEvents: true,
   // What the seat manual promises the agent, and how it was actually injected.

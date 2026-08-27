@@ -570,6 +570,9 @@ const startInput = z.object({
   adapterVersion: z.string().min(1),
   cliVersion: z.string().min(1),
   authMode: z.string().nullable().optional(),
+  // Ordinary runners compute this from the exact bytes handed to the provider.
+  // Mechanical runs omit it because they dispatch no model prompt.
+  promptHash: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   manifest: z.record(z.string(), z.unknown()),
   // Nullable for the mechanical executor only, which provisions no workspace at
   // all — the column is already `String?`. An ordinary runner still sends a
@@ -3376,6 +3379,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
           adapterVersion: body.adapterVersion,
           cliVersion: body.cliVersion,
           authMode: body.authMode ?? null,
+          ...(body.promptHash === undefined ? {} : { promptHash: body.promptHash }),
           manifest: jsonValue(body.manifest),
           workspacePath: body.workspacePath,
           branch: body.branch ?? null,

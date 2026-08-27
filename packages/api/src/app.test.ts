@@ -618,6 +618,7 @@ test("starting a fresh run stamps the same new timestamp on its Run and Session"
   await withTokens(async () => {
     const runWrites: Array<Record<string, unknown>> = [];
     const sessionWrites: Array<Record<string, unknown>> = [];
+    const dispatchedPromptHash = createHash("sha256").update("the exact dispatched prompt").digest("hex");
     const tx = {
       $queryRaw: async () => [{ id: "run-1" }],
       run: {
@@ -646,6 +647,7 @@ test("starting a fresh run stamps the same new timestamp on its Run and Session"
         fencingToken: "1:run-1:current",
         adapterVersion: "test",
         cliVersion: "test",
+        promptHash: dispatchedPromptHash,
         manifest: {},
         workspacePath: "/scratch/fresh",
       }),
@@ -654,6 +656,7 @@ test("starting a fresh run stamps the same new timestamp on its Run and Session"
     assert.ok(runWrites[0]?.startedAt instanceof Date);
     assert.equal(sessionWrites[0]?.startedAt, runWrites[0]?.startedAt);
     assert.ok((runWrites[0]?.startedAt as Date).getTime() >= before);
+    assert.equal(runWrites[0]?.promptHash, dispatchedPromptHash);
   });
 });
 
