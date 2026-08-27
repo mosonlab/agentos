@@ -43,6 +43,7 @@
     { "glob": "docker-compose.yml", "purpose": "local development services" },
     { "glob": "eslint.config.mjs", "purpose": "type-aware lint gate rule" },
     { "glob": "docs/BRIEF-TEMPLATE.md", "purpose": "the feature-brief structure a direct chain's description is written to, referenced by AGENTS.md" },
+    { "glob": "docs/media/agents.png", "purpose": "README screenshot: the agents list with each agent's role, model, effort and runner" },
     { "glob": "docs/media/chain.png", "purpose": "README screenshot: a twelve-step assurance chain with assigned agent roles" },
     { "glob": "docs/media/tasks.png", "purpose": "README screenshot: the task board with a twelve-step template chain in flight" },
     { "glob": "docs/public-snapshot.md", "purpose": "snapshot safety procedure" },

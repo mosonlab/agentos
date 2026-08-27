@@ -26,7 +26,17 @@ AgentOS 把任务、agent、仓库与文件授权、独立的运行记录、prov
 它编排的是你已经安装并完成认证的官方 Codex CLI 与 Claude Code；AgentOS 不捆绑
 也不转售任何订阅，provider 条款与套餐限制仍然适用。
 
+<div align="center">
+
 <img src="docs/media/chain.png" alt="链视图：十二步保障工作流，每一步标注其指派的 agent 角色" width="880">
+
+<sub>任务链：每一步都带着自己的角色、提示词与评审关卡。</sub>
+
+<img src="docs/media/agents.png" alt="Agents 视图：每个 agent 的角色、模型、推理档位与 runner" width="880">
+
+<sub>Agents：一个角色、一段提示词、一个模型与档位，以及它派往的 runner。</sub>
+
+</div>
 
 > **Developer Preview 2（v0.2.0）。** 接口、配置与已存数据的形状都可能在预览版
 > 之间变动，预览版之间除全新安装外没有升级路径。

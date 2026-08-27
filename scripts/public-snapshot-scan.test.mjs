@@ -380,6 +380,7 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/governance/task-routing-v1.md",
     "docs/install.md",
     "docs/install.zh-CN.md",
+    "docs/media/agents.png",
     "docs/media/chain.png",
     "docs/media/tasks.png",
     "docs/public-snapshot.md",

@@ -28,7 +28,17 @@ It orchestrates the official Codex CLI and Claude Code that you have already
 installed and signed in to. It bundles or resells no subscription, and provider
 terms and plan limits apply.
 
+<div align="center">
+
 <img src="docs/media/chain.png" alt="Chain view: a twelve-step assurance workflow with assigned agent roles" width="880">
+
+<sub>A task chain: each step carries its own role, prompt and review gate.</sub>
+
+<img src="docs/media/agents.png" alt="Agents view: each agent's role, model, reasoning effort and runner" width="880">
+
+<sub>Agents: a role, a prompt, a model and effort, and the runner it goes to.</sub>
+
+</div>
 
 > **Developer Preview 2 (v0.2.0).** Interfaces, configuration and stored data
 > shapes may change between preview releases, and the only upgrade path is a
