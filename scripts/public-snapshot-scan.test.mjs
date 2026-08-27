@@ -372,10 +372,14 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/BRIEF-TEMPLATE.md",
     "docs/adr/0001-merge-lease-hold-window.md",
     "docs/adr/README.md",
+    "docs/architecture.md",
+    "docs/architecture.zh-CN.md",
     "docs/demos/templates-release-demo.md",
     "docs/demos/templates-release-evidence.schema.json",
     "docs/governance/review-role-convergence-v1.md",
     "docs/governance/task-routing-v1.md",
+    "docs/install.md",
+    "docs/install.zh-CN.md",
     "docs/media/chain.png",
     "docs/media/tasks.png",
     "docs/public-snapshot.md",
@@ -393,6 +397,8 @@ test("the docs surface is closed and named one file at a time", () => {
     "docs/runbooks/merge-delivery.md",
     "docs/runbooks/merge-executor.md",
     "docs/runbooks/quiet-window-auto-deploy.md",
+    "docs/status.md",
+    "docs/status.zh-CN.md",
   ]);
   // Named one at a time rather than by `docs/release/*.md`, because a directory
   // glob would publish anything dropped into the directory later — the
