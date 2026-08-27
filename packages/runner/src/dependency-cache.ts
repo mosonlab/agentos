@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, writeFile,
+  chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, writeFile,
 } from "node:fs/promises";
 import { platform } from "node:os";
 import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+
+import { flock } from "fs-ext";
 
 import type { RunnerConfig } from "./config.js";
 import type { CommandOptions } from "./exec.js";
@@ -17,6 +19,10 @@ const METADATA_FILE = "metadata.json";
 const TREE_DIRECTORY = "trees";
 const MAX_METADATA_BYTES = 128 * 1024 * 1024;
 const NPM_PROBE_TIMEOUT_MS = 10_000;
+const CACHE_LOCK_FILE = "lock";
+const CACHE_USAGE_DIRECTORY = "usage";
+const CACHE_KEY = /^[a-f0-9]{64}$/u;
+export const DEPENDENCY_CACHE_ENTRY_LIMIT = 4;
 
 export type DependencyCommandExecutor = (
   config: RunnerConfig,
@@ -57,10 +63,11 @@ type DependencyProject = {
 };
 
 export type DependencyCacheProgress = {
-  event: "hit" | "miss" | "publication" | "integrity-refusal" | "elapsed";
+  event: "hit" | "miss" | "publication" | "integrity-refusal" | "eviction" | "phase" | "elapsed";
   key?: string;
   condition?: string;
   elapsedMs?: number;
+  phase?: "identity" | "validate" | "restore" | "rebuild" | "install" | "publish" | "retention";
 };
 
 export type DependencyCacheOptions = {
@@ -108,6 +115,19 @@ const sha256 = (content: string | Buffer): string => createHash("sha256").update
 
 const progressReporter = (progress: DependencyCacheProgress): void => {
   console.log(JSON.stringify({ audit: "dependency-cache", ...progress }));
+};
+
+const timed = async <T>(
+  phase: NonNullable<DependencyCacheProgress["phase"]>,
+  report: (progress: DependencyCacheProgress) => void,
+  work: () => Promise<T>,
+): Promise<T> => {
+  const started = Date.now();
+  try {
+    return await work();
+  } finally {
+    report({ event: "phase", phase, elapsedMs: Date.now() - started });
+  }
 };
 
 const errorCode = (error: unknown): string | undefined => (error as NodeJS.ErrnoException).code;
@@ -718,7 +738,113 @@ const ensureCacheRoot = async (configuredRoot: string, workspace: string): Promi
   await mkdir(entries, { recursive: true, mode: 0o711 });
   if ((await lstat(entries)).isSymbolicLink()) throw new Error("Dependency cache entries root is a symlink");
   await chmod(entries, 0o711);
+  const usage = join(root, CACHE_USAGE_DIRECTORY);
+  await mkdir(usage, { recursive: true, mode: 0o700 });
+  if ((await lstat(usage)).isSymbolicLink()) throw new Error("Dependency cache usage root is a symlink");
+  await chmod(usage, 0o700);
   return root;
+};
+
+const flockAsync = (fd: number, operation: "sh" | "exnb" | "un"): Promise<void> => new Promise((accept, reject) => {
+  flock(fd, operation, (error) => error ? reject(error) : accept());
+});
+
+const openCacheLock = async (cacheRoot: string) => {
+  const path = join(cacheRoot, CACHE_LOCK_FILE);
+  const handle = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+  const info = await handle.stat();
+  if (!info.isFile()) {
+    await handle.close();
+    throw new Error("Dependency cache lock is not a file");
+  }
+  return handle;
+};
+
+const withSharedCacheLock = async <T>(cacheRoot: string, work: () => Promise<T>): Promise<T> => {
+  const handle = await openCacheLock(cacheRoot);
+  try {
+    await flockAsync(handle.fd, "sh");
+    try {
+      return await work();
+    } finally {
+      await flockAsync(handle.fd, "un");
+    }
+  } finally {
+    await handle.close();
+  }
+};
+
+const recordCacheUse = async (cacheRoot: string, key: string): Promise<void> => {
+  if (!CACHE_KEY.test(key)) throw new Error("Dependency cache usage key is invalid");
+  const marker = join(cacheRoot, CACHE_USAGE_DIRECTORY, key);
+  const handle = await open(
+    marker,
+    constants.O_CREAT | constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await handle.writeFile(`${new Date().toISOString()}\n`);
+  } finally {
+    await handle.close();
+  }
+};
+
+const pruneCacheEntries = async (
+  cacheRoot: string,
+  currentKey: string | undefined,
+  report: (progress: DependencyCacheProgress) => void,
+): Promise<void> => {
+  const handle = await openCacheLock(cacheRoot);
+  try {
+    try {
+      await flockAsync(handle.fd, "exnb");
+    } catch (error: unknown) {
+      if (["EAGAIN", "EWOULDBLOCK"].includes(errorCode(error) ?? "")) return;
+      throw error;
+    }
+    try {
+      const entriesRoot = join(cacheRoot, "entries");
+      const usageRoot = join(cacheRoot, CACHE_USAGE_DIRECTORY);
+      const entries: Array<{ key: string; path: string; usedMs: number }> = [];
+      for (const name of await readdir(entriesRoot)) {
+        if (!CACHE_KEY.test(name)) continue;
+        const path = join(entriesRoot, name);
+        const info = await lstat(path);
+        if (info.isSymbolicLink() || !info.isDirectory()) {
+          report({ event: "integrity-refusal", key: name.slice(0, 16), condition: "unsafe-retention-entry" });
+          continue;
+        }
+        const marker = join(usageRoot, name);
+        const markerInfo = await lstat(marker).catch((error: unknown) => {
+          if (errorCode(error) === "ENOENT") return null;
+          throw error;
+        });
+        if (markerInfo?.isSymbolicLink() || (markerInfo !== null && !markerInfo.isFile())) {
+          report({ event: "integrity-refusal", key: name.slice(0, 16), condition: "unsafe-usage-marker" });
+          continue;
+        }
+        entries.push({ key: name, path, usedMs: markerInfo?.mtimeMs ?? info.mtimeMs });
+      }
+      entries.sort((left, right) => right.usedMs - left.usedMs || right.key.localeCompare(left.key));
+      const keep = new Set<string>();
+      if (currentKey && CACHE_KEY.test(currentKey)) keep.add(currentKey);
+      for (const entry of entries) {
+        if (keep.size >= DEPENDENCY_CACHE_ENTRY_LIMIT) break;
+        keep.add(entry.key);
+      }
+      for (const entry of entries) {
+        if (keep.has(entry.key)) continue;
+        await makeWritable(entry.path);
+        await rm(entry.path, { recursive: true, force: true });
+        await rm(join(usageRoot, entry.key), { force: true });
+        report({ event: "eviction", key: entry.key.slice(0, 16), condition: "entry-limit" });
+      }
+    } finally {
+      await flockAsync(handle.fd, "un");
+    }
+  } finally {
+    await handle.close();
+  }
 };
 
 const restoreEntry = async (
@@ -871,11 +997,13 @@ export const materializeWorkspaceDependencies = async (
   try {
     let identity: DependencyCacheIdentity | null;
     try {
-      identity = await deriveDependencyCacheKey(config, workspace, env, execute, options);
+      identity = await timed("identity", report, () => deriveDependencyCacheKey(config, workspace, env, execute, options));
     } catch (error: unknown) {
       if (!(error instanceof DependencyCacheInputMissError)) throw error;
       report({ event: "miss", condition: error.condition });
-      await installDependencies(config, workspace, error.targets, env, execute, options.installRetryOptions);
+      await timed("install", report, () => installDependencies(
+        config, workspace, error.targets, env, execute, options.installRetryOptions,
+      ));
       return { status: "installed", condition: error.condition };
     }
     if (identity === null) {
@@ -890,35 +1018,48 @@ export const materializeWorkspaceDependencies = async (
     const entry = resolve(cacheRoot, "entries", key);
     if (!insideOrEqual(cacheRoot, entry)) throw new Error("Dependency cache entry escaped its root");
     const expected = { format: CACHE_FORMAT, key, toolchain, inputs, targetPaths } as const;
-    let integrityCondition: string | undefined;
-    if (await pathKind(entry) !== "missing") {
-      try {
-        const metadata = await validateEntry(entry, expected, workspace);
-        await restoreEntry(config, metadata, entry, workspace, env, execute);
-        await rebuildNativeWorkspaces(config, workspace, nativeWorkspaces, env, execute);
-        report({ event: "hit", key: key.slice(0, 16) });
-        return { status: "restored", key };
-      } catch (error: unknown) {
-        if (!(error instanceof DependencyCacheIntegrityError)) throw error;
-        integrityCondition = error.condition;
-        report({ event: "integrity-refusal", key: key.slice(0, 16), condition: error.condition });
-      }
-    } else {
-      report({ event: "miss", key: key.slice(0, 16), condition: "entry-missing" });
-    }
-
-    const targets = await installDependencies(config, workspace, targetPaths, env, execute, options.installRetryOptions);
-    const metadata: CacheMetadata = { format: CACHE_FORMAT, key, toolchain, inputs, targets };
-    if (integrityCondition === undefined) {
-      const publication = await publishEntry(cacheRoot, entry, metadata, workspace, expected);
-      if (publication === "refused") {
-        integrityCondition = "concurrent-entry-invalid";
-        report({ event: "integrity-refusal", key: key.slice(0, 16), condition: integrityCondition });
+    const locked = await withSharedCacheLock(cacheRoot, async () => {
+      let integrityCondition: string | undefined;
+      if (await pathKind(entry) !== "missing") {
+        try {
+          const metadata = await timed("validate", report, () => validateEntry(entry, expected, workspace));
+          await timed("restore", report, () => restoreEntry(config, metadata, entry, workspace, env, execute));
+          await timed("rebuild", report, () => rebuildNativeWorkspaces(config, workspace, nativeWorkspaces, env, execute));
+          await recordCacheUse(cacheRoot, key);
+          report({ event: "hit", key: key.slice(0, 16) });
+          return { result: { status: "restored", key } as DependencyCacheResult, usableKey: key };
+        } catch (error: unknown) {
+          if (!(error instanceof DependencyCacheIntegrityError)) throw error;
+          integrityCondition = error.condition;
+          report({ event: "integrity-refusal", key: key.slice(0, 16), condition: error.condition });
+        }
       } else {
-        report({ event: "publication", key: key.slice(0, 16), condition: publication });
+        report({ event: "miss", key: key.slice(0, 16), condition: "entry-missing" });
       }
-    }
-    return { status: "installed", key, ...(integrityCondition ? { condition: integrityCondition } : {}) };
+
+      const targets = await timed("install", report, () => installDependencies(
+        config, workspace, targetPaths, env, execute, options.installRetryOptions,
+      ));
+      const metadata: CacheMetadata = { format: CACHE_FORMAT, key, toolchain, inputs, targets };
+      let usableKey: string | undefined;
+      if (integrityCondition === undefined) {
+        const publication = await timed("publish", report, () => publishEntry(cacheRoot, entry, metadata, workspace, expected));
+        if (publication === "refused") {
+          integrityCondition = "concurrent-entry-invalid";
+          report({ event: "integrity-refusal", key: key.slice(0, 16), condition: integrityCondition });
+        } else {
+          await recordCacheUse(cacheRoot, key);
+          usableKey = key;
+          report({ event: "publication", key: key.slice(0, 16), condition: publication });
+        }
+      }
+      return {
+        result: { status: "installed", key, ...(integrityCondition ? { condition: integrityCondition } : {}) } as DependencyCacheResult,
+        usableKey,
+      };
+    });
+    await timed("retention", report, () => pruneCacheEntries(cacheRoot, locked.usableKey, report));
+    return locked.result;
   } finally {
     report({ event: "elapsed", elapsedMs: Date.now() - started });
   }

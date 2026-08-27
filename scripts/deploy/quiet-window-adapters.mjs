@@ -3,18 +3,106 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { BLOCKING_RUN_STATUSES, DeployFailure, gitPreflightFailure } from "./quiet-window-lib.mjs";
+
+export const DEPLOY_PREVIOUS_RETENTION_COUNT = 3;
+export const DEPLOY_BACKUP_RETENTION_COUNT = 14;
+export const DEPLOY_BACKUP_DAILY_RETENTION_DAYS = 30;
+
+const PREVIOUS_DIRECTORY = /^previous-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const BACKUP_FILE = /^(\d{4}-\d{2}-\d{2})T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{12}-[0-9a-f]{12}\.dump$/u;
+
+const assertDirectChild = (root, path, name) => {
+  if (dirname(resolve(path)) !== resolve(root)) {
+    throw new DeployFailure("deploy-retention-refused", `path-escaped-${name}`);
+  }
+};
+
+const removableEntries = ({ root, pattern, kind }) => {
+  if (!existsSync(root)) return [];
+  const entries = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!pattern.test(entry.name)) continue;
+    const path = join(root, entry.name);
+    assertDirectChild(root, path, entry.name);
+    const info = lstatSync(path);
+    if (info.isSymbolicLink() || (kind === "directory" ? !info.isDirectory() : !info.isFile())) {
+      throw new DeployFailure("deploy-retention-refused", `unsafe-${kind}-${entry.name}`);
+    }
+    if (dirname(realpathSync(path)) !== realpathSync(root)) {
+      throw new DeployFailure("deploy-retention-refused", `resolved-path-escaped-${entry.name}`);
+    }
+    entries.push({ name: entry.name, path, modifiedMs: statSync(path).mtimeMs });
+  }
+  return entries;
+};
+
+/**
+ * Retains bounded rollback state without touching the live build, active stage,
+ * lock, escalation marker, or any unrecognized state-directory entry.
+ */
+export const pruneDeployHistory = ({
+  stateDir,
+  now = Date.now(),
+  previousLimit = DEPLOY_PREVIOUS_RETENTION_COUNT,
+  backupLimit = DEPLOY_BACKUP_RETENTION_COUNT,
+  dailyRetentionDays = DEPLOY_BACKUP_DAILY_RETENTION_DAYS,
+} = {}) => {
+  if (typeof stateDir !== "string" || stateDir.length === 0) {
+    throw new DeployFailure("deploy-retention-refused", "state-directory-missing");
+  }
+  for (const [name, value] of [
+    ["previous-limit", previousLimit],
+    ["backup-limit", backupLimit],
+    ["daily-retention-days", dailyRetentionDays],
+  ]) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new DeployFailure("deploy-retention-refused", `${name}-invalid`);
+  }
+
+  const previous = removableEntries({ root: stateDir, pattern: PREVIOUS_DIRECTORY, kind: "directory" })
+    .sort((left, right) => right.modifiedMs - left.modifiedMs || right.name.localeCompare(left.name));
+  const removedPrevious = previous.slice(previousLimit);
+
+  const backupRoot = join(stateDir, "backups");
+  const backups = removableEntries({ root: backupRoot, pattern: BACKUP_FILE, kind: "file" })
+    .sort((left, right) => right.name.localeCompare(left.name));
+  const keptBackupNames = new Set(backups.slice(0, backupLimit).map(({ name }) => name));
+  const cutoff = now - dailyRetentionDays * 24 * 60 * 60 * 1_000;
+  const daily = new Set();
+  for (const backup of backups) {
+    if (backup.modifiedMs < cutoff) continue;
+    const day = BACKUP_FILE.exec(backup.name)?.[1];
+    if (day && !daily.has(day)) {
+      daily.add(day);
+      keptBackupNames.add(backup.name);
+    }
+  }
+  const removedBackups = backups.filter(({ name }) => !keptBackupNames.has(name));
+
+  for (const entry of removedPrevious) rmSync(entry.path, { recursive: true, force: true });
+  for (const entry of removedBackups) rmSync(entry.path, { force: true });
+
+  return Object.freeze({
+    keptPrevious: previous.length - removedPrevious.length,
+    removedPrevious: removedPrevious.length,
+    keptBackups: backups.length - removedBackups.length,
+    removedBackups: removedBackups.length,
+  });
+};
 
 export const DEPLOY_REQUIRED_ARTIFACT_PATHS = Object.freeze([
   "packages/github-client/dist",

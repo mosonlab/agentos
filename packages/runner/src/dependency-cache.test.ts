@@ -11,7 +11,8 @@ import test from "node:test";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
-  DependencyCacheInputMissError, deriveDependencyCacheKey, materializeWorkspaceDependencies,
+  DEPENDENCY_CACHE_ENTRY_LIMIT, DependencyCacheInputMissError, deriveDependencyCacheKey,
+  materializeWorkspaceDependencies,
   type DependencyCacheProgress, type DependencyCacheToolchain, type DependencyCommandExecutor,
 } from "./dependency-cache.js";
 import { CommandTimeoutError, runCommand } from "./exec.js";
@@ -622,12 +623,47 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
     assert.equal(fake.installs(), 2);
     assert.equal(new Set(results.map(({ key }) => key)).size, 1);
     const names = await readdir(join(root, "cache"));
-    assert.deepEqual(names, ["entries"], "private stages must not survive publication");
+    assert.deepEqual(names.sort(), ["entries", "lock", "usage"], "private stages must not survive publication");
     const entries = await readdir(join(root, "cache/entries"));
     assert.equal(entries.length, 1);
     const entry = join(root, "cache/entries", entries[0]!);
     assert.equal((await lstat(entry)).mode & 0o222, 0);
     assert.equal(await readFile(join(entry, "trees/node_modules/fake-package/index.js"), "utf8"), "race winner\n");
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("retention keeps four recently used entries and reports phase latency", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-"));
+  try {
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    const events: DependencyCacheProgress[] = [];
+    const requestedEntries = DEPENDENCY_CACHE_ENTRY_LIMIT + 2;
+    for (let index = 0; index < requestedEntries; index += 1) {
+      const workspace = join(root, `workspace-${index}`);
+      await createFixture(workspace);
+      await writeFile(join(workspace, "package-lock.json"), packageLock(`1.0.${index}`));
+      await materializeWorkspaceDependencies(
+        configured,
+        workspace,
+        workspaceEnvironment(configured),
+        fake.execute,
+        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+      );
+    }
+
+    const entries = await readdir(join(root, "cache/entries"));
+    const usage = await readdir(join(root, "cache/usage"));
+    assert.equal(entries.length, DEPENDENCY_CACHE_ENTRY_LIMIT);
+    assert.deepEqual(usage.sort(), entries.sort());
+    assert.equal(events.filter(({ event }) => event === "eviction").length, requestedEntries - DEPENDENCY_CACHE_ENTRY_LIMIT);
+    const phases = new Set(events.filter(({ event }) => event === "phase").map(({ phase }) => phase));
+    assert.ok(phases.has("identity"));
+    assert.ok(phases.has("install"));
+    assert.ok(phases.has("publish"));
+    assert.ok(phases.has("retention"));
   } finally {
     await cleanupRoot(root);
   }

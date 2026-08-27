@@ -34,6 +34,7 @@ import {
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   inspectGitPreflight,
   inspectProductionCheckout,
+  pruneDeployHistory,
   publishDirectories,
   workspaceDependencyPaths,
 } from "./quiet-window-adapters.mjs";
@@ -437,11 +438,22 @@ const readAuthority = (root = REPOSITORY_ROOT) => {
 };
 
 const parseArgs = (args) => {
-  const allowed = new Set(["--dry-run", "--clear-escalation"]);
+  const allowed = new Set(["--dry-run", "--clear-escalation", "--prune-history"]);
   const unknown = args.find((argument) => !allowed.has(argument));
   if (unknown) fail("usage", `unknown-argument-${unknown}`);
-  if (args.includes("--dry-run") && args.includes("--clear-escalation")) fail("usage", "modes-are-mutually-exclusive");
-  return { dryRun: args.includes("--dry-run"), clearEscalation: args.includes("--clear-escalation") };
+  const modes = ["--dry-run", "--clear-escalation", "--prune-history"].filter((mode) => args.includes(mode));
+  if (modes.length > 1) fail("usage", "modes-are-mutually-exclusive");
+  return {
+    dryRun: args.includes("--dry-run"),
+    clearEscalation: args.includes("--clear-escalation"),
+    pruneHistory: args.includes("--prune-history"),
+  };
+};
+
+const pruneHistory = () => {
+  const result = pruneDeployHistory({ stateDir: STATE_DIR });
+  log(`PRUNE deploy-history previous-kept=${result.keptPrevious} previous-removed=${result.removedPrevious} backups-kept=${result.keptBackups} backups-removed=${result.removedBackups}`);
+  return result;
 };
 
 const serviceState = async () => {
@@ -524,6 +536,15 @@ const main = async () => {
     return 0;
   }
   if (options.dryRun) return dryRun();
+  if (options.pruneHistory) {
+    loadBinaries();
+    const result = await runLocked({ acquireLock, log }, async () => {
+      assertProductionCheckout();
+      pruneHistory();
+      return { ok: true };
+    });
+    return result.ok ? 0 : 1;
+  }
 
   await loadEnvironment();
   loadBinaries();
@@ -548,6 +569,7 @@ const main = async () => {
       return { ok: false, reason: failure.reason };
     }
     if (from === to) {
+      pruneHistory();
       log(`NOOP already-deployed revision=${from}`);
       return { ok: true, skipped: "already-deployed" };
     }
@@ -710,6 +732,7 @@ const main = async () => {
       },
     });
     const result = await executeUpgrade(host, { from, to });
+    if (result.ok) pruneHistory();
     return result.ok ? { ok: true } : { ok: false, reason: result.failure.reason };
   }).then((result) => result.ok ? 0 : 1);
 };
